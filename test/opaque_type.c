@@ -5,7 +5,7 @@
 _type(my_list, list Int32.t)
 
 // Use it in _include_pulse via $type
-_include_pulse(
+_include_pulse(Opaque_type_include,
   let empty_list : $type(my_list) = ([] #Int32.t)
 )
 

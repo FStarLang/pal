@@ -84,6 +84,10 @@ impl Diagnostics {
         self.diags.push(diag)
     }
 
+    pub fn merge(&mut self, other: Diagnostics) {
+        self.diags.extend(other.diags);
+    }
+
     pub fn has_errors(&self) -> bool {
         self.diags.iter().any(|d| d.level.is_error())
     }

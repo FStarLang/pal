@@ -21,7 +21,7 @@ typedef struct {
 } my_pair;
 
 // Test $type in a top-level _include_pulse block
-_include_pulse(
+_include_pulse(Antiquot_include1,
   let antiquot_type_test : Type0 = $type(int *)
 
   $declare(my_pair x)
@@ -48,7 +48,7 @@ typedef union {
   long b;
 } my_union;
 
-_include_pulse(
+_include_pulse(Antiquot_include2,
   $declare(my_union x)
 
   let my_fun =
@@ -66,7 +66,7 @@ void test_union() {
 }
 
 // Test $unfold, $fold, $unfold-uninit, $fold-uninit antiquotations
-_include_pulse(
+_include_pulse(Antiquot_include3,
   let struct_unfold_name = $unfold(my_pair)
   let struct_fold_name = $fold(my_pair)
   let struct_unfold_uninit_name = $unfold-uninit(my_pair)
@@ -76,13 +76,13 @@ _include_pulse(
 )
 
 // Lexical antiquotations
-_include_pulse(
+_include_pulse(Antiquot_include4,
   ghost fn foo (x: ref int)
     preserves x |-> $`x // $`x is translated to 'x
   {}
 )
 
-_include_pulse(
+_include_pulse(Antiquot_include5,
   let foo$`bar = 67 // translated to foo'bar
   let bar$` = 42 // bar$` is translated to bar'
 )

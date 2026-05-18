@@ -11,7 +11,7 @@ void write_via_ptr(_array int *a)
   _ghost_stmt(arrayptr_drop $(p));
 }
 
-_include_pulse(
+_include_pulse(Arrayptrs_include1,
   let unless_null #a (x: array a) (p: slprop) : slprop =
     if array_is_null x then emp else p
 
@@ -50,7 +50,7 @@ _include_pulse(
   }
 )
 
-_include_pulse(
+_include_pulse(Arrayptrs_include2,
   unfold
   let is_slice_prop #a (lo hi: array a) (x: array a) (v: full_array_spec a) =
     base_of lo == base_of x /\ base_of hi == base_of x

@@ -4,7 +4,7 @@
 #include "DPE.h"
 #include "EngineCore.h"
 
-_include_pulse(
+_include_pulse(DPE_context_full_data,
   $declare(context_t s)
   [@@erasable]
   noeq type context_full_data =
@@ -20,9 +20,8 @@ _include_pulse(
     | _ -> False
 )
 
-_include_pulse(
+_include_pulse(DPE_predicates,
   $declare(context_t s)
-
   [@@pulse_eager_unfold]
   let uds_pred (uds: $type(uds_array)) (uds_data: Seq.seq (option UInt8.t)) : slprop =
     exists* mask. ty_uds_array__pred uds 1.0R uds_data mask ** freeable_array uds
@@ -120,7 +119,7 @@ _allocated context_obj init_engine_context(const uds_array uds)
   return ctx;
 }
 
-_include_pulse (
+_include_pulse (DPE_ghost_helpers,
   ghost fn elim_maybe_true (p:slprop)
   requires maybe _true_ p
   ensures p

@@ -64,8 +64,8 @@ enum DeclName {
     Include(Rc<SourceInfo>),
 }
 
-fn in_main_file(mf: &Rc<str>, loc: &SourceInfo) -> bool {
-    loc.location().file_name == *mf
+fn in_main_file(main_files: &[Rc<str>], loc: &SourceInfo) -> bool {
+    main_files.iter().any(|mf| loc.location().file_name == *mf)
 }
 
 fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
@@ -381,7 +381,7 @@ pub fn prune(tu: &mut TranslationUnit) {
     let mut deps = Deps::new();
     scan_translation_unit(&mut deps, tu);
     for decl in &tu.decls {
-        if in_main_file(&tu.main_file_name, &decl.loc) {
+        if in_main_file(&tu.main_file_names, &decl.loc) {
             deps.add_root(decl_name(&decl))
         }
     }

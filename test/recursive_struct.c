@@ -33,7 +33,7 @@ int get_data(node *n) {
 /* 3. _include_pulse: recursive ownership predicate + ghost helpers.
  *    Tests that pal generates correct struct types and that _include_pulse
  *    can define recursive predicates over self-referential structs. */
-_include_pulse(
+_include_pulse(Recursive_struct_include1,
   module L = FStar.List.Tot
 
   let rec is_list ([@@@mkey] head: $type(node *)) (p: perm) (l: list Int32.t)
@@ -58,7 +58,7 @@ typedef struct node *list;
 _letimpure(spec_list _elements_of(const list l),
   _inline_pulse(observe (is_list $(l) _)))
 
-_include_pulse(
+_include_pulse(Recursive_struct_include2,
   ghost fn is_list_nil_case (head: $type(node *)) (#l: list Int32.t)
     preserves is_list head $`p l
     requires pure (is_null head)

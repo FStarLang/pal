@@ -4,7 +4,7 @@
 
 #define __pal_concat_ind(x, y) x ## y
 #define __pal_concat(x, y) __pal_concat_ind(x, y)
-#define _include_pulse(...) [[clang::annotate("pal-includes", __COUNTER__)]] \
+#define _include_pulse(modname, ...) [[clang::annotate("pal-includes", #modname, __capture_args(__VA_ARGS__))]] \
     void __pal_concat(__pal_include_anchor_, __COUNTER__) (void) {}
 
 #define __capture_args(args) __COUNTER__
@@ -31,7 +31,7 @@
 
 #else
 
-#define _include_pulse(...)
+#define _include_pulse(modname, ...)
 #define _requires(p)
 #define _ensures(p)
 #define _refine(p)

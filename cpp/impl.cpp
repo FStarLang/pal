@@ -1371,20 +1371,27 @@ public:
       // Include block
       if (FD->getName().starts_with("__pal_include_anchor")) {
         std::optional<unsigned> code;
+        std::string modName;
         for (auto attr : FD->getAttrs()) {
           if (auto ann = dyn_cast<AnnotateAttr>(attr);
               ann && ann->getAnnotation() == "pal-includes" &&
-              ann->args_size() == 1) {
+              ann->args_size() == 2) {
+            // First arg: string literal for module name
+            if (auto strLit = dyn_cast<StringLiteral>(
+                    ann->args_begin()[0]->IgnoreParenCasts())) {
+              modName = strLit->getString().str();
+            }
+            // Second arg: __COUNTER__ for snippet index
             if (auto ctrVal =
-                    ann->args_begin()[0]->getIntegerConstantExpr(*astCtx)) {
+                    ann->args_begin()[1]->getIntegerConstantExpr(*astCtx)) {
               unsigned ctr = ctrVal->getZExtValue();
               code = ctr;
             }
           }
         }
         auto loc = getRange(D->getSourceRange());
-        if (code) {
-          ctx.add_include(std::move(loc), *code, snippets);
+        if (code && !modName.empty()) {
+          ctx.add_include(std::move(loc), toStr(modName), *code, snippets);
         } else {
           ctx.report_diag(std::move(loc), true,
                           "internal error: invalid INCLUDES encoding"_rs);

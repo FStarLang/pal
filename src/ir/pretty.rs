@@ -745,7 +745,12 @@ impl_display_using_prettyir!(TranslationUnit);
 
 impl PrettyIR for TranslationUnit {
     fn to_doc(&self) -> RcDoc<'_, ()> {
-        let header_comment = RcDoc::text("// ").append(&*self.main_file_name);
+        let header_comment = RcDoc::text("// ").append(RcDoc::intersperse(
+            self.main_file_names
+                .iter()
+                .map(|f| RcDoc::text(f.to_string())),
+            RcDoc::text(", "),
+        ));
 
         RcDoc::intersperse(
             std::iter::once(header_comment)
