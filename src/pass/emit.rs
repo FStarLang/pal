@@ -4564,42 +4564,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
     let typedef_override_map = build_typedef_override_map(&tu.decls);
 
     // Collect include module names for open directives
-    let include_modules: Vec<String> = tu
-        .decls
-        .iter()
-        .filter_map(|d| {
-            if let DeclT::IncludeDecl(inc) = &d.val {
-                Some(inc.module_name.to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-    // Collect let module names for open directives (needed for proof visibility)
-    let let_modules: Vec<String> = tu
-        .decls
-        .iter()
-        .filter_map(|d| {
-            if let DeclT::LetDecl(ld) = &d.val {
-                Some(format!("Let_{}", ld.name.val))
-            } else {
-                None
-            }
-        })
-        .collect();
-    // Collect opaque type module names for open directives
-    let type_modules: Vec<String> = tu
-        .decls
-        .iter()
-        .filter_map(|d| {
-            if let DeclT::OpaqueTypeDecl(td) = &d.val {
-                Some(format!("Type_{}", td.name.val))
-            } else {
-                None
-            }
-        })
-        .collect();
-
     let mut results = Vec::new();
     // Use a single NameMangling instance shared across all modules to ensure
     // consistent mangled names for cross-references.
@@ -4609,18 +4573,11 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
     let mut type_val_params: HashMap<TypeRef, Vec<Doc>> = HashMap::new();
     let mut type_uninit_val_params: HashMap<TypeRef, Vec<Doc>> = HashMap::new();
 
-    // First pass: emit all modules, collecting code bodies (without opens in preamble for non-Func)
+    // Emit all modules, collecting code bodies
     struct PendingModule {
         mod_name: String,
-        decl_kind: DeclKind,
         body_code: String,
         range_map: crate::pass::emit::SourceRangeMap,
-    }
-    #[derive(Clone, Copy, PartialEq)]
-    enum DeclKind {
-        Func,      // FnDefn, FnDecl, GlobalVar
-        StructTU,  // StructDefn, StructDecl, UnionDefn, Typedef
-        Auxiliary, // IncludeDecl, LetDecl, OpaqueTypeDecl
     }
 
     let mut pending: Vec<PendingModule> = Vec::new();
@@ -4675,18 +4632,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
                 .or_insert_with(|| v.clone());
         }
 
-        let decl_kind = match &decl.val {
-            DeclT::FnDefn(_) | DeclT::FnDecl(_) | DeclT::GlobalVar(_) => DeclKind::Func,
-            DeclT::StructDefn(_)
-            | DeclT::StructDecl(_)
-            | DeclT::UnionDefn(_)
-            | DeclT::Typedef(_) => DeclKind::StructTU,
-            _ => DeclKind::Auxiliary,
-        };
-
         let new_module = PendingModule {
             mod_name: mod_name.clone(),
-            decl_kind,
             body_code: writer.buffer,
             range_map: writer.source_range_map,
         };
@@ -4700,153 +4647,12 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         }
     }
 
-    // Build dependency sets for each module based on direct body text references.
-    use std::collections::HashSet;
-    let all_module_names: Vec<String> = pending.iter().map(|pm| pm.mod_name.clone()).collect();
-
-    // Build a map of symbols defined in each auxiliary module.
-    // We detect definitions by looking for common F* declaration patterns in the emitted code.
-    let mut symbol_to_module: HashMap<String, String> = HashMap::new();
-    for pm in &pending {
-        if pm.decl_kind == DeclKind::Auxiliary {
-            // Extract defined names: look for patterns like "let name", "fn name", "ghost fn name", "val name"
-            for line in pm.body_code.lines() {
-                let trimmed = line.trim();
-                // Match "let <name>", "let rec <name>", "fn <name>", "ghost fn <name>", "val <name>"
-                let words: Vec<&str> = trimmed.split_whitespace().collect();
-                let name = if words.len() >= 2
-                    && (words[0] == "let" || words[0] == "fn" || words[0] == "val")
-                {
-                    // skip "let rec" -> take word after "rec"
-                    if words[0] == "let" && words.len() >= 3 && words[1] == "rec" {
-                        Some(words[2])
-                    } else {
-                        Some(words[1])
-                    }
-                } else if words.len() >= 3 && words[0] == "ghost" && words[1] == "fn" {
-                    Some(words[2])
-                } else {
-                    None
-                };
-                if let Some(name) = name {
-                    // Clean up: remove trailing punctuation
-                    let clean_name =
-                        name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                    if !clean_name.is_empty() && clean_name != "predicate" {
-                        symbol_to_module.insert(clean_name.to_string(), pm.mod_name.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    // Direct references: scan each module's body for occurrences of other module names
-    // AND for unqualified uses of symbols defined in auxiliary modules
-    let mut direct_refs: HashMap<String, HashSet<String>> = HashMap::new();
-    for pm in &pending {
-        let mut refs = HashSet::new();
-        for other_mod in &all_module_names {
-            if *other_mod != pm.mod_name && pm.body_code.contains(other_mod.as_str()) {
-                refs.insert(other_mod.clone());
-            }
-        }
-        // Also check for unqualified references to auxiliary-defined symbols
-        for (symbol, defining_mod) in &symbol_to_module {
-            if *defining_mod != pm.mod_name && pm.body_code.contains(symbol.as_str()) {
-                // Verify it's not already qualified (i.e., not preceded by "ModName.")
-                let qualified = format!("{}.{}", defining_mod, symbol);
-                if !pm.body_code.contains(&qualified) {
-                    refs.insert(defining_mod.clone());
-                }
-            }
-        }
-        direct_refs.insert(pm.mod_name.clone(), refs);
-    }
-
-    // Compute transitive closure of direct_refs using DFS-based reachability
-    let mut transitive_deps: HashMap<String, HashSet<String>> = HashMap::new();
-    for mod_name in &all_module_names {
-        let mut reachable = HashSet::new();
-        let mut stack: Vec<&str> = direct_refs
-            .get(mod_name)
-            .map(|s| s.iter().map(|x| x.as_str()).collect())
-            .unwrap_or_default();
-        while let Some(dep) = stack.pop() {
-            if dep == mod_name.as_str() || !reachable.insert(dep.to_string()) {
-                continue;
-            }
-            if let Some(dep_deps) = direct_refs.get(dep) {
-                for dd in dep_deps {
-                    if !reachable.contains(dd.as_str()) {
-                        stack.push(dd);
-                    }
-                }
-            }
-        }
-        transitive_deps.insert(mod_name.clone(), reachable);
-    }
-
-    // Second pass: build final code with appropriate preambles
+    // Build final code with preambles
     for pm in pending {
-        let mut preamble = format!("module {}\nopen Pulse\nopen Pulse.Lib.C", pm.mod_name);
-
-        let aux_modules = include_modules
-            .iter()
-            .chain(let_modules.iter())
-            .chain(type_modules.iter());
-
-        match pm.decl_kind {
-            DeclKind::Func => {
-                // Func/Global modules get all include/let/type opens (safe: nothing depends on Func_*)
-                for m in aux_modules {
-                    if *m != pm.mod_name {
-                        preamble.push_str(&format!("\nopen {}", m));
-                    }
-                }
-            }
-            DeclKind::StructTU => {
-                // Struct/Typedef/Union: only open modules directly referenced in body
-                // AND that don't transitively depend on us
-                let my_direct_refs = direct_refs.get(&pm.mod_name).cloned().unwrap_or_default();
-                for m in aux_modules {
-                    if *m == pm.mod_name {
-                        continue;
-                    }
-                    // Only open if our body actually references this module
-                    if !my_direct_refs.contains(m) {
-                        continue;
-                    }
-                    // Check if it transitively depends on us (would create a cycle)
-                    let creates_cycle = transitive_deps
-                        .get(m)
-                        .map_or(false, |deps| deps.contains(&pm.mod_name));
-                    if !creates_cycle {
-                        preamble.push_str(&format!("\nopen {}", m));
-                    }
-                }
-            }
-            DeclKind::Auxiliary => {
-                // Auxiliary modules only open other auxiliary modules they directly reference
-                let my_direct_refs = direct_refs.get(&pm.mod_name).cloned().unwrap_or_default();
-                for m in aux_modules {
-                    if *m == pm.mod_name {
-                        continue;
-                    }
-                    // Only open if our body actually references this module
-                    if !my_direct_refs.contains(m) {
-                        continue;
-                    }
-                    let creates_cycle = transitive_deps
-                        .get(m)
-                        .map_or(false, |deps| deps.contains(&pm.mod_name));
-                    if !creates_cycle {
-                        preamble.push_str(&format!("\nopen {}", m));
-                    }
-                }
-            }
-        }
-
-        preamble.push_str("\n#lang-pulse\n\n");
+        let preamble = format!(
+            "module {}\nopen Pulse\nopen Pulse.Lib.C\n#lang-pulse\n\n",
+            pm.mod_name
+        );
         let full_code = format!("{}{}", preamble, pm.body_code);
 
         results.push(EmittedModule {

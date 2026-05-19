@@ -38,8 +38,8 @@ void test_declare(my_pair *x)
   _requires(x->a == 0)
   _ensures(x->a == 0)
 {
-  _ghost_stmt(assert pure (test_access $(*x) == 0l));
-  _ghost_stmt(assert pure (test_access_2 $(*x) == 0l));
+  _ghost_stmt(assert pure (Antiquot_include1.test_access $(*x) == 0l));
+  _ghost_stmt(assert pure (Antiquot_include1.test_access_2 $(*x) == 0l));
   return;
 }
 
@@ -62,7 +62,7 @@ void test_union() {
   my_union x;
   x.b = 1;
   _assert(!x.a._active);
-  _ghost_stmt(assert pure (~(other_fun $(x))));
+  _ghost_stmt(assert pure (~(Antiquot_include2.other_fun $(x))));
 }
 
 // Test $unfold, $fold, $unfold-uninit, $fold-uninit antiquotations

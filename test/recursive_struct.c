@@ -50,24 +50,24 @@ _include_pulse(Recursive_struct_include1,
 
 _type(spec_list, list Int32.t)
 
-_refine_value(spec_list elements, _inline_pulse(is_list $(this) p elements))
+_refine_value(spec_list elements, _inline_pulse(Recursive_struct_include1.is_list $(this) p elements))
 _refine_uninit(_inline_pulse(pts_to_uninit $(this)))
 _plain
 typedef struct node *list;
 
 _letimpure(spec_list _elements_of(const list l),
-  _inline_pulse(observe (is_list $(l) _)))
+  _inline_pulse(observe (Recursive_struct_include1.is_list $(l) _)))
 
 _include_pulse(Recursive_struct_include2,
   ghost fn is_list_nil_case (head: $type(node *)) (#l: list Int32.t)
-    preserves is_list head $`p l
+    preserves Recursive_struct_include1.is_list head $`p l
     requires pure (is_null head)
     ensures pure (l == [])
   {
     match l {
       Nil -> { () }
       Cons hd tl -> {
-        unfold (is_list head _ (hd :: tl));
+        unfold (Recursive_struct_include1.is_list head _ (hd :: tl));
         Pulse.Lib.Reference.pts_to_not_null head;
         unreachable ()
       }
@@ -75,15 +75,15 @@ _include_pulse(Recursive_struct_include2,
   }
 
   ghost fn elim_is_list_nonnull (head: $type(node *)) (#l: list Int32.t)
-    requires is_list head $`p l ** pure (not (is_null head))
+    requires Recursive_struct_include1.is_list head $`p l ** pure (not (is_null head))
     ensures exists* (nd: $type(node)) (tl: list Int32.t).
       pts_to head nd ** freeable head **
       pure (l == nd.$field(node::data) :: tl) **
-      is_list nd.$field(node::next) $`p tl
+      Recursive_struct_include1.is_list nd.$field(node::next) $`p tl
   {
     match l {
-      Nil -> { unfold (is_list head _ []); unreachable () }
-      Cons hd tl -> { unfold (is_list head _ (hd :: tl)) }
+      Nil -> { unfold (Recursive_struct_include1.is_list head _ []); unreachable () }
+      Cons hd tl -> { unfold (Recursive_struct_include1.is_list head _ (hd :: tl)) }
     }
   }
 
@@ -94,10 +94,10 @@ _include_pulse(Recursive_struct_include2,
     requires
       pts_to head nd **
       freeable head **
-      is_list nd.$field(node::next) $`p tl
-    ensures is_list head $`p (nd.$field(node::data) :: tl)
+      Recursive_struct_include1.is_list nd.$field(node::next) $`p tl
+    ensures Recursive_struct_include1.is_list head $`p (nd.$field(node::data) :: tl)
   {
-    fold (is_list head _ (nd.$field(node::data) :: tl))
+    fold (Recursive_struct_include1.is_list head _ (nd.$field(node::data) :: tl))
   }
 )
 
@@ -108,13 +108,13 @@ _rec void traverse(const list head)
     _decreases(_elements_of(head))
 {
     if (head == NULL) {
-        _ghost_stmt(is_list_nil_case $(head));
+        _ghost_stmt(Recursive_struct_include2.is_list_nil_case $(head));
         return;
     }
-    _ghost_stmt(elim_is_list_nonnull $(head));
+    _ghost_stmt(Recursive_struct_include2.elim_is_list_nonnull $(head));
     node *nx = head->next;
     traverse(nx);
-    _ghost_stmt(intro_is_list_cons $(head) $(*head));
+    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) $(*head));
 }
 
 _let(bool starts_with(spec_list xs, int x),
@@ -127,11 +127,11 @@ bool peek_head(const list head, int *out)
   _ensures(!return ==> is_empty(_elements_of(head)))
 {
     if (head == NULL) {
-        _ghost_stmt(is_list_nil_case $(head));
+        _ghost_stmt(Recursive_struct_include2.is_list_nil_case $(head));
         return false;
     }
-    _ghost_stmt(elim_is_list_nonnull $(head));
+    _ghost_stmt(Recursive_struct_include2.elim_is_list_nonnull $(head));
     *out = head->data;
-    _ghost_stmt(intro_is_list_cons $(head) $(*head));
+    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) $(*head));
     return true;
 }
