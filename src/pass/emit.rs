@@ -4563,15 +4563,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
     // Build the override map for OpaqueTypeDecl typedef names
     let typedef_override_map = build_typedef_override_map(&tu.decls);
 
-    // Collect include module names for open directives
     let mut results = Vec::new();
-    // Use a single NameMangling instance shared across all modules to ensure
-    // consistent mangled names for cross-references.
-    let mut nm = NameMangling::new();
-    // Accumulate type_val_params across modules so that later modules know about
-    // val params registered by earlier typedef/struct definitions.
-    let mut type_val_params: HashMap<TypeRef, Vec<Doc>> = HashMap::new();
-    let mut type_uninit_val_params: HashMap<TypeRef, Vec<Doc>> = HashMap::new();
 
     // Emit all modules, collecting code bodies
     struct PendingModule {
@@ -4586,28 +4578,23 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
     // We keep the LAST occurrence (most complete definition).
     let mut seen_modules: HashMap<String, usize> = HashMap::new();
 
+    // Build env incrementally: start from rec_env and push each decl after emitting it
+    let mut env = rec_env;
+    // Reuse a single Emitter across all modules
+    let mut emitter = Emitter {
+        nm: NameMangling::new(),
+        diags,
+        type_val_params: HashMap::new(),
+        type_uninit_val_params: HashMap::new(),
+        defining_struct: None,
+        current_module: String::new(),
+        fn_module_map,
+        typedef_override_map,
+    };
+
     for decl in &tu.decls {
         let mod_name = module_name_for_decl(decl);
-
-        // Build env for this decl: include all prior decls + rec fns
-        let mut env = rec_env.clone();
-        for d in &tu.decls {
-            if std::ptr::eq(d, decl) {
-                break;
-            }
-            env.push_decl(d);
-        }
-
-        let emitter = &mut Emitter {
-            nm: nm.clone(),
-            diags,
-            type_val_params: type_val_params.clone(),
-            type_uninit_val_params: type_uninit_val_params.clone(),
-            defining_struct: None,
-            current_module: mod_name.clone(),
-            fn_module_map: fn_module_map.clone(),
-            typedef_override_map: typedef_override_map.clone(),
-        };
+        emitter.current_module = mod_name.clone();
 
         // Emit just the body (decl code)
         let body_doc = emitter.emit_decl(&env, decl);
@@ -4617,20 +4604,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
             .append(body_doc);
         let mut writer = StrWriter::new();
         body_with_restart.render_raw(100, &mut writer).unwrap();
-
-        // Merge back the name mangling state so subsequent modules see the same mappings
-        nm = emitter.nm.clone();
-        // Merge back type_val_params so later modules can see val params from earlier typedefs/structs
-        for (k, v) in &emitter.type_val_params {
-            type_val_params
-                .entry(k.clone())
-                .or_insert_with(|| v.clone());
-        }
-        for (k, v) in &emitter.type_uninit_val_params {
-            type_uninit_val_params
-                .entry(k.clone())
-                .or_insert_with(|| v.clone());
-        }
 
         let new_module = PendingModule {
             mod_name: mod_name.clone(),
@@ -4645,6 +4618,9 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
             seen_modules.insert(mod_name, pending.len());
             pending.push(new_module);
         }
+
+        // Push current decl to env so subsequent modules can see it
+        env.push_decl(decl);
     }
 
     // Build final code with preambles
