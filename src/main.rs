@@ -152,19 +152,6 @@ fn main() {
         },
     };
 
-    // Check for duplicate module names
-    {
-        let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for (i, m) in modules.iter().enumerate() {
-            if let Some(&prev) = seen.get(m.module_name.as_str()) {
-                let _ = prev; // both have same name
-                eprintln!("error: duplicate module name '{}'", m.module_name);
-                std::process::exit(1);
-            }
-            seen.insert(&m.module_name, i);
-        }
-    }
-
     for module in &modules {
         let mut code = module.code.clone();
         if diags.has_errors() {

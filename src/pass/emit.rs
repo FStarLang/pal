@@ -4624,6 +4624,10 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
     }
 
     let mut pending: Vec<PendingModule> = Vec::new();
+    // Track already-emitted module names to skip duplicate declarations
+    // (e.g., forward typedef + full typedef for the same name).
+    // We keep the LAST occurrence (most complete definition).
+    let mut seen_modules: HashMap<String, usize> = HashMap::new();
 
     for decl in &tu.decls {
         let mod_name = module_name_for_decl(decl);
@@ -4680,12 +4684,20 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
             _ => DeclKind::Auxiliary,
         };
 
-        pending.push(PendingModule {
-            mod_name,
+        let new_module = PendingModule {
+            mod_name: mod_name.clone(),
             decl_kind,
             body_code: writer.buffer,
             range_map: writer.source_range_map,
-        });
+        };
+
+        // Deduplicate: if we've seen this module name before, replace with the later (more complete) one
+        if let Some(&idx) = seen_modules.get(&mod_name) {
+            pending[idx] = new_module;
+        } else {
+            seen_modules.insert(mod_name, pending.len());
+            pending.push(new_module);
+        }
     }
 
     // Build dependency sets for each module based on direct body text references.
