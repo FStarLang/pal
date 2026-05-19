@@ -4325,10 +4325,12 @@ impl<'a> Emitter<'a> {
             });
 
             params.push(parens(
-                annotated(&n, || Doc::text(self.nm.mangle(&Name::Var(n.val.clone())).to_string()))
-                    .append(":")
-                    .append(Doc::line())
-                    .append(self.emit_type(env, &arg.ty)),
+                annotated(&n, || {
+                    Doc::text(self.nm.mangle(&Name::Var(n.val.clone())).to_string())
+                })
+                .append(":")
+                .append(Doc::line())
+                .append(self.emit_type(env, &arg.ty)),
             ));
 
             env.push_arg(arg, LocalDeclKind::RValue);
@@ -4395,7 +4397,11 @@ impl<'a> Emitter<'a> {
         let body_rvalue = self.emit_rvalue(env, &let_decl.body);
         let rewrites_to_doc = Doc::text("rewrites_to")
             .append(Doc::line())
-            .append(Doc::text(self.nm.mangle(&Name::Var(return_id.val.clone())).to_string()))
+            .append(Doc::text(
+                self.nm
+                    .mangle(&Name::Var(return_id.val.clone()))
+                    .to_string(),
+            ))
             .append(Doc::line())
             .append(parens(
                 Doc::text("old").append(Doc::line()).append(body_rvalue),
@@ -4403,9 +4409,11 @@ impl<'a> Emitter<'a> {
 
         // Header: ghost fn name (params)
         let hdr = Doc::group(
-            Doc::text("ghost fn")
-                .append(Doc::line())
-                .append(Doc::text(self.nm.mangle(&Name::Fn(let_decl.name.val.clone())).to_string())),
+            Doc::text("ghost fn").append(Doc::line()).append(Doc::text(
+                self.nm
+                    .mangle(&Name::Fn(let_decl.name.val.clone()))
+                    .to_string(),
+            )),
         )
         .append(Doc::concat(params.into_iter().map(|p| Doc::line().append(p))).nest(2))
         .group();
@@ -4433,7 +4441,11 @@ impl<'a> Emitter<'a> {
             .append(Doc::group(
                 Doc::text("returns")
                     .append(Doc::line())
-                    .append(Doc::text(self.nm.mangle(&Name::Var(return_id.val.clone())).to_string()))
+                    .append(Doc::text(
+                        self.nm
+                            .mangle(&Name::Var(return_id.val.clone()))
+                            .to_string(),
+                    ))
                     .append(Doc::line())
                     .append(":")
                     .group()
