@@ -19,7 +19,7 @@ $(shell mkdir -p $(OUT_DIR))
 
 ALL_STAMPS := $(patsubst %.c,$(OUT_DIR)/%/.stamp,$(TESTS))
 
-# Generate per-file rules
+# Generate per-file rules for translation
 define make_stamp_rule
 $(OUT_DIR)/$(1:.c=)/.stamp: $(1) $$(C2PULSE) pal.h
 	@mkdir -p $(OUT_DIR)/$(1:.c=)
@@ -31,34 +31,21 @@ $(foreach t,$(TESTS),$(eval $(call make_stamp_rule,$(t))))
 .PHONY: translate
 translate: $(ALL_STAMPS)
 
-# Verification: after translation, verify each test's .fst files
-FSTAR_EXE ?= ../opt/run-fstar.sh
-FSTAR = $(FSTAR_EXE) \
-	--cache_checked_modules	\
-	--cache_dir $(CACHE_DIR) \
-	--already_cached Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore
+# ── Verification ───────────────────────────────────────────────────
+# Each test gets its own verify target that invokes verify.mk in its output dir.
 
-.PHONY: verify
-verify: translate
-	@failed=0; \
-	for dir in $(OUT_DIR)/*/; do \
-		test_name=$$(basename "$$dir"); \
-		cache_dir="$(CACHE_DIR)/$$test_name"; \
-		mkdir -p "$$cache_dir"; \
-		for f in $$(find "$$dir" -maxdepth 1 -name '*.fst' | sort); do \
-			base=$$(basename $$f .fst); \
-			if [ ! -f "$$cache_dir/$$base.fst.checked" ]; then \
-				echo "Verifying $$f"; \
-				if ! $(FSTAR_EXE) --cache_checked_modules --cache_dir "$$cache_dir" --already_cached Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore --include "$$dir" $$f; then \
-					failed=$$((failed + 1)); \
-				fi; \
-			fi; \
-		done; \
-	done; \
-	if [ $$failed -gt 0 ]; then \
-		echo "$$failed module(s) failed verification"; \
-		exit 1; \
-	fi
+FSTAR_EXE ?= ../opt/run-fstar.sh
+
+TEST_STEMS   := $(patsubst %.c,%,$(TESTS))
+VERIFY_TARGETS := $(patsubst %,verify-%,$(TEST_STEMS))
+
+.PHONY: verify $(VERIFY_TARGETS)
+verify: $(VERIFY_TARGETS)
+
+$(VERIFY_TARGETS): verify-%: $(OUT_DIR)/%/.stamp
+	@$(MAKE) -C $(OUT_DIR)/$* -f ../../verify.mk \
+		FSTAR_EXE=../../$(FSTAR_EXE) \
+		CACHE_DIR=../../$(CACHE_DIR)/$*
 
 .PHONY: clean
 clean:
@@ -79,3 +66,4 @@ test-xfail-%: %.c $(C2PULSE)
 	  echo "$$output"; \
 	  echo "UNEXPECTED PASS — $< should have failed"; exit 1; \
 	fi
+
