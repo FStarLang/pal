@@ -4763,36 +4763,27 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         direct_refs.insert(pm.mod_name.clone(), refs);
     }
 
-    // Compute transitive closure of direct_refs (what each module transitively depends on via body text)
-    let mut transitive_deps: HashMap<String, HashSet<String>> = direct_refs.clone();
-    loop {
-        let mut changed = false;
-        for mod_name in &all_module_names {
-            let current_deps: Vec<String> = transitive_deps
-                .get(mod_name)
-                .map(|s| s.iter().cloned().collect())
-                .unwrap_or_default();
-            for dep in current_deps {
-                let dep_deps: Vec<String> = transitive_deps
-                    .get(&dep)
-                    .map(|s| s.iter().cloned().collect())
-                    .unwrap_or_default();
+    // Compute transitive closure of direct_refs using DFS-based reachability
+    let mut transitive_deps: HashMap<String, HashSet<String>> = HashMap::new();
+    for mod_name in &all_module_names {
+        let mut reachable = HashSet::new();
+        let mut stack: Vec<&str> = direct_refs
+            .get(mod_name)
+            .map(|s| s.iter().map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        while let Some(dep) = stack.pop() {
+            if dep == mod_name.as_str() || !reachable.insert(dep.to_string()) {
+                continue;
+            }
+            if let Some(dep_deps) = direct_refs.get(dep) {
                 for dd in dep_deps {
-                    if dd != *mod_name {
-                        if transitive_deps
-                            .entry(mod_name.clone())
-                            .or_default()
-                            .insert(dd)
-                        {
-                            changed = true;
-                        }
+                    if !reachable.contains(dd.as_str()) {
+                        stack.push(dd);
                     }
                 }
             }
         }
-        if !changed {
-            break;
-        }
+        transitive_deps.insert(mod_name.clone(), reachable);
     }
 
     // Second pass: build final code with appropriate preambles
