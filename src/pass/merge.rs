@@ -28,6 +28,42 @@ fn types_match(env: &Env, decl: &FnDecl, defn: &FnDecl) -> bool {
 }
 
 pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
+    // === Phase 1: Deduplicate identical declarations from shared headers ===
+    // For each declaration kind+name, keep only the last occurrence (most complete).
+    {
+        let mut seen: HashMap<(u8, Rc<str>), usize> = HashMap::new();
+        let mut to_remove: Vec<usize> = Vec::new();
+
+        for (i, decl) in tu.decls.iter().enumerate() {
+            // Classify by a (kind_tag, name) key
+            let key: Option<(u8, Rc<str>)> = match &decl.val {
+                DeclT::Typedef(td) => Some((0, td.name.val.clone())),
+                DeclT::StructDefn(sd) => Some((1, sd.name.val.clone())),
+                DeclT::StructDecl(name) => Some((2, name.val.clone())),
+                DeclT::UnionDefn(ud) => Some((3, ud.name.val.clone())),
+                DeclT::FnDefn(fd) => Some((4, fd.decl.name.val.clone())),
+                DeclT::FnDecl(fd) => Some((5, fd.name.val.clone())),
+                DeclT::GlobalVar(gv) => Some((6, gv.name.val.clone())),
+                DeclT::IncludeDecl(inc) => Some((7, inc.module_name.clone())),
+                DeclT::LetDecl(ld) => Some((8, ld.name.val.clone())),
+                DeclT::OpaqueTypeDecl(td) => Some((9, td.name.val.clone())),
+            };
+            if let Some(key) = key {
+                if let Some(prev) = seen.insert(key, i) {
+                    // Mark the earlier occurrence for removal
+                    to_remove.push(prev);
+                }
+            }
+        }
+
+        to_remove.sort_unstable();
+        to_remove.dedup();
+        for &i in to_remove.iter().rev() {
+            tu.decls.remove(i);
+        }
+    }
+
+    // === Phase 2: Merge FnDecl specs into FnDefn, remove redundant StructDecls ===
     // Build index: fn name → position of its FnDefn in tu.decls
     let mut defn_indices: HashMap<Rc<str>, usize> = HashMap::new();
     let mut struct_defn_names: std::collections::HashSet<Rc<str>> =
