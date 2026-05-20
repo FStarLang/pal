@@ -1,4 +1,4 @@
-use std::{path::Path, rc::Rc};
+use std::{path::Path, rc::Rc, time::Instant};
 
 use crate::{
     diag::{Diagnostic, Diagnostics},
@@ -27,6 +27,9 @@ struct Cli {
 
     #[arg(long = "print-ir")]
     print_ir: bool,
+
+    #[arg(long = "time-passes")]
+    time_passes: bool,
 
     #[arg(short = 'I')]
     include_paths: Vec<String>,
@@ -103,6 +106,7 @@ fn main() {
     };
     let mut diags = Diagnostics::empty();
 
+    let parse_start = Instant::now();
     for file in &cli.files {
         let file_name = std::path::absolute(file)
             .unwrap()
@@ -121,14 +125,59 @@ fn main() {
         combined_tu.decls.extend(tu.decls);
         diags.merge(file_diags);
     }
+    if cli.time_passes {
+        eprintln!(
+            "  parse ({} files, {} decls): {:.3}s",
+            cli.files.len(),
+            combined_tu.decls.len(),
+            parse_start.elapsed().as_secs_f64()
+        );
+    }
 
     // Run passes
+    let t = Instant::now();
     pass::prune::prune(&mut combined_tu);
+    if cli.time_passes {
+        eprintln!(
+            "  prune ({} decls): {:.3}s",
+            combined_tu.decls.len(),
+            t.elapsed().as_secs_f64()
+        );
+    }
+
+    let t = Instant::now();
     pass::check::check(&mut diags, &mut combined_tu, "prune", false);
+    if cli.time_passes {
+        eprintln!("  check (post-prune): {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
     pass::merge::merge(&mut diags, &mut combined_tu);
+    if cli.time_passes {
+        eprintln!(
+            "  merge ({} decls): {:.3}s",
+            combined_tu.decls.len(),
+            t.elapsed().as_secs_f64()
+        );
+    }
+
+    let t = Instant::now();
     pass::restructure_goto::restructure_goto(&mut combined_tu);
+    if cli.time_passes {
+        eprintln!("  restructure_goto: {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
     pass::elab::elab(&mut diags, &mut combined_tu);
+    if cli.time_passes {
+        eprintln!("  elab: {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
     pass::check::check(&mut diags, &mut combined_tu, "elab", true);
+    if cli.time_passes {
+        eprintln!("  check (post-elab): {:.3}s", t.elapsed().as_secs_f64());
+    }
 
     if cli.print_ir {
         println!("{}", combined_tu);
@@ -136,7 +185,15 @@ fn main() {
     }
 
     // Emit per-declaration modules
+    let t = Instant::now();
     let modules = pass::emit::emit_multifile(&mut diags, &combined_tu);
+    if cli.time_passes {
+        eprintln!(
+            "  emit ({} modules): {:.3}s",
+            modules.len(),
+            t.elapsed().as_secs_f64()
+        );
+    }
 
     let outdir = match &cli.outdir {
         Some(outdir) => Path::new(outdir).to_path_buf(),
