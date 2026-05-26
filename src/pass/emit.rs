@@ -2354,15 +2354,21 @@ fn mk_attrs(attrs: Vec<Doc>) -> Doc {
 
 fn mk_assume_val(attrs: Vec<Doc>, n: Doc, args: &[Doc], ty: Doc) -> Doc {
     mk_attrs(attrs)
-        .append(Doc::text("assume val").append(Doc::line()).append(n))
         .append(
-            Doc::concat(args.iter().map(|arg| Doc::line().append(arg.clone())))
-                .append(Doc::line().append(":"))
-                .nest(2),
+            Doc::text("assume val")
+                .append(Doc::line())
+                .append(n)
+                .group()
+                .append(
+                    Doc::concat(args.iter().map(|arg| Doc::line().append(arg.clone())))
+                        .append(Doc::line().append(":"))
+                        .group(),
+                )
+                .group()
+                .append(Doc::line().append(ty).nest(2))
+                .nest(2)
+                .group(),
         )
-        .group()
-        .append(Doc::line().append(ty))
-        .nest(2)
         .group()
 }
 
