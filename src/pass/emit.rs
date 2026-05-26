@@ -680,7 +680,7 @@ impl<'a> Emitter<'a> {
                             let pointee_type_doc = self.emit_type(env, pointee_ty);
                             let slprop = annotated(ty, || {
                                 naryfn([
-                                    Doc::text("pts_to"),
+                                    Doc::text("Pulse.Lib.Reference.pts_to"),
                                     this_doc,
                                     Doc::text("#").append(perm.clone()),
                                     val_name.clone(),
