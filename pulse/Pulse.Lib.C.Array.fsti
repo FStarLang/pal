@@ -1,7 +1,7 @@
 module Pulse.Lib.C.Array
 open Pulse
 open Pulse.Lib.C.Inhabited
-module A = Pulse.Lib.Array
+open Pulse.Lib.SmallType
 module SZ = FStar.SizeT
 
 #lang-pulse
@@ -22,7 +22,7 @@ val array_spec_initd #a (s: array_spec a) (i: nat) : prop
 val array_spec_mask #a (s: array_spec a) (i: nat) : prop
 val array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : GTot a
 
-val array_spec_len_fits #a s : Lemma (SZ.fits (array_spec_len #a s)) [SMTPat (array_spec_len #a s)]
+// val array_spec_len_fits #a s : Lemma (SZ.fits (array_spec_len #a s)) [SMTPat (array_spec_len #a s)]
 
 let array_spec_full_mask #a (s: array_spec a) =
   forall (i:nat). {:pattern array_spec_mask s i} i < array_spec_len s ==> array_spec_mask s i
@@ -81,25 +81,25 @@ val array_spec_uninit (a: Type) (n: nat) : array_spec a
 val array_spec_uninit_len a n : Lemma (array_spec_len (array_spec_uninit a n) == n) [SMTPat (array_spec_len (array_spec_uninit a n))]
 val array_spec_uninit_mask a n (i:nat) : Lemma (i < n ==> array_spec_mask (array_spec_uninit a n) i) [SMTPat (array_spec_mask (array_spec_uninit a n) i)]
 
-fn alloc_array u#a (#a:Type u#a) (sz:SizeT.t)
+fn alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SizeT.t)
   returns r : array a
   ensures freeable_array r
   ensures array_pts_to_uninit' r
-  ensures pure (array_spec_of r == array_spec_uninit a (SZ.v sz))
+  ensures pure (reveal (array_spec_of r) == array_spec_uninit a (SZ.v sz))
 
 fn free_array u#a (#a:Type u#a) (r:array a)
   requires array_pts_to_uninit' r
   requires freeable_array r
 
-fn stack_alloc_array u#a (#a:Type u#a) (sz:SizeT.t)
+fn stack_alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SizeT.t)
   returns r : array a
   ensures array_pts_to_uninit' r
-  ensures pure (array_spec_of r == array_spec_uninit a (SZ.v sz))
+  ensures pure (reveal (array_spec_of r) == array_spec_uninit a (SZ.v sz))
 
 fn stack_free_array u#a (#a:Type u#a) (r:array a)
   requires array_pts_to_uninit' r
 
-fn calloc_array u#a (#a:Type u#a) {| has_zero_default a |} (sz:SizeT.t)
+fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} (sz:SizeT.t)
   returns r : array a
   ensures freeable_array r
   ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SizeT.v sz) zero_default)
@@ -125,7 +125,8 @@ fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
 val array_spec_upd (#a: Type) (s: array_spec a) (n: nat) (x: a) : array_spec a
 val array_spec_upd_len #a s n x : Lemma (array_spec_len (array_spec_upd #a s n x) == array_spec_len s) [SMTPat (array_spec_len (array_spec_upd #a s n x))]
 val array_spec_upd_initd #a s n x (i:nat) : Lemma (array_spec_initd (array_spec_upd #a s n x) i <==> (i == n /\ i < array_spec_len s) \/ array_spec_initd s i) [SMTPat (array_spec_initd (array_spec_upd #a s n x) i)]
-val array_spec_upd_mask #a s n x (i:nat) : Lemma (array_spec_mask (array_spec_upd #a s n x) i <==> array_spec_mask s i) [SMTPat (array_spec_mask (array_spec_upd #a s n x) i)]
+val array_spec_upd_mask #a s n x (i:nat) :
+  Lemma (array_spec_mask (array_spec_upd #a s n x) i <==> array_spec_mask s i \/ (i == n /\ n < array_spec_len s)) [SMTPat (array_spec_mask (array_spec_upd #a s n x) i)]
 val array_spec_upd_idx1 #a s n x (i:nat) : Lemma (i =!= n /\ array_spec_initd s i ==> (array_spec_idx (array_spec_upd #a s n x) i == array_spec_idx s i)) [SMTPat (array_spec_idx (array_spec_upd #a s n x) i)]
 val array_spec_upd_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_spec_idx (array_spec_upd #a s n x) n == x) [SMTPat (array_spec_idx (array_spec_upd #a s n x) n)]
 
@@ -163,8 +164,7 @@ ghost fn arrayptr_pts_to_dup u#a (#t: Type u#a) x y : duplicable_f (arrayptr_pts
   fold arrayptr_pts_to x y;
 }
 
-instance duplicable_arrayptr_pts_to #t x y : duplicable (arrayptr_pts_to #t x y) =
-  { dup_f = fun _ -> arrayptr_pts_to_dup x y }
+instance val duplicable_arrayptr_pts_to #t x y : duplicable (arrayptr_pts_to #t x y)
 
 /// Create an arrayptr from an array at offset `i`.
 val array_to_arrayptr (#t: Type u#a) (arr: array t) (i: SZ.t)
