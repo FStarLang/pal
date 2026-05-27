@@ -345,6 +345,24 @@ struct SpecFieldBinding {
     ty: Doc,
 }
 
+/// Controls how val bindings are generated during slprop emission.
+enum ValNaming<'a> {
+    /// Standard: standalone val names (val_x_0) stored in ExBinding list.
+    /// Used for function signatures and old-style preds.
+    Standard {
+        quote: bool,
+        bindings: &'a mut Vec<ExBinding>,
+    },
+    /// Spec record: val references become `spec_param.field_name`.
+    /// Used for struct pred body with spec record parameter.
+    SpecRecord {
+        spec_param: &'a Doc,
+        type_ref: &'a TypeRef,
+        field_name: &'a Rc<IdentT>,
+        bindings: &'a mut Vec<SpecFieldBinding>,
+    },
+}
+
 /// Per-field spec info collected during struct pred analysis.
 struct FieldSpecInfo {
     /// The struct field name (e.g., "y")
@@ -681,23 +699,98 @@ impl<'a> Emitter<'a> {
         }))
     }
 
+    /// Push a val binding using the naming strategy, with an auto-generated name based on `this`.
+    /// Returns the Doc to use as the val reference in the slprop.
+    fn push_val_binding(&mut self, naming: &mut ValNaming, this: &Rc<Expr>, ty: Doc) -> Doc {
+        match naming {
+            ValNaming::Standard { quote, bindings } => {
+                let idx = bindings.len() as u32;
+                let raw = self.nm.emit(Name::Val(extract_base_ident(this), idx));
+                let val_name = if *quote {
+                    Doc::text("'").append(raw)
+                } else {
+                    raw
+                };
+                bindings.push(ExBinding {
+                    name: val_name.clone(),
+                    ty,
+                });
+                val_name
+            }
+            ValNaming::SpecRecord {
+                spec_param,
+                type_ref,
+                field_name,
+                bindings,
+            } => {
+                let idx = bindings.len() as u32;
+                let spec_field_name_str = format!("{}_{}", field_name, idx);
+                let spec_field_name = self.nm.emit(Name::TypeRefSpecField(
+                    (*type_ref).clone(),
+                    spec_field_name_str,
+                ));
+                let val_access = spec_param
+                    .clone()
+                    .append(".")
+                    .append(spec_field_name.clone());
+                bindings.push(SpecFieldBinding {
+                    field_name: spec_field_name,
+                    ty,
+                });
+                val_access
+            }
+        }
+    }
+
+    /// Push a val binding with an explicit name (used by RefineValue).
+    /// Returns the Doc to use as the val reference in the slprop.
+    fn push_val_binding_explicit(&mut self, naming: &mut ValNaming, raw_name: Doc, ty: Doc) -> Doc {
+        match naming {
+            ValNaming::Standard { quote, bindings } => {
+                let val_name = if *quote {
+                    Doc::text("'").append(raw_name)
+                } else {
+                    raw_name
+                };
+                bindings.push(ExBinding {
+                    name: val_name.clone(),
+                    ty,
+                });
+                val_name
+            }
+            ValNaming::SpecRecord {
+                spec_param,
+                type_ref,
+                bindings,
+                ..
+            } => {
+                // For explicit names in spec context, use the name as the field name
+                let spec_field_name = self.nm.emit(Name::TypeRefSpecField(
+                    (*type_ref).clone(),
+                    format!("{}", raw_name.pretty(80)),
+                ));
+                let val_access = spec_param
+                    .clone()
+                    .append(".")
+                    .append(spec_field_name.clone());
+                bindings.push(SpecFieldBinding {
+                    field_name: spec_field_name,
+                    ty,
+                });
+                val_access
+            }
+        }
+    }
+
     fn emit_type_slprop(
         &mut self,
         env: &Env,
         ty: &Type,
         variant: SLPropVariant,
-        quote: bool, // use single quote for implicit arg
-        bindings: &mut Vec<ExBinding>,
+        naming: &mut ValNaming,
         props: &mut Vec<Doc>,
         this: &Rc<Expr>,
     ) {
-        let q = |doc: Doc| -> Doc {
-            if quote {
-                Doc::text("'").append(doc)
-            } else {
-                doc
-            }
-        };
         match &ty.val {
             TypeT::Void
             | TypeT::Bool
@@ -713,25 +806,18 @@ impl<'a> Emitter<'a> {
                 match kind {
                     PointerKind::Ref | PointerKind::Unknown => match variant {
                         SLPropVariant::Init { perm } => {
-                            let val_name = q(self
-                                .nm
-                                .emit(Name::Val(extract_base_ident(this), bindings.len() as u32)));
                             let pointee_type_doc = self.emit_type(env, pointee_ty);
+                            let val_name = self.push_val_binding(naming, this, pointee_type_doc);
                             let slprop = annotated(ty, || {
                                 naryfn([
                                     Doc::text("Pulse.Lib.Reference.pts_to"),
                                     this_doc,
                                     Doc::text("#").append(perm.clone()),
-                                    val_name.clone(),
+                                    val_name,
                                 ])
                             });
                             props.push(slprop);
-                            bindings.push(ExBinding {
-                                name: val_name,
-                                ty: pointee_type_doc,
-                            });
                             // Skip recursion for self-referential struct pointers
-                            // (the user defines their own recursive predicate)
                             let is_self_ref = match &pointee_ty.val {
                                 TypeT::TypeRef(TypeRefKind::Struct(s)) => {
                                     self.defining_struct.as_deref() == Some(&*s.val)
@@ -741,7 +827,7 @@ impl<'a> Emitter<'a> {
                             if !is_self_ref {
                                 let derefed = ExprT::Deref(this.clone()).with_loc(this.loc.clone());
                                 self.emit_type_slprop(
-                                    env, pointee_ty, variant, quote, bindings, props, &derefed,
+                                    env, pointee_ty, variant, naming, props, &derefed,
                                 );
                             }
                         }
@@ -753,13 +839,11 @@ impl<'a> Emitter<'a> {
                     },
                     PointerKind::Array => {
                         let pointee_type_doc = self.emit_type(env, pointee_ty);
-                        let val_name = q(self
-                            .nm
-                            .emit(Name::Val(extract_base_ident(this), bindings.len() as u32)));
-                        bindings.push(ExBinding {
-                            name: val_name.clone(),
-                            ty: unaryfn(Doc::text("full_array_spec"), pointee_type_doc),
-                        });
+                        let val_name = self.push_val_binding(
+                            naming,
+                            this,
+                            unaryfn(Doc::text("full_array_spec"), pointee_type_doc),
+                        );
                         match variant {
                             SLPropVariant::Init { perm } => props.push(annotated(ty, || {
                                 naryfn([
@@ -800,13 +884,8 @@ impl<'a> Emitter<'a> {
                 };
                 let mut val_args: Vec<Doc> = vec![];
                 for vp_type in &val_param_types {
-                    let idx = bindings.len() as u32;
-                    let val_name_raw = self.nm.emit(Name::Val(extract_base_ident(this), idx));
-                    val_args.push(q(val_name_raw.clone()));
-                    bindings.push(ExBinding {
-                        name: q(val_name_raw),
-                        ty: vp_type.clone(),
-                    });
+                    let val_name = self.push_val_binding(naming, this, vp_type.clone());
+                    val_args.push(val_name);
                 }
                 let mut args: Vec<Doc> = vec![pred_name, this_doc];
                 if let SLPropVariant::Init { perm, .. } = variant {
@@ -816,7 +895,7 @@ impl<'a> Emitter<'a> {
                 props.push(naryfn(args));
             }
             TypeT::Refine(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, quote, bindings, props, this);
+                self.emit_type_slprop(env, ty, variant, naming, props, this);
                 if let SLPropVariant::Init { .. } = variant {
                     let p = &mut p.clone();
                     self.subst_this_rvalue(env, Rc::make_mut(p), this);
@@ -824,13 +903,13 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::RefineAlways(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, quote, bindings, props, this);
+                self.emit_type_slprop(env, ty, variant, naming, props, this);
                 let p = &mut p.clone();
                 self.subst_this_rvalue(env, Rc::make_mut(p), this);
                 props.push(self.emit_rvalue(env, p));
             }
             TypeT::RefineUninit(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, quote, bindings, props, this);
+                self.emit_type_slprop(env, ty, variant, naming, props, this);
                 if let SLPropVariant::Uninit = variant {
                     let p = &mut p.clone();
                     self.subst_this_rvalue(env, Rc::make_mut(p), this);
@@ -838,14 +917,14 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::RefineValue(ty, binding_name, binding_ty, p) => {
-                self.emit_type_slprop(env, ty, variant, quote, bindings, props, this);
+                self.emit_type_slprop(env, ty, variant, naming, props, this);
                 if let SLPropVariant::Init { .. } = variant {
                     let binding_type_doc = self.emit_type(env, binding_ty);
-                    let val_name = q(Doc::text(binding_name.val.to_string()));
-                    bindings.push(ExBinding {
-                        name: val_name.clone(),
-                        ty: binding_type_doc,
-                    });
+                    // RefineValue uses an explicit binding name from the user annotation
+                    let raw_name = Doc::text(binding_name.val.to_string());
+                    let val_name =
+                        self.push_val_binding_explicit(naming, raw_name, binding_type_doc);
+                    let _ = val_name; // name is used implicitly in the refinement prop
                     let p = &mut p.clone();
                     self.subst_this_rvalue(env, Rc::make_mut(p), this);
                     props.push(self.emit_rvalue(env, p));
@@ -863,7 +942,7 @@ impl<'a> Emitter<'a> {
         variant: SLPropVariant,
         k: &TypeRefKind,
         base_args: Vec<Doc>,
-        emit_slprops: impl Fn(&mut Self, SLPropVariant, &mut Vec<ExBinding>, &mut Vec<Doc>),
+        emit_slprops: impl Fn(&mut Self, SLPropVariant, &mut ValNaming, &mut Vec<Doc>),
     ) -> Doc {
         let pred_name = match variant {
             SLPropVariant::Init { .. } => self.nm.emit(Name::TypeRefPred(k.into())),
@@ -875,7 +954,12 @@ impl<'a> Emitter<'a> {
         }
         let mut bindings = vec![];
         let mut props = vec![];
-        emit_slprops(self, variant, &mut bindings, &mut props);
+        let mut naming = ValNaming::Standard {
+            quote: false,
+            bindings: &mut bindings,
+        };
+        emit_slprops(self, variant, &mut naming, &mut props);
+        drop(naming);
         match variant {
             SLPropVariant::Init { .. } => {
                 self.type_val_params.insert(
@@ -900,242 +984,6 @@ impl<'a> Emitter<'a> {
             ));
         }
         mk_eager_unfold_slprop(pred_name, &args, mk_star(props))
-    }
-
-    /// Collect spec bindings for a single struct field by walking its pointer chain.
-    /// `spec_param` is the Doc for the spec record parameter (e.g., "val_simple_0").
-    /// Returns the spec field bindings, init slprops, and uninit slprops for this field.
-    fn collect_field_spec(
-        &mut self,
-        env: &Env,
-        k: &TypeRefKind,
-        field_ident: &Ident,
-        field_ty: &Type,
-        this_expr: &Doc,
-        spec_param: &Doc,
-    ) -> FieldSpecInfo {
-        let type_ref = TypeRef::from(k);
-        let struct_name = match &type_ref {
-            TypeRef::Struct(s) => s.clone(),
-            _ => unreachable!(),
-        };
-        let field_name: Rc<IdentT> = field_ident.val.clone();
-        let mut bindings = vec![];
-        let mut init_props = vec![];
-
-        let field_doc = this_expr.clone().append(".").append(
-            self.nm
-                .emit(Name::StructDirectFieldName(struct_name, field_name.clone())),
-        );
-
-        self.collect_field_spec_recursive(
-            env,
-            &type_ref,
-            &field_name,
-            field_ty,
-            &field_doc,
-            spec_param,
-            &mut bindings,
-            &mut init_props,
-        );
-
-        FieldSpecInfo {
-            field_ident: field_name,
-            bindings,
-            init_props,
-        }
-    }
-
-    /// Recursively walk a type to collect spec bindings for pointer fields.
-    fn collect_field_spec_recursive(
-        &mut self,
-        env: &Env,
-        type_ref: &TypeRef,
-        field_name: &Rc<IdentT>,
-        ty: &Type,
-        expr_doc: &Doc,
-        spec_param: &Doc,
-        bindings: &mut Vec<SpecFieldBinding>,
-        init_props: &mut Vec<Doc>,
-    ) {
-        match &ty.val {
-            TypeT::Pointer(pointee_ty, PointerKind::Ref | PointerKind::Unknown) => {
-                let idx = bindings.len() as u32;
-                let spec_field_name_str = format!("{}_{}", field_name, idx);
-                let spec_field_name = self.nm.emit(Name::TypeRefSpecField(
-                    type_ref.clone(),
-                    spec_field_name_str,
-                ));
-                let pointee_type_doc = self.emit_type(env, pointee_ty);
-
-                // The val reference in the pred body: spec_param.spec_field_name
-                let val_access = spec_param
-                    .clone()
-                    .append(".")
-                    .append(spec_field_name.clone());
-
-                bindings.push(SpecFieldBinding {
-                    field_name: spec_field_name,
-                    ty: pointee_type_doc,
-                });
-
-                // Init slprop: pts_to expr #p spec_param.field
-                init_props.push(nary_no_parens([
-                    Doc::text("Pulse.Lib.Reference.pts_to"),
-                    expr_doc.clone(),
-                    Doc::text("#p"),
-                    val_access,
-                ]));
-
-                // Recurse into pointee if it's also a pointer (but not self-referential)
-                let is_self_ref = match &pointee_ty.val {
-                    TypeT::TypeRef(TypeRefKind::Struct(s)) => {
-                        self.defining_struct.as_deref() == Some(&*s.val)
-                    }
-                    _ => false,
-                };
-                if !is_self_ref {
-                    let deref_doc = parens(Doc::text("!").append(expr_doc.clone()));
-                    self.collect_field_spec_recursive(
-                        env, type_ref, field_name, pointee_ty, &deref_doc, spec_param, bindings,
-                        init_props,
-                    );
-                }
-            }
-            TypeT::Pointer(pointee_ty, PointerKind::Array) => {
-                let pointee_type_doc = self.emit_type(env, pointee_ty);
-
-                // Array fields generate two spec bindings: val (Seq.seq) and mask (nat->prop)
-                let val_idx = bindings.len() as u32;
-                let val_field_name_str = format!("{}_{}", field_name, val_idx);
-                let val_spec_field_name = self
-                    .nm
-                    .emit(Name::TypeRefSpecField(type_ref.clone(), val_field_name_str));
-                let val_access = spec_param
-                    .clone()
-                    .append(".")
-                    .append(val_spec_field_name.clone());
-                bindings.push(SpecFieldBinding {
-                    field_name: val_spec_field_name,
-                    ty: unaryfn(
-                        Doc::text("Seq.seq"),
-                        unaryfn(Doc::text("option"), pointee_type_doc),
-                    ),
-                });
-
-                let mask_idx = bindings.len() as u32;
-                let mask_field_name_str = format!("{}_{}", field_name, mask_idx);
-                let mask_spec_field_name = self.nm.emit(Name::TypeRefSpecField(
-                    type_ref.clone(),
-                    mask_field_name_str,
-                ));
-                let mask_access = spec_param
-                    .clone()
-                    .append(".")
-                    .append(mask_spec_field_name.clone());
-                bindings.push(SpecFieldBinding {
-                    field_name: mask_spec_field_name,
-                    ty: Doc::text("(nat->prop)"),
-                });
-
-                // Init slprop: array_pts_to expr p val mask
-                init_props.push(nary_no_parens([
-                    Doc::text("array_pts_to"),
-                    expr_doc.clone(),
-                    Doc::text("p"),
-                    val_access,
-                    mask_access,
-                ]));
-            }
-            // Non-pointer types and ArrayPtr don't contribute to the spec
-            _ => {}
-        }
-    }
-
-    /// Generate the requires slprops for the fold ghost fn.
-    /// Uses individual val names (val_<field>_<idx>) instead of spec record access.
-    fn emit_struct_fold_requires(
-        &mut self,
-        env: &Env,
-        k: &TypeRefKind,
-        fields: &[(Ident, Rc<Type>)],
-        this_doc: &Doc,
-    ) -> Vec<Doc> {
-        let type_ref = TypeRef::from(k);
-        let struct_name = match &type_ref {
-            TypeRef::Struct(s) => s.clone(),
-            _ => unreachable!(),
-        };
-        let mut reqs = vec![];
-        for (fld, fld_ty) in fields {
-            let field_doc =
-                this_doc
-                    .clone()
-                    .append(".")
-                    .append(self.nm.emit(Name::StructDirectFieldName(
-                        struct_name.clone(),
-                        fld.val.clone(),
-                    )));
-            let mut idx = 0u32;
-            self.emit_fold_requires_recursive(
-                env, fld_ty, &field_doc, &fld.val, &mut idx, &mut reqs,
-            );
-        }
-        reqs
-    }
-
-    /// Recursively generate pts_to requires for fold, using val_<field>_<idx> names.
-    fn emit_fold_requires_recursive(
-        &mut self,
-        env: &Env,
-        ty: &Type,
-        expr_doc: &Doc,
-        field_name: &Rc<IdentT>,
-        idx: &mut u32,
-        reqs: &mut Vec<Doc>,
-    ) {
-        match &ty.val {
-            TypeT::Pointer(pointee_ty, PointerKind::Ref | PointerKind::Unknown) => {
-                let val_name = Doc::text(format!("val_{}_{}", field_name, idx));
-                *idx += 1;
-
-                reqs.push(nary_no_parens([
-                    Doc::text("Pulse.Lib.Reference.pts_to"),
-                    expr_doc.clone(),
-                    Doc::text("#p"),
-                    val_name,
-                ]));
-
-                // Recurse if pointee is also a pointer (not self-referential)
-                let is_self_ref = match &pointee_ty.val {
-                    TypeT::TypeRef(TypeRefKind::Struct(s)) => {
-                        self.defining_struct.as_deref() == Some(&*s.val)
-                    }
-                    _ => false,
-                };
-                if !is_self_ref {
-                    let deref_doc = parens(Doc::text("!").append(expr_doc.clone()));
-                    self.emit_fold_requires_recursive(
-                        env, pointee_ty, &deref_doc, field_name, idx, reqs,
-                    );
-                }
-            }
-            TypeT::Pointer(_pointee_ty, PointerKind::Array) => {
-                let val_name = Doc::text(format!("val_{}_{}", field_name, idx));
-                *idx += 1;
-                let mask_name = Doc::text(format!("val_{}_{}", field_name, idx));
-                *idx += 1;
-
-                reqs.push(nary_no_parens([
-                    Doc::text("array_pts_to"),
-                    expr_doc.clone(),
-                    Doc::text("p"),
-                    val_name,
-                    mask_name,
-                ]));
-            }
-            _ => {}
-        }
     }
 
     fn emit_var(&mut self, v: &Ident) -> Doc {
@@ -2550,16 +2398,8 @@ impl<'a> Emitter<'a> {
             },
             k,
             vec![this_arg.clone()],
-            |s, variant, bindings, props| {
-                s.emit_type_slprop(
-                    env,
-                    &body,
-                    variant,
-                    false,
-                    bindings,
-                    props,
-                    &mk_rvar(&this_r),
-                );
+            |s, variant, naming, props| {
+                s.emit_type_slprop(env, &body, variant, naming, props, &mk_rvar(&this_r));
             },
         );
 
@@ -2568,16 +2408,8 @@ impl<'a> Emitter<'a> {
             SLPropVariant::Uninit,
             k,
             vec![this_arg],
-            |s, variant, bindings, props| {
-                s.emit_type_slprop(
-                    env,
-                    &body,
-                    variant,
-                    false,
-                    bindings,
-                    props,
-                    &mk_rvar(&this_r),
-                );
+            |s, variant, naming, props| {
+                s.emit_type_slprop(env, &body, variant, naming, props, &mk_rvar(&this_r));
             },
         );
 
@@ -2778,11 +2610,38 @@ impl<'a> Emitter<'a> {
         // Determine the spec param name (e.g., "val_simple_0")
         let spec_param_name = self.nm.emit(Name::Val(name.val.clone(), 0));
 
-        // Collect per-field spec info
+        // Collect per-field spec info using emit_type_slprop with SpecRecord naming
+        let type_ref = TypeRef::from(k);
         let field_specs: Vec<FieldSpecInfo> = fields
             .iter()
             .map(|(fld, fld_ty)| {
-                self.collect_field_spec(env, k, fld, fld_ty, &this_doc, &spec_param_name)
+                let field_name: Rc<IdentT> = fld.val.clone();
+                let mut bindings = vec![];
+                let mut init_props = vec![];
+                let field_expr =
+                    ExprT::Member(mk_rvar(&this), fld.clone().into()).with_loc(fld.loc.clone());
+                let mut naming = ValNaming::SpecRecord {
+                    spec_param: &spec_param_name,
+                    type_ref: &type_ref,
+                    field_name: &field_name,
+                    bindings: &mut bindings,
+                };
+                self.emit_type_slprop(
+                    env,
+                    fld_ty,
+                    SLPropVariant::Init {
+                        perm: &Doc::text("p"),
+                    },
+                    &mut naming,
+                    &mut init_props,
+                    &field_expr,
+                );
+                drop(naming);
+                FieldSpecInfo {
+                    field_ident: field_name,
+                    bindings,
+                    init_props,
+                }
             })
             .collect();
 
@@ -2875,9 +2734,7 @@ impl<'a> Emitter<'a> {
                     .group()
                     .nest(2)
                     .group()
-                    .append(
-                        Doc::line().append(mk_star(init_props.iter().map(|p| parens(p.clone())))),
-                    )
+                    .append(Doc::line().append(mk_star(init_props.iter().cloned())))
                     .group()
                     .nest(2),
             );
@@ -2924,12 +2781,12 @@ impl<'a> Emitter<'a> {
             let this_r = this.clone();
             let emit_uninit_slprops = |s: &mut Self,
                                        variant: SLPropVariant,
-                                       bindings: &mut Vec<ExBinding>,
+                                       naming: &mut ValNaming,
                                        props: &mut Vec<Doc>| {
                 for (fld, fld_ty) in fields {
                     let field_expr = ExprT::Member(mk_rvar(&this_r), fld.clone().into())
                         .with_loc(fld.loc.clone());
-                    s.emit_type_slprop(env, fld_ty, variant, false, bindings, props, &field_expr);
+                    s.emit_type_slprop(env, fld_ty, variant, naming, props, &field_expr);
                 }
             };
             ses.push(self.emit_pred_decl(
@@ -3019,8 +2876,27 @@ impl<'a> Emitter<'a> {
                 }
             }
 
-            // Generate init props using individual val names
-            let fold_requires = self.emit_struct_fold_requires(env, k, fields, &this_doc);
+            // Generate init props using individual val names (per-field Standard naming)
+            let mut fold_requires = vec![];
+            for (fld, fld_ty) in fields {
+                let field_expr =
+                    ExprT::Member(mk_rvar(&this), fld.clone().into()).with_loc(fld.loc.clone());
+                let mut field_bindings = vec![];
+                let mut naming = ValNaming::Standard {
+                    quote: false,
+                    bindings: &mut field_bindings,
+                };
+                self.emit_type_slprop(
+                    env,
+                    fld_ty,
+                    SLPropVariant::Init {
+                        perm: &Doc::text("p"),
+                    },
+                    &mut naming,
+                    &mut fold_requires,
+                    &field_expr,
+                );
+            }
 
             // Build the spec record literal for ensures
             let spec_record_literal = parens(
@@ -3732,17 +3608,21 @@ impl<'a> Emitter<'a> {
                 ParamMode::Regular | ParamMode::Consumed => {
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
+                    let mut naming = ValNaming::Standard {
+                        quote: false,
+                        bindings: &mut type_bindings,
+                    };
                     self.emit_type_slprop(
                         env,
                         &arg.ty,
                         SLPropVariant::Init {
                             perm: &Doc::text("1.0R"),
                         },
-                        false,
-                        &mut type_bindings,
+                        &mut naming,
                         &mut type_props,
                         &mk_rvar(&n),
                     );
+                    drop(naming);
                     if !type_props.is_empty() {
                         let wrapped = wrap_exists(&type_bindings, type_props);
                         match arg.mode {
@@ -3764,30 +3644,38 @@ impl<'a> Emitter<'a> {
                     let perm_doc = Doc::text("'").append(perm_name);
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
+                    let mut naming = ValNaming::Standard {
+                        quote: true,
+                        bindings: &mut type_bindings,
+                    };
                     self.emit_type_slprop(
                         env,
                         &arg.ty,
                         SLPropVariant::Init { perm: &perm_doc },
-                        true,
-                        &mut type_bindings,
+                        &mut naming,
                         &mut type_props,
                         &mk_rvar(&n),
                     );
+                    drop(naming);
                     preserves_props.extend(type_props);
                 }
                 ParamMode::Out => {
                     // Precondition: uninit slprop
                     let mut uninit_bindings = vec![];
                     let mut uninit_props = vec![];
+                    let mut naming = ValNaming::Standard {
+                        quote: true,
+                        bindings: &mut uninit_bindings,
+                    };
                     self.emit_type_slprop(
                         env,
                         &arg.ty,
                         SLPropVariant::Uninit,
-                        true,
-                        &mut uninit_bindings,
+                        &mut naming,
                         &mut uninit_props,
                         &mk_rvar(&n),
                     );
+                    drop(naming);
                     if !uninit_props.is_empty() {
                         requires_props.push(wrap_exists(&uninit_bindings, uninit_props));
                     }
@@ -3795,17 +3683,21 @@ impl<'a> Emitter<'a> {
                     // Postcondition: normal initialized slprop
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
+                    let mut naming = ValNaming::Standard {
+                        quote: false,
+                        bindings: &mut type_bindings,
+                    };
                     self.emit_type_slprop(
                         env,
                         &arg.ty,
                         SLPropVariant::Init {
                             perm: &Doc::text("1.0R"),
                         },
-                        false,
-                        &mut type_bindings,
+                        &mut naming,
                         &mut type_props,
                         &mk_rvar(&n),
                     );
+                    drop(naming);
                     if !type_props.is_empty() {
                         ensures_props.push(wrap_exists(&type_bindings, type_props));
                     }
@@ -3824,17 +3716,21 @@ impl<'a> Emitter<'a> {
             .with_loc(ret_type.loc.clone());
         let mut ret_bindings = vec![];
         let mut ret_props = vec![];
+        let mut naming = ValNaming::Standard {
+            quote: false,
+            bindings: &mut ret_bindings,
+        };
         self.emit_type_slprop(
             env,
             &ret_type,
             SLPropVariant::Init {
                 perm: &Doc::text("1.0R"),
             },
-            false,
-            &mut ret_bindings,
+            &mut naming,
             &mut ret_props,
             &mk_rvar(&return_id),
         );
+        drop(naming);
         if !ret_props.is_empty() {
             ensures_props.push(wrap_exists(&ret_bindings, ret_props));
         }
@@ -4331,31 +4227,39 @@ impl<'a> Emitter<'a> {
                     let perm_doc = Doc::text("'").append(perm_name);
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
+                    let mut naming = ValNaming::Standard {
+                        quote: true,
+                        bindings: &mut type_bindings,
+                    };
                     self.emit_type_slprop(
                         env,
                         &arg.ty,
                         SLPropVariant::Init { perm: &perm_doc },
-                        true,
-                        &mut type_bindings,
+                        &mut naming,
                         &mut type_props,
                         &mk_rvar(&n),
                     );
+                    drop(naming);
                     requires_props.extend(type_props);
                 }
                 _ => {
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
+                    let mut naming = ValNaming::Standard {
+                        quote: false,
+                        bindings: &mut type_bindings,
+                    };
                     self.emit_type_slprop(
                         env,
                         &arg.ty,
                         SLPropVariant::Init {
                             perm: &Doc::text("1.0R"),
                         },
-                        false,
-                        &mut type_bindings,
+                        &mut naming,
                         &mut type_props,
                         &mk_rvar(&n),
                     );
+                    drop(naming);
                     if !type_props.is_empty() {
                         requires_props.push(wrap_exists(&type_bindings, type_props));
                     }
