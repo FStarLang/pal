@@ -174,7 +174,6 @@ enum Name {
 
     TypeRefSpec(TypeRef),
     TypeRefSpecField(TypeRef, String),
-    TypeRefPredPrime(TypeRef),
     TypeRefPredUnfold(TypeRef),
     TypeRefPredFold(TypeRef),
 
@@ -223,7 +222,6 @@ impl Name {
             Name::TypeRef(TypeRef::Union(str)) => format!("union_{}", str),
             Name::TypeRef(TypeRef::Typedef(ty)) => format!("ty_{}", ty),
             Name::TypeRefPred(type_ref) => format!("{}__pred", typeref_to_string(type_ref)),
-            Name::TypeRefPredPrime(type_ref) => format!("{}__pred'", typeref_to_string(type_ref)),
             Name::TypeRefPredUnfold(type_ref) => {
                 format!("{}__pred_unfold", typeref_to_string(type_ref))
             }
@@ -2696,11 +2694,10 @@ impl<'a> Emitter<'a> {
             .flat_map(|fs| fs.init_props.clone())
             .collect();
 
-        // Emit __pred' (unfold, with spec record param) and __pred (wrapper)
-        let pred_prime_name = self.nm.emit(Name::TypeRefPredPrime(k.into()));
+        // Emit __pred directly (no indirection via __pred')
         let pred_name = self.nm.emit(Name::TypeRefPred(k.into()));
         if !all_spec_bindings.is_empty() {
-            let pred_prime_args = vec![
+            let pred_args = vec![
                 this_arg.clone(),
                 parens(Doc::text("p: perm")),
                 parens(
@@ -2712,57 +2709,21 @@ impl<'a> Emitter<'a> {
                 ),
             ];
             ses.push(
-                Doc::text("unfold")
-                    .append(Doc::hardline())
+                Doc::text("let")
+                    .append(Doc::line())
+                    .append("predicate")
+                    .append(Doc::line())
+                    .append(pred_name.clone())
+                    .group()
                     .append(
-                        Doc::text("let")
-                            .append(Doc::line())
-                            .append("predicate")
-                            .append(Doc::line())
-                            .append(pred_prime_name.clone())
-                            .group(),
-                    )
-                    .append(
-                        Doc::concat(
-                            pred_prime_args
-                                .iter()
-                                .map(|arg| Doc::line().append(arg.clone())),
-                        )
-                        .nest(2)
-                        .append(Doc::line().append("=").group()),
+                        Doc::concat(pred_args.iter().map(|arg| Doc::line().append(arg.clone())))
+                            .nest(2)
+                            .append(Doc::line().append("=").group()),
                     )
                     .group()
                     .nest(2)
                     .group()
                     .append(Doc::line().append(mk_star(init_props.iter().cloned())))
-                    .group()
-                    .nest(2),
-            );
-
-            // Emit __pred (non-unfolded wrapper)
-            ses.push(
-                Doc::text("let")
-                    .append(Doc::line())
-                    .append(pred_name.clone())
-                    .group()
-                    .append(
-                        Doc::concat(
-                            pred_prime_args
-                                .iter()
-                                .map(|arg| Doc::line().append(arg.clone())),
-                        )
-                        .nest(2)
-                        .append(Doc::line().append("=").group()),
-                    )
-                    .group()
-                    .nest(2)
-                    .group()
-                    .append(Doc::line().append(naryfn([
-                        pred_prime_name.clone(),
-                        this_doc.clone(),
-                        Doc::text("p"),
-                        spec_param_name.clone(),
-                    ])))
                     .group()
                     .nest(2),
             );
