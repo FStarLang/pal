@@ -843,7 +843,11 @@ impl<'a> Emitter<'a> {
         match naming {
             ValNaming::Standard { quote, bindings } => {
                 let idx = bindings.len() as u32;
-                let raw = Doc::text(self.nm.mangle(&Name::Val(extract_base_ident(this), idx)).to_string());
+                let raw = Doc::text(
+                    self.nm
+                        .mangle(&Name::Val(extract_base_ident(this), idx))
+                        .to_string(),
+                );
                 let val_name = if *quote {
                     Doc::text("'").append(raw)
                 } else {
@@ -863,10 +867,14 @@ impl<'a> Emitter<'a> {
             } => {
                 let idx = bindings.len() as u32;
                 let spec_field_name_str = format!("{}_{}", field_name, idx);
-                let spec_field_name = Doc::text(self.nm.mangle(&Name::TypeRefSpecField(
-                    (*type_ref).clone(),
-                    spec_field_name_str,
-                )).to_string());
+                let spec_field_name = Doc::text(
+                    self.nm
+                        .mangle(&Name::TypeRefSpecField(
+                            (*type_ref).clone(),
+                            spec_field_name_str,
+                        ))
+                        .to_string(),
+                );
                 let val_access = spec_param
                     .clone()
                     .append(".")
@@ -903,10 +911,14 @@ impl<'a> Emitter<'a> {
                 ..
             } => {
                 // For explicit names in spec context, use the name as the field name
-                let spec_field_name = Doc::text(self.nm.mangle(&Name::TypeRefSpecField(
-                    (*type_ref).clone(),
-                    format!("{}", raw_name.pretty(80)),
-                )).to_string());
+                let spec_field_name = Doc::text(
+                    self.nm
+                        .mangle(&Name::TypeRefSpecField(
+                            (*type_ref).clone(),
+                            format!("{}", raw_name.pretty(80)),
+                        ))
+                        .to_string(),
+                );
                 let val_access = spec_param
                     .clone()
                     .append(".")
@@ -2755,7 +2767,8 @@ impl<'a> Emitter<'a> {
         );
 
         // Determine the spec param name (e.g., "val_simple_0")
-        let spec_param_name = Doc::text(self.nm.mangle(&Name::Val(name.val.clone(), 0)).to_string());
+        let spec_param_name =
+            Doc::text(self.nm.mangle(&Name::Val(name.val.clone(), 0)).to_string());
 
         // Collect per-field spec info using emit_type_slprop with SpecRecord naming
         let type_ref = TypeRef::from(k);
@@ -2799,12 +2812,21 @@ impl<'a> Emitter<'a> {
             .collect();
 
         // Emit the spec record type if there are any spec bindings
-        let spec_type_name = Doc::text(self.nm.mangle(&Name::TypeRefSpec(k.into())).to_string());
+        // Use mangle for definition (local), force qualification for storage (cross-module use)
+        let spec_type_name_local =
+            Doc::text(self.nm.mangle(&Name::TypeRefSpec(k.into())).to_string());
+        let spec_mangled = self.nm.mangle(&Name::TypeRefSpec(k.into())).to_string();
+        let spec_type_name_qualified =
+            if let Some(owner) = module_for_name(&Name::TypeRefSpec(k.into())) {
+                Doc::text(format!("{}.{}", owner, spec_mangled))
+            } else {
+                Doc::text(spec_mangled)
+            };
         if !all_spec_bindings.is_empty() {
             ses.push(
                 Doc::text("[@@erasable] noeq type")
                     .append(Doc::line())
-                    .append(spec_type_name.clone())
+                    .append(spec_type_name_local.clone())
                     .append(Doc::line())
                     .append("=")
                     .append(Doc::line())
@@ -2834,7 +2856,7 @@ impl<'a> Emitter<'a> {
             self.type_val_params.insert(TypeRef::from(k), vec![]);
         } else {
             self.type_val_params
-                .insert(TypeRef::from(k), vec![spec_type_name.clone()]);
+                .insert(TypeRef::from(k), vec![spec_type_name_qualified.clone()]);
         }
 
         // Collect init props from field specs
@@ -2854,7 +2876,7 @@ impl<'a> Emitter<'a> {
                         .clone()
                         .append(":")
                         .append(Doc::line())
-                        .append(spec_type_name.clone()),
+                        .append(spec_type_name_local.clone()),
                 ),
             ];
             ses.push(
@@ -2909,7 +2931,11 @@ impl<'a> Emitter<'a> {
 
         // Emit __pred_unfold ghost fn
         if !all_spec_bindings.is_empty() {
-            let unfold_name = Doc::text(self.nm.mangle(&Name::TypeRefPredUnfold(k.into())).to_string());
+            let unfold_name = Doc::text(
+                self.nm
+                    .mangle(&Name::TypeRefPredUnfold(k.into()))
+                    .to_string(),
+            );
             let requires_doc = nary_no_parens([
                 pred_name.clone(),
                 this_doc.clone(),
@@ -2940,7 +2966,7 @@ impl<'a> Emitter<'a> {
                             .append("    (")
                             .append(spec_param_name.clone())
                             .append(": ")
-                            .append(spec_type_name.clone())
+                            .append(spec_type_name_local.clone())
                             .append(")"),
                     )
                     .append(Doc::hardline().append("  requires ").append(requires_doc))
