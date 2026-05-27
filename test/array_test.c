@@ -41,20 +41,11 @@ void struct_arr(uptr_struct a)
   a.x[1] = a.x[0] + 67;
 }
 
-typedef struct {
-  _refine(this._length == 32) _array unsigned char *x;
-} b32_struct;
-void b32_arr(b32_struct a)
-  _ensures(a.x[10] == 67)
-{
-  a.x[10] = 67;
-}
-
 _refine(this.x._length == 32)
 typedef struct {
   _array unsigned char *x;
-} b32_struct_alt;
-void b32_arr_alt(b32_struct_alt a)
+} b32_struct;
+void b32_arr(b32_struct a)
   _ensures(a.x[10] == 67)
 {
   a.x[10] = 67;
