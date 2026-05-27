@@ -6,115 +6,133 @@ module SZ = FStar.SizeT
 
 #lang-pulse
 
-let array_value_of #a (x: array a) #p #m #y =
-  observe (fun y -> pts_to_mask x #p y m) #y
+val array ([@@@unused] a:Type u#a) : Type u#0
 
-let array_full_mask #t (s: Seq.seq (option t)) (mask: nat -> prop) =
-  forall (i: nat). i < Seq.length s ==> mask i
+val array_null #a : array a
+val array_is_null #a (r: array a) : b:bool {b <==> r == array_null}
 
-let array_initialized #t (s: Seq.seq (option t)) : prop =
-  forall (i: nat). i < Seq.length s ==> Some? (Seq.index s i)
+instance has_zero_default_array (a:Type) : Pulse.Lib.C.Inhabited.has_zero_default (array a) = {
+  zero_default = array_null
+}
+
+[@@erasable] val array_spec (a: Type u#a) : Type u#a
+
+val array_spec_len #a (s: array_spec a) : GTot nat
+val array_spec_initd #a (s: array_spec a) (i: nat) : prop
+val array_spec_mask #a (s: array_spec a) (i: nat) : prop
+val array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : GTot a
+
+val array_spec_len_fits #a s : Lemma (SZ.fits (array_spec_len #a s)) [SMTPat (array_spec_len #a s)]
+
+let array_spec_full_mask #a (s: array_spec a) =
+  forall (i:nat). {:pattern array_spec_mask s i} i < array_spec_len s ==> array_spec_mask s i
+
+let array_spec_initialized #a (s: array_spec a) =
+  forall (i:nat). {:pattern array_spec_initd s i} i < array_spec_len s ==> array_spec_initd s i
+
+let array_spec_full #a (s: array_spec a) =
+  array_spec_full_mask s /\ array_spec_initialized s
+
+let full_array_spec a = s: array_spec a { array_spec_full s }
+
+val array_spec_ext #a (s1 s2: array_spec a) :
+  Lemma (requires
+    array_spec_len s1 == array_spec_len s2
+      /\ (forall (i:nat). i < array_spec_len s1 ==> (array_spec_initd s1 i <==> array_spec_initd s2 i))
+      /\ (forall (i:nat). i < array_spec_len s1 ==> (array_spec_mask s1 i <==> array_spec_mask s2 i))
+      /\ (forall (i:nat). i < array_spec_len s1 /\ array_spec_initd s1 i ==> array_spec_idx s1 i == array_spec_idx s2 i))
+  (ensures s1 == s2)
+
+val array_spec_zeroed (a: Type) (n: nat) (x: a) : array_spec a
+val array_spec_zeroed_len a n x : Lemma (array_spec_len (array_spec_zeroed a n x) == n) [SMTPat (array_spec_len (array_spec_zeroed a n x))]
+val array_spec_zeroed_initd a n x (i:nat) : Lemma (i < n ==> array_spec_initd (array_spec_zeroed a n x) i) [SMTPat (array_spec_initd (array_spec_zeroed a n x) i)]
+val array_spec_zeroed_mask a n x (i:nat) : Lemma (i < n ==> array_spec_mask (array_spec_zeroed a n x) i) [SMTPat (array_spec_mask (array_spec_zeroed a n x) i)]
+val array_spec_zeroed_idx a n x (i:nat) : Lemma (i < n ==> array_spec_idx (array_spec_zeroed a n x) i == x) [SMTPat (array_spec_idx (array_spec_zeroed a n x) i)]
+
+val array_pts_to #a ([@@@mkey] x: array a) (p: perm) (y: array_spec a) : slprop
+
+let array_spec_seq #a (s: array_spec a) : GTot (Seq.seq (option a)) =
+  Seq.init_ghost (array_spec_len s) fun i -> if array_spec_initd s i then Some (array_spec_idx s i) else None
+
+let array_spec_of #a (x: array a) #p #y =
+  observe (array_pts_to x p) #y
+
+ghost fn array_value_of u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
+  preserves array_pts_to x p y
+  returns v: Seq.seq (option a)
+  ensures rewrites_to v (array_spec_seq y)
+{ array_spec_seq y }
 
 [@@pulse_eager_unfold]
-let array_pts_to_uninit (#t: Type u#a) (a: array t) (s: Seq.seq (option t)) (mask: nat -> prop) =
-  pts_to_mask a s mask ** with_pure (array_full_mask s mask) fun _ -> emp
+let array_pts_to_full (#t: Type u#a) (a: array t) p (y: full_array_spec t) =
+  array_pts_to a p y
 
 [@@pulse_eager_unfold]
-let array_pts_to (#t: Type u#a) ([@@@mkey] a: array t) (p: perm) (s: Seq.seq (option t)) (mask: nat -> prop) : slprop =
-  pts_to_mask a #p s mask ** with_pure (array_full_mask s mask /\ array_initialized s) fun _ -> emp
+let array_pts_to_uninit (#t: Type u#a) (a: array t) y =
+  array_pts_to a 1.0R y ** with_pure (array_spec_full_mask y) fun _ -> emp
+
+[@@pulse_eager_unfold]
+let array_pts_to_uninit' (#t: Type u#a) (a: array t) =
+  exists* y. array_pts_to_uninit a y
 
 val freeable_array (#a:Type) (r:array a) : slprop
+
+val array_spec_uninit (a: Type) (n: nat) : array_spec a
+val array_spec_uninit_len a n : Lemma (array_spec_len (array_spec_uninit a n) == n) [SMTPat (array_spec_len (array_spec_uninit a n))]
+val array_spec_uninit_mask a n (i:nat) : Lemma (i < n ==> array_spec_mask (array_spec_uninit a n) i) [SMTPat (array_spec_mask (array_spec_uninit a n) i)]
 
 fn alloc_array u#a (#a:Type u#a) (sz:SizeT.t)
   returns r : array a
   ensures freeable_array r
-  ensures exists* s mask. array_pts_to_uninit r s mask
-  ensures pure (Seq.length (array_value_of r) == (SizeT.v sz))
+  ensures array_pts_to_uninit' r
+  ensures pure (array_spec_of r == array_spec_uninit a (SZ.v sz))
 
 fn free_array u#a (#a:Type u#a) (r:array a)
-  requires exists* s mask. array_pts_to_uninit r s mask
+  requires array_pts_to_uninit' r
   requires freeable_array r
+
+fn stack_alloc_array u#a (#a:Type u#a) (sz:SizeT.t)
+  returns r : array a
+  ensures array_pts_to_uninit' r
+  ensures pure (array_spec_of r == array_spec_uninit a (SZ.v sz))
+
+fn stack_free_array u#a (#a:Type u#a) (r:array a)
+  requires array_pts_to_uninit' r
 
 fn calloc_array u#a (#a:Type u#a) {| has_zero_default a |} (sz:SizeT.t)
   returns r : array a
   ensures freeable_array r
-  ensures A.pts_to r (Seq.create (SizeT.v sz) zero_default)
+  ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SizeT.v sz) zero_default)
 
-// Convert pts_to to pts_to_mask for uniform array handling
-ghost fn arr_to_mask u#a (#t: Type u#a) (arr: array t) (#p: perm) (#v: erased (Seq.seq t))
-  requires A.pts_to arr #p v
-  ensures exists* (s: Seq.seq (option t)). pts_to_mask arr #p s (fun _ -> True)
-    ** pure (Seq.length s == Seq.length v /\
-      (forall (i: nat). i < Seq.length s ==> Seq.index s i == Some (Seq.index v i)))
-{
-  A.to_mask arr;
-}
-
-// Calloc that returns pts_to_mask instead of pts_to
-fn calloc_array_mask u#a (#a:Type u#a) {| has_zero_default a |} (sz:SizeT.t)
-  returns r : array a
-  ensures freeable_array r
-  ensures exists* (s: Seq.seq (option a)) mask.
-    pts_to_mask r s mask **
-    pure (Seq.length s == SZ.v sz /\ array_initialized s /\ array_full_mask s mask /\
-      (forall (i: nat). i < Seq.length s ==> Seq.index s i == Some zero_default))
-{
-  let r = calloc_array #a sz;
-  arr_to_mask r;
-  r
-}
-
-let has_length #a ([@@@mkey] x: a) (len: nat) : slprop = emp
-
-[@@pulse_intro]
-ghost fn intro_has_length_init u#a (#a: Type u#a) (x: array a)
-  requires pts_to x #'p 'y
-  ensures has_length x (Seq.length 'y)
-{
-  drop_ (pts_to x #'p 'y);
-  fold has_length x (Seq.length 'y);
-}
-
-[@@pulse_intro]
-ghost fn intro_has_length_mask u#a (#a: Type u#a) (x: array a)
-  requires A.pts_to_mask x #'p 'y 'mask
-  ensures has_length x (Seq.length 'y)
-{
-  drop_ (A.pts_to_mask x #'p _ _);
-  fold has_length x (Seq.length 'y);
-}
-
-let length_of #a (x: a) #y = observe (has_length x) #y
+ghost fn length_of u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
+  preserves array_pts_to x p y
+  returns n: nat
+  ensures rewrites_to n (array_spec_len y)
+{ array_spec_len y }
 
 // live_array: array resource preserved across loop iterations
 [@@pulse_eager_unfold]
 let live_array (#t: Type u#a) (a: array t) : slprop =
-  exists* s mask. array_pts_to a 1.0R s mask
+  exists* (s: full_array_spec t). array_pts_to a 1.0R s
 
-// Array read that works in spec contexts (has rewrites_to).
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#p: perm)
-  (#s: Ghost.erased (Seq.seq (option t)) { SZ.v i < Seq.length s })
-  #mask
-  preserves pts_to_mask a #p s mask
-  requires with_pure (mask (SZ.v i) /\ Some? (Seq.index s (SZ.v i)))
+  (#s: array_spec t { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
+  preserves array_pts_to a p s
   returns res: t
-  ensures rewrites_to res (Some?.v (Seq.index s (SZ.v i)))
-{
-  A.mask_read a i
-}
+  ensures rewrites_to res (array_spec_idx s (SZ.v i))
 
-// Array write for use with pts_to_mask.
-inline_for_extraction
+val array_spec_upd (#a: Type) (s: array_spec a) (n: nat) (x: a) : array_spec a
+val array_spec_upd_len #a s n x : Lemma (array_spec_len (array_spec_upd #a s n x) == array_spec_len s) [SMTPat (array_spec_len (array_spec_upd #a s n x))]
+val array_spec_upd_initd #a s n x (i:nat) : Lemma (array_spec_initd (array_spec_upd #a s n x) i <==> (i == n /\ i < array_spec_len s) \/ array_spec_initd s i) [SMTPat (array_spec_initd (array_spec_upd #a s n x) i)]
+val array_spec_upd_mask #a s n x (i:nat) : Lemma (array_spec_mask (array_spec_upd #a s n x) i <==> array_spec_mask s i) [SMTPat (array_spec_mask (array_spec_upd #a s n x) i)]
+val array_spec_upd_idx1 #a s n x (i:nat) : Lemma (i =!= n /\ array_spec_initd s i ==> (array_spec_idx (array_spec_upd #a s n x) i == array_spec_idx s i)) [SMTPat (array_spec_idx (array_spec_upd #a s n x) i)]
+val array_spec_upd_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_spec_idx (array_spec_upd #a s n x) n == x) [SMTPat (array_spec_idx (array_spec_upd #a s n x) n)]
+
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
-  (#s: Ghost.erased (Seq.seq (option t)) { SZ.v i < Seq.length s })
-  #mask
-  requires pts_to_mask a s mask
-  requires pure (mask (SZ.v i))
-  ensures pts_to_mask a (Seq.upd s (SZ.v i) (Some v)) mask
-{
-  A.mask_write a i v
-}
+  (#s: array_spec t { array_spec_mask s (SZ.v i) })
+  requires array_pts_to a 1.0R s
+  ensures exists* s'. array_pts_to a 1.0R s' ** pure (s' == array_spec_upd s (SZ.v i) v)
 
 // ---------------------------------------------------------------------------
 // ArrayPtr: pointers into arrays (zero-length sub-arrays sharing a base)
@@ -122,6 +140,10 @@ fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
 // An arrayptr is just a Pulse array with length 0 and the same base as its
 // parent. arrayptr_pts_to is a pure proposition asserting this relationship.
 // ---------------------------------------------------------------------------
+
+val length #t (a: array t) : GTot nat
+val base_of #t (a: array t) : base_t
+val offset_of #t (a: array t) : GTot nat
 
 /// Offset of x relative to y (may be negative).
 private let arrayptr_off (#t: Type) (x y: array t) : GTot int =
@@ -148,59 +170,51 @@ instance duplicable_arrayptr_pts_to #t x y : duplicable (arrayptr_pts_to #t x y)
 val array_to_arrayptr (#t: Type u#a) (arr: array t) (i: SZ.t)
   : stt (array t)
     emp
-    (fun r -> arrayptr_pts_to r arr ** pure (offset_of r == offset_of arr + SZ.v i))
+    (fun r -> arrayptr_pts_to r arr ** pure (base_of r == base_of arr /\ offset_of r == offset_of arr + SZ.v i))
 
 /// Shift an arrayptr by `n` positions.
 val arrayptr_shift (#t: Type u#a) (x: array t) (n: SZ.t) (#y: erased (array t))
   : stt (array t)
     (arrayptr_pts_to x y)
     (fun r -> arrayptr_pts_to x y ** arrayptr_pts_to r y **
-      pure (offset_of r == offset_of x + SZ.v n))
+      pure (base_of r == base_of x /\ offset_of r == offset_of x + SZ.v n))
 
 /// Read through an arrayptr at index `i`, borrowing permissions from parent `y`.
-val arrayptr_read (#t: Type u#a) (x: array t) (i: SZ.t)
+fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
   (#y: erased (array t))
-  (#p: perm) (#s: Ghost.erased (Seq.seq (option t))) (#mask: Ghost.erased (nat -> prop))
-  : stt t
-    (arrayptr_pts_to x y ** pts_to_mask y #p s mask **
-      pure (0 <= arrayptr_off x y + SZ.v i /\
-            arrayptr_off x y + SZ.v i < Seq.length s /\
-            reveal mask (arrayptr_off x y + SZ.v i) /\
-            Some? (Seq.index s (arrayptr_off x y + SZ.v i))))
-    (fun res -> arrayptr_pts_to x y ** pts_to_mask y #p s mask)
+  (#p: perm) (#s: array_spec t { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_initd s (arrayptr_off x y + SZ.v i) })
+  requires arrayptr_pts_to x y
+  preserves array_pts_to y p s
+  returns res: t
+  ensures rewrites_to res (array_spec_idx s (arrayptr_off x y + SZ.v i))
 
 /// Write through an arrayptr at index `i`, using permissions from parent `y`.
-val arrayptr_write (#t: Type u#a)
-  (x: array t) (i: SZ.t) (v: t)
-  (#y: array t)
-  (#s: Ghost.erased (Seq.seq (option t))) (#mask: Ghost.erased (nat -> prop))
-  : stt unit
-    (arrayptr_pts_to x y ** pts_to_mask y s mask **
-      pure (0 <= arrayptr_off x y + SZ.v i /\
-            arrayptr_off x y + SZ.v i < Seq.length s /\
-            reveal mask (arrayptr_off x y + SZ.v i)))
-    (fun _ ->
-      exists* s'. arrayptr_pts_to x y **
-        pts_to_mask y s' mask **
-        pure (0 <= arrayptr_off x y + SZ.v i /\
-              arrayptr_off x y + SZ.v i < Seq.length s /\
-              s' == Seq.upd s (arrayptr_off x y + SZ.v i) (Some v)))
+fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
+  (#y: erased (array t))
+  (#s: array_spec t { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_mask s (arrayptr_off x y + SZ.v i) })
+  requires arrayptr_pts_to x y
+  requires array_pts_to y 1.0R s
+  ensures exists* s'.
+    array_pts_to y 1.0R s' **
+    pure (s' == array_spec_upd s (arrayptr_off x y + SZ.v i) v)
 
 /// Subtract two arrayptrs to get their offset difference.
 val arrayptr_diff (#t: Type) (x z: array t)
   : (r:Pulse.Lib.C.PtrdiffT.t{Pulse.Lib.C.PtrdiffT.v r == offset_of x - offset_of z})
 
 /// Compare two arrayptrs for equality.
-val arrayptr_eq (#t: Type) (x z: array t) : (r:bool{r == (offset_of x = offset_of z)})
+val arrayptr_eq (#t: Type) (x z: array t) :
+  Pure bool (requires True) (ensures fun r -> offset_of x == offset_of z)
 
 /// Check if arrayptr x offset is <= z offset.
-val arrayptr_lte (#t: Type) (x z: array t) : (r:bool{r == (offset_of x <= offset_of z)})
+val arrayptr_lte (#t: Type) (x z: array t) :
+  Pure bool (requires base_of x == base_of z) (ensures fun r -> offset_of x <= offset_of z)
 
 /// Check if arrayptr x offset is < z offset.
-val arrayptr_lt (#t: Type) (x z: array t) : (r:bool{r == (offset_of x < offset_of z)})
+val arrayptr_lt (#t: Type) (x z: array t) :
+  Pure bool (requires base_of x == base_of z) (ensures fun r -> offset_of x < offset_of z)
 
 /// Drop an arrayptr_pts_to predicate (for scope exit / cleanup).
-val arrayptr_drop (#t: Type u#a) (x: array t) (#y: array t)
-  : stt_ghost unit emp_inames
-    (arrayptr_pts_to x y)
-    (fun _ -> emp)
+ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
+  requires arrayptr_pts_to x y
+{}

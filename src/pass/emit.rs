@@ -719,35 +719,19 @@ impl<'a> Emitter<'a> {
                             .emit(Name::Val(extract_base_ident(this), bindings.len() as u32)));
                         bindings.push(ExBinding {
                             name: val_name.clone(),
-                            ty: unaryfn(
-                                Doc::text("Seq.seq"),
-                                unaryfn(Doc::text("option"), pointee_type_doc),
-                            ),
-                        });
-                        let mask_name = q(self
-                            .nm
-                            .emit(Name::Val(extract_base_ident(this), bindings.len() as u32)));
-                        bindings.push(ExBinding {
-                            name: mask_name.clone(),
-                            ty: Doc::text("(nat->prop)"),
+                            ty: unaryfn(Doc::text("full_array_spec"), pointee_type_doc),
                         });
                         match variant {
                             SLPropVariant::Init { perm } => props.push(annotated(ty, || {
                                 naryfn([
-                                    Doc::text("array_pts_to"),
+                                    Doc::text("array_pts_to_full"),
                                     this_doc,
                                     perm.clone(),
                                     val_name,
-                                    mask_name,
                                 ])
                             })),
                             SLPropVariant::Uninit => props.push(annotated(ty, || {
-                                naryfn([
-                                    Doc::text("array_pts_to_uninit"),
-                                    this_doc,
-                                    val_name,
-                                    mask_name,
-                                ])
+                                naryfn([Doc::text("array_pts_to_uninit"), this_doc, val_name])
                             })),
                         }
                     }
@@ -1287,7 +1271,7 @@ impl<'a> Emitter<'a> {
                         TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
                             if **val == BigInt::ZERO =>
                         {
-                            Doc::text("Pulse.Lib.Array.null")
+                            Doc::text("array_null")
                         }
                         _ => {
                             self.report(
@@ -1444,9 +1428,7 @@ impl<'a> Emitter<'a> {
                         // (TypeT::Pointer { to, kind }, TypeT::Bool) => todo!(),
                         (TypeT::Pointer(_, kind), TypeT::Bool) => {
                             let is_null_fn = match kind {
-                                PointerKind::Array | PointerKind::ArrayPtr => {
-                                    "Pulse.Lib.Array.is_null"
-                                }
+                                PointerKind::Array | PointerKind::ArrayPtr => "array_is_null",
                                 _ => "Pulse.Lib.Reference.is_null",
                             };
                             unaryfn(Doc::text("not"), unaryfn(Doc::text(is_null_fn), val_doc))
@@ -1495,7 +1477,7 @@ impl<'a> Emitter<'a> {
                                 match to_kind {
                                     PointerKind::Ref | PointerKind::Unknown => Doc::text("null"),
                                     PointerKind::Array | PointerKind::ArrayPtr => {
-                                        Doc::text("Pulse.Lib.Array.null")
+                                        Doc::text("array_null")
                                     }
                                 }
                             } else if matches!(to_kind, PointerKind::ArrayPtr) {
@@ -1565,7 +1547,7 @@ impl<'a> Emitter<'a> {
                             ) => {
                                 if **n == BigInt::ZERO {
                                     return unaryfn(
-                                        Doc::text("Pulse.Lib.Array.is_null"),
+                                        Doc::text("array_is_null"),
                                         self.emit_rvalue(env, lhs),
                                     );
                                 }
@@ -1822,7 +1804,7 @@ impl<'a> Emitter<'a> {
                         .append(self.emit_rvalue(env, count)),
                 ),
                 ExprT::CallocArray(ty, count) => parens(
-                    Doc::text("Pulse.Lib.C.Array.calloc_array_mask")
+                    Doc::text("Pulse.Lib.C.Array.calloc_array")
                         .append(Doc::line())
                         .append(Doc::text("#"))
                         .append(self.emit_type(env, ty))
@@ -1940,26 +1922,29 @@ impl<'a> Emitter<'a> {
                     let x = self.nm.emit(Name::Var(name.val.clone()));
                     let size_doc = self.emit_rvalue(env, size);
                     let elem_type_doc = self.emit_type(env, elem_type);
-                    // let mut arr : (array T) = [| len |];  (uninit, gives pts_to_mask)
-                    let alloc = Doc::text("let mut ")
+                    // let var_arr = stack_alloc_array #Int32.t 10sz;
+                    let alloc = Doc::text("let ")
                         .append(x.clone())
-                        .append(Doc::text(" : (array "))
-                        .append(elem_type_doc)
-                        .append(Doc::text(") ="))
+                        .append(Doc::text(" ="))
                         .append(Doc::line())
-                        .append("[|")
-                        .append(Doc::line())
-                        .append(size_doc)
-                        .append(Doc::line())
-                        .append("|];")
+                        .append(naryfn([
+                            Doc::text("stack_alloc_array"),
+                            Doc::text("#").append(elem_type_doc),
+                            size_doc,
+                        ]))
+                        .append(";")
                         .nest(2)
                         .group();
-                    // HACK: the Pulse checker adds `pts_to_mask x s (fun _ -> True)` to the context and the lambda breaks the prover?!?
-                    let alloc = alloc.append(Doc::hardline()).append(
-                        Doc::text("assert exists* mask. pts_to_mask ")
-                            .append(x.clone())
-                            .append(" _ mask ** pure (forall i. mask i);"),
-                    );
+                    // defer array_pts_to_uninit' var_arr {stack_free_array _};
+                    let defer = Doc::text("defer ")
+                        .append(unaryfn(Doc::text("array_pts_to_uninit'"), x.clone()))
+                        .nest(2)
+                        .group()
+                        .append(Doc::line())
+                        .append(Doc::text("{ stack_free_array _ }"))
+                        .append(";")
+                        .nest(2)
+                        .group();
                     // let mut arr = arr;  (redeclare as ref for lvalue convention)
                     let redecl = Doc::text("let mut ")
                         .append(x.clone())
@@ -1969,7 +1954,11 @@ impl<'a> Emitter<'a> {
                         .append(";")
                         .nest(2)
                         .group();
-                    alloc.append(Doc::hardline()).append(redecl)
+                    alloc
+                        .append(Doc::hardline())
+                        .append(defer)
+                        .append(Doc::hardline())
+                        .append(redecl)
                 }
                 StmtT::Assign(x, t) => {
                     if let ExprT::Index(arr, idx) = &x.val {
@@ -3974,7 +3963,7 @@ pub fn emit(
     };
     let mut output: Vec<Doc> = vec![];
     output.push(Doc::text(format!(
-        "module {}\nopen Pulse\nopen Pulse.Lib.C\n#lang-pulse\n",
+        "module {}\nopen Pulse\nopen Pulse.Lib.C\n#lang-pulse\n#set-options \"--split_queries always\"\n",
         module_name
     )));
     for decl in &tu.decls {
