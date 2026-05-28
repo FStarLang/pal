@@ -215,6 +215,7 @@ fn main() {
             }
         },
     };
+    std::fs::create_dir_all(&outdir).unwrap();
 
     for module in &modules {
         let mut code = module.code.clone();
