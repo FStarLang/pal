@@ -143,6 +143,7 @@ enum Token<'src> {
 
     String(&'src str),
     Integer(&'src str, IntegerSuffix),
+    Char(u32),
     Ident(&'src str),
 
     Punct(Punct),
@@ -156,6 +157,7 @@ impl<'src> Display for Token<'src> {
             Token::Whitespace => write!(f, " "),
             Token::String(tok) => write!(f, "{}", tok),
             Token::Integer(i, suffix) => write!(f, "{}{}", i, suffix),
+            Token::Char(n) => write!(f, "'\\x{:x}'", n),
             Token::Ident(id) => write!(f, "{}", id),
             Token::Punct(punct) => write!(f, "{}", punct.to_str()),
             Token::Error => write!(f, "(LEXING ERROR)"),
@@ -203,13 +205,43 @@ fn lex_core_token<'src>() -> impl Parser<'src, &'src str, Token<'src>> {
         .delimited_by(just('"'), just('"'))
         .map(Token::String);
 
+    // C-style character literal: 'X' or '\E' for a small set of common
+    // escapes. The value is the codepoint of the character (for plain
+    // chars) or the escape-mapped byte value. Wide-char prefixes (L'…',
+    // u'…', U'…'), multi-character constants, octal escapes, and
+    // \xHH+ / \uHHHH numeric escapes are unsupported
+    let char_escape = just('\\').ignore_then(choice((
+        just('n').to(b'\n' as u32),
+        just('t').to(b'\t' as u32),
+        just('r').to(b'\r' as u32),
+        just('0').to(0u32),
+        just('\\').to(b'\\' as u32),
+        just('\'').to(b'\'' as u32),
+        just('"').to(b'"' as u32),
+        just('a').to(0x07u32),
+        just('b').to(0x08u32),
+        just('f').to(0x0Cu32),
+        just('v').to(0x0Bu32),
+        just('?').to(b'?' as u32),
+    )));
+    let plain_char = none_of("'\\\n").map(|c: char| c as u32);
+    let char_literal = char_escape
+        .or(plain_char)
+        .delimited_by(just('\''), just('\''))
+        .map(Token::Char);
+
     let fallback = text::whitespace()
         .not()
         .repeated()
         .at_least(1)
         .to(Token::Error);
 
-    integer_literal.or(op).or(ident).or(string).or(fallback)
+    integer_literal
+        .or(op)
+        .or(ident)
+        .or(string)
+        .or(char_literal)
+        .or(fallback)
 }
 
 fn ws<'tokens, 'src: 'tokens, I: ValueInput<'tokens, Token = Token<'src>, Span = Span>, Span>()
@@ -600,7 +632,18 @@ fn expr_parser<
                 }
             });
 
-        let constant = integer_constant;
+        // Character constants are emitted as SpecInt-typed integer
+        // literals — matches how an unsuffixed `65` is treated in a
+        // spec, which is what `'A'` is.
+        let char_constant = select! { Token::Char(n) => n }.map_with(|n, extra| -> Expr {
+            let loc = sift.resolve_source_info(&extra.span());
+            let ty = TypeT::SpecInt.with_loc(loc.clone());
+            ExprT::IntLit(Rc::new(BigInt::from(n)), ty)
+                .with_loc(loc)
+                .into()
+        });
+
+        let constant = integer_constant.or(char_constant);
 
         let parenthesized = expr
             .clone()
