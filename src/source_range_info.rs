@@ -67,6 +67,11 @@ fn to_module_info(module: &EmittedModule) -> ModuleInfo {
             .then(a.source.character.cmp(&b.source.character))
     });
 
+    // Deduplicate by source position (keep first occurrence)
+    mappings.dedup_by(|b, a| {
+        a.source.line == b.source.line && a.source.character == b.source.character
+    });
+
     ModuleInfo {
         fst_file: format!("{}.fst", module.module_name),
         decl_name: module.decl_name.clone(),
