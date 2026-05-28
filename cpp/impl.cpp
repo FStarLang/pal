@@ -618,6 +618,11 @@ public:
         return mk_int_lit(std::move(loc), toBigInt(il->getValue()),
                           std::move(ty));
       }
+    } else if (auto cl = dyn_cast<CharacterLiteral>(e)) {
+      auto ty = trQualType(cl->getType(), cl->getSourceRange());
+      return mk_int_lit(std::move(loc),
+                        mk_bigint(toStr(std::to_string(cl->getValue()))),
+                        std::move(ty));
     } else if (auto uo = dyn_cast<UnaryOperator>(e)) {
       switch (uo->getOpcode()) {
       case UO_AddrOf:
