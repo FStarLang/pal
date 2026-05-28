@@ -3700,7 +3700,15 @@ impl<'a> Emitter<'a> {
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
     }
 
-    fn emit_fn_sig(
+    fn emit_fn_sig(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        self.emit_fn_sig_inner(env, decl, false)
+    }
+
+    fn emit_fn_sig_for_interface(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        self.emit_fn_sig_inner(env, decl, true)
+    }
+
+    fn emit_fn_sig_inner(
         &mut self,
         env: &Env,
         FnDecl {
@@ -3714,6 +3722,7 @@ impl<'a> Emitter<'a> {
             is_rec,
             decreases,
         }: &FnDecl,
+        for_interface: bool,
     ) -> Doc {
         let env = &mut env.clone();
 
@@ -3935,15 +3944,19 @@ impl<'a> Emitter<'a> {
                     .group(),
             )
         })))
-        .append(match decreases {
-            Some(dec) => Doc::hardline().append(
-                Doc::text("decreases")
-                    .append(Doc::line())
-                    .append(self.emit_rvalue(env, dec))
-                    .nest(2)
-                    .group(),
-            ),
-            None => Doc::nil(),
+        .append(if for_interface {
+            Doc::nil()
+        } else {
+            match decreases {
+                Some(dec) => Doc::hardline().append(
+                    Doc::text("decreases")
+                        .append(Doc::line())
+                        .append(self.emit_rvalue(env, dec))
+                        .nest(2)
+                        .group(),
+                ),
+                None => Doc::nil(),
+            }
         })
         .group()
     }
@@ -4578,6 +4591,7 @@ impl<'a> Emitter<'a> {
 pub struct EmittedModule {
     pub module_name: String,
     pub code: String,
+    pub fsti_code: Option<String>,
     pub range_map: SourceRangeMap,
     pub source_file: Rc<str>,
     pub decl_name: String,
@@ -4614,6 +4628,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
     struct PendingModule {
         mod_name: String,
         body_code: String,
+        fsti_body_code: Option<String>,
         range_map: crate::pass::emit::SourceRangeMap,
         source_file: Rc<str>,
         decl_name: String,
@@ -4653,10 +4668,32 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         let mut writer = StrWriter::new();
         body_with_restart.render_raw(100, &mut writer).unwrap();
 
+        // For function definitions, also emit the interface (signature only, no body)
+        // Skip pure functions — they are emitted as `let` definitions, not `fn`
+        let fsti_body_code = if let DeclT::FnDefn(fn_defn) = &decl.val {
+            if fn_defn.decl.is_pure {
+                None
+            } else {
+                let iface_doc = emitter.emit_fn_sig_for_interface(&env, &fn_defn.decl);
+                let iface_with_restart = Doc::text("#restart-solver")
+                    .append(Doc::hardline())
+                    .append(Doc::hardline())
+                    .append(iface_doc);
+                let mut iface_writer = StrWriter::new();
+                iface_with_restart
+                    .render_raw(100, &mut iface_writer)
+                    .unwrap();
+                Some(iface_writer.buffer)
+            }
+        } else {
+            None
+        };
+
         let decl_loc = decl.loc.location();
         let new_module = PendingModule {
             mod_name: mod_name.clone(),
             body_code: writer.buffer,
+            fsti_body_code,
             range_map: writer.source_range_map,
             source_file: decl_loc.file_name.clone(),
             decl_name: decl_name(decl),
@@ -4682,10 +4719,14 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
             pm.mod_name
         );
         let full_code = format!("{}{}", preamble, pm.body_code);
+        let fsti_code = pm
+            .fsti_body_code
+            .map(|body| format!("{}{}", preamble, body));
 
         results.push(EmittedModule {
             module_name: pm.mod_name,
             code: full_code,
+            fsti_code,
             range_map: pm.range_map,
             source_file: pm.source_file,
             decl_name: pm.decl_name,

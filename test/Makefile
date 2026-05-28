@@ -22,6 +22,7 @@ ALL_STAMPS := $(patsubst %.c,$(OUT_DIR)/%/.stamp,$(TESTS))
 # Generate per-file rules for translation
 define make_stamp_rule
 $(OUT_DIR)/$(1:.c=)/.stamp: $(1) $$(C2PULSE) pal.h
+	@rm -rf $(OUT_DIR)/$(1:.c=)
 	@mkdir -p $(OUT_DIR)/$(1:.c=)
 	$$(C2PULSE) $$(OPTS_$(basename $(1))) --outdir $(OUT_DIR)/$(1:.c=) $(1)
 	@touch $$@

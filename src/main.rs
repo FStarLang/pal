@@ -226,6 +226,13 @@ fn main() {
             code = format!("{}\n\nlet _ = assert False\n", code);
         }
         std::fs::write(outdir.join(format!("{}.fst", module.module_name)), &code).unwrap();
+        if let Some(fsti_code) = &module.fsti_code {
+            std::fs::write(
+                outdir.join(format!("{}.fsti", module.module_name)),
+                fsti_code,
+            )
+            .unwrap();
+        }
     }
 
     // Write single unified source_range_info.json

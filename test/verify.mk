@@ -15,7 +15,9 @@ FSTAR = $(FSTAR_EXE) \
 	--include .
 
 FST_FILES := $(wildcard *.fst)
-ALL_CHECKED_FILES := $(patsubst %.fst,$(CACHE_DIR)/%.fst.checked,$(FST_FILES))
+FSTI_FILES := $(wildcard *.fsti)
+ALL_CHECKED_FILES := $(patsubst %.fst,$(CACHE_DIR)/%.fst.checked,$(FST_FILES)) \
+                     $(patsubst %.fsti,$(CACHE_DIR)/%.fsti.checked,$(FSTI_FILES))
 
 .PHONY: all
 all: $(ALL_CHECKED_FILES)
@@ -25,14 +27,19 @@ $(shell mkdir -p $(CACHE_DIR))
 # Compute inter-module dependencies via F* --dep full.
 # The generated .depend provides per-target prerequisite rules like:
 #   cache/Func_foo.fst.checked: Func_foo.fst cache/Struct_bar.fst.checked ...
-.depend: $(FST_FILES)
-	$(FSTAR) --dep full $(FST_FILES) --output_deps_to $@
+.depend: $(FST_FILES) $(FSTI_FILES)
+	$(FSTAR) --dep full $(FST_FILES) $(FSTI_FILES) --output_deps_to $@
 
 include .depend
 
 $(CACHE_DIR)/%.fst.checked:
 	@echo "Verifying $*.fst"
 	$(FSTAR) $(notdir $*.fst)
+	@touch -c $@
+
+$(CACHE_DIR)/%.fsti.checked:
+	@echo "Verifying $*.fsti"
+	$(FSTAR) $(notdir $*.fsti)
 	@touch -c $@
 
 .PHONY: clean
