@@ -4661,12 +4661,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
 
         // Emit just the body (decl code)
         let body_doc = emitter.emit_decl(&env, decl);
-        let body_with_restart = Doc::text("#restart-solver")
-            .append(Doc::hardline())
-            .append(Doc::hardline())
-            .append(body_doc);
         let mut writer = StrWriter::new();
-        body_with_restart.render_raw(100, &mut writer).unwrap();
+        body_doc.render_raw(100, &mut writer).unwrap();
 
         // For function definitions, also emit the interface (signature only, no body)
         // Skip pure functions — they are emitted as `let` definitions, not `fn`
@@ -4675,14 +4671,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
                 None
             } else {
                 let iface_doc = emitter.emit_fn_sig_for_interface(&env, &fn_defn.decl);
-                let iface_with_restart = Doc::text("#restart-solver")
-                    .append(Doc::hardline())
-                    .append(Doc::hardline())
-                    .append(iface_doc);
                 let mut iface_writer = StrWriter::new();
-                iface_with_restart
-                    .render_raw(100, &mut iface_writer)
-                    .unwrap();
+                iface_doc.render_raw(100, &mut iface_writer).unwrap();
                 Some(iface_writer.buffer)
             }
         } else {
