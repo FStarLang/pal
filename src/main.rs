@@ -18,22 +18,33 @@ mod source_range_info;
 mod vfs;
 
 #[derive(Parser)]
+#[command(about = "Translate C source files to verified Pulse/F* code")]
 struct Cli {
-    #[arg(long = "tmpdir")]
+    #[arg(long = "tmpdir", help = "Directory for intermediate temporary files")]
     tmpdir: Option<String>,
 
-    #[arg(long = "outdir")]
+    #[arg(long = "outdir", help = "Output directory for generated .fst files")]
     outdir: Option<String>,
 
-    #[arg(long = "print-ir")]
+    #[arg(
+        long = "print-ir",
+        help = "Print the intermediate representation and exit"
+    )]
     print_ir: bool,
 
-    #[arg(long = "time-passes")]
+    #[arg(
+        long = "time-passes",
+        help = "Show timing information for each compiler pass"
+    )]
     time_passes: bool,
 
-    #[arg(short = 'I')]
+    #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
+    quiet: bool,
+
+    #[arg(short = 'I', help = "Additional include search paths")]
     include_paths: Vec<String>,
 
+    #[arg(help = "C source files to translate")]
     files: Vec<String>,
 }
 
@@ -239,7 +250,9 @@ fn main() {
     )
     .unwrap();
 
-    diags.print_to_stderr(&mut *vfs);
+    if !cli.quiet {
+        diags.print_to_stderr(&mut *vfs);
+    }
     if diags.has_errors() {
         std::process::exit(0)
     }
