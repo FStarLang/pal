@@ -32,6 +32,22 @@ pub fn module_name_for_decl(decl: &Decl) -> String {
     }
 }
 
+/// Extracts the raw C declaration name (identifier) from a Decl.
+pub fn decl_name(decl: &Decl) -> String {
+    match &decl.val {
+        DeclT::FnDefn(fn_defn) => fn_defn.decl.name.val.to_string(),
+        DeclT::FnDecl(fn_decl) => fn_decl.name.val.to_string(),
+        DeclT::Typedef(type_defn) => type_defn.name.val.to_string(),
+        DeclT::StructDefn(struct_defn) => struct_defn.name.val.to_string(),
+        DeclT::StructDecl(name) => name.val.to_string(),
+        DeclT::UnionDefn(union_defn) => union_defn.name.val.to_string(),
+        DeclT::IncludeDecl(include_decl) => include_decl.module_name.to_string(),
+        DeclT::LetDecl(let_decl) => let_decl.name.val.to_string(),
+        DeclT::OpaqueTypeDecl(decl) => decl.name.val.to_string(),
+        DeclT::GlobalVar(gv) => gv.name.val.to_string(),
+    }
+}
+
 /// Determines the module name that would contain a given Name reference.
 fn module_for_name(name: &Name) -> Option<String> {
     match name {
@@ -4563,6 +4579,9 @@ pub struct EmittedModule {
     pub module_name: String,
     pub code: String,
     pub range_map: SourceRangeMap,
+    pub source_file: Rc<str>,
+    pub decl_name: String,
+    pub decl_range: Range,
 }
 
 /// Emit each declaration as its own module.
@@ -4596,6 +4615,9 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         mod_name: String,
         body_code: String,
         range_map: crate::pass::emit::SourceRangeMap,
+        source_file: Rc<str>,
+        decl_name: String,
+        decl_range: Range,
     }
 
     let mut pending: Vec<PendingModule> = Vec::new();
@@ -4631,10 +4653,14 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         let mut writer = StrWriter::new();
         body_with_restart.render_raw(100, &mut writer).unwrap();
 
+        let decl_loc = decl.loc.location();
         let new_module = PendingModule {
             mod_name: mod_name.clone(),
             body_code: writer.buffer,
             range_map: writer.source_range_map,
+            source_file: decl_loc.file_name.clone(),
+            decl_name: decl_name(decl),
+            decl_range: decl_loc.range,
         };
 
         // Deduplicate: if we've seen this module name before, replace with the later (more complete) one
@@ -4661,6 +4687,9 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
             module_name: pm.mod_name,
             code: full_code,
             range_map: pm.range_map,
+            source_file: pm.source_file,
+            decl_name: pm.decl_name,
+            decl_range: pm.decl_range,
         });
     }
 

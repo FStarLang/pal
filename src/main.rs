@@ -226,12 +226,14 @@ fn main() {
             code = format!("{}\n\nlet _ = assert False\n", code);
         }
         std::fs::write(outdir.join(format!("{}.fst", module.module_name)), &code).unwrap();
-        std::fs::write(
-            outdir.join(format!("{}_source_range_info.json", module.module_name)),
-            source_range_info::serialize(&module.range_map),
-        )
-        .unwrap();
     }
+
+    // Write single unified source_range_info.json
+    std::fs::write(
+        outdir.join("source_range_info.json"),
+        source_range_info::serialize(&modules),
+    )
+    .unwrap();
 
     // Write diagnostics for the first file (for LSP compatibility)
     let first_file = std::path::absolute(&cli.files[0])

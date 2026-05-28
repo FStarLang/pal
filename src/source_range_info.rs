@@ -1,84 +1,120 @@
-// Legacy source range info JSON format
-
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use serde::Serialize;
 
 use crate::{
     ir::{Location, Position, Range},
-    pass::emit,
+    pass::emit::EmittedModule,
 };
 
+/// LSP-compatible 0-based position.
 #[derive(Serialize)]
-struct SourceMapPos {
-    line: u32,   // starts with 1
-    column: u32, // starts with 1
+struct LspPosition {
+    line: u32,
+    character: u32,
 }
 
+/// LSP-compatible 0-based range.
 #[derive(Serialize)]
-struct SourceMapRange {
-    start: SourceMapPos,
-    end: SourceMapPos,
+struct LspRange {
+    start: LspPosition,
+    end: LspPosition,
 }
 
-type PulseSourceRange = SourceMapRange;
+/// A single pulse↔source range mapping.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RangeMapping {
+    pulse_range: LspRange,
+    source_range: LspRange,
+}
 
-struct RcStr(Rc<str>);
-impl Serialize for RcStr {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
+/// Info about one emitted .fst module from a given source file.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleInfo {
+    fst_file: String,
+    decl_name: String,
+    source_range: LspRange,
+    mappings: Vec<RangeMapping>,
+}
+
+/// Source file entry grouping all modules originating from it.
+#[derive(Serialize)]
+struct SourceFileInfo {
+    uri: String,
+    modules: Vec<ModuleInfo>,
+}
+
+/// Top-level source range info document.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceRangeInfoDoc {
+    source_files: Vec<SourceFileInfo>,
+}
+
+fn to_lsp_pos(p: &Position) -> LspPosition {
+    LspPosition {
+        line: p.line.saturating_sub(1),
+        character: p.character.saturating_sub(1),
     }
 }
 
-#[derive(Serialize)]
-struct CSourceRange {
-    #[serde(flatten)]
-    range: SourceMapRange,
-    #[serde(rename = "fileName")]
-    file_name: RcStr,
-    #[serde(rename = "isVerbatim")]
-    is_verbatim: bool,
-}
-
-#[derive(Serialize)]
-struct SourceRangeInfoItem {
-    #[serde(rename = "pulseRange")]
-    pulse_range: PulseSourceRange,
-    #[serde(rename = "cRange")]
-    c_range: CSourceRange,
-}
-
-type SourceRangeInfo = Vec<SourceRangeInfoItem>;
-
-fn to_smp(p: &Position) -> SourceMapPos {
-    SourceMapPos {
-        line: p.line,
-        column: p.character,
+fn to_lsp_range(r: &Range) -> LspRange {
+    LspRange {
+        start: to_lsp_pos(&r.start),
+        end: to_lsp_pos(&r.end),
     }
 }
 
-fn to_srm(r: &Range) -> SourceMapRange {
-    SourceMapRange {
-        start: to_smp(&r.start),
-        end: to_smp(&r.end),
+fn to_mapping(source_loc: &Location, pulse_range: &Range) -> RangeMapping {
+    RangeMapping {
+        pulse_range: to_lsp_range(pulse_range),
+        source_range: to_lsp_range(&source_loc.range),
     }
 }
 
-fn to_srii(l: &Location, r: &Range) -> SourceRangeInfoItem {
-    SourceRangeInfoItem {
-        pulse_range: to_srm(&r),
-        c_range: CSourceRange {
-            range: to_srm(&l.range),
-            file_name: RcStr(l.file_name.clone()),
-            is_verbatim: false, // TODO
-        },
+fn to_module_info(module: &EmittedModule) -> ModuleInfo {
+    ModuleInfo {
+        fst_file: format!("{}.fst", module.module_name),
+        decl_name: module.decl_name.clone(),
+        source_range: to_lsp_range(&module.decl_range),
+        mappings: module
+            .range_map
+            .iter()
+            .map(|(loc, pulse_range)| to_mapping(loc, pulse_range))
+            .collect(),
     }
 }
 
-fn to_sri(ranges: &emit::SourceRangeMap) -> SourceRangeInfo {
-    ranges.iter().map(|(l, r)| to_srii(l, r)).collect()
+fn path_to_uri(path: &str) -> String {
+    if path.starts_with('/') {
+        format!("file://{}", path)
+    } else {
+        format!("file:///{}", path)
+    }
 }
 
-pub fn serialize(ranges: &emit::SourceRangeMap) -> String {
-    serde_json::to_string_pretty(&to_sri(ranges)).unwrap()
+pub fn serialize(modules: &[EmittedModule]) -> String {
+    // Group modules by source file, preserving order with BTreeMap
+    let mut by_file: BTreeMap<Rc<str>, Vec<&EmittedModule>> = BTreeMap::new();
+    for module in modules {
+        by_file
+            .entry(module.source_file.clone())
+            .or_default()
+            .push(module);
+    }
+
+    let doc = SourceRangeInfoDoc {
+        source_files: by_file
+            .into_iter()
+            .map(|(file, mods)| SourceFileInfo {
+                uri: path_to_uri(&file),
+                modules: mods.iter().map(|m| to_module_info(m)).collect(),
+            })
+            .collect(),
+    };
+
+    serde_json::to_string_pretty(&doc).unwrap()
 }
