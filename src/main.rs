@@ -1,8 +1,7 @@
-use std::{path::Path, rc::Rc, time::Instant};
+use std::{path::Path, time::Instant};
 
 use crate::{
     diag::{Diagnostic, Diagnostics},
-    ir::{Location, Position, Range},
     vfs::{OverlayFS, RealFS, VFS},
 };
 use clap::Parser;
@@ -48,35 +47,32 @@ struct Cli {
     files: Vec<String>,
 }
 
-fn serialize_diags(for_file: &str, diags: &Diagnostics) -> String {
-    let for_file = Rc::from(for_file);
-    serde_json::to_string_pretty(
-        &diags
-            .diags
-            .iter()
-            .map(Diagnostic::clone)
-            .map(|mut diag| {
-                if diag.loc.file_name == for_file {
-                    diag
-                } else {
-                    let pos0 = Position {
-                        line: 0,
-                        character: 0,
-                    };
-                    diag.loc = Location {
-                        file_name: for_file.clone(),
-                        range: Range {
-                            start: pos0,
-                            end: pos0,
-                        },
-                    };
-                    diag
-                }
-            })
-            .map(|diag| Diagnostic::to_lsp(&diag))
-            .collect::<Vec<_>>(),
-    )
-    .unwrap()
+fn serialize_diags(diags: &Diagnostics) -> String {
+    use std::collections::BTreeMap;
+
+    // Group diagnostics by source file
+    let mut by_file: BTreeMap<&str, Vec<lsp_types::Diagnostic>> = BTreeMap::new();
+    for diag in &diags.diags {
+        by_file
+            .entry(&diag.loc.file_name)
+            .or_default()
+            .push(Diagnostic::to_lsp(diag));
+    }
+
+    // Serialize as { "file://...": [...], ... }
+    let result: BTreeMap<String, Vec<lsp_types::Diagnostic>> = by_file
+        .into_iter()
+        .map(|(file, diags)| {
+            let uri = if file.starts_with('/') {
+                format!("file://{}", file)
+            } else {
+                format!("file:///{}", file)
+            };
+            (uri, diags)
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&result).unwrap()
 }
 
 fn main() {
@@ -242,22 +238,8 @@ fn main() {
     )
     .unwrap();
 
-    // Write diagnostics for the first file (for LSP compatibility)
-    let first_file = std::path::absolute(&cli.files[0])
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    std::fs::write(
-        outdir.join(format!(
-            "{}_diagnostics.json",
-            Path::new(&first_file)
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-        )),
-        &serialize_diags(&first_file, &diags),
-    )
-    .unwrap();
+    // Write diagnostics
+    std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
 
     if !cli.quiet {
         diags.print_to_stderr(&mut *vfs);
