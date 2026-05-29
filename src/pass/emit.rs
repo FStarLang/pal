@@ -1544,7 +1544,17 @@ impl<'a> Emitter<'a> {
                         // (TypeT::Int { signed, width }, TypeT::SizeT) => todo!(),
                         // (TypeT::Int { signed, width }, TypeT::SLProp) => todo!(),
                         // (TypeT::SizeT, TypeT::Bool) => todo!(),
-                        // (TypeT::SizeT, TypeT::Int { signed, width }) => todo!(),
+                        (TypeT::SizeT, TypeT::Int { signed, width }) => {
+                            if let Some(m) = get_int_mod(signed, width) {
+                                unaryfn(
+                                    Doc::text(format!("{}.uint_to_t (SizeT.v", m)),
+                                    val_doc.append(Doc::text(")")),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
                         // (TypeT::SizeT, TypeT::SLProp) => todo!(),
                         // (TypeT::Pointer { to, kind }, TypeT::Bool) => todo!(),
                         (TypeT::Pointer(_, kind), TypeT::Bool) => {

@@ -797,6 +797,24 @@ public:
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
       return mk_rvalue_lvalue(std::move(loc), trLValue(e));
+    } else if (auto *u = dyn_cast<UnaryExprOrTypeTraitExpr>(e)) {
+      // sizeof / _Alignof: clang has already constant-folded these for any
+      // non-VLA type or expression. Emit as a size_t literal. The value
+      // depends on the target triple PAL invokes clang with; for a 64-bit
+      // target this matches the runtime layout assumed by msquic.
+      if (u->getKind() == UETT_SizeOf || u->getKind() == UETT_AlignOf ||
+          u->getKind() == UETT_PreferredAlignOf) {
+        Expr::EvalResult er;
+        if (u->EvaluateAsInt(er, *astCtx)) {
+          SmallString<32> valStr;
+          er.Val.getInt().toString(valStr);
+          return mk_int_lit(loc.clone(),
+                            mk_bigint(toStr(StringRef(valStr))),
+                            mk_sizet(std::move(loc)));
+        }
+        // VLA sizeof or other non-constant case: fall through to the
+        // generic unsupported-rvalue error below.
+      }
     }
 
     reportUnsupported(e->getSourceRange(), loc,
