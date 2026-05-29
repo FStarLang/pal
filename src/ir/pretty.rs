@@ -343,6 +343,44 @@ impl PrettyIR for ExprT {
                 .append(")")
                 .nest(2)
                 .group(),
+            ExprT::SizeOf(cty) => RcDoc::text("sizeof(")
+                .append(cty.to_doc())
+                .append(")")
+                .group(),
+            ExprT::AlignOf(cty) => RcDoc::text("_Alignof(")
+                .append(cty.to_doc())
+                .append(")")
+                .group(),
+        }
+    }
+}
+
+impl_display_using_prettyir!(CTypeExprT);
+
+impl PrettyIR for CTypeExprT {
+    fn to_doc(&self) -> RcDoc<'_, ()> {
+        match self {
+            CTypeExprT::Void => RcDoc::text("void"),
+            CTypeExprT::Bool => RcDoc::text("bool"),
+            CTypeExprT::SizeT => RcDoc::text("size_t"),
+            CTypeExprT::PtrdiffT => RcDoc::text("ptrdiff_t"),
+            CTypeExprT::Int {
+                signed: true,
+                width,
+            } => RcDoc::text(format!("int{}_t", width)),
+            CTypeExprT::Int {
+                signed: false,
+                width,
+            } => RcDoc::text(format!("uint{}_t", width)),
+            CTypeExprT::Pointer(inner) => inner.to_doc().append("*"),
+            CTypeExprT::Array(elem, n) => elem
+                .to_doc()
+                .append("[")
+                .append(RcDoc::text(n.to_string()))
+                .append("]"),
+            CTypeExprT::Named(TypeRefKind::Typedef(n)) => n.to_doc(),
+            CTypeExprT::Named(TypeRefKind::Struct(n)) => RcDoc::text("struct ").append(n.to_doc()),
+            CTypeExprT::Named(TypeRefKind::Union(n)) => RcDoc::text("union ").append(n.to_doc()),
         }
     }
 }

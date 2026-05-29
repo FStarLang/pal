@@ -23,6 +23,7 @@ use ::std::vec::Vec as Vec;
 use crate::ir::Ident as Ident;
 use crate::ir::SourceInfo as SourceInfo;
 use crate::ir::Type as Type;
+use crate::ir::CTypeExpr as CTypeExpr;
 use crate::ir::Stmt as Stmt;
 use crate::ir::Expr as Expr;
 use crate::ir::UnOp as UnOp;
@@ -44,6 +45,7 @@ mod crate::ir {
     type SourceInfo { #only_by_ref; }
     type Ident { wellknown_traits(?Sized); }
     type Type { #only_by_ref; }
+    type CTypeExpr { #only_by_ref; }
     type Expr { #only_by_ref; }
     type Stmt { #only_by_ref; }
 
@@ -84,6 +86,11 @@ mod crate::ir {
     type Rc<Type> {
         #layout(size=8, align=8);
         fn deref(&self) -> &Type;
+    }
+
+    type Rc<CTypeExpr> {
+        #layout(size=8, align=8);
+        fn deref(&self) -> &CTypeExpr;
     }
 
     type Rc<Ident> {
@@ -249,6 +256,17 @@ mod crate::clang {
     fn mk_type_arrayptr(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_err(Rc<SourceInfo>) -> Rc<Type>;
 
+    fn mk_ctype_void(Rc<SourceInfo>) -> Rc<CTypeExpr>;
+    fn mk_ctype_bool(Rc<SourceInfo>) -> Rc<CTypeExpr>;
+    fn mk_ctype_sizet(Rc<SourceInfo>) -> Rc<CTypeExpr>;
+    fn mk_ctype_ptrdifft(Rc<SourceInfo>) -> Rc<CTypeExpr>;
+    fn mk_ctype_int(Rc<SourceInfo>, bool, u32) -> Rc<CTypeExpr>;
+    fn mk_ctype_pointer(Rc<SourceInfo>, Rc<CTypeExpr>) -> Rc<CTypeExpr>;
+    fn mk_ctype_array(Rc<SourceInfo>, Rc<CTypeExpr>, Rc<BigInt>) -> Rc<CTypeExpr>;
+    fn mk_ctype_named_typedef(Rc<SourceInfo>, Rc<Ident>) -> Rc<CTypeExpr>;
+    fn mk_ctype_named_struct(Rc<SourceInfo>, Rc<Ident>) -> Rc<CTypeExpr>;
+    fn mk_ctype_named_union(Rc<SourceInfo>, Rc<Ident>) -> Rc<CTypeExpr>;
+
     fn mk_bigint(&str) -> Rc<BigInt>;
 
     fn mk_bool_lit(Rc<SourceInfo>, bool) -> Rc<Expr>;
@@ -273,6 +291,9 @@ mod crate::clang {
     fn mk_cond(Rc<SourceInfo>, Rc<Expr>, Rc<Expr>, Rc<Expr>) -> Rc<Expr>;
     fn mk_live(Rc<SourceInfo>, Rc<Expr>) -> Rc<Expr>;
     fn mk_assign_expr(Rc<SourceInfo>, Rc<Expr>, Rc<Expr>) -> Rc<Expr>;
+
+    fn mk_sizeof(Rc<SourceInfo>, Rc<CTypeExpr>) -> Rc<Expr>;
+    fn mk_alignof(Rc<SourceInfo>, Rc<CTypeExpr>) -> Rc<Expr>;
 
     fn mk_lvalue_var(Rc<SourceInfo>, Rc<Ident>) -> Rc<Expr>;
     fn mk_lvalue_member(Rc<SourceInfo>, Rc<Expr>, Rc<Ident>) -> Rc<Expr>;

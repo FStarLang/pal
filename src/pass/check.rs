@@ -448,6 +448,34 @@ impl<'a> Checker<'a> {
                 self.check_rvalue(env, rhs);
             }
             ExprT::Error(ty) => self.check_type(env, ty),
+            ExprT::SizeOf(cty) | ExprT::AlignOf(cty) => self.check_ctype(env, cty),
+        }
+    }
+
+    fn check_ctype(&mut self, env: &Env, cty: &CTypeExpr) {
+        match &cty.val {
+            CTypeExprT::Void
+            | CTypeExprT::Bool
+            | CTypeExprT::SizeT
+            | CTypeExprT::PtrdiffT
+            | CTypeExprT::Int { .. } => {}
+            CTypeExprT::Pointer(inner) => self.check_ctype(env, inner),
+            CTypeExprT::Array(elem, _) => self.check_ctype(env, elem),
+            CTypeExprT::Named(TypeRefKind::Typedef(n)) => {
+                if !env.is_known_type(&n.val) {
+                    self.report(format!("unknown type {} in sizeof", n), &cty.loc);
+                }
+            }
+            CTypeExprT::Named(TypeRefKind::Struct(n)) => {
+                if env.lookup_struct(n).is_none() {
+                    self.report(format!("unknown struct {} in sizeof", n), &cty.loc);
+                }
+            }
+            CTypeExprT::Named(TypeRefKind::Union(n)) => {
+                if env.lookup_union(n).is_none() {
+                    self.report(format!("unknown union {} in sizeof", n), &cty.loc);
+                }
+            }
         }
     }
 

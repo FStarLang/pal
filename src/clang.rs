@@ -603,6 +603,37 @@ fn mk_type_err(loc: Rc<SourceInfo>) -> Rc<Type> {
     mk_ast(loc, TypeT::Error)
 }
 
+fn mk_ctype_void(loc: Rc<SourceInfo>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::Void)
+}
+fn mk_ctype_bool(loc: Rc<SourceInfo>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::Bool)
+}
+fn mk_ctype_sizet(loc: Rc<SourceInfo>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::SizeT)
+}
+fn mk_ctype_ptrdifft(loc: Rc<SourceInfo>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::PtrdiffT)
+}
+fn mk_ctype_int(loc: Rc<SourceInfo>, signed: bool, width: u32) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::Int { signed, width })
+}
+fn mk_ctype_pointer(loc: Rc<SourceInfo>, to: Rc<CTypeExpr>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::Pointer(to))
+}
+fn mk_ctype_array(loc: Rc<SourceInfo>, elem: Rc<CTypeExpr>, n: Rc<BigInt>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::Array(elem, n))
+}
+fn mk_ctype_named_typedef(loc: Rc<SourceInfo>, name: Rc<Ident>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::Named(TypeRefKind::Typedef(name)))
+}
+fn mk_ctype_named_struct(loc: Rc<SourceInfo>, name: Rc<Ident>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::Named(TypeRefKind::Struct(name)))
+}
+fn mk_ctype_named_union(loc: Rc<SourceInfo>, name: Rc<Ident>) -> Rc<CTypeExpr> {
+    mk_ast(loc, CTypeExprT::Named(TypeRefKind::Union(name)))
+}
+
 fn mk_bigint(s: &str) -> Rc<BigInt> {
     Rc::from(BigInt::from_str(s).unwrap())
 }
@@ -679,6 +710,13 @@ fn mk_live(loc: Rc<SourceInfo>, val: Rc<Expr>) -> Rc<Expr> {
 }
 fn mk_assign_expr(loc: Rc<SourceInfo>, lhs: Rc<Expr>, rhs: Rc<Expr>) -> Rc<Expr> {
     mk_ast(loc, ExprT::AssignExpr(lhs, rhs))
+}
+
+fn mk_sizeof(loc: Rc<SourceInfo>, ty: Rc<CTypeExpr>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::SizeOf(ty))
+}
+fn mk_alignof(loc: Rc<SourceInfo>, ty: Rc<CTypeExpr>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::AlignOf(ty))
 }
 
 pub struct StructInitBuilder {

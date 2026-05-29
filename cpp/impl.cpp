@@ -348,6 +348,75 @@ public:
     return mk_type_err(std::move(loc));
   }
 
+  /// Build a reified [CTypeExpr] for the type appearing as the operand of
+  /// `sizeof` / `_Alignof`. Mirrors [trQualType] but produces values that
+  /// are arguments to the opaque `c_sizeof` / `c_alignof` functions, and
+  /// preserves constant array lengths (which are dropped by [trQualType]).
+  Rc<ir::CTypeExpr> trCTypeFromQualType(QualType t, SourceRange range) {
+    t = t.IgnoreParens();
+    auto loc = getRange(range);
+
+    if (t.getAsString() == "size_t") {
+      return mk_ctype_sizet(std::move(loc));
+    } else if (t.getAsString() == "ptrdiff_t") {
+      return mk_ctype_ptrdifft(std::move(loc));
+    } else if (auto tydef = dyn_cast<TypedefType>(t)) {
+      auto id = ctx.mk_ident(toStr(tydef->getDecl()->getName()), loc.clone());
+      return mk_ctype_named_typedef(std::move(loc), std::move(id));
+#if LLVM_VERSION_MAJOR < 22
+    } else if (auto elab = dyn_cast<ElaboratedType>(t)) {
+      return trCTypeFromQualType(elab->desugar(), range);
+#endif
+    } else if (auto ptr = dyn_cast<PointerType>(t)) {
+      return mk_ctype_pointer(
+          std::move(loc), trCTypeFromQualType(ptr->getPointeeType(), range));
+    } else if (auto adj = dyn_cast<AdjustedType>(t)) {
+      return trCTypeFromQualType(adj->getOriginalType(), range);
+    } else if (auto carr = dyn_cast<ConstantArrayType>(t)) {
+      auto elem = trCTypeFromQualType(carr->getElementType(), range);
+      SmallString<32> nStr;
+      carr->getSize().toString(nStr, 10, /*Signed=*/false);
+      auto n = mk_bigint(toStr(StringRef(nStr)));
+      return mk_ctype_array(std::move(loc), std::move(elem), std::move(n));
+    } else if (auto rec = dyn_cast<RecordType>(t)) {
+      auto decl = rec->getDecl();
+      if (!decl->getIdentifier()) {
+        reportUnsupported(range, loc,
+                          "sizeof/_Alignof on anonymous struct/union outside "
+                          "of typedef is unsupported",
+                          "");
+        return mk_ctype_named_struct(loc.clone(),
+                                     ctx.mk_ident("__anon__"_rs, loc.clone()));
+      }
+      auto name = ctx.mk_ident(toStr(decl->getName()), loc.clone());
+      switch (decl->getTagKind()) {
+      case TagTypeKind::Struct:
+        return mk_ctype_named_struct(std::move(loc), std::move(name));
+      case TagTypeKind::Union:
+        return mk_ctype_named_union(std::move(loc), std::move(name));
+      default:
+        reportUnsupported(range, loc, "unsupported record kind in sizeof", "");
+        return mk_ctype_named_struct(std::move(loc), std::move(name));
+      }
+    }
+    if (t->isVoidType()) {
+      return mk_ctype_void(std::move(loc));
+    }
+    if (isBoolType(t)) {
+      return mk_ctype_bool(std::move(loc));
+    }
+    if (t->isSignedIntegerType() || t->isUnsignedIntegerType()) {
+      bool isSigned = t->isSignedIntegerType();
+      unsigned width = astCtx->getIntWidth(t);
+      return mk_ctype_int(std::move(loc), isSigned, width);
+    }
+
+    reportUnsupported(range, loc, "unsupported type in sizeof/_Alignof ",
+                      t->getTypeClassName());
+    return mk_ctype_named_struct(
+        loc.clone(), ctx.mk_ident("__unsupported__"_rs, loc.clone()));
+  }
+
   Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty) {
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
       if (auto ann = dyn_cast<AnnotateAttr>(*it)) {
@@ -797,6 +866,32 @@ public:
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
       return mk_rvalue_lvalue(std::move(loc), trLValue(e));
+    } else if (auto *u = dyn_cast<UnaryExprOrTypeTraitExpr>(e)) {
+      // sizeof / _Alignof: translated to opaque calls to c_sizeof /
+      // c_alignof on a reified C-type term. We deliberately do *not*
+      // commit to a specific numeric value here; the verifier sees an
+      // abstract size_t whose only known properties come from the axioms
+      // in Pulse.Lib.C.Sizeof. VLAs and other non-constant cases are
+      // unsupported.
+      if (u->getKind() == UETT_SizeOf || u->getKind() == UETT_AlignOf ||
+          u->getKind() == UETT_PreferredAlignOf) {
+        QualType argTy = u->getTypeOfArgument();
+        if (argTy->isVariableArrayType() || argTy->isDependentType() ||
+            argTy->isIncompleteType()) {
+          reportUnsupported(e->getSourceRange(), loc,
+                            "unsupported sizeof/_Alignof on incomplete, "
+                            "dependent, or variable-length type",
+                            "");
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(e->getType(), e->getSourceRange()));
+        }
+        auto ctype = trCTypeFromQualType(argTy, u->getSourceRange());
+        if (u->getKind() == UETT_AlignOf ||
+            u->getKind() == UETT_PreferredAlignOf) {
+          return mk_alignof(std::move(loc), std::move(ctype));
+        }
+        return mk_sizeof(std::move(loc), std::move(ctype));
+      }
     }
 
     reportUnsupported(e->getSourceRange(), loc,

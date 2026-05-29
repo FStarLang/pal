@@ -571,6 +571,7 @@ impl<'a> Emitter<'a> {
                 self.subst_this_rvalue(env, Rc::make_mut(lhs), this);
                 self.subst_this_rvalue(env, Rc::make_mut(rhs), this);
             }
+            ExprT::SizeOf(_) | ExprT::AlignOf(_) => {}
         }
     }
 
@@ -2018,8 +2019,56 @@ impl<'a> Emitter<'a> {
                     );
                     Doc::text("(admit())")
                 }
+                ExprT::SizeOf(cty) => parens(
+                    Doc::text("Pulse.Lib.C.Sizeof.c_sizeof")
+                        .append(Doc::line())
+                        .append(self.emit_ctype(env, cty)),
+                ),
+                ExprT::AlignOf(cty) => parens(
+                    Doc::text("Pulse.Lib.C.Sizeof.c_alignof")
+                        .append(Doc::line())
+                        .append(self.emit_ctype(env, cty)),
+                ),
             }
         })
+    }
+
+    fn emit_ctype(&mut self, env: &Env, cty: &CTypeExpr) -> Doc {
+        match &cty.val {
+            CTypeExprT::Void => Doc::text("Pulse.Lib.C.Sizeof.C_Void"),
+            CTypeExprT::Bool => Doc::text("Pulse.Lib.C.Sizeof.C_Bool"),
+            CTypeExprT::SizeT => Doc::text("Pulse.Lib.C.Sizeof.C_SizeT"),
+            CTypeExprT::PtrdiffT => Doc::text("Pulse.Lib.C.Sizeof.C_PtrdiffT"),
+            CTypeExprT::Int { signed, width } => parens(
+                Doc::text("Pulse.Lib.C.Sizeof.C_Int")
+                    .append(Doc::line())
+                    .append(Doc::text(if *signed { "true" } else { "false" }))
+                    .append(Doc::line())
+                    .append(Doc::text(width.to_string())),
+            ),
+            CTypeExprT::Pointer(inner) => parens(
+                Doc::text("Pulse.Lib.C.Sizeof.C_Pointer")
+                    .append(Doc::line())
+                    .append(self.emit_ctype(env, inner)),
+            ),
+            CTypeExprT::Array(elem, n) => parens(
+                Doc::text("Pulse.Lib.C.Sizeof.C_Array")
+                    .append(Doc::line())
+                    .append(self.emit_ctype(env, elem))
+                    .append(Doc::line())
+                    .append(Doc::text(n.to_string())),
+            ),
+            CTypeExprT::Named(n) => {
+                let mangled = self.nm.emit(Name::TypeRef(n.into()));
+                parens(
+                    Doc::text("Pulse.Lib.C.Sizeof.C_Named")
+                        .append(Doc::line())
+                        .append(Doc::text("\""))
+                        .append(mangled)
+                        .append(Doc::text("\"")),
+                )
+            }
+        }
     }
 
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {

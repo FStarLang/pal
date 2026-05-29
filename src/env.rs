@@ -358,6 +358,9 @@ impl Env {
             },
             ExprT::Cast(_, ty) => Ok(ty.clone().into()),
             ExprT::Error(ty) => Ok(ty.clone().into()),
+            ExprT::SizeOf(_) | ExprT::AlignOf(_) => {
+                Ok(TypeT::SizeT.with_loc_core(expr.loc.clone()).into())
+            }
             ExprT::Malloc(ty) | ExprT::Calloc(ty) => Ok(expr
                 .reuse_loc(TypeT::Pointer(ty.clone(), PointerKind::Ref))
                 .into()),

@@ -354,6 +354,28 @@ fn mk_binop(binop: BinOp, lhs: Expr, rhs: Expr, loc: Rc<SourceInfo>) -> Expr {
         .into()
 }
 
+/// Convert a TypeT (as parsed by hauntedc's `type_name`) into a reified
+/// CTypeExprT for use as the argument of `sizeof` / `_Alignof`. Returns
+/// None if the type cannot be reified (e.g. SLProp, SpecInt, Refine, ...).
+fn type_t_to_ctype(ty: &TypeT) -> Option<CTypeExprT> {
+    Some(match ty {
+        TypeT::Void => CTypeExprT::Void,
+        TypeT::Bool => CTypeExprT::Bool,
+        TypeT::SizeT => CTypeExprT::SizeT,
+        TypeT::PtrdiffT => CTypeExprT::PtrdiffT,
+        TypeT::Int { signed, width } => CTypeExprT::Int {
+            signed: *signed,
+            width: *width,
+        },
+        TypeT::Pointer(inner, _) => {
+            let inner_ct = type_t_to_ctype(&inner.val)?;
+            CTypeExprT::Pointer(inner_ct.with_loc(inner.loc.clone()))
+        }
+        TypeT::TypeRef(tk) => CTypeExprT::Named(tk.clone()),
+        _ => return None,
+    })
+}
+
 type Extra<'tokens, 'src> = extra::Err<Rich<'tokens, Token<'src>, SimpleSpan>>;
 
 fn type_parser<
@@ -686,6 +708,48 @@ fn expr_parser<
                         .with_loc(loc)
                         .into()
                 }),
+            // sizeof(<type>) / sizeof(<type>[N]) and _Alignof(<type>)
+            select! {
+                Token::Ident("sizeof") => true,
+                Token::Ident("_Alignof") => false,
+                Token::Ident("__alignof__") => false,
+            }
+            .padded_by(ws())
+            .then(
+                type_name
+                    .clone()
+                    .then(
+                        select! { Token::Integer(i, _) => i }
+                            .delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))
+                            .or_not(),
+                    )
+                    .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
+            )
+            .try_map(move |(is_sizeof, (ty, arr_opt)), span: SimpleSpan| {
+                let loc = sift.resolve_source_info(&span);
+                let Some(ct_inner) = type_t_to_ctype(&ty.val) else {
+                    return Err(Rich::custom(
+                        span,
+                        format!("unsupported type in sizeof/_Alignof"),
+                    ));
+                };
+                let inner_ctype = ct_inner.with_loc(ty.loc.clone());
+                let ct = match arr_opt {
+                    None => inner_ctype,
+                    Some(n_str) => {
+                        let n = BigInt::from_str(n_str)
+                            .map_err(|e| Rich::custom(span, format!("{}", e)))?;
+                        CTypeExprT::Array(inner_ctype, Rc::new(n)).with_loc(loc.clone())
+                    }
+                };
+                let expr_t = if is_sizeof {
+                    ExprT::SizeOf(ct)
+                } else {
+                    ExprT::AlignOf(ct)
+                };
+                Ok::<Expr, Rich<'_, Token<'_>, SimpleSpan>>(expr_t.with_loc(loc).into())
+            })
+            .boxed(),
             ident
                 .clone() // TODO: function should be postfix_expression
                 .then(

@@ -304,7 +304,26 @@ pub enum ExprT {
     /// Assignment expression: assigns rhs to lhs, evaluates to rhs.
     /// Lowered to Assign statement + value in elab pass.
     AssignExpr(Rc<Expr>, Rc<Expr>),
+    /// `sizeof(T)` — translated to an opaque `c_sizeof` call.
+    SizeOf(Rc<CTypeExpr>),
+    /// `_Alignof(T)` / `__alignof__(T)` — translated to an opaque `c_alignof` call.
+    AlignOf(Rc<CTypeExpr>),
     Error(Rc<Type>),
+}
+
+/// Reified C type used as the argument of [ExprT::SizeOf] / [ExprT::AlignOf].
+/// Mirrors the `c_type` inductive declared in `Pulse.Lib.C.Sizeof`.
+pub type CTypeExpr = Ast<CTypeExprT>;
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub enum CTypeExprT {
+    Void,
+    Bool,
+    SizeT,
+    PtrdiffT,
+    Int { signed: bool, width: u32 },
+    Pointer(Rc<CTypeExpr>),
+    Array(Rc<CTypeExpr>, Rc<BigInt>),
+    Named(TypeRefKind),
 }
 
 pub type IdentT = str;

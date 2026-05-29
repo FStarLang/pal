@@ -92,6 +92,19 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    fn elab_ctype(&mut self, env: &Env, cty: &mut CTypeExpr) {
+        match &mut cty.val {
+            CTypeExprT::Void
+            | CTypeExprT::Bool
+            | CTypeExprT::SizeT
+            | CTypeExprT::PtrdiffT
+            | CTypeExprT::Int { .. }
+            | CTypeExprT::Named(_) => {}
+            CTypeExprT::Pointer(inner) => self.elab_ctype(env, Rc::make_mut(inner)),
+            CTypeExprT::Array(elem, _) => self.elab_ctype(env, Rc::make_mut(elem)),
+        }
+    }
+
     fn cast_to_slprop(&mut self, env: &Env, rval: &mut Rc<Expr>) {
         if env
             .infer_expr(rval)
@@ -247,6 +260,9 @@ impl<'a> Elaborator<'a> {
                 // TODO: check that actual_ty can be casted to ty
             }
             ExprT::Error(ty) => self.elab_type(env, Rc::make_mut(ty)),
+            ExprT::SizeOf(cty) | ExprT::AlignOf(cty) => {
+                self.elab_ctype(env, Rc::make_mut(cty));
+            }
             ExprT::Malloc(ty) | ExprT::Calloc(ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
                 self.elab_type(env, Rc::make_mut(ty));

@@ -195,6 +195,26 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             scan_expr(deps, lhs);
             scan_expr(deps, rhs);
         }
+        ExprT::SizeOf(cty) | ExprT::AlignOf(cty) => scan_ctype(deps, cty),
+    }
+}
+
+fn scan_ctype(deps: &mut HashSet<DeclName>, cty: &CTypeExpr) {
+    match &cty.val {
+        CTypeExprT::Void
+        | CTypeExprT::Bool
+        | CTypeExprT::SizeT
+        | CTypeExprT::PtrdiffT
+        | CTypeExprT::Int { .. } => {}
+        CTypeExprT::Pointer(inner) => scan_ctype(deps, inner),
+        CTypeExprT::Array(elem, _) => scan_ctype(deps, elem),
+        CTypeExprT::Named(n) => {
+            deps.insert(match n {
+                TypeRefKind::Typedef(n) => DeclName::Typedef(n.val.clone()),
+                TypeRefKind::Struct(n) => DeclName::Struct(n.val.clone()),
+                TypeRefKind::Union(n) => DeclName::Union(n.val.clone()),
+            });
+        }
     }
 }
 
