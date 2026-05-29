@@ -48,10 +48,10 @@ struct Cli {
 }
 
 fn serialize_diags(diags: &Diagnostics) -> String {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     // Group diagnostics by source file
-    let mut by_file: BTreeMap<&str, Vec<lsp_types::Diagnostic>> = BTreeMap::new();
+    let mut by_file: HashMap<&str, Vec<lsp_types::Diagnostic>> = HashMap::new();
     for diag in &diags.diags {
         by_file
             .entry(&diag.loc.file_name)
