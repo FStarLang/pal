@@ -808,8 +808,7 @@ public:
         if (u->EvaluateAsInt(er, *astCtx)) {
           SmallString<32> valStr;
           er.Val.getInt().toString(valStr);
-          return mk_int_lit(loc.clone(),
-                            mk_bigint(toStr(StringRef(valStr))),
+          return mk_int_lit(loc.clone(), mk_bigint(toStr(StringRef(valStr))),
                             mk_sizet(std::move(loc)));
         }
         // VLA sizeof or other non-constant case: fall through to the
