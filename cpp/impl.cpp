@@ -618,6 +618,11 @@ public:
         return mk_int_lit(std::move(loc), toBigInt(il->getValue()),
                           std::move(ty));
       }
+    } else if (auto cl = dyn_cast<CharacterLiteral>(e)) {
+      auto ty = trQualType(cl->getType(), cl->getSourceRange());
+      return mk_int_lit(std::move(loc),
+                        mk_bigint(toStr(std::to_string(cl->getValue()))),
+                        std::move(ty));
     } else if (auto uo = dyn_cast<UnaryOperator>(e)) {
       switch (uo->getOpcode()) {
       case UO_AddrOf:
@@ -792,6 +797,26 @@ public:
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
       return mk_rvalue_lvalue(std::move(loc), trLValue(e));
+    } else if (auto *u = dyn_cast<UnaryExprOrTypeTraitExpr>(e)) {
+      auto kind = u->getKind();
+      if (kind == UETT_SizeOf || kind == UETT_AlignOf ||
+          kind == UETT_PreferredAlignOf) {
+        auto argTy = u->getTypeOfArgument();
+        if (argTy->isIncompleteType() || argTy->isDependentType() ||
+            argTy->isVariableArrayType()) {
+          reportUnsupported(
+              e->getSourceRange(), loc,
+              "sizeof/_Alignof on incomplete, dependent, or VLA type ", "");
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(e->getType(), e->getSourceRange()));
+        }
+        auto ty = trQualType(argTy, e->getSourceRange());
+        if (kind == UETT_SizeOf) {
+          return mk_sizeof(std::move(loc), std::move(ty));
+        } else {
+          return mk_alignof(std::move(loc), std::move(ty));
+        }
+      }
     }
 
     reportUnsupported(e->getSourceRange(), loc,

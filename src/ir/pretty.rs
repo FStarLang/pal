@@ -343,6 +343,8 @@ impl PrettyIR for ExprT {
                 .append(")")
                 .nest(2)
                 .group(),
+            ExprT::SizeOf(ty) => RcDoc::text("sizeof(").append(ty.to_doc()).append(")"),
+            ExprT::AlignOf(ty) => RcDoc::text("_Alignof(").append(ty.to_doc()).append(")"),
         }
     }
 }

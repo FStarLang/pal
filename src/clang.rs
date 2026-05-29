@@ -690,6 +690,12 @@ fn mk_live(loc: Rc<SourceInfo>, val: Rc<Expr>) -> Rc<Expr> {
 fn mk_assign_expr(loc: Rc<SourceInfo>, lhs: Rc<Expr>, rhs: Rc<Expr>) -> Rc<Expr> {
     mk_ast(loc, ExprT::AssignExpr(lhs, rhs))
 }
+fn mk_sizeof(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::SizeOf(ty))
+}
+fn mk_alignof(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::AlignOf(ty))
+}
 
 pub struct StructInitBuilder {
     loc: Rc<SourceInfo>,

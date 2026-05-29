@@ -727,6 +727,7 @@ impl<'a> Emitter<'a> {
                 self.subst_this_rvalue(env, Rc::make_mut(lhs), this);
                 self.subst_this_rvalue(env, Rc::make_mut(rhs), this);
             }
+            ExprT::SizeOf(_) | ExprT::AlignOf(_) => {}
         }
     }
 
@@ -2197,6 +2198,14 @@ impl<'a> Emitter<'a> {
                     );
                     Doc::text("(admit())")
                 }
+                ExprT::SizeOf(ty) => unaryfn(
+                    Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"),
+                    self.emit_type(env, ty),
+                ),
+                ExprT::AlignOf(ty) => unaryfn(
+                    Doc::text("Pulse.Lib.C.Sizeof.c_alignof"),
+                    self.emit_type(env, ty),
+                ),
             }
         })
     }
