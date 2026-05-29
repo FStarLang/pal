@@ -1,0 +1,9 @@
+{
+  "fstar_exe": "../../opt/run-fstar.sh",
+  "include_dirs": ["out", "_cache"],
+  "options": [
+    "--cache_checked_modules",
+    "--already_cached",
+    "Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore"
+  ]
+}
