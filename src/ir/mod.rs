@@ -304,6 +304,11 @@ pub enum ExprT {
     /// Assignment expression: assigns rhs to lhs, evaluates to rhs.
     /// Lowered to Assign statement + value in elab pass.
     AssignExpr(Rc<Expr>, Rc<Expr>),
+    /// `sizeof(T)` — translated to an opaque `c_sizeof T` call where `T`
+    /// is the F* type PAL uses to represent the C type being measured.
+    SizeOf(Rc<Type>),
+    /// `_Alignof(T)` / `__alignof__(T)` — translated to `c_alignof T`.
+    AlignOf(Rc<Type>),
     Error(Rc<Type>),
 }
 

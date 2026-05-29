@@ -686,6 +686,37 @@ fn expr_parser<
                         .with_loc(loc)
                         .into()
                 }),
+            // sizeof(<type>) / sizeof(<type>[N]) and _Alignof(<type>)
+            select! {
+                Token::Ident("sizeof") => true,
+                Token::Ident("_Alignof") => false,
+                Token::Ident("__alignof__") => false,
+            }
+            .padded_by(ws())
+            .then(
+                type_name
+                    .clone()
+                    .then(
+                        select! { Token::Integer(_, _) => () }
+                            .delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))
+                            .or_not(),
+                    )
+                    .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
+            )
+            .map_with(|(is_sizeof, (ty, arr_opt)), extra| -> Expr {
+                let loc = sift.resolve_source_info(&extra.span());
+                let inner_ty = match arr_opt {
+                    None => ty,
+                    Some(()) => TypeT::Pointer(ty, PointerKind::Array).with_loc(loc.clone()),
+                };
+                let expr_t = if is_sizeof {
+                    ExprT::SizeOf(inner_ty)
+                } else {
+                    ExprT::AlignOf(inner_ty)
+                };
+                expr_t.with_loc(loc).into()
+            })
+            .boxed(),
             ident
                 .clone() // TODO: function should be postfix_expression
                 .then(
