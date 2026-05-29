@@ -247,6 +247,7 @@ impl<'a> Elaborator<'a> {
                 // TODO: check that actual_ty can be casted to ty
             }
             ExprT::Error(ty) => self.elab_type(env, Rc::make_mut(ty)),
+            ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::Malloc(ty) | ExprT::Calloc(ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
                 self.elab_type(env, Rc::make_mut(ty));

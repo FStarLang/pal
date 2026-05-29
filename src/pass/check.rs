@@ -447,6 +447,7 @@ impl<'a> Checker<'a> {
                 self.check_rvalue(env, lhs);
                 self.check_rvalue(env, rhs);
             }
+            ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => self.check_type(env, ty),
             ExprT::Error(ty) => self.check_type(env, ty),
         }
     }
