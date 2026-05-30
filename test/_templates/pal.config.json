@@ -1,4 +1,5 @@
 {
-  "c2pulse_exe": "../../target/debug/pal",
-  "options": []
+  "pal_exe": "../../target/debug/pal",
+  "options": ["--outdir", "out"],
+  "files": "*.c"
 }
