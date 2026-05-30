@@ -1,4 +1,5 @@
-/_cache
-/*_diagnostics.json
-/*_source_range_info.json
-/*.fst
+**/out/
+**/_cache/
+**/.depend
+diagnostics.json
+source_range_info.json

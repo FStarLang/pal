@@ -515,6 +515,7 @@ pub struct InlinePulseCode {
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct IncludeDecl {
+    pub module_name: Rc<str>,
     pub code: InlinePulseCode,
 }
 
@@ -561,6 +562,6 @@ pub enum DeclT {
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct TranslationUnit {
-    pub main_file_name: Rc<str>,
+    pub main_file_names: Vec<Rc<str>>,
     pub decls: Vec<Decl>,
 }

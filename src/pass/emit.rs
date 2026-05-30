@@ -16,6 +16,129 @@ use crate::{
 
 pub type SourceRangeMap = Vec<(Location, Range)>;
 
+/// Determines the output module name for a given top-level declaration.
+pub fn module_name_for_decl(decl: &Decl) -> String {
+    match &decl.val {
+        DeclT::FnDefn(fn_defn) => format!("Func_{}", fn_defn.decl.name.val),
+        DeclT::FnDecl(fn_decl) => format!("Func_{}", fn_decl.name.val),
+        DeclT::Typedef(type_defn) => format!("Typedef_{}", type_defn.name.val),
+        DeclT::StructDefn(struct_defn) => format!("Struct_{}", struct_defn.name.val),
+        DeclT::StructDecl(name) => format!("Struct_{}", name.val),
+        DeclT::UnionDefn(union_defn) => format!("Union_{}", union_defn.name.val),
+        DeclT::IncludeDecl(include_decl) => include_decl.module_name.to_string(),
+        DeclT::LetDecl(let_decl) => format!("Let_{}", let_decl.name.val),
+        DeclT::OpaqueTypeDecl(decl) => format!("Type_{}", decl.name.val),
+        DeclT::GlobalVar(gv) => format!("Global_{}", gv.name.val),
+    }
+}
+
+/// Extracts the raw C declaration name (identifier) from a Decl.
+pub fn decl_name(decl: &Decl) -> String {
+    match &decl.val {
+        DeclT::FnDefn(fn_defn) => fn_defn.decl.name.val.to_string(),
+        DeclT::FnDecl(fn_decl) => fn_decl.name.val.to_string(),
+        DeclT::Typedef(type_defn) => type_defn.name.val.to_string(),
+        DeclT::StructDefn(struct_defn) => struct_defn.name.val.to_string(),
+        DeclT::StructDecl(name) => name.val.to_string(),
+        DeclT::UnionDefn(union_defn) => union_defn.name.val.to_string(),
+        DeclT::IncludeDecl(include_decl) => include_decl.module_name.to_string(),
+        DeclT::LetDecl(let_decl) => let_decl.name.val.to_string(),
+        DeclT::OpaqueTypeDecl(decl) => decl.name.val.to_string(),
+        DeclT::GlobalVar(gv) => gv.name.val.to_string(),
+    }
+}
+
+/// Determines the module name that would contain a given Name reference.
+fn module_for_name(name: &Name) -> Option<String> {
+    match name {
+        // Name::Fn is handled via fn_module_map in Emitter::emit_name
+        Name::Fn(_) => None,
+        Name::TypeRef(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRef(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRef(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefPred(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefPred(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefPred(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefUninitPred(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefUninitPred(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefUninitPred(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::StructFieldProj(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructDirectFieldName(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructGhostFieldProj(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructAuxFn(s, _) => Some(format!("Struct_{}", s)),
+        Name::UnionFieldConstructor(u, _) => Some(format!("Union_{}", u)),
+        Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
+        Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
+        Name::UnionAuxFn(u, _, _) => Some(format!("Union_{}", u)),
+        Name::TypeRefDefault(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefDefault(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefDefault(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefSpec(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefSpec(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefSpec(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefSpecField(TypeRef::Struct(s), _) => Some(format!("Struct_{}", s)),
+        Name::TypeRefSpecField(TypeRef::Union(u), _) => Some(format!("Union_{}", u)),
+        Name::TypeRefSpecField(TypeRef::Typedef(t), _) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefPredUnfold(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefPredUnfold(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefPredUnfold(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefPredFold(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefPredFold(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefPredFold(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        // Local names (Var, Val, Perm) are not cross-module references
+        Name::Var(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
+    }
+}
+
+/// Builds a map from function/let/global/opaque-type identifiers to their owning module name.
+/// This is needed because Name::Fn is used for all function-like references (FnDefn, LetDecl, etc.)
+/// but they live in different module prefixes.
+fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
+    let mut map = HashMap::new();
+    for decl in decls {
+        match &decl.val {
+            DeclT::FnDefn(fn_defn) => {
+                map.insert(
+                    fn_defn.decl.name.val.clone(),
+                    format!("Func_{}", fn_defn.decl.name.val),
+                );
+            }
+            DeclT::FnDecl(fn_decl) => {
+                map.insert(
+                    fn_decl.name.val.clone(),
+                    format!("Func_{}", fn_decl.name.val),
+                );
+            }
+            DeclT::LetDecl(let_decl) => {
+                map.insert(
+                    let_decl.name.val.clone(),
+                    format!("Let_{}", let_decl.name.val),
+                );
+            }
+            DeclT::OpaqueTypeDecl(decl) => {
+                map.insert(decl.name.val.clone(), format!("Type_{}", decl.name.val));
+            }
+            DeclT::GlobalVar(gv) => {
+                map.insert(gv.name.val.clone(), format!("Global_{}", gv.name.val));
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
+/// Builds a map from typedef names that are actually OpaqueTypeDecls to their `Type_*` module.
+/// This overrides the default `Typedef_*` mapping from module_for_name for TypeRef lookups.
+fn build_typedef_override_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
+    let mut map = HashMap::new();
+    for decl in decls {
+        if let DeclT::OpaqueTypeDecl(d) = &decl.val {
+            map.insert(d.name.val.clone(), format!("Type_{}", d.name.val));
+        }
+    }
+    map
+}
+
 type Annotation = Rc<SourceInfo>;
 type Doc = RcDoc<'static, Annotation>;
 
@@ -281,6 +404,7 @@ const RESERVED: &[&str] = &[
     "pulse_intro",
 ];
 
+#[derive(Clone)]
 struct NameMangling {
     map: HashMap<Name, Rc<str>>,
     used: HashSet<Rc<str>>,
@@ -323,10 +447,6 @@ impl NameMangling {
         self.used.insert(mangled.clone());
         self.map.insert(name.clone(), mangled.clone());
         mangled
-    }
-
-    fn emit(&mut self, name: Name) -> Doc {
-        Doc::text(self.mangle(&name).to_string())
     }
 }
 
@@ -386,6 +506,12 @@ struct Emitter<'a> {
     /// When emitting a struct's pred, tracks the struct name to avoid
     /// infinite recursion on self-referential pointer fields.
     defining_struct: Option<Rc<str>>,
+    /// The module currently being emitted (for qualified name resolution).
+    current_module: String,
+    /// Maps function/let/global/opaque identifiers to their owning module.
+    fn_module_map: HashMap<Rc<str>, String>,
+    /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
+    typedef_override_map: HashMap<Rc<str>, String>,
 }
 
 impl<'a> Emitter<'a> {
@@ -395,6 +521,36 @@ impl<'a> Emitter<'a> {
             level: DiagnosticLevel::Error,
             msg,
         });
+    }
+
+    /// Emit a Name with full module qualification when it refers to a different module.
+    fn emit_name(&mut self, name: Name) -> Doc {
+        let mangled = self.nm.mangle(&name).to_string();
+        // For Name::Fn, look up the actual module from the declaration-based map
+        let owner_module = if let Name::Fn(ref v) = name {
+            self.fn_module_map.get(v).cloned()
+        } else {
+            // Check typedef_override_map for TypeRef::Typedef names (OpaqueTypeDecl)
+            let base_module = module_for_name(&name);
+            match &name {
+                Name::TypeRef(TypeRef::Typedef(t))
+                | Name::TypeRefPred(TypeRef::Typedef(t))
+                | Name::TypeRefUninitPred(TypeRef::Typedef(t))
+                | Name::TypeRefDefault(TypeRef::Typedef(t)) => {
+                    self.typedef_override_map.get(t).cloned().or(base_module)
+                }
+                _ => base_module,
+            }
+        };
+        if let Some(owner_module) = owner_module {
+            if owner_module == self.current_module {
+                Doc::text(mangled)
+            } else {
+                Doc::text(format!("{}.{}", owner_module, mangled))
+            }
+        } else {
+            Doc::text(mangled)
+        }
     }
 }
 
@@ -458,7 +614,7 @@ impl<'a> Emitter<'a> {
                 TypeT::Unknown => Doc::text("unit"),
                 TypeT::Error => Doc::text("unit"),
 
-                TypeT::TypeRef(n) => self.nm.emit(Name::TypeRef(n.into())),
+                TypeT::TypeRef(n) => self.emit_name(Name::TypeRef(n.into())),
 
                 TypeT::SLProp => Doc::text("slprop"),
                 TypeT::SpecInt => Doc::text("int"),
@@ -618,12 +774,12 @@ impl<'a> Emitter<'a> {
                     let resolved = env.vtype_whnf(ty.clone().into());
                     match &resolved.val {
                         TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => Doc::text(*before)
-                            .append(self.nm.emit(Name::StructDirectFieldName(
+                            .append(self.emit_name(Name::StructDirectFieldName(
                                 struct_name.val.clone(),
                                 field_name.val.clone(),
                             ))),
                         TypeT::TypeRef(TypeRefKind::Union(union_name)) => Doc::text(*before)
-                            .append(self.nm.emit(Name::UnionFieldConstructor(
+                            .append(self.emit_name(Name::UnionFieldConstructor(
                                 union_name.val.clone(),
                                 field_name.val.clone(),
                             ))),
@@ -651,7 +807,7 @@ impl<'a> Emitter<'a> {
                                     &ty.loc,
                                 );
                             }
-                            Doc::text(*before).append(self.nm.emit(Name::StructAuxFn(
+                            Doc::text(*before).append(self.emit_name(Name::StructAuxFn(
                                 struct_name.val.clone(),
                                 kind.struct_aux_name().into(),
                             )))
@@ -659,7 +815,7 @@ impl<'a> Emitter<'a> {
                         TypeT::TypeRef(TypeRefKind::Union(union_name)) => {
                             match (kind.union_aux_name(), field_name) {
                                 (Some(aux_name), Some(fld)) => {
-                                    Doc::text(*before).append(self.nm.emit(Name::UnionAuxFn(
+                                    Doc::text(*before).append(self.emit_name(Name::UnionAuxFn(
                                         union_name.val.clone(),
                                         aux_name,
                                         fld.val.clone(),
@@ -704,7 +860,11 @@ impl<'a> Emitter<'a> {
         match naming {
             ValNaming::Standard { quote, bindings } => {
                 let idx = bindings.len() as u32;
-                let raw = self.nm.emit(Name::Val(extract_base_ident(this), idx));
+                let raw = Doc::text(
+                    self.nm
+                        .mangle(&Name::Val(extract_base_ident(this), idx))
+                        .to_string(),
+                );
                 let val_name = if *quote {
                     Doc::text("'").append(raw)
                 } else {
@@ -724,10 +884,14 @@ impl<'a> Emitter<'a> {
             } => {
                 let idx = bindings.len() as u32;
                 let spec_field_name_str = format!("{}_{}", field_name, idx);
-                let spec_field_name = self.nm.emit(Name::TypeRefSpecField(
-                    (*type_ref).clone(),
-                    spec_field_name_str,
-                ));
+                let spec_field_name = Doc::text(
+                    self.nm
+                        .mangle(&Name::TypeRefSpecField(
+                            (*type_ref).clone(),
+                            spec_field_name_str,
+                        ))
+                        .to_string(),
+                );
                 let val_access = spec_param
                     .clone()
                     .append(".")
@@ -764,10 +928,14 @@ impl<'a> Emitter<'a> {
                 ..
             } => {
                 // For explicit names in spec context, use the name as the field name
-                let spec_field_name = self.nm.emit(Name::TypeRefSpecField(
-                    (*type_ref).clone(),
-                    format!("{}", raw_name.pretty(80)),
-                ));
+                let spec_field_name = Doc::text(
+                    self.nm
+                        .mangle(&Name::TypeRefSpecField(
+                            (*type_ref).clone(),
+                            format!("{}", raw_name.pretty(80)),
+                        ))
+                        .to_string(),
+                );
                 let val_access = spec_param
                     .clone()
                     .append(".")
@@ -871,14 +1039,14 @@ impl<'a> Emitter<'a> {
                             .get(&TypeRef::from(n))
                             .cloned()
                             .unwrap_or_default(),
-                        self.nm.emit(Name::TypeRefPred(n.into())),
+                        self.emit_name(Name::TypeRefPred(n.into())),
                     ),
                     SLPropVariant::Uninit => (
                         self.type_uninit_val_params
                             .get(&TypeRef::from(n))
                             .cloned()
                             .unwrap_or_default(),
-                        self.nm.emit(Name::TypeRefUninitPred(n.into())),
+                        self.emit_name(Name::TypeRefUninitPred(n.into())),
                     ),
                 };
                 let mut val_args: Vec<Doc> = vec![];
@@ -944,8 +1112,8 @@ impl<'a> Emitter<'a> {
         emit_slprops: impl Fn(&mut Self, SLPropVariant, &mut ValNaming, &mut Vec<Doc>),
     ) -> Doc {
         let pred_name = match variant {
-            SLPropVariant::Init { .. } => self.nm.emit(Name::TypeRefPred(k.into())),
-            SLPropVariant::Uninit => self.nm.emit(Name::TypeRefUninitPred(k.into())),
+            SLPropVariant::Init { .. } => self.emit_name(Name::TypeRefPred(k.into())),
+            SLPropVariant::Uninit => self.emit_name(Name::TypeRefUninitPred(k.into())),
         };
         let mut args = base_args;
         if let SLPropVariant::Init { .. } = variant {
@@ -986,7 +1154,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_var(&mut self, v: &Ident) -> Doc {
-        annotated(v, || self.nm.emit(Name::Var(v.val.clone())))
+        annotated(v, || self.emit_name(Name::Var(v.val.clone())))
     }
 
     fn emit_lvalue(&mut self, env: &Env, v: &Expr) -> Doc {
@@ -1002,17 +1170,32 @@ impl<'a> Emitter<'a> {
     fn emit_expr(&mut self, env: &Env, v: &Expr) -> ExprKind {
         match &v.val {
             ExprT::Var(x) => {
-                let x2 = annotated(v, || self.emit_var(x));
-                if let Some(LocalDecl {
-                    kind: LocalDeclKind::RValue,
-                    ..
-                }) = env.lookup_var(x)
-                {
-                    ExprKind::RValue(x2)
-                } else if env.lookup_global_var(x).is_some() {
+                if env.lookup_global_var(x).is_some() {
+                    // Global variables need module-qualified names
+                    let x2 = annotated(v, || {
+                        let mangled = self.nm.mangle(&Name::Var(x.val.clone())).to_string();
+                        if let Some(owner_module) = self.fn_module_map.get(&x.val) {
+                            if *owner_module == self.current_module {
+                                Doc::text(mangled)
+                            } else {
+                                Doc::text(format!("{}.{}", owner_module, mangled))
+                            }
+                        } else {
+                            Doc::text(mangled)
+                        }
+                    });
                     ExprKind::RValue(x2)
                 } else {
-                    ExprKind::LValue(x2)
+                    let x2 = annotated(v, || self.emit_var(x));
+                    if let Some(LocalDecl {
+                        kind: LocalDeclKind::RValue,
+                        ..
+                    }) = env.lookup_var(x)
+                    {
+                        ExprKind::RValue(x2)
+                    } else {
+                        ExprKind::LValue(x2)
+                    }
                 }
             }
             ExprT::Deref(inner) => {
@@ -1047,7 +1230,7 @@ impl<'a> Emitter<'a> {
                             match self.emit_expr(env, x) {
                                 ExprKind::LValue(x_doc) => ExprKind::LValue(annotated(v, || {
                                     unaryfn(
-                                        self.nm.emit(Name::StructFieldProj(
+                                        self.emit_name(Name::StructFieldProj(
                                             struct_name.val.clone(),
                                             a.val.clone(),
                                         )),
@@ -1055,7 +1238,7 @@ impl<'a> Emitter<'a> {
                                     )
                                 })),
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
-                                    x_doc.append(Doc::text(".")).append(self.nm.emit(
+                                    x_doc.append(Doc::text(".")).append(self.emit_name(
                                         Name::StructDirectFieldName(
                                             struct_name.val.clone(),
                                             a.val.clone(),
@@ -1068,7 +1251,7 @@ impl<'a> Emitter<'a> {
                             match self.emit_expr(env, x) {
                                 ExprKind::LValue(x_doc) => ExprKind::LValue(annotated(v, || {
                                     unaryfn(
-                                        self.nm.emit(Name::UnionFieldProj(
+                                        self.emit_name(Name::UnionFieldProj(
                                             union_name.val.clone(),
                                             a.val.clone(),
                                         )),
@@ -1077,15 +1260,14 @@ impl<'a> Emitter<'a> {
                                 })),
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
                                     parens(
-                                        self.nm
-                                            .emit(Name::UnionFieldConstructor(
-                                                union_name.val.clone(),
-                                                a.val.clone(),
-                                            ))
-                                            .append("?._0")
-                                            .append(Doc::line())
-                                            .append(x_doc)
-                                            .group(),
+                                        self.emit_name(Name::UnionFieldConstructor(
+                                            union_name.val.clone(),
+                                            a.val.clone(),
+                                        ))
+                                        .append("?._0")
+                                        .append(Doc::line())
+                                        .append(x_doc)
+                                        .group(),
                                     )
                                 })),
                             }
@@ -1121,15 +1303,14 @@ impl<'a> Emitter<'a> {
                 let base_doc = self.emit_rvalue(env, base);
                 ExprKind::RValue(annotated(v, || {
                     parens(
-                        self.nm
-                            .emit(Name::UnionFieldConstructor(
-                                union_name.val.clone(),
-                                fld.val.clone(),
-                            ))
-                            .append("?")
-                            .append(Doc::line())
-                            .append(base_doc)
-                            .group(),
+                        self.emit_name(Name::UnionFieldConstructor(
+                            union_name.val.clone(),
+                            fld.val.clone(),
+                        ))
+                        .append("?")
+                        .append(Doc::line())
+                        .append(base_doc)
+                        .group(),
                     )
                 }))
             }
@@ -1795,8 +1976,7 @@ impl<'a> Emitter<'a> {
                         )
                     };
                     parens(
-                        self.nm
-                            .emit(Name::Fn(f.val.clone()))
+                        self.emit_name(Name::Fn(f.val.clone()))
                             .append(Doc::line())
                             .append(args),
                     )
@@ -1868,8 +2048,7 @@ impl<'a> Emitter<'a> {
                         Doc::text(keyword)
                             .append(Doc::line())
                             .append(parens(
-                                self.nm
-                                    .emit(Name::Var(var.val.clone()))
+                                self.emit_name(Name::Var(var.val.clone()))
                                     .append(":")
                                     .append(Doc::space())
                                     .append(self.emit_type(&env, ty)),
@@ -1882,7 +2061,7 @@ impl<'a> Emitter<'a> {
                 ExprT::StructInit(name, fields) => Doc::text("{")
                     .append(Doc::concat(fields.iter().map(|(fld, val)| {
                         Doc::line()
-                            .append(self.nm.emit(Name::StructDirectFieldName(
+                            .append(self.emit_name(Name::StructDirectFieldName(
                                 name.val.clone(),
                                 fld.val.clone(),
                             )))
@@ -1895,7 +2074,7 @@ impl<'a> Emitter<'a> {
                     .append("}")
                     .group(),
                 ExprT::UnionInit(name, fld, val) => unaryfn(
-                    self.nm.emit(Name::UnionFieldConstructor(
+                    self.emit_name(Name::UnionFieldConstructor(
                         name.val.clone(),
                         fld.val.clone(),
                     )),
@@ -2036,7 +2215,7 @@ impl<'a> Emitter<'a> {
             match &stmt.val {
                 StmtT::Call(v) => self.emit_rvalue(env, v).append(";").nest(2).group(),
                 StmtT::Decl(x, ty) => {
-                    let x = self.nm.emit(Name::Var(x.val.clone()));
+                    let x = self.emit_name(Name::Var(x.val.clone()));
                     (Doc::text("let mut ").append(x).append(" :"))
                         .append(Doc::line())
                         .append(self.emit_type(env, ty))
@@ -2049,7 +2228,7 @@ impl<'a> Emitter<'a> {
                     elem_type,
                     size,
                 } => {
-                    let x = self.nm.emit(Name::Var(name.val.clone()));
+                    let x = self.emit_name(Name::Var(name.val.clone()));
                     let size_doc = self.emit_rvalue(env, size);
                     let elem_type_doc = self.emit_type(env, elem_type);
                     // let var_arr = stack_alloc_array #Int32.t 10sz;
@@ -2152,7 +2331,7 @@ impl<'a> Emitter<'a> {
                         if let Ok(base_ty) = env.infer_expr(base) {
                             let base_ty = env.vtype_whnf(base_ty);
                             if let TypeT::TypeRef(TypeRefKind::Union(union_name)) = &base_ty.val {
-                                let ctor = self.nm.emit(Name::UnionFieldConstructor(
+                                let ctor = self.emit_name(Name::UnionFieldConstructor(
                                     union_name.val.clone(),
                                     fld.val.clone(),
                                 ));
@@ -2253,7 +2432,7 @@ impl<'a> Emitter<'a> {
                     self.emit_inline_pulse_tokens(env, code).append(";")
                 }
                 StmtT::Goto(label) => Doc::text("goto ")
-                    .append(self.nm.emit(Name::Var(label.val.clone())))
+                    .append(self.emit_name(Name::Var(label.val.clone())))
                     .append(";"),
                 StmtT::Label { .. } => Doc::text("(* unrestructured label *)"),
                 StmtT::GotoBlock {
@@ -2270,7 +2449,7 @@ impl<'a> Emitter<'a> {
                     }
                     doc.append(Doc::hardline())
                         .append("label ")
-                        .append(self.nm.emit(Name::Var(label.val.clone())))
+                        .append(self.emit_name(Name::Var(label.val.clone())))
                         .append(":;")
                 }
                 StmtT::Error => Doc::text("(admit());"),
@@ -2377,7 +2556,7 @@ impl<'a> Emitter<'a> {
         env.push_typedef(decl.clone());
 
         let k = &TypeRefKind::Typedef(name.clone());
-        let t = self.nm.emit(Name::TypeRef(k.into()));
+        let t = self.emit_name(Name::TypeRef(k.into()));
         // The unfold here is important to trigger the loop detection in the Pulse prover
         let ty_decl = Doc::text("unfold").append(Doc::line()).append(mk_let(
             t.clone(),
@@ -2390,8 +2569,7 @@ impl<'a> Emitter<'a> {
             .push_this(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()))
             .with_loc(name.loc.clone());
         let this_arg = parens(
-            self.nm
-                .emit(Name::Var(this.val.clone()))
+            self.emit_name(Name::Var(this.val.clone()))
                 .append(":")
                 .append(Doc::line())
                 .append(t),
@@ -2421,8 +2599,8 @@ impl<'a> Emitter<'a> {
         );
 
         // has_zero_default instance
-        let default_name = self.nm.emit(Name::TypeRefDefault(k.into()));
-        let type_name = self.nm.emit(Name::TypeRef(k.into()));
+        let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
+        let type_name = self.emit_name(Name::TypeRef(k.into()));
         let default_decl = Doc::text("instance")
             .append(Doc::line())
             .append(default_name)
@@ -2507,9 +2685,9 @@ fn mk_thunk(body: Doc) -> Doc {
 impl<'a> Emitter<'a> {
     fn emit_struct_decl(&mut self, _env: &Env, name: &Ident) -> Doc {
         let k = &TypeRefKind::Struct(name.clone().into());
-        let struct_type_name = self.nm.emit(Name::TypeRef(k.into()));
-        let pts_to_name = self.nm.emit(Name::TypeRefPred(k.into()));
-        let uninit_pred_name = self.nm.emit(Name::TypeRefUninitPred(k.into()));
+        let struct_type_name = self.emit_name(Name::TypeRef(k.into()));
+        let pts_to_name = self.emit_name(Name::TypeRefPred(k.into()));
+        let uninit_pred_name = self.emit_name(Name::TypeRefUninitPred(k.into()));
 
         Doc::intersperse(
             [
@@ -2565,7 +2743,7 @@ impl<'a> Emitter<'a> {
         self.defining_struct = Some(name.val.clone());
 
         let k = &TypeRefKind::Struct(name.clone());
-        let struct_type_name = self.nm.emit(Name::TypeRef(k.into()));
+        let struct_type_name = self.emit_name(Name::TypeRef(k.into()));
         let ref_struct_type = unaryfn(Doc::text("ref"), struct_type_name.clone());
 
         let direct_fld =
@@ -2584,8 +2762,7 @@ impl<'a> Emitter<'a> {
                 .group()
                 .append(Doc::concat(fields.iter().map(|(fld, fld_ty)| {
                     Doc::hardline().append(
-                        self.nm
-                            .emit(direct_fld(fld))
+                        self.emit_name(direct_fld(fld))
                             .append(":")
                             .append(Doc::line())
                             .append(self.emit_type(env, fld_ty))
@@ -2605,7 +2782,7 @@ impl<'a> Emitter<'a> {
         let this = env
             .push_this(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()))
             .with_loc(name.loc.clone());
-        let this_doc = self.nm.emit(Name::Var(this.val.clone()));
+        let this_doc = Doc::text(self.nm.mangle(&Name::Var(this.val.clone())).to_string());
         let this_arg = parens(
             Doc::text("[@@@mkey] ")
                 .append(this_doc.clone())
@@ -2615,7 +2792,8 @@ impl<'a> Emitter<'a> {
         );
 
         // Determine the spec param name (e.g., "val_simple_0")
-        let spec_param_name = self.nm.emit(Name::Val(name.val.clone(), 0));
+        let spec_param_name =
+            Doc::text(self.nm.mangle(&Name::Val(name.val.clone(), 0)).to_string());
 
         // Collect per-field spec info using emit_type_slprop with SpecRecord naming
         let type_ref = TypeRef::from(k);
@@ -2659,12 +2837,21 @@ impl<'a> Emitter<'a> {
             .collect();
 
         // Emit the spec record type if there are any spec bindings
-        let spec_type_name = self.nm.emit(Name::TypeRefSpec(k.into()));
+        // Use mangle for definition (local), force qualification for storage (cross-module use)
+        let spec_type_name_local =
+            Doc::text(self.nm.mangle(&Name::TypeRefSpec(k.into())).to_string());
+        let spec_mangled = self.nm.mangle(&Name::TypeRefSpec(k.into())).to_string();
+        let spec_type_name_qualified =
+            if let Some(owner) = module_for_name(&Name::TypeRefSpec(k.into())) {
+                Doc::text(format!("{}.{}", owner, spec_mangled))
+            } else {
+                Doc::text(spec_mangled)
+            };
         if !all_spec_bindings.is_empty() {
             ses.push(
                 Doc::text("[@@erasable] noeq type")
                     .append(Doc::line())
-                    .append(spec_type_name.clone())
+                    .append(spec_type_name_local.clone())
                     .append(Doc::line())
                     .append("=")
                     .append(Doc::line())
@@ -2694,7 +2881,7 @@ impl<'a> Emitter<'a> {
             self.type_val_params.insert(TypeRef::from(k), vec![]);
         } else {
             self.type_val_params
-                .insert(TypeRef::from(k), vec![spec_type_name.clone()]);
+                .insert(TypeRef::from(k), vec![spec_type_name_qualified.clone()]);
         }
 
         // Collect init props from field specs
@@ -2704,7 +2891,7 @@ impl<'a> Emitter<'a> {
             .collect();
 
         // Emit __pred directly (no indirection via __pred')
-        let pred_name = self.nm.emit(Name::TypeRefPred(k.into()));
+        let pred_name = Doc::text(self.nm.mangle(&Name::TypeRefPred(k.into())).to_string());
         if !all_spec_bindings.is_empty() {
             let pred_args = vec![
                 this_arg.clone(),
@@ -2714,7 +2901,7 @@ impl<'a> Emitter<'a> {
                         .clone()
                         .append(":")
                         .append(Doc::line())
-                        .append(spec_type_name.clone()),
+                        .append(spec_type_name_local.clone()),
                 ),
             ];
             ses.push(
@@ -2769,7 +2956,11 @@ impl<'a> Emitter<'a> {
 
         // Emit __pred_unfold ghost fn
         if !all_spec_bindings.is_empty() {
-            let unfold_name = self.nm.emit(Name::TypeRefPredUnfold(k.into()));
+            let unfold_name = Doc::text(
+                self.nm
+                    .mangle(&Name::TypeRefPredUnfold(k.into()))
+                    .to_string(),
+            );
             let requires_doc = nary_no_parens([
                 pred_name.clone(),
                 this_doc.clone(),
@@ -2800,7 +2991,7 @@ impl<'a> Emitter<'a> {
                             .append("    (")
                             .append(spec_param_name.clone())
                             .append(": ")
-                            .append(spec_type_name.clone())
+                            .append(spec_type_name_local.clone())
                             .append(")"),
                     )
                     .append(Doc::hardline().append("  requires ").append(requires_doc))
@@ -2820,7 +3011,7 @@ impl<'a> Emitter<'a> {
 
         // Emit __pred_fold ghost fn
         if !all_spec_bindings.is_empty() {
-            let fold_name = self.nm.emit(Name::TypeRefPredFold(k.into()));
+            let fold_name = Doc::text(self.nm.mangle(&Name::TypeRefPredFold(k.into())).to_string());
 
             // Build per-binding val params for fold
             let mut fold_val_params: Vec<Doc> = vec![];
@@ -2917,9 +3108,8 @@ impl<'a> Emitter<'a> {
             );
         }
 
-        let unfolded_tok = self
-            .nm
-            .emit(Name::StructAuxFn(name.val.clone(), "raw_unfolded".into()));
+        let unfolded_tok =
+            self.emit_name(Name::StructAuxFn(name.val.clone(), "raw_unfolded".into()));
         ses.push(mk_assume_val(
             vec![],
             unfolded_tok.clone(),
@@ -2941,7 +3131,7 @@ impl<'a> Emitter<'a> {
 
             ses.push(mk_assume_val(
                 vec![],
-                self.nm.emit(ghost_fld(fld)),
+                self.emit_name(ghost_fld(fld)),
                 &[parens(
                     Doc::text("x:")
                         .append(Doc::line())
@@ -2956,8 +3146,7 @@ impl<'a> Emitter<'a> {
 
         ses.push(mk_assume_val(
             vec![Doc::text("pulse_intro")],
-            self.nm
-                .emit(Name::StructAuxFn(name.val.clone(), "raw_unfold".into())),
+            self.emit_name(Name::StructAuxFn(name.val.clone(), "raw_unfold".into())),
             &[
                 parens(
                     Doc::text("x:")
@@ -2991,9 +3180,9 @@ impl<'a> Emitter<'a> {
                     for (fld, _) in fields {
                         post.push(naryfn([
                             Doc::text("Pulse.Lib.Reference.pts_to"),
-                            unaryfn(self.nm.emit(ghost_fld(fld)), Doc::text("x")),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                             Doc::text("#p"),
-                            Doc::text("vx.").append(self.nm.emit(direct_fld(fld))),
+                            Doc::text("vx.").append(self.emit_name(direct_fld(fld))),
                         ]));
                     }
                     mk_thunk(mk_star(post))
@@ -3004,8 +3193,7 @@ impl<'a> Emitter<'a> {
         let fold_arg_name = |fld: &Ident| Doc::text(format!("v_{}", fld));
         ses.push(mk_assume_val(
             vec![Doc::text("pulse_intro")],
-            self.nm
-                .emit(Name::StructAuxFn(name.val.clone(), "raw_fold".into())),
+            self.emit_name(Name::StructAuxFn(name.val.clone(), "raw_fold".into())),
             &{
                 let mut args = vec![
                     parens(
@@ -3033,7 +3221,7 @@ impl<'a> Emitter<'a> {
                     for (fld, _) in fields {
                         pre.push(naryfn([
                             Doc::text("Pulse.Lib.Reference.pts_to"),
-                            unaryfn(self.nm.emit(ghost_fld(fld)), Doc::text("x")),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                             Doc::text("#p"),
                             fold_arg_name(fld),
                         ]));
@@ -3047,7 +3235,7 @@ impl<'a> Emitter<'a> {
                     Doc::text("{")
                         .append(Doc::concat(fields.iter().map(|(fld, _)| {
                             Doc::line()
-                                .append(self.nm.emit(direct_fld(fld)))
+                                .append(self.emit_name(direct_fld(fld)))
                                 .append("=")
                                 .append(fold_arg_name(fld))
                                 .append(";")
@@ -3061,7 +3249,7 @@ impl<'a> Emitter<'a> {
         ));
         ses.push(mk_assume_val(
             vec![Doc::text("pulse_intro")],
-            self.nm.emit(Name::StructAuxFn(
+            self.emit_name(Name::StructAuxFn(
                 name.val.clone(),
                 "raw_fold_uninit".into(),
             )),
@@ -3083,7 +3271,7 @@ impl<'a> Emitter<'a> {
                     for (fld, _) in fields {
                         pre.push(naryfn([
                             Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
-                            unaryfn(self.nm.emit(ghost_fld(fld)), Doc::text("x")),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                         ]));
                     }
                     mk_star(pre)
@@ -3096,7 +3284,7 @@ impl<'a> Emitter<'a> {
         ));
         ses.push(mk_assume_val(
             vec![],
-            self.nm.emit(Name::StructAuxFn(
+            self.emit_name(Name::StructAuxFn(
                 name.val.clone(),
                 "raw_unfold_uninit".into(),
             )),
@@ -3122,7 +3310,7 @@ impl<'a> Emitter<'a> {
                     for (fld, _) in fields {
                         post.push(naryfn([
                             Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
-                            unaryfn(self.nm.emit(ghost_fld(fld)), Doc::text("x")),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                         ]));
                     }
                     mk_star(post)
@@ -3135,8 +3323,7 @@ impl<'a> Emitter<'a> {
             let unfolded = naryfn([unfolded_tok.clone(), Doc::text("x"), Doc::text("p")]);
             ses.push(mk_assume_val(
                 vec![Doc::text("pulse_impure_spec_no_proof_required")],
-                self.nm
-                    .emit(Name::StructFieldProj(name.val.clone(), fld.val.clone())),
+                self.emit_name(Name::StructFieldProj(name.val.clone(), fld.val.clone())),
                 &[
                     parens(
                         Doc::text("x:")
@@ -3158,7 +3345,7 @@ impl<'a> Emitter<'a> {
                             naryfn([
                                 Doc::text("rewrites_to"),
                                 Doc::text("vx'"),
-                                unaryfn(self.nm.emit(ghost_fld(fld)), Doc::text("x")),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                             ]),
                         ]),
                     ),
@@ -3167,7 +3354,7 @@ impl<'a> Emitter<'a> {
         }
 
         // has_zero_default instance
-        let default_name = self.nm.emit(Name::TypeRefDefault(k.into()));
+        let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
         ses.push(
             Doc::text("instance")
                 .append(Doc::line())
@@ -3188,7 +3375,7 @@ impl<'a> Emitter<'a> {
                 .append(Doc::text("zero_default = {"))
                 .append(Doc::concat(fields.iter().map(|(fld, fld_ty)| {
                     Doc::line()
-                        .append(self.nm.emit(direct_fld(fld)))
+                        .append(self.emit_name(direct_fld(fld)))
                         .append(" =")
                         .append(Doc::line())
                         .append(self.emit_type_default(env, fld_ty))
@@ -3213,8 +3400,8 @@ impl<'a> Emitter<'a> {
         env.push_union(decl.clone());
 
         let k = &TypeRefKind::Union(name.clone());
-        let union_type_name = self.nm.emit(Name::TypeRef(k.into()));
-        let pts_to_name = self.nm.emit(Name::TypeRefPred(k.into()));
+        let union_type_name = self.emit_name(Name::TypeRef(k.into()));
+        let pts_to_name = self.emit_name(Name::TypeRefPred(k.into()));
         let ref_union_type = unaryfn(Doc::text("ref"), union_type_name.clone());
 
         let field_ctor =
@@ -3233,7 +3420,7 @@ impl<'a> Emitter<'a> {
                 .append(Doc::concat(fields.iter().map(|(fld, fld_ty)| {
                     Doc::hardline().append(
                         Doc::text("| ")
-                            .append(self.nm.emit(field_ctor(fld)))
+                            .append(self.emit_name(field_ctor(fld)))
                             .append(Doc::text(" :"))
                             .append(Doc::line())
                             .append(self.emit_type(env, fld_ty))
@@ -3255,7 +3442,7 @@ impl<'a> Emitter<'a> {
         let all_args = vec![
             parens(
                 Doc::text("[@@@mkey] ")
-                    .append(self.nm.emit(Name::Var(this.val.clone())))
+                    .append(self.emit_name(Name::Var(this.val.clone())))
                     .append(":")
                     .append(Doc::line())
                     .append(union_type_name.clone()),
@@ -3272,10 +3459,10 @@ impl<'a> Emitter<'a> {
 
         // Emit uninit predicate
         {
-            let uninit_pred_name = self.nm.emit(Name::TypeRefUninitPred(k.into()));
+            let uninit_pred_name = self.emit_name(Name::TypeRefUninitPred(k.into()));
             let uninit_args = vec![parens(
                 Doc::text("[@@@mkey] ")
-                    .append(self.nm.emit(Name::Var(this.val.clone())))
+                    .append(self.emit_name(Name::Var(this.val.clone())))
                     .append(":")
                     .append(Doc::line())
                     .append(union_type_name.clone()),
@@ -3293,7 +3480,7 @@ impl<'a> Emitter<'a> {
         for (fld, _) in fields {
             ses.push(mk_assume_val(
                 vec![],
-                self.nm.emit(unfolded_tok(fld)),
+                self.emit_name(unfolded_tok(fld)),
                 &[
                     parens(
                         Doc::text("[@@@mkey] x:")
@@ -3311,7 +3498,7 @@ impl<'a> Emitter<'a> {
             let ll_type = self.emit_type(env, fld_ty);
             ses.push(mk_assume_val(
                 vec![],
-                self.nm.emit(ghost_fld(fld)),
+                self.emit_name(ghost_fld(fld)),
                 &[parens(
                     Doc::text("x:")
                         .append(Doc::line())
@@ -3328,7 +3515,7 @@ impl<'a> Emitter<'a> {
         // gives back unfolded token + pts_to of the field ref
         for (fld, fld_ty) in fields {
             let ll_type = self.emit_type(env, fld_ty);
-            let ctor_name = self.nm.emit(field_ctor(fld));
+            let ctor_name = self.emit_name(field_ctor(fld));
             // vx has refined type: (vx: union_foo{Ctor? vx})
             let vx_refined_ty = parens(
                 Doc::text("vx:").append(Doc::line()).append(
@@ -3344,7 +3531,7 @@ impl<'a> Emitter<'a> {
             );
             ses.push(mk_assume_val(
                 vec![Doc::text("pulse_intro")],
-                self.nm.emit(Name::UnionAuxFn(
+                self.emit_name(Name::UnionAuxFn(
                     name.val.clone(),
                     "raw_unfold",
                     fld.val.clone(),
@@ -3370,13 +3557,13 @@ impl<'a> Emitter<'a> {
                     ]),
                     mk_thunk(mk_star([
                         naryfn([
-                            self.nm.emit(unfolded_tok(fld)),
+                            self.emit_name(unfolded_tok(fld)),
                             Doc::text("x"),
                             Doc::text("p"),
                         ]),
                         naryfn([
                             Doc::text("Pulse.Lib.Reference.pts_to"),
-                            unaryfn(self.nm.emit(ghost_fld(fld)), Doc::text("x")),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                             Doc::text("#p"),
                             parens(
                                 ctor_name
@@ -3394,7 +3581,7 @@ impl<'a> Emitter<'a> {
             // Per-field fold: takes unfolded token + field pts_to, gives back pts_to x (Ctor val)
             ses.push(mk_assume_val(
                 vec![Doc::text("pulse_intro")],
-                self.nm.emit(Name::UnionAuxFn(
+                self.emit_name(Name::UnionAuxFn(
                     name.val.clone(),
                     "raw_fold",
                     fld.val.clone(),
@@ -3418,13 +3605,13 @@ impl<'a> Emitter<'a> {
                     Doc::text("emp_inames"),
                     mk_star([
                         naryfn([
-                            self.nm.emit(unfolded_tok(fld)),
+                            self.emit_name(unfolded_tok(fld)),
                             Doc::text("x"),
                             Doc::text("p"),
                         ]),
                         naryfn([
                             Doc::text("Pulse.Lib.Reference.pts_to"),
-                            unaryfn(self.nm.emit(ghost_fld(fld)), Doc::text("x")),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                             Doc::text("#p"),
                             Doc::text(format!("v_{}", fld)),
                         ]),
@@ -3443,14 +3630,13 @@ impl<'a> Emitter<'a> {
         for (fld, fld_ty) in fields {
             let ll_ty = self.emit_type(env, fld_ty);
             let unfolded = naryfn([
-                self.nm.emit(unfolded_tok(fld)),
+                self.emit_name(unfolded_tok(fld)),
                 Doc::text("x"),
                 Doc::text("p"),
             ]);
             ses.push(mk_assume_val(
                 vec![Doc::text("pulse_impure_spec_no_proof_required")],
-                self.nm
-                    .emit(Name::UnionFieldProj(name.val.clone(), fld.val.clone())),
+                self.emit_name(Name::UnionFieldProj(name.val.clone(), fld.val.clone())),
                 &[
                     parens(
                         Doc::text("x:")
@@ -3472,7 +3658,7 @@ impl<'a> Emitter<'a> {
                             naryfn([
                                 Doc::text("rewrites_to"),
                                 Doc::text("vx'"),
-                                unaryfn(self.nm.emit(ghost_fld(fld)), Doc::text("x")),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                             ]),
                         ]),
                     ),
@@ -3482,8 +3668,8 @@ impl<'a> Emitter<'a> {
 
         // has_zero_default instance (uses first field's constructor)
         if let Some((first_fld, first_fld_ty)) = fields.first() {
-            let default_name = self.nm.emit(Name::TypeRefDefault(k.into()));
-            let first_ctor = self.nm.emit(Name::UnionFieldConstructor(
+            let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
+            let first_ctor = self.emit_name(Name::UnionFieldConstructor(
                 name.val.clone(),
                 first_fld.val.clone(),
             ));
@@ -3523,7 +3709,15 @@ impl<'a> Emitter<'a> {
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
     }
 
-    fn emit_fn_sig(
+    fn emit_fn_sig(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        self.emit_fn_sig_inner(env, decl, false)
+    }
+
+    fn emit_fn_sig_for_interface(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        self.emit_fn_sig_inner(env, decl, true)
+    }
+
+    fn emit_fn_sig_inner(
         &mut self,
         env: &Env,
         FnDecl {
@@ -3537,6 +3731,7 @@ impl<'a> Emitter<'a> {
             is_rec,
             decreases,
         }: &FnDecl,
+        for_interface: bool,
     ) -> Doc {
         let env = &mut env.clone();
 
@@ -3547,7 +3742,7 @@ impl<'a> Emitter<'a> {
 
         // Emit ghost arguments as implicit erased parameters
         for ga in ghost_args {
-            let var_name = annotated(&ga.name, || self.nm.emit(Name::Var(ga.name.val.clone())));
+            let var_name = annotated(&ga.name, || self.emit_name(Name::Var(ga.name.val.clone())));
             let ty_doc = self.emit_type(env, &ga.ty);
             params.push(parens(
                 Doc::text("#")
@@ -3567,7 +3762,7 @@ impl<'a> Emitter<'a> {
             });
 
             params.push(parens(
-                annotated(&n, || self.nm.emit(Name::Var(n.val.clone())))
+                annotated(&n, || self.emit_name(Name::Var(n.val.clone())))
                     .append(":")
                     .append(Doc::line())
                     .append(self.emit_type(env, &arg.ty)),
@@ -3608,9 +3803,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 ParamMode::Const => {
-                    let perm_name = self
-                        .nm
-                        .emit(Name::Perm(extract_base_ident(&mk_rvar(&n)), 0));
+                    let perm_name = self.emit_name(Name::Perm(extract_base_ident(&mk_rvar(&n)), 0));
                     let perm_doc = Doc::text("'").append(perm_name);
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
@@ -3717,7 +3910,7 @@ impl<'a> Emitter<'a> {
         let hdr = Doc::group(
             fn_keyword
                 .append(Doc::line())
-                .append(self.nm.emit(Name::Fn(name.val.clone()))),
+                .append(self.emit_name(Name::Fn(name.val.clone()))),
         )
         .append(Doc::concat(params.into_iter().map(|p| Doc::line().append(p))).nest(2))
         .group();
@@ -3744,7 +3937,7 @@ impl<'a> Emitter<'a> {
         .append(Doc::group(
             Doc::text("returns")
                 .append(Doc::line())
-                .append(self.nm.emit(Name::Var(return_id.val.clone())))
+                .append(self.emit_name(Name::Var(return_id.val.clone())))
                 .append(Doc::line())
                 .append(":")
                 .group()
@@ -3760,15 +3953,19 @@ impl<'a> Emitter<'a> {
                     .group(),
             )
         })))
-        .append(match decreases {
-            Some(dec) => Doc::hardline().append(
-                Doc::text("decreases")
-                    .append(Doc::line())
-                    .append(self.emit_rvalue(env, dec))
-                    .nest(2)
-                    .group(),
-            ),
-            None => Doc::nil(),
+        .append(if for_interface {
+            Doc::nil()
+        } else {
+            match decreases {
+                Some(dec) => Doc::hardline().append(
+                    Doc::text("decreases")
+                        .append(Doc::line())
+                        .append(self.emit_rvalue(env, dec))
+                        .nest(2)
+                        .group(),
+                ),
+                None => Doc::nil(),
+            }
         })
         .group()
     }
@@ -3790,7 +3987,7 @@ impl<'a> Emitter<'a> {
             arg.name.as_ref().map(|n| {
                 Doc::line().append(annotated(n, || {
                     Doc::group({
-                        let n = self.nm.emit(Name::Var(n.val.clone()));
+                        let n = self.emit_name(Name::Var(n.val.clone()));
                         Doc::text("let mut ")
                             .append(n.clone())
                             .append(" = ")
@@ -3925,7 +4122,7 @@ impl<'a> Emitter<'a> {
                                 return parens(
                                     Doc::text("let")
                                         .append(Doc::line())
-                                        .append(self.nm.emit(Name::Var(x.val.clone())))
+                                        .append(self.emit_name(Name::Var(x.val.clone())))
                                         .append(Doc::line())
                                         .append(":")
                                         .append(Doc::line())
@@ -3969,7 +4166,7 @@ impl<'a> Emitter<'a> {
 
         // Emit ghost arguments as implicit erased parameters
         for ga in &decl.ghost_args {
-            let var_name = annotated(&ga.name, || self.nm.emit(Name::Var(ga.name.val.clone())));
+            let var_name = annotated(&ga.name, || self.emit_name(Name::Var(ga.name.val.clone())));
             let ty_doc = self.emit_type(env, &ga.ty);
             params.push(parens(
                 Doc::text("#")
@@ -3989,7 +4186,7 @@ impl<'a> Emitter<'a> {
             });
 
             params.push(parens(
-                annotated(&n, || self.nm.emit(Name::Var(n.val.clone())))
+                annotated(&n, || self.emit_name(Name::Var(n.val.clone())))
                     .append(":")
                     .append(Doc::line())
                     .append(self.emit_type(env, &arg.ty)),
@@ -4046,7 +4243,7 @@ impl<'a> Emitter<'a> {
                     Doc::text("ensures").append(Doc::line()).append(parens(
                         Doc::text("fun")
                             .append(Doc::line())
-                            .append(self.nm.emit(Name::Var(return_id.val.clone())))
+                            .append(self.emit_name(Name::Var(return_id.val.clone())))
                             .append(Doc::line())
                             .append("->")
                             .group()
@@ -4068,13 +4265,18 @@ impl<'a> Emitter<'a> {
             ret_type_doc
         };
 
-        mk_let_rec(
+        let body = mk_let_rec(
             decl.is_rec,
-            self.nm.emit(Name::Fn(decl.name.val.clone())),
+            self.emit_name(Name::Fn(decl.name.val.clone())),
             &params,
             ty_doc,
             body_doc,
-        )
+        );
+        if decl.is_rec {
+            body
+        } else {
+            Doc::text("unfold").append(Doc::hardline()).append(body)
+        }
     }
 
     fn emit_let_decl(&mut self, env: &Env, let_decl: &LetDecl) -> Doc {
@@ -4091,7 +4293,7 @@ impl<'a> Emitter<'a> {
             });
 
             params.push(parens(
-                annotated(&n, || self.nm.emit(Name::Var(n.val.clone())))
+                annotated(&n, || self.emit_name(Name::Var(n.val.clone())))
                     .append(":")
                     .append(Doc::line())
                     .append(self.emit_type(env, &arg.ty)),
@@ -4141,7 +4343,7 @@ impl<'a> Emitter<'a> {
                     Doc::text("ensures").append(Doc::line()).append(parens(
                         Doc::text("fun")
                             .append(Doc::line())
-                            .append(self.nm.emit(Name::Var(return_id.val.clone())))
+                            .append(self.emit_name(Name::Var(return_id.val.clone())))
                             .append(Doc::line())
                             .append("->")
                             .group()
@@ -4161,13 +4363,18 @@ impl<'a> Emitter<'a> {
             self.emit_rvalue(env, &let_decl.body)
         };
 
-        mk_let_rec(
+        let body = mk_let_rec(
             let_decl.is_rec,
-            self.nm.emit(Name::Fn(let_decl.name.val.clone())),
+            self.emit_name(Name::Fn(let_decl.name.val.clone())),
             &params,
             ty_doc,
             body_doc,
-        )
+        );
+        if let_decl.is_rec {
+            body
+        } else {
+            Doc::text("unfold").append(Doc::hardline()).append(body)
+        }
     }
 
     fn emit_letimpure_decl(&mut self, env: &Env, let_decl: &LetDecl) -> Doc {
@@ -4182,18 +4389,22 @@ impl<'a> Emitter<'a> {
             });
 
             params.push(parens(
-                annotated(&n, || self.nm.emit(Name::Var(n.val.clone())))
-                    .append(":")
-                    .append(Doc::line())
-                    .append(self.emit_type(env, &arg.ty)),
+                annotated(&n, || {
+                    Doc::text(self.nm.mangle(&Name::Var(n.val.clone())).to_string())
+                })
+                .append(":")
+                .append(Doc::line())
+                .append(self.emit_type(env, &arg.ty)),
             ));
 
             env.push_arg(arg, LocalDeclKind::RValue);
             match arg.mode {
                 ParamMode::Const => {
-                    let perm_name = self
-                        .nm
-                        .emit(Name::Perm(extract_base_ident(&mk_rvar(&n)), 0));
+                    let perm_name = Doc::text(
+                        self.nm
+                            .mangle(&Name::Perm(extract_base_ident(&mk_rvar(&n)), 0))
+                            .to_string(),
+                    );
                     let perm_doc = Doc::text("'").append(perm_name);
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
@@ -4250,7 +4461,11 @@ impl<'a> Emitter<'a> {
         let body_rvalue = self.emit_rvalue(env, &let_decl.body);
         let rewrites_to_doc = Doc::text("rewrites_to")
             .append(Doc::line())
-            .append(self.nm.emit(Name::Var(return_id.val.clone())))
+            .append(Doc::text(
+                self.nm
+                    .mangle(&Name::Var(return_id.val.clone()))
+                    .to_string(),
+            ))
             .append(Doc::line())
             .append(parens(
                 Doc::text("old").append(Doc::line()).append(body_rvalue),
@@ -4258,9 +4473,11 @@ impl<'a> Emitter<'a> {
 
         // Header: ghost fn name (params)
         let hdr = Doc::group(
-            Doc::text("ghost fn")
-                .append(Doc::line())
-                .append(self.nm.emit(Name::Fn(let_decl.name.val.clone()))),
+            Doc::text("ghost fn").append(Doc::line()).append(Doc::text(
+                self.nm
+                    .mangle(&Name::Fn(let_decl.name.val.clone()))
+                    .to_string(),
+            )),
         )
         .append(Doc::concat(params.into_iter().map(|p| Doc::line().append(p))).nest(2))
         .group();
@@ -4288,7 +4505,11 @@ impl<'a> Emitter<'a> {
             .append(Doc::group(
                 Doc::text("returns")
                     .append(Doc::line())
-                    .append(self.nm.emit(Name::Var(return_id.val.clone())))
+                    .append(Doc::text(
+                        self.nm
+                            .mangle(&Name::Var(return_id.val.clone()))
+                            .to_string(),
+                    ))
                     .append(Doc::line())
                     .append(":")
                     .group()
@@ -4319,12 +4540,14 @@ impl<'a> Emitter<'a> {
             );
             return Doc::nil();
         }
-        let name = self.nm.emit(Name::Var(gv.name.val.clone()));
+        let name = self.emit_name(Name::Var(gv.name.val.clone()));
         let ty = self.emit_type(env, &gv.ty);
         match &gv.init {
             Some(init) => {
                 let init_doc = self.emit_rvalue(env, init);
-                Doc::text("let ")
+                Doc::text("unfold")
+                    .append(Doc::hardline())
+                    .append(Doc::text("let "))
                     .append(name)
                     .append(" : ")
                     .append(ty)
@@ -4333,7 +4556,9 @@ impl<'a> Emitter<'a> {
             }
             None => {
                 let default_doc = self.emit_type_default(env, &gv.ty);
-                Doc::text("let ")
+                Doc::text("unfold")
+                    .append(Doc::hardline())
+                    .append(Doc::text("let "))
                     .append(name)
                     .append(" : ")
                     .append(ty)
@@ -4358,9 +4583,7 @@ impl<'a> Emitter<'a> {
             DeclT::LetDecl(let_decl) => self.emit_let_decl(env, let_decl),
             DeclT::OpaqueTypeDecl(decl) => {
                 let env = &mut env.clone();
-                let t = self
-                    .nm
-                    .emit(Name::TypeRef(TypeRef::Typedef(decl.name.val.clone())));
+                let t = self.emit_name(Name::TypeRef(TypeRef::Typedef(decl.name.val.clone())));
                 Doc::text("unfold").append(Doc::line()).append(mk_let(
                     t,
                     &[],
@@ -4373,36 +4596,142 @@ impl<'a> Emitter<'a> {
     }
 } // impl Emitter (group F)
 
-pub fn emit(
-    diags: &mut Diagnostics,
-    module_name: &str,
-    tu: &TranslationUnit,
-) -> (String, SourceRangeMap) {
-    let mut env = Env::new();
-    let emitter = &mut Emitter {
+/// Emitted output for a single module.
+pub struct EmittedModule {
+    pub module_name: String,
+    pub code: String,
+    pub fsti_code: Option<String>,
+    pub range_map: SourceRangeMap,
+    pub source_file: Rc<str>,
+    pub decl_name: String,
+    pub decl_range: Range,
+}
+
+/// Emit each declaration as its own module.
+/// Returns a list of (module_name, code, source_range_map) for each declaration.
+pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<EmittedModule> {
+    // First pass: build env with all decls (needed for type lookups during emission)
+    let mut full_env = Env::new();
+    for decl in &tu.decls {
+        full_env.push_decl(decl);
+    }
+
+    // Also pre-register recursive functions
+    let mut rec_env = Env::new();
+    for decl in &tu.decls {
+        if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &decl.val {
+            if fn_decl.is_rec {
+                rec_env.push_fn_decl(fn_decl.clone());
+            }
+        }
+    }
+
+    // Build the map from function/let/global identifiers to their owning modules
+    let fn_module_map = build_fn_module_map(&tu.decls);
+    // Build the override map for OpaqueTypeDecl typedef names
+    let typedef_override_map = build_typedef_override_map(&tu.decls);
+
+    let mut results = Vec::new();
+
+    // Emit all modules, collecting code bodies
+    struct PendingModule {
+        mod_name: String,
+        body_code: String,
+        fsti_body_code: Option<String>,
+        range_map: crate::pass::emit::SourceRangeMap,
+        source_file: Rc<str>,
+        decl_name: String,
+        decl_range: Range,
+    }
+
+    let mut pending: Vec<PendingModule> = Vec::new();
+    // Track already-emitted module names to skip duplicate declarations
+    // (e.g., forward typedef + full typedef for the same name).
+    // We keep the LAST occurrence (most complete definition).
+    let mut seen_modules: HashMap<String, usize> = HashMap::new();
+
+    // Build env incrementally: start from rec_env and push each decl after emitting it
+    let mut env = rec_env;
+    // Reuse a single Emitter across all modules
+    let mut emitter = Emitter {
         nm: NameMangling::new(),
         diags,
         type_val_params: HashMap::new(),
         type_uninit_val_params: HashMap::new(),
         defining_struct: None,
+        current_module: String::new(),
+        fn_module_map,
+        typedef_override_map,
     };
-    let mut output: Vec<Doc> = vec![];
-    output.push(Doc::text(format!(
-        "module {}\nopen Pulse\nopen Pulse.Lib.C\n#lang-pulse\n#set-options \"--split_queries always\"\n",
-        module_name
-    )));
+
     for decl in &tu.decls {
-        if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &decl.val {
-            if fn_decl.is_rec {
-                env.push_fn_decl(fn_decl.clone());
+        let mod_name = module_name_for_decl(decl);
+        emitter.current_module = mod_name.clone();
+
+        // Emit just the body (decl code)
+        let body_doc = emitter.emit_decl(&env, decl);
+        let mut writer = StrWriter::new();
+        body_doc.render_raw(100, &mut writer).unwrap();
+
+        // For function definitions, also emit the interface (signature only, no body)
+        // Skip pure functions — they are emitted as `let` definitions, not `fn`
+        let fsti_body_code = if let DeclT::FnDefn(fn_defn) = &decl.val {
+            if fn_defn.decl.is_pure {
+                None
+            } else {
+                let iface_doc = emitter.emit_fn_sig_for_interface(&env, &fn_defn.decl);
+                let mut iface_writer = StrWriter::new();
+                iface_doc.render_raw(100, &mut iface_writer).unwrap();
+                Some(iface_writer.buffer)
             }
+        } else {
+            None
+        };
+
+        let decl_loc = decl.loc.location();
+        let new_module = PendingModule {
+            mod_name: mod_name.clone(),
+            body_code: writer.buffer,
+            fsti_body_code,
+            range_map: writer.source_range_map,
+            source_file: decl_loc.file_name.clone(),
+            decl_name: decl_name(decl),
+            decl_range: decl_loc.range,
+        };
+
+        // Deduplicate: if we've seen this module name before, replace with the later (more complete) one
+        if let Some(&idx) = seen_modules.get(&mod_name) {
+            pending[idx] = new_module;
+        } else {
+            seen_modules.insert(mod_name, pending.len());
+            pending.push(new_module);
         }
-        output.push(Doc::text("#restart-solver"));
-        output.push(emitter.emit_decl(&env, decl));
+
+        // Push current decl to env so subsequent modules can see it
         env.push_decl(decl);
     }
-    let output = Doc::intersperse(output, Doc::hardline().append(Doc::hardline())).group();
-    let mut writer = StrWriter::new();
-    output.render_raw(100, &mut writer).unwrap();
-    (writer.buffer, writer.source_range_map)
+
+    // Build final code with preambles
+    for pm in pending {
+        let preamble = format!(
+            "module {}\nopen Pulse\nopen Pulse.Lib.C\n#lang-pulse\n\n",
+            pm.mod_name
+        );
+        let full_code = format!("{}{}", preamble, pm.body_code);
+        let fsti_code = pm
+            .fsti_body_code
+            .map(|body| format!("{}{}", preamble, body));
+
+        results.push(EmittedModule {
+            module_name: pm.mod_name,
+            code: full_code,
+            fsti_code,
+            range_map: pm.range_map,
+            source_file: pm.source_file,
+            decl_name: pm.decl_name,
+            decl_range: pm.decl_range,
+        });
+    }
+
+    results
 }

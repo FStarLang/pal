@@ -42,7 +42,7 @@ impl<'a> Ctx<'a> {
             include_paths,
             interned_strs: HashSet::new(),
             translation_unit: TranslationUnit {
-                main_file_name: main_file_name,
+                main_file_names: vec![main_file_name],
                 decls: vec![],
             },
             diagnostics: Diagnostics::empty(),
@@ -174,14 +174,24 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    fn add_include(&mut self, loc: Rc<SourceInfo>, idx: u32, snippets: &SnippetMap) {
+    fn add_include(
+        &mut self,
+        loc: Rc<SourceInfo>,
+        module_name: &str,
+        idx: u32,
+        snippets: &SnippetMap,
+    ) {
         match snippets.snippets.get(&idx) {
             Some(code) => {
                 let pulse_code =
                     process_inline_pulse(&loc, code, snippets, &self.target_int_widths);
+                let module_name: Rc<str> = Rc::from(module_name);
                 self.translation_unit.decls.push(Ast {
                     loc,
-                    val: DeclT::IncludeDecl(IncludeDecl { code: pulse_code }),
+                    val: DeclT::IncludeDecl(IncludeDecl {
+                        module_name,
+                        code: pulse_code,
+                    }),
                 })
             }
             None => self.report_diag(loc, true, "internal error: invalid inline_pulse encoding"),
