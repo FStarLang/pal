@@ -554,6 +554,17 @@ impl<'a> Emitter<'a> {
     }
 }
 
+/// If `ty` resolves (modulo typedef/refinement) to a `_array T *` pointer,
+/// returns `Some(T)`. The struct emitter uses this to special-case array
+/// fields, whose ownership is tracked via `array_pts_to_full` rather than
+/// the regular `Pulse.Lib.Reference.pts_to` used for other field kinds.
+fn array_field_pointee(env: &Env, ty: &Rc<Type>) -> Option<Rc<Type>> {
+    match &env.vtype_whnf(ty.clone().into()).val {
+        TypeT::Pointer(to, PointerKind::Array) => Some(to.clone()),
+        _ => None,
+    }
+}
+
 fn extract_base_ident(this: &Rc<Expr>) -> Rc<IdentT> {
     match &this.val {
         ExprT::Var(x) => x.val.clone(),
@@ -1227,16 +1238,43 @@ impl<'a> Emitter<'a> {
                     let ty = env.vtype_whnf(ty);
                     match &ty.val {
                         TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => {
+                            // Array struct fields cannot be accessed through
+                            // __get_<fld>, because the pred holds ownership at
+                            // the value-record handle vx.f while __get_<fld>
+                            // returns a different handle (__f_1 x) that Pulse
+                            // cannot easily unify with the pred's path. Instead
+                            // we go through `(!x).f` so the resulting handle is
+                            // exactly the pred's `this.f`.
+                            let is_array_field = env
+                                .lookup_struct(struct_name)
+                                .and_then(|s| s.get_field(a))
+                                .map(|fld_ty| array_field_pointee(env, fld_ty).is_some())
+                                .unwrap_or(false);
                             match self.emit_expr(env, x) {
-                                ExprKind::LValue(x_doc) => ExprKind::LValue(annotated(v, || {
-                                    unaryfn(
-                                        self.emit_name(Name::StructFieldProj(
-                                            struct_name.val.clone(),
-                                            a.val.clone(),
-                                        )),
-                                        x_doc,
-                                    )
-                                })),
+                                ExprKind::LValue(x_doc) => {
+                                    if is_array_field {
+                                        ExprKind::RValue(annotated(v, || {
+                                            parens(Doc::text("!").append(x_doc))
+                                                .append(Doc::text("."))
+                                                .append(self.emit_name(
+                                                    Name::StructDirectFieldName(
+                                                        struct_name.val.clone(),
+                                                        a.val.clone(),
+                                                    ),
+                                                ))
+                                        }))
+                                    } else {
+                                        ExprKind::LValue(annotated(v, || {
+                                            unaryfn(
+                                                self.emit_name(Name::StructFieldProj(
+                                                    struct_name.val.clone(),
+                                                    a.val.clone(),
+                                                )),
+                                                x_doc,
+                                            )
+                                        }))
+                                    }
+                                }
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
                                     x_doc.append(Doc::text(".")).append(self.emit_name(
                                         Name::StructDirectFieldName(
