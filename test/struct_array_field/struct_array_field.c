@@ -3,13 +3,7 @@
 // Regression test for the struct array-field emission fix.
 //
 // Exercises `s->arr_field[i]` (read and write) on a struct passed by
-// pointer. Before the fix, Member access on an _array T * field went
-// through __get_<fld>, which returned an awkward `ref (array T)`
-// requiring a `!` deref at the call site (only verifying through a
-// chain of rewrites_to that happened to bottom out at the value-record
-// path). After the fix, Member access for an array field on an LValue
-// receiver emits `(!x).struct_S__f` directly, so the handle the user
-// works with is exactly the path the struct predicate speaks about.
+// pointer.
 
 typedef struct {
   _array unsigned *data;
