@@ -5,15 +5,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "pal.h"
+#include "HACL.h"
 
 #define _allocated_array _refine((_slprop) _inline_pulse(freeable_array $(this)))
-
-#define DICE_DIGEST_LEN 64 //TODO generalize
-_refine(this._length == DICE_DIGEST_LEN) _array
-typedef uint8_t *dice_digest;
-
-
-#include "HACL.h"
 
 #define UDS_LEN 32
 _refine(this._length == UDS_LEN) _array
