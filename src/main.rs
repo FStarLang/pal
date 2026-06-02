@@ -231,14 +231,14 @@ fn main() {
 
     // Write TranslationErrors.fst — asserts False when there are errors so
     // that F* reports a failure, but individual modules remain verifiable.
-    {
-        let errors_code = if diags.has_errors() {
-            "module TranslationErrors\nlet _ = assert False\n"
-        } else {
-            "module TranslationErrors\n"
-        };
-        std::fs::write(outdir.join("TranslationErrors.fst"), errors_code).unwrap();
-    }
+    std::fs::write(outdir.join("TranslationErrors.fst"), {
+        let mut errors_code = "module TranslationErrors\n".to_string();
+        if diags.has_errors() {
+            errors_code += "let _ = assert False\n";
+        }
+        errors_code
+    })
+    .unwrap();
 
     // Write single unified source_range_info.json
     std::fs::write(
