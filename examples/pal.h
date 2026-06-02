@@ -12,7 +12,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _include_pulse(modname, ...) [[clang::annotate("pal-includes", #modname, __capture_args(__VA_ARGS__))]] \
     void __pal_concat(__pal_include_anchor_, __COUNTER__) (void) {}
 
-#define __capture_args(args) __COUNTER__
+#define __capture_args(...) __COUNTER__
 
 #define _requires(p) __attribute__((annotate("pal-requires", __capture_args(p))))
 #define _ensures(p) __attribute__((annotate("pal-ensures", __capture_args(p))))

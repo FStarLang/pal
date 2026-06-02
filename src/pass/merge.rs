@@ -29,9 +29,13 @@ fn types_match(env: &Env, decl: &FnDecl, defn: &FnDecl) -> bool {
 
 pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // === Phase 1: Deduplicate identical declarations from shared headers ===
-    // For each declaration kind+name, keep only the last occurrence (most complete).
+    // For each declaration kind+name, keep the most complete (last) content at the
+    // earliest (first) position. This preserves the source ordering so that later
+    // passes (e.g. elab) that build their environment incrementally see types
+    // before they are referenced by `_include_pulse` blocks in the same file.
     {
-        let mut seen: HashMap<(u8, Rc<str>), usize> = HashMap::new();
+        let mut first_idx: HashMap<(u8, Rc<str>), usize> = HashMap::new();
+        let mut moves: Vec<(usize, usize)> = Vec::new();
         let mut to_remove: Vec<usize> = Vec::new();
 
         for (i, decl) in tu.decls.iter().enumerate() {
@@ -49,11 +53,21 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 DeclT::OpaqueTypeDecl(td) => Some((9, td.name.val.clone())),
             };
             if let Some(key) = key {
-                if let Some(prev) = seen.insert(key, i) {
-                    // Mark the earlier occurrence for removal
-                    to_remove.push(prev);
+                if let Some(&first) = first_idx.get(&key) {
+                    // Copy this (later, more complete) decl back to the first position
+                    // and mark this duplicate for removal.
+                    moves.push((i, first));
+                    to_remove.push(i);
+                } else {
+                    first_idx.insert(key, i);
                 }
             }
+        }
+
+        // Apply moves in order so the final value at each first position is the
+        // last (most complete) occurrence.
+        for &(src, dst) in &moves {
+            tu.decls[dst] = tu.decls[src].clone();
         }
 
         to_remove.sort_unstable();
@@ -64,24 +78,27 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     }
 
     // === Phase 2: Merge FnDecl specs into FnDefn, remove redundant StructDecls ===
-    // Build index: fn name → position of its FnDefn in tu.decls
+    // Build index: fn name → position of its FnDefn in tu.decls.
+    // Also index StructDefns and UnionDefns by name so we can move them to the
+    // position of the earliest StructDecl/declaration that referenced them.
     let mut defn_indices: HashMap<Rc<str>, usize> = HashMap::new();
-    let mut struct_defn_names: std::collections::HashSet<Rc<str>> =
-        std::collections::HashSet::new();
+    let mut struct_defn_indices: HashMap<Rc<str>, usize> = HashMap::new();
     for (i, decl) in tu.decls.iter().enumerate() {
         match &decl.val {
             DeclT::FnDefn(fn_defn) => {
                 defn_indices.insert(fn_defn.decl.name.val.clone(), i);
             }
             DeclT::StructDefn(struct_defn) => {
-                struct_defn_names.insert(struct_defn.name.val.clone());
+                struct_defn_indices.insert(struct_defn.name.val.clone(), i);
             }
             _ => {}
         }
     }
 
-    // Track which FnDecl indices to remove (merged into their FnDefn)
+    // Track which indices to remove (merged into their FnDefn/StructDefn).
     let mut to_remove: Vec<usize> = Vec::new();
+    // Track moves: copy content from src to dst (applied after the analysis loop).
+    let mut moves: Vec<(usize, usize)> = Vec::new();
 
     // Build an Env for type comparison (need typedef resolution)
     let mut env = Env::new();
@@ -148,14 +165,30 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                         }
                     }
 
-                    // Mark FnDecl for removal — it will be merged into the FnDefn
-                    to_remove.push(i);
+                    // Mark FnDecl for removal — it will be merged into the FnDefn.
+                    // If the forward declaration came before the definition, move
+                    // the (spec-merged) definition back to the declaration's
+                    // position so that other declarations between the two (e.g.
+                    // _include_pulse blocks, callers) can still resolve it.
+                    if i < defn_idx {
+                        moves.push((defn_idx, i));
+                        to_remove.push(defn_idx);
+                    } else {
+                        to_remove.push(i);
+                    }
                 }
             }
-            // Remove StructDecl when a matching StructDefn exists
+            // Remove StructDecl when a matching StructDefn exists. As with
+            // functions, hoist the StructDefn to the earliest StructDecl
+            // position when the decl comes first.
             DeclT::StructDecl(name) => {
-                if struct_defn_names.contains(&name.val) {
-                    to_remove.push(i);
+                if let Some(&defn_idx) = struct_defn_indices.get(&name.val) {
+                    if i < defn_idx {
+                        moves.push((defn_idx, i));
+                        to_remove.push(defn_idx);
+                    } else {
+                        to_remove.push(i);
+                    }
                 }
             }
             _ => {}
@@ -179,8 +212,15 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         }
     }
 
-    // Remove merged FnDecls (iterate in reverse to preserve indices)
+    // Apply moves: copy the spec-merged FnDefn/StructDefn into the position
+    // of its earliest forward declaration.
+    for &(src, dst) in &moves {
+        tu.decls[dst] = tu.decls[src].clone();
+    }
+
+    // Remove merged decls (iterate in reverse to preserve indices)
     to_remove.sort_unstable();
+    to_remove.dedup();
     for &i in to_remove.iter().rev() {
         tu.decls.remove(i);
     }

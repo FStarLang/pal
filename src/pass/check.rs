@@ -697,6 +697,10 @@ impl<'a> Checker<'a> {
 
     fn check_translation_unit(&mut self, tu: &TranslationUnit) {
         let mut env = Env::new();
+        // Pre-register every declaration so checking is order-independent.
+        for decl in &tu.decls {
+            env.push_decl(decl);
+        }
         for decl in &tu.decls {
             if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &decl.val {
                 if fn_decl.is_rec {

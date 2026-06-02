@@ -818,6 +818,62 @@ impl<'a> Elaborator<'a> {
 pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     let mut env = Env::new();
     let mut elab = Elaborator { diags };
+    // Pre-register every declaration so that elaboration is order-independent
+    // (e.g. an `_include_pulse` block in one file can refer to a typedef
+    // declared in another file, and a function body can call another function
+    // defined later in the translation unit). Elaboration of each decl below
+    // pushes the elaborated version into the environment, overwriting this
+    // initial entry.
+    for decl in tu.decls.iter() {
+        env.push_decl(decl);
+    }
+    // Pre-pass: elaborate the type-level parts of each declaration (function
+    // signatures, typedef bodies, struct/union fields, etc.) and re-register
+    // the elaborated version. This ensures that when we later elaborate a
+    // function body or `_include_pulse` block, every cross-reference resolves
+    // to a properly elaborated type (e.g. pointer kinds promoted from Unknown
+    // to Ref) regardless of declaration order.
+    for decl in &mut tu.decls {
+        match &mut decl.val {
+            DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) | DeclT::FnDecl(fn_decl) => {
+                let env = &mut env.clone();
+                for ga in &mut fn_decl.ghost_args {
+                    elab.elab_type(env, Rc::make_mut(&mut ga.ty));
+                }
+                for arg in &mut fn_decl.args {
+                    elab.elab_type(env, Rc::make_mut(&mut arg.ty));
+                }
+                elab.elab_type(env, Rc::make_mut(&mut fn_decl.ret_type));
+            }
+            DeclT::Typedef(td) => {
+                elab.elab_type(&env, Rc::make_mut(&mut td.body));
+            }
+            DeclT::StructDefn(StructDefn { fields, .. }) => {
+                for (_n, ty) in fields {
+                    elab.elab_type(&env, Rc::make_mut(ty));
+                }
+            }
+            DeclT::UnionDefn(UnionDefn { fields, .. }) => {
+                for (_n, ty) in fields {
+                    elab.elab_type(&env, Rc::make_mut(ty));
+                }
+            }
+            DeclT::LetDecl(let_decl) => {
+                let env = &mut env.clone();
+                for arg in &mut let_decl.params {
+                    elab.elab_type(env, Rc::make_mut(&mut arg.ty));
+                }
+                elab.elab_type(env, Rc::make_mut(&mut let_decl.ret_type));
+            }
+            DeclT::GlobalVar(GlobalVar { ty, .. }) => {
+                elab.elab_type(&env, Rc::make_mut(ty));
+            }
+            DeclT::StructDecl(_) | DeclT::IncludeDecl(_) | DeclT::OpaqueTypeDecl(_) => {}
+        }
+        env.push_decl(decl);
+    }
+    // Main pass: full elaboration. Bodies and specifications can now see
+    // properly elaborated signatures for every other declaration.
     for decl in &mut tu.decls {
         if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &mut decl.val {
             if fn_decl.is_rec {

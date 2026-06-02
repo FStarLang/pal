@@ -24,11 +24,17 @@ _include_pulse(DPE_predicates,
   $declare(context_t s)
   [@@pulse_eager_unfold]
   let uds_pred (uds: $type(uds_array)) (uds_data: Seq.seq (option UInt8.t)) : slprop =
-    exists* mask. ty_uds_array__pred uds 1.0R uds_data mask ** freeable_array uds
+    exists* (aspec: full_array_spec UInt8.t).
+      Typedef_uds_array.ty_uds_array__pred uds 1.0R aspec **
+      pure (array_spec_seq aspec == uds_data) **
+      freeable_array uds
 
   [@@pulse_eager_unfold]
   let cdi_pred (cdi: $type(dice_digest)) (cdi_data: Seq.seq (option UInt8.t)) : slprop =
-    exists* mask. ty_dice_digest__pred cdi 1.0R cdi_data mask ** freeable_array cdi
+    exists* (aspec: full_array_spec UInt8.t).
+      Typedef_dice_digest.ty_dice_digest__pred cdi 1.0R aspec **
+      pure (array_spec_seq aspec == cdi_data) **
+      freeable_array cdi
 
   let context_full_pred ([@@@mkey] $(s): $type(context_t)) (h: DPE_context_full_data.context_full_data) : slprop =
     match $(s.payload), h with
