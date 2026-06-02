@@ -767,7 +767,9 @@ impl<'a> Elaborator<'a> {
             }
             DeclT::FnDecl(fn_decl) => self.elab_fn_decl(env, fn_decl),
             DeclT::Typedef(typedef) => self.elab_type(env, Rc::make_mut(&mut typedef.body)),
-            DeclT::StructDefn(StructDefn { name: _, fields }) => {
+            DeclT::StructDefn(StructDefn {
+                name: _, fields, ..
+            }) => {
                 for (_n, ty) in fields {
                     self.elab_type(env, Rc::make_mut(ty))
                 }

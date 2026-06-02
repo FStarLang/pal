@@ -357,6 +357,7 @@ pub enum StmtT {
 pub struct StructDefn {
     pub name: Rc<Ident>,
     pub fields: Vec<(Ident, Rc<Type>)>,
+    pub eager_unfold_pred: bool,
 }
 
 impl StructDefn {

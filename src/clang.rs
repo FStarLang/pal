@@ -134,6 +134,7 @@ impl<'a> Ctx<'a> {
             val: DeclT::StructDefn(StructDefn {
                 name: builder.name,
                 fields: builder.fields,
+                eager_unfold_pred: builder.eager_unfold_pred,
             }),
         })
     }
@@ -396,6 +397,7 @@ struct DeclBuilder {
     is_pure: bool,
     is_rec: bool,
     decreases: Option<Rc<Expr>>,
+    eager_unfold_pred: bool,
 }
 
 impl DeclBuilder {
@@ -412,6 +414,7 @@ impl DeclBuilder {
             is_pure: false,
             is_rec: false,
             decreases: None,
+            eager_unfold_pred: false,
         }
     }
 
@@ -449,6 +452,9 @@ impl DeclBuilder {
     }
     fn set_rec(&mut self) {
         self.is_rec = true;
+    }
+    fn set_eager_unfold_pred(&mut self) {
+        self.eager_unfold_pred = true;
     }
     fn decreases(&mut self, p: Rc<Expr>) {
         self.decreases = Some(p);

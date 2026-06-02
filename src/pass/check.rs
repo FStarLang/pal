@@ -639,7 +639,9 @@ impl<'a> Checker<'a> {
             }
             DeclT::FnDecl(fn_decl) => self.check_fn_decl(env, fn_decl),
             DeclT::Typedef(TypeDefn { name: _, body }) => self.check_type(env, body),
-            DeclT::StructDefn(StructDefn { name: _, fields }) => {
+            DeclT::StructDefn(StructDefn {
+                name: _, fields, ..
+            }) => {
                 for (_n, ty) in fields {
                     self.check_type(env, ty)
                 }

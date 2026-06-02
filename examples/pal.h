@@ -34,6 +34,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _arrayptr __attribute((annotate("pal-arrayptr")))
 #define _pure __attribute((annotate("pal-pure")))
 #define _rec __attribute((annotate("pal-rec")))
+#define _pulse_eager_unfold_predicate __attribute__((annotate("pal-eager-unfold-predicate")))
 #define _decreases(p) __attribute__((annotate("pal-decreases", __capture_args(p))))
 
 #define _inline_pulse(args) _inline_pulse(__capture_args(args))
@@ -70,6 +71,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _arrayptr
 #define _pure
 #define _rec
+#define _pulse_eager_unfold_predicate
 #define _decreases(p)
 
 #define _let(sig, body)

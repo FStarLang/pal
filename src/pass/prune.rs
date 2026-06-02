@@ -329,7 +329,11 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 scan_fn_decl(deps.deps_for(n), fn_decl);
             }
             DeclT::Typedef(TypeDefn { name: _, body }) => scan_type(deps.deps_for(n), body),
-            DeclT::StructDefn(StructDefn { name: _, fields }) => {
+            DeclT::StructDefn(StructDefn {
+                name: _,
+                fields,
+                eager_unfold_pred: _,
+            }) => {
                 let ds = deps.deps_for(n);
                 for (_name, ty) in fields {
                     scan_type(ds, ty)

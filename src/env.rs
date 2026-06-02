@@ -171,6 +171,7 @@ impl Env {
                     self.push_struct(StructDefn {
                         name: name.clone(),
                         fields: vec![],
+                        eager_unfold_pred: false,
                     });
                 }
             }

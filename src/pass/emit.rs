@@ -3027,7 +3027,7 @@ impl<'a> Emitter<'a> {
     fn emit_structdefn(
         &mut self,
         env: &Env,
-        decl @ StructDefn { name, fields }: &StructDefn,
+        decl @ StructDefn { name, fields, .. }: &StructDefn,
     ) -> Doc {
         let env = &mut env.clone();
         env.push_struct(decl.clone());
@@ -3198,25 +3198,35 @@ impl<'a> Emitter<'a> {
                         .append(spec_type_name_local.clone()),
                 ),
             ];
-            ses.push(
-                Doc::text("let")
-                    .append(Doc::line())
-                    .append("predicate")
-                    .append(Doc::line())
-                    .append(pred_name.clone())
-                    .group()
-                    .append(
-                        Doc::concat(pred_args.iter().map(|arg| Doc::line().append(arg.clone())))
+            if decl.eager_unfold_pred {
+                ses.push(mk_eager_unfold_slprop(
+                    pred_name.clone(),
+                    &pred_args,
+                    mk_star(init_props.iter().cloned()),
+                ));
+            } else {
+                ses.push(
+                    Doc::text("let")
+                        .append(Doc::line())
+                        .append("predicate")
+                        .append(Doc::line())
+                        .append(pred_name.clone())
+                        .group()
+                        .append(
+                            Doc::concat(
+                                pred_args.iter().map(|arg| Doc::line().append(arg.clone())),
+                            )
                             .nest(2)
                             .append(Doc::line().append("=").group()),
-                    )
-                    .group()
-                    .nest(2)
-                    .group()
-                    .append(Doc::line().append(mk_star(init_props.iter().cloned())))
-                    .group()
-                    .nest(2),
-            );
+                        )
+                        .group()
+                        .nest(2)
+                        .group()
+                        .append(Doc::line().append(mk_star(init_props.iter().cloned())))
+                        .group()
+                        .nest(2),
+                );
+            }
         } else {
             // No spec bindings - emit a simple pred with just this and perm
             ses.push(mk_eager_unfold_slprop(
@@ -3249,7 +3259,7 @@ impl<'a> Emitter<'a> {
         }
 
         // Emit __pred_unfold ghost fn
-        if !all_spec_bindings.is_empty() {
+        if !decl.eager_unfold_pred && !all_spec_bindings.is_empty() {
             let unfold_name = Doc::text(
                 self.nm
                     .mangle(&Name::TypeRefPredUnfold(k.into()))
@@ -3304,7 +3314,7 @@ impl<'a> Emitter<'a> {
         }
 
         // Emit __pred_fold ghost fn
-        if !all_spec_bindings.is_empty() {
+        if !decl.eager_unfold_pred && !all_spec_bindings.is_empty() {
             let fold_name = Doc::text(self.nm.mangle(&Name::TypeRefPredFold(k.into())).to_string());
 
             // Build per-binding val params for fold

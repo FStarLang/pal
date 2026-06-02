@@ -21,6 +21,7 @@
 #define _consumes __attribute__((annotate("pal-consumes")))
 #define _array __attribute((annotate("pal-array")))
 #define _pure __attribute((annotate("pal-pure")))
+#define _pulse_eager_unfold_predicate __attribute__((annotate("pal-eager-unfold-predicate")))
 
 #define _inline_pulse(args) _inline_pulse(__capture_args(args))
 
@@ -44,6 +45,7 @@
 #define _consumes
 #define _array
 #define _pure
+#define _pulse_eager_unfold_predicate
 
 #define _let(sig, body)
 #define _let_rec(sig, body)

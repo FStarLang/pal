@@ -207,6 +207,7 @@ mod crate::clang {
         fn ensures(&mut self, Rc<Expr>);
         fn set_pure(&mut self);
         fn set_rec(&mut self);
+        fn set_eager_unfold_pred(&mut self);
         fn decreases(&mut self, Rc<Expr>);
     }
 
