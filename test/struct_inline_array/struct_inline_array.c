@@ -45,11 +45,12 @@ void write_first_a(struct mixed s, int x)
 // spec `v`". The helper bakes in the static length (10) and uses
 // `array_pts_to_full` so callers don't need to assert init/mask
 // preconditions for reads/writes at in-range indices. Internally it
-// pairs the struct's `aux_raw_unfolded` slprop with `array_pts_to_full`
-// on the ghost projection of `b`; the `aux_raw_unfolded` clause is
-// what `s->b` access desugars to via `get_b` (and ties its permission
-// to the array's permission `p`, which Pulse's unifier otherwise
-// can't infer). Callers/callees only see `pts_to_b` in their specs.
+// chains three slprops: the struct's `aux_raw_unfolded` (what `s->b`
+// access desugars to via `get_b`), the `pts_to` for the ghost ref to
+// the array handle (treated uniformly with plain fields like `c`),
+// and the `array_pts_to_full` over the handle itself. We existentially
+// quantify over the handle so callers don't need to name it.
+// Callers/callees only see `pts_to_b` in their specs.
 
 _include_pulse(Mixed_helpers,
   [@@pulse_eager_unfold]
@@ -59,8 +60,10 @@ _include_pulse(Mixed_helpers,
         (v: full_array_spec Int32.t { array_spec_len v == 10 })
     : slprop
     =
-      Struct_mixed.struct_mixed__aux_raw_unfolded s p **
-      array_pts_to_full (Struct_mixed.struct_mixed__b_1 s) p v
+      exists* (h: (a: array Int32.t { length a == 10 })).
+        Struct_mixed.struct_mixed__aux_raw_unfolded s p **
+        Pulse.Lib.Reference.pts_to (Struct_mixed.struct_mixed__b_1 s) #p h **
+        array_pts_to_full h p v
 )
 
 int read_first_b(_plain struct mixed *s)
