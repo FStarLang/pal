@@ -2791,18 +2791,9 @@ impl<'a> Emitter<'a> {
         let direct_fld =
             |fld: &Ident| Name::StructDirectFieldName(name.val.clone(), fld.val.clone());
 
-        // Render the F* record field type for a struct field. For
-        // `Plain` this is just the stored type. For inline array fields
-        // (`T arr[N];`) the noeq record stores the array's *contents*
-        // as `array_spec T` refined to length `N` with a full *mask*
-        // (every slot allocated). The full-mask refinement reflects
-        // the C invariant that a `T arr[N]` field always owns `N`
-        // allocated slots; it's also needed so that on free we can
-        // convert `array_pts_to` back to `array_pts_to_uninit'`.
-        // We deliberately do NOT require `array_spec_full` (init):
-        // individual slots may hold uninitialised garbage.
-        // `aux_raw_unfold` ties the ghost handle `__<fld>_1 x` to
-        // these contents via `array_pts_to`.
+        // Render the F* record field type. For inline arrays this is
+        // the array's contents (`array_spec T`) refined to the static
+        // length and full mask; for plain fields it's the stored type.
         let render_record_field_type = |s: &mut Self, env: &Env, f: &Field| -> Doc {
             match &f.val {
                 FieldT::Plain { name: _, ty } => s.emit_type(env, ty),
@@ -3621,18 +3612,10 @@ impl<'a> Emitter<'a> {
             |fld: &Ident| Name::UnionFieldConstructor(name.val.clone(), fld.val.clone());
         let ghost_fld = |fld: &Ident| Name::UnionGhostFieldProj(name.val.clone(), fld.val.clone());
 
-        // Render the F* type for a union field's *value* — the value
-        // the noeq inductive constructor carries. Plain fields use
-        // their stored type. Inline-array fields (`T arr[N];`) carry
-        // the array's *contents* as `array_spec T` refined to length
-        // `N` with a full *mask* (every slot allocated). The
-        // full-mask refinement reflects the C invariant that a
-        // `T arr[N]` field always owns `N` allocated slots and is
-        // needed so that on free we can convert `array_pts_to` back
-        // to `array_pts_to_uninit'`. We deliberately do NOT require
-        // `array_spec_full` (init): individual slots may be
-        // uninitialised. `aux_raw_unfold` ties the noeq value to the
-        // ghost handle via `array_pts_to`.
+        // Render the F* type carried by a union constructor field.
+        // For inline arrays this is the array's contents
+        // (`array_spec T`) refined to the static length and full mask;
+        // for plain fields it's the stored type.
         let render_field_type = |s: &mut Self, env: &Env, f: &Field| -> Doc {
             match &f.val {
                 FieldT::Plain { name: _, ty } => s.emit_type(env, ty),
