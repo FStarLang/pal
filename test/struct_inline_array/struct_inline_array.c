@@ -4,27 +4,23 @@
 //
 // `_array int *a` — pointer-array field. The struct stores only the
 // array handle; the storage lives externally. Its ownership is part of
-// the auto-generated `__pred`, so callers/callees use the same
-// `a._length` / `a[i]` notation as `arrayptrs.c` (no exposure of
-// internal preds).
+// the auto-generated `__pred`.
 //
 // `int b[10]` — inline-array field. The storage is part of the struct's
-// own bytes, so it is deliberately NOT tracked in the struct's `__pred`
-// (it would double-own w.r.t. the value-level `pts_to`). Functions
-// that touch `b` package the array's ownership through a small
-// user-level helper slprop, in the same way `arrayptrs.c` abstracts
-// `array_pts_to`/`arrayptr_pts_to` behind `is_slice`.
+// own bytes. The noeq record value carries the array's contents
+// directly (as a `full_array_spec` refined to length 10), and the
+// auto-generated `aux_raw_unfold` ties the ghost array handle
+// `__b_1 s` to that spec via `array_pts_to_full`. This is why we are
+// able to abstract `s->b` access behind a small user-level helper
+// without ever mentioning the raw `array_pts_to` clause in the
+// function specs.
 struct mixed {
     _array int *a;
     int b[10];
+    int c;
 };
 
 // --- Operations on the external `_array` field (by value) ------------
-//
-// Passing the struct by value gives callers/callees a clean, auto-
-// generated `__pred`-based spec. The function body addresses the
-// external array storage via the inline `a._length` and `a[i]`
-// notation — no internal preds appear in the spec.
 
 int read_first_a(struct mixed s)
   _requires(s.a._length >= 1)
@@ -67,14 +63,14 @@ _include_pulse(Mixed_helpers,
       array_pts_to_full (Struct_mixed.struct_mixed__b_1 s) p v
 )
 
-int read_first_b(struct mixed *s)
+int read_first_b(_plain struct mixed *s)
   _preserves(_inline_pulse(Mixed_helpers.pts_to_b $(s) $`p $`vb))
   _ensures(_inline_pulse(pure ($(return) == array_spec_idx $`vb 0)))
 {
     return s->b[0];
 }
 
-void write_first_b(struct mixed *s, int x)
+void write_first_b(_plain struct mixed *s, int x)
   _requires(_inline_pulse(Mixed_helpers.pts_to_b $(s) 1.0R $`vb))
   _ensures(_inline_pulse(Mixed_helpers.pts_to_b $(s) 1.0R (array_spec_upd $`vb 0 $(x))))
 {
