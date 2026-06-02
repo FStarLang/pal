@@ -512,34 +512,6 @@ struct Emitter<'a> {
     fn_module_map: HashMap<Rc<str>, String>,
     /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
     typedef_override_map: HashMap<Rc<str>, String>,
-    /// When emitting a slprop refinement on a typedef body, redirect `_length`
-    /// of `this`/`this.<field>` to the underlying spec's `array_spec_len`.
-    slprop_length_subst: Option<SLPropLengthSubst>,
-    /// Set to true whenever `try_subst_length` actually rewrites a `_length`
-    /// access into a direct spec-record `array_spec_len`. Read (and reset) at
-    /// `Bool→SLProp` coercion sites so that a fully-substituted refinement is
-    /// emitted with `pure` (since it no longer mentions a stateful `length_of`
-    /// that requires `with_pure`'s continuation form).
-    length_subst_fired: bool,
-}
-
-/// Substitution context for `_length` inside a typedef pred refinement body or
-/// a function signature where the relevant spec values are in scope. Lets the
-/// emitter rewrite `x._length` and `x.<field>._length` to use the underlying
-/// spec record's `array_spec_len`, avoiding `length_of` ghost-fn calls (which
-/// would otherwise require `array_pts_to` to be in scope at the use site).
-#[derive(Default)]
-struct SLPropLengthSubst {
-    /// One entry per substitution root (e.g., the typedef `this`, or each
-    /// array-typed function parameter).
-    roots: HashMap<Rc<str>, SLPropLengthRoot>,
-}
-
-struct SLPropLengthRoot {
-    /// For a root of array type: the spec access for the root itself.
-    self_spec: Option<Doc>,
-    /// For a root of struct type: maps array field name to spec access doc.
-    field_specs: HashMap<Rc<str>, Doc>,
 }
 
 impl<'a> Emitter<'a> {
@@ -579,104 +551,6 @@ impl<'a> Emitter<'a> {
         } else {
             Doc::text(mangled)
         }
-    }
-
-    /// If we're inside a slprop scope with a `_length` substitution active,
-    /// try to translate `_length` of `x`/`x.<field>` into a direct
-    /// `array_spec_len` access on the underlying spec record. Returns the spec
-    /// access doc on a hit and records the hit in `length_subst_fired`.
-    fn try_subst_length(&mut self, x: &Rc<Expr>) -> Option<Doc> {
-        let subst = self.slprop_length_subst.as_ref()?;
-        let hit = match &x.val {
-            ExprT::Var(v) => subst.roots.get(&v.val).and_then(|r| r.self_spec.clone()),
-            ExprT::Member(base, field) => match &base.val {
-                ExprT::Var(v) => subst
-                    .roots
-                    .get(&v.val)
-                    .and_then(|r| r.field_specs.get(&field.val).cloned()),
-                _ => None,
-            },
-            _ => None,
-        };
-        if hit.is_some() {
-            self.length_subst_fired = true;
-        }
-        hit
-    }
-
-    /// Build a `_length` substitution entry for a typedef pred body / function
-    /// parameter, given the value-binding doc for the root (e.g. `val_this_0`
-    /// or `'val_src_0`) and the root's type. Returns `None` for roots whose
-    /// type is neither a struct nor an array.
-    fn build_length_root(
-        &mut self,
-        env: &Env,
-        val_root: &Doc,
-        ty: &Type,
-    ) -> Option<SLPropLengthRoot> {
-        let ty_whnf = env.vtype_whnf(ty.clone().into());
-        match &ty_whnf.val {
-            TypeT::Pointer(_, PointerKind::Array) => Some(SLPropLengthRoot {
-                self_spec: Some(val_root.clone()),
-                field_specs: HashMap::new(),
-            }),
-            TypeT::TypeRef(TypeRefKind::Struct(s_name)) => {
-                let s_defn = env.lookup_struct(s_name)?;
-                let type_ref = TypeRef::Struct(s_name.val.clone());
-                let fields: Vec<_> = s_defn
-                    .fields
-                    .iter()
-                    .map(|(fld, fld_ty)| (fld.val.clone(), fld_ty.clone()))
-                    .collect();
-                let mut field_specs = HashMap::new();
-                for (fld_name, fld_ty) in fields {
-                    let fld_ty_whnf = env.vtype_whnf(fld_ty.clone().into());
-                    let is_array =
-                        matches!(&fld_ty_whnf.val, TypeT::Pointer(_, PointerKind::Array));
-                    if !is_array {
-                        continue;
-                    }
-                    let spec_field_str = format!("{}_{}", fld_name, 0);
-                    let spec_field =
-                        self.emit_name(Name::TypeRefSpecField(type_ref.clone(), spec_field_str));
-                    let access = val_root.clone().append(".").append(spec_field);
-                    field_specs.insert(fld_name, access);
-                }
-                Some(SLPropLengthRoot {
-                    self_spec: None,
-                    field_specs,
-                })
-            }
-            _ => None,
-        }
-    }
-
-    /// Build a `_length` substitution map for a typedef pred body, redirecting
-    /// to the underlying spec record. Returns an (empty) subst for typedefs
-    /// whose underlying type isn't a struct or array.
-    /// Build a `_length` substitution map for a function signature, covering
-    /// each `Const`-mode array/struct parameter. We only substitute for `Const`
-    /// because that's the only case where the val binding is a free ghost
-    /// (`'val_<arg>_0`) auto-shared across all `requires`/`preserves`/`ensures`
-    /// clauses. For `Regular`/`Out` parameters the val binding lives inside an
-    /// `exists*` local to a single clause and cannot be referenced elsewhere.
-    fn build_fn_length_subst(&mut self, env: &Env, args: &[FnArg]) -> SLPropLengthSubst {
-        let mut subst = SLPropLengthSubst::default();
-        for arg in args {
-            let Some(arg_name) = &arg.name else { continue };
-            if !matches!(arg.mode, ParamMode::Const) {
-                continue;
-            }
-            let mangled = self
-                .nm
-                .mangle(&Name::Val(arg_name.val.clone(), 0))
-                .to_string();
-            let val_doc = Doc::text(format!("'{}", mangled));
-            if let Some(root) = self.build_length_root(env, &val_doc, &arg.ty) {
-                subst.roots.insert(arg_name.val.clone(), root);
-            }
-        }
-        subst
     }
 }
 
@@ -1075,90 +949,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Emit a typedef pred body whose underlying type (after stripping
-    /// `_refine` wrappers) resolves to a struct. Instead of calling the
-    /// (non-eager) `struct__pred`, this inlines each struct field's typed
-    /// slprop directly, so field-level typedef-pred refinements (e.g. a
-    /// `dice_digest` field's `_length == 64`) propagate through the
-    /// `pulse_eager_unfold` typedef pred wrapper. `_refine` wrappers on the
-    /// typedef body itself are emitted in-place around the struct body.
-    fn emit_struct_fields_inline(
-        &mut self,
-        env: &Env,
-        s_name: &Rc<Ident>,
-        body: &Type,
-        variant: SLPropVariant,
-        naming: &mut ValNaming,
-        props: &mut Vec<Doc>,
-        this: &Rc<Expr>,
-    ) {
-        // Reuse the standard slprop walker: it handles Refine wrappers
-        // generically. Only the TypeRef(Struct) leaf is treated specially —
-        // we replace `struct__pred` with the inlined field walk.
-        match &body.val {
-            TypeT::Refine(inner, p) => {
-                self.emit_struct_fields_inline(env, s_name, inner, variant, naming, props, this);
-                if let SLPropVariant::Init { .. } = variant {
-                    let p = &mut p.clone();
-                    self.subst_this_rvalue(env, Rc::make_mut(p), this);
-                    props.push(self.emit_rvalue(env, p));
-                }
-            }
-            TypeT::RefineAlways(inner, p) => {
-                self.emit_struct_fields_inline(env, s_name, inner, variant, naming, props, this);
-                let p = &mut p.clone();
-                self.subst_this_rvalue(env, Rc::make_mut(p), this);
-                props.push(self.emit_rvalue(env, p));
-            }
-            TypeT::RefineUninit(inner, p) => {
-                self.emit_struct_fields_inline(env, s_name, inner, variant, naming, props, this);
-                if let SLPropVariant::Uninit = variant {
-                    let p = &mut p.clone();
-                    self.subst_this_rvalue(env, Rc::make_mut(p), this);
-                    props.push(self.emit_rvalue(env, p));
-                }
-            }
-            TypeT::RefineValue(inner, binding_name, binding_ty, p) => {
-                self.emit_struct_fields_inline(env, s_name, inner, variant, naming, props, this);
-                if let SLPropVariant::Init { .. } = variant {
-                    let binding_type_doc = self.emit_type(env, binding_ty);
-                    let raw_name = Doc::text(binding_name.val.to_string());
-                    let val_name =
-                        self.push_val_binding_explicit(naming, raw_name, binding_type_doc);
-                    let _ = val_name;
-                    let p = &mut p.clone();
-                    self.subst_this_rvalue(env, Rc::make_mut(p), this);
-                    props.push(self.emit_rvalue(env, p));
-                }
-            }
-            TypeT::TypeRef(TypeRefKind::Struct(actual)) if actual.val == s_name.val => {
-                // Walk struct fields and emit per-field slprops directly. This
-                // mirrors `struct__pred`'s body so the typedef pred is its
-                // semantic equal but without the wrapping closed predicate.
-                let Some(s_defn) = env.lookup_struct(s_name) else {
-                    // No struct defn — fall back to the standard form.
-                    self.emit_type_slprop(env, body, variant, naming, props, this);
-                    return;
-                };
-                let fields: Vec<(Rc<Ident>, Rc<Type>)> = s_defn
-                    .fields
-                    .iter()
-                    .map(|(f, t)| (Rc::new(f.clone()), t.clone()))
-                    .collect();
-                for (fld, fld_ty) in fields {
-                    let fld_loc = fld.loc.clone();
-                    let field_expr = ExprT::Member(this.clone(), fld.clone()).with_loc(fld_loc);
-                    self.emit_type_slprop(env, &fld_ty, variant, naming, props, &field_expr);
-                }
-            }
-            _ => {
-                // Fall back: typedef body is not actually the expected struct;
-                // emit normally.
-                self.emit_type_slprop(env, body, variant, naming, props, this);
-            }
-        }
-    }
-
     fn emit_type_slprop(
         &mut self,
         env: &Env,
@@ -1506,20 +1296,12 @@ impl<'a> Emitter<'a> {
                     ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
                 }
             },
-            ExprT::VAttr(VAttr::Length, x) => {
-                if let Some(doc) = self.try_subst_length(x) {
-                    ExprKind::RValue(annotated(v, || {
-                        unaryfn(Doc::text("Pulse.Lib.C.Array.array_spec_len"), doc)
-                    }))
-                } else {
-                    ExprKind::RValue(annotated(v, || {
-                        unaryfn(
-                            Doc::text("reveal"),
-                            unaryfn(Doc::text("length_of"), self.emit_rvalue(env, x)),
-                        )
-                    }))
-                }
-            }
+            ExprT::VAttr(VAttr::Length, x) => ExprKind::RValue(annotated(v, || {
+                unaryfn(
+                    Doc::text("reveal"),
+                    unaryfn(Doc::text("length_of"), self.emit_rvalue(env, x)),
+                )
+            })),
             ExprT::VAttr(VAttr::Active(fld), base) => {
                 let base_ty = env.vtype_whnf(env.infer_expr(base).unwrap());
                 let TypeT::TypeRef(TypeRefKind::Union(union_name)) = &base_ty.val else {
@@ -1820,44 +1602,24 @@ impl<'a> Emitter<'a> {
                 }
                 ExprT::Ref(v) => self.emit_lvalue(env, v),
                 ExprT::Cast(val, to_ty) => {
-                    let from_ty_opt = env.infer_expr(val).map(|t| env.vtype_whnf(t)).ok();
-                    let to_ty_w = env.vtype_whnf(to_ty.clone().into());
-                    let is_bool_to_slprop = matches!(
-                        (&from_ty_opt.as_ref().map(|t| &t.val), &to_ty_w.val),
-                        (Some(TypeT::Bool), TypeT::SLProp)
-                    );
-                    let prev_fired = if is_bool_to_slprop {
-                        Some(std::mem::replace(&mut self.length_subst_fired, false))
-                    } else {
-                        None
-                    };
                     let val_doc = self.emit_rvalue(env, val);
-                    let Some(from_ty) = from_ty_opt else {
+                    let Ok(from_ty) = env.infer_expr(val).map(|t| env.vtype_whnf(t)) else {
                         // If we can't infer the type, we should have logged an error somewhere else.
-                        if let Some(prev) = prev_fired {
-                            self.length_subst_fired = prev;
-                        }
                         return val_doc;
                     };
-                    let to_ty = to_ty_w;
+                    let to_ty = env.vtype_whnf(to_ty.clone().into());
                     // Special case: integer literal cast to SizeT → emit Nsz
                     if matches!(&to_ty.val, TypeT::SizeT) {
                         if let ExprT::IntLit(n, _) = &val.val {
-                            if let Some(prev) = prev_fired {
-                                self.length_subst_fired = prev;
-                            }
                             return Doc::text(format!("{}sz", n));
                         }
                     }
                     if env.vtype_eq(from_ty.clone(), to_ty.clone()) {
                         // Same underlying type, no cast necessary.
-                        if let Some(prev) = prev_fired {
-                            self.length_subst_fired = prev;
-                        }
                         return val_doc;
                     }
                     let default_msg = format!("unsupported cast from {} to {}", from_ty, to_ty);
-                    let result = match (&from_ty.val, &to_ty.val) {
+                    match (&from_ty.val, &to_ty.val) {
                         (TypeT::Bool, TypeT::Int { signed, width }) => {
                             fn abbrev(s: &bool, w: &u32) -> String {
                                 format!("{}int{}", if *s { "" } else { "u" }, w)
@@ -1880,14 +1642,7 @@ impl<'a> Emitter<'a> {
                         (TypeT::SpecNat, TypeT::SpecInt) => with_type(val_doc, Doc::text("int")),
                         (TypeT::SpecInt, TypeT::SpecNat) => with_type(val_doc, Doc::text("nat")),
                         // (TypeT::Bool, TypeT::SizeT) => todo!(),
-                        (TypeT::Bool, TypeT::SLProp) => {
-                            let wrapper = if self.length_subst_fired {
-                                "pure"
-                            } else {
-                                "with_pure"
-                            };
-                            unaryfn(Doc::text(wrapper), val_doc)
-                        }
+                        (TypeT::Bool, TypeT::SLProp) => unaryfn(Doc::text("with_pure"), val_doc),
                         (TypeT::Int { signed, width }, TypeT::Bool) => {
                             fn abbrev(s: &bool, w: &u32) -> String {
                                 format!("{}int{}", if *s { "" } else { "u" }, w)
@@ -2053,11 +1808,7 @@ impl<'a> Emitter<'a> {
                             self.report(default_msg.clone(), &v.loc);
                             Doc::text("(admit())")
                         }
-                    };
-                    if let Some(prev) = prev_fired {
-                        self.length_subst_fired = prev;
                     }
-                    result
                 }
                 ExprT::Error(_ty) => Doc::text("(admit())"),
                 ExprT::InlinePulse(val, _) => {
@@ -2833,32 +2584,6 @@ impl<'a> Emitter<'a> {
 
         let body = body.clone();
         let this_r = this.clone();
-
-        // Detect whether the typedef body (after stripping `_refine` wrappers)
-        // resolves to a struct. When it does, we *inline* the struct's per-field
-        // assertions into the typedef pred body instead of emitting a call to
-        // the struct's closed `struct__pred`. This is what makes typedef preds
-        // for typedef-of-struct expose field-level typedef-pred refinements
-        // (e.g. `dice_digest`'s `_length == 64`) at call sites via the
-        // top-level `pulse_eager_unfold` on the typedef pred — without it,
-        // those refinements would be hidden inside the non-eager `struct__pred`.
-        let underlying_struct = {
-            let mut t = body.clone();
-            loop {
-                match &t.val {
-                    TypeT::Refine(inner, _)
-                    | TypeT::RefineAlways(inner, _)
-                    | TypeT::RefineUninit(inner, _)
-                    | TypeT::RefineValue(inner, _, _, _) => t = inner.clone(),
-                    _ => break,
-                }
-            }
-            match &t.val {
-                TypeT::TypeRef(TypeRefKind::Struct(s_name)) => Some(s_name.clone()),
-                _ => None,
-            }
-        };
-
         let pred_decl = self.emit_pred_decl(
             SLPropVariant::Init {
                 perm: &Doc::text("p"),
@@ -2866,19 +2591,7 @@ impl<'a> Emitter<'a> {
             k,
             vec![this_arg.clone()],
             |s, variant, naming, props| {
-                if let Some(s_name) = &underlying_struct {
-                    s.emit_struct_fields_inline(
-                        env,
-                        s_name,
-                        &body,
-                        variant,
-                        naming,
-                        props,
-                        &mk_rvar(&this_r),
-                    );
-                } else {
-                    s.emit_type_slprop(env, &body, variant, naming, props, &mk_rvar(&this_r));
-                }
+                s.emit_type_slprop(env, &body, variant, naming, props, &mk_rvar(&this_r));
             },
         );
 
@@ -4180,9 +3893,6 @@ impl<'a> Emitter<'a> {
             params.push(Doc::text("()"));
         }
 
-        let fn_subst = self.build_fn_length_subst(env, args);
-        let prev_subst = self.slprop_length_subst.replace(fn_subst);
-
         requires_props.extend(requires.iter().map(|r| self.emit_rvalue(env, r)));
 
         let return_id = env
@@ -4211,8 +3921,6 @@ impl<'a> Emitter<'a> {
         let ret_type_doc = self.emit_type(env, ret_type);
 
         ensures_props.extend(ensures.iter().map(|r| self.emit_rvalue(env, r)));
-
-        self.slprop_length_subst = prev_subst;
 
         let fn_keyword = if *is_rec {
             Doc::text("fn rec")
@@ -4975,8 +4683,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_module: String::new(),
         fn_module_map,
         typedef_override_map,
-        slprop_length_subst: None,
-        length_subst_fired: false,
     };
 
     for decl in &tu.decls {

@@ -21,7 +21,7 @@ typedef uint8_t *uds_array;
 
 _refine(this.l0_image_header._length == this.l0_image_header_size)
 _refine(this.l0_binary._length == this.l0_binary_size)
-typedef struct _engine_record_t {
+typedef struct _pulse_eager_unfold_predicate _engine_record_t {
     size_t  l0_image_header_size;
     _array uint8_t *l0_image_header;
     ed25519_sig l0_image_header_sig;
@@ -33,7 +33,7 @@ typedef struct _engine_record_t {
 
 _refine(this.deviceIDCSR._length == this.deviceIDCSR_len)
 _refine(this.aliasKeyCRT._length == this.aliasKeyCRT_len)
-typedef struct {
+typedef struct _pulse_eager_unfold_predicate {
   ed25519_key deviceID_pub;
   ed25519_key aliasKey_priv;
   ed25519_key aliasKey_pub;

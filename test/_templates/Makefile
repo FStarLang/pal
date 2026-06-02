@@ -6,6 +6,7 @@ CACHE_DIR ?= _cache
 OUT_DIR ?= out
 
 C_FILES := $(wildcard *.c)
+H_FILES := $(wildcard *.h)
 PAL_OPTS :=
 
 # If there's an include/ directory, add -I include
@@ -17,7 +18,7 @@ all: verify
 
 translate: $(OUT_DIR)/.stamp
 
-$(OUT_DIR)/.stamp: $(C_FILES) $(C2PULSE) pal.h
+$(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
 	@rm -rf $(OUT_DIR)
 	@mkdir -p $(OUT_DIR)
 	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
