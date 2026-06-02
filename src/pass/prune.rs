@@ -335,8 +335,15 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 eager_unfold_pred: _,
             }) => {
                 let ds = deps.deps_for(n);
-                for (_name, ty) in fields {
-                    scan_type(ds, ty)
+                for f in fields {
+                    match &f.val {
+                        FieldT::Plain { name: _, ty } => scan_type(ds, ty),
+                        FieldT::Array {
+                            name: _,
+                            elem_ty,
+                            length: _,
+                        } => scan_type(ds, elem_ty),
+                    }
                 }
             }
             DeclT::StructDecl(_) => {
@@ -344,8 +351,15 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
             }
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
                 let ds = deps.deps_for(n);
-                for (_name, ty) in fields {
-                    scan_type(ds, ty)
+                for f in fields {
+                    match &f.val {
+                        FieldT::Plain { name: _, ty } => scan_type(ds, ty),
+                        FieldT::Array {
+                            name: _,
+                            elem_ty,
+                            length: _,
+                        } => scan_type(ds, elem_ty),
+                    }
                 }
             }
             DeclT::IncludeDecl(code) => {

@@ -642,14 +642,28 @@ impl<'a> Checker<'a> {
             DeclT::StructDefn(StructDefn {
                 name: _, fields, ..
             }) => {
-                for (_n, ty) in fields {
-                    self.check_type(env, ty)
+                for f in fields {
+                    match &f.val {
+                        FieldT::Plain { name: _, ty } => self.check_type(env, ty),
+                        FieldT::Array {
+                            name: _,
+                            elem_ty,
+                            length: _,
+                        } => self.check_type(env, elem_ty),
+                    }
                 }
             }
             DeclT::StructDecl(_) => {}
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
-                for (_n, ty) in fields {
-                    self.check_type(env, ty)
+                for f in fields {
+                    match &f.val {
+                        FieldT::Plain { name: _, ty } => self.check_type(env, ty),
+                        FieldT::Array {
+                            name: _,
+                            elem_ty,
+                            length: _,
+                        } => self.check_type(env, elem_ty),
+                    }
                 }
             }
             DeclT::IncludeDecl(_) => {}

@@ -356,31 +356,72 @@ pub enum StmtT {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct StructDefn {
     pub name: Rc<Ident>,
-    pub fields: Vec<(Ident, Rc<Type>)>,
+    pub fields: Vec<Field>,
     pub eager_unfold_pred: bool,
 }
 
 impl StructDefn {
-    pub fn get_field(&self, name: &Ident) -> Option<&Rc<Type>> {
+    pub fn get_field(&self, name: &Ident) -> Option<Rc<Type>> {
         self.fields
             .iter()
-            .find(|(field_name, _)| name.val == field_name.val)
-            .map(|(_, ty)| ty)
+            .find(|f| f.val.name().val == name.val)
+            .map(|f| f.val.logical_type(&f.loc))
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct UnionDefn {
     pub name: Rc<Ident>,
-    pub fields: Vec<(Ident, Rc<Type>)>,
+    pub fields: Vec<Field>,
 }
 
 impl UnionDefn {
-    pub fn get_field(&self, name: &Ident) -> Option<&Rc<Type>> {
+    pub fn get_field(&self, name: &Ident) -> Option<Rc<Type>> {
         self.fields
             .iter()
-            .find(|(field_name, _)| name.val == field_name.val)
-            .map(|(_, ty)| ty)
+            .find(|f| f.val.name().val == name.val)
+            .map(|f| f.val.logical_type(&f.loc))
+    }
+}
+
+pub type Field = Ast<FieldT>;
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub enum FieldT {
+    /// A regular field: `T name;`
+    Plain { name: Ident, ty: Rc<Type> },
+    /// A fixed-size C array field: `T name[length];`. The element type
+    /// `elem_ty` and constant `length` are tracked separately so that
+    /// emission can treat the field as inline storage.
+    Array {
+        name: Ident,
+        elem_ty: Rc<Type>,
+        length: u64,
+    },
+}
+
+impl FieldT {
+    pub fn name(&self) -> &Ident {
+        match self {
+            FieldT::Plain { name, .. } | FieldT::Array { name, .. } => name,
+        }
+    }
+
+    pub fn is_array(&self) -> bool {
+        matches!(self, FieldT::Array { .. })
+    }
+
+    /// Returns the "logical" type of the field. For `Plain` this is the
+    /// stored type; for `Array` this is `Pointer(elem_ty, Array)` —
+    /// matching how an array field was previously represented in the
+    /// IR, so that callers that only care about the type shape (type
+    /// inference, member-access type lookup, etc.) need no change.
+    pub fn logical_type(&self, loc: &Rc<SourceInfo>) -> Rc<Type> {
+        match self {
+            FieldT::Plain { ty, .. } => ty.clone(),
+            FieldT::Array { elem_ty, .. } => Rc::new(
+                TypeT::Pointer(elem_ty.clone(), PointerKind::Array).with_loc_core(loc.clone()),
+            ),
+        }
     }
 }
 
