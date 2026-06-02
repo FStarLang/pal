@@ -2792,8 +2792,8 @@ impl<'a> Emitter<'a> {
             |fld: &Ident| Name::StructDirectFieldName(name.val.clone(), fld.val.clone());
 
         // Render the F* record field type. For inline arrays this is
-        // the array's contents (`array_spec T`) refined to the static
-        // length and full mask; for plain fields it's the stored type.
+        // the array's contents (`full_array_spec T`) refined to the
+        // static length; for plain fields it's the stored type.
         let render_record_field_type = |s: &mut Self, env: &Env, f: &Field| -> Doc {
             match &f.val {
                 FieldT::Plain { name: _, ty } => s.emit_type(env, ty),
@@ -2804,12 +2804,12 @@ impl<'a> Emitter<'a> {
                 } => parens(
                     Doc::text("v:")
                         .append(Doc::line())
-                        .append(unaryfn(Doc::text("array_spec"), s.emit_type(env, elem_ty)))
+                        .append(unaryfn(
+                            Doc::text("full_array_spec"),
+                            s.emit_type(env, elem_ty),
+                        ))
                         .append(Doc::line())
-                        .append(Doc::text(format!(
-                            "{{ array_spec_len v == {} /\\ array_spec_full_mask v }}",
-                            length
-                        ))),
+                        .append(Doc::text(format!("{{ array_spec_len v == {} }}", length))),
                 ),
             }
         };
@@ -3250,7 +3250,7 @@ impl<'a> Emitter<'a> {
             //   - `Plain` fields: `ref T` (ties to a value cell via `pts_to`).
             //   - Inline-array fields: the array *handle* itself
             //     (no `ref` wrapper); `aux_raw_unfold` ties it to the
-            //     noeq's `<fld>` (contents) via `array_pts_to`.
+            //     noeq's `<fld>` (contents) via `array_pts_to_full`.
             let projected_type = match &f.val {
                 FieldT::Array { .. } => render_array_handle_type(self, env, f),
                 FieldT::Plain { name: _, ty } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
@@ -3311,7 +3311,7 @@ impl<'a> Emitter<'a> {
                             // `__<fld>_1 x` to the contents stored in
                             // the noeq value at `vx.<fld>`.
                             post.push(naryfn([
-                                Doc::text("array_pts_to"),
+                                Doc::text("array_pts_to_full"),
                                 unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                                 Doc::text("p"),
                                 Doc::text("vx.").append(self.emit_name(direct_fld(fld))),
@@ -3346,7 +3346,7 @@ impl<'a> Emitter<'a> {
                 // Every field (Plain or Array) contributes a value arg
                 // so we can construct the resulting struct record
                 // literal. Inline-array args are annotated with the
-                // refined `array_spec` type so the length refinement
+                // refined `full_array_spec` type so the length refinement
                 // is discharged at fold time rather than inferred.
                 for f in fields {
                     let fld = f.val.name();
@@ -3375,11 +3375,11 @@ impl<'a> Emitter<'a> {
                     for f in fields {
                         let fld = f.val.name();
                         if f.val.is_array() {
-                            // Inline array: consume `array_pts_to` on
+                            // Inline array: consume `array_pts_to_full` on
                             // the ghost handle so the resulting struct
                             // value carries the contents in `vx.<fld>`.
                             pre.push(naryfn([
-                                Doc::text("array_pts_to"),
+                                Doc::text("array_pts_to_full"),
                                 unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                                 Doc::text("p"),
                                 fold_arg_name(fld),
@@ -3549,10 +3549,10 @@ impl<'a> Emitter<'a> {
 
         // has_zero_default instance. If the struct contains inline-array
         // fields, the record type embeds a refinement
-        // `(a: array T { length a == N })` which has no natural zero
-        // default. We therefore omit the instance in that case;
-        // downstream code that needs a default value for such structs
-        // will have to construct it explicitly.
+        // `(v: full_array_spec T { array_spec_len v == N })` which has
+        // no natural zero default. We therefore omit the instance in
+        // that case; downstream code that needs a default value for
+        // such structs will have to construct it explicitly.
         let has_inline_array = fields.iter().any(|f| f.val.is_array());
         if !has_inline_array {
             let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
@@ -3614,8 +3614,8 @@ impl<'a> Emitter<'a> {
 
         // Render the F* type carried by a union constructor field.
         // For inline arrays this is the array's contents
-        // (`array_spec T`) refined to the static length and full mask;
-        // for plain fields it's the stored type.
+        // (`full_array_spec T`) refined to the static length; for
+        // plain fields it's the stored type.
         let render_field_type = |s: &mut Self, env: &Env, f: &Field| -> Doc {
             match &f.val {
                 FieldT::Plain { name: _, ty } => s.emit_type(env, ty),
@@ -3626,12 +3626,12 @@ impl<'a> Emitter<'a> {
                 } => parens(
                     Doc::text("v:")
                         .append(Doc::line())
-                        .append(unaryfn(Doc::text("array_spec"), s.emit_type(env, elem_ty)))
+                        .append(unaryfn(
+                            Doc::text("full_array_spec"),
+                            s.emit_type(env, elem_ty),
+                        ))
                         .append(Doc::line())
-                        .append(Doc::text(format!(
-                            "{{ array_spec_len v == {} /\\ array_spec_full_mask v }}",
-                            length
-                        ))),
+                        .append(Doc::text(format!("{{ array_spec_len v == {} }}", length))),
                 ),
             }
         };
@@ -3747,7 +3747,7 @@ impl<'a> Emitter<'a> {
         //   - Plain fields:        `ref T`
         //   - Inline-array fields: the refined array *handle* itself
         //     (no `ref` wrapper). `aux_raw_unfold` ties the noeq
-        //     value's contents to this handle via `array_pts_to`.
+        //     value's contents to this handle via `array_pts_to_full`.
         for f in fields {
             let fld = f.val.name();
             let projected_type = match &f.val {
@@ -3804,7 +3804,7 @@ impl<'a> Emitter<'a> {
             );
             if f.val.is_array() {
                 post_items.push(naryfn([
-                    Doc::text("array_pts_to"),
+                    Doc::text("array_pts_to_full"),
                     unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                     Doc::text("p"),
                     ctor_payload,
@@ -3848,7 +3848,7 @@ impl<'a> Emitter<'a> {
             ));
 
             // Per-field fold: symmetric — for inline arrays we consume
-            // the `array_pts_to` of the ghost handle (so the
+            // the `array_pts_to_full` of the ghost handle (so the
             // constructor value can carry the contents); for plain
             // fields we consume the field's `pts_to`.
             let fld_ty_doc = render_field_type(self, env, f);
@@ -3859,7 +3859,7 @@ impl<'a> Emitter<'a> {
             ])];
             if f.val.is_array() {
                 pre_items.push(naryfn([
-                    Doc::text("array_pts_to"),
+                    Doc::text("array_pts_to_full"),
                     unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                     Doc::text("p"),
                     Doc::text(format!("v_{}", fld)),

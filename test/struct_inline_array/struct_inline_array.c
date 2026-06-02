@@ -20,6 +20,10 @@ struct mixed {
     int c;
 };
 
+int read_int(_plain struct mixed s){
+  return s.c;
+}
+
 // --- Operations on the external `_array` field (by value) ------------
 
 int read_first_a(struct mixed s)
@@ -75,4 +79,12 @@ void write_first_b(_plain struct mixed *s, int x)
   _ensures(_inline_pulse(Mixed_helpers.pts_to_b $(s) 1.0R (array_spec_upd $`vb 0 $(x))))
 {
     s->b[0] = x;
+}
+
+
+int read_first_b_by_value(_plain struct mixed s)
+  // _preserves(_inline_pulse(Mixed_helpers.pts_to_b $(s) $`p $`vb))
+  // _ensures(_inline_pulse(pure ($(return) == array_spec_idx $`vb 0)))
+{
+    return s.b[0];
 }
