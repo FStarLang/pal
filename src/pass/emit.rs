@@ -660,6 +660,25 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Emit the zero-default value for a struct/union field. For
+    /// `Plain` fields this is just the type's zero default. For inline
+    /// arrays it is `array_spec_zeroed <elem> (SizeT.v Nsz) zero_default`
+    /// — a `full_array_spec` of length N whose every slot holds the
+    /// element type's zero default.
+    fn emit_field_default(&mut self, env: &Env, field: &Field) -> Doc {
+        match &field.val {
+            FieldT::Plain { ty, .. } => self.emit_type_default(env, ty),
+            FieldT::Array {
+                elem_ty, length, ..
+            } => parens(naryfn([
+                Doc::text("array_spec_zeroed"),
+                self.emit_type(env, elem_ty),
+                parens(Doc::text(format!("SizeT.v {}sz", length))),
+                Doc::text("zero_default"),
+            ])),
+        }
+    }
+
     fn subst_this_rvalue(&mut self, env: &Env, rvalue: &mut Expr, this: &Rc<Expr>) {
         match &mut rvalue.val {
             ExprT::Var(x) => {
@@ -3555,53 +3574,47 @@ impl<'a> Emitter<'a> {
             ))
         }
 
-        // has_zero_default instance. If the struct contains inline-array
-        // fields, the record type embeds a refinement
-        // `(v: full_array_spec T { array_spec_len v == N })` which has
-        // no natural zero default. We therefore omit the instance in
-        // that case; downstream code that needs a default value for
-        // such structs will have to construct it explicitly.
-        let has_inline_array = fields.iter().any(|f| f.val.is_array());
-        if !has_inline_array {
-            let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
-            ses.push(
-                Doc::text("instance")
-                    .append(Doc::line())
-                    .append(default_name)
-                    .append(Doc::line())
-                    .append(":")
-                    .append(Doc::line())
-                    .append(unaryfn(
-                        Doc::text("has_zero_default"),
-                        struct_type_name.clone(),
-                    ))
-                    .append(Doc::line())
-                    .append("=")
-                    .append(Doc::line())
-                    .append("{")
-                    .group()
-                    .append(Doc::line())
-                    .append(Doc::text("zero_default = {"))
-                    .append(Doc::concat(fields.iter().map(|f| {
-                        let fld = f.val.name();
-                        let fld_ty = f.val.logical_type(&f.loc);
-                        Doc::line()
-                            .append(self.emit_name(direct_fld(fld)))
-                            .append(" =")
-                            .append(Doc::line())
-                            .append(self.emit_type_default(env, &fld_ty))
-                            .append(";")
-                            .group()
-                            .nest(2)
-                    })))
-                    .nest(2)
-                    .append(Doc::line())
-                    .append("}")
-                    .append(Doc::line())
-                    .append("}")
-                    .group(),
-            );
-        }
+        // has_zero_default instance. For inline-array fields the
+        // default is `array_spec_zeroed T (SizeT.v Nsz) zero_default`,
+        // which is a `full_array_spec T` of length N satisfying the
+        // noeq's `array_spec_len v == N` refinement.
+        let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
+        ses.push(
+            Doc::text("instance")
+                .append(Doc::line())
+                .append(default_name)
+                .append(Doc::line())
+                .append(":")
+                .append(Doc::line())
+                .append(unaryfn(
+                    Doc::text("has_zero_default"),
+                    struct_type_name.clone(),
+                ))
+                .append(Doc::line())
+                .append("=")
+                .append(Doc::line())
+                .append("{")
+                .group()
+                .append(Doc::line())
+                .append(Doc::text("zero_default = {"))
+                .append(Doc::concat(fields.iter().map(|f| {
+                    let fld = f.val.name();
+                    Doc::line()
+                        .append(self.emit_name(direct_fld(fld)))
+                        .append(" =")
+                        .append(Doc::line())
+                        .append(self.emit_field_default(env, f))
+                        .append(";")
+                        .group()
+                        .nest(2)
+                })))
+                .nest(2)
+                .append(Doc::line())
+                .append("}")
+                .append(Doc::line())
+                .append("}")
+                .group(),
+        );
 
         self.defining_struct = None;
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
@@ -3962,49 +3975,44 @@ impl<'a> Emitter<'a> {
         }
 
         // has_zero_default instance (uses first field's constructor).
-        // Skip when the first field is an inline array, since the
-        // refined-array type has no zero default.
+        // For an inline-array first field, the constructor wraps an
+        // `array_spec_zeroed`-built `full_array_spec` of the static
+        // length.
         if let Some(first_f) = fields.first() {
-            if !first_f.val.is_array() {
-                let first_fld = first_f.val.name();
-                let first_fld_ty = first_f.val.logical_type(&first_f.loc);
-                let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
-                let first_ctor = self.emit_name(Name::UnionFieldConstructor(
-                    name.val.clone(),
-                    first_fld.val.clone(),
-                ));
-                ses.push(
-                    Doc::text("instance")
-                        .append(Doc::line())
-                        .append(default_name)
-                        .append(Doc::line())
-                        .append(":")
-                        .append(Doc::line())
-                        .append(unaryfn(
-                            Doc::text("has_zero_default"),
-                            union_type_name.clone(),
-                        ))
-                        .append(Doc::line())
-                        .append("=")
-                        .append(Doc::line())
-                        .append("{")
-                        .group()
-                        .append(Doc::line())
-                        .append(
-                            Doc::text("zero_default =")
-                                .append(Doc::line())
-                                .append(unaryfn(
-                                    first_ctor,
-                                    self.emit_type_default(env, &first_fld_ty),
-                                ))
-                                .group(),
-                        )
-                        .nest(2)
-                        .append(Doc::line())
-                        .append("}")
-                        .group(),
-                );
-            }
+            let first_fld = first_f.val.name();
+            let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
+            let first_ctor = self.emit_name(Name::UnionFieldConstructor(
+                name.val.clone(),
+                first_fld.val.clone(),
+            ));
+            ses.push(
+                Doc::text("instance")
+                    .append(Doc::line())
+                    .append(default_name)
+                    .append(Doc::line())
+                    .append(":")
+                    .append(Doc::line())
+                    .append(unaryfn(
+                        Doc::text("has_zero_default"),
+                        union_type_name.clone(),
+                    ))
+                    .append(Doc::line())
+                    .append("=")
+                    .append(Doc::line())
+                    .append("{")
+                    .group()
+                    .append(Doc::line())
+                    .append(
+                        Doc::text("zero_default =")
+                            .append(Doc::line())
+                            .append(unaryfn(first_ctor, self.emit_field_default(env, first_f)))
+                            .group(),
+                    )
+                    .nest(2)
+                    .append(Doc::line())
+                    .append("}")
+                    .group(),
+            );
         }
 
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())

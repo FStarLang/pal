@@ -15,7 +15,7 @@ int read_first_b(struct mixed *s)
 
 
 int read_third_b(struct mixed *s)
-  _ensures(s->b[0] == return)
+  _ensures(s->b[3] == return)
 {
     return s->b[3];
 }
