@@ -218,10 +218,7 @@ fn main() {
     std::fs::create_dir_all(&outdir).unwrap();
 
     for module in &modules {
-        let mut code = module.code.clone();
-        if diags.has_errors() {
-            code = format!("{}\n\nlet _ = assert False\n", code);
-        }
+        let code = module.code.clone();
         std::fs::write(outdir.join(format!("{}.fst", module.module_name)), &code).unwrap();
         if let Some(fsti_code) = &module.fsti_code {
             std::fs::write(
@@ -230,6 +227,17 @@ fn main() {
             )
             .unwrap();
         }
+    }
+
+    // Write TranslationErrors.fst — asserts False when there are errors so
+    // that F* reports a failure, but individual modules remain verifiable.
+    {
+        let errors_code = if diags.has_errors() {
+            "module TranslationErrors\nlet _ = assert False\n"
+        } else {
+            "module TranslationErrors\n"
+        };
+        std::fs::write(outdir.join("TranslationErrors.fst"), errors_code).unwrap();
     }
 
     // Write single unified source_range_info.json
