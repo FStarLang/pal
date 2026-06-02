@@ -1,9 +1,12 @@
-.PHONY: all clean
+.PHONY: all check-template clean
 
 TESTS := $(shell find . -mindepth 1 -maxdepth 1 -type d \
 	! -name '_*' ! -name '.*' | sort | sed 's|^\./||')
 
-all: $(TESTS)
+all: check-template $(TESTS)
+
+check-template:
+	@./check-template.sh
 
 .PHONY: $(TESTS)
 $(TESTS):
