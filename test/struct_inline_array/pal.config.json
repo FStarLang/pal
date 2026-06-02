@@ -1,5 +1,1 @@
-{
-  "pal_exe": "../../target/debug/pal",
-  "options": ["--outdir", "out"],
-  "files": "*.c"
-}
+../_templates/pal.config.json
