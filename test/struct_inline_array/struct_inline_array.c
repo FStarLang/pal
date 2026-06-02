@@ -81,6 +81,17 @@ void write_first_b(_plain struct mixed *s, int x)
     s->b[0] = x;
 }
 
+int read_first_b0(const struct mixed *s)
+  _ensures(s->b[0] == return)
+{
+    return s->b[0];
+}
+
+void write_first_b0(struct mixed *s, int x)
+  _ensures(s->b[0] == x)
+{
+    s->b[0] = x;
+}
 
 int read_first_b_by_value(_plain struct mixed s)
   // _preserves(_inline_pulse(Mixed_helpers.pts_to_b $(s) $`p $`vb))

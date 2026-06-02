@@ -3250,7 +3250,7 @@ impl<'a> Emitter<'a> {
             //   - `Plain` fields: `ref T` (ties to a value cell via `pts_to`).
             //   - Inline-array fields: the array *handle* itself
             //     (no `ref` wrapper); `aux_raw_unfold` ties it to the
-            //     noeq's `<fld>` (contents) via `array_pts_to_full`.
+            //     noeq's `<fld>` (contents) via `array_pts_to`.
             let projected_type = match &f.val {
                 FieldT::Array { .. } => render_array_handle_type(self, env, f),
                 FieldT::Plain { name: _, ty } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
@@ -3309,9 +3309,14 @@ impl<'a> Emitter<'a> {
                         if f.val.is_array() {
                             // Inline array: tie the ghost array handle
                             // `__<fld>_1 x` to the contents stored in
-                            // the noeq value at `vx.<fld>`.
+                            // the noeq value at `vx.<fld>`. The noeq
+                            // refines `vx.<fld>` to `full_array_spec`
+                            // (refinement subtype of `array_spec`), so
+                            // `array_pts_to` accepts it directly and the
+                            // caller can still recover `array_pts_to_full`
+                            // when needed.
                             post.push(naryfn([
-                                Doc::text("array_pts_to_full"),
+                                Doc::text("array_pts_to"),
                                 unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                                 Doc::text("p"),
                                 Doc::text("vx.").append(self.emit_name(direct_fld(fld))),
@@ -3375,11 +3380,14 @@ impl<'a> Emitter<'a> {
                     for f in fields {
                         let fld = f.val.name();
                         if f.val.is_array() {
-                            // Inline array: consume `array_pts_to_full` on
-                            // the ghost handle so the resulting struct
-                            // value carries the contents in `vx.<fld>`.
+                            // Inline array: consume `array_pts_to` on the
+                            // ghost handle so the resulting struct value
+                            // carries the contents in `vx.<fld>`. The
+                            // refined `full_array_spec` type of `v_<fld>`
+                            // is a subtype of `array_spec`, so the call
+                            // typechecks and full-ness is preserved.
                             pre.push(naryfn([
-                                Doc::text("array_pts_to_full"),
+                                Doc::text("array_pts_to"),
                                 unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                                 Doc::text("p"),
                                 fold_arg_name(fld),
@@ -3747,7 +3755,7 @@ impl<'a> Emitter<'a> {
         //   - Plain fields:        `ref T`
         //   - Inline-array fields: the refined array *handle* itself
         //     (no `ref` wrapper). `aux_raw_unfold` ties the noeq
-        //     value's contents to this handle via `array_pts_to_full`.
+        //     value's contents to this handle via `array_pts_to`.
         for f in fields {
             let fld = f.val.name();
             let projected_type = match &f.val {
@@ -3804,7 +3812,7 @@ impl<'a> Emitter<'a> {
             );
             if f.val.is_array() {
                 post_items.push(naryfn([
-                    Doc::text("array_pts_to_full"),
+                    Doc::text("array_pts_to"),
                     unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                     Doc::text("p"),
                     ctor_payload,
@@ -3848,9 +3856,9 @@ impl<'a> Emitter<'a> {
             ));
 
             // Per-field fold: symmetric — for inline arrays we consume
-            // the `array_pts_to_full` of the ghost handle (so the
-            // constructor value can carry the contents); for plain
-            // fields we consume the field's `pts_to`.
+            // the `array_pts_to` of the ghost handle (so the constructor
+            // value can carry the contents); for plain fields we consume
+            // the field's `pts_to`.
             let fld_ty_doc = render_field_type(self, env, f);
             let mut pre_items: Vec<Doc> = vec![naryfn([
                 self.emit_name(unfolded_tok(fld)),
@@ -3859,7 +3867,7 @@ impl<'a> Emitter<'a> {
             ])];
             if f.val.is_array() {
                 pre_items.push(naryfn([
-                    Doc::text("array_pts_to_full"),
+                    Doc::text("array_pts_to"),
                     unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                     Doc::text("p"),
                     Doc::text(format!("v_{}", fld)),
