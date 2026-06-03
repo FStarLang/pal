@@ -15,12 +15,12 @@ instance has_zero_default_array (a:Type) : Pulse.Lib.C.Inhabited.has_zero_defaul
   zero_default = array_null
 }
 
-[@@erasable] val array_spec (a: Type u#a) : Type u#a
+val array_spec (a: Type u#a) : Type u#a
 
 val array_spec_len #a (s: array_spec a) : GTot nat
 val array_spec_initd #a (s: array_spec a) (i: nat) : prop
 val array_spec_mask #a (s: array_spec a) (i: nat) : prop
-val array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : GTot a
+val array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : Tot a
 
 // val array_spec_len_fits #a s : Lemma (SZ.fits (array_spec_len #a s)) [SMTPat (array_spec_len #a s)]
 
@@ -117,7 +117,7 @@ let live_array (#t: Type u#a) (a: array t) : slprop =
 
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#p: perm)
-  (#s: array_spec t { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
+  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
   preserves array_pts_to a p s
   returns res: t
   ensures rewrites_to res (array_spec_idx s (SZ.v i))
@@ -131,7 +131,7 @@ val array_spec_upd_idx1 #a s n x (i:nat) : Lemma (i =!= n /\ array_spec_initd s 
 val array_spec_upd_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_spec_idx (array_spec_upd #a s n x) n == x) [SMTPat (array_spec_idx (array_spec_upd #a s n x) n)]
 
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
-  (#s: array_spec t { array_spec_mask s (SZ.v i) })
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   requires array_pts_to a 1.0R s
   ensures exists* s'. array_pts_to a 1.0R s' ** pure (s' == array_spec_upd s (SZ.v i) v)
 
@@ -182,7 +182,7 @@ val arrayptr_shift (#t: Type u#a) (x: array t) (n: SZ.t) (#y: erased (array t))
 /// Read through an arrayptr at index `i`, borrowing permissions from parent `y`.
 fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
   (#y: erased (array t))
-  (#p: perm) (#s: array_spec t { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_initd s (arrayptr_off x y + SZ.v i) })
+  (#p: perm) (#s: erased (array_spec t) { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_initd s (arrayptr_off x y + SZ.v i) })
   requires arrayptr_pts_to x y
   preserves array_pts_to y p s
   returns res: t
@@ -191,7 +191,7 @@ fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
 /// Write through an arrayptr at index `i`, using permissions from parent `y`.
 fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
   (#y: erased (array t))
-  (#s: array_spec t { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_mask s (arrayptr_off x y + SZ.v i) })
+  (#s: erased (array_spec t) { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_mask s (arrayptr_off x y + SZ.v i) })
   requires arrayptr_pts_to x y
   requires array_pts_to y 1.0R s
   ensures exists* s'.

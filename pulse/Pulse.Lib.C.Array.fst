@@ -9,22 +9,20 @@ let array a = A.array a
 let array_null #a = A.null #a
 let array_is_null #a r = A.is_null #a r
 
-[@@erasable]
 noeq type array_spec_cell t =
   | OutOfMask
   | Uninit
   | Val of t
 
-[@@erasable]
 let array_spec_t t =
-  erased (Seq.seq (array_spec_cell t))
+  Seq.seq (array_spec_cell t)
 
 let array_spec t = array_spec_t t
 
 let array_spec_len #a (s: array_spec a) = Seq.length s
 let array_spec_initd #a (s: array_spec a) (i: nat) : prop = i < Seq.length s /\ Val? (Seq.index s i)
 let array_spec_mask #a (s: array_spec a) (i: nat) : prop = i < Seq.length s /\ ~(OutOfMask? (Seq.index s i))
-let array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : GTot a = let Val x = Seq.index s i in x
+let array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : Tot a = let Val x = Seq.index s i in x
 
 let to_mask #t (s: array_spec t) (i: nat) : prop = array_spec_mask s i
 
@@ -56,7 +54,7 @@ let array_spec_ext #a (s1 s2: array_spec a) :
   Seq.lemma_eq_intro s1 s2
 
 let array_spec_zeroed (a: Type) (n: nat) (x: a) : array_spec a =
-  Seq.init_ghost n fun _ -> Val x
+  Seq.init n fun _ -> Val x
 
 let array_spec_zeroed_len a n x = ()
 let array_spec_zeroed_initd a n x i = ()
@@ -72,7 +70,7 @@ let freeable_array #a (r: array a) : slprop =
   pure (A.is_full_array r)
 
 let array_spec_uninit (a: Type) (n: nat) : array_spec a =
-  Seq.init_ghost n fun _ -> Uninit
+  Seq.init n fun _ -> Uninit
 
 let array_spec_uninit_len a n = ()
 let array_spec_uninit_mask a n i = ()
@@ -150,7 +148,7 @@ fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} 
 
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#p: perm)
-  (#s: array_spec t { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
+  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
   preserves array_pts_to a p s
   returns res: t
   ensures rewrites_to res (array_spec_idx s (SZ.v i))
@@ -163,7 +161,7 @@ fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
 }
 
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
-  (#s: array_spec t { array_spec_mask s (SZ.v i) })
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   requires array_pts_to a 1.0R s
   ensures exists* s'. array_pts_to a 1.0R s' ** pure (s' == array_spec_upd s (SZ.v i) v)
 {
@@ -171,7 +169,7 @@ fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   A.mask_write a i v;
   // Need to show that the updated sequence matches to_seq (array_spec_upd s (SZ.v i) v)
   // and the mask matches to_mask (array_spec_upd s (SZ.v i) v)
-  let s' = array_spec_upd s (SZ.v i) v;
+  let s' = hide (array_spec_upd s (SZ.v i) v);
   A.mask_mext a (to_mask s');
   A.mask_vext a (to_seq s');
   fold (array_pts_to a 1.0R s');
@@ -202,7 +200,7 @@ let arrayptr_shift #t x n #y =
 
 fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
   (#y: erased (array t))
-  (#p: perm) (#s: array_spec t { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_initd s (arrayptr_off x y + SZ.v i) })
+  (#p: perm) (#s: erased (array_spec t) { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_initd s (arrayptr_off x y + SZ.v i) })
   requires arrayptr_pts_to x y
   preserves array_pts_to y p s
   returns res: t
@@ -216,7 +214,7 @@ fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
 
 fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
   (#y: erased (array t))
-  (#s: array_spec t { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_mask s (arrayptr_off x y + SZ.v i) })
+  (#s: erased (array_spec t) { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_mask s (arrayptr_off x y + SZ.v i) })
   requires arrayptr_pts_to x y
   requires array_pts_to y 1.0R s
   ensures exists* s'.

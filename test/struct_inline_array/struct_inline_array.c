@@ -51,3 +51,11 @@ void write_fifth_b(struct containsarray *a, int v)
 {
     a->b[5] = v;
 }
+
+_pure struct containsarray global;
+int read_global(unsigned i)
+    _requires(i < 10)
+    _ensures(return == 0)
+{
+    return global.b[i];
+}
