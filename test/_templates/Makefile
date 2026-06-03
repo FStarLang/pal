@@ -21,7 +21,6 @@ all: verify compile
 translate: $(OUT_DIR)/.stamp
 
 $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
-	@rm -rf $(OUT_DIR)
 	@mkdir -p $(OUT_DIR)
 	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
 	@touch $@
