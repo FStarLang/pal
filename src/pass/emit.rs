@@ -1282,6 +1282,21 @@ impl<'a> Emitter<'a> {
                                         x_doc,
                                     )
                                 })),
+                                ExprKind::RValue(_) if is_inline_array => {
+                                    // Inline-array field projected from a by-value
+                                    // struct yields a `full_array_spec` value that
+                                    // is only meaningful in an indexing context
+                                    // (handled in `ExprT::Index`). Reject any
+                                    // other use.
+                                    self.report(
+                                        format!(
+                                            "inline-array field `{}` of a by-value struct can only be used inside an indexing expression (e.g. `s.{}[i]`)",
+                                            a, a
+                                        ),
+                                        &v.loc,
+                                    );
+                                    ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                                }
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
                                     x_doc.append(Doc::text(".")).append(self.emit_name(
                                         Name::StructDirectFieldName(
@@ -1319,6 +1334,16 @@ impl<'a> Emitter<'a> {
                                         x_doc,
                                     )
                                 })),
+                                ExprKind::RValue(_) if is_inline_array => {
+                                    self.report(
+                                        format!(
+                                            "inline-array field `{}` of a by-value union can only be used inside an indexing expression (e.g. `u.{}[i]`)",
+                                            a, a
+                                        ),
+                                        &v.loc,
+                                    );
+                                    ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                                }
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
                                     parens(
                                         self.emit_name(Name::UnionFieldConstructor(
@@ -1376,6 +1401,76 @@ impl<'a> Emitter<'a> {
                 }))
             }
             ExprT::Index(arr, idx) => {
+                // Detect indexing of an inline-array field of a by-value
+                // struct/union: `Index(Member(x, a), idx)` where x has
+                // struct/union type, field `a` is inline-array, and x
+                // lowers to an RValue. In that case the field projection
+                // yields a `full_array_spec` value (not an array handle),
+                // so emit a pure `array_spec_idx` instead of a stateful
+                // `array_read`.
+                if let ExprT::Member(x, a) = &arr.val {
+                    if let Ok(x_ty) = env.infer_expr(x) {
+                        let x_ty = env.vtype_whnf(x_ty);
+                        let inline_proj = match &x_ty.val {
+                            TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => env
+                                .lookup_struct(struct_name)
+                                .and_then(|s| s.fields.iter().find(|f| f.val.name().val == a.val))
+                                .filter(|f| f.val.is_array())
+                                .map(|_| {
+                                    (
+                                        false,
+                                        Name::StructDirectFieldName(
+                                            struct_name.val.clone(),
+                                            a.val.clone(),
+                                        ),
+                                    )
+                                }),
+                            TypeT::TypeRef(TypeRefKind::Union(union_name)) => env
+                                .lookup_union(union_name)
+                                .and_then(|u| u.fields.iter().find(|f| f.val.name().val == a.val))
+                                .filter(|f| f.val.is_array())
+                                .map(|_| {
+                                    (
+                                        true,
+                                        Name::UnionFieldConstructor(
+                                            union_name.val.clone(),
+                                            a.val.clone(),
+                                        ),
+                                    )
+                                }),
+                            _ => None,
+                        };
+                        if let Some((is_union, proj_name)) = inline_proj {
+                            if let ExprKind::RValue(x_doc) = self.emit_expr(env, x) {
+                                let idx_doc = self.emit_rvalue(env, idx);
+                                let proj_doc = if is_union {
+                                    parens(
+                                        self.emit_name(proj_name)
+                                            .append("?._0")
+                                            .append(Doc::line())
+                                            .append(x_doc)
+                                            .group(),
+                                    )
+                                } else {
+                                    x_doc
+                                        .append(Doc::text("."))
+                                        .append(self.emit_name(proj_name))
+                                };
+                                return ExprKind::RValue(annotated(v, || {
+                                    parens(naryfn([
+                                        Doc::text("array_spec_idx"),
+                                        proj_doc,
+                                        parens(
+                                            Doc::text("SizeT.v")
+                                                .append(Doc::line())
+                                                .append(idx_doc),
+                                        ),
+                                    ]))
+                                }));
+                            }
+                        }
+                    }
+                }
                 let is_arrayptr = env
                     .infer_expr(arr)
                     .map(|ty| {

@@ -26,16 +26,19 @@ int read_first_b_const(const struct mixed *s)
     return s->b[0];
 }
 
-// this fails because pulse wrongly unifies the evar in the post
-// void write_first_b0(struct mixed *s, int x)
-//   _ensures(s->b[0] == x)
-// {
-//     s->b[0] = x;
-// }
+void write_first_a0(struct mixed *s, int x)
+  _requires(s->a._length >= 1)
+  _preserves_value(s->a._length)
+  _ensures(s->a[0] == x)
+{
+    s->a[0] = x;
+}
 
-// should this verify?
-// int read_first_b_by_value(_plain struct mixed s)
-//  _ensures(s.b[0] == return)
-// {
-//     return s.b[0];
-// }
+
+//should this verify?
+int read_first_b_by_value(_plain struct mixed s)
+ _ensures(s.b[0] == return)
+{
+    return s.b[0];
+}
+
