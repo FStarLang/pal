@@ -495,6 +495,15 @@ public:
   Rc<ir::Expr> trInitList(InitListExpr *init, SourceRange range,
                           Rc<ir::SourceInfo> loc) {
     auto qt = init->getType().getDesugaredType(*astCtx);
+    // Handle array initializer lists
+    if (auto *cat = dyn_cast<ConstantArrayType>(qt.getTypePtr())) {
+      auto elemTy = trQualType(cat->getElementType(), range);
+      auto elems = Vec<Rc<ir::Expr>>::new_();
+      for (unsigned i = 0; i < init->getNumInits(); ++i) {
+        elems.push(trRValue(init->getInit(i)));
+      }
+      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems));
+    }
     auto *rec = dyn_cast<RecordType>(qt.getTypePtr());
     if (!rec) {
       reportUnsupported(range, loc,

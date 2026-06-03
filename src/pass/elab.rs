@@ -443,6 +443,11 @@ impl<'a> Elaborator<'a> {
             ExprT::UnionInit(_, _, fld_val) => {
                 self.elab_rvalue(env, Rc::make_mut(fld_val), None);
             }
+            ExprT::ArrayInit(_, elems) => {
+                for elem in elems {
+                    self.elab_rvalue(env, Rc::make_mut(elem), None);
+                }
+            }
             ExprT::Cond(cond, then_expr, else_expr) => {
                 self.elab_rvalue(env, Rc::make_mut(cond), None);
                 self.cast_to_bool(env, cond);

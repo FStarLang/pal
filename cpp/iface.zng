@@ -227,6 +227,7 @@ mod crate::clang {
     }
 
     fn mk_union_init(Rc<SourceInfo>, Rc<Ident>, Rc<Ident>, Rc<Expr>) -> Rc<Expr>;
+    fn mk_array_init(Rc<SourceInfo>, Rc<Type>, Vec<Rc<Expr>>) -> Rc<Expr>;
 
     fn str_from_parts(*const u8, usize) -> &str;
 

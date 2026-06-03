@@ -52,10 +52,30 @@ void write_fifth_b(struct containsarray *a, int v)
     a->b[5] = v;
 }
 
+int read_from_initializer(unsigned i)
+    _requires(i < 10)
+    _ensures(return == i)
+{
+    _pure struct containsarray a = {
+        .b = { 0,1,2,3,4,5,6,7,8,9 }
+    };
+    return a.b[i];
+}
+
 _pure struct containsarray global;
 int read_global(unsigned i)
     _requires(i < 10)
     _ensures(return == 0)
 {
     return global.b[i];
+}
+
+_pure struct containsarray data = {
+    .b = { 0,1,2,3,4,5,6,7,8,9 }
+};
+int read_data(unsigned i)
+    _requires(i < 10)
+    _ensures(return == i)
+{
+    return data.b[i];
 }

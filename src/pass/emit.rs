@@ -779,6 +779,11 @@ impl<'a> Emitter<'a> {
             ExprT::UnionInit(_, _, val) => {
                 self.subst_this_rvalue(env, Rc::make_mut(val), this);
             }
+            ExprT::ArrayInit(_, elems) => {
+                for elem in elems {
+                    self.subst_this_rvalue(env, Rc::make_mut(elem), this);
+                }
+            }
             ExprT::Malloc(_) | ExprT::Calloc(_) => {}
             ExprT::MallocArray(_, count) | ExprT::CallocArray(_, count) => {
                 self.subst_this_rvalue(env, Rc::make_mut(count), this);
@@ -2302,6 +2307,25 @@ impl<'a> Emitter<'a> {
                     )),
                     self.emit_rvalue(env, val),
                 ),
+                ExprT::ArrayInit(elem_ty, elems) => {
+                    // Emit as nested array_spec_upd calls on array_spec_zeroed base:
+                    // (array_spec_upd (... (array_spec_zeroed T (SizeT.v Nsz) zero_default) 0 v0) 1 v1) ...
+                    let n = elems.len();
+                    let base = parens(naryfn([
+                        Doc::text("array_spec_zeroed"),
+                        self.emit_type(env, elem_ty),
+                        parens(Doc::text(format!("SizeT.v {}sz", n))),
+                        Doc::text("zero_default"),
+                    ]));
+                    elems.iter().enumerate().fold(base, |acc, (i, elem)| {
+                        parens(naryfn([
+                            Doc::text("array_spec_upd"),
+                            acc,
+                            Doc::text(format!("{}", i)),
+                            self.emit_rvalue(env, elem),
+                        ]))
+                    })
+                }
                 ExprT::Malloc(ty) => parens(
                     Doc::text("Pulse.Lib.C.Ref.alloc_ref")
                         .append(Doc::line())

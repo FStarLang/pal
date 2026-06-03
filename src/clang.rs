@@ -750,6 +750,10 @@ fn mk_union_init(loc: Rc<SourceInfo>, name: Rc<Ident>, fld: Rc<Ident>, val: Rc<E
     ExprT::UnionInit(name, fld, val).with_loc(loc)
 }
 
+fn mk_array_init(loc: Rc<SourceInfo>, elem_ty: Rc<Type>, elems: Vec<Rc<Expr>>) -> Rc<Expr> {
+    ExprT::ArrayInit(elem_ty, elems).with_loc(loc)
+}
+
 fn mk_lvalue_var(loc: Rc<SourceInfo>, name: Rc<Ident>) -> Rc<Expr> {
     mk_ast(loc, ExprT::Var(name))
 }

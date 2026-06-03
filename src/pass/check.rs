@@ -441,6 +441,12 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprT::Malloc(ty) | ExprT::Calloc(ty) => self.check_type(env, ty),
+            ExprT::ArrayInit(elem_ty, elems) => {
+                self.check_type(env, elem_ty);
+                for elem in elems {
+                    self.check_rvalue(env, elem);
+                }
+            }
             ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
                 self.check_type(env, ty);
                 self.check_rvalue(env, count);
