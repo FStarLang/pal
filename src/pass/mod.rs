@@ -1,4 +1,5 @@
 pub mod check;
+pub mod decay;
 pub mod elab;
 pub mod emit;
 pub mod merge;

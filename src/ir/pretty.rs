@@ -132,6 +132,7 @@ impl PrettyIR for TypeT {
             TypeT::Pointer(ty, PointerKind::Array) => ty.to_doc().append(RcDoc::text("[]")),
             TypeT::Pointer(ty, PointerKind::ArrayPtr) => ty.to_doc().append(RcDoc::text("[ptr]")),
             TypeT::Pointer(ty, PointerKind::Unknown) => ty.to_doc().append(RcDoc::text("[?]")),
+            TypeT::FixedArray(ty, len) => ty.to_doc().append(RcDoc::text(format!("[{}]", len))),
             TypeT::SpecInt => RcDoc::text("_specint"),
             TypeT::SpecNat => RcDoc::text("_specnat"),
             TypeT::SLProp => RcDoc::text("_slprop"),
@@ -511,19 +512,6 @@ impl PrettyIR for FieldT {
                 .to_doc()
                 .append(RcDoc::line())
                 .append(name.to_doc())
-                .append(";")
-                .group()
-                .nest(2)
-                .append(RcDoc::hardline()),
-            FieldT::Array {
-                name,
-                elem_ty,
-                length,
-            } => elem_ty
-                .to_doc()
-                .append(RcDoc::line())
-                .append(name.to_doc())
-                .append(format!("[{}]", length))
                 .append(";")
                 .group()
                 .nest(2)

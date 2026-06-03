@@ -611,6 +611,9 @@ impl<'a> Emitter<'a> {
                 TypeT::Pointer(to, PointerKind::Ref | PointerKind::Unknown) => {
                     unaryfn(Doc::text("ref"), self.emit_type(env, to))
                 }
+                TypeT::FixedArray(elem_ty, _) => {
+                    unaryfn(Doc::text("full_array_spec"), self.emit_type(env, elem_ty))
+                }
                 TypeT::Unknown => Doc::text("unit"),
                 TypeT::Error => Doc::text("unit"),
 
@@ -646,6 +649,12 @@ impl<'a> Emitter<'a> {
             TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => {
                 Doc::text("zero_default")
             }
+            TypeT::FixedArray(elem_ty, length) => parens(naryfn([
+                Doc::text("array_spec_zeroed"),
+                self.emit_type(env, elem_ty),
+                parens(Doc::text(format!("SizeT.v {}sz", length))),
+                Doc::text("zero_default"),
+            ])),
             TypeT::Void => Doc::text("()"),
             TypeT::TypeRef(_) => Doc::text("zero_default"),
             TypeT::Refine(ty, _)
@@ -666,16 +675,16 @@ impl<'a> Emitter<'a> {
     /// — a `full_array_spec` of length N whose every slot holds the
     /// element type's zero default.
     fn emit_field_default(&mut self, env: &Env, field: &Field) -> Doc {
-        match &field.val {
-            FieldT::Plain { ty, .. } => self.emit_type_default(env, ty),
-            FieldT::Array {
-                elem_ty, length, ..
-            } => parens(naryfn([
+        if let Some((elem_ty, length)) = field.val.fixed_array_info() {
+            return parens(naryfn([
                 Doc::text("array_spec_zeroed"),
                 self.emit_type(env, elem_ty),
                 parens(Doc::text(format!("SizeT.v {}sz", length))),
                 Doc::text("zero_default"),
-            ])),
+            ]));
+        }
+        match &field.val {
+            FieldT::Plain { ty, .. } => self.emit_type_default(env, ty),
         }
     }
 
@@ -684,13 +693,8 @@ impl<'a> Emitter<'a> {
     /// arrays it is the array's contents (`full_array_spec T`) refined
     /// to the static length.
     fn emit_field_record_type(&mut self, env: &Env, field: &Field) -> Doc {
-        match &field.val {
-            FieldT::Plain { name: _, ty } => self.emit_type(env, ty),
-            FieldT::Array {
-                name: _,
-                elem_ty,
-                length,
-            } => parens(
+        if let Some((elem_ty, length)) = field.val.fixed_array_info() {
+            return parens(
                 Doc::text("v:")
                     .append(Doc::line())
                     .append(unaryfn(
@@ -699,39 +703,40 @@ impl<'a> Emitter<'a> {
                     ))
                     .append(Doc::line())
                     .append(Doc::text(format!("{{ array_spec_len v == {} }}", length))),
-            ),
+            );
+        }
+        match &field.val {
+            FieldT::Plain { name: _, ty } => self.emit_type(env, ty),
         }
     }
 
     /// Render the type of an inline-array ghost projection — the array
     /// *handle* itself (no `ref` wrapper), refined to the same static
-    /// length as the noeq contents. Panics if called on a `Plain` field.
+    /// length as the noeq contents. Panics if called on a non-array field.
     fn emit_field_array_handle_type(&mut self, env: &Env, field: &Field) -> Doc {
-        match &field.val {
-            FieldT::Array {
-                name: _,
-                elem_ty,
-                length,
-            } => parens(
-                Doc::text("a:")
-                    .append(Doc::line())
-                    .append(unaryfn(Doc::text("array"), self.emit_type(env, elem_ty)))
-                    .append(Doc::line())
-                    .append(Doc::text(format!("{{ length a == {} }}", length))),
-            ),
-            FieldT::Plain { .. } => {
-                unreachable!("emit_field_array_handle_type called on Plain field")
-            }
-        }
+        let (elem_ty, length) = field
+            .val
+            .fixed_array_info()
+            .expect("emit_field_array_handle_type called on non-array field");
+        parens(
+            Doc::text("a:")
+                .append(Doc::line())
+                .append(unaryfn(Doc::text("array"), self.emit_type(env, elem_ty)))
+                .append(Doc::line())
+                .append(Doc::text(format!("{{ length a == {} }}", length))),
+        )
     }
 
     /// Render the F* type of the ghost projection / getter for `field`.
     /// For inline-array fields this is the bare refined array handle
     /// (no `ref` wrapper); for plain fields it is `ref T`.
     fn emit_field_projection_type(&mut self, env: &Env, field: &Field) -> Doc {
-        match &field.val {
-            FieldT::Array { .. } => self.emit_field_array_handle_type(env, field),
-            FieldT::Plain { name: _, ty } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
+        if field.val.is_array() {
+            self.emit_field_array_handle_type(env, field)
+        } else {
+            match &field.val {
+                FieldT::Plain { name: _, ty } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
+            }
         }
     }
 
@@ -1047,6 +1052,7 @@ impl<'a> Emitter<'a> {
             | TypeT::SpecInt
             | TypeT::SpecNat
             | TypeT::SLProp
+            | TypeT::FixedArray(_, _)
             | TypeT::Unknown => {}
             TypeT::Pointer(pointee_ty, kind) => {
                 let this_doc = self.emit_rvalue(env, this);
@@ -1767,7 +1773,8 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
         )
         | (_, TypeT::SLProp)
         | (_, TypeT::Error)
-        | (_, TypeT::Unknown) => return None,
+        | (_, TypeT::Unknown)
+        | (_, TypeT::FixedArray(_, _)) => return None,
     })
 }
 
@@ -2001,6 +2008,11 @@ impl<'a> Emitter<'a> {
                             }
                         }
                         (TypeT::PtrdiffT, TypeT::PtrdiffT) => val_doc,
+                        // FixedArray → Pointer(Array): array-to-pointer decay (identity in Pulse)
+                        (
+                            TypeT::FixedArray(_, _),
+                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
+                        ) => val_doc,
                         (TypeT::Pointer(_, _), TypeT::Pointer(_, to_kind)) => {
                             // Pointer kind change (e.g., Ref→ArrayPtr for null)
                             if matches!(&val.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) {
@@ -2444,14 +2456,25 @@ impl<'a> Emitter<'a> {
                     );
                     Doc::text("(admit())")
                 }
-                ExprT::SizeOf(ty) => unaryfn(
-                    Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"),
-                    self.emit_type(env, ty),
-                ),
-                ExprT::AlignOf(ty) => unaryfn(
-                    Doc::text("Pulse.Lib.C.Sizeof.c_alignof"),
-                    self.emit_type(env, ty),
-                ),
+                ExprT::SizeOf(ty) => {
+                    // For FixedArray, emit as `array T` to match annotation parser output
+                    let ty_doc = match &ty.val {
+                        TypeT::FixedArray(elem, _) => {
+                            unaryfn(Doc::text("array"), self.emit_type(env, elem))
+                        }
+                        _ => self.emit_type(env, ty),
+                    };
+                    unaryfn(Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"), ty_doc)
+                }
+                ExprT::AlignOf(ty) => {
+                    let ty_doc = match &ty.val {
+                        TypeT::FixedArray(elem, _) => {
+                            unaryfn(Doc::text("array"), self.emit_type(env, elem))
+                        }
+                        _ => self.emit_type(env, ty),
+                    };
+                    unaryfn(Doc::text("Pulse.Lib.C.Sizeof.c_alignof"), ty_doc)
+                }
             }
         })
     }
@@ -2461,13 +2484,54 @@ impl<'a> Emitter<'a> {
             match &stmt.val {
                 StmtT::Call(v) => self.emit_rvalue(env, v).append(";").nest(2).group(),
                 StmtT::Decl(x, ty) => {
-                    let x = self.emit_name(Name::Var(x.val.clone()));
-                    (Doc::text("let mut ").append(x).append(" :"))
-                        .append(Doc::line())
-                        .append(self.emit_type(env, ty))
-                        .append(";")
-                        .nest(2)
-                        .group()
+                    if let TypeT::FixedArray(elem_ty, length) = &ty.val {
+                        // Fixed-size array declaration: emit stack_alloc_array + defer
+                        let x_doc = self.emit_name(Name::Var(x.val.clone()));
+                        let elem_type_doc = self.emit_type(env, elem_ty);
+                        let size_doc = Doc::text(format!("{}sz", length));
+                        let alloc = Doc::text("let ")
+                            .append(x_doc.clone())
+                            .append(Doc::text(" ="))
+                            .append(Doc::line())
+                            .append(naryfn([
+                                Doc::text("stack_alloc_array"),
+                                Doc::text("#").append(elem_type_doc),
+                                size_doc,
+                            ]))
+                            .append(";")
+                            .nest(2)
+                            .group();
+                        let defer = Doc::text("defer ")
+                            .append(unaryfn(Doc::text("array_pts_to_uninit'"), x_doc.clone()))
+                            .nest(2)
+                            .group()
+                            .append(Doc::line())
+                            .append(Doc::text("{ stack_free_array _ }"))
+                            .append(";")
+                            .nest(2)
+                            .group();
+                        let redecl = Doc::text("let mut ")
+                            .append(x_doc.clone())
+                            .append(" =")
+                            .append(Doc::line())
+                            .append(x_doc)
+                            .append(";")
+                            .nest(2)
+                            .group();
+                        alloc
+                            .append(Doc::hardline())
+                            .append(defer)
+                            .append(Doc::hardline())
+                            .append(redecl)
+                    } else {
+                        let x = self.emit_name(Name::Var(x.val.clone()));
+                        (Doc::text("let mut ").append(x).append(" :"))
+                            .append(Doc::line())
+                            .append(self.emit_type(env, ty))
+                            .append(";")
+                            .nest(2)
+                            .group()
+                    }
                 }
                 StmtT::DeclStackArray {
                     name,
@@ -3513,14 +3577,15 @@ impl<'a> Emitter<'a> {
                 // is discharged at fold time rather than inferred.
                 for f in fields {
                     let fld = f.val.name();
-                    match &f.val {
-                        FieldT::Array { .. } => args.push(parens(
+                    if f.val.is_array() {
+                        args.push(parens(
                             fold_arg_name(fld)
                                 .append(":")
                                 .append(Doc::line())
                                 .append(self.emit_field_record_type(env, f)),
-                        )),
-                        FieldT::Plain { .. } => args.push(fold_arg_name(fld)),
+                        ));
+                    } else {
+                        args.push(fold_arg_name(fld));
                     }
                 }
                 args
@@ -4432,6 +4497,12 @@ impl<'a> Emitter<'a> {
             TypeT::Pointer(_, _) => {
                 self.report(
                     format!("pointer parameters are not supported in pure functions"),
+                    &ty.loc,
+                );
+            }
+            TypeT::FixedArray(_, _) => {
+                self.report(
+                    format!("array parameters are not supported in pure functions"),
                     &ty.loc,
                 );
             }

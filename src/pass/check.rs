@@ -72,11 +72,6 @@ impl<'a> Checker<'a> {
     fn check_field(&mut self, env: &Env, field: &Field) {
         match &field.val {
             FieldT::Plain { name: _, ty } => self.check_type(env, ty),
-            FieldT::Array {
-                name: _,
-                elem_ty,
-                length: _,
-            } => self.check_type(env, elem_ty),
         }
     }
 
@@ -92,6 +87,9 @@ impl<'a> Checker<'a> {
             TypeT::PtrdiffT => {}
             TypeT::Pointer(ty, _kind) => {
                 self.check_type(env, ty);
+            }
+            TypeT::FixedArray(elem_ty, _) => {
+                self.check_type(env, elem_ty);
             }
             TypeT::SpecInt | TypeT::SpecNat => {}
             TypeT::SLProp => {}
@@ -138,6 +136,7 @@ impl<'a> Checker<'a> {
             TypeT::SizeT => true,
             TypeT::PtrdiffT => true,
             TypeT::Pointer(_, _) => true, // == 0 ?
+            TypeT::FixedArray(_, _) => false,
             TypeT::SpecInt | TypeT::SpecNat => true,
             TypeT::SLProp => true, // true/false
             TypeT::TypeRef(_) => false,
@@ -236,6 +235,7 @@ impl<'a> Checker<'a> {
                         let arr_ty = env.vtype_whnf(arr_ty);
                         match &arr_ty.val {
                             TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => {}
+                            TypeT::FixedArray(_, _) => {}
                             TypeT::Error => {}
                             _ => self.report(format!("not an array type: {}", arr_ty), &rval.loc),
                         }

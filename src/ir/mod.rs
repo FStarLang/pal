@@ -143,6 +143,9 @@ pub enum TypeT {
     SizeT,
     PtrdiffT,
     Pointer(Rc<Type>, PointerKind),
+    /// Fixed-size C array type `T[N]`. Decays to `Pointer(T, Array)` in
+    /// function parameters (handled by the decay pass).
+    FixedArray(Rc<Type>, u64),
 
     SpecInt,
     SpecNat,
@@ -391,39 +394,37 @@ pub type Field = Ast<FieldT>;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum FieldT {
     /// A regular field: `T name;`
+    /// For fixed-size C array fields (`T name[length]`), the type is `FixedArray(T, length)`.
     Plain { name: Ident, ty: Rc<Type> },
-    /// A fixed-size C array field: `T name[length];`. The element type
-    /// `elem_ty` and constant `length` are tracked separately so that
-    /// emission can treat the field as inline storage.
-    Array {
-        name: Ident,
-        elem_ty: Rc<Type>,
-        length: u64,
-    },
 }
 
 impl FieldT {
     pub fn name(&self) -> &Ident {
         match self {
-            FieldT::Plain { name, .. } | FieldT::Array { name, .. } => name,
+            FieldT::Plain { name, .. } => name,
         }
     }
 
     pub fn is_array(&self) -> bool {
-        matches!(self, FieldT::Array { .. })
+        match self {
+            FieldT::Plain { ty, .. } => matches!(ty.val, TypeT::FixedArray(_, _)),
+        }
     }
 
-    /// Returns the "logical" type of the field. For `Plain` this is the
-    /// stored type; for `Array` this is `Pointer(elem_ty, Array)` —
-    /// matching how an array field was previously represented in the
-    /// IR, so that callers that only care about the type shape (type
-    /// inference, member-access type lookup, etc.) need no change.
-    pub fn logical_type(&self, loc: &Rc<SourceInfo>) -> Rc<Type> {
+    /// For array fields, return the element type and length.
+    pub fn fixed_array_info(&self) -> Option<(&Rc<Type>, u64)> {
+        match self {
+            FieldT::Plain { ty, .. } => match &ty.val {
+                TypeT::FixedArray(elem_ty, length) => Some((elem_ty, *length)),
+                _ => None,
+            },
+        }
+    }
+
+    /// Returns the "logical" type of the field.
+    pub fn logical_type(&self, _loc: &Rc<SourceInfo>) -> Rc<Type> {
         match self {
             FieldT::Plain { ty, .. } => ty.clone(),
-            FieldT::Array { elem_ty, .. } => Rc::new(
-                TypeT::Pointer(elem_ty.clone(), PointerKind::Array).with_loc_core(loc.clone()),
-            ),
         }
     }
 }

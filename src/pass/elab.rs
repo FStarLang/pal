@@ -39,11 +39,6 @@ impl<'a> Elaborator<'a> {
     fn elab_field(&mut self, env: &Env, field: &mut Field) {
         match &mut field.val {
             FieldT::Plain { name: _, ty } => self.elab_type(env, Rc::make_mut(ty)),
-            FieldT::Array {
-                name: _,
-                elem_ty,
-                length: _,
-            } => self.elab_type(env, Rc::make_mut(elem_ty)),
         }
     }
 
@@ -63,6 +58,9 @@ impl<'a> Elaborator<'a> {
                     PointerKind::Array => {}
                     PointerKind::ArrayPtr => {}
                 }
+            }
+            TypeT::FixedArray(elem_ty, _) => {
+                self.elab_type(env, Rc::make_mut(elem_ty));
             }
             TypeT::Unknown => {}
             TypeT::Error => {}

@@ -195,6 +195,12 @@ fn main() {
     }
 
     let t = Instant::now();
+    pass::decay::decay(&mut combined_tu);
+    if cli.time_passes {
+        eprintln!("  decay: {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
     pass::elab::elab(&mut diags, &mut combined_tu);
     if cli.time_passes {
         eprintln!("  elab: {:.3}s", t.elapsed().as_secs_f64());

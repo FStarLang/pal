@@ -254,14 +254,7 @@ public:
         }
         auto qt = f->getType();
         auto *qtPtr = qt.IgnoreParens().getTypePtr();
-        if (auto *cat = dyn_cast<ConstantArrayType>(qtPtr)) {
-          auto elemTy = trQualType(cat->getElementType(), f->getSourceRange(),
-                                   liftStructs);
-          builder.array_field(
-              ctx.mk_ident(toStr(f->getName()), std::move(floc)),
-              std::move(elemTy), cat->getSize().getZExtValue());
-        } else if (isa<VariableArrayType>(qtPtr) ||
-                   isa<IncompleteArrayType>(qtPtr)) {
+        if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
           reportUnsupported(f->getSourceRange(), floc,
                             "unsupported non-constant-length array field", "");
         } else {
@@ -294,14 +287,7 @@ public:
         }
         auto qt = f->getType();
         auto *qtPtr = qt.IgnoreParens().getTypePtr();
-        if (auto *cat = dyn_cast<ConstantArrayType>(qtPtr)) {
-          auto elemTy = trQualType(cat->getElementType(), f->getSourceRange(),
-                                   liftStructs);
-          builder.array_field(
-              ctx.mk_ident(toStr(f->getName()), std::move(floc)),
-              std::move(elemTy), cat->getSize().getZExtValue());
-        } else if (isa<VariableArrayType>(qtPtr) ||
-                   isa<IncompleteArrayType>(qtPtr)) {
+        if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
           reportUnsupported(f->getSourceRange(), floc,
                             "unsupported non-constant-length array field", "");
         } else {
@@ -339,7 +325,13 @@ public:
           trQualType(ptr->getPointeeType(), /*TODO*/ range, liftStructs));
     } else if (auto adj = dyn_cast<AdjustedType>(t)) {
       return trQualType(adj->getOriginalType(), range, liftStructs);
+    } else if (auto cat = dyn_cast<ConstantArrayType>(t)) {
+      return mk_fixed_array_type(
+          std::move(loc),
+          trQualType(cat->getElementType(), /* TODO */ range, liftStructs),
+          cat->getSize().getZExtValue());
     } else if (auto arr = dyn_cast<ArrayType>(t)) {
+      // VLA or incomplete array — decays to pointer
       return mk_pointer_array(
           std::move(loc),
           trQualType(arr->getElementType(), /* TODO */ range, liftStructs));
@@ -1313,19 +1305,8 @@ public:
         if (auto vd = dyn_cast<VarDecl>(d)) {
           auto id = ctx.mk_ident(toStr(vd->getName()), dloc.clone());
           auto qt = vd->getType();
-          if (auto *cat =
-                  dyn_cast<ConstantArrayType>(qt.IgnoreParens().getTypePtr())) {
-            auto elemTy =
-                trQualType(cat->getElementType(), vd->getSourceRange());
-            auto sizeVal = cat->getSize().getZExtValue();
-            auto sizeStr = std::to_string(sizeVal);
-            auto sizeExpr = mk_int_lit(dloc.clone(), mk_bigint(toStr(sizeStr)),
-                                       mk_sizet(dloc.clone()));
-            stmts.push(mk_decl_stack_array(dloc.clone(), id.clone(),
-                                           std::move(elemTy),
-                                           std::move(sizeExpr)));
-          } else if (auto *vat = dyn_cast<VariableArrayType>(
-                         qt.IgnoreParens().getTypePtr())) {
+          if (auto *vat =
+                  dyn_cast<VariableArrayType>(qt.IgnoreParens().getTypePtr())) {
             auto elemTy =
                 trQualType(vat->getElementType(), vd->getSourceRange());
             auto sizeExpr = trRValue(vat->getSizeExpr());

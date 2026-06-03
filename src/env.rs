@@ -343,6 +343,7 @@ impl Env {
                     TypeT::Pointer(elem, PointerKind::Array | PointerKind::ArrayPtr) => {
                         Ok(elem.clone().into())
                     }
+                    TypeT::FixedArray(elem, _) => Ok(elem.clone().into()),
                     _ => Err(InferError::CannotIndex(arr_ty)),
                 }
             }
@@ -431,8 +432,8 @@ impl Env {
             ExprT::UnionInit(name, _, _) => Ok(expr
                 .reuse_loc(TypeT::TypeRef(TypeRefKind::Union(name.clone())))
                 .into()),
-            ExprT::ArrayInit(elem_ty, _) => Ok(expr
-                .reuse_loc(TypeT::Pointer(elem_ty.clone(), PointerKind::Array))
+            ExprT::ArrayInit(elem_ty, elems) => Ok(expr
+                .reuse_loc(TypeT::FixedArray(elem_ty.clone(), elems.len() as u64))
                 .into()),
             ExprT::Cond(_, then_expr, _) => self.infer_expr(then_expr),
             ExprT::AssignExpr(_, rhs) => self.infer_expr(rhs),
@@ -524,6 +525,7 @@ impl Env {
 
             either_side!(TypeT::Void) => None,
             either_side!(TypeT::Pointer(_, _)) => None,
+            either_side!(TypeT::FixedArray(_, _)) => None,
 
             either_side!(TypeT::TypeRef(_)) => None,
 
@@ -553,6 +555,7 @@ impl Env {
             | TypeT::SizeT
             | TypeT::PtrdiffT
             | TypeT::Pointer(_, _)
+            | TypeT::FixedArray(_, _)
             | TypeT::SpecInt
             | TypeT::SpecNat
             | TypeT::SLProp
@@ -591,6 +594,9 @@ impl Env {
             (TypeT::PtrdiffT, TypeT::PtrdiffT) => true,
             (TypeT::Pointer(t1, k1), TypeT::Pointer(t2, k2)) => {
                 k1 == k2 && self.vtype_eq(t1.clone().into(), t2.clone().into())
+            }
+            (TypeT::FixedArray(t1, n1), TypeT::FixedArray(t2, n2)) => {
+                n1 == n2 && self.vtype_eq(t1.clone().into(), t2.clone().into())
             }
             (TypeT::SpecInt, TypeT::SpecInt) => true,
             (TypeT::SpecNat, TypeT::SpecNat) => true,

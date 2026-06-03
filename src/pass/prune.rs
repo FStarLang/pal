@@ -71,11 +71,6 @@ fn in_main_file(main_files: &[Rc<str>], loc: &SourceInfo) -> bool {
 fn scan_field(deps: &mut HashSet<DeclName>, field: &Field) {
     match &field.val {
         FieldT::Plain { name: _, ty } => scan_type(deps, ty),
-        FieldT::Array {
-            name: _,
-            elem_ty,
-            length: _,
-        } => scan_type(deps, elem_ty),
     }
 }
 
@@ -95,6 +90,9 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
                 PointerKind::Array => {}
                 PointerKind::ArrayPtr => {}
             }
+        }
+        TypeT::FixedArray(elem_ty, _) => {
+            scan_type(deps, elem_ty);
         }
         TypeT::Unknown => {}
         TypeT::Error => {}

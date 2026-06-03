@@ -448,18 +448,6 @@ impl DeclBuilder {
         })
     }
 
-    fn array_field(&mut self, name: Rc<Ident>, elem_ty: Rc<Type>, length: u64) {
-        let loc = name.loc.clone();
-        self.fields.push(Ast {
-            loc,
-            val: FieldT::Array {
-                name: (*name).clone(),
-                elem_ty,
-                length,
-            },
-        })
-    }
-
     fn requires(&mut self, p: Rc<Expr>) {
         self.requires.push(p)
     }
@@ -558,6 +546,9 @@ fn mk_pointer_unknown(loc: Rc<SourceInfo>, to: Rc<Type>) -> Rc<Type> {
 }
 fn mk_pointer_array(loc: Rc<SourceInfo>, to: Rc<Type>) -> Rc<Type> {
     mk_ast(loc, TypeT::Pointer(to, PointerKind::Array))
+}
+fn mk_fixed_array_type(loc: Rc<SourceInfo>, elem_ty: Rc<Type>, length: u64) -> Rc<Type> {
+    mk_ast(loc, TypeT::FixedArray(elem_ty, length))
 }
 fn mk_type_struct(loc: Rc<SourceInfo>, n: Rc<Ident>) -> Rc<Type> {
     mk_ast(loc, TypeT::TypeRef(TypeRefKind::Struct(n)))
