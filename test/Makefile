@@ -10,7 +10,6 @@ check-template:
 
 .PHONY: $(TESTS)
 $(TESTS):
-	@echo "=== $@ ==="
 	@$(MAKE) -C $@
 
 clean:

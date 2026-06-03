@@ -1,5 +1,6 @@
 **/out/
 **/_cache/
+**/obj/
 **/.depend
 diagnostics.json
 source_range_info.json
