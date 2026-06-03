@@ -4357,7 +4357,7 @@ impl<'a> Emitter<'a> {
                 Doc::intersperse(ensures_props, Doc::text(" /\\ "))
             };
             naryfn(vec![
-                Doc::text("Pure"),
+                Doc::text("Ghost"),
                 ret_type_doc,
                 parens(Doc::text("requires").append(Doc::line()).append(req_doc)),
                 parens(
@@ -4375,7 +4375,7 @@ impl<'a> Emitter<'a> {
                 ),
             ])
         } else {
-            ret_type_doc
+            unaryfn(Doc::text("GTot"), ret_type_doc)
         };
 
         let body_doc = if matches!(let_decl.ret_type.val, TypeT::SLProp) {
@@ -4391,11 +4391,7 @@ impl<'a> Emitter<'a> {
             ty_doc,
             body_doc,
         );
-        if let_decl.is_rec {
-            body
-        } else {
-            Doc::text("unfold").append(Doc::hardline()).append(body)
-        }
+        body
     }
 
     fn emit_letimpure_decl(&mut self, env: &Env, let_decl: &LetDecl) -> Doc {
