@@ -117,7 +117,6 @@ mk_punct_table! {
     Lt => "<",
     Gt => ">",
     EqEq => "==",
-    EqEqGt => "==>",
     Hat => "^",
     PipePipe => "||",
     Pipe => "|",
@@ -253,6 +252,21 @@ fn punct<'tokens, 'src: 'tokens, I: ValueInput<'tokens, Token = Token<'src>, Spa
     op: Punct,
 ) -> impl Parser<'tokens, I, Token<'src>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone {
     just(Token::Punct(op)).padded_by(ws())
+}
+
+fn punct2<
+    'tokens,
+    'src: 'tokens,
+    I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
+    Span,
+>(
+    op1: Punct,
+    op2: Punct,
+) -> impl Parser<'tokens, I, (Token<'src>, Token<'src>), extra::Err<Rich<'tokens, Token<'src>, Span>>>
++ Clone {
+    just(Token::Punct(op1))
+        .then(just(Token::Punct(op2)))
+        .padded_by(ws())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -893,11 +907,15 @@ fn expr_parser<
         let conditional_expression = logical_or_expression
             .clone()
             .then(
-                punct(Punct::EqEqGt)
+                punct2(Punct::EqEq, Punct::Gt)
                     .ignore_then(recursive(|implies_rhs| {
                         logical_or_expression
                             .clone()
-                            .then(punct(Punct::EqEqGt).ignore_then(implies_rhs).or_not())
+                            .then(
+                                punct2(Punct::EqEq, Punct::Gt)
+                                    .ignore_then(implies_rhs)
+                                    .or_not(),
+                            )
                             .map_with(|(lhs, rhs): (Expr, Option<Expr>), extra| -> Expr {
                                 match rhs {
                                     Some(rhs) => mk_binop(
@@ -1076,18 +1094,6 @@ fn relex_inline_code<'a>(diagnostics: &mut Diagnostics, code: &'a InlineCode) ->
             ));
         }
         source_infos.push(loc.clone());
-    }
-    // Merge adjacent EqEq + Gt tokens (no whitespace between) into EqEqGt.
-    // Clang's lexer tokenizes `==>` as `==` followed by `>`, so we merge them here.
-    let mut i = 0;
-    while i + 1 < tokens.len() {
-        if tokens[i].0 == Token::Punct(Punct::EqEq) && tokens[i + 1].0 == Token::Punct(Punct::Gt) {
-            tokens[i].0 = Token::Punct(Punct::EqEqGt);
-            // Expand span to cover both original tokens
-            tokens[i].1 = (tokens[i].1.start..tokens[i + 1].1.end).into();
-            tokens.remove(i + 1);
-        }
-        i += 1;
     }
     RelexedTokens {
         tokens,
