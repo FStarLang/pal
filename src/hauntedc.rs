@@ -628,7 +628,7 @@ fn expr_parser<
                         let ty = ty_val.with_loc(loc.clone());
                         Ok(ExprT::IntLit(Rc::new(i), ty).with_loc(loc).into())
                     }
-                    Err(err) => Err(Rich::custom(span, err)),
+                    Err(err) => Err(Rich::custom(span, err.to_string())),
                 }
             });
 
