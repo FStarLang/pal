@@ -22,7 +22,11 @@ struct Cli {
     #[arg(long = "tmpdir", help = "Directory for intermediate temporary files")]
     tmpdir: Option<String>,
 
-    #[arg(long = "outdir", help = "Output directory for generated .fst files")]
+    #[arg(
+        long = "outdir",
+        short = 'o',
+        help = "Output directory for generated .fst files"
+    )]
     outdir: Option<String>,
 
     #[arg(
@@ -202,56 +206,48 @@ fn main() {
         );
     }
 
-    let outdir = match &cli.outdir {
-        Some(outdir) => Path::new(outdir).to_path_buf(),
-        None => match &cli.tmpdir {
-            Some(tmpdir) => Path::new(tmpdir).to_path_buf(),
-            None => {
-                let first_file = std::path::absolute(&cli.files[0])
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                Path::new(&first_file).parent().unwrap().to_path_buf()
-            }
-        },
-    };
-    std::fs::create_dir_all(&outdir).unwrap();
+    if let Some(outdir) = &cli.outdir {
+        let outdir = Path::new(&outdir).to_path_buf();
+        std::fs::create_dir_all(&outdir).unwrap();
 
-    for module in &modules {
-        std::fs::write(
-            outdir.join(format!("{}.fst", module.module_name)),
-            &module.code,
-        )
-        .unwrap();
-        if let Some(fsti_code) = &module.fsti_code {
+        for module in &modules {
             std::fs::write(
-                outdir.join(format!("{}.fsti", module.module_name)),
-                fsti_code,
+                outdir.join(format!("{}.fst", module.module_name)),
+                &module.code,
             )
             .unwrap();
+            if let Some(fsti_code) = &module.fsti_code {
+                std::fs::write(
+                    outdir.join(format!("{}.fsti", module.module_name)),
+                    fsti_code,
+                )
+                .unwrap();
+            }
         }
+
+        // Write TranslationErrors.fst — asserts False when there are errors so
+        // that F* reports a failure, but individual modules remain verifiable.
+        std::fs::write(outdir.join("TranslationErrors.fst"), {
+            let mut errors_code = "module TranslationErrors\n".to_string();
+            if diags.has_errors() {
+                errors_code += "let _ = assert False\n";
+            }
+            errors_code
+        })
+        .unwrap();
+
+        // Write single unified source_range_info.json
+        std::fs::write(
+            outdir.join("source_range_info.json"),
+            source_range_info::serialize(&modules),
+        )
+        .unwrap();
+
+        // Write diagnostics
+        std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
+    } else {
+        eprintln!("Not saving generated Pulse output, specify --outdir to create files");
     }
-
-    // Write TranslationErrors.fst — asserts False when there are errors so
-    // that F* reports a failure, but individual modules remain verifiable.
-    std::fs::write(outdir.join("TranslationErrors.fst"), {
-        let mut errors_code = "module TranslationErrors\n".to_string();
-        if diags.has_errors() {
-            errors_code += "let _ = assert False\n";
-        }
-        errors_code
-    })
-    .unwrap();
-
-    // Write single unified source_range_info.json
-    std::fs::write(
-        outdir.join("source_range_info.json"),
-        source_range_info::serialize(&modules),
-    )
-    .unwrap();
-
-    // Write diagnostics
-    std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
 
     if !cli.quiet {
         diags.print_to_stderr(&mut *vfs);
