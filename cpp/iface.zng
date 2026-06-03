@@ -300,5 +300,5 @@ mod crate::clang {
 }
 
 extern "C++" {
-    fn parse_file(&mut crate::clang::Ctx);
+    safe fn parse_file(&mut crate::clang::Ctx);
 }

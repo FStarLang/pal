@@ -804,18 +804,18 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zngur"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fc89b2ef4f7f8aa2670ce10f5f912815e0cceec7de4b66a81e0430f4f8d07a3"
+checksum = "7fc912d12934b4d04aabc52c14db6fc88ae8aa5a47902f27e8759c2de254723f"
 dependencies = [
  "zngur-generator",
 ]
 
 [[package]]
 name = "zngur-def"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33d84ca623b1b418b60ab154b413a7e0d918c1b3285f1ad522162095e871b3bb"
+checksum = "8f27e49a62db537cea43a6c122ded7eda99c4ac0ca1d7cfd74f2bf6a6c88712d"
 dependencies = [
  "indexmap",
  "itertools",
@@ -823,9 +823,9 @@ dependencies = [
 
 [[package]]
 name = "zngur-generator"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4af1bc91c503a4c1a67cfc14960efde673440625c8143495ce94d37b6b8047e"
+checksum = "5ffad8c6994c477023aba7613bdf17c470003bbd191846d3096e84ffecf86d4c"
 dependencies = [
  "askama",
  "hex",
@@ -838,9 +838,9 @@ dependencies = [
 
 [[package]]
 name = "zngur-parser"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88d8f9c5492e2623387eef9e9dcc247d28d8f005d0b3c99940ff8fee28e545a6"
+checksum = "8d66c1b85ca6eab9576df5de31758cb1f9046b4ce47b25f45dabcb0fc7ef8789"
 dependencies = [
  "ariadne",
  "chumsky 1.0.0-alpha.8",
