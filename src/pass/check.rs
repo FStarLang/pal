@@ -105,11 +105,12 @@ impl<'a> Checker<'a> {
                 env.push_this(ty.clone());
                 self.check_slprop(env, p);
             }
-            TypeT::RefineValue(ty, _binding_name, binding_ty, p) => {
+            TypeT::RefineValue(ty, binding_name, binding_ty, p) => {
                 self.check_type(env, ty);
                 self.check_type(env, binding_ty);
                 let env = &mut env.clone();
                 env.push_this(ty.clone());
+                env.push_var_decl(binding_name, binding_ty.clone(), LocalDeclKind::RValue);
                 self.check_slprop(env, p);
             }
             TypeT::Plain(ty) => self.check_type(env, ty),

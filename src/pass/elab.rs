@@ -71,12 +71,13 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(p), Some(&slprop_ty));
                 self.cast_to_slprop(env, p);
             }
-            TypeT::RefineValue(ty, _binding_name, binding_ty, p) => {
+            TypeT::RefineValue(ty, binding_name, binding_ty, p) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 self.elab_type(env, Rc::make_mut(binding_ty));
 
                 let env = &mut env.clone();
                 env.push_this(ty.clone());
+                env.push_var_decl(binding_name, binding_ty.clone(), LocalDeclKind::RValue);
                 let slprop_ty = TypeT::SLProp.with_loc(p.loc.clone());
                 self.elab_rvalue(env, Rc::make_mut(p), Some(&slprop_ty));
                 self.cast_to_slprop(env, p);

@@ -123,7 +123,7 @@ void memcpy_(size_t len, _array const uint8_t *a1, _out _array uint8_t *a2)
 }
 
 _refine_value(context_full_data state,
-  tag_relation(*this, _inline_pulse(state)) && context_full_pred(*this, _inline_pulse(state)))
+  tag_relation(*this, state) && context_full_pred(*this, state))
 typedef context_t *context_obj;
 
 _letimpure(context_full_data engine_state(const context_obj ctx),

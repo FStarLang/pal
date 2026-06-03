@@ -1101,7 +1101,17 @@ impl<'a> Emitter<'a> {
                     let _ = val_name; // name is used implicitly in the refinement prop
                     let p = &mut p.clone();
                     self.subst_this_rvalue(env, Rc::make_mut(p), this);
-                    props.push(self.emit_rvalue(env, p));
+                    let mut env = env.clone();
+                    env.push_var_decl(binding_name, binding_ty.clone(), LocalDeclKind::RValue);
+                    // Pre-register the binding name in the mangler so it emits without
+                    // the "var_" prefix, matching the existential binding name exactly.
+                    let name_key = Name::Var(binding_name.val.clone());
+                    if !self.nm.map.contains_key(&name_key) {
+                        let raw: Rc<str> = Rc::from(&*binding_name.val);
+                        self.nm.used.insert(raw.clone());
+                        self.nm.map.insert(name_key, raw);
+                    }
+                    props.push(self.emit_rvalue(&env, p));
                 }
             }
             TypeT::Plain(_) => {}

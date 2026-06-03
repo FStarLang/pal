@@ -50,7 +50,7 @@ _include_pulse(Recursive_struct_include1,
 
 _type(spec_list, list Int32.t)
 
-_refine_value(spec_list elements, _inline_pulse(Recursive_struct_include1.is_list $(this) p elements))
+_refine_value(spec_list elements, _inline_pulse(Recursive_struct_include1.is_list $(this) p $(elements)))
 _refine_uninit(_inline_pulse(pts_to_uninit $(this)))
 _plain
 typedef struct node *list;
