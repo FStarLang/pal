@@ -35,7 +35,6 @@ void write_first_a0(struct mixed *s, int x)
 }
 
 
-//should this verify?
 int read_first_b_by_value(_plain struct mixed s)
  _ensures(s.b[0] == return)
 {

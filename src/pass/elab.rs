@@ -36,6 +36,17 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    fn elab_field(&mut self, env: &Env, field: &mut Field) {
+        match &mut field.val {
+            FieldT::Plain { name: _, ty } => self.elab_type(env, Rc::make_mut(ty)),
+            FieldT::Array {
+                name: _,
+                elem_ty,
+                length: _,
+            } => self.elab_type(env, Rc::make_mut(elem_ty)),
+        }
+    }
+
     fn elab_type(&mut self, env: &Env, ty: &mut Type) {
         match &mut ty.val {
             TypeT::Int {
@@ -771,27 +782,13 @@ impl<'a> Elaborator<'a> {
                 name: _, fields, ..
             }) => {
                 for f in fields {
-                    match &mut f.val {
-                        FieldT::Plain { name: _, ty } => self.elab_type(env, Rc::make_mut(ty)),
-                        FieldT::Array {
-                            name: _,
-                            elem_ty,
-                            length: _,
-                        } => self.elab_type(env, Rc::make_mut(elem_ty)),
-                    }
+                    self.elab_field(env, f);
                 }
             }
             DeclT::StructDecl(_) => {}
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
                 for f in fields {
-                    match &mut f.val {
-                        FieldT::Plain { name: _, ty } => self.elab_type(env, Rc::make_mut(ty)),
-                        FieldT::Array {
-                            name: _,
-                            elem_ty,
-                            length: _,
-                        } => self.elab_type(env, Rc::make_mut(elem_ty)),
-                    }
+                    self.elab_field(env, f);
                 }
             }
             DeclT::IncludeDecl(include_decl) => {
@@ -866,26 +863,12 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             }
             DeclT::StructDefn(StructDefn { fields, .. }) => {
                 for f in fields {
-                    match &mut f.val {
-                        FieldT::Plain { name: _, ty } => elab.elab_type(&env, Rc::make_mut(ty)),
-                        FieldT::Array {
-                            name: _,
-                            elem_ty,
-                            length: _,
-                        } => elab.elab_type(&env, Rc::make_mut(elem_ty)),
-                    }
+                    elab.elab_field(&env, f);
                 }
             }
             DeclT::UnionDefn(UnionDefn { fields, .. }) => {
                 for f in fields {
-                    match &mut f.val {
-                        FieldT::Plain { name: _, ty } => elab.elab_type(&env, Rc::make_mut(ty)),
-                        FieldT::Array {
-                            name: _,
-                            elem_ty,
-                            length: _,
-                        } => elab.elab_type(&env, Rc::make_mut(elem_ty)),
-                    }
+                    elab.elab_field(&env, f);
                 }
             }
             DeclT::LetDecl(let_decl) => {

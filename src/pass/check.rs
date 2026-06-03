@@ -69,6 +69,17 @@ impl<'a> Checker<'a> {
         self.check_has_type(env, p, TypeT::Bool.with_loc_core(p.loc.clone()).into());
     }
 
+    fn check_field(&mut self, env: &Env, field: &Field) {
+        match &field.val {
+            FieldT::Plain { name: _, ty } => self.check_type(env, ty),
+            FieldT::Array {
+                name: _,
+                elem_ty,
+                length: _,
+            } => self.check_type(env, elem_ty),
+        }
+    }
+
     fn check_type(&mut self, env: &Env, ty: &Type) {
         match &ty.val {
             TypeT::Void => {}
@@ -643,27 +654,13 @@ impl<'a> Checker<'a> {
                 name: _, fields, ..
             }) => {
                 for f in fields {
-                    match &f.val {
-                        FieldT::Plain { name: _, ty } => self.check_type(env, ty),
-                        FieldT::Array {
-                            name: _,
-                            elem_ty,
-                            length: _,
-                        } => self.check_type(env, elem_ty),
-                    }
+                    self.check_field(env, f);
                 }
             }
             DeclT::StructDecl(_) => {}
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
                 for f in fields {
-                    match &f.val {
-                        FieldT::Plain { name: _, ty } => self.check_type(env, ty),
-                        FieldT::Array {
-                            name: _,
-                            elem_ty,
-                            length: _,
-                        } => self.check_type(env, elem_ty),
-                    }
+                    self.check_field(env, f);
                 }
             }
             DeclT::IncludeDecl(_) => {}
