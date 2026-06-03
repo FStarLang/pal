@@ -66,6 +66,14 @@ let array_spec_zeroed_idx a n x i = ()
 let array_pts_to #a (x: array a) (p: perm) (y: array_spec a) : slprop =
   A.pts_to_mask x #p (to_seq y) (to_mask y)
 
+fn array_read_all u#a (#a: Type u#a) (x: array a)
+  preserves array_pts_to x 'p 'y
+  returns z: array_spec a
+  ensures rewrites_to z 'y
+{
+  admit ()
+}
+
 let freeable_array #a (r: array a) : slprop =
   pure (A.is_full_array r)
 

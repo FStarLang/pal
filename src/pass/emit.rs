@@ -144,8 +144,9 @@ type Doc = RcDoc<'static, Annotation>;
 
 /// Tracks whether an emitted expression is an F* lvalue (ref a) or rvalue (a).
 enum ExprKind {
-    LValue(Doc),
-    RValue(Doc),
+    LValue(Doc),      // ref a
+    ArrayLValue(Doc), // array elem (when a = array_spec elem)
+    RValue(Doc),      // a
 }
 
 impl ExprKind {
@@ -153,6 +154,7 @@ impl ExprKind {
     fn to_rvalue(self) -> Doc {
         match self {
             ExprKind::LValue(doc) => parens(Doc::text("!").append(doc)),
+            ExprKind::ArrayLValue(doc) => unaryfn(Doc::text("array_read_all"), doc),
             ExprKind::RValue(doc) => doc,
         }
     }
@@ -160,7 +162,7 @@ impl ExprKind {
     /// Extract the raw document without rvalue/lvalue conversion.
     fn into_doc(self) -> Doc {
         match self {
-            ExprKind::LValue(doc) | ExprKind::RValue(doc) => doc,
+            ExprKind::LValue(doc) | ExprKind::ArrayLValue(doc) | ExprKind::RValue(doc) => doc,
         }
     }
 }
@@ -1263,7 +1265,7 @@ impl<'a> Emitter<'a> {
     fn emit_lvalue(&mut self, env: &Env, v: &Expr) -> Doc {
         match self.emit_expr(env, v) {
             ExprKind::LValue(doc) => doc,
-            ExprKind::RValue(_) => {
+            _ => {
                 self.report(format!("cannot produce lvalue for {}", v), &v.loc);
                 Doc::text("(admit())")
             }
@@ -1336,43 +1338,34 @@ impl<'a> Emitter<'a> {
                                 .map(|f| f.val.is_array())
                                 .unwrap_or(false);
                             match self.emit_expr(env, x) {
-                                ExprKind::LValue(x_doc) if is_inline_array => {
-                                    // Inline array fields are not stored behind a `ref` —
-                                    // the field projection already yields the array handle
-                                    // (an rvalue).
-                                    ExprKind::RValue(annotated(v, || {
-                                        unaryfn(
-                                            self.emit_name(Name::StructFieldProj(
-                                                struct_name.val.clone(),
-                                                a.val.clone(),
-                                            )),
-                                            x_doc,
-                                        )
-                                    }))
-                                }
-                                ExprKind::LValue(x_doc) => ExprKind::LValue(annotated(v, || {
-                                    unaryfn(
-                                        self.emit_name(Name::StructFieldProj(
-                                            struct_name.val.clone(),
-                                            a.val.clone(),
-                                        )),
-                                        x_doc,
-                                    )
-                                })),
-                                ExprKind::RValue(_) if is_inline_array => {
-                                    // Inline-array field projected from a by-value
-                                    // struct yields a `full_array_spec` value that
-                                    // is only meaningful in an indexing context
-                                    // (handled in `ExprT::Index`). Reject any
-                                    // other use.
-                                    self.report(
-                                        format!(
-                                            "inline-array field `{}` of a by-value struct can only be used inside an indexing expression (e.g. `s.{}[i]`)",
-                                            a, a
-                                        ),
-                                        &v.loc,
-                                    );
-                                    ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                                ExprKind::ArrayLValue(_) => unreachable!(
+                                    "emitting an expression of structure type cannot produce an array"
+                                ),
+                                ExprKind::LValue(x_doc) => {
+                                    if is_inline_array {
+                                        // Inline array fields are not stored behind a `ref` —
+                                        // the field projection already yields the array handle
+                                        // (an rvalue).
+                                        ExprKind::ArrayLValue(annotated(v, || {
+                                            unaryfn(
+                                                self.emit_name(Name::StructFieldProj(
+                                                    struct_name.val.clone(),
+                                                    a.val.clone(),
+                                                )),
+                                                x_doc,
+                                            )
+                                        }))
+                                    } else {
+                                        ExprKind::LValue(annotated(v, || {
+                                            unaryfn(
+                                                self.emit_name(Name::StructFieldProj(
+                                                    struct_name.val.clone(),
+                                                    a.val.clone(),
+                                                )),
+                                                x_doc,
+                                            )
+                                        }))
+                                    }
                                 }
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
                                     x_doc.append(Doc::text(".")).append(self.emit_name(
@@ -1391,35 +1384,29 @@ impl<'a> Emitter<'a> {
                                 .map(|f| f.val.is_array())
                                 .unwrap_or(false);
                             match self.emit_expr(env, x) {
-                                ExprKind::LValue(x_doc) if is_inline_array => {
-                                    ExprKind::RValue(annotated(v, || {
-                                        unaryfn(
+                                ExprKind::ArrayLValue(_) => unreachable!(
+                                    "emitting an expression of union type cannot produce an array"
+                                ),
+                                ExprKind::LValue(x_doc) => {
+                                    if is_inline_array {
+                                        ExprKind::ArrayLValue(annotated(v, || {
+                                            unaryfn(
+                                                self.emit_name(Name::UnionFieldProj(
+                                                    union_name.val.clone(),
+                                                    a.val.clone(),
+                                                )),
+                                                x_doc,
+                                            )
+                                        }))
+                                    } else {
+                                        ExprKind::LValue(unaryfn(
                                             self.emit_name(Name::UnionFieldProj(
                                                 union_name.val.clone(),
                                                 a.val.clone(),
                                             )),
                                             x_doc,
-                                        )
-                                    }))
-                                }
-                                ExprKind::LValue(x_doc) => ExprKind::LValue(annotated(v, || {
-                                    unaryfn(
-                                        self.emit_name(Name::UnionFieldProj(
-                                            union_name.val.clone(),
-                                            a.val.clone(),
-                                        )),
-                                        x_doc,
-                                    )
-                                })),
-                                ExprKind::RValue(_) if is_inline_array => {
-                                    self.report(
-                                        format!(
-                                            "inline-array field `{}` of a by-value union can only be used inside an indexing expression (e.g. `u.{}[i]`)",
-                                            a, a
-                                        ),
-                                        &v.loc,
-                                    );
-                                    ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                                        ))
+                                    }
                                 }
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
                                     parens(
@@ -1478,76 +1465,6 @@ impl<'a> Emitter<'a> {
                 }))
             }
             ExprT::Index(arr, idx) => {
-                // Detect indexing of an inline-array field of a by-value
-                // struct/union: `Index(Member(x, a), idx)` where x has
-                // struct/union type, field `a` is inline-array, and x
-                // lowers to an RValue. In that case the field projection
-                // yields a `full_array_spec` value (not an array handle),
-                // so emit a pure `array_spec_idx` instead of a stateful
-                // `array_read`.
-                if let ExprT::Member(x, a) = &arr.val {
-                    if let Ok(x_ty) = env.infer_expr(x) {
-                        let x_ty = env.vtype_whnf(x_ty);
-                        let inline_proj = match &x_ty.val {
-                            TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => env
-                                .lookup_struct(struct_name)
-                                .and_then(|s| s.fields.iter().find(|f| f.val.name().val == a.val))
-                                .filter(|f| f.val.is_array())
-                                .map(|_| {
-                                    (
-                                        false,
-                                        Name::StructDirectFieldName(
-                                            struct_name.val.clone(),
-                                            a.val.clone(),
-                                        ),
-                                    )
-                                }),
-                            TypeT::TypeRef(TypeRefKind::Union(union_name)) => env
-                                .lookup_union(union_name)
-                                .and_then(|u| u.fields.iter().find(|f| f.val.name().val == a.val))
-                                .filter(|f| f.val.is_array())
-                                .map(|_| {
-                                    (
-                                        true,
-                                        Name::UnionFieldConstructor(
-                                            union_name.val.clone(),
-                                            a.val.clone(),
-                                        ),
-                                    )
-                                }),
-                            _ => None,
-                        };
-                        if let Some((is_union, proj_name)) = inline_proj {
-                            if let ExprKind::RValue(x_doc) = self.emit_expr(env, x) {
-                                let idx_doc = self.emit_rvalue(env, idx);
-                                let proj_doc = if is_union {
-                                    parens(
-                                        self.emit_name(proj_name)
-                                            .append("?._0")
-                                            .append(Doc::line())
-                                            .append(x_doc)
-                                            .group(),
-                                    )
-                                } else {
-                                    x_doc
-                                        .append(Doc::text("."))
-                                        .append(self.emit_name(proj_name))
-                                };
-                                return ExprKind::RValue(annotated(v, || {
-                                    parens(naryfn([
-                                        Doc::text("array_spec_idx"),
-                                        proj_doc,
-                                        parens(
-                                            Doc::text("SizeT.v")
-                                                .append(Doc::line())
-                                                .append(idx_doc),
-                                        ),
-                                    ]))
-                                }));
-                            }
-                        }
-                    }
-                }
                 // Check the type of the array expression to decide emission strategy
                 let arr_ty = env.infer_expr(arr).ok().map(|ty| env.vtype_whnf(ty));
                 let is_fixed_array = arr_ty
@@ -1557,7 +1474,7 @@ impl<'a> Emitter<'a> {
                     .as_ref()
                     .is_some_and(|ty| matches!(&ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr)));
 
-                if is_fixed_array && !env.is_lvalue(arr) {
+                if is_fixed_array {
                     // Pure FixedArray value (e.g., global pure array or by-value struct field);
                     // use array_spec_idx for pure indexing
                     let arr_doc = self.emit_rvalue(env, arr);
@@ -2609,9 +2526,13 @@ impl<'a> Emitter<'a> {
                         } else {
                             "array_write"
                         };
+                        let arr_doc = match self.emit_expr(env, arr) {
+                            ExprKind::ArrayLValue(arr_doc) => arr_doc,
+                            arr_doc => arr_doc.to_rvalue(),
+                        };
                         naryfn([
                             Doc::text(fn_name),
-                            self.emit_rvalue(env, arr),
+                            arr_doc,
                             self.emit_rvalue(env, idx),
                             self.emit_rvalue(env, t),
                         ])

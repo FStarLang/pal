@@ -57,6 +57,11 @@ let array_spec_seq #a (s: array_spec a) : GTot (Seq.seq (option a)) =
 let array_spec_of #a (x: array a) #p #y =
   observe (array_pts_to x p) #y
 
+fn array_read_all u#a (#a: Type u#a) (x: array a)
+  preserves array_pts_to x 'p 'y
+  returns z: array_spec a
+  ensures rewrites_to z 'y
+
 ghost fn array_value_of u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
   preserves array_pts_to x p y
   returns v: Seq.seq (option a)
