@@ -29,6 +29,8 @@ The test suite (`test/Makefile`) runs `pal` on each `.c` file in `test/`, then v
 
 ALWAYS RUN `make test -j8` TO MAKE SURE THE TESTS SUCCEED!!!
 
+Please commit your changes once you're done!
+
 NEVER RUN `git remote set-url`.  You are probably running in a sandbox with restricted permissions, it's expected that `git push` doesn't work.
 
 ## Architecture
