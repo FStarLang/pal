@@ -41,3 +41,13 @@ int read_first_b_by_value(_plain struct mixed s)
     return s.b[0];
 }
 
+
+struct containsarray {
+    int b[10];
+};
+
+void write_fifth_b(struct containsarray *a, int v)
+  _ensures(a->b[5] == v)
+{
+    a->b[5] = v;
+}
