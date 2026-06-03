@@ -660,6 +660,81 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Emit the zero-default value for a struct/union field. For
+    /// `Plain` fields this is just the type's zero default. For inline
+    /// arrays it is `array_spec_zeroed <elem> (SizeT.v Nsz) zero_default`
+    /// — a `full_array_spec` of length N whose every slot holds the
+    /// element type's zero default.
+    fn emit_field_default(&mut self, env: &Env, field: &Field) -> Doc {
+        match &field.val {
+            FieldT::Plain { ty, .. } => self.emit_type_default(env, ty),
+            FieldT::Array {
+                elem_ty, length, ..
+            } => parens(naryfn([
+                Doc::text("array_spec_zeroed"),
+                self.emit_type(env, elem_ty),
+                parens(Doc::text(format!("SizeT.v {}sz", length))),
+                Doc::text("zero_default"),
+            ])),
+        }
+    }
+
+    /// Render the F* type appearing in a struct/union's noeq record for
+    /// `field`. For `Plain` fields this is the stored type; for inline
+    /// arrays it is the array's contents (`full_array_spec T`) refined
+    /// to the static length.
+    fn emit_field_record_type(&mut self, env: &Env, field: &Field) -> Doc {
+        match &field.val {
+            FieldT::Plain { name: _, ty } => self.emit_type(env, ty),
+            FieldT::Array {
+                name: _,
+                elem_ty,
+                length,
+            } => parens(
+                Doc::text("v:")
+                    .append(Doc::line())
+                    .append(unaryfn(
+                        Doc::text("full_array_spec"),
+                        self.emit_type(env, elem_ty),
+                    ))
+                    .append(Doc::line())
+                    .append(Doc::text(format!("{{ array_spec_len v == {} }}", length))),
+            ),
+        }
+    }
+
+    /// Render the type of an inline-array ghost projection — the array
+    /// *handle* itself (no `ref` wrapper), refined to the same static
+    /// length as the noeq contents. Panics if called on a `Plain` field.
+    fn emit_field_array_handle_type(&mut self, env: &Env, field: &Field) -> Doc {
+        match &field.val {
+            FieldT::Array {
+                name: _,
+                elem_ty,
+                length,
+            } => parens(
+                Doc::text("a:")
+                    .append(Doc::line())
+                    .append(unaryfn(Doc::text("array"), self.emit_type(env, elem_ty)))
+                    .append(Doc::line())
+                    .append(Doc::text(format!("{{ length a == {} }}", length))),
+            ),
+            FieldT::Plain { .. } => {
+                unreachable!("emit_field_array_handle_type called on Plain field")
+            }
+        }
+    }
+
+    /// Render the F* type of the ghost projection / getter for `field`.
+    /// For inline-array fields this is the bare refined array handle
+    /// (no `ref` wrapper); for plain fields it is `ref T`.
+    fn emit_field_projection_type(&mut self, env: &Env, field: &Field) -> Doc {
+        match &field.val {
+            FieldT::Array { .. } => self.emit_field_array_handle_type(env, field),
+            FieldT::Plain { name: _, ty } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
+        }
+    }
+
     fn subst_this_rvalue(&mut self, env: &Env, rvalue: &mut Expr, this: &Rc<Expr>) {
         match &mut rvalue.val {
             ExprT::Var(x) => {
@@ -1244,7 +1319,26 @@ impl<'a> Emitter<'a> {
                     let ty = env.vtype_whnf(ty);
                     match &ty.val {
                         TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => {
+                            let is_inline_array = env
+                                .lookup_struct(struct_name)
+                                .and_then(|s| s.fields.iter().find(|f| f.val.name().val == a.val))
+                                .map(|f| f.val.is_array())
+                                .unwrap_or(false);
                             match self.emit_expr(env, x) {
+                                ExprKind::LValue(x_doc) if is_inline_array => {
+                                    // Inline array fields are not stored behind a `ref` —
+                                    // the field projection already yields the array handle
+                                    // (an rvalue).
+                                    ExprKind::RValue(annotated(v, || {
+                                        unaryfn(
+                                            self.emit_name(Name::StructFieldProj(
+                                                struct_name.val.clone(),
+                                                a.val.clone(),
+                                            )),
+                                            x_doc,
+                                        )
+                                    }))
+                                }
                                 ExprKind::LValue(x_doc) => ExprKind::LValue(annotated(v, || {
                                     unaryfn(
                                         self.emit_name(Name::StructFieldProj(
@@ -1254,6 +1348,21 @@ impl<'a> Emitter<'a> {
                                         x_doc,
                                     )
                                 })),
+                                ExprKind::RValue(_) if is_inline_array => {
+                                    // Inline-array field projected from a by-value
+                                    // struct yields a `full_array_spec` value that
+                                    // is only meaningful in an indexing context
+                                    // (handled in `ExprT::Index`). Reject any
+                                    // other use.
+                                    self.report(
+                                        format!(
+                                            "inline-array field `{}` of a by-value struct can only be used inside an indexing expression (e.g. `s.{}[i]`)",
+                                            a, a
+                                        ),
+                                        &v.loc,
+                                    );
+                                    ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                                }
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
                                     x_doc.append(Doc::text(".")).append(self.emit_name(
                                         Name::StructDirectFieldName(
@@ -1265,7 +1374,23 @@ impl<'a> Emitter<'a> {
                             }
                         }
                         TypeT::TypeRef(TypeRefKind::Union(union_name)) => {
+                            let is_inline_array = env
+                                .lookup_union(union_name)
+                                .and_then(|u| u.fields.iter().find(|f| f.val.name().val == a.val))
+                                .map(|f| f.val.is_array())
+                                .unwrap_or(false);
                             match self.emit_expr(env, x) {
+                                ExprKind::LValue(x_doc) if is_inline_array => {
+                                    ExprKind::RValue(annotated(v, || {
+                                        unaryfn(
+                                            self.emit_name(Name::UnionFieldProj(
+                                                union_name.val.clone(),
+                                                a.val.clone(),
+                                            )),
+                                            x_doc,
+                                        )
+                                    }))
+                                }
                                 ExprKind::LValue(x_doc) => ExprKind::LValue(annotated(v, || {
                                     unaryfn(
                                         self.emit_name(Name::UnionFieldProj(
@@ -1275,6 +1400,16 @@ impl<'a> Emitter<'a> {
                                         x_doc,
                                     )
                                 })),
+                                ExprKind::RValue(_) if is_inline_array => {
+                                    self.report(
+                                        format!(
+                                            "inline-array field `{}` of a by-value union can only be used inside an indexing expression (e.g. `u.{}[i]`)",
+                                            a, a
+                                        ),
+                                        &v.loc,
+                                    );
+                                    ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                                }
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
                                     parens(
                                         self.emit_name(Name::UnionFieldConstructor(
@@ -1332,6 +1467,76 @@ impl<'a> Emitter<'a> {
                 }))
             }
             ExprT::Index(arr, idx) => {
+                // Detect indexing of an inline-array field of a by-value
+                // struct/union: `Index(Member(x, a), idx)` where x has
+                // struct/union type, field `a` is inline-array, and x
+                // lowers to an RValue. In that case the field projection
+                // yields a `full_array_spec` value (not an array handle),
+                // so emit a pure `array_spec_idx` instead of a stateful
+                // `array_read`.
+                if let ExprT::Member(x, a) = &arr.val {
+                    if let Ok(x_ty) = env.infer_expr(x) {
+                        let x_ty = env.vtype_whnf(x_ty);
+                        let inline_proj = match &x_ty.val {
+                            TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => env
+                                .lookup_struct(struct_name)
+                                .and_then(|s| s.fields.iter().find(|f| f.val.name().val == a.val))
+                                .filter(|f| f.val.is_array())
+                                .map(|_| {
+                                    (
+                                        false,
+                                        Name::StructDirectFieldName(
+                                            struct_name.val.clone(),
+                                            a.val.clone(),
+                                        ),
+                                    )
+                                }),
+                            TypeT::TypeRef(TypeRefKind::Union(union_name)) => env
+                                .lookup_union(union_name)
+                                .and_then(|u| u.fields.iter().find(|f| f.val.name().val == a.val))
+                                .filter(|f| f.val.is_array())
+                                .map(|_| {
+                                    (
+                                        true,
+                                        Name::UnionFieldConstructor(
+                                            union_name.val.clone(),
+                                            a.val.clone(),
+                                        ),
+                                    )
+                                }),
+                            _ => None,
+                        };
+                        if let Some((is_union, proj_name)) = inline_proj {
+                            if let ExprKind::RValue(x_doc) = self.emit_expr(env, x) {
+                                let idx_doc = self.emit_rvalue(env, idx);
+                                let proj_doc = if is_union {
+                                    parens(
+                                        self.emit_name(proj_name)
+                                            .append("?._0")
+                                            .append(Doc::line())
+                                            .append(x_doc)
+                                            .group(),
+                                    )
+                                } else {
+                                    x_doc
+                                        .append(Doc::text("."))
+                                        .append(self.emit_name(proj_name))
+                                };
+                                return ExprKind::RValue(annotated(v, || {
+                                    parens(naryfn([
+                                        Doc::text("array_spec_idx"),
+                                        proj_doc,
+                                        parens(
+                                            Doc::text("SizeT.v")
+                                                .append(Doc::line())
+                                                .append(idx_doc),
+                                        ),
+                                    ]))
+                                }));
+                            }
+                        }
+                    }
+                }
                 let is_arrayptr = env
                     .infer_expr(arr)
                     .map(|ty| {
@@ -2777,12 +2982,13 @@ impl<'a> Emitter<'a> {
                 .append(Doc::line())
                 .append("{")
                 .group()
-                .append(Doc::concat(fields.iter().map(|(fld, fld_ty)| {
+                .append(Doc::concat(fields.iter().map(|f| {
+                    let fld = f.val.name();
                     Doc::hardline().append(
                         self.emit_name(direct_fld(fld))
                             .append(":")
                             .append(Doc::line())
-                            .append(self.emit_type(env, fld_ty))
+                            .append(self.emit_field_record_type(env, f))
                             .append(";")
                             .group()
                             .nest(2),
@@ -2812,11 +3018,17 @@ impl<'a> Emitter<'a> {
         let spec_param_name =
             Doc::text(self.nm.mangle(&Name::Val(name.val.clone(), 0)).to_string());
 
-        // Collect per-field spec info using emit_type_slprop with SpecRecord naming
+        // Collect per-field spec info using emit_type_slprop with SpecRecord naming.
+        // Inline array fields (`T arr[N];`) are NOT tracked in the struct's spec
+        // record / pred — they are inline storage and their value is captured
+        // directly in the struct's record value.
         let type_ref = TypeRef::from(k);
         let field_specs: Vec<FieldSpecInfo> = fields
             .iter()
-            .map(|(fld, fld_ty)| {
+            .filter(|f| !f.val.is_array())
+            .map(|f| {
+                let fld = f.val.name();
+                let fld_ty = f.val.logical_type(&f.loc);
                 let field_name: Rc<IdentT> = fld.val.clone();
                 let mut bindings = vec![];
                 let mut init_props = vec![];
@@ -2830,7 +3042,7 @@ impl<'a> Emitter<'a> {
                 };
                 self.emit_type_slprop(
                     env,
-                    fld_ty,
+                    &fld_ty,
                     SLPropVariant::Init {
                         perm: &Doc::text("p"),
                     },
@@ -2967,10 +3179,16 @@ impl<'a> Emitter<'a> {
                                        variant: SLPropVariant,
                                        naming: &mut ValNaming,
                                        props: &mut Vec<Doc>| {
-                for (fld, fld_ty) in fields {
+                for f in fields {
+                    if f.val.is_array() {
+                        // Inline array fields are not tracked in the uninit pred.
+                        continue;
+                    }
+                    let fld = f.val.name();
+                    let fld_ty = f.val.logical_type(&f.loc);
                     let field_expr = ExprT::Member(mk_rvar(&this_r), fld.clone().into())
                         .with_loc(fld.loc.clone());
-                    s.emit_type_slprop(env, fld_ty, variant, naming, props, &field_expr);
+                    s.emit_type_slprop(env, &fld_ty, variant, naming, props, &field_expr);
                 }
             };
             ses.push(self.emit_pred_decl(
@@ -3070,7 +3288,13 @@ impl<'a> Emitter<'a> {
 
             // Generate init props using individual val names (per-field Standard naming)
             let mut fold_requires = vec![];
-            for (fld, fld_ty) in fields {
+            for f in fields {
+                if f.val.is_array() {
+                    // Inline array fields are not tracked in the pred / spec record.
+                    continue;
+                }
+                let fld = f.val.name();
+                let fld_ty = f.val.logical_type(&f.loc);
                 let field_expr =
                     ExprT::Member(mk_rvar(&this), fld.clone().into()).with_loc(fld.loc.clone());
                 let mut field_bindings = vec![];
@@ -3080,7 +3304,7 @@ impl<'a> Emitter<'a> {
                 };
                 self.emit_type_slprop(
                     env,
-                    fld_ty,
+                    &fld_ty,
                     SLPropVariant::Init {
                         perm: &Doc::text("p"),
                     },
@@ -3157,8 +3381,14 @@ impl<'a> Emitter<'a> {
 
         let ghost_fld = |fld: &Ident| Name::StructGhostFieldProj(name.val.clone(), fld.val.clone());
 
-        for (fld, fld_ty) in fields {
-            let ll_type = self.emit_type(env, fld_ty);
+        for f in fields {
+            let fld = f.val.name();
+            // Ghost projection:
+            //   - `Plain` fields: `ref T` (ties to a value cell via `pts_to`).
+            //   - Inline-array fields: the array *handle* itself
+            //     (no `ref` wrapper); `aux_raw_unfold` ties it to the
+            //     noeq's `<fld>` (contents) via `array_pts_to`.
+            let projected_type = self.emit_field_projection_type(env, f);
 
             ses.push(mk_assume_val(
                 vec![],
@@ -3170,7 +3400,7 @@ impl<'a> Emitter<'a> {
                 )],
                 Doc::text("GTot")
                     .append(Doc::line())
-                    .append(unaryfn(Doc::text("ref"), ll_type))
+                    .append(projected_type)
                     .group(),
             ));
         }
@@ -3208,13 +3438,31 @@ impl<'a> Emitter<'a> {
                         Doc::text("x"),
                         Doc::text("p"),
                     ])];
-                    for (fld, _) in fields {
-                        post.push(naryfn([
-                            Doc::text("Pulse.Lib.Reference.pts_to"),
-                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
-                            Doc::text("#p"),
-                            Doc::text("vx.").append(self.emit_name(direct_fld(fld))),
-                        ]));
+                    for f in fields {
+                        let fld = f.val.name();
+                        if f.val.is_array() {
+                            // Inline array: tie the ghost array handle
+                            // `__<fld>_1 x` to the contents stored in
+                            // the noeq value at `vx.<fld>`. The noeq
+                            // refines `vx.<fld>` to `full_array_spec`
+                            // (refinement subtype of `array_spec`), so
+                            // `array_pts_to` accepts it directly and the
+                            // caller can still recover `array_pts_to_full`
+                            // when needed.
+                            post.push(naryfn([
+                                Doc::text("array_pts_to"),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                                Doc::text("p"),
+                                Doc::text("vx.").append(self.emit_name(direct_fld(fld))),
+                            ]));
+                        } else {
+                            post.push(naryfn([
+                                Doc::text("Pulse.Lib.Reference.pts_to"),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                                Doc::text("#p"),
+                                Doc::text("vx.").append(self.emit_name(direct_fld(fld))),
+                            ]));
+                        }
                     }
                     mk_thunk(mk_star(post))
                 },
@@ -3234,8 +3482,22 @@ impl<'a> Emitter<'a> {
                     ),
                     parens(Doc::text("#p: perm")),
                 ];
-                for (fld, _) in fields {
-                    args.push(fold_arg_name(fld))
+                // Every field (Plain or Array) contributes a value arg
+                // so we can construct the resulting struct record
+                // literal. Inline-array args are annotated with the
+                // refined `full_array_spec` type so the length refinement
+                // is discharged at fold time rather than inferred.
+                for f in fields {
+                    let fld = f.val.name();
+                    match &f.val {
+                        FieldT::Array { .. } => args.push(parens(
+                            fold_arg_name(fld)
+                                .append(":")
+                                .append(Doc::line())
+                                .append(self.emit_field_record_type(env, f)),
+                        )),
+                        FieldT::Plain { .. } => args.push(fold_arg_name(fld)),
+                    }
                 }
                 args
             },
@@ -3249,13 +3511,29 @@ impl<'a> Emitter<'a> {
                         Doc::text("x"),
                         Doc::text("p"),
                     ])];
-                    for (fld, _) in fields {
-                        pre.push(naryfn([
-                            Doc::text("Pulse.Lib.Reference.pts_to"),
-                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
-                            Doc::text("#p"),
-                            fold_arg_name(fld),
-                        ]));
+                    for f in fields {
+                        let fld = f.val.name();
+                        if f.val.is_array() {
+                            // Inline array: consume `array_pts_to` on the
+                            // ghost handle so the resulting struct value
+                            // carries the contents in `vx.<fld>`. The
+                            // refined `full_array_spec` type of `v_<fld>`
+                            // is a subtype of `array_spec`, so the call
+                            // typechecks and full-ness is preserved.
+                            pre.push(naryfn([
+                                Doc::text("array_pts_to"),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                                Doc::text("p"),
+                                fold_arg_name(fld),
+                            ]));
+                        } else {
+                            pre.push(naryfn([
+                                Doc::text("Pulse.Lib.Reference.pts_to"),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                                Doc::text("#p"),
+                                fold_arg_name(fld),
+                            ]));
+                        }
                     }
                     mk_star(pre)
                 },
@@ -3264,7 +3542,8 @@ impl<'a> Emitter<'a> {
                     Doc::text("x"),
                     Doc::text("#p"),
                     Doc::text("{")
-                        .append(Doc::concat(fields.iter().map(|(fld, _)| {
+                        .append(Doc::concat(fields.iter().map(|f| {
+                            let fld = f.val.name();
                             Doc::line()
                                 .append(self.emit_name(direct_fld(fld)))
                                 .append("=")
@@ -3299,11 +3578,22 @@ impl<'a> Emitter<'a> {
                         Doc::text("x"),
                         Doc::text("1.0R"),
                     ])];
-                    for (fld, _) in fields {
-                        pre.push(naryfn([
-                            Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
-                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
-                        ]));
+                    for f in fields {
+                        let fld = f.val.name();
+                        if f.val.is_array() {
+                            // Inline array: the storage exists but is
+                            // uninitialised; track it via
+                            // `array_pts_to_uninit'` (no spec needed).
+                            pre.push(naryfn([
+                                Doc::text("array_pts_to_uninit'"),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                            ]));
+                        } else {
+                            pre.push(naryfn([
+                                Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                            ]));
+                        }
                     }
                     mk_star(pre)
                 },
@@ -3338,19 +3628,31 @@ impl<'a> Emitter<'a> {
                         Doc::text("x"),
                         Doc::text("1.0R"),
                     ])];
-                    for (fld, _) in fields {
-                        post.push(naryfn([
-                            Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
-                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
-                        ]));
+                    for f in fields {
+                        let fld = f.val.name();
+                        if f.val.is_array() {
+                            post.push(naryfn([
+                                Doc::text("array_pts_to_uninit'"),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                            ]));
+                        } else {
+                            post.push(naryfn([
+                                Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
+                                unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                            ]));
+                        }
                     }
                     mk_star(post)
                 }),
             ]),
         ));
 
-        for (fld, fld_ty) in fields {
-            let ll_ty = self.emit_type(env, fld_ty);
+        for f in fields {
+            let fld = f.val.name();
+            // Getter return type: for inline-array fields the array
+            // *handle* itself (no `ref` wrapper) — same as the ghost
+            // projection. For plain fields, `ref T`.
+            let ret_type = self.emit_field_projection_type(env, f);
             let unfolded = naryfn([unfolded_tok.clone(), Doc::text("x"), Doc::text("p")]);
             ses.push(mk_assume_val(
                 vec![Doc::text("pulse_impure_spec_no_proof_required")],
@@ -3365,7 +3667,7 @@ impl<'a> Emitter<'a> {
                 ],
                 naryfn([
                     Doc::text("stt_atomic"),
-                    unaryfn(Doc::text("ref"), ll_ty),
+                    ret_type,
                     Doc::text("#PulseCore.Observability.Neutral"),
                     Doc::text("emp_inames"),
                     unfolded.clone(),
@@ -3384,7 +3686,10 @@ impl<'a> Emitter<'a> {
             ))
         }
 
-        // has_zero_default instance
+        // has_zero_default instance. For inline-array fields the
+        // default is `array_spec_zeroed T (SizeT.v Nsz) zero_default`,
+        // which is a `full_array_spec T` of length N satisfying the
+        // noeq's `array_spec_len v == N` refinement.
         let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
         ses.push(
             Doc::text("instance")
@@ -3404,12 +3709,13 @@ impl<'a> Emitter<'a> {
                 .group()
                 .append(Doc::line())
                 .append(Doc::text("zero_default = {"))
-                .append(Doc::concat(fields.iter().map(|(fld, fld_ty)| {
+                .append(Doc::concat(fields.iter().map(|f| {
+                    let fld = f.val.name();
                     Doc::line()
                         .append(self.emit_name(direct_fld(fld)))
                         .append(" =")
                         .append(Doc::line())
-                        .append(self.emit_type_default(env, fld_ty))
+                        .append(self.emit_field_default(env, f))
                         .append(";")
                         .group()
                         .nest(2)
@@ -3448,13 +3754,14 @@ impl<'a> Emitter<'a> {
                 .append(union_type_name.clone())
                 .append(Doc::line())
                 .append("=")
-                .append(Doc::concat(fields.iter().map(|(fld, fld_ty)| {
+                .append(Doc::concat(fields.iter().map(|f| {
+                    let fld = f.val.name();
                     Doc::hardline().append(
                         Doc::text("| ")
                             .append(self.emit_name(field_ctor(fld)))
                             .append(Doc::text(" :"))
                             .append(Doc::line())
-                            .append(self.emit_type(env, fld_ty))
+                            .append(self.emit_field_record_type(env, f))
                             .append(Doc::text(" ->"))
                             .append(Doc::line())
                             .append(union_type_name.clone())
@@ -3508,7 +3815,8 @@ impl<'a> Emitter<'a> {
         // Emit unfolded token
         let unfolded_tok =
             |fld: &Ident| Name::UnionAuxFn(name.val.clone(), "raw_unfolded", fld.val.clone());
-        for (fld, _) in fields {
+        for f in fields {
+            let fld = f.val.name();
             ses.push(mk_assume_val(
                 vec![],
                 self.emit_name(unfolded_tok(fld)),
@@ -3524,9 +3832,14 @@ impl<'a> Emitter<'a> {
             ));
         }
 
-        // Emit ghost field projections
-        for (fld, fld_ty) in fields {
-            let ll_type = self.emit_type(env, fld_ty);
+        // Emit ghost field projections.
+        //   - Plain fields:        `ref T`
+        //   - Inline-array fields: the refined array *handle* itself
+        //     (no `ref` wrapper). `aux_raw_unfold` ties the noeq
+        //     value's contents to this handle via `array_pts_to`.
+        for f in fields {
+            let fld = f.val.name();
+            let projected_type = self.emit_field_projection_type(env, f);
             ses.push(mk_assume_val(
                 vec![],
                 self.emit_name(ghost_fld(fld)),
@@ -3537,15 +3850,17 @@ impl<'a> Emitter<'a> {
                 )],
                 Doc::text("GTot")
                     .append(Doc::line())
-                    .append(unaryfn(Doc::text("ref"), ll_type))
+                    .append(projected_type)
                     .group(),
             ));
         }
 
         // Per-field unfold: requires pts_to x #p vx ** pure (Field_foo__x? vx)
-        // gives back unfolded token + pts_to of the field ref
-        for (fld, fld_ty) in fields {
-            let ll_type = self.emit_type(env, fld_ty);
+        // gives back unfolded token plus the field's `pts_to` clause
+        // tying the ghost projection to the active constructor's
+        // payload. Uniform for plain and inline-array fields.
+        for f in fields {
+            let fld = f.val.name();
             let ctor_name = self.emit_name(field_ctor(fld));
             // vx has refined type: (vx: union_foo{Ctor? vx})
             let vx_refined_ty = parens(
@@ -3560,6 +3875,34 @@ impl<'a> Emitter<'a> {
                         .group(),
                 ),
             );
+            let mut post_items: Vec<Doc> = vec![naryfn([
+                self.emit_name(unfolded_tok(fld)),
+                Doc::text("x"),
+                Doc::text("p"),
+            ])];
+            let ctor_payload = parens(
+                ctor_name
+                    .clone()
+                    .append("?._0")
+                    .append(Doc::line())
+                    .append("vx")
+                    .group(),
+            );
+            if f.val.is_array() {
+                post_items.push(naryfn([
+                    Doc::text("array_pts_to"),
+                    unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                    Doc::text("p"),
+                    ctor_payload,
+                ]));
+            } else {
+                post_items.push(naryfn([
+                    Doc::text("Pulse.Lib.Reference.pts_to"),
+                    unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                    Doc::text("#p"),
+                    ctor_payload,
+                ]));
+            }
             ses.push(mk_assume_val(
                 vec![Doc::text("pulse_intro")],
                 self.emit_name(Name::UnionAuxFn(
@@ -3586,30 +3929,35 @@ impl<'a> Emitter<'a> {
                         Doc::text("#p"),
                         Doc::text("vx"),
                     ]),
-                    mk_thunk(mk_star([
-                        naryfn([
-                            self.emit_name(unfolded_tok(fld)),
-                            Doc::text("x"),
-                            Doc::text("p"),
-                        ]),
-                        naryfn([
-                            Doc::text("Pulse.Lib.Reference.pts_to"),
-                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
-                            Doc::text("#p"),
-                            parens(
-                                ctor_name
-                                    .clone()
-                                    .append("?._0")
-                                    .append(Doc::line())
-                                    .append("vx")
-                                    .group(),
-                            ),
-                        ]),
-                    ])),
+                    mk_thunk(mk_star(post_items)),
                 ]),
             ));
 
-            // Per-field fold: takes unfolded token + field pts_to, gives back pts_to x (Ctor val)
+            // Per-field fold: symmetric — for inline arrays we consume
+            // the `array_pts_to` of the ghost handle (so the constructor
+            // value can carry the contents); for plain fields we consume
+            // the field's `pts_to`.
+            let fld_ty_doc = self.emit_field_record_type(env, f);
+            let mut pre_items: Vec<Doc> = vec![naryfn([
+                self.emit_name(unfolded_tok(fld)),
+                Doc::text("x"),
+                Doc::text("p"),
+            ])];
+            if f.val.is_array() {
+                pre_items.push(naryfn([
+                    Doc::text("array_pts_to"),
+                    unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                    Doc::text("p"),
+                    Doc::text(format!("v_{}", fld)),
+                ]));
+            } else {
+                pre_items.push(naryfn([
+                    Doc::text("Pulse.Lib.Reference.pts_to"),
+                    unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
+                    Doc::text("#p"),
+                    Doc::text(format!("v_{}", fld)),
+                ]));
+            }
             ses.push(mk_assume_val(
                 vec![Doc::text("pulse_intro")],
                 self.emit_name(Name::UnionAuxFn(
@@ -3627,26 +3975,14 @@ impl<'a> Emitter<'a> {
                     parens(
                         Doc::text(format!("v_{}:", fld))
                             .append(Doc::line())
-                            .append(ll_type.clone()),
+                            .append(fld_ty_doc),
                     ),
                 ],
                 naryfn([
                     Doc::text("stt_ghost"),
                     Doc::text("unit"),
                     Doc::text("emp_inames"),
-                    mk_star([
-                        naryfn([
-                            self.emit_name(unfolded_tok(fld)),
-                            Doc::text("x"),
-                            Doc::text("p"),
-                        ]),
-                        naryfn([
-                            Doc::text("Pulse.Lib.Reference.pts_to"),
-                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
-                            Doc::text("#p"),
-                            Doc::text(format!("v_{}", fld)),
-                        ]),
-                    ]),
+                    mk_star(pre_items),
                     mk_thunk(naryfn([
                         Doc::text("Pulse.Lib.Reference.pts_to"),
                         Doc::text("x"),
@@ -3657,9 +3993,12 @@ impl<'a> Emitter<'a> {
             ));
         }
 
-        // Field getter functions (stt_atomic, like structs)
-        for (fld, fld_ty) in fields {
-            let ll_ty = self.emit_type(env, fld_ty);
+        // Field getter functions (stt_atomic, like structs).
+        // For inline-array fields the getter returns the array handle
+        // (no `ref` wrapper); for plain fields it returns `ref T`.
+        for f in fields {
+            let fld = f.val.name();
+            let ret_type = self.emit_field_projection_type(env, f);
             let unfolded = naryfn([
                 self.emit_name(unfolded_tok(fld)),
                 Doc::text("x"),
@@ -3678,7 +4017,7 @@ impl<'a> Emitter<'a> {
                 ],
                 naryfn([
                     Doc::text("stt_atomic"),
-                    unaryfn(Doc::text("ref"), ll_ty),
+                    ret_type,
                     Doc::text("#PulseCore.Observability.Neutral"),
                     Doc::text("emp_inames"),
                     unfolded.clone(),
@@ -3697,8 +4036,12 @@ impl<'a> Emitter<'a> {
             ))
         }
 
-        // has_zero_default instance (uses first field's constructor)
-        if let Some((first_fld, first_fld_ty)) = fields.first() {
+        // has_zero_default instance (uses first field's constructor).
+        // For an inline-array first field, the constructor wraps an
+        // `array_spec_zeroed`-built `full_array_spec` of the static
+        // length.
+        if let Some(first_f) = fields.first() {
+            let first_fld = first_f.val.name();
             let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
             let first_ctor = self.emit_name(Name::UnionFieldConstructor(
                 name.val.clone(),
@@ -3724,10 +4067,7 @@ impl<'a> Emitter<'a> {
                     .append(
                         Doc::text("zero_default =")
                             .append(Doc::line())
-                            .append(unaryfn(
-                                first_ctor,
-                                self.emit_type_default(env, first_fld_ty),
-                            ))
+                            .append(unaryfn(first_ctor, self.emit_field_default(env, first_f)))
                             .group(),
                     )
                     .nest(2)

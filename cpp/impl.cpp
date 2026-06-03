@@ -252,10 +252,25 @@ public:
           reportUnsupported(f->getSourceRange(), floc,
                             "unsupported anonymous field names", "");
         }
-        builder.field(ctx.mk_ident(toStr(f->getName()), std::move(floc)),
-                      trTypeAttrs(f->getAttrs(),
-                                  trQualType(f->getType(), f->getSourceRange(),
-                                             liftStructs)));
+        auto qt = f->getType();
+        auto *qtPtr = qt.IgnoreParens().getTypePtr();
+        if (auto *cat = dyn_cast<ConstantArrayType>(qtPtr)) {
+          auto elemTy = trQualType(cat->getElementType(), f->getSourceRange(),
+                                   liftStructs);
+          builder.array_field(
+              ctx.mk_ident(toStr(f->getName()), std::move(floc)),
+              std::move(elemTy), cat->getSize().getZExtValue());
+        } else if (isa<VariableArrayType>(qtPtr) ||
+                   isa<IncompleteArrayType>(qtPtr)) {
+          reportUnsupported(f->getSourceRange(), floc,
+                            "unsupported non-constant-length array field", "");
+        } else {
+          builder.field(
+              ctx.mk_ident(toStr(f->getName()), std::move(floc)),
+              trTypeAttrs(
+                  f->getAttrs(),
+                  trQualType(f->getType(), f->getSourceRange(), liftStructs)));
+        }
       }
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
@@ -277,10 +292,25 @@ public:
           reportUnsupported(f->getSourceRange(), floc,
                             "unsupported anonymous field names", "");
         }
-        builder.field(ctx.mk_ident(toStr(f->getName()), std::move(floc)),
-                      trTypeAttrs(f->getAttrs(),
-                                  trQualType(f->getType(), f->getSourceRange(),
-                                             liftStructs)));
+        auto qt = f->getType();
+        auto *qtPtr = qt.IgnoreParens().getTypePtr();
+        if (auto *cat = dyn_cast<ConstantArrayType>(qtPtr)) {
+          auto elemTy = trQualType(cat->getElementType(), f->getSourceRange(),
+                                   liftStructs);
+          builder.array_field(
+              ctx.mk_ident(toStr(f->getName()), std::move(floc)),
+              std::move(elemTy), cat->getSize().getZExtValue());
+        } else if (isa<VariableArrayType>(qtPtr) ||
+                   isa<IncompleteArrayType>(qtPtr)) {
+          reportUnsupported(f->getSourceRange(), floc,
+                            "unsupported non-constant-length array field", "");
+        } else {
+          builder.field(
+              ctx.mk_ident(toStr(f->getName()), std::move(floc)),
+              trTypeAttrs(
+                  f->getAttrs(),
+                  trQualType(f->getType(), f->getSourceRange(), liftStructs)));
+        }
       }
       ctx.add_union(std::move(builder));
     } else {

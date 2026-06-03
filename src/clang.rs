@@ -391,7 +391,7 @@ struct DeclBuilder {
     ret_type: Option<Rc<Type>>,
     args: Vec<FnArg>,
     ghost_args: Vec<GhostArg>,
-    fields: Vec<(Ident, Rc<Type>)>,
+    fields: Vec<Field>,
     requires: Vec<Rc<Expr>>,
     ensures: Vec<Rc<Expr>>,
     is_pure: bool,
@@ -438,7 +438,26 @@ impl DeclBuilder {
     }
 
     fn field(&mut self, name: Rc<Ident>, ty: Rc<Type>) {
-        self.fields.push(((*name).clone(), ty))
+        let loc = name.loc.clone();
+        self.fields.push(Ast {
+            loc,
+            val: FieldT::Plain {
+                name: (*name).clone(),
+                ty,
+            },
+        })
+    }
+
+    fn array_field(&mut self, name: Rc<Ident>, elem_ty: Rc<Type>, length: u64) {
+        let loc = name.loc.clone();
+        self.fields.push(Ast {
+            loc,
+            val: FieldT::Array {
+                name: (*name).clone(),
+                elem_ty,
+                length,
+            },
+        })
     }
 
     fn requires(&mut self, p: Rc<Expr>) {

@@ -496,21 +496,41 @@ impl PrettyIR for Stmts {
     }
 }
 
+impl PrettyIR for FieldT {
+    fn to_doc(&self) -> RcDoc<'_, ()> {
+        match self {
+            FieldT::Plain { name, ty } => ty
+                .to_doc()
+                .append(RcDoc::line())
+                .append(name.to_doc())
+                .append(";")
+                .group()
+                .nest(2)
+                .append(RcDoc::hardline()),
+            FieldT::Array {
+                name,
+                elem_ty,
+                length,
+            } => elem_ty
+                .to_doc()
+                .append(RcDoc::line())
+                .append(name.to_doc())
+                .append(format!("[{}]", length))
+                .append(";")
+                .group()
+                .nest(2)
+                .append(RcDoc::hardline()),
+        }
+    }
+}
+
 impl PrettyIR for StructDefn {
     fn to_doc(&self) -> RcDoc<'_, ()> {
         RcDoc::text("struct ")
             .append(self.name.to_doc())
             .append(" {")
             .append(RcDoc::line_())
-            .append(RcDoc::concat(self.fields.iter().map(|f| {
-                f.1.to_doc()
-                    .append(RcDoc::line())
-                    .append(f.0.to_doc())
-                    .append(";")
-                    .group()
-                    .nest(2)
-                    .append(RcDoc::hardline())
-            })))
+            .append(RcDoc::concat(self.fields.iter().map(|f| f.val.to_doc())))
             .group()
             .nest(2)
             .append("};")
@@ -523,15 +543,7 @@ impl PrettyIR for UnionDefn {
             .append(self.name.to_doc())
             .append(" {")
             .append(RcDoc::line_())
-            .append(RcDoc::concat(self.fields.iter().map(|f| {
-                f.1.to_doc()
-                    .append(RcDoc::line())
-                    .append(f.0.to_doc())
-                    .append(";")
-                    .group()
-                    .nest(2)
-                    .append(RcDoc::hardline())
-            })))
+            .append(RcDoc::concat(self.fields.iter().map(|f| f.val.to_doc())))
             .group()
             .nest(2)
             .append("};")
