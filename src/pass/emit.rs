@@ -1548,25 +1548,39 @@ impl<'a> Emitter<'a> {
                         }
                     }
                 }
-                let is_arrayptr = env
-                    .infer_expr(arr)
-                    .map(|ty| {
-                        matches!(
-                            env.vtype_whnf(ty).val,
-                            TypeT::Pointer(_, PointerKind::ArrayPtr)
-                        )
-                    })
-                    .unwrap_or(false);
-                let arr_doc = self.emit_rvalue(env, arr);
-                let idx_doc = self.emit_rvalue(env, idx);
-                let fn_name = if is_arrayptr {
-                    "arrayptr_read"
+                // Check the type of the array expression to decide emission strategy
+                let arr_ty = env.infer_expr(arr).ok().map(|ty| env.vtype_whnf(ty));
+                let is_fixed_array = arr_ty
+                    .as_ref()
+                    .is_some_and(|ty| matches!(&ty.val, TypeT::FixedArray(_, _)));
+                let is_arrayptr = arr_ty
+                    .as_ref()
+                    .is_some_and(|ty| matches!(&ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr)));
+
+                if is_fixed_array && !env.is_lvalue(arr) {
+                    // Pure FixedArray value (e.g., global pure array or by-value struct field);
+                    // use array_spec_idx for pure indexing
+                    let arr_doc = self.emit_rvalue(env, arr);
+                    let idx_doc = self.emit_rvalue(env, idx);
+                    ExprKind::RValue(annotated(v, || {
+                        parens(naryfn([
+                            Doc::text("array_spec_idx"),
+                            arr_doc,
+                            parens(Doc::text("SizeT.v").append(Doc::line()).append(idx_doc)),
+                        ]))
+                    }))
                 } else {
-                    "array_read"
-                };
-                ExprKind::RValue(annotated(v, || {
-                    parens(naryfn([Doc::text(fn_name), arr_doc, idx_doc]))
-                }))
+                    let arr_doc = self.emit_rvalue(env, arr);
+                    let idx_doc = self.emit_rvalue(env, idx);
+                    let fn_name = if is_arrayptr {
+                        "arrayptr_read"
+                    } else {
+                        "array_read"
+                    };
+                    ExprKind::RValue(annotated(v, || {
+                        parens(naryfn([Doc::text(fn_name), arr_doc, idx_doc]))
+                    }))
+                }
             }
             _ => ExprKind::RValue(self.emit_rvalue_inner(env, v)),
         }

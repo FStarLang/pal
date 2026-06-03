@@ -79,3 +79,11 @@ int read_data(unsigned i)
 {
     return data.b[i];
 }
+
+_pure int global_array[10] = { 0,1,2,3,4,5,6,7,8,9 };
+int read_global_array(unsigned i)
+    _requires(i < 10)
+    _ensures(return == i)
+{
+    return global_array[i];
+}
