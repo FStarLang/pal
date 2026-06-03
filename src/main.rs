@@ -1,4 +1,8 @@
-use std::{path::Path, time::Instant};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use crate::{
     diag::{Diagnostic, Diagnostics},
@@ -49,6 +53,18 @@ struct Cli {
 
     #[arg(help = "C source files to translate")]
     files: Vec<String>,
+}
+
+/// Write `contents` to `path` only if the file doesn't already exist with
+/// identical contents. This avoids bumping the timestamp and triggering
+/// unnecessary F* reverification.
+fn write_if_changed(path: &PathBuf, contents: &[u8]) {
+    if let Ok(existing) = std::fs::read(path) {
+        if existing == contents {
+            return;
+        }
+    }
+    std::fs::write(path, contents).unwrap();
 }
 
 fn serialize_diags(diags: &Diagnostics) -> String {
@@ -210,31 +226,35 @@ fn main() {
         let outdir = Path::new(&outdir).to_path_buf();
         std::fs::create_dir_all(&outdir).unwrap();
 
+        // Track which .fst/.fsti files we generate this run
+        let mut generated_files: HashSet<PathBuf> = HashSet::new();
+
         for module in &modules {
-            std::fs::write(
-                outdir.join(format!("{}.fst", module.module_name)),
-                &module.code,
-            )
-            .unwrap();
+            let fst_path = outdir.join(format!("{}.fst", module.module_name));
+            write_if_changed(&fst_path, module.code.as_bytes());
+            generated_files.insert(fst_path);
             if let Some(fsti_code) = &module.fsti_code {
-                std::fs::write(
-                    outdir.join(format!("{}.fsti", module.module_name)),
-                    fsti_code,
-                )
-                .unwrap();
+                let fsti_path = outdir.join(format!("{}.fsti", module.module_name));
+                write_if_changed(&fsti_path, fsti_code.as_bytes());
+                generated_files.insert(fsti_path);
             }
         }
 
         // Write TranslationErrors.fst — asserts False when there are errors so
         // that F* reports a failure, but individual modules remain verifiable.
-        std::fs::write(outdir.join("TranslationErrors.fst"), {
-            let mut errors_code = "module TranslationErrors\n".to_string();
-            if diags.has_errors() {
-                errors_code += "let _ = assert False\n";
+        let errors_path = outdir.join("TranslationErrors.fst");
+        write_if_changed(
+            &errors_path,
+            {
+                let mut errors_code = "module TranslationErrors\n".to_string();
+                if diags.has_errors() {
+                    errors_code += "let _ = assert False\n";
+                }
+                errors_code
             }
-            errors_code
-        })
-        .unwrap();
+            .as_bytes(),
+        );
+        generated_files.insert(errors_path);
 
         // Write single unified source_range_info.json
         std::fs::write(
@@ -245,6 +265,18 @@ fn main() {
 
         // Write diagnostics
         std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
+
+        // Remove stale .fst/.fsti files from previous runs
+        if let Ok(entries) = std::fs::read_dir(&outdir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if (ext == "fst" || ext == "fsti") && !generated_files.contains(&path) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
     } else {
         eprintln!("Not saving generated Pulse output, specify --outdir to create files");
     }
