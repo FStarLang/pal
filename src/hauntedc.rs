@@ -1517,7 +1517,7 @@ pub fn process_inline_pulse(
     let dollar_keyword = |kw| {
         just(Token::Punct(Punct::Dollar))
             .map_with(|_, extra| extra.span())
-            .then_ignore(just(Token::Ident(kw)).padded_by(ws()))
+            .then_ignore(just(Token::Ident(kw)))
             .then_ignore(just(Token::Punct(Punct::LParen)))
             .then(balanced_inner.clone())
             .then_ignore(just(Token::Punct(Punct::RParen)))
@@ -1545,9 +1545,9 @@ pub fn process_inline_pulse(
     let dollar_keyword_uninit = |kw| {
         just(Token::Punct(Punct::Dollar))
             .map_with(|_, extra| extra.span())
-            .then_ignore(just(Token::Ident(kw)).padded_by(ws()))
-            .then_ignore(just(Token::Punct(Punct::Dash)).padded_by(ws()))
-            .then_ignore(just(Token::Ident("uninit")).padded_by(ws()))
+            .then_ignore(just(Token::Ident(kw)))
+            .then_ignore(just(Token::Punct(Punct::Dash)))
+            .then_ignore(just(Token::Ident("uninit")))
             .then_ignore(just(Token::Punct(Punct::LParen)))
             .then(balanced_inner.clone())
             .then_ignore(just(Token::Punct(Punct::RParen)))
