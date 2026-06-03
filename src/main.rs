@@ -218,8 +218,11 @@ fn main() {
     std::fs::create_dir_all(&outdir).unwrap();
 
     for module in &modules {
-        let code = module.code.clone();
-        std::fs::write(outdir.join(format!("{}.fst", module.module_name)), &code).unwrap();
+        std::fs::write(
+            outdir.join(format!("{}.fst", module.module_name)),
+            &module.code,
+        )
+        .unwrap();
         if let Some(fsti_code) = &module.fsti_code {
             std::fs::write(
                 outdir.join(format!("{}.fsti", module.module_name)),
