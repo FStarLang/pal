@@ -4675,11 +4675,7 @@ impl<'a> Emitter<'a> {
             ty_doc,
             body_doc,
         );
-        if decl.is_rec {
-            body
-        } else {
-            Doc::text("unfold").append(Doc::hardline()).append(body)
-        }
+        body
     }
 
     fn emit_let_decl(&mut self, env: &Env, let_decl: &LetDecl) -> Doc {
@@ -4941,30 +4937,11 @@ impl<'a> Emitter<'a> {
         }
         let name = self.emit_name(Name::Var(gv.name.val.clone()));
         let ty = self.emit_type(env, &gv.ty);
-        match &gv.init {
-            Some(init) => {
-                let init_doc = self.emit_rvalue(env, init);
-                Doc::text("unfold")
-                    .append(Doc::hardline())
-                    .append(Doc::text("let "))
-                    .append(name)
-                    .append(" : ")
-                    .append(ty)
-                    .append(" = ")
-                    .append(init_doc)
-            }
-            None => {
-                let default_doc = self.emit_type_default(env, &gv.ty);
-                Doc::text("unfold")
-                    .append(Doc::hardline())
-                    .append(Doc::text("let "))
-                    .append(name)
-                    .append(" : ")
-                    .append(ty)
-                    .append(" = ")
-                    .append(default_doc)
-            }
-        }
+        let body = match &gv.init {
+            Some(init) => self.emit_rvalue(env, init),
+            None => self.emit_type_default(env, &gv.ty),
+        };
+        mk_let(name, &[], ty, body)
     }
 
     fn emit_decl(&mut self, env: &Env, decl: &Decl) -> Doc {
