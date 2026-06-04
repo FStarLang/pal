@@ -14,3 +14,18 @@ This doc explains how structs are modelled in pal. Whenever you define a struct 
 12. `has_zero_default_struct_foo` : A typeclass instance defining the default 0 values for the struct (according to the C standard).
 
 Unions are emitted analogously to `Union_foo.fst`, with a sum-type constructor in place of the record.
+
+## Examples
+
+Tests exercising plain structs (without inline arrays):
+
+- [`test/simple_struct/simple_struct.c`](../test/simple_struct/simple_struct.c),  [`test/struct/struct.c`](../test/struct/struct.c) — minimal struct.
+- [`test/inner_struct/inner_struct.c`](../test/inner_struct/inner_struct.c) — nested struct fields.
+- [`test/forward_struct/forward_struct.c`](../test/forward_struct/forward_struct.c) — forward declarations.
+- [`test/recursive_struct/recursive_struct.c`](../test/recursive_struct/recursive_struct.c) — self-referential structs.
+- [`test/swap_struct/swap_struct.c`](../test/swap_struct/swap_struct.c), [`test/swap_struct_fun/swap_struct_fun.c`](../test/swap_struct_fun/swap_struct_fun.c) — swapping struct fields by reference.
+- [`test/eager_unfold_struct/eager_unfold_struct.c`](../test/eager_unfold_struct/eager_unfold_struct.c) — `_pulse_eager_unfold_predicate`.
+
+Structs containing inline arrays (`T b[N]`) are exercised separately because their fields have a dual representation (see the inline-array notes above):
+
+- [`test/struct_inline_array/struct_inline_array.c`](../test/struct_inline_array/struct_inline_array.c) — read and write inline-array fields by reference and by value.
