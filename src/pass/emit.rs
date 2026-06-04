@@ -1474,11 +1474,15 @@ impl<'a> Emitter<'a> {
                     .as_ref()
                     .is_some_and(|ty| matches!(&ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr)));
 
-                if is_fixed_array {
+                let (arr_doc, use_spec_idx) = match self.emit_expr(env, arr) {
+                    ExprKind::ArrayLValue(arr_doc) => (arr_doc, false),
+                    arr_doc => (arr_doc.to_rvalue(), is_fixed_array),
+                };
+                let idx_doc = self.emit_rvalue(env, idx);
+
+                if use_spec_idx {
                     // Pure FixedArray value (e.g., global pure array or by-value struct field);
                     // use array_spec_idx for pure indexing
-                    let arr_doc = self.emit_rvalue(env, arr);
-                    let idx_doc = self.emit_rvalue(env, idx);
                     ExprKind::RValue(annotated(v, || {
                         parens(naryfn([
                             Doc::text("array_spec_idx"),
@@ -1487,8 +1491,6 @@ impl<'a> Emitter<'a> {
                         ]))
                     }))
                 } else {
-                    let arr_doc = self.emit_rvalue(env, arr);
-                    let idx_doc = self.emit_rvalue(env, idx);
                     let fn_name = if is_arrayptr {
                         "arrayptr_read"
                     } else {
