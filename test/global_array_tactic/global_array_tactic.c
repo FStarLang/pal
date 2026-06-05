@@ -90,8 +90,8 @@ _pure int my_array[] = {
   1021, 1022, 1023, 1024};
 
 _Bool use_sorted_property(int i, int j)
-  _requires(0 < i && i < 16) // TODO: use my_array._length
-  _requires(0 < j && j < 16)
+  _requires(0 < i && i < my_array._length)
+  _requires(0 < j && j < my_array._length)
   _ensures(i <= j ==> return)
 {
   _ghost_stmt(Helper.my_array_sorted ());

@@ -179,6 +179,9 @@ impl<'a> Elaborator<'a> {
                         TypeT::Pointer(_, PointerKind::Array) if &*a.val == "_length" => {
                             rval.val = ExprT::VAttr(VAttr::Length, x.clone());
                         }
+                        TypeT::FixedArray(_, _) if &*a.val == "_length" => {
+                            rval.val = ExprT::VAttr(VAttr::Length, x.clone());
+                        }
                         TypeT::TypeRef(TypeRefKind::Struct(n)) => {
                             let Some(s) = env.lookup_struct(n) else {
                                 return self.report(format!("unknown structure {}", n), &rval.loc);

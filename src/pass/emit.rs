@@ -1440,6 +1440,13 @@ impl<'a> Emitter<'a> {
                 }
             },
             ExprT::VAttr(VAttr::Length, x) => ExprKind::RValue(annotated(v, || {
+                // For FixedArray, emit the statically known length as a plain integer
+                let x_ty = env.infer_expr(x).ok().map(|ty| env.vtype_whnf(ty));
+                if let Some(ref ty) = x_ty {
+                    if let TypeT::FixedArray(_, length) = &ty.val {
+                        return Doc::text(format!("{}", length));
+                    }
+                }
                 unaryfn(
                     Doc::text("reveal"),
                     unaryfn(Doc::text("length_of"), self.emit_rvalue(env, x)),
