@@ -4989,7 +4989,7 @@ impl<'a> Emitter<'a> {
                 let lemma = Doc::hardline()
                     .append(Doc::hardline())
                     .append(Doc::text(format!(
-                        "let {}_length : squash (array_spec_len {} == ({} <: nat)) =\n  let open FStar.Tactics.V2 in\n  _ by (apply (`array_spec_len_of_list); compute ())",
+                        "let {}_length : (array_spec_len {} == ({} <: nat)) =\n  let open FStar.Tactics.V2 in\n  _ by (apply (`array_spec_len_of_list); compute ())",
                         var_name, var_name, length
                     )));
                 result = result.append(lemma);
