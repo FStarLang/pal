@@ -2266,28 +2266,18 @@ impl<'a> Emitter<'a> {
                     )),
                     self.emit_rvalue(env, val),
                 ),
-                ExprT::ArrayInit(_elem_ty, elems) => {
-                    // Emit as normalize_term (array_spec_of_list n zero_default [v0; v1; ...])
-                    // normalize_term unfolds the let-rec to a chain of array_spec_upd
-                    // for element-wise reasoning; SMTPat lemma handles fullness/length.
-                    let n = elems.len();
-                    let list_elems = elems
-                        .iter()
-                        .map(|elem| self.emit_rvalue(env, elem))
-                        .collect::<Vec<_>>();
-                    let list_doc = Doc::text("[")
-                        .append(Doc::intersperse(list_elems, Doc::text("; ")))
-                        .append(Doc::text("]"));
-                    parens(unaryfn(
-                        Doc::text("normalize_term"),
-                        parens(naryfn([
-                            Doc::text("array_spec_of_list"),
-                            Doc::text(format!("{}", n)),
-                            Doc::text("zero_default"),
-                            list_doc,
-                        ])),
-                    ))
-                }
+                ExprT::ArrayInit(elem_ty, elems) => naryfn([
+                    Doc::text("array_spec_of_list"),
+                    Doc::text("#").append(self.emit_type(env, elem_ty)),
+                    Doc::text("[")
+                        .append(Doc::intersperse(
+                            elems.iter().map(|elem| self.emit_rvalue(env, elem)),
+                            Doc::text(";").append(Doc::line()),
+                        ))
+                        .append(Doc::text("]"))
+                        .group()
+                        .nest(2),
+                ]),
                 ExprT::Malloc(ty) => parens(
                     Doc::text("Pulse.Lib.C.Ref.alloc_ref")
                         .append(Doc::line())

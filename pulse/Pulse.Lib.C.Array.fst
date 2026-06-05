@@ -94,21 +94,12 @@ let array_spec_upd_mask #a s n x i = ()
 let array_spec_upd_idx1 #a s n x i = ()
 let array_spec_upd_idx2 #a s (n:nat) x = ()
 
-let rec array_spec_of_list_full_len_aux (#a: Type) (s: array_spec a) (i: nat) (n: nat) (xs: list a) :
-  Lemma
-    (requires array_spec_full s /\ array_spec_len s == n)
-    (ensures
-      array_spec_full (array_spec_of_list_aux s i xs)
-      /\ array_spec_len (array_spec_of_list_aux s i xs) == n)
-    (decreases xs)
-  = match xs with
-    | [] -> ()
-    | x :: rest -> array_spec_of_list_full_len_aux (array_spec_upd s i x) (i + 1) n rest
+let array_spec_of_list xs =
+  Seq.init (List.length xs) fun i -> Val (List.Tot.index xs i)
 
-let array_spec_of_list_full_len #a n x xs =
-  array_spec_of_list_full_len_aux (array_spec_zeroed a n x) 0 n xs
+let array_spec_of_list_full_len xs = ()
 
-#set-options "--split_queries always"
+let array_spec_of_list_idx xs i = ()
 
 // alloc_array: allocate an uninitialized array
 fn alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SZ.t)
@@ -181,6 +172,8 @@ fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   fold (array_pts_to a p s);
   r
 }
+
+#restart-solver
 
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })

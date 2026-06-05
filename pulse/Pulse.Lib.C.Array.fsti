@@ -135,17 +135,27 @@ val array_spec_upd_mask #a s n x (i:nat) :
 val array_spec_upd_idx1 #a s n x (i:nat) : Lemma (i =!= n /\ array_spec_initd s i ==> (array_spec_idx (array_spec_upd #a s n x) i == array_spec_idx s i)) [SMTPat (array_spec_idx (array_spec_upd #a s n x) i)]
 val array_spec_upd_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_spec_idx (array_spec_upd #a s n x) n == x) [SMTPat (array_spec_idx (array_spec_upd #a s n x) n)]
 
-let rec array_spec_of_list_aux (#a: Type) (s: array_spec a) (i: nat) (xs: list a) : Tot (array_spec a) (decreases xs) =
-  match xs with
-  | [] -> s
-  | x :: rest -> array_spec_of_list_aux (array_spec_upd s i x) (i + 1) rest
+let list_length_nil #a : Lemma (List.length ([] <: list a) == 0) [SMTPat (List.length ([] <: list a))] = ()
+let list_length_cons #a (x: a) (xs: list a) : Lemma (List.length (x :: xs) == List.length xs + 1) [SMTPat (List.length (x :: xs))] = ()
+let list_index_zero #a (x: a) (xs: list a) : Lemma (List.Tot.index (x::xs) 0 == x) [SMTPat (List.Tot.index (x::xs) 0)] = ()
+let list_index_pos #a (x: a) (xs: list a) (i: nat) :
+  Lemma
+    (requires 0 < i /\ i < List.length xs + 1)
+    (ensures List.Tot.index (x::xs) i == List.Tot.index xs (i-1))
+    [SMTPat (List.Tot.index (x::xs) i)] =
+  ()
 
-let array_spec_of_list (#a: Type) (n: nat) (x: a) (xs: list a) : array_spec a =
-  array_spec_of_list_aux (array_spec_zeroed a n x) 0 xs
+val array_spec_of_list (#a: Type) (xs: list a) : array_spec a
 
-val array_spec_of_list_full_len (#a: Type) (n: nat) (x: a) (xs: list a) :
-  Lemma (array_spec_full (array_spec_of_list n x xs) /\ array_spec_len (array_spec_of_list n x xs) == n)
-  [SMTPat (array_spec_of_list n x xs)]
+val array_spec_of_list_full_len (#a: Type) (xs: list a) :
+  Lemma (array_spec_full (array_spec_of_list xs) /\ array_spec_len (array_spec_of_list xs) == List.length xs)
+  [SMTPat (array_spec_of_list xs)]
+
+val array_spec_of_list_idx #a (xs: list a) (i: nat) :
+  Lemma
+    (requires i < List.length xs)
+    (ensures array_spec_idx (array_spec_of_list xs) i == List.Tot.index xs i)
+    [SMTPat (array_spec_idx (array_spec_of_list xs) i)]
 
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
