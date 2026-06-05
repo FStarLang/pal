@@ -673,39 +673,141 @@ impl<'a> Elaborator<'a> {
         false
     }
 
-    /// Lower AssignExpr: `x = (y = expr)` → insert `y = expr` before,
-    /// replace rhs with `y`. Returns statements to insert before, if any.
+    /// Recursively traverse `expr`, hoisting every `AssignExpr` subexpression
+    /// out into `hoisted` (in left-to-right pre-order), and replacing the
+    /// `AssignExpr` with its lhs (a bare lvalue read).
+    ///
+    /// `(y = expr)` becomes a hoisted `y = expr` statement and the expression
+    /// is rewritten to just `y`. Nested chains like `a = b = c` are flattened
+    /// by recursing into the rhs of an `AssignExpr` before pushing the outer
+    /// assignment.
+    ///
+    /// Conditionally-evaluated subexpressions are NOT traversed:
+    /// - the rhs of short-circuit `&&` / `||` / `==>`
+    /// - the branches of the ternary `?:`
+    /// Hoisting from those would change semantics. AssignExprs left in those
+    /// positions are flagged later by the emit pass.
+    ///
+    /// Spec-level expressions (`Old`, `Live`, `Forall`, `Exists`) are also
+    /// skipped; AssignExpr should not appear there.
+    fn hoist_assign_exprs(expr: &mut Rc<Expr>, hoisted: &mut Vec<Rc<Stmt>>) {
+        if matches!(expr.val, ExprT::AssignExpr(_, _)) {
+            let loc = expr.loc.clone();
+            let (lhs, rhs) = match &expr.val {
+                ExprT::AssignExpr(l, r) => (l.clone(), r.clone()),
+                _ => unreachable!(),
+            };
+            let mut new_lhs = lhs;
+            let mut new_rhs = rhs;
+            // Hoist assignments inside the rhs first (they happen before this
+            // one), then inside the lhs (e.g. an Index whose index has side
+            // effects). C99 leaves the order of `=` operand evaluation
+            // unspecified, so left-vs-right here is a deterministic choice.
+            Self::hoist_assign_exprs(&mut new_rhs, hoisted);
+            Self::hoist_assign_exprs(&mut new_lhs, hoisted);
+            hoisted.push(StmtT::Assign(new_lhs.clone(), new_rhs).with_loc(loc));
+            *expr = new_lhs;
+            return;
+        }
+        let e = Rc::make_mut(expr);
+        match &mut e.val {
+            ExprT::Var(_)
+            | ExprT::IntLit(_, _)
+            | ExprT::BoolLit(_)
+            | ExprT::Error(_)
+            | ExprT::SizeOf(_)
+            | ExprT::AlignOf(_)
+            | ExprT::InlinePulse(_, _)
+            | ExprT::Malloc(_)
+            | ExprT::Calloc(_) => {}
+            ExprT::Deref(v)
+            | ExprT::Ref(v)
+            | ExprT::UnOp(_, v)
+            | ExprT::Cast(v, _)
+            | ExprT::VAttr(_, v)
+            | ExprT::PreIncr(v)
+            | ExprT::PostIncr(v)
+            | ExprT::PreDecr(v)
+            | ExprT::PostDecr(v)
+            | ExprT::Free(v) => {
+                Self::hoist_assign_exprs(v, hoisted);
+            }
+            ExprT::Member(x, _) => Self::hoist_assign_exprs(x, hoisted),
+            ExprT::Index(arr, idx) => {
+                Self::hoist_assign_exprs(arr, hoisted);
+                Self::hoist_assign_exprs(idx, hoisted);
+            }
+            ExprT::BinOp(op, l, r) => {
+                Self::hoist_assign_exprs(l, hoisted);
+                // Short-circuit operators don't always evaluate their rhs.
+                if !matches!(op, BinOp::LogAnd | BinOp::LogOr | BinOp::Implies) {
+                    Self::hoist_assign_exprs(r, hoisted);
+                }
+            }
+            ExprT::FnCall(_, args) => {
+                for a in args {
+                    Self::hoist_assign_exprs(a, hoisted);
+                }
+            }
+            ExprT::Cond(c, _, _) => {
+                // Branches are conditionally evaluated; only walk the
+                // (always-evaluated) condition.
+                Self::hoist_assign_exprs(c, hoisted);
+            }
+            ExprT::StructInit(_, flds) => {
+                for (_, v) in flds {
+                    Self::hoist_assign_exprs(v, hoisted);
+                }
+            }
+            ExprT::UnionInit(_, _, v) => Self::hoist_assign_exprs(v, hoisted),
+            ExprT::ArrayInit(_, elems) => {
+                for v in elems {
+                    Self::hoist_assign_exprs(v, hoisted);
+                }
+            }
+            ExprT::MallocArray(_, n) | ExprT::CallocArray(_, n) => {
+                Self::hoist_assign_exprs(n, hoisted);
+            }
+            // Spec-level constructs: AssignExpr should not appear inside
+            // them, and a stmt-level hoist would not be semantically valid.
+            ExprT::Old(_) | ExprT::Live(_) | ExprT::Forall(_, _, _) | ExprT::Exists(_, _, _) => {}
+            ExprT::AssignExpr(_, _) => unreachable!(),
+        }
+    }
+
+    /// Hoist `AssignExpr` subexpressions out of the top-level expressions of
+    /// `stmt`. Returns the assignment statements to insert immediately before
+    /// `stmt`.
+    ///
+    /// Statement positions whose expression is evaluated repeatedly
+    /// (`While { cond, .. }`) are intentionally skipped: hoisting before the
+    /// loop would only run the assignment once. Lowering those will need a
+    /// loop-rewrite that this pass doesn't yet perform.
     fn lower_assign_expr(stmt: &mut Rc<Stmt>) -> Vec<Rc<Stmt>> {
         let s = Rc::make_mut(stmt);
-        let loc = s.loc.clone();
-
-        // Extract the top-level rhs expression
-        let rhs = match &s.val {
-            StmtT::Assign(_, rhs) => Some(rhs.clone()),
-            StmtT::Return(Some(rhs)) => Some(rhs.clone()),
-            StmtT::Call(rhs) => Some(rhs.clone()),
-            _ => None,
-        };
-
-        let Some(rhs) = rhs else { return vec![] };
-        let ExprT::AssignExpr(inner_lhs, inner_rhs) = &rhs.val else {
-            return vec![];
-        };
-        let inner_lhs = inner_lhs.clone();
-        let inner_rhs = inner_rhs.clone();
-
-        // Create the assignment statement: inner_lhs = inner_rhs
-        let assign_stmt = StmtT::Assign(inner_lhs.clone(), inner_rhs).with_loc(loc.clone());
-
-        // Replace the rhs in the current statement with a read of inner_lhs
+        let mut hoisted = Vec::new();
         match &mut s.val {
-            StmtT::Assign(_, rhs) => *rhs = inner_lhs,
-            StmtT::Return(Some(rhs)) => *rhs = inner_lhs,
-            StmtT::Call(rhs) => *rhs = inner_lhs,
-            _ => unreachable!(),
+            StmtT::Assign(x, v) => {
+                Self::hoist_assign_exprs(x, &mut hoisted);
+                Self::hoist_assign_exprs(v, &mut hoisted);
+            }
+            StmtT::Return(Some(v)) => Self::hoist_assign_exprs(v, &mut hoisted),
+            StmtT::Call(v) => Self::hoist_assign_exprs(v, &mut hoisted),
+            StmtT::If(c, _, _) => Self::hoist_assign_exprs(c, &mut hoisted),
+            StmtT::DeclStackArray { size, .. } => Self::hoist_assign_exprs(size, &mut hoisted),
+            StmtT::Assert(v) => Self::hoist_assign_exprs(v, &mut hoisted),
+            StmtT::While { .. }
+            | StmtT::Decl(_, _)
+            | StmtT::Return(None)
+            | StmtT::Break
+            | StmtT::Continue
+            | StmtT::GhostStmt(_)
+            | StmtT::Goto(_)
+            | StmtT::Label { .. }
+            | StmtT::GotoBlock { .. }
+            | StmtT::Error => {}
         }
-
-        vec![assign_stmt]
+        hoisted
     }
 
     fn elab_stmts(&mut self, env: &Env, stmts: &mut Vec<Rc<Stmt>>) {
