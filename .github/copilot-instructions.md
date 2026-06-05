@@ -74,5 +74,11 @@ Diagnostics are emitted as LSP-compatible JSON (`*_diagnostics.json`) alongside 
 - Rust edition 2024; uses `chumsky` for parsing inline Pulse expressions (`src/hauntedc.rs`).
 - The `pretty` crate is used for Pulse code emission with source range tracking.
 - Output file names are derived from input: `foo.c` → `Foo.fst` (first letter capitalized).
-- Test C files live in `test/`; each must include `pal.h` and contain verification annotations.
+- Test C files live in `test/<name>/<name>.c`; each must include `pal.h` and contain verification annotations.
+- In each test subfolder (`test/<name>/`), the header files and Makefile must be symlinks, not real files. Specifically:
+  - `pal.h` → `../pal.h`
+  - `Makefile` → `../_templates/Makefile`
+  - `fstar.fst.config.json` → `../_templates/fstar.fst.config.json`
+  - `pal.config.json` → `../_templates/pal.config.json`
+  Create new test folders by mirroring an existing one (e.g., `test/swap/`) so these symlinks are set up correctly.
 - The `pulse/` directory contains F*/Pulse library files (`.fst`/`.fsti`) for C interop types.
