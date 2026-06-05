@@ -80,5 +80,5 @@ Diagnostics are emitted as LSP-compatible JSON (`*_diagnostics.json`) alongside 
   - `Makefile` → `../_templates/Makefile`
   - `fstar.fst.config.json` → `../_templates/fstar.fst.config.json`
   - `pal.config.json` → `../_templates/pal.config.json`
-  Create new test folders by mirroring an existing one (e.g., `test/swap/`) so these symlinks are set up correctly.
+  Create new test folders by running the `test/new.sh test_name` script so these symlinks are set up correctly.
 - The `pulse/` directory contains F*/Pulse library files (`.fst`/`.fsti`) for C interop types.
