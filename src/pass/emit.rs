@@ -159,6 +159,24 @@ impl ExprKind {
         }
     }
 
+    /// Convert to an rvalue with C-style array-to-pointer decay.
+    ///
+    /// In C, an inline array used in rvalue context decays to a pointer to
+    /// its first element — i.e. yields the bare array handle, not the
+    /// contents. This is the correct conversion for every rvalue use of an
+    /// inline-array field projection (assignment RHS, function-call args,
+    /// return values, requires/ensures, etc.). Distinct from `to_rvalue`,
+    /// which wraps `ArrayLValue` in `array_read_all` and returns
+    /// `array_spec T` — only correct if a caller genuinely wants the
+    /// contents (currently no emit site does).
+    fn to_rvalue_decayed(self) -> Doc {
+        match self {
+            ExprKind::LValue(doc) => parens(Doc::text("!").append(doc)),
+            ExprKind::ArrayLValue(doc) => doc,
+            ExprKind::RValue(doc) => doc,
+        }
+    }
+
     /// Extract the raw document without rvalue/lvalue conversion.
     fn into_doc(self) -> Doc {
         match self {
@@ -1713,7 +1731,7 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
 
 impl<'a> Emitter<'a> {
     fn emit_rvalue(&mut self, env: &Env, v: &Expr) -> Doc {
-        self.emit_expr(env, v).to_rvalue()
+        self.emit_expr(env, v).to_rvalue_decayed()
     }
 
     fn emit_rvalue_inner(&mut self, env: &Env, v: &Expr) -> Doc {
