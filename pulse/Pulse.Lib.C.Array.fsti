@@ -157,6 +157,8 @@ val array_spec_of_list_idx #a (xs: list a) (i: nat) :
     (ensures array_spec_idx (array_spec_of_list xs) i == List.Tot.index xs i)
     [SMTPat (array_spec_idx (array_spec_of_list xs) i)]
 
+let array_spec_len_of_list #a (#xs: list a) #n (h: List.length xs == n) : (array_spec_len (array_spec_of_list xs) == n) = ()
+
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   requires array_pts_to a 1.0R s
