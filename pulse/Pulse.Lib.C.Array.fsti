@@ -135,6 +135,18 @@ val array_spec_upd_mask #a s n x (i:nat) :
 val array_spec_upd_idx1 #a s n x (i:nat) : Lemma (i =!= n /\ array_spec_initd s i ==> (array_spec_idx (array_spec_upd #a s n x) i == array_spec_idx s i)) [SMTPat (array_spec_idx (array_spec_upd #a s n x) i)]
 val array_spec_upd_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_spec_idx (array_spec_upd #a s n x) n == x) [SMTPat (array_spec_idx (array_spec_upd #a s n x) n)]
 
+let rec array_spec_of_list_aux (#a: Type) (s: array_spec a) (i: nat) (xs: list a) : Tot (array_spec a) (decreases xs) =
+  match xs with
+  | [] -> s
+  | x :: rest -> array_spec_of_list_aux (array_spec_upd s i x) (i + 1) rest
+
+let array_spec_of_list (#a: Type) (n: nat) (x: a) (xs: list a) : array_spec a =
+  array_spec_of_list_aux (array_spec_zeroed a n x) 0 xs
+
+val array_spec_of_list_full_len (#a: Type) (n: nat) (x: a) (xs: list a) :
+  Lemma (array_spec_full (array_spec_of_list n x xs) /\ array_spec_len (array_spec_of_list n x xs) == n)
+  [SMTPat (array_spec_of_list n x xs)]
+
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   requires array_pts_to a 1.0R s

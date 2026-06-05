@@ -2266,24 +2266,27 @@ impl<'a> Emitter<'a> {
                     )),
                     self.emit_rvalue(env, val),
                 ),
-                ExprT::ArrayInit(elem_ty, elems) => {
-                    // Emit as nested array_spec_upd calls on array_spec_zeroed base:
-                    // (array_spec_upd (... (array_spec_zeroed T (SizeT.v Nsz) zero_default) 0 v0) 1 v1) ...
+                ExprT::ArrayInit(_elem_ty, elems) => {
+                    // Emit as normalize_term (array_spec_of_list n zero_default [v0; v1; ...])
+                    // normalize_term unfolds the let-rec to a chain of array_spec_upd
+                    // for element-wise reasoning; SMTPat lemma handles fullness/length.
                     let n = elems.len();
-                    let base = parens(naryfn([
-                        Doc::text("array_spec_zeroed"),
-                        self.emit_type(env, elem_ty),
-                        parens(Doc::text(format!("SizeT.v {}sz", n))),
-                        Doc::text("zero_default"),
-                    ]));
-                    elems.iter().enumerate().fold(base, |acc, (i, elem)| {
+                    let list_elems = elems
+                        .iter()
+                        .map(|elem| self.emit_rvalue(env, elem))
+                        .collect::<Vec<_>>();
+                    let list_doc = Doc::text("[")
+                        .append(Doc::intersperse(list_elems, Doc::text("; ")))
+                        .append(Doc::text("]"));
+                    parens(unaryfn(
+                        Doc::text("normalize_term"),
                         parens(naryfn([
-                            Doc::text("array_spec_upd"),
-                            acc,
-                            Doc::text(format!("{}", i)),
-                            self.emit_rvalue(env, elem),
-                        ]))
-                    })
+                            Doc::text("array_spec_of_list"),
+                            Doc::text(format!("{}", n)),
+                            Doc::text("zero_default"),
+                            list_doc,
+                        ])),
+                    ))
                 }
                 ExprT::Malloc(ty) => parens(
                     Doc::text("Pulse.Lib.C.Ref.alloc_ref")

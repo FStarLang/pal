@@ -94,6 +94,20 @@ let array_spec_upd_mask #a s n x i = ()
 let array_spec_upd_idx1 #a s n x i = ()
 let array_spec_upd_idx2 #a s (n:nat) x = ()
 
+let rec array_spec_of_list_full_len_aux (#a: Type) (s: array_spec a) (i: nat) (n: nat) (xs: list a) :
+  Lemma
+    (requires array_spec_full s /\ array_spec_len s == n)
+    (ensures
+      array_spec_full (array_spec_of_list_aux s i xs)
+      /\ array_spec_len (array_spec_of_list_aux s i xs) == n)
+    (decreases xs)
+  = match xs with
+    | [] -> ()
+    | x :: rest -> array_spec_of_list_full_len_aux (array_spec_upd s i x) (i + 1) n rest
+
+let array_spec_of_list_full_len #a n x xs =
+  array_spec_of_list_full_len_aux (array_spec_zeroed a n x) 0 n xs
+
 #set-options "--split_queries always"
 
 // alloc_array: allocate an uninitialized array
