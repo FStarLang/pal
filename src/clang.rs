@@ -163,6 +163,7 @@ impl<'a> Ctx<'a> {
         ty: Rc<Type>,
         init: Option<Rc<Expr>>,
         is_pure: bool,
+        opaque_to_smt: bool,
     ) {
         self.translation_unit.decls.push(Ast {
             loc,
@@ -171,6 +172,7 @@ impl<'a> Ctx<'a> {
                 ty,
                 init,
                 is_pure,
+                opaque_to_smt,
             }),
         })
     }

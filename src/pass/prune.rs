@@ -386,6 +386,7 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 ty,
                 init,
                 is_pure: _,
+                opaque_to_smt: _,
             }) => {
                 let ds = deps.deps_for(n);
                 scan_type(ds, ty);

@@ -956,6 +956,7 @@ impl<'a> Elaborator<'a> {
                 ty,
                 init,
                 is_pure: _,
+                opaque_to_smt: _,
             }) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 if let Some(init) = init {

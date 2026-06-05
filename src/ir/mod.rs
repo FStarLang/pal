@@ -589,6 +589,7 @@ pub struct GlobalVar {
     pub ty: Rc<Type>,
     pub init: Option<Rc<Expr>>,
     pub is_pure: bool,
+    pub opaque_to_smt: bool,
 }
 
 pub type Decl = Ast<DeclT>;

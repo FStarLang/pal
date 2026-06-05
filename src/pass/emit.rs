@@ -4978,7 +4978,26 @@ impl<'a> Emitter<'a> {
             Some(init) => self.emit_rvalue(env, init),
             None => self.emit_type_default(env, &gv.ty),
         };
-        mk_let(name, &[], ty, body)
+        let def = mk_let(name.clone(), &[], ty, body);
+        if gv.opaque_to_smt {
+            let var_name = format!("var_{}", gv.name.val);
+            let mut result = Doc::text("[@@\"opaque_to_smt\"]")
+                .append(Doc::hardline())
+                .append(def);
+            // Emit a length fact for FixedArray types so SMT knows the length
+            if let TypeT::FixedArray(_, length) = &gv.ty.val {
+                let lemma = Doc::hardline()
+                    .append(Doc::hardline())
+                    .append(Doc::text(format!(
+                        "let {}_length : squash (array_spec_len {} == {}) = normalize_term_spec (array_spec_len {})",
+                        var_name, var_name, length, var_name
+                    )));
+                result = result.append(lemma);
+            }
+            result
+        } else {
+            def
+        }
     }
 
     fn emit_decl(&mut self, env: &Env, decl: &Decl) -> Doc {

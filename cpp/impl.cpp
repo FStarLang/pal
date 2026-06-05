@@ -1628,15 +1628,21 @@ public:
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
                                    : OptExpr::None();
       bool is_pure = VD->getType().isConstQualified() && VD->hasInit();
+      bool opaque_to_smt = false;
       for (auto attr : VD->getAttrs()) {
         if (auto ann = dyn_cast<AnnotateAttr>(attr);
             ann && ann->getAnnotation() == "pal-pure" &&
             ann->args_size() == 0) {
           is_pure = true;
         }
+        if (auto ann = dyn_cast<AnnotateAttr>(attr);
+            ann && ann->getAnnotation() == "pal-opaque-to-smt" &&
+            ann->args_size() == 0) {
+          opaque_to_smt = true;
+        }
       }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
-                                std::move(init), is_pure);
+                                std::move(init), is_pure, opaque_to_smt);
     } else if (dyn_cast<EnumDecl>(D)) {
       // Enum declarations need no IR representation;
       // constants are inlined as integer literals at use sites.
