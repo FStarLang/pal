@@ -222,6 +222,35 @@ impl<'a> Elaborator<'a> {
             ExprT::IntLit(_, ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::Ref(v) => {
                 self.elab_rvalue(env, Rc::make_mut(v), None);
+                // C defines `&E1[E2]` as `(E1) + (E2)`. When E1 is one of
+                // PAL's array-shaped pointers (which aren't true memory
+                // arrays at the Pulse level), rewrite to a BinOp::Add so
+                // that emission goes through the pointer-arithmetic path
+                // instead of trying to manufacture an lvalue for the
+                // element. The index would otherwise be lost in the
+                // implicit Array→ArrayPtr coercion at the call site.
+                if let ExprT::Index(arr, idx) = &v.val {
+                    let arr_is_array_ptr = env
+                        .infer_expr(arr)
+                        .ok()
+                        .map(|t| env.vtype_whnf(t))
+                        .is_some_and(|t| {
+                            matches!(
+                                &t.val,
+                                TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
+                            )
+                        });
+                    if arr_is_array_ptr {
+                        let arr = arr.clone();
+                        let idx = idx.clone();
+                        rval.val = ExprT::BinOp(BinOp::Add, arr, idx);
+                        // Re-elaborate as a BinOp::Add. The new node isn't
+                        // a Ref, so this rewrite arm can't re-fire and the
+                        // recursion terminates.
+                        self.elab_rvalue(env, rval, expected);
+                        return;
+                    }
+                }
                 if !env.is_lvalue(v) {
                     self.report(format!("expected lvalue for &, got {}", v), &rval.loc);
                 }
