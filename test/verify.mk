@@ -12,6 +12,7 @@ FSTAR = $(FSTAR_EXE) \
 	--cache_checked_modules \
 	--cache_dir $(CACHE_DIR) \
 	--already_cached Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore \
+	--include helpers \
 	--include $(OUT_DIR)
 
 FST_FILES := $(wildcard $(OUT_DIR)/*.fst)
@@ -31,12 +32,12 @@ include .depend
 
 $(CACHE_DIR)/%.fst.checked:
 	@echo "Verifying $*.fst"
-	$(FSTAR) $(OUT_DIR)/$*.fst
+	$(FSTAR) $<
 	@touch -c $@
 
 $(CACHE_DIR)/%.fsti.checked:
 	@echo "Verifying $*.fsti"
-	$(FSTAR) $(OUT_DIR)/$*.fsti
+	$(FSTAR) $<
 	@touch -c $@
 
 .PHONY: clean

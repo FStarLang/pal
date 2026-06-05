@@ -1,6 +1,6 @@
 {
   "fstar_exe": "../../opt/run-fstar.sh",
-  "include_dirs": ["out", "_cache"],
+  "include_dirs": ["helpers", "out", "_cache"],
   "options": [
     "--cache_checked_modules",
     "--already_cached",

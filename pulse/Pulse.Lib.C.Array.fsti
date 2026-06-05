@@ -145,10 +145,10 @@ let list_index_pos #a (x: a) (xs: list a) (i: nat) :
     [SMTPat (List.Tot.index (x::xs) i)] =
   ()
 
-val array_spec_of_list (#a: Type) (xs: list a) : array_spec a
+val array_spec_of_list (#a: Type) (xs: list a) : full_array_spec a
 
 val array_spec_of_list_full_len (#a: Type) (xs: list a) :
-  Lemma (array_spec_full (array_spec_of_list xs) /\ array_spec_len (array_spec_of_list xs) == List.length xs)
+  Lemma (array_spec_len (array_spec_of_list xs) == List.length xs)
   [SMTPat (array_spec_of_list xs)]
 
 val array_spec_of_list_idx #a (xs: list a) (i: nat) :

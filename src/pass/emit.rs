@@ -1723,6 +1723,9 @@ impl<'a> Emitter<'a> {
                 ExprT::IntLit(val, ty) => {
                     let resolved = env.vtype_whnf(ty.clone().into());
                     match resolved.val {
+                        TypeT::Int { signed, width: 32 } => {
+                            Doc::text(format!("{}{}l", val, if signed { "" } else { "u" }))
+                        }
                         TypeT::Int {
                             signed: true,
                             width,
@@ -2266,18 +2269,38 @@ impl<'a> Emitter<'a> {
                     )),
                     self.emit_rvalue(env, val),
                 ),
-                ExprT::ArrayInit(elem_ty, elems) => naryfn([
-                    Doc::text("array_spec_of_list"),
-                    Doc::text("#").append(self.emit_type(env, elem_ty)),
-                    Doc::text("[")
-                        .append(Doc::intersperse(
-                            elems.iter().map(|elem| self.emit_rvalue(env, elem)),
-                            Doc::text(";").append(Doc::line()),
-                        ))
-                        .append(Doc::text("]"))
-                        .group()
-                        .nest(2),
-                ]),
+                ExprT::ArrayInit(elem_ty, elems) => {
+                    let elem_ty_doc = self.emit_type(env, elem_ty);
+                    let elem_ty_arg = Doc::text("#").append(elem_ty_doc);
+                    naryfn([
+                        Doc::text("array_spec_of_list"),
+                        elem_ty_arg.clone(),
+                        // Doc::text("[")
+                        //     .append(Doc::intersperse(
+                        //         elems.iter().map(|elem| self.emit_rvalue(env, elem)),
+                        //         Doc::text(";").append(Doc::line()),
+                        //     ))
+                        //     .append(Doc::text("]"))
+                        //     .group()
+                        //     .nest(2),
+                        elems.iter().rev().fold(
+                            unaryfn(Doc::text("Nil"), elem_ty_arg.clone()),
+                            |doc, elem| {
+                                Doc::text("(Cons")
+                                    .append(Doc::line())
+                                    .append(elem_ty_arg.clone())
+                                    .group()
+                                    .append(Doc::line())
+                                    .append(self.emit_rvalue(env, elem))
+                                    .group()
+                                    .nest(2)
+                                    .append(Doc::line())
+                                    .append(doc)
+                                    .append(")")
+                            },
+                        ),
+                    ])
+                }
                 ExprT::Malloc(ty) => parens(
                     Doc::text("Pulse.Lib.C.Ref.alloc_ref")
                         .append(Doc::line())
