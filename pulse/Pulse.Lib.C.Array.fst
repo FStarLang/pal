@@ -101,7 +101,53 @@ let array_spec_of_list_full_len xs = ()
 
 let array_spec_of_list_idx xs i = ()
 
-// alloc_array: allocate an uninitialized array
+private let rec mk_list (#a: Type) (s: full_array_spec a) (i: nat { i <= Seq.length s }) : Tot (list a)
+  (decreases (Seq.length s - i))
+=
+  if i >= Seq.length s then []
+  else array_spec_idx s i :: mk_list s (i + 1)
+
+let array_spec_to_list #a (s: full_array_spec a) : list a =
+  mk_list s 0
+
+private let rec mk_list_length (#a: Type) (s: full_array_spec a) (i: nat) : Lemma
+  (requires i <= array_spec_len s)
+  (ensures List.length (mk_list s i) == array_spec_len s - i)
+  (decreases (array_spec_len s - i))
+=
+  if i >= array_spec_len s then ()
+  else mk_list_length s (i + 1)
+
+let array_spec_to_list_len #a s =
+  mk_list_length s 0
+
+private let rec mk_list_index (#a: Type) (s: full_array_spec a) (i j: nat) : Lemma
+  (requires i <= array_spec_len s /\ i + j < array_spec_len s)
+  (ensures (mk_list_length s i; List.Tot.index (mk_list s i) j == array_spec_idx s (i + j)))
+  (decreases j)
+=
+  mk_list_length s i;
+  if j = 0 then ()
+  else begin
+    mk_list_length s (i + 1);
+    mk_list_index s (i + 1) (j - 1)
+  end
+
+let array_spec_to_list_idx #a s i =
+  mk_list_length s 0;
+  mk_list_index s 0 i
+
+let array_spec_to_list_of_list #a xs =
+  let s = array_spec_of_list xs in
+  mk_list_length s 0;
+  array_spec_of_list_full_len xs;
+  let aux (i: nat { i < List.length (mk_list s 0) }) : Lemma
+    (List.Tot.index (mk_list s 0) i == List.Tot.index xs i)
+  = mk_list_index s 0 i
+  in
+  Classical.forall_intro aux;
+  List.Tot.Properties.index_extensionality (mk_list s 0) xs
+
 fn alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SZ.t)
   returns r : array a
   ensures freeable_array r

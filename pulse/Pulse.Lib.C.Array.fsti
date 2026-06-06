@@ -159,6 +159,17 @@ val array_spec_of_list_idx #a (xs: list a) (i: nat) :
 
 let array_spec_len_of_list #a (#xs: list a) #n (h: List.length xs == n) : (array_spec_len (array_spec_of_list xs) == n) = ()
 
+val array_spec_to_list #a (s: full_array_spec a) : list a
+val array_spec_to_list_len #a s : Lemma (List.length (array_spec_to_list #a s) == array_spec_len s) [SMTPat (List.length (array_spec_to_list #a s))]
+val array_spec_to_list_idx #a (s: full_array_spec a) (i: nat) :
+  Lemma
+    (requires i < array_spec_len s)
+    (ensures List.Tot.index (array_spec_to_list s) i == array_spec_idx s i)
+    [SMTPat (List.Tot.index (array_spec_to_list s) i)]
+val array_spec_to_list_of_list #a (xs: list a) :
+  Lemma (array_spec_to_list (array_spec_of_list xs) == xs)
+    [SMTPat (array_spec_to_list (array_spec_of_list xs))]
+
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   requires array_pts_to a 1.0R s
