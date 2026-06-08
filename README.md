@@ -12,7 +12,7 @@
 [![F\*/Pulse](https://img.shields.io/badge/F*%2FPulse-verified-5B2D8E.svg)](https://github.com/FStarLang/pulse)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-[Quick Start](#quick-start) · [Examples](#examples) · [Docs](#documentation)
+[Quick Start](#quick-start) · [Docs](#documentation)
 
 </div>
 
@@ -45,7 +45,7 @@ void swap(int *x, int *y)
 The `_ensures` annotation states the postcondition: after `swap` returns,
 the values are exchanged. PAL translates this into a Pulse function whose
 type encodes that contract. F\*/Pulse type-checks the generated code -- if
-it passes, the implementation satisfies the spec.
+it passes, the implementation satisfies the spec. More availabe at [`examples/`](examples/).
 
 ---
 
@@ -119,46 +119,6 @@ pal [OPTIONS] <FILES>...
 
 ---
 
-## Examples
-
-```c
-#include "pal.h"
-
-int max(int a, int b)
-    _ensures(a <= return && b <= return)
-{
-    if (a <= b) {
-        return b;
-    } else {
-        return a;
-    }
-}
-```
-
-```c
-#include "pal.h"
-#include <stdint.h>
-
-uint32_t multiply_by_repeated_addition(uint32_t x, uint32_t y)
-    _requires((_specint) x * y <= UINT32_MAX)
-    _ensures(return == x * y)
-{
-    uint32_t ctr = 0, acc = 0;
-    while (ctr < x)
-        _invariant(_live(ctr) && _live(acc))
-        _invariant(ctr <= x && acc == ctr * y)
-    {
-        ctr = ctr + 1;
-        acc = acc + y;
-    }
-    return acc;
-}
-```
-
-More in [`examples/`](examples/) and [`test/`](test/).
-
----
-
 ## Documentation
 
 Detailed references live in [`doc/`](doc/):
@@ -169,34 +129,6 @@ Detailed references live in [`doc/`](doc/):
 | [Structs](doc/structs.md) | What PAL emits per `struct` and `union`: generated types, predicates, fold/unfold, field projections |
 | [Internals](doc/internals.md) | Pipeline passes, IR design, Zngur FFI, diagnostics, output structure, Pulse support library |
 | [doc/README.md](doc/README.md) | Documentation index: how to write specs, how C data is modeled in Pulse |
-
----
-
-## Project Structure
-
-```
-src/
-  main.rs           pipeline orchestration + CLI
-  clang.rs           libclang FFI (parse C to IR)
-  ir/                typed AST
-  pass/              transform passes
-  hauntedc.rs        inline Pulse expression parser
-  diag.rs            diagnostics
-  env.rs             type environment
-  vfs.rs             virtual filesystem
-cpp/
-  impl.cpp           C++ frontend (Clang AST walker)
-  iface.zng          Zngur interface definition
-pulse/
-  Pulse.Lib.C.*.fst/i  support library for C interop types
-doc/                    detailed documentation
-test/                   82 verified test cases
-opt/
-  install-fstar.sh   F* installer
-  run-fstar.sh       F* wrapper used by test makefiles
-```
-
-See [Internals](doc/internals.md) for what each component does.
 
 ---
 
