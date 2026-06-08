@@ -1322,24 +1322,24 @@ impl<'a> Emitter<'a> {
                 }
             }
             ExprT::Deref(inner) => {
-                // *arrayptr → arrayptr_read at index 0
-                let is_arrayptr = env
-                    .infer_expr(inner)
-                    .map(|ty| {
-                        matches!(
-                            env.vtype_whnf(ty).val,
-                            TypeT::Pointer(_, PointerKind::ArrayPtr)
-                        )
-                    })
-                    .unwrap_or(false);
-                if is_arrayptr {
+                // *array     → array_read at index 0
+                // *arrayptr  → arrayptr_read at index 0
+                let inner_kind = env.infer_expr(inner).map(|ty| {
+                    if let TypeT::Pointer(_, k) = &env.vtype_whnf(ty).val {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                });
+                let read_fn = match inner_kind {
+                    Ok(Some(PointerKind::Array)) => Some("array_read"),
+                    Ok(Some(PointerKind::ArrayPtr)) => Some("arrayptr_read"),
+                    _ => None,
+                };
+                if let Some(read_fn) = read_fn {
                     let inner_doc = self.emit_rvalue(env, inner);
                     ExprKind::RValue(annotated(v, || {
-                        parens(naryfn([
-                            Doc::text("arrayptr_read"),
-                            inner_doc,
-                            Doc::text("0sz"),
-                        ]))
+                        parens(naryfn([Doc::text(read_fn), inner_doc, Doc::text("0sz")]))
                     }))
                 } else {
                     ExprKind::LValue(annotated(v, || self.emit_expr(env, inner).to_rvalue()))
@@ -2225,9 +2225,16 @@ impl<'a> Emitter<'a> {
                         // arrayptrs carry no permissions; _live is emp
                         Doc::text("emp")
                     } else if is_array {
+                        // Extract the inner expression from `*arr` and pass its
+                        // rvalue (the array handle itself) to live_array.
+                        // `ExprT::Deref` for Array now returns an RValue
+                        // (array_read ... 0sz), so emit_lvalue would fail.
+                        let ExprT::Deref(inner) = &v.val else {
+                            unreachable!("is_array implies v is a Deref")
+                        };
                         unaryfn(
                             Doc::text("Pulse.Lib.C.Array.live_array"),
-                            self.emit_lvalue(env, v),
+                            self.emit_rvalue(env, inner),
                         )
                     } else {
                         unaryfn(Doc::text("live"), self.emit_lvalue(env, v))
@@ -2597,19 +2604,19 @@ impl<'a> Emitter<'a> {
                         .nest(2)
                         .group()
                     } else if let ExprT::Deref(inner) = &x.val {
-                        // Check if dereferencing an arrayptr: *p = val → arrayptr_write p 0sz val
-                        let is_arrayptr = env
+                        // *array     = val → array_write    p 0sz val
+                        // *arrayptr  = val → arrayptr_write p 0sz val
+                        let write_fn = env
                             .infer_expr(inner)
-                            .map(|ty| {
-                                matches!(
-                                    env.vtype_whnf(ty).val,
-                                    TypeT::Pointer(_, PointerKind::ArrayPtr)
-                                )
+                            .map(|ty| match env.vtype_whnf(ty).val {
+                                TypeT::Pointer(_, PointerKind::Array) => Some("array_write"),
+                                TypeT::Pointer(_, PointerKind::ArrayPtr) => Some("arrayptr_write"),
+                                _ => None,
                             })
-                            .unwrap_or(false);
-                        if is_arrayptr {
+                            .unwrap_or(None);
+                        if let Some(write_fn) = write_fn {
                             naryfn([
-                                Doc::text("arrayptr_write"),
+                                Doc::text(write_fn),
                                 self.emit_rvalue(env, inner),
                                 Doc::text("0sz"),
                                 self.emit_rvalue(env, t),
