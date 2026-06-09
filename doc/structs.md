@@ -1,6 +1,6 @@
 This doc explains how structs are modelled in pal. Whenever you define a struct `foo`, PAL generates a file `Struct_foo.fst`. This file contains the following:
 
-1. `noeq type struct_foo`: This is the F* record that is the lightweight representation of the struct.
+1. `noeq type struct_foo`: This is the F* record that is the refinement of the struct.
 2. `noeq type struct_foo__spec`: A collection of all the data that pointers in the struct point to. Marked `[@@erasable]` (ghost-only). If the struct has no pointer fields, this type — together with its `pred_unfold`/`pred_fold` ghost fns — is omitted and `struct_foo__pred` collapses to `emp`.
 3. `struct_foo__pred` and `struct_foo__uninit_pred`: These contain the initialized and uninitialized versions of the points-tos linking the fields in `struct_foo` to the things that they point to in `struct_foo__spec`
 4. `struct_foo__pred_unfold` : A ghost fn that given `struct_foo__pred` decomposes it into its constituent points-tos. It has the `[@@pulse_intro]` annotation, which tells pulse to apply it whenever it wants to prove one of the predicates included in its postcondition.
