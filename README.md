@@ -21,7 +21,7 @@
 
 PAL is a verification framework that lets you write C and prove it correct.
 You annotate standard C code with contracts -- preconditions, postconditions,
-loop invariants, ownership disciplines -- using macros from [`pal.h`](test/pal.h), and PAL
+loop invariants, ownership disciplines -- using macros from [`pal.h`](examples/pal.h), and PAL
 handles the rest: it transpiles the annotated source into
 [Pulse](https://github.com/FStarLang/pulse) (a separation-logic-based
 verification language built on [F\*](https://github.com/FStarLang/fstar)),
