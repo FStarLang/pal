@@ -6,10 +6,6 @@ parse, lower, check, emit progression found in production compilers,
 applied here to translating C with proof annotations into a
 separation-logic-based verification language.
 
-For the high-level overview see the [README](../README.md).
-For the annotation reference see [pal_surface_syntax.md](pal_surface_syntax.md).
-For the struct/union data model see [structs.md](structs.md).
-
 ---
 
 ## 1. From C to Verified Pulse
