@@ -5166,20 +5166,16 @@ pub struct EmittedModule {
 /// Emit each declaration as its own module.
 /// Returns a list of (module_name, code, source_range_map) for each declaration.
 pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<EmittedModule> {
-    // First pass: build env with all decls (needed for type lookups during emission)
+    // Build env with all decls pre-registered so call sites can resolve forward
+    // references regardless of source order. PAL's clang frontend does not always
+    // visit decls in source order (e.g. functions defined later in a TU may be
+    // emitted before functions defined earlier), so incremental population would
+    // cause `infer_expr` to fail on later-defined callees, producing wrong code
+    // in `BinOp::Eq` (`= array_null` instead of `array_is_null ...`) and other
+    // type-driven emit branches.
     let mut full_env = Env::new();
     for decl in &tu.decls {
         full_env.push_decl(decl);
-    }
-
-    // Also pre-register recursive functions
-    let mut rec_env = Env::new();
-    for decl in &tu.decls {
-        if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &decl.val {
-            if fn_decl.is_rec {
-                rec_env.push_fn_decl(fn_decl.clone());
-            }
-        }
     }
 
     // Build the map from function/let/global identifiers to their owning modules
@@ -5206,8 +5202,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
     // We keep the LAST occurrence (most complete definition).
     let mut seen_modules: HashMap<String, usize> = HashMap::new();
 
-    // Build env incrementally: start from rec_env and push each decl after emitting it
-    let mut env = rec_env;
+    let env = full_env;
     // Reuse a single Emitter across all modules
     let mut emitter = Emitter {
         nm: NameMangling::new(),
@@ -5262,9 +5257,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
             seen_modules.insert(mod_name, pending.len());
             pending.push(new_module);
         }
-
-        // Push current decl to env so subsequent modules can see it
-        env.push_decl(decl);
     }
 
     // Build final code with preambles
