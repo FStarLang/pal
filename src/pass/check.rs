@@ -464,6 +464,12 @@ impl<'a> Checker<'a> {
             ExprT::AssignExpr(lhs, rhs) => {
                 self.check_rvalue(env, lhs);
                 self.check_rvalue(env, rhs);
+                if self.check_types
+                    && let (Some(lhs_ty), Some(rhs_ty)) =
+                        (self.infer_expr(env, lhs), self.infer_expr(env, rhs))
+                {
+                    self.check_type_eq(env, rhs_ty.into(), lhs_ty.into());
+                }
             }
             ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => self.check_type(env, ty),
             ExprT::Error(ty) => self.check_type(env, ty),
