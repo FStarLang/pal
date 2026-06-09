@@ -26,7 +26,7 @@ transform -- it is a well-formedness validator that runs twice: once
 after prune and once after elab. If check finds an inconsistency, it
 reports a diagnostic and the pipeline continues with best-effort output.
 
-**Parse.** [`src/clang.rs`](../src/clang.rs) invokes libclang to parse the C source.
+- **Parse.** [`src/clang.rs`](../src/clang.rs) invokes libclang to parse the C source.
 A C++ frontend ([`cpp/impl.cpp`](../cpp/impl.cpp)) walks the resulting Clang AST and
 calls Rust constructors through a [Zngur](https://github.com/HKalbasi/zngur)
 FFI boundary ([`cpp/iface.zng`](../cpp/iface.zng)) to build IR nodes. Each Clang AST node
@@ -35,35 +35,35 @@ maps to one or more IR nodes. The parser also invokes [`hauntedc.rs`](../src/hau
 parse inline Pulse expressions embedded in `_inline_pulse(...)` and
 similar annotation macros.
 
-**Prune.** [`src/pass/prune.rs`](../src/pass/prune.rs) walks the declaration list and drops
+- **Prune.** [`src/pass/prune.rs`](../src/pass/prune.rs) walks the declaration list and drops
 everything that does not originate from the main source file. This
 removes system headers, standard library prototypes, and anything
 pulled in by `#include` that is not the user's code.
 
-**Merge.** [`src/pass/merge.rs`](../src/pass/merge.rs) joins forward declarations with their
+- **Merge.** [`src/pass/merge.rs`](../src/pass/merge.rs) joins forward declarations with their
 corresponding definitions. A `struct foo;` followed by
 `struct foo { int x; }` becomes a single `StructDefn` node.
 
-**Restructure goto.** [`src/pass/restructure_goto.rs`](../src/pass/restructure_goto.rs) eliminates `goto`
+- **Restructure goto.** [`src/pass/restructure_goto.rs`](../src/pass/restructure_goto.rs) eliminates `goto`
 statements. The pass scans for label/goto pairs from the bottom of each
 statement list and wraps the intermediate code in `GotoBlock` nodes --
 structured loops with break semantics that Pulse can express. Labels
 that no goto references are left as-is and removed later.
 
-**Decay.** [`src/pass/decay.rs`](../src/pass/decay.rs) handles C's array-to-pointer decay
+- **Decay.** [`src/pass/decay.rs`](../src/pass/decay.rs) handles C's array-to-pointer decay
 rule for function parameters. A parameter declared as `T x[]` or
 annotated with `_array` is rewritten from `FixedArray(T, N)` to
 `Pointer(T, Array)` so that the emitter can generate the correct
 `array_pts_to` separation logic predicates.
 
-**Elab.** [`src/pass/elab.rs`](../src/pass/elab.rs) is the largest pass. It resolves
+- **Elab.** [`src/pass/elab.rs`](../src/pass/elab.rs) is the largest pass. It resolves
 `TypeT::Unknown` placeholders left by the parser, infers expression
 types, checks type compatibility, elaborates implicit casts (integer
 promotions, pointer conversions), and fills in default ownership
 annotations for function parameters that lack explicit `_plain`,
 `_consumes`, or `_out` markers.
 
-**Emit.** [`src/pass/emit.rs`](../src/pass/emit.rs) lowers the fully elaborated IR into Pulse
+- **Emit.** [`src/pass/emit.rs`](../src/pass/emit.rs) lowers the fully elaborated IR into Pulse
 source code. Each top-level declaration produces its own `.fst` module
 (and optionally a `.fsti` interface). The emitter uses the `pretty`
 crate for layout and tracks source range mappings so that positions
@@ -219,13 +219,13 @@ The build script ([`build.rs`](../build.rs)) orchestrates everything:
 
 PAL produces diagnostics in two formats:
 
-**Stderr.** Human-readable error messages printed via
+- **Stderr.** Human-readable error messages printed via
 [codespan-reporting](https://github.com/brendanzab/codespan-reporting),
 which renders source snippets with underlined ranges and error labels.
 The virtual filesystem ([`src/vfs.rs`](../src/vfs.rs)) provides file contents for the
 renderer.
 
-**JSON.** LSP-compatible diagnostics written to `diagnostics.json`,
+- **JSON.** LSP-compatible diagnostics written to `diagnostics.json`,
 grouped by source file URI (`file://...`). Each entry is an
 `lsp_types::Diagnostic` with range, severity, and message. This
 enables IDE integration: an editor can load the JSON and display
