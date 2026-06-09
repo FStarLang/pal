@@ -15,6 +15,34 @@ This doc explains how structs are modelled in pal. Whenever you define a struct 
 
 Unions are emitted analogously to `Union_foo.fst`, with a sum-type constructor in place of the record.
 
+## Typedefs that wrap a struct
+
+A `typedef struct ... name;` produces **two** files: one for the struct body and one for the alias.
+
+| C source                              | files emitted                                          |
+|---------------------------------------|--------------------------------------------------------|
+| `struct point { ... };`               | `Struct_point.fst`                                     |
+| `typedef struct point { ... } P;`     | `Struct_point.fst` + `Typedef_P.fst`                   |
+| `typedef struct { ... } P;` (anon)    | `Struct_P_anon_1.fst` + `Typedef_P.fst`                |
+| `typedef struct point P;` (alias)     | `Typedef_P.fst` only (struct body lives in its own file) |
+
+For anonymous structs the body file is named `Struct_<typedef>_anon_<n>.fst` since there is no tag to use.
+
+`Typedef_P.fst` is a thin alias layer; it never duplicates the struct's representation. It contains:
+
+1. `let ty_P : Type = Struct_<inner>.struct_<inner>` — an `unfold` alias.
+2. `ty_P__pred` / `ty_P__uninit_pred` — `[@@pulse_eager_unfold]` predicates that delegate to the struct's predicates, so the alias is transparent in proof obligations.
+3. `instance has_zero_default_ty_P` — forwards the struct's zero-default typeclass instance.
+
+Refinements written on the typedef (rather than on the struct) land here. For example, given:
+
+```c
+_refine(this.x._length == 32)
+typedef struct { _array uint8_t *x; } b32_struct;
+```
+
+`Typedef_b32_struct.fst` defines `ty_b32_struct__pred` as the inner struct's pred conjoined with the extra pure conjunct `length_of this.x = 32`. `ty_b32_struct__uninit_pred` is unchanged because `_refine` fires only in the init slprop (use `_refine_always` to extend it to the uninit pred as well). See [`test/array_test/array_test.c`](../test/array_test/array_test.c) for refined-typedef examples.
+
 ## Examples
 
 Tests exercising plain structs (without inline arrays):
