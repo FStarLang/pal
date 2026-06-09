@@ -12,8 +12,11 @@ FSTAR = $(FSTAR_EXE) \
 	--cache_checked_modules \
 	--cache_dir $(CACHE_DIR) \
 	--already_cached Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore \
-	--include helpers \
 	--include $(OUT_DIR)
+
+ifneq ($(wildcard helpers),)
+FSTAR += --include helpers
+endif
 
 FST_FILES := $(wildcard $(OUT_DIR)/*.fst)
 FSTI_FILES := $(wildcard $(OUT_DIR)/*.fsti)
