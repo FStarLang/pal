@@ -247,6 +247,16 @@ fn array_assign_ret u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   v
 }
 
+fn array_update u#a (#t #s: Type u#a) (a: array t) (i: SZ.t) (upd: (t -> s -> t)) (y: s)
+  (#sp: erased (array_spec t) { array_spec_initd sp (SZ.v i) /\ array_spec_mask sp (SZ.v i) })
+  requires array_pts_to a 1.0R sp
+  ensures exists* sp'. array_pts_to a 1.0R sp' **
+    pure (sp' == array_spec_upd sp (SZ.v i) (upd (array_spec_idx sp (SZ.v i)) y))
+{
+  let v = array_read a i;
+  array_write a i (upd v y);
+}
+
 let length #t (a: array t) : GTot nat = A.length a
 let base_of #t (a: array t) : base_t = A.base_of a
 let offset_of #t (a: array t) : GTot nat = A.offset_of a
@@ -310,6 +320,21 @@ fn arrayptr_assign_ret u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
 {
   arrayptr_write x i v;
   v
+}
+
+fn arrayptr_update u#a (#t #s: Type u#a) (x: array t) (i: SZ.t) (upd: (t -> s -> t)) (y: s)
+  (#arr: erased (array t))
+  (#sp: erased (array_spec t) { 0 <= arrayptr_off x arr + SZ.v i /\
+    array_spec_initd sp (arrayptr_off x arr + SZ.v i) /\
+    array_spec_mask sp (arrayptr_off x arr + SZ.v i) })
+  requires arrayptr_pts_to x arr
+  requires array_pts_to arr 1.0R sp
+  ensures exists* sp'.
+    array_pts_to arr 1.0R sp' **
+    pure (sp' == array_spec_upd sp (arrayptr_off x arr + SZ.v i)
+      (upd (array_spec_idx sp (arrayptr_off x arr + SZ.v i)) y))
+{
+  arrayptr_write x i (upd (arrayptr_read x i) y);
 }
 
 let arrayptr_diff #t x z = admit ()

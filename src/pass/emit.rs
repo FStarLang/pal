@@ -2627,6 +2627,53 @@ impl<'a> Emitter<'a> {
                         .append(redecl)
                 }
                 StmtT::Assign(x, t) => {
+                    // a[i].field = val → array_update / arrayptr_update
+                    if let ExprT::Member(base, fld) = &x.val {
+                        if let ExprT::Index(arr, idx) = &base.val {
+                            let arr_ty = env.infer_expr(arr).ok().map(|ty| env.vtype_whnf(ty));
+                            let is_arrayptr = arr_ty
+                                .as_ref()
+                                .map(|ty| {
+                                    matches!(ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr))
+                                })
+                                .unwrap_or(false);
+                            // Check that the element type is a struct
+                            if let Some(struct_name) = env.infer_expr(base).ok().and_then(|ty| {
+                                let ty = env.vtype_whnf(ty);
+                                match &ty.val {
+                                    TypeT::TypeRef(TypeRefKind::Struct(s)) => Some(s.val.clone()),
+                                    _ => None,
+                                }
+                            }) {
+                                let fn_name = if is_arrayptr {
+                                    "arrayptr_update"
+                                } else {
+                                    "array_update"
+                                };
+                                let arr_doc = match self.emit_expr(env, arr) {
+                                    ExprKind::ArrayLValue(arr_doc) => arr_doc,
+                                    arr_doc => arr_doc.to_rvalue(),
+                                };
+                                let field_name = self.emit_name(Name::StructDirectFieldName(
+                                    struct_name,
+                                    fld.val.clone(),
+                                ));
+                                let upd_fn = Doc::text("(fun __v __y -> { __v with ")
+                                    .append(field_name)
+                                    .append(Doc::text(" = __y })"));
+                                return naryfn([
+                                    Doc::text(fn_name),
+                                    arr_doc,
+                                    self.emit_rvalue(env, idx),
+                                    upd_fn,
+                                    self.emit_rvalue(env, t),
+                                ])
+                                .append(";")
+                                .nest(2)
+                                .group();
+                            }
+                        }
+                    }
                     if let ExprT::Index(arr, idx) = &x.val {
                         let is_arrayptr = env
                             .infer_expr(arr)
