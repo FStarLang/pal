@@ -1,8 +1,9 @@
 <div align="center">
 
-<img src="assets/pal-logo.png" alt="PAL" width="200"/>
 
-# PAL
+
+#  <img src="assets/pal-logo.png" alt="PAL" width="28"/> PAL
+
 
 ### Proof Annotated Language for C
 
