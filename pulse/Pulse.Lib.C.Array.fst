@@ -237,6 +237,16 @@ fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   ()
 }
 
+fn array_assign_ret u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
+  requires array_pts_to a 1.0R s
+  returns v': t
+  ensures exists* s'. array_pts_to a 1.0R s' ** pure (s' == array_spec_upd s (SZ.v i) v) ** rewrites_to v' v
+{
+  array_write a i v;
+  v
+}
+
 let length #t (a: array t) : GTot nat = A.length a
 let base_of #t (a: array t) : base_t = A.base_of a
 let offset_of #t (a: array t) : GTot nat = A.offset_of a
@@ -285,6 +295,21 @@ fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
   admit ()
   // Stuck: same issue as arrayptr_read — need to compute index,
   // unfold, call mask_write, then refold with updated spec.
+}
+
+fn arrayptr_assign_ret u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
+  (#y: erased (array t))
+  (#s: erased (array_spec t) { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_mask s (arrayptr_off x y + SZ.v i) })
+  requires arrayptr_pts_to x y
+  requires array_pts_to y 1.0R s
+  returns v': t
+  ensures exists* s'.
+    array_pts_to y 1.0R s' **
+    pure (s' == array_spec_upd s (arrayptr_off x y + SZ.v i) v) **
+    rewrites_to v' v
+{
+  arrayptr_write x i v;
+  v
 }
 
 let arrayptr_diff #t x z = admit ()

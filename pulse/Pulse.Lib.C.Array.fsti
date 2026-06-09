@@ -175,6 +175,12 @@ fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   requires array_pts_to a 1.0R s
   ensures exists* s'. array_pts_to a 1.0R s' ** pure (s' == array_spec_upd s (SZ.v i) v)
 
+fn array_assign_ret u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
+  requires array_pts_to a 1.0R s
+  returns v': t
+  ensures exists* s'. array_pts_to a 1.0R s' ** pure (s' == array_spec_upd s (SZ.v i) v) ** rewrites_to v' v
+
 // ---------------------------------------------------------------------------
 // ArrayPtr: pointers into arrays (zero-length sub-arrays sharing a base)
 //
@@ -237,6 +243,17 @@ fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
   ensures exists* s'.
     array_pts_to y 1.0R s' **
     pure (s' == array_spec_upd s (arrayptr_off x y + SZ.v i) v)
+
+fn arrayptr_assign_ret u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
+  (#y: erased (array t))
+  (#s: erased (array_spec t) { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_mask s (arrayptr_off x y + SZ.v i) })
+  requires arrayptr_pts_to x y
+  requires array_pts_to y 1.0R s
+  returns v': t
+  ensures exists* s'.
+    array_pts_to y 1.0R s' **
+    pure (s' == array_spec_upd s (arrayptr_off x y + SZ.v i) v) **
+    rewrites_to v' v
 
 /// Subtract two arrayptrs to get their offset difference.
 val arrayptr_diff (#t: Type) (x z: array t)

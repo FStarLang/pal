@@ -2444,12 +2444,64 @@ impl<'a> Emitter<'a> {
                         .append("else")
                         .append(Doc::line().append(self.emit_rvalue(env, else_expr)).nest(2)),
                 ),
-                ExprT::AssignExpr(_, _) => {
-                    self.report(
-                        "assignment expression should have been lowered".to_string(),
-                        &v.loc,
-                    );
-                    Doc::text("(admit())")
+                ExprT::AssignExpr(lhs, rhs) => {
+                    if let ExprT::Index(arr, idx) = &lhs.val {
+                        let is_arrayptr = env
+                            .infer_expr(arr)
+                            .map(|ty| {
+                                matches!(
+                                    env.vtype_whnf(ty).val,
+                                    TypeT::Pointer(_, PointerKind::ArrayPtr)
+                                )
+                            })
+                            .unwrap_or(false);
+                        let fn_name = if is_arrayptr {
+                            "arrayptr_assign_ret"
+                        } else {
+                            "array_assign_ret"
+                        };
+                        let arr_doc = match self.emit_expr(env, arr) {
+                            ExprKind::ArrayLValue(arr_doc) => arr_doc,
+                            arr_doc => arr_doc.to_rvalue(),
+                        };
+                        naryfn([
+                            Doc::text(fn_name),
+                            arr_doc,
+                            self.emit_rvalue(env, idx),
+                            self.emit_rvalue(env, rhs),
+                        ])
+                    } else if let ExprT::Deref(inner) = &lhs.val {
+                        let write_fn = env
+                            .infer_expr(inner)
+                            .map(|ty| match env.vtype_whnf(ty).val {
+                                TypeT::Pointer(_, PointerKind::Array) => Some("array_assign_ret"),
+                                TypeT::Pointer(_, PointerKind::ArrayPtr) => {
+                                    Some("arrayptr_assign_ret")
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(None);
+                        if let Some(write_fn) = write_fn {
+                            naryfn([
+                                Doc::text(write_fn),
+                                self.emit_rvalue(env, inner),
+                                Doc::text("0sz"),
+                                self.emit_rvalue(env, rhs),
+                            ])
+                        } else {
+                            naryfn([
+                                Doc::text("assign_ret"),
+                                self.emit_lvalue(env, lhs),
+                                self.emit_rvalue(env, rhs),
+                            ])
+                        }
+                    } else {
+                        naryfn([
+                            Doc::text("assign_ret"),
+                            self.emit_lvalue(env, lhs),
+                            self.emit_rvalue(env, rhs),
+                        ])
+                    }
                 }
                 ExprT::SizeOf(ty) => {
                     // For FixedArray, emit as `array T` to match annotation parser output

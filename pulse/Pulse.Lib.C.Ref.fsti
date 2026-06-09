@@ -127,6 +127,11 @@ ensures (r |->? Frac p x) ** pure (x == None)
 
 
 
+fn assign_ret u#a (#a: Type u#a) (r: ref a) (v: a)
+  requires pts_to_uninit r
+  returns v': a
+  ensures pts_to r v ** rewrites_to v' v
+
 /// Compare two refs for equality (no preconditions).
 val ref_eq (#t: Type) (x y: ref t) : (r:bool{r == true <==> x == y})
 
