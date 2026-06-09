@@ -15,6 +15,13 @@ let sizet_fits_u32_pat (x:int)
     [SMTPat (fits x)]
   = fits_u32_implies_fits x
 
+let sizet_fits_u32_of_size_pat (x:int)
+  : Lemma
+    (requires 0 <= x /\ UInt.size x 32)
+    (ensures SizeT.fits x)
+    [SMTPat (SizeT.fits x)]
+  = fits_u32_implies_fits x
+
 // Whether C assert() is enabled (i.e., NDEBUG is not defined).
 // Opaque so the verifier must handle both cases, exposing any
 // side effects in assert arguments that would change behavior
