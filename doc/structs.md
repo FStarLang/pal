@@ -47,12 +47,20 @@ typedef struct { _array uint8_t *x; } b32_struct;
 
 Tests exercising plain structs (without inline arrays):
 
-- [`test/simple_struct/simple_struct.c`](../test/simple_struct/simple_struct.c),  [`test/struct/struct.c`](../test/struct/struct.c) — minimal struct.
+- [`test/simple_struct/simple_struct.c`](../test/simple_struct/simple_struct.c), [`test/struct/struct.c`](../test/struct/struct.c) — minimal struct.
 - [`test/inner_struct/inner_struct.c`](../test/inner_struct/inner_struct.c) — nested struct fields.
 - [`test/forward_struct/forward_struct.c`](../test/forward_struct/forward_struct.c) — forward declarations.
 - [`test/recursive_struct/recursive_struct.c`](../test/recursive_struct/recursive_struct.c) — self-referential structs.
 - [`test/swap_struct/swap_struct.c`](../test/swap_struct/swap_struct.c), [`test/swap_struct_fun/swap_struct_fun.c`](../test/swap_struct_fun/swap_struct_fun.c) — swapping struct fields by reference.
 - [`test/eager_unfold_struct/eager_unfold_struct.c`](../test/eager_unfold_struct/eager_unfold_struct.c) — `_pulse_eager_unfold_predicate`.
+- [`test/default_test/default_test.c`](../test/default_test/default_test.c) — `_pure` struct globals and `calloc` of a struct array; exercises `has_zero_default`.
+- [`test/issue28/issue28.c`](../test/issue28/issue28.c) — tagged typedef struct (`typedef struct _point { ... } point;`).
+
+Tests exercising typedefs of structs:
+
+- [`test/refine_typedef_pred/refine_typedef_pred.c`](../test/refine_typedef_pred/refine_typedef_pred.c) — replacing the auto-generated typedef pred with a custom `_refine(_inline_pulse ...)`, combined with `_plain` to suppress the default.
+- [`test/array_test/array_test.c`](../test/array_test/array_test.c) — typedef-level `_refine` on struct wrappers around `_array` fields (`b32_struct`, `uptr_struct`, `two_arrays`).
+- [`test/dpe/DPETypes.c`](../test/dpe/DPETypes.c) — large real-world typedef structs.
 
 Structs containing inline arrays (`T b[N]`) are exercised separately because their fields have a dual representation (see the inline-array notes above):
 
