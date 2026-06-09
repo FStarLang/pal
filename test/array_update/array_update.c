@@ -20,6 +20,8 @@ struct entry {
 
 void set_elem_fields(_array struct entry *a, uint32_t i, uint64_t v, uint64_t t)
   _requires((size_t)i < a._length)
+  _preserves_value(a._length)
+  _ensures(a[i].value == v && a[i].time == t)
 {
     a[i].value = v;
     a[i].time = t;
