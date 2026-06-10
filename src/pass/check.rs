@@ -83,6 +83,7 @@ impl<'a> Checker<'a> {
                 signed: _,
                 width: _,
             } => {}
+            TypeT::Float { width: _ } => {}
             TypeT::SizeT => {}
             TypeT::PtrdiffT => {}
             TypeT::Pointer(ty, _kind) => {
@@ -133,6 +134,7 @@ impl<'a> Checker<'a> {
             TypeT::Void => false, // ?
             TypeT::Bool => true,
             TypeT::Int { .. } => true,
+            TypeT::Float { .. } => true,
             TypeT::SizeT => true,
             TypeT::PtrdiffT => true,
             TypeT::Pointer(_, _) => true, // == 0 ?
@@ -179,6 +181,17 @@ impl<'a> Checker<'a> {
                 self.check_type(env, ty);
                 if self.check_types && !self.is_valid_int_type(env, ty.clone().into()) {
                     self.report(format!("invalid integer type: {}", ty), &rval.loc);
+                }
+            }
+            ExprT::FloatLit(_n, ty) => {
+                self.check_type(env, ty);
+                if self.check_types
+                    && !matches!(
+                        &env.vtype_whnf(ty.clone().into()).val,
+                        TypeT::Float { .. } | TypeT::Error
+                    )
+                {
+                    self.report(format!("invalid floating literal type: {}", ty), &rval.loc);
                 }
             }
             ExprT::Var(n) => self.check_var(env, n, false),

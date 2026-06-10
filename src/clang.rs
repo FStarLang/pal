@@ -540,6 +540,9 @@ fn mk_int_type(loc: Rc<SourceInfo>, signed: bool, width: u32) -> Rc<Type> {
         },
     )
 }
+fn mk_float_type(loc: Rc<SourceInfo>, width: u32) -> Rc<Type> {
+    mk_ast(loc, TypeT::Float { width })
+}
 fn mk_sizet(loc: Rc<SourceInfo>) -> Rc<Type> {
     mk_ast(loc, TypeT::SizeT)
 }
@@ -640,6 +643,9 @@ fn mk_bool_lit(loc: Rc<SourceInfo>, val: bool) -> Rc<Expr> {
 }
 fn mk_int_lit(loc: Rc<SourceInfo>, val: Rc<BigInt>, ty: Rc<Type>) -> Rc<Expr> {
     mk_ast(loc, ExprT::IntLit(val, ty))
+}
+fn mk_float_lit(loc: Rc<SourceInfo>, val: Rc<str>, ty: Rc<Type>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::FloatLit(val, ty))
 }
 fn mk_rvalue_lvalue(loc: Rc<SourceInfo>, lval: Rc<Expr>) -> Rc<Expr> {
     // With unified Expr, lvalue-to-rvalue is identity

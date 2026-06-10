@@ -371,6 +371,17 @@ public:
     if (isBoolType(t)) {
       return mk_bool_type(std::move(loc));
     }
+    if (t->isSpecificBuiltinType(BuiltinType::Float)) {
+      return mk_float_type(std::move(loc), 32);
+    }
+    if (t->isSpecificBuiltinType(BuiltinType::Double)) {
+      return mk_float_type(std::move(loc), 64);
+    }
+    if (t->isFloatingType()) {
+      reportUnsupported(range, loc, "unsupported floating-point type ",
+                        t.getAsString());
+      return mk_type_err(std::move(loc));
+    }
     if (t->isSignedIntegerType() || t->isUnsignedIntegerType()) {
       bool isSigned = t->isSignedIntegerType();
       unsigned width = astCtx->getIntWidth(t);
@@ -561,6 +572,10 @@ public:
       case CK_IntegralCast:
       case CK_IntegralToBoolean:
       case CK_PointerToBoolean:
+      case CK_FloatingCast:
+      case CK_IntegralToFloating:
+      case CK_FloatingToIntegral:
+      case CK_FloatingToBoolean:
         return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
                               trQualType(ic->getType(), ic->getSourceRange()));
 
@@ -660,6 +675,13 @@ public:
         return mk_int_lit(std::move(loc), toBigInt(il->getValue()),
                           std::move(ty));
       }
+    } else if (auto fl = dyn_cast<FloatingLiteral>(e)) {
+      SmallString<32> value;
+      fl->getValue().toString(value);
+      auto ty = trQualType(fl->getType(), fl->getSourceRange());
+      return mk_float_lit(std::move(loc),
+                          ctx.intern_str(toStr(StringRef(value))),
+                          std::move(ty));
     } else if (auto cl = dyn_cast<CharacterLiteral>(e)) {
       auto ty = trQualType(cl->getType(), cl->getSourceRange());
       return mk_int_lit(std::move(loc),

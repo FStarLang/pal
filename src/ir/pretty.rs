@@ -126,6 +126,9 @@ impl PrettyIR for TypeT {
             } else {
                 format!("uint{}_t", width)
             }),
+            TypeT::Float { width: 32 } => RcDoc::text("float"),
+            TypeT::Float { width: 64 } => RcDoc::text("double"),
+            TypeT::Float { width } => RcDoc::text(format!("float{}", width)),
             TypeT::SizeT => RcDoc::text("size_t"),
             TypeT::PtrdiffT => RcDoc::text("ptrdiff_t"),
             TypeT::Pointer(ty, PointerKind::Ref) => ty.to_doc().append("*"),
@@ -204,6 +207,7 @@ impl PrettyIR for ExprT {
             // RValue variants
             ExprT::BoolLit(b) => RcDoc::text(if *b { "true" } else { "false" }),
             ExprT::IntLit(n, _ty) => RcDoc::text(n.to_string()),
+            ExprT::FloatLit(n, _ty) => RcDoc::text(n.to_string()),
             ExprT::Ref(lval) => RcDoc::text("&").append(lval.to_doc()),
             ExprT::UnOp(un_op, arg) => RcDoc::text(un_op.to_str()).append(arg.to_doc()),
             ExprT::BinOp(bin_op, lhs, rhs) => RcDoc::text("(")

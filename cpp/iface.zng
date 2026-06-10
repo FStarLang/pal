@@ -236,6 +236,7 @@ mod crate::clang {
     fn mk_void_type(Rc<SourceInfo>) -> Rc<Type>;
     fn mk_bool_type(Rc<SourceInfo>) -> Rc<Type>;
     fn mk_int_type(Rc<SourceInfo>, bool, u32) -> Rc<Type>;
+    fn mk_float_type(Rc<SourceInfo>, u32) -> Rc<Type>;
     fn mk_sizet(Rc<SourceInfo>) -> Rc<Type>;
     fn mk_pointer_unknown(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_pointer_array(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
@@ -256,6 +257,7 @@ mod crate::clang {
 
     fn mk_bool_lit(Rc<SourceInfo>, bool) -> Rc<Expr>;
     fn mk_int_lit(Rc<SourceInfo>, Rc<BigInt>, Rc<Type>) -> Rc<Expr>;
+    fn mk_float_lit(Rc<SourceInfo>, Rc<str>, Rc<Type>) -> Rc<Expr>;
     fn mk_rvalue_lvalue(Rc<SourceInfo>, Rc<Expr>) -> Rc<Expr>;
     fn mk_rvalue_ref(Rc<SourceInfo>, Rc<Expr>) -> Rc<Expr>;
     fn mk_rvalue_cast(Rc<SourceInfo>, Rc<Expr>, Rc<Type>) -> Rc<Expr>;

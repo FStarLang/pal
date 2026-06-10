@@ -348,6 +348,7 @@ impl Env {
                 }
             }
             ExprT::IntLit(_, ty) => Ok(ty.clone().into()),
+            ExprT::FloatLit(_, ty) => Ok(ty.clone().into()),
             ExprT::Ref(v) => Ok(expr
                 .reuse_loc(TypeT::Pointer(
                     self.infer_expr(v)?.to_rc(),
@@ -473,6 +474,22 @@ impl Env {
             (TypeT::Int { .. }, TypeT::Bool) => Some(a0),
             (TypeT::Bool, TypeT::Int { .. }) => Some(b0),
 
+            (TypeT::Float { width: w1 }, TypeT::Float { width: w2 }) => {
+                if w1 >= w2 {
+                    Some(a0)
+                } else {
+                    Some(b0)
+                }
+            }
+            (
+                TypeT::Float { .. },
+                TypeT::Bool | TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT,
+            ) => Some(a0),
+            (
+                TypeT::Bool | TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT,
+                TypeT::Float { .. },
+            ) => Some(b0),
+
             (
                 TypeT::SLProp,
                 TypeT::Bool
@@ -524,6 +541,7 @@ impl Env {
             (TypeT::SpecInt, TypeT::SpecNat) | (TypeT::SpecNat, TypeT::SpecInt) => None,
 
             either_side!(TypeT::Void) => None,
+            either_side!(TypeT::Float { .. }) => None,
             either_side!(TypeT::Pointer(_, _)) => None,
             either_side!(TypeT::FixedArray(_, _)) => None,
 
@@ -552,6 +570,7 @@ impl Env {
             TypeT::Void
             | TypeT::Bool
             | TypeT::Int { .. }
+            | TypeT::Float { .. }
             | TypeT::SizeT
             | TypeT::PtrdiffT
             | TypeT::Pointer(_, _)
@@ -590,6 +609,7 @@ impl Env {
                     width: w2,
                 },
             ) => s1 == s2 && w1 == w2,
+            (TypeT::Float { width: w1 }, TypeT::Float { width: w2 }) => w1 == w2,
             (TypeT::SizeT, TypeT::SizeT) => true,
             (TypeT::PtrdiffT, TypeT::PtrdiffT) => true,
             (TypeT::Pointer(t1, k1), TypeT::Pointer(t2, k2)) => {

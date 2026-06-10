@@ -448,6 +448,8 @@ fn type_parser<
             Token::Ident("_specnat") => TypeT::SpecNat,
             Token::Ident("void") => TypeT::Void,
             Token::Ident("size_t") => TypeT::SizeT,
+            Token::Ident("float") => TypeT::Float { width: 32 },
+            Token::Ident("double") => TypeT::Float { width: 64 },
         }
         .padded_by(ws()),
         select! {
@@ -560,6 +562,8 @@ fn expr_parser<
                 Token::Ident("_specnat") => TypeT::SpecNat,
                 Token::Ident("void") => TypeT::Void,
                 Token::Ident("size_t") => TypeT::SizeT,
+                Token::Ident("float") => TypeT::Float { width: 32 },
+                Token::Ident("double") => TypeT::Float { width: 64 },
             }
             .padded_by(ws()),
             select! {

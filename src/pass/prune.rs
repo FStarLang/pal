@@ -80,6 +80,7 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
             signed: _,
             width: _,
         } => {}
+        TypeT::Float { width: _ } => {}
         TypeT::SizeT => {}
         TypeT::PtrdiffT => {}
         TypeT::Pointer(to, kind) => {
@@ -149,7 +150,7 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             scan_expr(deps, arr);
             scan_expr(deps, idx);
         }
-        ExprT::IntLit(_, ty) => scan_type(deps, ty),
+        ExprT::IntLit(_, ty) | ExprT::FloatLit(_, ty) => scan_type(deps, ty),
         ExprT::Ref(v) => scan_expr(deps, v),
         ExprT::Cast(val, ty) => {
             scan_expr(deps, val);

@@ -48,6 +48,7 @@ impl<'a> Elaborator<'a> {
                 signed: _,
                 width: _,
             } => {}
+            TypeT::Float { width: _ } => {}
             TypeT::SizeT => {}
             TypeT::PtrdiffT => {}
             TypeT::Pointer(to, kind) => {
@@ -222,7 +223,7 @@ impl<'a> Elaborator<'a> {
                     }
                 }
             }
-            ExprT::IntLit(_, ty) => self.elab_type(env, Rc::make_mut(ty)),
+            ExprT::IntLit(_, ty) | ExprT::FloatLit(_, ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::Ref(v) => {
                 self.elab_rvalue(env, Rc::make_mut(v), None);
                 // C defines `&E1[E2]` as `(E1) + (E2)`. When E1 is one of

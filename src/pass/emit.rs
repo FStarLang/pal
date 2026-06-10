@@ -620,6 +620,15 @@ impl<'a> Emitter<'a> {
                     signed: true,
                     width,
                 } => Doc::text(format!("Int{}.t", width)),
+                TypeT::Float { width: 32 } => Doc::text("Pulse.Lib.C.float32"),
+                TypeT::Float { width: 64 } => Doc::text("Pulse.Lib.C.float64"),
+                TypeT::Float { width } => {
+                    self.report(
+                        format!("unsupported floating-point width {}", width),
+                        &ty.loc,
+                    );
+                    Doc::text("unit")
+                }
 
                 TypeT::Bool => Doc::text("bool"),
                 TypeT::SizeT => Doc::text("SizeT.t"),
@@ -663,6 +672,8 @@ impl<'a> Emitter<'a> {
                 };
                 parens(Doc::text(format!("{}.{} 0", modu, ctor)))
             }
+            TypeT::Float { width: 32 } => Doc::text("Pulse.Lib.C.float32_zero"),
+            TypeT::Float { width: 64 } => Doc::text("Pulse.Lib.C.float64_zero"),
             TypeT::Bool => Doc::text("false"),
             TypeT::SizeT => Doc::text("0sz"),
             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown) => Doc::text("null"),
@@ -771,6 +782,7 @@ impl<'a> Emitter<'a> {
             ExprT::Member(x, _a) => self.subst_this_rvalue(env, Rc::make_mut(x), this),
             ExprT::BoolLit(_) => {}
             ExprT::IntLit(..) => {}
+            ExprT::FloatLit(..) => {}
             ExprT::Ref(lv) => self.subst_this_rvalue(env, Rc::make_mut(lv), this),
             ExprT::UnOp(_, arg) => {
                 self.subst_this_rvalue(env, Rc::make_mut(arg), this);
@@ -1067,6 +1079,7 @@ impl<'a> Emitter<'a> {
             TypeT::Void
             | TypeT::Bool
             | TypeT::Int { .. }
+            | TypeT::Float { .. }
             | TypeT::SizeT
             | TypeT::PtrdiffT
             | TypeT::SpecInt
@@ -1557,6 +1570,14 @@ fn get_int_mod(signed: &bool, width: &u32) -> Option<&'static str> {
     })
 }
 
+fn get_float_mod(width: &u32) -> Option<&'static str> {
+    Some(match width {
+        32 => "Pulse.Lib.C.float32",
+        64 => "Pulse.Lib.C.float64",
+        _ => return None,
+    })
+}
+
 macro_rules! todo_binop {
     () => {
         return None
@@ -1575,6 +1596,7 @@ fn emit_unop(env: &Env, op: UnOp, ty: MaybeRc<Type>) -> Option<Doc> {
             }
         }
         (UnOp::Neg, TypeT::SpecInt | TypeT::SpecNat) => Doc::text("op_Minus"),
+        (UnOp::Neg, TypeT::Float { width }) => Doc::text(format!("{}_neg", get_float_mod(width)?)),
         (UnOp::Neg, _) => return None,
         (UnOp::BitNot, TypeT::Int { signed, width }) => {
             Doc::text(format!("{}.lognot", get_int_mod(signed, width)?))
@@ -1592,6 +1614,7 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
         (BinOp::Eq, TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)) => {
             Doc::text("`Pulse.Lib.C.Ref.ref_eq`")
         }
+        (BinOp::Eq, TypeT::Float { width }) => Doc::text(format!("`{}_eq`", get_float_mod(width)?)),
         (
             BinOp::Eq,
             TypeT::SpecInt
@@ -1613,6 +1636,10 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
         (BinOp::Lt, TypeT::SizeT) => Doc::text("`SizeT.lt`"),
         (BinOp::LEq, TypeT::PtrdiffT) => Doc::text("`Pulse.Lib.C.PtrdiffT.lte`"),
         (BinOp::Lt, TypeT::PtrdiffT) => Doc::text("`Pulse.Lib.C.PtrdiffT.lt`"),
+        (BinOp::LEq, TypeT::Float { width }) => {
+            Doc::text(format!("`{}_lte`", get_float_mod(width)?))
+        }
+        (BinOp::Lt, TypeT::Float { width }) => Doc::text(format!("`{}_lt`", get_float_mod(width)?)),
         (BinOp::LEq, TypeT::Pointer(_, PointerKind::ArrayPtr)) => {
             Doc::text("`Pulse.Lib.C.Array.arrayptr_lte`")
         }
@@ -1655,6 +1682,20 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
             Doc::text(format!("`{}.sub`", get_int_mod(signed, width)?))
         }
         (BinOp::Sub, TypeT::SizeT) => Doc::text("`SizeT.sub`"),
+
+        (BinOp::Mul, TypeT::Float { width }) => {
+            Doc::text(format!("`{}_mul`", get_float_mod(width)?))
+        }
+        (BinOp::Div, TypeT::Float { width }) => {
+            Doc::text(format!("`{}_div`", get_float_mod(width)?))
+        }
+        (BinOp::Mod, TypeT::Float { .. }) => todo_binop!(),
+        (BinOp::Add, TypeT::Float { width }) => {
+            Doc::text(format!("`{}_add`", get_float_mod(width)?))
+        }
+        (BinOp::Sub, TypeT::Float { width }) => {
+            Doc::text(format!("`{}_sub`", get_float_mod(width)?))
+        }
 
         (BinOp::Add, TypeT::PtrdiffT) => Doc::text("`Pulse.Lib.C.PtrdiffT.add`"),
         (BinOp::Sub, TypeT::PtrdiffT) => Doc::text("`Pulse.Lib.C.PtrdiffT.sub`"),
@@ -1723,11 +1764,15 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
         | (_, TypeT::Void)
         | (
             BinOp::LogAnd | BinOp::LogOr | BinOp::Implies,
-            TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT | TypeT::Pointer(..),
+            TypeT::Int { .. }
+            | TypeT::Float { .. }
+            | TypeT::SizeT
+            | TypeT::PtrdiffT
+            | TypeT::Pointer(..),
         )
         | (
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr,
-            TypeT::Bool | TypeT::SizeT | TypeT::PtrdiffT,
+            TypeT::Bool | TypeT::Float { .. } | TypeT::SizeT | TypeT::PtrdiffT,
         )
         | (_, TypeT::SLProp)
         | (_, TypeT::Error)
@@ -1777,6 +1822,26 @@ impl<'a> Emitter<'a> {
                                 &v.loc,
                             );
                             Doc::text(format!("(admit()) (* {} *)", val))
+                        }
+                    }
+                }
+                ExprT::FloatLit(val, ty) => {
+                    let resolved = env.vtype_whnf(ty.clone().into());
+                    match resolved.val {
+                        TypeT::Float { width: 32 } => unaryfn(
+                            Doc::text("Pulse.Lib.C.float32_of_string"),
+                            Doc::text(format!("{:?}", val.to_string())),
+                        ),
+                        TypeT::Float { width: 64 } => unaryfn(
+                            Doc::text("Pulse.Lib.C.float64_of_string"),
+                            Doc::text(format!("{:?}", val.to_string())),
+                        ),
+                        _ => {
+                            self.report(
+                                format!("unsupported floating literal type for {}", val),
+                                &v.loc,
+                            );
+                            Doc::text("(admit())")
                         }
                     }
                 }
@@ -1831,6 +1896,14 @@ impl<'a> Emitter<'a> {
                         (TypeT::SpecInt, TypeT::SpecNat) => with_type(val_doc, Doc::text("nat")),
                         // (TypeT::Bool, TypeT::SizeT) => todo!(),
                         (TypeT::Bool, TypeT::SLProp) => unaryfn(Doc::text("with_pure"), val_doc),
+                        (TypeT::Bool, TypeT::Float { width }) => {
+                            if let Some(m) = get_float_mod(width) {
+                                unaryfn(Doc::text(format!("{}_of_bool", m)), val_doc)
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
                         (TypeT::Int { signed, width }, TypeT::Bool) => {
                             fn abbrev(s: &bool, w: &u32) -> String {
                                 format!("{}int{}", if *s { "" } else { "u" }, w)
@@ -1856,6 +1929,56 @@ impl<'a> Emitter<'a> {
                                     Doc::text(format!("{}.v", m)),
                                     val_doc,
                                     Doc::text("int"),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
+                        (TypeT::Float { width }, TypeT::Bool) => {
+                            if let Some(m) = get_float_mod(width) {
+                                unaryfn(Doc::text(format!("{}_to_bool", m)), val_doc)
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
+                        (TypeT::Float { width: 32 }, TypeT::Float { width: 64 }) => unaryfn(
+                            Doc::text("Pulse.Lib.C.float64_of_int (Pulse.Lib.C.float32_to_int"),
+                            val_doc.append(Doc::text(")")),
+                        ),
+                        (TypeT::Float { width: 64 }, TypeT::Float { width: 32 }) => unaryfn(
+                            Doc::text("Pulse.Lib.C.float32_of_int (Pulse.Lib.C.float64_to_int"),
+                            val_doc.append(Doc::text(")")),
+                        ),
+                        (TypeT::Float { width: w1 }, TypeT::Float { width: w2 }) if w1 == w2 => {
+                            val_doc
+                        }
+                        (TypeT::Int { signed, width }, TypeT::Float { width: fw }) => {
+                            if let (Some(int_mod), Some(float_mod)) =
+                                (get_int_mod(signed, width), get_float_mod(fw))
+                            {
+                                unaryfn(
+                                    Doc::text(format!("{}_of_int ({}.v", float_mod, int_mod)),
+                                    val_doc.append(Doc::text(")")),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
+                        (TypeT::Float { width: fw }, TypeT::Int { signed, width }) => {
+                            if let (Some(float_mod), Some(int_mod)) =
+                                (get_float_mod(fw), get_int_mod(signed, width))
+                            {
+                                unaryfn(
+                                    Doc::text(format!(
+                                        "{}.{} ({}_to_int",
+                                        int_mod,
+                                        if *signed { "int_to_t" } else { "uint_to_t" },
+                                        float_mod
+                                    )),
+                                    val_doc.append(Doc::text(")")),
                                 )
                             } else {
                                 self.report(default_msg.clone(), &v.loc);
@@ -1956,6 +2079,28 @@ impl<'a> Emitter<'a> {
                             Doc::text("Pulse.Lib.C.PtrdiffT.of_int (SizeT.v"),
                             val_doc.append(Doc::text(")")),
                         ),
+                        (TypeT::SizeT, TypeT::Float { width }) => {
+                            if let Some(m) = get_float_mod(width) {
+                                unaryfn(
+                                    Doc::text(format!("{}_of_int (SizeT.v", m)),
+                                    val_doc.append(Doc::text(")")),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
+                        (TypeT::Float { width }, TypeT::SizeT) => {
+                            if let Some(m) = get_float_mod(width) {
+                                unaryfn(
+                                    Doc::text(format!("SizeT.uint_to_t ({}_to_int", m)),
+                                    val_doc.append(Doc::text(")")),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
                         (TypeT::Int { signed, width }, TypeT::PtrdiffT) => {
                             if let Some(m) = get_int_mod(signed, width) {
                                 unaryfn(
@@ -1983,6 +2128,28 @@ impl<'a> Emitter<'a> {
                             }
                         }
                         (TypeT::PtrdiffT, TypeT::PtrdiffT) => val_doc,
+                        (TypeT::PtrdiffT, TypeT::Float { width }) => {
+                            if let Some(m) = get_float_mod(width) {
+                                unaryfn(
+                                    Doc::text(format!("{}_of_int (Pulse.Lib.C.PtrdiffT.v", m)),
+                                    val_doc.append(Doc::text(")")),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
+                        (TypeT::Float { width }, TypeT::PtrdiffT) => {
+                            if let Some(m) = get_float_mod(width) {
+                                unaryfn(
+                                    Doc::text(format!("Pulse.Lib.C.PtrdiffT.of_int ({}_to_int", m)),
+                                    val_doc.append(Doc::text(")")),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
                         // FixedArray → Pointer(Array): array-to-pointer decay (identity in Pulse)
                         (
                             TypeT::FixedArray(_, _),
@@ -2420,6 +2587,8 @@ impl<'a> Emitter<'a> {
                             TypeT::Int { signed, width } => {
                                 get_int_mod(signed, width).map(|s| s.to_lowercase())
                             }
+                            TypeT::Float { width: 32 } => Some("float32".to_string()),
+                            TypeT::Float { width: 64 } => Some("float64".to_string()),
                             TypeT::SizeT => Some("sizet".to_string()),
                             TypeT::PtrdiffT => Some("ptrdifft".to_string()),
                             _ => None,
@@ -4596,6 +4765,7 @@ impl<'a> Emitter<'a> {
             TypeT::Void
             | TypeT::Bool
             | TypeT::Int { .. }
+            | TypeT::Float { .. }
             | TypeT::SizeT
             | TypeT::PtrdiffT
             | TypeT::SpecInt

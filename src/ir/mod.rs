@@ -140,6 +140,9 @@ pub enum TypeT {
         signed: bool,
         width: u32,
     },
+    Float {
+        width: u32,
+    },
     SizeT,
     PtrdiffT,
     Pointer(Rc<Type>, PointerKind),
@@ -282,6 +285,7 @@ pub enum ExprT {
     // RValue variants
     BoolLit(bool),
     IntLit(Rc<BigInt>, Rc<Type>),
+    FloatLit(Rc<str>, Rc<Type>),
     Ref(Rc<Expr>),
     UnOp(UnOp, Rc<Expr>),
     BinOp(BinOp, Rc<Expr>, Rc<Expr>),

@@ -14,6 +14,57 @@ include Pulse.Lib.WithPure
 open Pulse.Lib.Core
 let _Bool = bool
 
+type float32
+type float64
+
+val float32_zero : float32
+val float64_zero : float64
+
+val float32_of_string : string -> float32
+val float64_of_string : string -> float64
+
+val float32_neg : float32 -> float32
+val float32_add : float32 -> float32 -> float32
+val float32_sub : float32 -> float32 -> float32
+val float32_mul : float32 -> float32 -> float32
+val float32_div : float32 -> float32 -> float32
+val float32_eq : float32 -> float32 -> bool
+val float32_lt : float32 -> float32 -> bool
+val float32_lte : float32 -> float32 -> bool
+val float32_to_bool : float32 -> bool
+val float32_of_bool : bool -> float32
+val float32_to_int : float32 -> int
+val float32_of_int : int -> float32
+
+val float64_neg : float64 -> float64
+val float64_add : float64 -> float64 -> float64
+val float64_sub : float64 -> float64 -> float64
+val float64_mul : float64 -> float64 -> float64
+val float64_div : float64 -> float64 -> float64
+val float64_eq : float64 -> float64 -> bool
+val float64_lt : float64 -> float64 -> bool
+val float64_lte : float64 -> float64 -> bool
+val float64_to_bool : float64 -> bool
+val float64_of_bool : bool -> float64
+val float64_to_int : float64 -> int
+val float64_of_int : int -> float64
+
+instance inhabited_float32 : inhabited float32 = {
+  witness = float32_zero
+}
+
+instance inhabited_float64 : inhabited float64 = {
+  witness = float64_zero
+}
+
+instance has_zero_default_float32 : has_zero_default float32 = {
+  zero_default = float32_zero
+}
+
+instance has_zero_default_float64 : has_zero_default float64 = {
+  zero_default = float64_zero
+}
+
 // We assume size_t is at least 64 bits.
 assume SizeTFitsU64 : fits_u64
 
