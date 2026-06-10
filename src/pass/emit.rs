@@ -3367,6 +3367,11 @@ impl<'a> Emitter<'a> {
         let struct_type_name = self.emit_name(Name::TypeRef(k.into()));
         let pts_to_name = self.emit_name(Name::TypeRefPred(k.into()));
         let uninit_pred_name = self.emit_name(Name::TypeRefUninitPred(k.into()));
+        let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
+        let default_value_name = self.emit_name(Name::StructAuxFn(
+            name.val.clone(),
+            "zero_default".to_string(),
+        ));
 
         Doc::intersperse(
             [
@@ -3398,11 +3403,36 @@ impl<'a> Emitter<'a> {
                     .append(Doc::line())
                     .append(":")
                     .append(Doc::line())
-                    .append(struct_type_name)
+                    .append(struct_type_name.clone())
                     .append(Doc::line())
                     .append("->")
                     .append(Doc::line())
                     .append("slprop")
+                    .group(),
+                Doc::text("assume val")
+                    .append(Doc::line())
+                    .append(default_value_name.clone())
+                    .append(Doc::line())
+                    .append(":")
+                    .append(Doc::line())
+                    .append(struct_type_name.clone())
+                    .group(),
+                Doc::text("instance")
+                    .append(Doc::line())
+                    .append(default_name)
+                    .append(Doc::line())
+                    .append(":")
+                    .append(Doc::line())
+                    .append(unaryfn(
+                        Doc::text("has_zero_default"),
+                        struct_type_name.clone(),
+                    ))
+                    .append(Doc::line())
+                    .append("=")
+                    .append(Doc::line())
+                    .append("{ zero_default = ")
+                    .append(default_value_name)
+                    .append(" }")
                     .group(),
             ],
             Doc::hardline(),

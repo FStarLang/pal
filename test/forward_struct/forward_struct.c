@@ -11,11 +11,13 @@ struct point {
     int y;
 };
 
+typedef struct opaque opaque;
+
 void use_point(struct point *p) {
     p->x = 1;
     p->y = 2;
 }
 
-struct opaque *use_opaque(_consumes struct opaque *o) {
+struct opaque *use_opaque(_consumes opaque *o) {
     return o;
 }
