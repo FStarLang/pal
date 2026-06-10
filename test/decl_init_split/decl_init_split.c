@@ -36,3 +36,50 @@ void triggers_bug(uint32_t size)
 
     assert (1);
 }
+
+// Several local declarations-with-initializer inside one `if`-block.
+void multiple_locals(uint32_t size)
+{
+    if (size > 0)
+        _ensures(_live(size))
+    {
+        uint32_t rear = size - 1;
+        uint32_t next = rear;
+        uint32_t sum = next;
+    }
+
+    assert (1);
+}
+
+// `if`/`else` pattern: both branches declare-and-write a local.  The single
+// `_ensures` on the `if` describes the post-condition of the whole
+// conditional, so it covers both branches.
+void if_else_locals(uint32_t size)
+{
+    if (size > 0)
+        _ensures(_live(size))
+    {
+        uint32_t hi = size - 1;
+    } else {
+        uint32_t lo = size + 1;
+    }
+
+    assert (1);
+}
+
+// Writing to a local declared *before* the `if`, alongside a fresh local
+// inside the block.  The outer local stays live afterwards, so the
+// post-condition mentions it as well (slprops are combined with `&&`).
+void write_outer_local(uint32_t size)
+{
+    uint32_t total = 0;
+
+    if (size > 0)
+        _ensures(_live(size) && _live(total))
+    {
+        uint32_t delta = size - 1;
+        total = total + delta;
+    }
+
+    assert (1);
+}
