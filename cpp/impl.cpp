@@ -576,6 +576,9 @@ public:
       case CK_NoOp:
         return trRValue(ic->getSubExpr());
       case CK_ArrayToPointerDecay:
+        if (dyn_cast<StringLiteral>(ic->getSubExpr()->IgnoreParenImpCasts())) {
+          return trRValue(ic->getSubExpr());
+        }
         return mk_rvalue_lvalue(std::move(loc), trLValue(ic->getSubExpr()));
       case CK_IntegralCast:
       case CK_IntegralToBoolean:
@@ -695,6 +698,35 @@ public:
       return mk_int_lit(std::move(loc),
                         mk_bigint(toStr(std::to_string(cl->getValue()))),
                         std::move(ty));
+    } else if (auto sl = dyn_cast<StringLiteral>(e)) {
+      if (sl->getKind() != StringLiteralKind::Ordinary ||
+          sl->getCharByteWidth() != 1) {
+        reportUnsupported(e->getSourceRange(), loc,
+                          "unsupported non-narrow string literal", "");
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
+      }
+      auto charIsSigned = astCtx->getLangOpts().CharIsSigned;
+      auto charWidth = astCtx->getTargetInfo().getCharWidth();
+      auto mkCharTy = [&]() {
+        return mk_int_type(loc.clone(), charIsSigned, charWidth);
+      };
+      auto mkCharLit = [&](unsigned char ch) {
+        long long value = ch;
+        if (charIsSigned && charWidth > 0 &&
+            value >= (1LL << (charWidth - 1))) {
+          value -= 1LL << charWidth;
+        }
+        return mk_int_lit(loc.clone(), mk_bigint(toStr(std::to_string(value))),
+                          mkCharTy());
+      };
+      auto elems = Vec<Rc<ir::Expr>>::new_();
+      for (unsigned char ch : sl->getBytes()) {
+        elems.push(mkCharLit(ch));
+      }
+      elems.push(mkCharLit(0));
+      auto elemTy = mkCharTy();
+      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems));
     } else if (auto uo = dyn_cast<UnaryOperator>(e)) {
       switch (uo->getOpcode()) {
       case UO_AddrOf:

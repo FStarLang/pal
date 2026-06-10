@@ -191,6 +191,19 @@ fn stack_free_array u#a (#a:Type u#a) (r:array a)
   free_array r;
 }
 
+fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |} (s: full_array_spec a)
+  returns r : array a
+  ensures array_pts_to_full r 1.0R s
+{
+  admit ()
+}
+
+fn stack_free_array_full u#a (#a: Type u#a) (r: array a) (#s: erased (full_array_spec a))
+  requires array_pts_to_full r 1.0R s
+{
+  admit ()
+}
+
 fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} (sz:SZ.t)
   returns r : array a
   ensures freeable_array r

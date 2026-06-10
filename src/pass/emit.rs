@@ -532,6 +532,7 @@ struct Emitter<'a> {
     fn_module_map: HashMap<Rc<str>, String>,
     /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
     typedef_override_map: HashMap<Rc<str>, String>,
+    tmp_counter: usize,
 }
 
 impl<'a> Emitter<'a> {
@@ -541,6 +542,12 @@ impl<'a> Emitter<'a> {
             level: DiagnosticLevel::Error,
             msg,
         });
+    }
+
+    fn fresh_tmp(&mut self, prefix: &str) -> Doc {
+        let tmp = Doc::text(format!("__pal_{}_{}", prefix, self.tmp_counter));
+        self.tmp_counter += 1;
+        tmp
     }
 
     /// Emit a Name with full module qualification when it refers to a different module.
@@ -2698,7 +2705,90 @@ impl<'a> Emitter<'a> {
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
         annotated(stmt, || {
             match &stmt.val {
-                StmtT::Call(v) => self.emit_rvalue(env, v).append(";").nest(2).group(),
+                StmtT::Call(v) => {
+                    if let ExprT::FnCall(f, args) = &v.val
+                        && let Some(fn_decl) = env.lookup_fn(f)
+                    {
+                        let mut prelude = Vec::new();
+                        let mut emitted_args = Vec::new();
+                        for (i, arg) in args.iter().enumerate() {
+                            let callee_expects_array = fn_decl.args.get(i).is_some_and(|fn_arg| {
+                                matches!(
+                                    env.vtype_whnf(fn_arg.ty.clone().into()).val,
+                                    TypeT::Pointer(_, PointerKind::Array)
+                                )
+                            });
+                            let array_init = match &arg.val {
+                                ExprT::ArrayInit(elem_ty, _) => Some((elem_ty, arg)),
+                                ExprT::Cast(inner, _)
+                                    if matches!(inner.val, ExprT::ArrayInit(_, _)) =>
+                                {
+                                    match &inner.val {
+                                        ExprT::ArrayInit(elem_ty, _) => Some((elem_ty, inner)),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            };
+                            if callee_expects_array && let Some((elem_ty, spec_arg)) = array_init {
+                                let tmp = self.fresh_tmp("arraylit");
+                                let elem_ty_doc = self.emit_type(env, elem_ty);
+                                let spec_doc = self.emit_rvalue(env, spec_arg);
+                                let alloc = Doc::text("let ")
+                                    .append(tmp.clone())
+                                    .append(Doc::text(" ="))
+                                    .append(Doc::line())
+                                    .append(naryfn([
+                                        Doc::text("stack_alloc_array_full"),
+                                        Doc::text("#").append(elem_ty_doc),
+                                        spec_doc.clone(),
+                                    ]))
+                                    .append(";")
+                                    .nest(2)
+                                    .group();
+                                let defer = Doc::text("defer ")
+                                    .append(naryfn([
+                                        Doc::text("array_pts_to_full"),
+                                        tmp.clone(),
+                                        Doc::text("1.0R"),
+                                        spec_doc,
+                                    ]))
+                                    .nest(2)
+                                    .group()
+                                    .append(Doc::line())
+                                    .append(Doc::text("{ stack_free_array_full _ }"))
+                                    .append(";")
+                                    .nest(2)
+                                    .group();
+                                prelude.push(alloc);
+                                prelude.push(defer);
+                                emitted_args.push(tmp);
+                            } else {
+                                emitted_args.push(self.emit_rvalue(env, arg));
+                            }
+                        }
+                        if !prelude.is_empty() {
+                            return Doc::concat(
+                                prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                            )
+                            .append(
+                                parens(
+                                    self.emit_name(Name::Fn(f.val.clone()))
+                                        .append(Doc::concat(
+                                            emitted_args
+                                                .into_iter()
+                                                .map(|arg| Doc::line().append(arg)),
+                                        ))
+                                        .nest(2),
+                                )
+                                .append(";")
+                                .nest(2)
+                                .group(),
+                            );
+                        }
+                    }
+                    self.emit_rvalue(env, v).append(";").nest(2).group()
+                }
                 StmtT::Decl(x, ty) => {
                     if let TypeT::FixedArray(elem_ty, length) = &ty.val {
                         // Fixed-size array declaration: emit stack_alloc_array + defer
@@ -5400,6 +5490,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_module: String::new(),
         fn_module_map,
         typedef_override_map,
+        tmp_counter: 0,
     };
 
     for decl in &tu.decls {
