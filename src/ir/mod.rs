@@ -333,7 +333,12 @@ pub enum StmtT {
         size: Rc<Expr>,
     },
     Assign(Rc<Expr>, Rc<Expr>),
-    If(Rc<Expr>, Rc<Stmts>, Rc<Stmts>),
+    If {
+        cond: Rc<Expr>,
+        then_branch: Rc<Stmts>,
+        else_branch: Rc<Stmts>,
+        ensures: Rc<Exprs>,
+    },
     While {
         cond: Rc<Expr>,
         inv: Rc<Exprs>,

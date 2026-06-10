@@ -5,7 +5,11 @@ use crate::ir::*;
 fn stmt_contains_goto(stmt: &Stmt, label: &str) -> bool {
     match &stmt.val {
         StmtT::Goto(l) => *l.val == *label,
-        StmtT::If(_, b1, b2) => stmts_contain_goto(b1, label) || stmts_contain_goto(b2, label),
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        } => stmts_contain_goto(then_branch, label) || stmts_contain_goto(else_branch, label),
         StmtT::While { body, .. } => stmts_contain_goto(body, label),
         StmtT::GotoBlock { body, .. } => stmts_contain_goto(body, label),
         _ => false,
@@ -70,9 +74,13 @@ fn restructure_stmts(stmts: &mut Vec<Rc<Stmt>>) {
 
 fn restructure_stmt(stmt: &mut Stmt) {
     match &mut stmt.val {
-        StmtT::If(_, b1, b2) => {
-            restructure_stmts(Rc::make_mut(b1));
-            restructure_stmts(Rc::make_mut(b2));
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            restructure_stmts(Rc::make_mut(then_branch));
+            restructure_stmts(Rc::make_mut(else_branch));
         }
         StmtT::While { body, .. } => {
             restructure_stmts(Rc::make_mut(body));

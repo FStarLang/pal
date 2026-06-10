@@ -974,8 +974,19 @@ public:
         // continue to error case
       }
     } else if (auto *i = dyn_cast<IfStmt>(stmt)) {
+      auto thenStmt = i->getThen();
+      auto enss = Vec<Rc<ir::Expr>>::new_();
+      if (auto attrThen = dyn_cast_or_null<AttributedStmt>(thenStmt)) {
+        for (auto attr : attrThen->getAttrs()) {
+          if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
+            enss.push(std::move(ens.value()));
+          }
+        }
+        thenStmt = attrThen->getSubStmt();
+      }
       return stmts.push(mk_if(loc.clone(), trRValue(i->getCond()),
-                              trStmts(i->getThen()), trStmts(i->getElse())));
+                              trStmts(thenStmt), trStmts(i->getElse()),
+                              std::move(enss)));
     } else if (auto *w = dyn_cast<WhileStmt>(stmt)) {
       auto body = w->getBody();
       auto invs = Vec<Rc<ir::Expr>>::new_();
@@ -1185,7 +1196,8 @@ public:
 
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(cond),
-                           std::move(thenStmts), std::move(elseStmts)));
+                           std::move(thenStmts), std::move(elseStmts),
+                           Vec<Rc<ir::Expr>>::new_()));
 
         } else if (dyn_cast<DefaultStmt>(child)) {
           seenDefault = true;
@@ -1206,7 +1218,8 @@ public:
 
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(notBrk),
-                           std::move(thenStmts), std::move(elseStmts)));
+                           std::move(thenStmts), std::move(elseStmts),
+                           Vec<Rc<ir::Expr>>::new_()));
 
         } else {
           // Bare statement outside case/default — translate directly
@@ -1358,7 +1371,8 @@ public:
           thenStmts.push(mk_assert(loc.clone(), std::move(boolVal)));
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           return stmts.push(mk_if(std::move(loc), std::move(enabledCall),
-                                  std::move(thenStmts), std::move(elseStmts)));
+                                  std::move(thenStmts), std::move(elseStmts),
+                                  Vec<Rc<ir::Expr>>::new_()));
         }
       }
       return stmts.push(mk_call(std::move(loc), trRValue(c)));

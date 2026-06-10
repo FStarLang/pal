@@ -291,7 +291,7 @@ mod crate::clang {
     fn mk_return(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_return_void(Rc<SourceInfo>) -> Rc<Stmt>;
     fn mk_call(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
-    fn mk_if(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Stmt>>, Vec<Rc<Stmt>>) -> Rc<Stmt>;
+    fn mk_if(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Stmt>>, Vec<Rc<Stmt>>, Vec<Rc<Expr>>) -> Rc<Stmt>;
     fn mk_while(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Expr>>, Vec<Rc<Expr>>, Vec<Rc<Expr>>, Vec<Rc<Stmt>>) -> Rc<Stmt>;
     fn mk_break(Rc<SourceInfo>) -> Rc<Stmt>;
     fn mk_continue(Rc<SourceInfo>) -> Rc<Stmt>;

@@ -234,10 +234,16 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
             scan_expr(deps, lhs);
             scan_expr(deps, v);
         }
-        StmtT::If(c, b1, b2) => {
-            scan_expr(deps, c);
-            scan_stmts(deps, b1);
-            scan_stmts(deps, b2)
+        StmtT::If {
+            cond,
+            then_branch,
+            else_branch,
+            ensures,
+        } => {
+            scan_expr(deps, cond);
+            scan_exprs(deps, ensures);
+            scan_stmts(deps, then_branch);
+            scan_stmts(deps, else_branch)
         }
         StmtT::While {
             cond,
