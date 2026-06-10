@@ -224,6 +224,29 @@ impl Env {
         self.set_return_type(decl.ret_type.clone());
     }
 
+    /// Like [`Self::push_fn_decl_args_for_body`], but only registers a
+    /// parameter as an `LValue` (mutable stack cell) when its name is in
+    /// `celled`; all other parameters are registered as `RValue`. Used by the
+    /// emitter so that parameters never used as lvalues are referenced directly
+    /// (`var_p`) instead of through a cell deref (`!var_p`).
+    pub fn push_fn_decl_args_for_body_with_celled(
+        &mut self,
+        decl: &FnDecl,
+        celled: &HashSet<Rc<str>>,
+    ) {
+        for ga in &decl.ghost_args {
+            self.push_var_decl(&ga.name, ga.ty.clone(), LocalDeclKind::RValue);
+        }
+        for arg in &decl.args {
+            let kind = match &arg.name {
+                Some(n) if celled.contains(&n.val) => LocalDeclKind::LValue,
+                _ => LocalDeclKind::RValue,
+            };
+            self.push_arg(arg, kind);
+        }
+        self.set_return_type(decl.ret_type.clone());
+    }
+
     pub fn lookup_fn(&self, ident: &Ident) -> Option<&FnDecl> {
         self.globals.fns.get(&ident.val)
     }

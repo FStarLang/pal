@@ -4553,22 +4553,38 @@ impl<'a> Emitter<'a> {
             return self.emit_pure_fn(env, decl, body);
         }
         let decl_doc = self.emit_fn_sig(env, decl).nest(2).append(Doc::hardline());
+
+        // Only parameters actually used as lvalues need a mutable stack cell
+        // (see `collect_celled_params`). Parameters used only as rvalues are
+        // referenced directly (`var_p`), matching the function signature and
+        // avoiding `(!var_p)` in spec annotations (e.g. `if`/`match` `ensures`).
+        let param_names: HashSet<Rc<str>> = decl
+            .args
+            .iter()
+            .filter_map(|arg| arg.name.as_ref().map(|n| n.val.clone()))
+            .collect();
+        let mut celled: HashSet<Rc<str>> = HashSet::new();
+        collect_celled_params(body, &param_names, &mut celled);
+
         let arg_redecl_as_mut = Doc::concat(decl.args.iter().filter_map(|arg| {
-            arg.name.as_ref().map(|n| {
-                Doc::line().append(annotated(n, || {
-                    Doc::group({
-                        let n = self.emit_name(Name::Var(n.val.clone()));
-                        Doc::text("let mut ")
-                            .append(n.clone())
-                            .append(" = ")
-                            .append(n)
-                            .append(";")
-                    })
-                }))
-            })
+            arg.name
+                .as_ref()
+                .filter(|n| celled.contains(&n.val))
+                .map(|n| {
+                    Doc::line().append(annotated(n, || {
+                        Doc::group({
+                            let n = self.emit_name(Name::Var(n.val.clone()));
+                            Doc::text("let mut ")
+                                .append(n.clone())
+                                .append(" = ")
+                                .append(n)
+                                .append(";")
+                        })
+                    }))
+                })
         }));
         let env = &mut env.clone();
-        env.push_fn_decl_args_for_body(decl);
+        env.push_fn_decl_args_for_body_with_celled(decl, &celled);
         decl_doc.append(block(arg_redecl_as_mut.append(self.emit_stmts(env, body))).group())
     }
 } // impl Emitter (group E)
@@ -4576,6 +4592,198 @@ impl<'a> Emitter<'a> {
 /// Append remaining statements to a block (for if/else continuation in pure functions).
 fn append_rest(block_stmts: &[Rc<Stmt>], rest: &[Rc<Stmt>]) -> Vec<Rc<Stmt>> {
     block_stmts.iter().chain(rest.iter()).cloned().collect()
+}
+
+/// Given an expression used in an lvalue position, peel virtual attributes and
+/// struct/union field projections (`.f`) to reach its lvalue root, and, if that
+/// root is directly one of `params`, record it in `out` as needing a mutable
+/// stack cell. Field projection preserves lvalue-ness of the base (`s.f` is an
+/// lvalue iff `s` is), so `s.f = ...` cells the value-struct `s`. A `Deref`
+/// (`*p`) or `Index` (`p[i]`) breaks the chain — it yields an lvalue regardless
+/// of the base, so writing *through* a pointer (`p->f = ...`, `*p = ...`,
+/// `p[i] = ...`) does not cell `p`.
+fn mark_lvalue_root(e: &Expr, params: &HashSet<Rc<str>>, out: &mut HashSet<Rc<str>>) {
+    let mut e = e;
+    loop {
+        match &e.val {
+            ExprT::VAttr(_, inner) | ExprT::Member(inner, _) => e = inner,
+            _ => break,
+        }
+    }
+    if let ExprT::Var(x) = &e.val {
+        if params.contains(&x.val) {
+            out.insert(x.val.clone());
+        }
+    }
+}
+
+/// Collect the names of parameters in `params` that are used as lvalues
+/// anywhere in `stmts`: reassigned, address-taken (`&p`),
+/// incremented/decremented, named as a liveness target (`_live(p)`), passed as
+/// an inline-Pulse lvalue antiquotation, or having a field written when passed
+/// by value (`s.f = ...`). Writing *through* a pointer parameter
+/// (`p->f = ...`, `*p = ...`, `p[i] = ...`) does not count, since the pointer
+/// itself is only read.
+fn collect_celled_params(
+    stmts: &[Rc<Stmt>],
+    params: &HashSet<Rc<str>>,
+    out: &mut HashSet<Rc<str>>,
+) {
+    for s in stmts {
+        collect_celled_stmt(s, params, out);
+    }
+}
+
+fn collect_celled_stmt(s: &Stmt, params: &HashSet<Rc<str>>, out: &mut HashSet<Rc<str>>) {
+    match &s.val {
+        StmtT::Call(e) => collect_celled_expr(e, params, out),
+        StmtT::DeclStackArray { size, .. } => collect_celled_expr(size, params, out),
+        StmtT::Assign(lhs, rhs) => {
+            mark_lvalue_root(lhs, params, out);
+            collect_celled_expr(lhs, params, out);
+            collect_celled_expr(rhs, params, out);
+        }
+        StmtT::If {
+            cond,
+            then_branch,
+            else_branch,
+            ensures,
+        } => {
+            collect_celled_expr(cond, params, out);
+            collect_celled_params(then_branch, params, out);
+            collect_celled_params(else_branch, params, out);
+            for e in ensures.iter() {
+                collect_celled_expr(e, params, out);
+            }
+        }
+        StmtT::While {
+            cond,
+            inv,
+            requires,
+            ensures,
+            body,
+        } => {
+            collect_celled_expr(cond, params, out);
+            for e in inv.iter() {
+                collect_celled_expr(e, params, out);
+            }
+            for e in requires.iter() {
+                collect_celled_expr(e, params, out);
+            }
+            for e in ensures.iter() {
+                collect_celled_expr(e, params, out);
+            }
+            collect_celled_params(body, params, out);
+        }
+        StmtT::Return(Some(e)) => collect_celled_expr(e, params, out),
+        StmtT::Assert(e) => collect_celled_expr(e, params, out),
+        StmtT::GhostStmt(code) => collect_celled_inline(code, params, out),
+        StmtT::Label { ensures, .. } => {
+            for e in ensures.iter() {
+                collect_celled_expr(e, params, out);
+            }
+        }
+        StmtT::GotoBlock { body, ensures, .. } => {
+            collect_celled_params(body, params, out);
+            for e in ensures.iter() {
+                collect_celled_expr(e, params, out);
+            }
+        }
+        StmtT::Decl(_, _)
+        | StmtT::Break
+        | StmtT::Continue
+        | StmtT::Return(None)
+        | StmtT::Goto(_)
+        | StmtT::Error => {}
+    }
+}
+
+fn collect_celled_expr(e: &Expr, params: &HashSet<Rc<str>>, out: &mut HashSet<Rc<str>>) {
+    match &e.val {
+        ExprT::Ref(inner) => {
+            mark_lvalue_root(inner, params, out);
+            collect_celled_expr(inner, params, out);
+        }
+        ExprT::PreIncr(v) | ExprT::PostIncr(v) | ExprT::PreDecr(v) | ExprT::PostDecr(v) => {
+            mark_lvalue_root(v, params, out);
+            collect_celled_expr(v, params, out);
+        }
+        ExprT::AssignExpr(lhs, rhs) => {
+            mark_lvalue_root(lhs, params, out);
+            collect_celled_expr(lhs, params, out);
+            collect_celled_expr(rhs, params, out);
+        }
+        // `_live(p)` emits `live <lvalue>`, so a parameter named directly (or via
+        // field projection) as a liveness target needs a mutable stack cell.
+        ExprT::Live(x) => {
+            mark_lvalue_root(x, params, out);
+            collect_celled_expr(x, params, out);
+        }
+        ExprT::InlinePulse(code, _) => collect_celled_inline(code, params, out),
+        ExprT::Deref(x)
+        | ExprT::Member(x, _)
+        | ExprT::VAttr(_, x)
+        | ExprT::UnOp(_, x)
+        | ExprT::Cast(x, _)
+        | ExprT::Old(x)
+        | ExprT::Free(x)
+        | ExprT::Forall(_, _, x)
+        | ExprT::Exists(_, _, x)
+        | ExprT::UnionInit(_, _, x)
+        | ExprT::MallocArray(_, x)
+        | ExprT::CallocArray(_, x) => collect_celled_expr(x, params, out),
+        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) => {
+            collect_celled_expr(a, params, out);
+            collect_celled_expr(b, params, out);
+        }
+        ExprT::Cond(a, b, c) => {
+            collect_celled_expr(a, params, out);
+            collect_celled_expr(b, params, out);
+            collect_celled_expr(c, params, out);
+        }
+        ExprT::FnCall(_, args) => {
+            for a in args.iter() {
+                collect_celled_expr(a, params, out);
+            }
+        }
+        ExprT::StructInit(_, fields) => {
+            for (_, v) in fields.iter() {
+                collect_celled_expr(v, params, out);
+            }
+        }
+        ExprT::ArrayInit(_, vs) => {
+            for v in vs.iter() {
+                collect_celled_expr(v, params, out);
+            }
+        }
+        ExprT::Var(_)
+        | ExprT::BoolLit(_)
+        | ExprT::IntLit(_, _)
+        | ExprT::Malloc(_)
+        | ExprT::Calloc(_)
+        | ExprT::SizeOf(_)
+        | ExprT::AlignOf(_)
+        | ExprT::Error(_) => {}
+    }
+}
+
+fn collect_celled_inline(
+    code: &InlinePulseCode,
+    params: &HashSet<Rc<str>>,
+    out: &mut HashSet<Rc<str>>,
+) {
+    for tok in &code.tokens {
+        match tok {
+            InlinePulseToken::LValueAntiquot { expr, .. } => {
+                mark_lvalue_root(expr, params, out);
+                collect_celled_expr(expr, params, out);
+            }
+            InlinePulseToken::RValueAntiquot { expr, .. } => {
+                collect_celled_expr(expr, params, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl<'a> Emitter<'a> {
