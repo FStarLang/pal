@@ -793,8 +793,14 @@ fn mk_return_void(loc: Rc<SourceInfo>) -> Rc<Stmt> {
 fn mk_call(loc: Rc<SourceInfo>, f: Rc<Expr>) -> Rc<Stmt> {
     StmtT::Call(f).with_loc(loc)
 }
-fn mk_if(loc: Rc<SourceInfo>, cond: Rc<Expr>, a: Stmts, b: Stmts) -> Rc<Stmt> {
-    StmtT::If(cond, Rc::new(a), Rc::new(b)).with_loc(loc)
+fn mk_if(loc: Rc<SourceInfo>, cond: Rc<Expr>, a: Stmts, b: Stmts, ensures: Exprs) -> Rc<Stmt> {
+    StmtT::If {
+        cond,
+        then_branch: Rc::new(a),
+        else_branch: Rc::new(b),
+        ensures: Rc::new(ensures),
+    }
+    .with_loc(loc)
 }
 fn mk_while(
     loc: Rc<SourceInfo>,

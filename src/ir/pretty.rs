@@ -403,12 +403,31 @@ impl PrettyIR for StmtT {
                 .append(";")
                 .nest(2)
                 .group(),
-            StmtT::If(c, b1, b2) => RcDoc::text("if (")
-                .append(c.to_doc().nest(4))
-                .append(") ")
-                .append(pretty_block(b1))
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => RcDoc::text("if (")
+                .append(cond.to_doc().nest(4))
+                .append(")")
+                .append(
+                    RcDoc::concat(ensures.iter().map(|e| {
+                        RcDoc::line().append(
+                            RcDoc::text("_ensures(")
+                                .append(RcDoc::line_())
+                                .append(e.to_doc())
+                                .nest(2)
+                                .append(")")
+                                .group(),
+                        )
+                    }))
+                    .nest(2),
+                )
+                .append(" ")
+                .append(pretty_block(then_branch))
                 .append(" else ")
-                .append(pretty_block(b2))
+                .append(pretty_block(else_branch))
                 .group(),
             StmtT::While {
                 cond,

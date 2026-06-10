@@ -532,10 +532,18 @@ impl<'a> Checker<'a> {
                     self.check_type_eq(env, v_ty.into(), x_ty.into());
                 }
             }
-            StmtT::If(c, b1, b2) => {
-                self.check_bool(env, c);
-                self.check_stmts(env, b1);
-                self.check_stmts(env, b2);
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                self.check_bool(env, cond);
+                for e in &**ensures {
+                    self.check_slprop(env, e)
+                }
+                self.check_stmts(env, then_branch);
+                self.check_stmts(env, else_branch);
             }
             StmtT::While {
                 cond,

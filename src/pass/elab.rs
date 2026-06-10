@@ -557,12 +557,18 @@ impl<'a> Elaborator<'a> {
                     }
                 }
             }
-            StmtT::If(c, b1, b2) => {
-                let bool_ty = TypeT::Bool.with_loc(c.loc.clone());
-                self.elab_rvalue(env, Rc::make_mut(c), Some(&bool_ty));
-                self.cast_to_bool(env, c);
-                self.elab_stmts(env, Rc::make_mut(b1));
-                self.elab_stmts(env, Rc::make_mut(b2));
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                let bool_ty = TypeT::Bool.with_loc(cond.loc.clone());
+                self.elab_rvalue(env, Rc::make_mut(cond), Some(&bool_ty));
+                self.cast_to_bool(env, cond);
+                self.elab_slprops(env, Rc::make_mut(ensures));
+                self.elab_stmts(env, Rc::make_mut(then_branch));
+                self.elab_stmts(env, Rc::make_mut(else_branch));
             }
             StmtT::While {
                 cond,
@@ -670,33 +676,38 @@ impl<'a> Elaborator<'a> {
             StmtT::Assign(lhs, rhs) => {
                 if let ExprT::Cond(c, a, b) = &rhs.val {
                     let (c, a, b, lhs) = (c.clone(), a.clone(), b.clone(), lhs.clone());
-                    s.val = StmtT::If(
-                        c,
-                        Rc::new(vec![StmtT::Assign(lhs.clone(), a).with_loc(loc.clone())]),
-                        Rc::new(vec![StmtT::Assign(lhs, b).with_loc(loc)]),
-                    );
+                    s.val = StmtT::If {
+                        cond: c,
+                        then_branch: Rc::new(vec![
+                            StmtT::Assign(lhs.clone(), a).with_loc(loc.clone()),
+                        ]),
+                        else_branch: Rc::new(vec![StmtT::Assign(lhs, b).with_loc(loc)]),
+                        ensures: Rc::new(vec![]),
+                    };
                     return true;
                 }
             }
             StmtT::Return(Some(rhs)) => {
                 if let ExprT::Cond(c, a, b) = &rhs.val {
                     let (c, a, b) = (c.clone(), a.clone(), b.clone());
-                    s.val = StmtT::If(
-                        c,
-                        Rc::new(vec![StmtT::Return(Some(a)).with_loc(loc.clone())]),
-                        Rc::new(vec![StmtT::Return(Some(b)).with_loc(loc)]),
-                    );
+                    s.val = StmtT::If {
+                        cond: c,
+                        then_branch: Rc::new(vec![StmtT::Return(Some(a)).with_loc(loc.clone())]),
+                        else_branch: Rc::new(vec![StmtT::Return(Some(b)).with_loc(loc)]),
+                        ensures: Rc::new(vec![]),
+                    };
                     return true;
                 }
             }
             StmtT::Call(rhs) => {
                 if let ExprT::Cond(c, a, b) = &rhs.val {
                     let (c, a, b) = (c.clone(), a.clone(), b.clone());
-                    s.val = StmtT::If(
-                        c,
-                        Rc::new(vec![StmtT::Call(a).with_loc(loc.clone())]),
-                        Rc::new(vec![StmtT::Call(b).with_loc(loc)]),
-                    );
+                    s.val = StmtT::If {
+                        cond: c,
+                        then_branch: Rc::new(vec![StmtT::Call(a).with_loc(loc.clone())]),
+                        else_branch: Rc::new(vec![StmtT::Call(b).with_loc(loc)]),
+                        ensures: Rc::new(vec![]),
+                    };
                     return true;
                 }
             }

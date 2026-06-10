@@ -2777,13 +2777,25 @@ impl<'a> Emitter<'a> {
                             .nest(2)
                     }
                 }
-                StmtT::If(c, b1, b2) => Doc::text("if ")
-                    .append(parens(self.emit_rvalue(env, c)))
+                StmtT::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ensures,
+                } => Doc::text("if ")
+                    .append(parens(self.emit_rvalue(env, cond)))
                     .nest(2)
+                    .append(Doc::concat(ensures.iter().map(|e| {
+                        Doc::line()
+                            .append("ensures ")
+                            .append(self.emit_rvalue(env, e))
+                            .group()
+                            .nest(2)
+                    })))
                     .append(" ")
-                    .append(self.emit_block(env, b1))
+                    .append(self.emit_block(env, then_branch))
                     .append(" else ")
-                    .append(self.emit_block(env, b2))
+                    .append(self.emit_block(env, else_branch))
                     .append(";")
                     .group(),
                 StmtT::While {
@@ -4621,7 +4633,12 @@ impl<'a> Emitter<'a> {
             StmtT::Return(Some(e)) if stmts.len() == 1 => self.emit_rvalue(env, e),
             StmtT::Return(None) if stmts.len() == 1 => Doc::text("()"),
 
-            StmtT::If(cond, then_body, else_body) => {
+            StmtT::If {
+                cond,
+                then_branch: then_body,
+                else_branch: else_body,
+                ..
+            } => {
                 let rest = &stmts[1..];
                 let then_stmts = append_rest(then_body, rest);
                 let else_stmts = append_rest(else_body, rest);
