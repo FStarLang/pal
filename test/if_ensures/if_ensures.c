@@ -87,8 +87,10 @@ void shadowed_local(uint32_t size)
 
 void if_while(uint32_t size)
 {
-    if (size > 0) {
-        uint32_t rear = size - 1;          // <-- Error 228 fires HERE
+    if (size > 0)
+        _ensures(_live(size))
+    {
+        uint32_t rear = size - 1;
     }
     while (size > 0) {
         assert(1);
