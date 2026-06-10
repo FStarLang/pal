@@ -26,7 +26,8 @@
 // that the (mutable) local backing `size` is still live after the block.
 
 
-void triggers_bug(uint32_t size)
+// Minimal case: a single declaration-with-initializer local inside an `if`.
+void single_local(uint32_t size)
 {
     if (size > 0)
         _ensures(_live(size))
@@ -82,4 +83,26 @@ void write_outer_local(uint32_t size)
     }
 
     assert (1);
+}
+
+// Shadowing: a local named `v` is declared independently in the `if` branch,
+// the `else` branch, and the enclosing scope, and used differently in each.
+// The inner declarations shadow the outer `v` only within their own branch,
+// so after the conditional `v` must still resolve to the outer local (read by
+// the trailing assert).  Exercises that PAL keeps these scopes distinct.
+void shadowed_local(uint32_t size)
+{
+    uint32_t v = 7;
+
+    if (size > 0)
+        _ensures(_live(size) && _live(v))
+    {
+        uint32_t v = size - 1;
+        uint32_t lower = v;
+    } else {
+        uint32_t v = size + 1;
+        uint32_t higher = v;
+    }
+
+    assert (v >= 0);
 }
