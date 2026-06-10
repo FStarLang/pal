@@ -195,6 +195,10 @@ public:
     return ctx.mk_ident(toStr(d->getName()), std::move(loc));
   }
 
+  RecordDecl *recordKey(RecordDecl *decl) {
+    return cast<RecordDecl>(decl->getCanonicalDecl());
+  }
+
   Rc<ir::SourceInfo> getRange(SourceRange const &range) {
     return rangeMap.getExpansionRange(sm, range);
   }
@@ -211,6 +215,7 @@ public:
 
   void trRecordDecl(Rc<ir::Ident> ident, RecordDecl *decl,
                     AnonNameGen *liftStructs) {
+    auto key = recordKey(decl);
     if (!decl->isCompleteDefinition()) {
       if (decl->getTagKind() == TagTypeKind::Struct) {
         auto loc = getRange(decl->getSourceRange());
@@ -218,7 +223,7 @@ public:
       }
       return;
     }
-    if (!alreadyDefined.insert(decl).second)
+    if (!alreadyDefined.insert(key).second)
       return;
     auto loc = getRange(decl->getSourceRange());
     auto builder = DeclBuilder::new_(loc.clone(), ident.clone());
@@ -337,13 +342,16 @@ public:
           trQualType(arr->getElementType(), /* TODO */ range, liftStructs));
     } else if (auto rec = dyn_cast<RecordType>(t)) {
       auto decl = rec->getDecl();
+      auto key = recordKey(decl);
       Rc<ir::Ident> name;
-      if (decl->getIdentifier()) {
-        structNames.emplace(decl, decl->getName().str());
+      if (auto it = structNames.find(key); it != structNames.end()) {
+        name = ctx.mk_ident(toStr(it->second), loc.clone());
+      } else if (decl->getIdentifier()) {
+        structNames.emplace(key, decl->getName().str());
         name = ctx.mk_ident(toStr(decl->getName()), loc.clone());
       } else if (liftStructs) {
         auto nameStr = liftStructs->next();
-        structNames.emplace(decl, nameStr);
+        structNames.emplace(key, nameStr);
         name = ctx.mk_ident(toStr(nameStr), loc.clone());
         trRecordDecl(name.clone(), decl, liftStructs);
       } else {
@@ -514,7 +522,7 @@ public:
       return mk_rvalue_err(std::move(loc), trQualType(init->getType(), range));
     }
     auto *decl = rec->getDecl();
-    auto it = structNames.find(decl);
+    auto it = structNames.find(recordKey(decl));
     if (it == structNames.end()) {
       reportUnsupported(range, loc, "unknown record in initializer list", "");
       return mk_rvalue_err(std::move(loc), trQualType(init->getType(), range));
