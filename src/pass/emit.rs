@@ -3189,6 +3189,23 @@ fn mk_let_rec(is_rec: bool, n: Doc, args: &[Doc], ty: Doc, body: Doc) -> Doc {
         .nest(2)
 }
 
+fn mk_instance(n: Doc, args: &[Doc], ty: Doc, body: Doc) -> Doc {
+    (Doc::text("instance").append(Doc::line()).append(n))
+        .append(
+            Doc::concat(args.iter().map(|arg| Doc::line().append(arg.clone())))
+                .append(Doc::line().append(":"))
+                .nest(2),
+        )
+        .group()
+        .append(Doc::line().append(ty))
+        .append(Doc::line().append("="))
+        .nest(2)
+        .group()
+        .append(Doc::line().append(body))
+        .group()
+        .nest(2)
+}
+
 fn mk_eager_unfold_slprop(n: Doc, args: &[Doc], body: Doc) -> Doc {
     (Doc::text("[@@pulse_eager_unfold]")
         .append(Doc::line())
@@ -3280,29 +3297,23 @@ impl<'a> Emitter<'a> {
         // has_zero_default instance
         let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
         let type_name = self.emit_name(Name::TypeRef(k.into()));
-        let default_decl = Doc::text("instance")
-            .append(Doc::line())
-            .append(default_name)
-            .append(Doc::line())
-            .append(":")
-            .append(Doc::line())
-            .append(unaryfn(Doc::text("has_zero_default"), type_name))
-            .append(Doc::line())
-            .append("=")
-            .append(Doc::line())
-            .append("{")
-            .group()
-            .append(Doc::line())
-            .append(
-                Doc::text("zero_default =")
-                    .append(Doc::line())
-                    .append(self.emit_type_default(env, &body))
-                    .group(),
-            )
-            .nest(2)
-            .append(Doc::line())
-            .append("}")
-            .group();
+        let default_decl = mk_instance(
+            default_name,
+            &[],
+            unaryfn(Doc::text("has_zero_default"), type_name),
+            Doc::text("{")
+                .append(Doc::line())
+                .append(
+                    Doc::text("zero_default =")
+                        .append(Doc::line())
+                        .append(self.emit_type_default(env, &body))
+                        .group(),
+                )
+                .nest(2)
+                .append(Doc::line())
+                .append("}")
+                .group(),
+        );
 
         Doc::intersperse(
             vec![ty_decl, pred_decl, uninit_pred_decl, default_decl],
@@ -3417,23 +3428,15 @@ impl<'a> Emitter<'a> {
                     .append(Doc::line())
                     .append(struct_type_name.clone())
                     .group(),
-                Doc::text("instance")
-                    .append(Doc::line())
-                    .append(default_name)
-                    .append(Doc::line())
-                    .append(":")
-                    .append(Doc::line())
-                    .append(unaryfn(
-                        Doc::text("has_zero_default"),
-                        struct_type_name.clone(),
-                    ))
-                    .append(Doc::line())
-                    .append("=")
-                    .append(Doc::line())
-                    .append("{ zero_default = ")
-                    .append(default_value_name)
-                    .append(" }")
-                    .group(),
+                mk_instance(
+                    default_name,
+                    &[],
+                    unaryfn(Doc::text("has_zero_default"), struct_type_name.clone()),
+                    Doc::text("{ zero_default = ")
+                        .append(default_value_name)
+                        .append(" }")
+                        .group(),
+                ),
             ],
             Doc::hardline(),
         )
@@ -4179,22 +4182,11 @@ impl<'a> Emitter<'a> {
         // which is a `full_array_spec T` of length N satisfying the
         // noeq's `array_spec_len v == N` refinement.
         let default_name = self.emit_name(Name::TypeRefDefault(k.into()));
-        ses.push(
-            Doc::text("instance")
-                .append(Doc::line())
-                .append(default_name)
-                .append(Doc::line())
-                .append(":")
-                .append(Doc::line())
-                .append(unaryfn(
-                    Doc::text("has_zero_default"),
-                    struct_type_name.clone(),
-                ))
-                .append(Doc::line())
-                .append("=")
-                .append(Doc::line())
-                .append("{")
-                .group()
+        ses.push(mk_instance(
+            default_name,
+            &[],
+            unaryfn(Doc::text("has_zero_default"), struct_type_name.clone()),
+            Doc::text("{")
                 .append(Doc::line())
                 .append(Doc::text("zero_default = {"))
                 .append(Doc::concat(fields.iter().map(|f| {
@@ -4214,7 +4206,7 @@ impl<'a> Emitter<'a> {
                 .append(Doc::line())
                 .append("}")
                 .group(),
-        );
+        ));
 
         self.defining_struct = None;
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
@@ -4535,22 +4527,11 @@ impl<'a> Emitter<'a> {
                 name.val.clone(),
                 first_fld.val.clone(),
             ));
-            ses.push(
-                Doc::text("instance")
-                    .append(Doc::line())
-                    .append(default_name)
-                    .append(Doc::line())
-                    .append(":")
-                    .append(Doc::line())
-                    .append(unaryfn(
-                        Doc::text("has_zero_default"),
-                        union_type_name.clone(),
-                    ))
-                    .append(Doc::line())
-                    .append("=")
-                    .append(Doc::line())
-                    .append("{")
-                    .group()
+            ses.push(mk_instance(
+                default_name,
+                &[],
+                unaryfn(Doc::text("has_zero_default"), union_type_name.clone()),
+                Doc::text("{")
                     .append(Doc::line())
                     .append(
                         Doc::text("zero_default =")
@@ -4562,7 +4543,7 @@ impl<'a> Emitter<'a> {
                     .append(Doc::line())
                     .append("}")
                     .group(),
-            );
+            ));
         }
 
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
