@@ -205,6 +205,16 @@ val length #t (a: array t) : GTot nat
 val base_of #t (a: array t) : base_t
 val offset_of #t (a: array t) : GTot nat
 
+/// Bridge between the handle's `length` and the spec's `array_spec_len`.
+/// `array_pts_to` is defined on top of `pts_to_mask`, whose length info
+/// is otherwise hidden by the abstraction; this exposes it so downstream
+/// proofs can discharge offset-bound VCs that compare a static
+/// `length x == K` refinement against `array_spec_len y`.
+ghost fn array_pts_to_len u#a (#a: Type u#a) (x: array a)
+                              (#p: perm) (#y: array_spec a)
+  preserves array_pts_to x p y
+  ensures pure (length x == array_spec_len y)
+
 /// Offset of x relative to y (may be negative).
 private let arrayptr_off (#t: Type) (x y: array t) : GTot int =
   offset_of x - offset_of y

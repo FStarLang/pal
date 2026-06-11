@@ -274,6 +274,16 @@ let length #t (a: array t) : GTot nat = A.length a
 let base_of #t (a: array t) : base_t = A.base_of a
 let offset_of #t (a: array t) : GTot nat = A.offset_of a
 
+ghost fn array_pts_to_len u#a (#a: Type u#a) (x: array a)
+                              (#p: perm) (#y: array_spec a)
+  preserves array_pts_to x p y
+  ensures pure (length x == array_spec_len y)
+{
+  unfold (array_pts_to x p y);
+  A.pts_to_mask_len x;
+  fold (array_pts_to x p y);
+}
+
 ghost fn arrayptr_pts_to_dup' u#a (#t: Type u#a) x y : duplicable_f (arrayptr_pts_to u#a #t x y) = {
   unfold arrayptr_pts_to x y;
   fold arrayptr_pts_to x y;
