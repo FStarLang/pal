@@ -908,44 +908,42 @@ fn expr_parser<
         })
         .boxed();
 
-        let conditional_expression = logical_or_expression
-            .clone()
-            .then(
-                punct2(Punct::EqEq, Punct::Gt)
-                    .ignore_then(recursive(|implies_rhs| {
-                        logical_or_expression
-                            .clone()
-                            .then(
-                                punct2(Punct::EqEq, Punct::Gt)
-                                    .ignore_then(implies_rhs)
-                                    .or_not(),
-                            )
-                            .map_with(|(lhs, rhs): (Expr, Option<Expr>), extra| -> Expr {
-                                match rhs {
-                                    Some(rhs) => mk_binop(
-                                        BinOp::Implies,
-                                        lhs,
-                                        rhs,
-                                        sift.resolve_source_info(&extra.span()),
-                                    ),
-                                    None => lhs,
-                                }
-                            })
-                    }))
-                    .or_not(),
-            )
-            .map_with(|(lhs, rhs): (Expr, Option<Expr>), extra| -> Expr {
-                match rhs {
-                    Some(rhs) => mk_binop(
-                        BinOp::Implies,
-                        lhs,
-                        rhs,
-                        sift.resolve_source_info(&extra.span()),
-                    ),
-                    None => lhs,
-                }
-            })
-            .boxed();
+        let conditional_expression = recursive(|conditional_expression| {
+            enum ConditionalRhs {
+                Ternary(Expr, Expr),
+                Implies(Expr),
+            }
+
+            let ternary_rhs = punct(Punct::Question)
+                .ignore_then(conditional_expression.clone())
+                .then_ignore(punct(Punct::Colon))
+                .then(conditional_expression.clone())
+                .map(|(then_expr, else_expr)| ConditionalRhs::Ternary(then_expr, else_expr));
+            let implies_rhs = punct2(Punct::EqEq, Punct::Gt)
+                .ignore_then(conditional_expression.clone())
+                .map(ConditionalRhs::Implies);
+
+            logical_or_expression
+                .clone()
+                .then(choice((ternary_rhs, implies_rhs)).or_not())
+                .map_with(|(lhs, rhs), extra| -> Expr {
+                    let loc = sift.resolve_source_info(&extra.span());
+                    match rhs {
+                        Some(ConditionalRhs::Ternary(then_expr, else_expr)) => ExprT::Cond(
+                            lhs.to_rvalue(),
+                            then_expr.to_rvalue(),
+                            else_expr.to_rvalue(),
+                        )
+                        .with_loc(loc)
+                        .into(),
+                        Some(ConditionalRhs::Implies(rhs)) => {
+                            mk_binop(BinOp::Implies, lhs, rhs, loc)
+                        }
+                        None => lhs,
+                    }
+                })
+        })
+        .boxed();
 
         let constant_expression = conditional_expression;
 
