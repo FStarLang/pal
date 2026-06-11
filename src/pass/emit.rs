@@ -2888,8 +2888,18 @@ impl<'a> Emitter<'a> {
                 }
                 StmtT::Assign(x, t) => {
                     // a[i].field = val → array_update / arrayptr_update
+                    // (*p).field = val → array_update / arrayptr_update at index 0
+                    //   (the `p->field` form, where `p` is an array/arrayptr)
                     if let ExprT::Member(base, fld) = &x.val {
-                        if let ExprT::Index(arr, idx) = &base.val {
+                        // Resolve the array/arrayptr being projected and the element index.
+                        // The deref form only applies to array/arrayptr pointers; plain
+                        // struct pointers fall through to the generic lvalue path below.
+                        let arr_and_idx: Option<(&Rc<Expr>, Option<&Rc<Expr>>)> = match &base.val {
+                            ExprT::Index(arr, idx) => Some((arr, Some(idx))),
+                            ExprT::Deref(ptr) => Some((ptr, None)),
+                            _ => None,
+                        };
+                        if let Some((arr, idx)) = arr_and_idx {
                             let arr_ty = env.infer_expr(arr).ok().map(|ty| env.vtype_whnf(ty));
                             let is_arrayptr = arr_ty
                                 .as_ref()
@@ -2897,14 +2907,24 @@ impl<'a> Emitter<'a> {
                                     matches!(ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr))
                                 })
                                 .unwrap_or(false);
+                            let is_array = arr_ty
+                                .as_ref()
+                                .map(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Array)))
+                                .unwrap_or(false);
+                            let applies = idx.is_some() || is_array || is_arrayptr;
                             // Check that the element type is a struct
-                            if let Some(struct_name) = env.infer_expr(base).ok().and_then(|ty| {
-                                let ty = env.vtype_whnf(ty);
-                                match &ty.val {
-                                    TypeT::TypeRef(TypeRefKind::Struct(s)) => Some(s.val.clone()),
-                                    _ => None,
-                                }
-                            }) {
+                            if applies
+                                && let Some(struct_name) =
+                                    env.infer_expr(base).ok().and_then(|ty| {
+                                        let ty = env.vtype_whnf(ty);
+                                        match &ty.val {
+                                            TypeT::TypeRef(TypeRefKind::Struct(s)) => {
+                                                Some(s.val.clone())
+                                            }
+                                            _ => None,
+                                        }
+                                    })
+                            {
                                 let fn_name = if is_arrayptr {
                                     "arrayptr_update"
                                 } else {
@@ -2913,6 +2933,10 @@ impl<'a> Emitter<'a> {
                                 let arr_doc = match self.emit_expr(env, arr) {
                                     ExprKind::ArrayLValue(arr_doc) => arr_doc,
                                     arr_doc => arr_doc.to_rvalue(),
+                                };
+                                let idx_doc = match idx {
+                                    Some(idx) => self.emit_rvalue(env, idx),
+                                    None => Doc::text("0sz"),
                                 };
                                 let field_name = self.emit_name(Name::StructDirectFieldName(
                                     struct_name,
@@ -2924,7 +2948,7 @@ impl<'a> Emitter<'a> {
                                 return naryfn([
                                     Doc::text(fn_name),
                                     arr_doc,
-                                    self.emit_rvalue(env, idx),
+                                    idx_doc,
                                     upd_fn,
                                     self.emit_rvalue(env, t),
                                 ])
