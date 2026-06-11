@@ -346,6 +346,16 @@ impl<'a> Elaborator<'a> {
                                 return;
                             }
                         }
+                        if let ExprT::Cast(inner, rhs_ty) = &mut Rc::make_mut(rhs).val
+                            && matches!(&inner.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
+                            && matches!(
+                                &env.vtype_whnf(rhs_ty.clone().into()).val,
+                                TypeT::Pointer(_, _)
+                            )
+                        {
+                            *rhs_ty = lhs_ty.to_rc();
+                            return;
+                        }
                     }
                 }
                 match bin_op {

@@ -1878,7 +1878,18 @@ impl<'a> Emitter<'a> {
                         ),
                         (TypeT::SpecNat, TypeT::SpecInt) => with_type(val_doc, Doc::text("int")),
                         (TypeT::SpecInt, TypeT::SpecNat) => with_type(val_doc, Doc::text("nat")),
-                        // (TypeT::Bool, TypeT::SizeT) => todo!(),
+                        (TypeT::Bool, TypeT::SizeT) => parens(
+                            Doc::text("if")
+                                .append(Doc::line())
+                                .append(val_doc)
+                                .group()
+                                .append(Doc::line())
+                                .append("then")
+                                .append(Doc::line().append("1sz").nest(2))
+                                .append(Doc::line())
+                                .append("else")
+                                .append(Doc::line().append("0sz").nest(2)),
+                        ),
                         (TypeT::Bool, TypeT::SLProp) => unaryfn(Doc::text("with_pure"), val_doc),
                         (TypeT::Bool, TypeT::Float { width }) => {
                             if let Some(m) = get_float_mod(width) {
@@ -2042,7 +2053,11 @@ impl<'a> Emitter<'a> {
                         // (TypeT::Int { signed:s1, width:w1 }, TypeT::Int { signed:s2, width:w2 }) => todo!(),
                         // (TypeT::Int { signed, width }, TypeT::SizeT) => todo!(),
                         // (TypeT::Int { signed, width }, TypeT::SLProp) => todo!(),
-                        // (TypeT::SizeT, TypeT::Bool) => todo!(),
+                        (TypeT::SizeT, TypeT::Bool) => binop(
+                            unaryfn(Doc::text("SizeT.v"), val_doc),
+                            Doc::text("<>"),
+                            Doc::text("0"),
+                        ),
                         // (TypeT::SizeT, TypeT::SLProp) => todo!(),
                         // (TypeT::Pointer { to, kind }, TypeT::Bool) => todo!(),
                         (TypeT::Pointer(_, kind), TypeT::Bool) => {
@@ -2053,6 +2068,14 @@ impl<'a> Emitter<'a> {
                             unaryfn(Doc::text("not"), unaryfn(Doc::text(is_null_fn), val_doc))
                         }
                         // (TypeT::Pointer { to, kind }, TypeT::SizeT) => todo!(),
+                        (_, TypeT::Pointer(_, to_kind)) if matches!(&val.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) => {
+                            match to_kind {
+                                PointerKind::Ref | PointerKind::Unknown => Doc::text("null"),
+                                PointerKind::Array | PointerKind::ArrayPtr => {
+                                    Doc::text("array_null")
+                                }
+                            }
+                        }
                         // (TypeT::Pointer { to:t1, kind:k1 }, TypeT::Pointer { to:t2, kind:k2 }) if t1 == t2 => todo!(),
                         // (TypeT::Pointer { to, kind }, TypeT::SLProp) => todo!(),
                         (TypeT::PtrdiffT, TypeT::SizeT) => unaryfn(
