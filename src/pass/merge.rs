@@ -265,7 +265,152 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
     }
 }
 
-/// Stably reorder declarations so that every struct/union/typedef definition is
+/// Collect type references appearing anywhere in an expression (in casts,
+/// allocations, `sizeof`, quantifier binders, inline-Pulse antiquotations, etc.)
+/// and recursively in its subexpressions.
+fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
+    match &e.val {
+        ExprT::Var(_) | ExprT::BoolLit(_) => {}
+        ExprT::IntLit(_, ty) | ExprT::FloatLit(_, ty) | ExprT::Error(ty) => {
+            collect_type_refs(ty, out)
+        }
+        ExprT::Deref(a)
+        | ExprT::Ref(a)
+        | ExprT::UnOp(_, a)
+        | ExprT::Live(a)
+        | ExprT::Old(a)
+        | ExprT::PreIncr(a)
+        | ExprT::PostIncr(a)
+        | ExprT::PreDecr(a)
+        | ExprT::PostDecr(a)
+        | ExprT::Free(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a) => collect_refs_expr(a, out),
+        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+            collect_refs_expr(a, out);
+            collect_refs_expr(b, out);
+        }
+        ExprT::Cond(a, b, c) => {
+            collect_refs_expr(a, out);
+            collect_refs_expr(b, out);
+            collect_refs_expr(c, out);
+        }
+        ExprT::FnCall(_, args) => {
+            for a in args {
+                collect_refs_expr(a, out);
+            }
+        }
+        ExprT::Cast(a, ty) => {
+            collect_refs_expr(a, out);
+            collect_type_refs(ty, out);
+        }
+        ExprT::InlinePulse(code, ty) => {
+            collect_refs_inline(code, out);
+            collect_type_refs(ty, out);
+        }
+        ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
+            collect_type_refs(ty, out);
+            collect_refs_expr(body, out);
+        }
+        ExprT::StructInit(_, fields) => {
+            for (_, v) in fields {
+                collect_refs_expr(v, out);
+            }
+        }
+        ExprT::UnionInit(_, _, v) => collect_refs_expr(v, out),
+        ExprT::ArrayInit(ty, elems) => {
+            collect_type_refs(ty, out);
+            for el in elems {
+                collect_refs_expr(el, out);
+            }
+        }
+        ExprT::Malloc(ty) | ExprT::Calloc(ty) | ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => {
+            collect_type_refs(ty, out)
+        }
+        ExprT::MallocArray(ty, n) | ExprT::CallocArray(ty, n) => {
+            collect_type_refs(ty, out);
+            collect_refs_expr(n, out);
+        }
+    }
+}
+
+/// Collect type references appearing in inline-Pulse code antiquotations.
+fn collect_refs_inline(code: &InlinePulseCode, out: &mut Vec<TypeKey>) {
+    for t in &code.tokens {
+        match t {
+            InlinePulseToken::RValueAntiquot { expr, .. }
+            | InlinePulseToken::LValueAntiquot { expr, .. } => collect_refs_expr(expr, out),
+            InlinePulseToken::TypeAntiquot { ty, .. }
+            | InlinePulseToken::FieldAntiquot { ty, .. }
+            | InlinePulseToken::AuxFnAntiquot { ty, .. }
+            | InlinePulseToken::Declare { ty, .. } => collect_type_refs(ty, out),
+            InlinePulseToken::Verbatim(_) => {}
+        }
+    }
+}
+
+/// Collect type references appearing in a statement and its substatements.
+fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
+    let exprs = |es: &Exprs, out: &mut Vec<TypeKey>| {
+        for e in es {
+            collect_refs_expr(e, out);
+        }
+    };
+    match &s.val {
+        StmtT::Call(e) | StmtT::Assert(e) => collect_refs_expr(e, out),
+        StmtT::Decl(_, ty) => collect_type_refs(ty, out),
+        StmtT::DeclStackArray {
+            elem_type, size, ..
+        } => {
+            collect_type_refs(elem_type, out);
+            collect_refs_expr(size, out);
+        }
+        StmtT::Assign(a, b) => {
+            collect_refs_expr(a, out);
+            collect_refs_expr(b, out);
+        }
+        StmtT::If {
+            cond,
+            then_branch,
+            else_branch,
+            ensures,
+        } => {
+            collect_refs_expr(cond, out);
+            for st in then_branch.iter() {
+                collect_refs_stmt(st, out);
+            }
+            for st in else_branch.iter() {
+                collect_refs_stmt(st, out);
+            }
+            exprs(ensures, out);
+        }
+        StmtT::While {
+            cond,
+            inv,
+            requires,
+            ensures,
+            body,
+        } => {
+            collect_refs_expr(cond, out);
+            exprs(inv, out);
+            exprs(requires, out);
+            exprs(ensures, out);
+            for st in body.iter() {
+                collect_refs_stmt(st, out);
+            }
+        }
+        StmtT::Return(Some(e)) => collect_refs_expr(e, out),
+        StmtT::GhostStmt(code) => collect_refs_inline(code, out),
+        StmtT::Label { ensures, .. } => exprs(ensures, out),
+        StmtT::GotoBlock { body, ensures, .. } => {
+            for st in body.iter() {
+                collect_refs_stmt(st, out);
+            }
+            exprs(ensures, out);
+        }
+        StmtT::Return(None) | StmtT::Break | StmtT::Continue | StmtT::Goto(_) | StmtT::Error => {}
+    }
+}
 /// emitted after the type definitions it references by-value or by-pointer.
 ///
 /// This is required because emission populates the spec-parameter tables for a
@@ -318,11 +463,20 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
                 for a in &fd.args {
                     collect_type_refs(&a.ty, &mut refs);
                 }
+                for e in fd.requires.iter().chain(fd.ensures.iter()) {
+                    collect_refs_expr(e, &mut refs);
+                }
             }
             DeclT::FnDefn(fd) => {
                 collect_type_refs(&fd.decl.ret_type, &mut refs);
                 for a in &fd.decl.args {
                     collect_type_refs(&a.ty, &mut refs);
+                }
+                for e in fd.decl.requires.iter().chain(fd.decl.ensures.iter()) {
+                    collect_refs_expr(e, &mut refs);
+                }
+                for st in fd.body.iter() {
+                    collect_refs_stmt(st, &mut refs);
                 }
             }
             DeclT::LetDecl(ld) => {
@@ -330,6 +484,10 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
                 for a in &ld.params {
                     collect_type_refs(&a.ty, &mut refs);
                 }
+                for e in ld.requires.iter().chain(ld.ensures.iter()) {
+                    collect_refs_expr(e, &mut refs);
+                }
+                collect_refs_expr(&ld.body, &mut refs);
             }
             DeclT::GlobalVar(gv) => collect_type_refs(&gv.ty, &mut refs),
             _ => {}
