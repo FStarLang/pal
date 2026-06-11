@@ -647,9 +647,11 @@ impl<'a> Emitter<'a> {
                 TypeT::Pointer(to, PointerKind::Ref | PointerKind::Unknown) => {
                     unaryfn(Doc::text("ref"), self.emit_type(env, to))
                 }
-                TypeT::FixedArray(elem_ty, _) => {
-                    unaryfn(Doc::text("full_array_spec"), self.emit_type(env, elem_ty))
-                }
+                TypeT::FixedArray(elem_ty, len) => naryfn([
+                    Doc::text("full_array_lspec"),
+                    self.emit_type(env, elem_ty),
+                    Doc::text(len.to_string()),
+                ]),
                 TypeT::Unknown => Doc::text("unit"),
                 TypeT::Error => Doc::text("unit"),
 
@@ -691,7 +693,7 @@ impl<'a> Emitter<'a> {
                 Doc::text("array_spec_zeroed"),
                 self.emit_type(env, elem_ty),
                 parens(Doc::text(format!("SizeT.v {}sz", length))),
-                Doc::text("zero_default"),
+                self.emit_type_default(env, elem_ty),
             ])),
             TypeT::Void => Doc::text("()"),
             TypeT::TypeRef(_) => Doc::text("zero_default"),
@@ -708,41 +710,16 @@ impl<'a> Emitter<'a> {
     }
 
     /// Emit the zero-default value for a struct/union field. For
-    /// `Plain` fields this is just the type's zero default. For inline
-    /// arrays it is `array_spec_zeroed <elem> (SizeT.v Nsz) zero_default`
-    /// — a `full_array_spec` of length N whose every slot holds the
-    /// element type's zero default.
+    /// `Plain` fields this is just the type's zero default.
     fn emit_field_default(&mut self, env: &Env, field: &Field) -> Doc {
-        if let Some((elem_ty, length)) = field.val.fixed_array_info() {
-            return parens(naryfn([
-                Doc::text("array_spec_zeroed"),
-                self.emit_type(env, elem_ty),
-                parens(Doc::text(format!("SizeT.v {}sz", length))),
-                Doc::text("zero_default"),
-            ]));
-        }
         match &field.val {
             FieldT::Plain { ty, .. } => self.emit_type_default(env, ty),
         }
     }
 
     /// Render the F* type appearing in a struct/union's noeq record for
-    /// `field`. For `Plain` fields this is the stored type; for inline
-    /// arrays it is the array's contents (`full_array_spec T`) refined
-    /// to the static length.
+    /// `field`. For `Plain` fields this is the stored type
     fn emit_field_record_type(&mut self, env: &Env, field: &Field) -> Doc {
-        if let Some((elem_ty, length)) = field.val.fixed_array_info() {
-            return parens(
-                Doc::text("v:")
-                    .append(Doc::line())
-                    .append(unaryfn(
-                        Doc::text("full_array_spec"),
-                        self.emit_type(env, elem_ty),
-                    ))
-                    .append(Doc::line())
-                    .append(Doc::text(format!("{{ array_spec_len v == {} }}", length))),
-            );
-        }
         match &field.val {
             FieldT::Plain { name: _, ty } => self.emit_type(env, ty),
         }
@@ -2479,7 +2456,7 @@ impl<'a> Emitter<'a> {
                     let elem_ty_doc = self.emit_type(env, elem_ty);
                     let elem_ty_arg = Doc::text("#").append(elem_ty_doc);
                     naryfn([
-                        Doc::text("array_spec_of_list"),
+                        Doc::text("array_spec_of_list_with_len"),
                         elem_ty_arg.clone(),
                         // Doc::text("[")
                         //     .append(Doc::intersperse(
@@ -2505,6 +2482,7 @@ impl<'a> Emitter<'a> {
                                     .append(")")
                             },
                         ),
+                        Doc::text(elems.len().to_string()),
                     ])
                 }
                 ExprT::Malloc(ty) => parens(
@@ -5392,21 +5370,9 @@ impl<'a> Emitter<'a> {
         };
         let def = mk_let(name.clone(), &[], ty, body);
         if gv.opaque_to_smt {
-            let var_name = format!("var_{}", gv.name.val);
-            let mut result = Doc::text("[@@\"opaque_to_smt\"]")
+            Doc::text("[@@\"opaque_to_smt\"]")
                 .append(Doc::hardline())
-                .append(def);
-            // Emit a length fact for FixedArray types so SMT knows the length
-            if let TypeT::FixedArray(_, length) = &gv.ty.val {
-                let lemma = Doc::hardline()
-                    .append(Doc::hardline())
-                    .append(Doc::text(format!(
-                        "let {}_length : (array_spec_len {} == ({} <: nat)) =\n  let open FStar.Tactics.V2 in\n  _ by (apply (`array_spec_len_of_list); compute ())",
-                        var_name, var_name, length
-                    )));
-                result = result.append(lemma);
-            }
-            result
+                .append(def)
         } else {
             def
         }

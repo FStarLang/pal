@@ -87,3 +87,11 @@ int read_global_array(unsigned i)
 {
     return global_array[i];
 }
+
+struct twodim {
+    int arr[3][4];
+};
+
+int access(const struct twodim *m) {
+    return m->arr[2][3];
+}

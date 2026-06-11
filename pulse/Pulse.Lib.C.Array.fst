@@ -97,7 +97,7 @@ let array_spec_upd_idx2 #a s (n:nat) x = ()
 let array_spec_of_list xs =
   Seq.init (List.length xs) fun i -> Val (List.Tot.index xs i)
 
-let array_spec_of_list_full_len xs = ()
+let array_spec_of_list_len xs = ()
 
 let array_spec_of_list_idx xs i = ()
 
@@ -140,7 +140,7 @@ let array_spec_to_list_idx #a s i =
 let array_spec_to_list_of_list #a xs =
   let s = array_spec_of_list xs in
   mk_list_length s 0;
-  array_spec_of_list_full_len xs;
+  array_spec_of_list_len xs;
   let aux (i: nat { i < List.length (mk_list s 0) }) : Lemma
     (List.Tot.index (mk_list s 0) i == List.Tot.index xs i)
   = mk_list_index s 0 i

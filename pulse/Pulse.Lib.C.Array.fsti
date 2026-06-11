@@ -34,6 +34,7 @@ let array_spec_full #a (s: array_spec a) =
   array_spec_full_mask s /\ array_spec_initialized s
 
 let full_array_spec a = s: array_spec a { array_spec_full s }
+let full_array_lspec a (l: nat) = s:full_array_spec a { array_spec_len s == l }
 
 val array_spec_ext #a (s1 s2: array_spec a) :
   Lemma (requires
@@ -154,9 +155,9 @@ let list_index_pos #a (x: a) (xs: list a) (i: nat) :
 
 val array_spec_of_list (#a: Type) (xs: list a) : full_array_spec a
 
-val array_spec_of_list_full_len (#a: Type) (xs: list a) :
+val array_spec_of_list_len #a (xs: list a) :
   Lemma (array_spec_len (array_spec_of_list xs) == List.length xs)
-  [SMTPat (array_spec_of_list xs)]
+    [SMTPat (array_spec_of_list xs)]
 
 val array_spec_of_list_idx #a (xs: list a) (i: nat) :
   Lemma
@@ -164,7 +165,9 @@ val array_spec_of_list_idx #a (xs: list a) (i: nat) :
     (ensures array_spec_idx (array_spec_of_list xs) i == List.Tot.index xs i)
     [SMTPat (array_spec_idx (array_spec_of_list xs) i)]
 
-let array_spec_len_of_list #a (#xs: list a) #n (h: List.length xs == n) : (array_spec_len (array_spec_of_list xs) == n) = ()
+let array_spec_of_list_with_len (#a: Type) (xs: list a) (n: nat) (#_: normalize_term (List.length xs) == n) :
+    full_array_lspec a n =
+  array_spec_of_list xs
 
 val array_spec_to_list #a (s: full_array_spec a) : list a
 val array_spec_to_list_len #a s : Lemma (List.length (array_spec_to_list #a s) == array_spec_len s) [SMTPat (List.length (array_spec_to_list #a s))]
