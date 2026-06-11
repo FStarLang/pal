@@ -224,4 +224,123 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     for &i in to_remove.iter().rev() {
         tu.decls.remove(i);
     }
+
+    // === Phase 3: Order type definitions before their dependents ===
+    reorder_type_deps(tu);
+}
+
+/// A key uniquely identifying a type-defining declaration. The first component
+/// disambiguates the namespace (typedef / struct / union) since a typedef and a
+/// struct may share the same name (e.g. `typedef struct profile profile;`).
+type TypeKey = (u8, Rc<str>);
+
+const TYPEDEF_NS: u8 = 0;
+const STRUCT_NS: u8 = 1;
+const UNION_NS: u8 = 2;
+
+/// Collect the type references that appear in a type expression, descending
+/// through pointers, arrays and refinements (but not into the referenced type's
+/// own definition). Emission of a struct/typedef predicate recurses through
+/// these layers and references each referenced type's predicate (including
+/// through pointers), so the referenced type's declaration must be emitted
+/// first to register its spec parameters.
+fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
+    match &ty.val {
+        TypeT::Pointer(inner, _) | TypeT::FixedArray(inner, _) | TypeT::Plain(inner) => {
+            collect_type_refs(inner, out)
+        }
+        TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _) => collect_type_refs(inner, out),
+        TypeT::TypeRef(k) => {
+            let key = match k {
+                TypeRefKind::Typedef(n) => (TYPEDEF_NS, n.val.clone()),
+                TypeRefKind::Struct(n) => (STRUCT_NS, n.val.clone()),
+                TypeRefKind::Union(n) => (UNION_NS, n.val.clone()),
+            };
+            out.push(key);
+        }
+        _ => {}
+    }
+}
+
+/// Stably reorder declarations so that every struct/union/typedef definition is
+/// emitted after the type definitions it references by-value or by-pointer.
+///
+/// This is required because emission populates the spec-parameter tables for a
+/// type when its predicate is emitted, and a dependent type's predicate reads
+/// those tables. Earlier merge phases can hoist a struct definition to the
+/// position of an earlier forward declaration (e.g. introduced by a forward
+/// `typedef`), which would otherwise place a struct before an anonymous struct
+/// lifted out of one of its fields.
+fn reorder_type_deps(tu: &mut TranslationUnit) {
+    let n = tu.decls.len();
+    if n == 0 {
+        return;
+    }
+
+    // Map each type-defining declaration to its key.
+    let mut node_of_key: HashMap<TypeKey, usize> = HashMap::new();
+    for (i, d) in tu.decls.iter().enumerate() {
+        let key = match &d.val {
+            DeclT::Typedef(t) => Some((TYPEDEF_NS, t.name.val.clone())),
+            DeclT::StructDefn(s) => Some((STRUCT_NS, s.name.val.clone())),
+            DeclT::UnionDefn(u) => Some((UNION_NS, u.name.val.clone())),
+            _ => None,
+        };
+        if let Some(key) = key {
+            node_of_key.insert(key, i);
+        }
+    }
+
+    // Compute prerequisites: indices that must precede each declaration.
+    let mut prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, d) in tu.decls.iter().enumerate() {
+        let mut refs: Vec<TypeKey> = Vec::new();
+        match &d.val {
+            DeclT::Typedef(t) => collect_type_refs(&t.body, &mut refs),
+            DeclT::StructDefn(s) => {
+                for f in &s.fields {
+                    collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                }
+            }
+            DeclT::UnionDefn(u) => {
+                for f in &u.fields {
+                    collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                }
+            }
+            _ => {}
+        }
+        for r in refs {
+            if let Some(&j) = node_of_key.get(&r) {
+                if j != i {
+                    prereqs[i].push(j);
+                }
+            }
+        }
+    }
+
+    // Stable topological sort: repeatedly pick the lowest-indexed declaration
+    // whose prerequisites are already placed. On a dependency cycle (e.g.
+    // mutually pointer-referential structs), fall back to original order to
+    // avoid looping.
+    let mut done = vec![false; n];
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    while order.len() < n {
+        let picked = (0..n)
+            .find(|&i| !done[i] && prereqs[i].iter().all(|&j| done[j]))
+            .or_else(|| (0..n).find(|&i| !done[i]))
+            .expect("at least one undone declaration");
+        done[picked] = true;
+        order.push(picked);
+    }
+
+    if order.iter().enumerate().any(|(pos, &i)| pos != i) {
+        let mut old: Vec<Option<_>> = std::mem::take(&mut tu.decls)
+            .into_iter()
+            .map(Some)
+            .collect();
+        tu.decls = order.into_iter().map(|i| old[i].take().unwrap()).collect();
+    }
 }
