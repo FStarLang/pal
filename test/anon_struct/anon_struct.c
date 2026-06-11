@@ -18,6 +18,8 @@ int frob(struct baz *b)
 typedef struct profile profile;
 typedef struct profiles profiles;
 
+void use_profiles(profiles *p) {}
+
 struct profile {
   const char *name;
 };

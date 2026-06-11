@@ -310,6 +310,28 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
                     collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
                 }
             }
+            // Functions, globals and let-definitions also reference type
+            // predicates (via their signature types) when emitting specs, so
+            // they must follow the type definitions they mention.
+            DeclT::FnDecl(fd) => {
+                collect_type_refs(&fd.ret_type, &mut refs);
+                for a in &fd.args {
+                    collect_type_refs(&a.ty, &mut refs);
+                }
+            }
+            DeclT::FnDefn(fd) => {
+                collect_type_refs(&fd.decl.ret_type, &mut refs);
+                for a in &fd.decl.args {
+                    collect_type_refs(&a.ty, &mut refs);
+                }
+            }
+            DeclT::LetDecl(ld) => {
+                collect_type_refs(&ld.ret_type, &mut refs);
+                for a in &ld.params {
+                    collect_type_refs(&a.ty, &mut refs);
+                }
+            }
+            DeclT::GlobalVar(gv) => collect_type_refs(&gv.ty, &mut refs),
             _ => {}
         }
         for r in refs {
