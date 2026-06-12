@@ -218,6 +218,15 @@ fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} 
   r
 }
 
+ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: array_spec a)
+  preserves array_pts_to r p v
+  ensures pure (not (array_is_null r))
+{
+  unfold array_pts_to r p v;
+  A.pts_to_mask_not_null r;
+  fold array_pts_to r p v;
+}
+
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#p: perm)
   (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })

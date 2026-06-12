@@ -123,6 +123,10 @@ ghost fn length_of u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
   ensures rewrites_to n (array_spec_len y)
 { array_spec_len y }
 
+ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: array_spec a)
+  preserves array_pts_to r p v
+  ensures pure (not (array_is_null r))
+
 // live_array: array resource preserved across loop iterations
 [@@pulse_eager_unfold]
 let live_array (#t: Type u#a) (a: array t) : slprop =
