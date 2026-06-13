@@ -1554,6 +1554,19 @@ fn get_int_mod(signed: &bool, width: &u32) -> Option<&'static str> {
     })
 }
 
+/// Fully-qualified Pulse module providing wrapping (modular) arithmetic for
+/// each unsigned width. Referenced fully-qualified because the short module
+/// names (`UInt32`, ...) always resolve to `FStar.UIntN`.
+fn get_uint_wrap_mod(width: &u32) -> Option<&'static str> {
+    Some(match width {
+        8 => "Pulse.Lib.C.UInt8",
+        16 => "Pulse.Lib.C.UInt16",
+        32 => "Pulse.Lib.C.UInt32",
+        64 => "Pulse.Lib.C.UInt64",
+        _ => return None,
+    })
+}
+
 fn get_float_mod(width: &u32) -> Option<&'static str> {
     Some(match width {
         32 => "Pulse.Lib.C.float32",
@@ -1645,6 +1658,31 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
         (BinOp::LogAnd, TypeT::SLProp) => Doc::text("**"),
         (BinOp::LogOr, TypeT::SLProp) => todo_binop!(),
         (BinOp::Implies, TypeT::SLProp) => Doc::text("`Pulse.Lib.Trade.trade`"),
+
+        // Unsigned C arithmetic wraps (modular). Use total wrapping ops with a
+        // postcondition that is exact when the result fits and wrapped otherwise.
+        // These must precede the generic signed `Int` arms below.
+        (
+            BinOp::Add,
+            TypeT::Int {
+                signed: false,
+                width,
+            },
+        ) => Doc::text(format!("`{}.add_wrap`", get_uint_wrap_mod(width)?)),
+        (
+            BinOp::Sub,
+            TypeT::Int {
+                signed: false,
+                width,
+            },
+        ) => Doc::text(format!("`{}.sub_wrap`", get_uint_wrap_mod(width)?)),
+        (
+            BinOp::Mul,
+            TypeT::Int {
+                signed: false,
+                width,
+            },
+        ) => Doc::text(format!("`{}.mul_wrap`", get_uint_wrap_mod(width)?)),
 
         (BinOp::Mul, TypeT::Int { signed, width }) => {
             Doc::text(format!("`{}.mul`", get_int_mod(signed, width)?))

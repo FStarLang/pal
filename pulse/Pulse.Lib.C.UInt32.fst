@@ -10,24 +10,37 @@ let fits (op : int -> int -> int) (vx vy : int) : prop =
 let min_uint32 = FStar.UInt.min_int U32.n
 let max_uint32 = FStar.UInt.max_int U32.n
 let (+^) = FStar.UInt32.add
-// let ( + ) (x y:uint32)
-// : Pure uint32 
-//   (requires True)
-//   (ensures fun z ->
-//     if (FStar.UInt.fits (as_int x + as_int y) U32.n)
-//     then as_int z == as_int x + as_int y
-//     else z == x `U32.add_mod` y)
-// = U32.(x `add_mod` y)
-// // let add x y = x + y
-// let ( * ) (x y:uint32)
-// : Pure uint32 
-//   (requires True)
-//   (ensures fun z ->
-//     if (FStar.UInt.fits (as_int x * as_int y) U32.n)
-//     then as_int z == as_int x * as_int y
-//     else z == x `U32.mul_mod` y)
-// = U32.(x `mul_mod` y)
-// let (<=) x y = U32.(x <=^ y)
+
+/// Wrapping (modular) arithmetic for unsigned C semantics: these are total
+/// (no overflow precondition). The postcondition is exact when the result
+/// fits and the wrapped value otherwise, so non-overflowing uses keep the
+/// natural `v z == v x + v y` reasoning.
+let add_wrap (x y: U32.t)
+  : Pure U32.t
+    (requires True)
+    (ensures fun z ->
+      if FStar.UInt.fits (U32.v x + U32.v y) U32.n
+      then U32.v z == U32.v x + U32.v y
+      else U32.v z == FStar.UInt.add_mod (U32.v x) (U32.v y))
+  = U32.add_mod x y
+
+let sub_wrap (x y: U32.t)
+  : Pure U32.t
+    (requires True)
+    (ensures fun z ->
+      if FStar.UInt.fits (U32.v x - U32.v y) U32.n
+      then U32.v z == U32.v x - U32.v y
+      else U32.v z == FStar.UInt.sub_mod (U32.v x) (U32.v y))
+  = U32.sub_mod x y
+
+let mul_wrap (x y: U32.t)
+  : Pure U32.t
+    (requires True)
+    (ensures fun z ->
+      if FStar.UInt.fits (U32.v x * U32.v y) U32.n
+      then U32.v z == U32.v x * U32.v y
+      else U32.v z == FStar.UInt.mul_mod (U32.v x) (U32.v y))
+  = U32.mul_mod x y
 
 instance inhabited_uint32 : Pulse.Lib.C.Inhabited.inhabited uint32 = {
   witness = U32.zero
