@@ -826,6 +826,13 @@ impl<'a> Elaborator<'a> {
                 }
                 let ret_type = let_decl.ret_type.clone();
                 self.elab_rvalue(env, Rc::make_mut(&mut let_decl.body), Some(&ret_type));
+                if matches!(ret_type.val, TypeT::SLProp) {
+                    self.cast_to_slprop(env, &mut let_decl.body);
+                } else if let Ok(v_ty) = env.infer_expr(&let_decl.body) {
+                    if !env.vtype_eq(v_ty, ret_type.clone().into()) {
+                        cast_to(&mut let_decl.body, ret_type);
+                    }
+                }
             }
             DeclT::GlobalVar(GlobalVar {
                 name: _,

@@ -4923,6 +4923,18 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Emit an expression as a standalone `slprop` term (e.g. the body of a
+    /// `_slprop` `_let`). Unlike the Pulse-block `with_pure` sugar, a plain F*
+    /// term must use the `pure` constructor to lift a boolean prop into `slprop`.
+    fn emit_slprop_term(&mut self, env: &Env, expr: &Expr) -> Doc {
+        match &expr.val {
+            ExprT::Cast(inner, ty) if matches!(ty.val, TypeT::SLProp) => {
+                unaryfn(Doc::text("pure"), self.emit_rvalue(env, inner))
+            }
+            _ => self.emit_rvalue(env, expr),
+        }
+    }
+
     /// Check that a parameter type is valid for a pure function (no pointers, arrays, etc.)
     fn check_pure_type(&mut self, ty: &Type) {
         match &ty.val {
@@ -5269,7 +5281,7 @@ impl<'a> Emitter<'a> {
         };
 
         let body_doc = if matches!(let_decl.ret_type.val, TypeT::SLProp) {
-            self.emit_pure_prop(env, &let_decl.body)
+            self.emit_slprop_term(env, &let_decl.body)
         } else {
             self.emit_rvalue(env, &let_decl.body)
         };
