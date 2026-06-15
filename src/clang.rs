@@ -338,8 +338,12 @@ impl<'a> Ctx<'a> {
     ) {
         match snippets.snippets.get(&idx) {
             Some(code) => {
-                if let Some((name, ty)) = parse_ghost_arg_binding(&mut self.diagnostics, &loc, code)
-                {
+                if let Some((name, ty)) = parse_ghost_arg_binding(
+                    &mut self.diagnostics,
+                    &loc,
+                    code,
+                    &self.target_int_widths,
+                ) {
                     builder.ghost_arg(name, ty);
                 }
             }

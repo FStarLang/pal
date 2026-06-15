@@ -12,3 +12,11 @@ int foo()
 {
     return 67;
 }
+
+int bar()
+    _ghost_arg(unsigned n)
+    _ghost_arg(tank t)
+    _preserves(tank_owns(t, n))
+{
+    return 42;
+}
