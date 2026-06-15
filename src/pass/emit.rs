@@ -2745,6 +2745,18 @@ impl<'a> Emitter<'a> {
         annotated(stmt, || {
             match &stmt.val {
                 StmtT::Call(v) => {
+                    // A bare call statement whose value is not unit/void must
+                    // explicitly discard its result, since Pulse requires the
+                    // statement to have type `unit`.
+                    let discard_lead = if env
+                        .infer_expr(v)
+                        .map(|t| !matches!(env.vtype_whnf(t).val, TypeT::Void))
+                        .unwrap_or(false)
+                    {
+                        Doc::text("let _ = ")
+                    } else {
+                        Doc::nil()
+                    };
                     if let ExprT::FnCall(f, args) = &v.val
                         && let Some(fn_decl) = env.lookup_fn(f)
                     {
@@ -2811,22 +2823,27 @@ impl<'a> Emitter<'a> {
                                 prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
                             )
                             .append(
-                                parens(
-                                    self.emit_name(Name::Fn(f.val.clone()))
-                                        .append(Doc::concat(
-                                            emitted_args
-                                                .into_iter()
-                                                .map(|arg| Doc::line().append(arg)),
-                                        ))
-                                        .nest(2),
-                                )
-                                .append(";")
-                                .nest(2)
-                                .group(),
+                                discard_lead
+                                    .append(parens(
+                                        self.emit_name(Name::Fn(f.val.clone()))
+                                            .append(Doc::concat(
+                                                emitted_args
+                                                    .into_iter()
+                                                    .map(|arg| Doc::line().append(arg)),
+                                            ))
+                                            .nest(2),
+                                    ))
+                                    .append(";")
+                                    .nest(2)
+                                    .group(),
                             );
                         }
                     }
-                    self.emit_rvalue(env, v).append(";").nest(2).group()
+                    discard_lead
+                        .append(self.emit_rvalue(env, v))
+                        .append(";")
+                        .nest(2)
+                        .group()
                 }
                 StmtT::Decl(x, ty) => {
                     if let TypeT::FixedArray(elem_ty, length) = &ty.val {
