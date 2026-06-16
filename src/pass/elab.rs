@@ -476,9 +476,31 @@ impl<'a> Elaborator<'a> {
                 env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
                 self.elab_rvalue(&env, Rc::make_mut(body), None);
             }
-            ExprT::StructInit(_, fields) => {
-                for (_fld_name, fld_val) in fields {
-                    self.elab_rvalue(env, Rc::make_mut(fld_val), None);
+            ExprT::StructInit(name, fields) => {
+                if env.lookup_type(name).is_some() {
+                    let ty = TypeT::TypeRef(TypeRefKind::Typedef(name.clone()))
+                        .with_loc(name.loc.clone());
+                    if let TypeT::TypeRef(TypeRefKind::Struct(struct_name)) =
+                        &env.vtype_whnf(ty.into()).val
+                    {
+                        *name = struct_name.clone();
+                    }
+                }
+                let field_types: Vec<Option<Rc<Type>>> = fields
+                    .iter()
+                    .map(|(fld_name, _)| {
+                        env.lookup_struct(name).and_then(|s| s.get_field(fld_name))
+                    })
+                    .collect();
+                for ((_fld_name, fld_val), expected_ty) in fields.iter_mut().zip(field_types) {
+                    self.elab_rvalue(env, Rc::make_mut(fld_val), expected_ty.as_deref());
+                    if let Some(exp) = expected_ty {
+                        if let Ok(v_ty) = env.infer_expr(fld_val) {
+                            if !env.vtype_eq(v_ty, exp.clone().into()) {
+                                cast_to(fld_val, exp);
+                            }
+                        }
+                    }
                 }
             }
             ExprT::UnionInit(_, _, fld_val) => {

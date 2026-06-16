@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 
 use chumsky::{
     Parser,
@@ -484,6 +484,7 @@ fn expr_parser<
     snip_map: &'src SnippetMap,
     sift: &'src SIFT,
     target_widths: &'src TargetIntWidths,
+    diags: &'src RefCell<Diagnostics>,
 ) -> impl Parser<'tokens, I, Expr, Extra<'tokens, 'src>> + Clone {
     recursive(|expr| {
         let assignment_expression = expr.clone();
@@ -600,8 +601,13 @@ fn expr_parser<
                 match snip {
                     Some(snip) => {
                         let fallback_loc = sift.resolve_source_info(&span);
-                        let code =
-                            process_inline_pulse(&fallback_loc, snip, snip_map, target_widths);
+                        let code = process_inline_pulse(
+                            &mut diags.borrow_mut(),
+                            &fallback_loc,
+                            snip,
+                            snip_map,
+                            target_widths,
+                        );
                         Ok(Rc::new(code))
                     }
                     None => Err(Rich::custom(span, format!("snippet {} not found", i))),
@@ -827,6 +833,37 @@ fn expr_parser<
             and_then!(type_name.delimited_by(punct(Punct::LParen), punct(Punct::RParen)), {
                 InlinePulse(ty, code: Rc<InlinePulseCode>: inline_pulse) = e =>
                     ExprT::InlinePulse(code, ty).with_loc(sift.resolve_source_info(&e.span())).into(),
+                CompoundLit(ty, fields: Vec<(Rc<Ident>, Expr)>:
+                    punct(Punct::Dot)
+                        .ignore_then(ident.clone())
+                        .then_ignore(punct(Punct::Eq))
+                        .then(assignment_expression.clone())
+                        .separated_by(punct(Punct::Comma))
+                        .allow_trailing()
+                        .collect::<Vec<_>>()
+                        .delimited_by(punct(Punct::LBrace), punct(Punct::RBrace))
+                ) = e => {
+                    let loc = sift.resolve_source_info(&e.span());
+                    match &ty.val {
+                        TypeT::TypeRef(TypeRefKind::Struct(n))
+                        | TypeT::TypeRef(TypeRefKind::Typedef(n)) => {
+                            let fields = fields
+                                .into_iter()
+                                .map(|(f, v)| (f, v.to_rvalue()))
+                                .collect();
+                            ExprT::StructInit(n.clone(), fields).with_loc(loc).into()
+                        }
+                        _ => {
+                            diags.borrow_mut().report(Diagnostic {
+                                loc: loc.location().clone(),
+                                level: DiagnosticLevel::Error,
+                                msg: "compound literals are only supported for struct types"
+                                    .to_string(),
+                            });
+                            ExprT::Error(TypeT::Error.with_loc(loc.clone())).with_loc(loc).into()
+                        }
+                    }
+                },
                 Plain(ty, x: Expr: cast_expression) = e =>
                     ExprT::Cast(x.to_rvalue(), ty).with_loc(sift.resolve_source_info(&e.span())).into(),
             }).or(unary_expression)
@@ -1118,23 +1155,29 @@ pub fn parse_expr(
         source_infos,
         fallback: fallback_loc.clone(),
     };
-    let result = expr_parser(snippets, &source_infos, target_widths).parse(IterInput::new(
-        tokens.iter().map(Clone::clone),
-        (tokens.len()..tokens.len()).into(),
-    ));
+    let diags_cell = RefCell::new(Diagnostics::empty());
+    let result =
+        expr_parser(snippets, &source_infos, target_widths, &diags_cell).parse(IterInput::new(
+            tokens.iter().map(Clone::clone),
+            (tokens.len()..tokens.len()).into(),
+        ));
     let output = match result.output() {
         Some(output) => output.clone().to_rvalue(),
         None => {
             ExprT::Error(TypeT::Error.with_loc(fallback_loc.clone())).with_loc(fallback_loc.clone())
         }
     };
-    diagnostics
-        .diags
-        .extend(result.errors().map(|err| Diagnostic {
+    let errors: Vec<Diagnostic> = result
+        .errors()
+        .map(|err| Diagnostic {
             loc: source_infos.resolve_error_location(err.span()),
             level: DiagnosticLevel::Error,
             msg: format!("{}", err),
-        }));
+        })
+        .collect();
+    drop(result);
+    diagnostics.merge(diags_cell.into_inner());
+    diagnostics.diags.extend(errors);
     output
 }
 
@@ -1301,14 +1344,15 @@ pub fn parse_let_signature(
     };
 
     // Build the parser for the signature
-    let sig_parser = let_signature_parser(snippets, &source_infos, target_widths);
+    let diags_cell = RefCell::new(Diagnostics::empty());
+    let sig_parser = let_signature_parser(snippets, &source_infos, target_widths, &diags_cell);
 
     let result = sig_parser.parse(IterInput::new(
         tokens.iter().map(Clone::clone),
         (tokens.len()..tokens.len()).into(),
     ));
 
-    match result.output() {
+    let output = match result.output() {
         Some(output) => Some(output.clone()),
         None => {
             diagnostics
@@ -1320,7 +1364,11 @@ pub fn parse_let_signature(
                 }));
             None
         }
-    }
+    };
+    drop(result);
+    drop(sig_parser);
+    diagnostics.merge(diags_cell.into_inner());
+    output
 }
 
 fn let_signature_parser<
@@ -1332,6 +1380,7 @@ fn let_signature_parser<
     snippets: &'src SnippetMap,
     sift: &'src SIFT,
     target_widths: &'src TargetIntWidths,
+    diags: &'src RefCell<Diagnostics>,
 ) -> impl Parser<'tokens, I, (Rc<Ident>, Rc<Type>, Vec<FnArg>, Exprs, Exprs), Extra<'tokens, 'src>>
 {
     let ret_type = type_parser(sift, target_widths);
@@ -1410,7 +1459,7 @@ fn let_signature_parser<
     }
     .padded_by(ws())
     .ignore_then(
-        expr_parser(snippets, sift, target_widths)
+        expr_parser(snippets, sift, target_widths, diags)
             .map(|e| e.to_rvalue())
             .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
     );
@@ -1421,7 +1470,7 @@ fn let_signature_parser<
     }
     .padded_by(ws())
     .ignore_then(
-        expr_parser(snippets, sift, target_widths)
+        expr_parser(snippets, sift, target_widths, diags)
             .map(|e| e.to_rvalue())
             .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
     );
@@ -1437,16 +1486,21 @@ fn let_signature_parser<
 }
 
 pub fn process_inline_pulse(
+    diagnostics: &mut Diagnostics,
     fallback_loc: &Rc<SourceInfo>,
     code: &InlineCode,
     snippets: &SnippetMap,
     target_widths: &TargetIntWidths,
 ) -> InlinePulseCode {
-    let mut diags = Diagnostics::empty();
+    // The top-level relex only classifies tokens to locate antiquotations;
+    // verbatim Pulse tokens are emitted unchanged, so their lexer errors are
+    // spurious and must not be reported. Diagnostics for antiquotation *content*
+    // are surfaced separately by the parse_expr / parse_type calls below.
+    let mut relex_diags = Diagnostics::empty();
     let RelexedTokens {
         tokens: relexed,
         source_infos: _,
-    } = relex_inline_code(&mut diags, code);
+    } = relex_inline_code(&mut relex_diags, code);
 
     // Intermediate representation: chumsky parser produces token index ranges,
     // then we post-process to parse antiquotation inner expressions.
@@ -1663,9 +1717,8 @@ pub fn process_inline_pulse(
                 let inner_code = InlineCode {
                     tokens: code.tokens[body_span.start..body_span.end].to_vec(),
                 };
-                let mut inner_diags = Diagnostics::empty();
                 let expr = parse_expr(
-                    &mut inner_diags,
+                    diagnostics,
                     fallback_loc,
                     &inner_code,
                     snippets,
@@ -1685,9 +1738,7 @@ pub fn process_inline_pulse(
                 let inner_code = InlineCode {
                     tokens: code.tokens[body_span.start..body_span.end].to_vec(),
                 };
-                let mut inner_diags = Diagnostics::empty();
-                let ty =
-                    parse_type_inner(&mut inner_diags, fallback_loc, &inner_code, target_widths);
+                let ty = parse_type_inner(diagnostics, fallback_loc, &inner_code, target_widths);
                 InlinePulseToken::TypeAntiquot { before, ty }
             }
             RawToken::FieldAntiquot {
@@ -1698,11 +1749,10 @@ pub fn process_inline_pulse(
                 let inner_code = InlineCode {
                     tokens: code.tokens[body_span.start..body_span.end].to_vec(),
                 };
-                let mut inner_diags = Diagnostics::empty();
                 let RelexedTokens {
                     tokens: inner_relexed,
                     source_infos: inner_si,
-                } = relex_inline_code(&mut inner_diags, &inner_code);
+                } = relex_inline_code(diagnostics, &inner_code);
                 let inner_sift = TokenSI {
                     source_infos: inner_si,
                     fallback: fallback_loc.clone(),
@@ -1737,11 +1787,10 @@ pub fn process_inline_pulse(
                 let inner_code = InlineCode {
                     tokens: code.tokens[body_span.start..body_span.end].to_vec(),
                 };
-                let mut inner_diags = Diagnostics::empty();
                 let RelexedTokens {
                     tokens: inner_relexed,
                     source_infos: inner_si,
-                } = relex_inline_code(&mut inner_diags, &inner_code);
+                } = relex_inline_code(diagnostics, &inner_code);
                 let inner_sift = TokenSI {
                     source_infos: inner_si,
                     fallback: fallback_loc.clone(),
@@ -1782,11 +1831,10 @@ pub fn process_inline_pulse(
                     tokens: code.tokens[body_span.start..body_span.end].to_vec(),
                 };
                 // Parse as type followed by identifier
-                let mut inner_diags = Diagnostics::empty();
                 let RelexedTokens {
                     tokens: inner_relexed,
                     source_infos: inner_si,
-                } = relex_inline_code(&mut inner_diags, &inner_code);
+                } = relex_inline_code(diagnostics, &inner_code);
                 let inner_sift = TokenSI {
                     source_infos: inner_si,
                     fallback: fallback_loc.clone(),

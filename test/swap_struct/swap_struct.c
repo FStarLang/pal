@@ -1,6 +1,6 @@
 #include "pal.h"
 
-typedef struct {
+typedef struct int_pair {
   int a;
   int b;
 } int_pair;
@@ -19,4 +19,10 @@ int_pair swap_functional(int_pair x)
 {
   swap_inplace(&x);
   return x;
+}
+
+void use_swap() {
+  int_pair x = { .a = 1, .b = 2 };
+  swap_inplace(&x);
+  _assert(_inline_pulse(pts_to $(&x) $((int_pair) { .a = 2, .b = 1 })));
 }

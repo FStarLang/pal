@@ -186,8 +186,13 @@ impl<'a> Ctx<'a> {
     ) {
         match snippets.snippets.get(&idx) {
             Some(code) => {
-                let pulse_code =
-                    process_inline_pulse(&loc, code, snippets, &self.target_int_widths);
+                let pulse_code = process_inline_pulse(
+                    &mut self.diagnostics,
+                    &loc,
+                    code,
+                    snippets,
+                    &self.target_int_widths,
+                );
                 let module_name: Rc<str> = Rc::from(module_name);
                 self.translation_unit.decls.push(Ast {
                     loc,
@@ -307,7 +312,13 @@ impl<'a> Ctx<'a> {
             None => return,
         };
 
-        let code = process_inline_pulse(&loc, body_code, snippets, &self.target_int_widths);
+        let code = process_inline_pulse(
+            &mut self.diagnostics,
+            &loc,
+            body_code,
+            snippets,
+            &self.target_int_widths,
+        );
 
         self.translation_unit.decls.push(Ast {
             loc,
@@ -318,8 +329,13 @@ impl<'a> Ctx<'a> {
     fn mk_ghost_stmt(&mut self, loc: Rc<SourceInfo>, idx: u32, snippets: &SnippetMap) -> Rc<Stmt> {
         match snippets.snippets.get(&idx) {
             Some(code) => {
-                let pulse_code =
-                    process_inline_pulse(&loc, code, snippets, &self.target_int_widths);
+                let pulse_code = process_inline_pulse(
+                    &mut self.diagnostics,
+                    &loc,
+                    code,
+                    snippets,
+                    &self.target_int_widths,
+                );
                 mk_ast(loc, StmtT::GhostStmt(Rc::new(pulse_code)))
             }
             None => {
