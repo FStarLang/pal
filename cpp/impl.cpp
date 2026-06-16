@@ -429,6 +429,9 @@ public:
         } else if (ann->getAnnotation() == "pal-plain" &&
                    ann->args_size() == 0) {
           ty = mk_type_plain(std::move(loc), std::move(ty));
+        } else if (ann->getAnnotation() == "pal-nullable" &&
+                   ann->args_size() == 0) {
+          ty = mk_type_nullable(std::move(loc), std::move(ty));
         } else if (ann->getAnnotation() == "pal-array" &&
                    ann->args_size() == 0) {
           ty = mk_type_array(std::move(loc), std::move(ty));

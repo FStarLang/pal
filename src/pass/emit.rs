@@ -665,7 +665,8 @@ impl<'a> Emitter<'a> {
                 | TypeT::RefineAlways(ty, _)
                 | TypeT::RefineUninit(ty, _)
                 | TypeT::RefineValue(ty, ..)
-                | TypeT::Plain(ty) => self.emit_type(env, ty),
+                | TypeT::Plain(ty)
+                | TypeT::Nullable(ty) => self.emit_type(env, ty),
             }
         })
     }
@@ -701,7 +702,8 @@ impl<'a> Emitter<'a> {
             | TypeT::RefineAlways(ty, _)
             | TypeT::RefineUninit(ty, _)
             | TypeT::RefineValue(ty, ..)
-            | TypeT::Plain(ty) => self.emit_type_default(env, ty),
+            | TypeT::Plain(ty)
+            | TypeT::Nullable(ty) => self.emit_type_default(env, ty),
             _ => {
                 self.report(format!("no zero default for type {}", ty), &ty.loc);
                 Doc::text("(admit())")
@@ -1218,6 +1220,18 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::Plain(_) => {}
+            TypeT::Nullable(inner) => {
+                // Collect the inner type's props separately, then wrap the whole
+                // conjunction in `unless_null this (…)` so the resource is `emp`
+                // when the pointer is null. Val bindings (existentials) are still
+                // registered via the shared `naming`.
+                let this_doc = self.emit_rvalue(env, this);
+                let mut inner_props: Vec<Doc> = vec![];
+                self.emit_type_slprop(env, inner, variant, naming, &mut inner_props, this);
+                props.push(annotated(ty, || {
+                    naryfn([Doc::text("unless_null"), this_doc, mk_star(inner_props)])
+                }));
+            }
             TypeT::Error => {}
         }
     }
@@ -1764,7 +1778,8 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
             | TypeT::RefineAlways(ty, _)
             | TypeT::RefineUninit(ty, _)
             | TypeT::RefineValue(ty, ..)
-            | TypeT::Plain(ty),
+            | TypeT::Plain(ty)
+            | TypeT::Nullable(ty),
         ) => emit_binop(env, op, ty.clone().into())?,
 
         (_, TypeT::TypeRef(_)) => return None,
@@ -4983,7 +4998,8 @@ impl<'a> Emitter<'a> {
             | TypeT::RefineAlways(inner, _)
             | TypeT::RefineUninit(inner, _)
             | TypeT::RefineValue(inner, ..)
-            | TypeT::Plain(inner) => self.check_pure_type(inner),
+            | TypeT::Plain(inner)
+            | TypeT::Nullable(inner) => self.check_pure_type(inner),
         }
     }
 

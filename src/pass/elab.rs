@@ -93,6 +93,7 @@ impl<'a> Elaborator<'a> {
                 self.cast_to_slprop(env, p);
             }
             TypeT::Plain(ty) => self.elab_type(env, Rc::make_mut(ty)),
+            TypeT::Nullable(ty) => self.elab_type(env, Rc::make_mut(ty)),
         }
     }
 

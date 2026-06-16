@@ -124,6 +124,7 @@ impl<'a> Checker<'a> {
                 self.check_slprop(env, p);
             }
             TypeT::Plain(ty) => self.check_type(env, ty),
+            TypeT::Nullable(ty) => self.check_type(env, ty),
             TypeT::Unknown => {}
             TypeT::Error => {}
         }
@@ -146,7 +147,8 @@ impl<'a> Checker<'a> {
             | TypeT::RefineAlways(..)
             | TypeT::RefineUninit(..)
             | TypeT::RefineValue(..)
-            | TypeT::Plain(..) => false,
+            | TypeT::Plain(..)
+            | TypeT::Nullable(..) => false,
             TypeT::Unknown => true,
             TypeT::Error => true,
         }

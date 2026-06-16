@@ -252,7 +252,8 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
         TypeT::Refine(inner, _)
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
-        | TypeT::RefineValue(inner, _, _, _) => collect_type_refs(inner, out),
+        | TypeT::RefineValue(inner, _, _, _)
+        | TypeT::Nullable(inner) => collect_type_refs(inner, out),
         TypeT::TypeRef(k) => {
             let key = match k {
                 TypeRefKind::Typedef(n) => (TYPEDEF_NS, n.val.clone()),

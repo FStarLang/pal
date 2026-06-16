@@ -1403,6 +1403,12 @@ fn let_signature_parser<
     }
     .padded_by(ws());
 
+    // Nullable modifier
+    let nullable = select! {
+        Token::Ident("_nullable") => (),
+    }
+    .padded_by(ws());
+
     // Pointer kind annotations
     let pointer_kind = select! {
         Token::Ident("_array") => PointerKind::Array,
@@ -1410,9 +1416,10 @@ fn let_signature_parser<
     }
     .padded_by(ws());
 
-    // A single parameter: [mode] [ptr_kind] type [name]
+    // A single parameter: [mode] [_nullable] [ptr_kind] type [name]
     let param = param_mode
         .or_not()
+        .then(nullable.or_not())
         .then(pointer_kind.or_not())
         .then(type_parser(sift, target_widths))
         .then(
@@ -1426,25 +1433,33 @@ fn let_signature_parser<
                 .padded_by(ws())
                 .or_not(),
         )
-        .map(|(((mode_opt, ptr_kind_opt), ty), name_opt)| {
-            let mode = mode_opt.unwrap_or(ParamMode::Regular);
-            // If a pointer kind annotation was given, override the pointer kind in the type
-            let ty = if let Some(ptr_kind) = ptr_kind_opt {
-                match &ty.val {
-                    TypeT::Pointer(inner, _) => {
-                        TypeT::Pointer(inner.clone(), ptr_kind).with_loc(ty.loc.clone())
+        .map(
+            |((((mode_opt, nullable_opt), ptr_kind_opt), ty), name_opt)| {
+                let mode = mode_opt.unwrap_or(ParamMode::Regular);
+                // If a pointer kind annotation was given, override the pointer kind in the type
+                let ty = if let Some(ptr_kind) = ptr_kind_opt {
+                    match &ty.val {
+                        TypeT::Pointer(inner, _) => {
+                            TypeT::Pointer(inner.clone(), ptr_kind).with_loc(ty.loc.clone())
+                        }
+                        _ => ty,
                     }
-                    _ => ty,
+                } else {
+                    ty
+                };
+                // Wrap the type in a transparent Nullable marker if requested
+                let ty = if nullable_opt.is_some() {
+                    TypeT::Nullable(ty.clone()).with_loc(ty.loc.clone())
+                } else {
+                    ty
+                };
+                FnArg {
+                    name: name_opt,
+                    ty,
+                    mode,
                 }
-            } else {
-                ty
-            };
-            FnArg {
-                name: name_opt,
-                ty,
-                mode,
-            }
-        });
+            },
+        );
 
     let params = param
         .separated_by(punct(Punct::Comma))

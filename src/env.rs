@@ -553,6 +553,7 @@ impl Env {
                     | TypeT::RefineUninit(..)
                     | TypeT::RefineValue(..)
                     | TypeT::Plain(..)
+                    | TypeT::Nullable(..)
             ) => None,
         }
     }
@@ -591,7 +592,8 @@ impl Env {
             | TypeT::RefineAlways(ty, _)
             | TypeT::RefineUninit(ty, _)
             | TypeT::RefineValue(ty, ..)
-            | TypeT::Plain(ty) => Some(ty.clone().into()),
+            | TypeT::Plain(ty)
+            | TypeT::Nullable(ty) => Some(ty.clone().into()),
         }
     }
 

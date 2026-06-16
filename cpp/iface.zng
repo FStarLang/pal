@@ -249,6 +249,7 @@ mod crate::clang {
     fn mk_type_refine_uninit(Rc<SourceInfo>, Rc<Type>, Rc<Expr>) -> Rc<Type>;
     fn mk_type_refine_value(Rc<SourceInfo>, Rc<Type>, u32, u32, &SnippetMap) -> Rc<Type>;
     fn mk_type_plain(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
+    fn mk_type_nullable(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_array(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_arrayptr(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_err(Rc<SourceInfo>) -> Rc<Type>;

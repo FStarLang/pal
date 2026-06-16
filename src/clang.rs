@@ -628,6 +628,9 @@ fn mk_type_refine_value(
 fn mk_type_plain(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
     TypeT::Plain(ty).with_loc(loc)
 }
+fn mk_type_nullable(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
+    TypeT::Nullable(ty).with_loc(loc)
+}
 fn mk_type_array(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
     match &ty.val {
         TypeT::Pointer(elem, PointerKind::Unknown) => {

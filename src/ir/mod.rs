@@ -165,6 +165,11 @@ pub enum TypeT {
     RefineValue(Rc<Type>, Rc<Ident>, Rc<Type>, Rc<Expr>),
     Plain(Rc<Type>),
 
+    /// Nullable pointer wrapper. Transparent to the F* type (emits the inner
+    /// type unchanged), but the generated separation-logic prop is wrapped in
+    /// `unless_null this (…)` so the resource is `emp` when the pointer is null.
+    Nullable(Rc<Type>),
+
     /// Placeholder for type inference (resolved during elaboration).
     Unknown,
     Error,
