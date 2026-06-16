@@ -138,6 +138,7 @@ bool peek_head(const list head, int *out)
 
 void get_head(const list head, _out int *out)
   _requires(head != NULL)
+  _ensures(starts_with(_elements_of(head), *out))
 {
     _ghost_stmt(Recursive_struct_include2.elim_is_list_nonnull $(head));
     *out = head->data;
