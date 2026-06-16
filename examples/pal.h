@@ -37,6 +37,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _pulse_opaque_to_smt __attribute((annotate("pal-opaque-to-smt")))
 #define _rec __attribute((annotate("pal-rec")))
 #define _pulse_eager_unfold_predicate __attribute__((annotate("pal-eager-unfold-predicate")))
+#define _pointer_view __attribute__((annotate("pal-pointer-view")))
 #define _decreases(p) __attribute__((annotate("pal-decreases", __capture_args(p))))
 
 #define _inline_pulse(args) _inline_pulse(__capture_args(args))
@@ -76,6 +77,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _pulse_opaque_to_smt
 #define _rec
 #define _pulse_eager_unfold_predicate
+#define _pointer_view
 #define _decreases(p)
 
 #define _let(sig, body)

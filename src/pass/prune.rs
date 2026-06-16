@@ -351,7 +351,11 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
             DeclT::FnDecl(fn_decl) => {
                 scan_fn_decl(deps.deps_for(n), fn_decl);
             }
-            DeclT::Typedef(TypeDefn { name: _, body }) => scan_type(deps.deps_for(n), body),
+            DeclT::Typedef(TypeDefn {
+                name: _,
+                body,
+                is_pointer_view: _,
+            }) => scan_type(deps.deps_for(n), body),
             DeclT::StructDefn(StructDefn {
                 name: _,
                 fields,

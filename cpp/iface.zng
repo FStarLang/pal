@@ -175,7 +175,7 @@ mod crate::clang {
 
         fn add_fn_decl(&mut self, DeclBuilder);
         fn add_fn_defn(&mut self, DeclBuilder, Vec<Rc<Stmt>>);
-        fn add_typedef(&mut self, Rc<SourceInfo>, Rc<Ident>, Rc<Type>);
+        fn add_typedef(&mut self, Rc<SourceInfo>, Rc<Ident>, Rc<Type>, bool);
         fn add_struct(&mut self, DeclBuilder);
         fn add_struct_decl(&mut self, Rc<SourceInfo>, Rc<Ident>);
         fn add_union(&mut self, DeclBuilder);
