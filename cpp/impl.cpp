@@ -1728,7 +1728,19 @@ public:
       auto type =
           trQualType(TD->getUnderlyingType(), TD->getSourceRange(), &anon);
       type = trTypeAttrs(TD->getAttrs(), std::move(type));
-      return ctx.add_typedef(std::move(loc), std::move(id), std::move(type));
+      bool isPointerView = false;
+      if (TD->hasAttrs()) {
+        for (auto *attr : TD->getAttrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
+            if (ann->getAnnotation() == "pal-pointer-view" &&
+                ann->args_size() == 0) {
+              isPointerView = true;
+            }
+          }
+        }
+      }
+      return ctx.add_typedef(std::move(loc), std::move(id), std::move(type),
+                             isPointerView);
     } else if (auto *RD = dyn_cast<RecordDecl>(D)) {
       auto loc = getRange(RD->getSourceRange());
       if (RD->getIdentifier()) {

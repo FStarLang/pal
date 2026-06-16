@@ -487,6 +487,7 @@ pub struct FnDefn {
 pub struct TypeDefn {
     pub name: Rc<Ident>,
     pub body: Rc<Type>,
+    pub is_pointer_view: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]

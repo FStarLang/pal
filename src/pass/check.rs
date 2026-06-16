@@ -685,7 +685,11 @@ impl<'a> Checker<'a> {
                 self.check_stmts(env, body);
             }
             DeclT::FnDecl(fn_decl) => self.check_fn_decl(env, fn_decl),
-            DeclT::Typedef(TypeDefn { name: _, body }) => self.check_type(env, body),
+            DeclT::Typedef(TypeDefn {
+                name: _,
+                body,
+                is_pointer_view: _,
+            }) => self.check_type(env, body),
             DeclT::StructDefn(StructDefn {
                 name: _, fields, ..
             }) => {

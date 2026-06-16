@@ -121,10 +121,20 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    fn add_typedef(&mut self, loc: Rc<SourceInfo>, name: Rc<Ident>, body: Rc<Type>) {
+    fn add_typedef(
+        &mut self,
+        loc: Rc<SourceInfo>,
+        name: Rc<Ident>,
+        body: Rc<Type>,
+        is_pointer_view: bool,
+    ) {
         self.translation_unit.decls.push(Ast {
             loc,
-            val: DeclT::Typedef(TypeDefn { name, body }),
+            val: DeclT::Typedef(TypeDefn {
+                name,
+                body,
+                is_pointer_view,
+            }),
         })
     }
 

@@ -4,10 +4,57 @@ use crate::diag::{Diagnostic, DiagnosticLevel, Diagnostics};
 use crate::env::{Env, LocalDeclKind};
 use crate::ir::*;
 use crate::mayberc::MaybeRc;
+use std::collections::HashMap;
 use std::rc::Rc;
+
+/// Position-independent key identifying the pointee of a pointer type, used to
+/// look up a registered default pointer-view (`_pointer_view`).
+#[derive(PartialEq, Eq, Hash, Clone)]
+enum PointeeKey {
+    Typedef(Rc<IdentT>),
+    Struct(Rc<IdentT>),
+    Union(Rc<IdentT>),
+}
+
+impl PointeeKey {
+    fn from_kind(k: &TypeRefKind) -> Self {
+        match k {
+            TypeRefKind::Typedef(t) => PointeeKey::Typedef(t.val.clone()),
+            TypeRefKind::Struct(s) => PointeeKey::Struct(s.val.clone()),
+            TypeRefKind::Union(u) => PointeeKey::Union(u.val.clone()),
+        }
+    }
+
+    /// Canonicalize a pointee type reference by resolving typedef aliases down
+    /// to their underlying struct/union tag, so that `node *` and
+    /// `struct node *` (where `node` is `typedef struct node {…} node;`) map to
+    /// the same key.
+    fn canon(env: &Env, k: &TypeRefKind) -> Self {
+        let mut cur = k.clone();
+        while let TypeRefKind::Typedef(n) = &cur {
+            match env.lookup_type(n).map(|d| d.body.val.clone()) {
+                Some(TypeT::TypeRef(inner)) => cur = inner,
+                _ => break,
+            }
+        }
+        PointeeKey::from_kind(&cur)
+    }
+}
 
 struct Elaborator<'a> {
     diags: &'a mut Diagnostics,
+    /// Map from a pointee type to the typedef registered (via `_pointer_view`)
+    /// as the default view for pointers to that type.
+    pointer_views: HashMap<PointeeKey, Rc<Ident>>,
+    /// When true, default pointer-view substitution is suppressed (inside
+    /// inline-Pulse code).
+    in_inline_pulse: bool,
+    /// When true, we are elaborating the body of a `_pointer_view` typedef, so
+    /// substitution is suppressed to avoid self-recursive predicates.
+    in_view_body: bool,
+    /// When true, the next type visited is exempt from pointer-view substitution
+    /// (set by `_plain` to keep the directly-wrapped pointer bare).
+    suppress_next_view: bool,
 }
 
 fn cast_to(rval: &mut Rc<Expr>, ty: Rc<Type>) {
@@ -42,7 +89,33 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    /// Apply the default pointer-view substitution if `ty` is a bare pointer
+    /// (`Ref`/`Unknown`) to a pointee with a registered `_pointer_view` typedef.
+    /// Replaces `ty` in place with a reference to that typedef. Suppressed inside
+    /// inline-Pulse code, inside a view typedef's own body, and for the single
+    /// type directly following `_plain`.
+    fn maybe_apply_view(&mut self, env: &Env, ty: &mut Type) {
+        let suppressed = self.suppress_next_view;
+        self.suppress_next_view = false;
+        if suppressed || self.in_inline_pulse || self.in_view_body {
+            return;
+        }
+        let TypeT::Pointer(to, kind) = &ty.val else {
+            return;
+        };
+        if !matches!(kind, PointerKind::Ref | PointerKind::Unknown) {
+            return;
+        }
+        let TypeT::TypeRef(k) = &to.val else {
+            return;
+        };
+        if let Some(view_name) = self.pointer_views.get(&PointeeKey::canon(env, k)) {
+            ty.val = TypeT::TypeRef(TypeRefKind::Typedef(view_name.clone()));
+        }
+    }
+
     fn elab_type(&mut self, env: &Env, ty: &mut Type) {
+        self.maybe_apply_view(env, ty);
         match &mut ty.val {
             TypeT::Int {
                 signed: _,
@@ -92,7 +165,10 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(p), Some(&slprop_ty));
                 self.cast_to_slprop(env, p);
             }
-            TypeT::Plain(ty) => self.elab_type(env, Rc::make_mut(ty)),
+            TypeT::Plain(ty) => {
+                self.suppress_next_view = true;
+                self.elab_type(env, Rc::make_mut(ty));
+            }
             TypeT::Nullable(ty) => self.elab_type(env, Rc::make_mut(ty)),
         }
     }
@@ -130,6 +206,8 @@ impl<'a> Elaborator<'a> {
 
     fn elab_inline_pulse_code(&mut self, env: &Env, code: &mut InlinePulseCode) {
         let env = &mut env.clone();
+        let prev_in_inline_pulse = self.in_inline_pulse;
+        self.in_inline_pulse = true;
         for tok in &mut code.tokens {
             match tok {
                 InlinePulseToken::RValueAntiquot { expr, .. }
@@ -145,6 +223,7 @@ impl<'a> Elaborator<'a> {
                 InlinePulseToken::AuxFnAntiquot { ty, .. } => self.elab_type(env, Rc::make_mut(ty)),
             }
         }
+        self.in_inline_pulse = prev_in_inline_pulse;
     }
 
     fn elab_rvalue(&mut self, env: &Env, rval: &mut Expr, expected: Option<&Type>) {
@@ -814,7 +893,11 @@ impl<'a> Elaborator<'a> {
                 self.elab_stmts(env, body);
             }
             DeclT::FnDecl(fn_decl) => self.elab_fn_decl(env, fn_decl),
-            DeclT::Typedef(typedef) => self.elab_type(env, Rc::make_mut(&mut typedef.body)),
+            DeclT::Typedef(typedef) => {
+                self.in_view_body = typedef.is_pointer_view;
+                self.elab_type(env, Rc::make_mut(&mut typedef.body));
+                self.in_view_body = false;
+            }
             DeclT::StructDefn(StructDefn {
                 name: _, fields, ..
             }) => {
@@ -873,9 +956,72 @@ impl<'a> Elaborator<'a> {
     }
 }
 
+/// Find the named pointee `TypeRefKind` of a `_pointer_view` typedef body by
+/// stripping refinement/`Plain`/`Nullable` wrappers down to the inner pointer.
+/// Returns `None` if the body is not (a wrapped) pointer to a named type.
+fn view_pointee(body: &Type) -> Option<&TypeRefKind> {
+    match &body.val {
+        TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, _, _, _)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t) => view_pointee(t),
+        TypeT::Pointer(to, _) => match &to.val {
+            TypeT::TypeRef(k) => Some(k),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Scan the translation unit for `_pointer_view` typedefs and build a map from
+/// pointee type to the registering typedef. Reports a diagnostic for views whose
+/// body is not a pointer to a named type, and for duplicate views of the same
+/// pointee.
+fn build_pointer_views(
+    diags: &mut Diagnostics,
+    env: &Env,
+    tu: &TranslationUnit,
+) -> HashMap<PointeeKey, Rc<Ident>> {
+    let mut views: HashMap<PointeeKey, Rc<Ident>> = HashMap::new();
+    for decl in &tu.decls {
+        let DeclT::Typedef(td) = &decl.val else {
+            continue;
+        };
+        if !td.is_pointer_view {
+            continue;
+        }
+        let Some(k) = view_pointee(&td.body) else {
+            diags.report(Diagnostic {
+                loc: td.name.loc.location().clone(),
+                level: DiagnosticLevel::Error,
+                msg: format!(
+                    "_pointer_view typedef `{}` must be a pointer to a named type",
+                    td.name
+                ),
+            });
+            continue;
+        };
+        let key = PointeeKey::canon(env, k);
+        if let Some(existing) = views.get(&key) {
+            diags.report(Diagnostic {
+                loc: td.name.loc.location().clone(),
+                level: DiagnosticLevel::Error,
+                msg: format!(
+                    "duplicate _pointer_view for the same pointee: `{}` conflicts with `{}`",
+                    td.name, existing
+                ),
+            });
+            continue;
+        }
+        views.insert(key, td.name.clone());
+    }
+    views
+}
+
 pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     let mut env = Env::new();
-    let mut elab = Elaborator { diags };
     // Pre-register every declaration so that elaboration is order-independent
     // (e.g. an `_include_pulse` block in one file can refer to a typedef
     // declared in another file, and a function body can call another function
@@ -885,6 +1031,16 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     for decl in tu.decls.iter() {
         env.push_decl(decl);
     }
+    // Build the default pointer-view map now that every typedef is registered,
+    // so pointee keys can be canonicalized through typedef aliases.
+    let pointer_views = build_pointer_views(diags, &env, tu);
+    let mut elab = Elaborator {
+        diags,
+        pointer_views,
+        in_inline_pulse: false,
+        in_view_body: false,
+        suppress_next_view: false,
+    };
     // Pre-pass: elaborate the type-level parts of each declaration (function
     // signatures, typedef bodies, struct/union fields, etc.) and re-register
     // the elaborated version. This ensures that when we later elaborate a
@@ -904,7 +1060,9 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 elab.elab_type(env, Rc::make_mut(&mut fn_decl.ret_type));
             }
             DeclT::Typedef(td) => {
+                elab.in_view_body = td.is_pointer_view;
                 elab.elab_type(&env, Rc::make_mut(&mut td.body));
+                elab.in_view_body = false;
             }
             DeclT::StructDefn(StructDefn { fields, .. }) => {
                 for f in fields {

@@ -3342,7 +3342,15 @@ fn mk_rvar(n: &Rc<Ident>) -> Rc<Expr> {
 }
 
 impl<'a> Emitter<'a> {
-    fn emit_typedef(&mut self, env: &Env, decl @ TypeDefn { name, body }: &TypeDefn) -> Doc {
+    fn emit_typedef(
+        &mut self,
+        env: &Env,
+        decl @ TypeDefn {
+            name,
+            body,
+            is_pointer_view: _,
+        }: &TypeDefn,
+    ) -> Doc {
         let env = &mut env.clone();
         env.push_typedef(decl.clone());
 
