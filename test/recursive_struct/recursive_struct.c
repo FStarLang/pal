@@ -135,3 +135,11 @@ bool peek_head(const list head, int *out)
     _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) $(*head));
     return true;
 }
+
+void get_head(const list head, _out int *out)
+  _requires(head != NULL)
+{
+    _ghost_stmt(Recursive_struct_include2.elim_is_list_nonnull $(head));
+    *out = head->data;
+    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) $(*head));
+}
