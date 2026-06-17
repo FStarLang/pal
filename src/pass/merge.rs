@@ -99,6 +99,8 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     let mut to_remove: Vec<usize> = Vec::new();
     // Track moves: copy content from src to dst (applied after the analysis loop).
     let mut moves: Vec<(usize, usize)> = Vec::new();
+    // Track FnDecl specs to copy into their matching FnDefn before moves/removals.
+    let mut spec_copies: Vec<(usize, Exprs, Exprs)> = Vec::new();
 
     // Build an Env for type comparison (need typedef resolution)
     let mut env = Env::new();
@@ -165,6 +167,14 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                         }
                     }
 
+                    if decl_has_specs && !defn_has_specs {
+                        spec_copies.push((
+                            defn_idx,
+                            fn_decl.requires.clone(),
+                            fn_decl.ensures.clone(),
+                        ));
+                    }
+
                     // Mark FnDecl for removal — it will be merged into the FnDefn.
                     // If the forward declaration came before the definition, move
                     // the (spec-merged) definition back to the declaration's
@@ -195,19 +205,12 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         }
     }
 
-    // Copy specs from declarations into definitions before removing them
-    // (need a separate pass to avoid borrow conflicts)
-    for &i in &to_remove {
-        let DeclT::FnDecl(fn_decl) = &tu.decls[i].val else {
-            continue;
-        };
-        let fn_decl = fn_decl.clone();
-        if let Some(&defn_idx) = defn_indices.get(&fn_decl.name.val) {
-            if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
-                if defn.decl.requires.is_empty() && defn.decl.ensures.is_empty() {
-                    defn.decl.requires = fn_decl.requires;
-                    defn.decl.ensures = fn_decl.ensures;
-                }
+    // Copy specs from declarations into definitions before moving/removing them.
+    for (defn_idx, requires, ensures) in spec_copies {
+        if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
+            if defn.decl.requires.is_empty() && defn.decl.ensures.is_empty() {
+                defn.decl.requires = requires;
+                defn.decl.ensures = ensures;
             }
         }
     }
