@@ -27,6 +27,173 @@ fn types_match(env: &Env, decl: &FnDecl, defn: &FnDecl) -> bool {
     env.vtype_eq(decl.ret_type.clone().into(), defn.ret_type.clone().into())
 }
 
+fn param_renames(decl: &FnDecl, defn: &FnDecl) -> HashMap<Rc<str>, Rc<Ident>> {
+    let mut renames = HashMap::new();
+    for (decl_arg, defn_arg) in decl.args.iter().zip(defn.args.iter()) {
+        let (Some(decl_name), Some(defn_name)) = (&decl_arg.name, &defn_arg.name) else {
+            continue;
+        };
+        if decl_name.val != defn_name.val {
+            renames.insert(decl_name.val.clone(), defn_name.clone());
+        }
+    }
+    for (decl_arg, defn_arg) in decl.ghost_args.iter().zip(defn.ghost_args.iter()) {
+        if decl_arg.name.val != defn_arg.name.val {
+            renames.insert(decl_arg.name.val.clone(), defn_arg.name.clone());
+        }
+    }
+    renames
+}
+
+fn rename_specs(exprs: &Exprs, renames: &HashMap<Rc<str>, Rc<Ident>>) -> Exprs {
+    if renames.is_empty() {
+        return exprs.clone();
+    }
+    exprs.iter().map(|e| rename_expr(e, renames)).collect()
+}
+
+fn rename_expr(expr: &Rc<Expr>, renames: &HashMap<Rc<str>, Rc<Ident>>) -> Rc<Expr> {
+    let mut expr = expr.clone();
+    rename_expr_in_place(Rc::make_mut(&mut expr), renames);
+    expr
+}
+
+fn rename_shadowed_expr(
+    binder: &Ident,
+    body: &mut Rc<Expr>,
+    renames: &HashMap<Rc<str>, Rc<Ident>>,
+) {
+    if renames.contains_key(&binder.val) {
+        let mut shadowed = renames.clone();
+        shadowed.remove(&binder.val);
+        rename_expr_in_place(Rc::make_mut(body), &shadowed);
+    } else {
+        rename_expr_in_place(Rc::make_mut(body), renames);
+    }
+}
+
+fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) {
+    match &mut expr.val {
+        ExprT::Var(name) => {
+            if let Some(new_name) = renames.get(&name.val) {
+                *name = new_name.clone();
+            }
+        }
+        ExprT::Deref(a)
+        | ExprT::Ref(a)
+        | ExprT::UnOp(_, a)
+        | ExprT::Live(a)
+        | ExprT::Old(a)
+        | ExprT::PreIncr(a)
+        | ExprT::PostIncr(a)
+        | ExprT::PreDecr(a)
+        | ExprT::PostDecr(a)
+        | ExprT::Free(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a) => rename_expr_in_place(Rc::make_mut(a), renames),
+        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+            rename_expr_in_place(Rc::make_mut(a), renames);
+            rename_expr_in_place(Rc::make_mut(b), renames);
+        }
+        ExprT::Cond(a, b, c) => {
+            rename_expr_in_place(Rc::make_mut(a), renames);
+            rename_expr_in_place(Rc::make_mut(b), renames);
+            rename_expr_in_place(Rc::make_mut(c), renames);
+        }
+        ExprT::FnCall(_, args) => {
+            for arg in args {
+                rename_expr_in_place(Rc::make_mut(arg), renames);
+            }
+        }
+        ExprT::Cast(a, ty) => {
+            rename_expr_in_place(Rc::make_mut(a), renames);
+            rename_type_in_place(Rc::make_mut(ty), renames);
+        }
+        ExprT::InlinePulse(code, ty) => {
+            rename_inline_pulse_in_place(Rc::make_mut(code), renames);
+            rename_type_in_place(Rc::make_mut(ty), renames);
+        }
+        ExprT::Forall(binder, ty, body) | ExprT::Exists(binder, ty, body) => {
+            rename_type_in_place(Rc::make_mut(ty), renames);
+            rename_shadowed_expr(binder, body, renames);
+        }
+        ExprT::StructInit(_, fields) => {
+            for (_, value) in fields {
+                rename_expr_in_place(Rc::make_mut(value), renames);
+            }
+        }
+        ExprT::UnionInit(_, _, value) => rename_expr_in_place(Rc::make_mut(value), renames),
+        ExprT::ArrayInit(ty, elems) => {
+            rename_type_in_place(Rc::make_mut(ty), renames);
+            for elem in elems {
+                rename_expr_in_place(Rc::make_mut(elem), renames);
+            }
+        }
+        ExprT::IntLit(_, ty)
+        | ExprT::FloatLit(_, ty)
+        | ExprT::Malloc(ty)
+        | ExprT::Calloc(ty)
+        | ExprT::SizeOf(ty)
+        | ExprT::AlignOf(ty)
+        | ExprT::Error(ty) => rename_type_in_place(Rc::make_mut(ty), renames),
+        ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
+            rename_type_in_place(Rc::make_mut(ty), renames);
+            rename_expr_in_place(Rc::make_mut(count), renames);
+        }
+        ExprT::BoolLit(_) => {}
+    }
+}
+
+fn rename_inline_pulse_in_place(code: &mut InlinePulseCode, renames: &HashMap<Rc<str>, Rc<Ident>>) {
+    for token in &mut code.tokens {
+        match token {
+            InlinePulseToken::RValueAntiquot { expr, .. }
+            | InlinePulseToken::LValueAntiquot { expr, .. } => {
+                rename_expr_in_place(Rc::make_mut(expr), renames);
+            }
+            InlinePulseToken::TypeAntiquot { ty, .. }
+            | InlinePulseToken::FieldAntiquot { ty, .. }
+            | InlinePulseToken::AuxFnAntiquot { ty, .. }
+            | InlinePulseToken::Declare { ty, .. } => {
+                rename_type_in_place(Rc::make_mut(ty), renames);
+            }
+            InlinePulseToken::Verbatim(_) => {}
+        }
+    }
+}
+
+fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
+    match &mut ty.val {
+        TypeT::Pointer(inner, _)
+        | TypeT::FixedArray(inner, _)
+        | TypeT::Plain(inner)
+        | TypeT::Nullable(inner) => rename_type_in_place(Rc::make_mut(inner), renames),
+        TypeT::Refine(inner, pred)
+        | TypeT::RefineAlways(inner, pred)
+        | TypeT::RefineUninit(inner, pred) => {
+            rename_type_in_place(Rc::make_mut(inner), renames);
+            rename_expr_in_place(Rc::make_mut(pred), renames);
+        }
+        TypeT::RefineValue(inner, binder, binder_ty, pred) => {
+            rename_type_in_place(Rc::make_mut(inner), renames);
+            rename_type_in_place(Rc::make_mut(binder_ty), renames);
+            rename_shadowed_expr(binder, pred, renames);
+        }
+        TypeT::Void
+        | TypeT::Bool
+        | TypeT::Int { .. }
+        | TypeT::Float { .. }
+        | TypeT::SizeT
+        | TypeT::PtrdiffT
+        | TypeT::SpecInt
+        | TypeT::SpecNat
+        | TypeT::SLProp
+        | TypeT::TypeRef(_)
+        | TypeT::Unknown
+        | TypeT::Error => {}
+    }
+}
+
 pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // === Phase 1: Deduplicate identical declarations from shared headers ===
     // For each declaration kind+name, keep the most complete (last) content at the
@@ -168,10 +335,11 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && !defn_has_specs {
+                        let renames = param_renames(fn_decl, &defn.decl);
                         spec_copies.push((
                             defn_idx,
-                            fn_decl.requires.clone(),
-                            fn_decl.ensures.clone(),
+                            rename_specs(&fn_decl.requires, &renames),
+                            rename_specs(&fn_decl.ensures, &renames),
                         ));
                     }
 

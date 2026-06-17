@@ -10,9 +10,9 @@ DeclMultipleRequires(
 
 void
 DeclMultipleRequires(
-    uint32_t Value
+    uint32_t OtherValue
     )
 {
     // Both declaration preconditions should be available in the body.
-    _assert(Value < 10);
+    _assert(OtherValue < 10);
 }
