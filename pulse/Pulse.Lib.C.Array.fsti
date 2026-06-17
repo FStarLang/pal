@@ -248,6 +248,14 @@ val array_to_arrayptr (#t: Type u#a) (arr: array t) (i: SZ.t)
     emp
     (fun r -> arrayptr_pts_to r arr ** pure (base_of r == base_of arr /\ offset_of r == offset_of arr + SZ.v i))
 
+/// An arrayptr into a non-null array is itself non-null.
+/// (The base model only states the null=>null direction via `gsub_null`;
+/// this is the missing non-null=>non-null direction.)
+ghost fn arrayptr_pts_to_not_null u#a (#t: Type u#a) (r: array t) (#arr: array t)
+  preserves arrayptr_pts_to r arr
+  requires pure (not (array_is_null arr))
+  ensures pure (not (array_is_null r))
+
 /// Shift an arrayptr by `n` positions.
 val arrayptr_shift (#t: Type u#a) (x: array t) (n: SZ.t) (#y: erased (array t))
   : stt (array t)
