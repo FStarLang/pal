@@ -222,6 +222,10 @@ impl Env {
             self.push_arg(arg, LocalDeclKind::LValue);
         }
         self.set_return_type(decl.ret_type.clone());
+        // Make `$(return)` resolvable inside the body: a trailing ghost
+        // statement after the final `return e` may reference the returned
+        // value (see Emitter::emit_fn_body_stmts).
+        self.push_return(decl.ret_type.clone());
     }
 
     pub fn lookup_fn(&self, ident: &Ident) -> Option<&FnDecl> {

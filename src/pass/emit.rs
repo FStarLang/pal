@@ -3243,11 +3243,62 @@ fn block(stmts: Doc) -> Doc {
 impl<'a> Emitter<'a> {
     fn emit_stmts(&mut self, env: &Env, stmts: &Vec<Rc<Stmt>>) -> Doc {
         let mut env = env.clone();
-        Doc::concat(stmts.iter().map(|stmt| {
-            let doc = Doc::line().append(self.emit_stmt(&env, stmt));
+        let mut doc = Doc::nil();
+        let mut idx = 0;
+        while idx < stmts.len() {
+            let stmt = &stmts[idx];
+            // Special case: `return e;` immediately followed by ghost
+            // statement(s). A bare `return e;` would leave those ghosts as dead
+            // code after an early return, with no access to the returned value.
+            // Instead emit `let <ret> = e; <ghosts>; return <ret>;` so the
+            // ghosts run live and can reference `$(return)` (e.g. to fold a
+            // postcondition predicate over the returned value). Statements after
+            // such a return are unreachable anyway, so we only transform the
+            // first one encountered in each block.
+            if let StmtT::Return(Some(t)) = &stmt.val
+                && idx + 1 < stmts.len()
+                && matches!(stmts[idx + 1].val, StmtT::GhostStmt(_))
+            {
+                let ret_doc = self.emit_rvalue(&env, t);
+                let ret_name = self.emit_name(Name::Var(Rc::from("return")));
+                doc = doc.append(
+                    Doc::line().append(Doc::group(
+                        Doc::text("let ")
+                            .append(ret_name.clone())
+                            .append(" = ")
+                            .append(ret_doc)
+                            .append(";"),
+                    )),
+                );
+                // Emit the consecutive ghost statements following the return.
+                idx += 1;
+                while idx < stmts.len() && matches!(stmts[idx].val, StmtT::GhostStmt(_)) {
+                    doc = doc.append(Doc::line().append(self.emit_stmt(&env, &stmts[idx])));
+                    env.push_stmt(&stmts[idx]);
+                    idx += 1;
+                }
+                // Now actually return the bound value. Anything after this in
+                // the block is unreachable (we only reach here via the first
+                // such return), so stop emitting: trailing dead code — e.g. a
+                // later `return (!x)` — would otherwise elaborate to ill-typed
+                // unreachable statements.
+                doc = doc.append(
+                    Doc::line().append(
+                        Doc::text("return")
+                            .append(Doc::line())
+                            .append(ret_name)
+                            .append(";")
+                            .group()
+                            .nest(2),
+                    ),
+                );
+                break;
+            }
+            doc = doc.append(Doc::line().append(self.emit_stmt(&env, stmt)));
             env.push_stmt(stmt);
-            doc
-        }))
+            idx += 1;
+        }
+        doc
     }
 
     fn emit_block(&mut self, env: &Env, stmts: &Vec<Rc<Stmt>>) -> Doc {
