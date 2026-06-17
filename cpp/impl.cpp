@@ -1693,6 +1693,8 @@ public:
           FD->getAttrs(),
           trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange())));
       for (auto attr : FD->getAttrs()) {
+        if (FD->hasBody() && attr->isInherited())
+          continue;
         if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
           builder.requires(std::move(req.value()));
         }
