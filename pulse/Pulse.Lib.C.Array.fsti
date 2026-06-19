@@ -81,6 +81,25 @@ let array_pts_to_uninit (#t: Type u#a) (a: array t) y =
 let array_pts_to_uninit' (#t: Type u#a) (a: array t) =
   exists* y. array_pts_to_uninit a y
 
+// Intro/elim bridging the canonical
+//   `array_pts_to a 1.0R y ** pure (array_spec_full_mask y)`
+// view (what a caller holds after fully writing a buffer) and the packaged
+// `array_pts_to_uninit'` (what alloc/free/stack APIs traffic in).
+//
+// The `u#a` annotation is REQUIRED: without it `#t` is solved to an
+// unresolved universe metavariable and frame inference fails to match the
+// existential under the eagerly-unfolded `array_pts_to_uninit'`
+// (symptom: `Error 339: Cannot check relation with uvars`).
+ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
+      (a: array t) (#y: erased (array_spec t))
+  requires array_pts_to a 1.0R y ** pure (array_spec_full_mask (reveal y))
+  ensures array_pts_to_uninit' a
+
+ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
+  requires array_pts_to_uninit' a
+  returns  y : erased (array_spec t)
+  ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
+
 val freeable_array (#a:Type) (r:array a) : slprop
 
 val array_spec_uninit (a: Type) (n: nat) : array_spec a
@@ -146,6 +165,12 @@ val array_spec_upd_mask #a s n x (i:nat) :
   Lemma (array_spec_mask (array_spec_upd #a s n x) i <==> array_spec_mask s i \/ (i == n /\ n < array_spec_len s)) [SMTPat (array_spec_mask (array_spec_upd #a s n x) i)]
 val array_spec_upd_idx1 #a s n x (i:nat) : Lemma (i =!= n /\ array_spec_initd s i ==> (array_spec_idx (array_spec_upd #a s n x) i == array_spec_idx s i)) [SMTPat (array_spec_idx (array_spec_upd #a s n x) i)]
 val array_spec_upd_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_spec_idx (array_spec_upd #a s n x) n == x) [SMTPat (array_spec_idx (array_spec_upd #a s n x) n)]
+
+// `array_spec_full_mask` is preserved by a single `array_spec_upd`: the
+// written slot's mask becomes set and every other slot's mask is unchanged.
+val array_spec_full_mask_upd #a (s: array_spec a) (n: nat) (x: a) :
+  Lemma (requires array_spec_full_mask s)
+        (ensures  array_spec_full_mask (array_spec_upd s n x))
 
 let list_length_nil #a : Lemma (List.length ([] <: list a) == 0) [SMTPat (List.length ([] <: list a))] = ()
 let list_length_cons #a (x: a) (xs: list a) : Lemma (List.length (x :: xs) == List.length xs + 1) [SMTPat (List.length (x :: xs))] = ()

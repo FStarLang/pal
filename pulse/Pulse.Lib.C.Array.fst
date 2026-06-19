@@ -94,6 +94,10 @@ let array_spec_upd_mask #a s n x i = ()
 let array_spec_upd_idx1 #a s n x i = ()
 let array_spec_upd_idx2 #a s (n:nat) x = ()
 
+// Discharged by the `array_spec_upd_mask` SMTPat firing under the
+// `array_spec_full_mask` quantifier's `{:pattern array_spec_mask s i}` trigger.
+let array_spec_full_mask_upd #a s n x = ()
+
 let array_spec_of_list xs =
   Seq.init (List.length xs) fun i -> Val (List.Tot.index xs i)
 
@@ -225,6 +229,26 @@ ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: a
   unfold array_pts_to r p v;
   A.pts_to_mask_not_null r;
   fold array_pts_to r p v;
+}
+
+ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
+      (a: array t) (#y: erased (array_spec t))
+  requires array_pts_to a 1.0R y ** pure (array_spec_full_mask (reveal y))
+  ensures array_pts_to_uninit' a
+{
+  ()
+}
+
+ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
+  requires array_pts_to_uninit' a
+  returns  y : erased (array_spec t)
+  ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
+{
+  with y. assert (array_pts_to_uninit a y);
+  unfold (array_pts_to_uninit a y);
+  let _ = Pulse.Lib.WithPure.elim_with_pure
+            (array_spec_full_mask y) (fun _ -> emp);
+  hide y
 }
 
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
