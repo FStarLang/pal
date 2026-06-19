@@ -307,23 +307,16 @@ let array_to_arrayptr #t arr i =
   // Stuck: need a concrete operation to produce a zero-length sub-array.
   // gsub is ghost-only, we need a runtime pointer arithmetic primitive.
 
-// Model-level fact missing from the base Pulse array interface: the null
-// pointer has a distinguished base shared by no live object, so two arrays
-// with the same base are both null or both non-null. The base model only
-// provides the null=>null direction (via `gsub_null`); this supplies the
-// converse needed to conclude an arrayptr into a non-null array is non-null.
-assume
-val same_base_null (#t: Type u#a) (x y: array t)
-  : Lemma (requires base_of x == base_of y)
-          (ensures (array_is_null x <==> array_is_null y))
-
+// An arrayptr into a non-null array is itself non-null. The base model only
+// provides the null=>null direction (via `gsub_null`); `A.same_base_null`
+// supplies the converse for arrays sharing a base.
 ghost fn arrayptr_pts_to_not_null u#a (#t: Type u#a) (r: array t) (#arr: array t)
   preserves arrayptr_pts_to r arr
   requires pure (not (array_is_null arr))
   ensures pure (not (array_is_null r))
 {
   unfold arrayptr_pts_to r arr;
-  same_base_null r arr;
+  A.same_base_null r arr;
   fold arrayptr_pts_to r arr;
 }
 
