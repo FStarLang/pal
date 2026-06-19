@@ -42,6 +42,15 @@ let mul_wrap (x y: U32.t)
       else U32.v z == FStar.UInt.mul_mod (U32.v x) (U32.v y))
   = U32.mul_mod x y
 
+/// `x & 1 == x % 2` for `uint32` -- the common C parity idiom.  Backed by
+/// `FStar.UInt.logand_mask #32 (v x) 1`, which gives
+/// `logand (v x) (pow2 1 - 1) == v x % pow2 1`, i.e. `logand (v x) 1 == v x % 2`.
+/// A plain `Lemma` (not a `ghost fn`) so this module stays pure F*; it is still
+/// injectable from C source via `_ghost_stmt`, which accepts pure F* lemmas.
+let logand_one_is_mod2 (x: U32.t)
+  : Lemma (U32.v (U32.logand x 1ul) == U32.v x % 2)
+  = FStar.UInt.logand_mask #32 (U32.v x) 1
+
 instance inhabited_uint32 : Pulse.Lib.C.Inhabited.inhabited uint32 = {
   witness = U32.zero
 }
