@@ -242,11 +242,7 @@ ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
   returns  y : erased (array_spec t)
   ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
 {
-  with y. assert (array_pts_to_uninit a y);
-  unfold (array_pts_to_uninit a y);
-  let _ = Pulse.Lib.WithPure.elim_with_pure
-            (array_spec_full_mask y) (fun _ -> emp);
-  hide y
+  observe (array_pts_to_uninit a)
 }
 
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
