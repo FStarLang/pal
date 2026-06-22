@@ -94,8 +94,6 @@ let array_spec_upd_mask #a s n x i = ()
 let array_spec_upd_idx1 #a s n x i = ()
 let array_spec_upd_idx2 #a s (n:nat) x = ()
 
-// Discharged by the `array_spec_upd_mask` SMTPat firing under the
-// `array_spec_full_mask` quantifier's `{:pattern array_spec_mask s i}` trigger.
 let array_spec_full_mask_upd #a s n x = ()
 
 let array_spec_of_list xs =
@@ -344,10 +342,6 @@ ghost fn arrayptr_pts_to_not_null u#a (#t: Type u#a) (r: array t) (#arr: array t
   fold arrayptr_pts_to r arr;
 }
 
-// Surface the pure witness facts (parent base equality + zero length) carried
-// by `arrayptr_pts_to`.  Both facts are already in the predicate; this lets a
-// caller name them in a pure postcondition (e.g. to re-fold the witness for a
-// later deref) without manually unfolding the abstract predicate.
 ghost fn arrayptr_pts_to_facts u#a (#t: Type u#a) (x: array t) (#y: array t)
   preserves arrayptr_pts_to x y
   ensures pure (base_of x == base_of y /\ length x == 0)
