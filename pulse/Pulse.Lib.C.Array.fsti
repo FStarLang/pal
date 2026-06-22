@@ -81,6 +81,19 @@ let array_pts_to_uninit (#t: Type u#a) (a: array t) y =
 let array_pts_to_uninit' (#t: Type u#a) (a: array t) =
   exists* y. array_pts_to_uninit a y
 
+// Intro/elim bridging the `array_pts_to a 1.0R y ** pure (array_spec_full_mask y)`
+// view (held after fully writing a buffer) and the packaged
+// `array_pts_to_uninit'` that alloc/free/stack APIs traffic in.
+ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
+      (a: array t) (#y: erased (array_spec t))
+  requires array_pts_to a 1.0R y ** pure (array_spec_full_mask (reveal y))
+  ensures array_pts_to_uninit' a
+
+ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
+  requires array_pts_to_uninit' a
+  returns  y : erased (array_spec t)
+  ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
+
 val freeable_array (#a:Type) (r:array a) : slprop
 
 val array_spec_uninit (a: Type) (n: nat) : array_spec a
@@ -146,6 +159,10 @@ val array_spec_upd_mask #a s n x (i:nat) :
   Lemma (array_spec_mask (array_spec_upd #a s n x) i <==> array_spec_mask s i \/ (i == n /\ n < array_spec_len s)) [SMTPat (array_spec_mask (array_spec_upd #a s n x) i)]
 val array_spec_upd_idx1 #a s n x (i:nat) : Lemma (i =!= n /\ array_spec_initd s i ==> (array_spec_idx (array_spec_upd #a s n x) i == array_spec_idx s i)) [SMTPat (array_spec_idx (array_spec_upd #a s n x) i)]
 val array_spec_upd_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_spec_idx (array_spec_upd #a s n x) n == x) [SMTPat (array_spec_idx (array_spec_upd #a s n x) n)]
+
+val array_spec_full_mask_upd #a (s: array_spec a) (n: nat) (x: a) :
+  Lemma (requires array_spec_full_mask s)
+        (ensures  array_spec_full_mask (array_spec_upd s n x))
 
 let list_length_nil #a : Lemma (List.length ([] <: list a) == 0) [SMTPat (List.length ([] <: list a))] = ()
 let list_length_cons #a (x: a) (xs: list a) : Lemma (List.length (x :: xs) == List.length xs + 1) [SMTPat (List.length (x :: xs))] = ()
@@ -255,6 +272,14 @@ ghost fn arrayptr_pts_to_not_null u#a (#t: Type u#a) (r: array t) (#arr: array t
   preserves arrayptr_pts_to r arr
   requires pure (not (array_is_null arr))
   ensures pure (not (array_is_null r))
+
+/// Surface the pure witness facts carried by `arrayptr_pts_to`: parent base
+/// equality and zero length. `array_to_arrayptr` exposes `base_of` directly,
+/// but `length x == 0` is otherwise trapped inside the (folded) predicate and
+/// framed away unless extracted.
+ghost fn arrayptr_pts_to_facts u#a (#t: Type u#a) (x: array t) (#y: array t)
+  preserves arrayptr_pts_to x y
+  ensures pure (base_of x == base_of y /\ length x == 0)
 
 /// Shift an arrayptr by `n` positions.
 val arrayptr_shift (#t: Type u#a) (x: array t) (n: SZ.t) (#y: erased (array t))

@@ -94,6 +94,8 @@ let array_spec_upd_mask #a s n x i = ()
 let array_spec_upd_idx1 #a s n x i = ()
 let array_spec_upd_idx2 #a s (n:nat) x = ()
 
+let array_spec_full_mask_upd #a s n x = ()
+
 let array_spec_of_list xs =
   Seq.init (List.length xs) fun i -> Val (List.Tot.index xs i)
 
@@ -227,6 +229,26 @@ ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: a
   fold array_pts_to r p v;
 }
 
+ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
+      (a: array t) (#y: erased (array_spec t))
+  requires array_pts_to a 1.0R y ** pure (array_spec_full_mask (reveal y))
+  ensures array_pts_to_uninit' a
+{
+  ()
+}
+
+ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
+  requires array_pts_to_uninit' a
+  returns  y : erased (array_spec t)
+  ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
+{
+  with y. assert (array_pts_to_uninit a y);
+  unfold (array_pts_to_uninit a y);
+  let _ = Pulse.Lib.WithPure.elim_with_pure
+            (array_spec_full_mask y) (fun _ -> emp);
+  hide y
+}
+
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#p: perm)
   (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
@@ -318,6 +340,14 @@ ghost fn arrayptr_pts_to_not_null u#a (#t: Type u#a) (r: array t) (#arr: array t
   unfold arrayptr_pts_to r arr;
   A.same_base_null r arr;
   fold arrayptr_pts_to r arr;
+}
+
+ghost fn arrayptr_pts_to_facts u#a (#t: Type u#a) (x: array t) (#y: array t)
+  preserves arrayptr_pts_to x y
+  ensures pure (base_of x == base_of y /\ length x == 0)
+{
+  unfold arrayptr_pts_to x y;
+  fold arrayptr_pts_to x y;
 }
 
 let arrayptr_shift #t x n #y =
