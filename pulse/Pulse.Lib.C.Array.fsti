@@ -281,6 +281,14 @@ ghost fn arrayptr_pts_to_not_null u#a (#t: Type u#a) (r: array t) (#arr: array t
   requires pure (not (array_is_null arr))
   ensures pure (not (array_is_null r))
 
+/// Surface the pure witness facts carried by `arrayptr_pts_to`: parent base
+/// equality and zero length. `array_to_arrayptr` exposes `base_of` directly,
+/// but `length x == 0` is otherwise trapped inside the (folded) predicate and
+/// framed away unless extracted.
+ghost fn arrayptr_pts_to_facts u#a (#t: Type u#a) (x: array t) (#y: array t)
+  preserves arrayptr_pts_to x y
+  ensures pure (base_of x == base_of y /\ length x == 0)
+
 /// Shift an arrayptr by `n` positions.
 val arrayptr_shift (#t: Type u#a) (x: array t) (n: SZ.t) (#y: erased (array t))
   : stt (array t)

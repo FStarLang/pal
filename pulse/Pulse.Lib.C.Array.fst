@@ -344,6 +344,18 @@ ghost fn arrayptr_pts_to_not_null u#a (#t: Type u#a) (r: array t) (#arr: array t
   fold arrayptr_pts_to r arr;
 }
 
+// Surface the pure witness facts (parent base equality + zero length) carried
+// by `arrayptr_pts_to`.  Both facts are already in the predicate; this lets a
+// caller name them in a pure postcondition (e.g. to re-fold the witness for a
+// later deref) without manually unfolding the abstract predicate.
+ghost fn arrayptr_pts_to_facts u#a (#t: Type u#a) (x: array t) (#y: array t)
+  preserves arrayptr_pts_to x y
+  ensures pure (base_of x == base_of y /\ length x == 0)
+{
+  unfold arrayptr_pts_to x y;
+  fold arrayptr_pts_to x y;
+}
+
 let arrayptr_shift #t x n #y =
   admit ()
   // Stuck: need a concrete operation to shift the pointer.
