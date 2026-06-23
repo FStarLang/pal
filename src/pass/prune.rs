@@ -90,6 +90,7 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
                 PointerKind::Ref => {}
                 PointerKind::Array => {}
                 PointerKind::ArrayPtr => {}
+                PointerKind::Core => {}
             }
         }
         TypeT::FixedArray(elem_ty, _) => {

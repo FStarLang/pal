@@ -252,6 +252,7 @@ mod crate::clang {
     fn mk_type_nullable(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_array(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_arrayptr(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
+    fn mk_type_core_ref(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_err(Rc<SourceInfo>) -> Rc<Type>;
 
     fn mk_bigint(&str) -> Rc<BigInt>;
