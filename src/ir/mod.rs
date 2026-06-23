@@ -129,6 +129,11 @@ pub enum PointerKind {
     Ref,
     Array,
     ArrayPtr,
+    /// An axiomatized, non-parametric raw pointer (`core_ref`). Used to break
+    /// type/predicate cycles in (mutually) recursive structs: the pointee type
+    /// is retained in the IR for documentation but is dropped on emission, and
+    /// no automatic ownership predicate is generated. Introduced by `_core_ref`.
+    Core,
 }
 
 pub type Type = Ast<TypeT>;

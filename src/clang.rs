@@ -663,6 +663,17 @@ fn mk_type_arrayptr(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
         }
     }
 }
+fn mk_type_core_ref(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
+    match &ty.val {
+        TypeT::Pointer(elem, PointerKind::Unknown) => {
+            TypeT::Pointer(elem.clone(), PointerKind::Core).with_loc(loc)
+        }
+        _ => {
+            eprintln!("warning: _core_ref on non-pointer type: {}", ty);
+            ty
+        }
+    }
+}
 fn mk_type_err(loc: Rc<SourceInfo>) -> Rc<Type> {
     mk_ast(loc, TypeT::Error)
 }

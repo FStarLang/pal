@@ -647,6 +647,10 @@ impl<'a> Emitter<'a> {
                 TypeT::Pointer(to, PointerKind::Ref | PointerKind::Unknown) => {
                     unaryfn(Doc::text("ref"), self.emit_type(env, to))
                 }
+                // A `core_ref` is a non-parametric raw pointer: drop the pointee
+                // type entirely so the emitted type carries no dependency on it
+                // (this is what breaks the module/type cycle for recursive structs).
+                TypeT::Pointer(_, PointerKind::Core) => Doc::text("core_ref"),
                 TypeT::FixedArray(elem_ty, len) => naryfn([
                     Doc::text("full_array_lspec"),
                     self.emit_type(env, elem_ty),
@@ -687,6 +691,7 @@ impl<'a> Emitter<'a> {
             TypeT::Bool => Doc::text("false"),
             TypeT::SizeT => Doc::text("0sz"),
             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown) => Doc::text("null"),
+            TypeT::Pointer(_, PointerKind::Core) => Doc::text("core_null"),
             TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => {
                 Doc::text("zero_default")
             }
@@ -1140,6 +1145,13 @@ impl<'a> Emitter<'a> {
                     PointerKind::ArrayPtr => {
                         // ArrayPtr has no data ownership — arrayptr_pts_to is
                         // expressed by the user via _slprop/_inline_pulse for MVP
+                    }
+                    PointerKind::Core => {
+                        // A `core_ref` carries no automatic ownership: the user
+                        // supplies the (recursive) ownership predicate by hand via
+                        // _include_pulse, recovering a typed `ref` with
+                        // `core_to_ref`. This is what breaks predicate recursion
+                        // for (mutually) recursive structs.
                     }
                 }
             }
@@ -1625,6 +1637,9 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
         (BinOp::Eq, TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)) => {
             Doc::text("`Pulse.Lib.C.Ref.ref_eq`")
         }
+        (BinOp::Eq, TypeT::Pointer(_, PointerKind::Core)) => {
+            Doc::text("`Pulse.Lib.C.CoreRef.core_ref_eq`")
+        }
         (BinOp::Eq, TypeT::Float { width }) => Doc::text(format!("`{}_eq`", get_float_mod(width)?)),
         (
             BinOp::Eq,
@@ -1852,6 +1867,9 @@ impl<'a> Emitter<'a> {
                             if **val == BigInt::ZERO =>
                         {
                             Doc::text("array_null")
+                        }
+                        TypeT::Pointer(_, PointerKind::Core) if **val == BigInt::ZERO => {
+                            Doc::text("core_null")
                         }
                         _ => {
                             self.report(
@@ -2116,6 +2134,7 @@ impl<'a> Emitter<'a> {
                         (TypeT::Pointer(_, kind), TypeT::Bool) => {
                             let is_null_fn = match kind {
                                 PointerKind::Array | PointerKind::ArrayPtr => "array_is_null",
+                                PointerKind::Core => "Pulse.Lib.C.CoreRef.core_is_null",
                                 _ => "Pulse.Lib.Reference.is_null",
                             };
                             unaryfn(Doc::text("not"), unaryfn(Doc::text(is_null_fn), val_doc))
@@ -2127,6 +2146,7 @@ impl<'a> Emitter<'a> {
                                 PointerKind::Array | PointerKind::ArrayPtr => {
                                     Doc::text("array_null")
                                 }
+                                PointerKind::Core => Doc::text("core_null"),
                             }
                         }
                         // (TypeT::Pointer { to:t1, kind:k1 }, TypeT::Pointer { to:t2, kind:k2 }) if t1 == t2 => todo!(),
@@ -2223,6 +2243,7 @@ impl<'a> Emitter<'a> {
                                     PointerKind::Array | PointerKind::ArrayPtr => {
                                         Doc::text("array_null")
                                     }
+                                    PointerKind::Core => Doc::text("core_null"),
                                 }
                             } else if matches!(to_kind, PointerKind::ArrayPtr) {
                                 // Array→ArrayPtr: obtain arrayptr_pts_to resource
@@ -2292,6 +2313,14 @@ impl<'a> Emitter<'a> {
                                 if **n == BigInt::ZERO {
                                     return unaryfn(
                                         Doc::text("array_is_null"),
+                                        self.emit_rvalue(env, lhs),
+                                    );
+                                }
+                            }
+                            (TypeT::Pointer(_, PointerKind::Core), ExprT::IntLit(n, _)) => {
+                                if **n == BigInt::ZERO {
+                                    return unaryfn(
+                                        Doc::text("Pulse.Lib.C.CoreRef.core_is_null"),
                                         self.emit_rvalue(env, lhs),
                                     );
                                 }

@@ -131,6 +131,7 @@ impl<'a> Elaborator<'a> {
                     PointerKind::Ref => {}
                     PointerKind::Array => {}
                     PointerKind::ArrayPtr => {}
+                    PointerKind::Core => {}
                 }
             }
             TypeT::FixedArray(elem_ty, _) => {
