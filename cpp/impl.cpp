@@ -195,6 +195,17 @@ public:
     return ctx.mk_ident(toStr(d->getName()), std::move(loc));
   }
 
+  // Name to use for a struct/union field. Unnamed fields (e.g. C11 anonymous
+  // struct/union members) have no identifier, so we synthesize a stable name
+  // from the field's index within its record. The index is deterministic and
+  // shared by the field definition and every member access referring to it, so
+  // the synthesized names stay consistent across the whole translation.
+  std::string fieldNameStr(FieldDecl const *f) {
+    if (f->getIdentifier())
+      return f->getName().str();
+    return "_unnamed" + std::to_string(f->getFieldIndex());
+  }
+
   RecordDecl *recordKey(RecordDecl *decl) {
     return cast<RecordDecl>(decl->getCanonicalDecl());
   }
@@ -253,10 +264,6 @@ public:
       }
       for (auto f : decl->fields()) {
         auto floc = getRange(f->getSourceRange());
-        if (!f->getIdentifier()) {
-          reportUnsupported(f->getSourceRange(), floc,
-                            "unsupported anonymous field names", "");
-        }
         auto qt = f->getType();
         auto *qtPtr = qt.IgnoreParens().getTypePtr();
         if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
@@ -264,7 +271,7 @@ public:
                             "unsupported non-constant-length array field", "");
         } else {
           builder.field(
-              ctx.mk_ident(toStr(f->getName()), std::move(floc)),
+              ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
               trTypeAttrs(
                   f->getAttrs(),
                   trQualType(f->getType(), f->getSourceRange(), liftStructs)));
@@ -286,10 +293,6 @@ public:
       }
       for (auto f : decl->fields()) {
         auto floc = getRange(f->getSourceRange());
-        if (!f->getIdentifier()) {
-          reportUnsupported(f->getSourceRange(), floc,
-                            "unsupported anonymous field names", "");
-        }
         auto qt = f->getType();
         auto *qtPtr = qt.IgnoreParens().getTypePtr();
         if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
@@ -297,7 +300,7 @@ public:
                             "unsupported non-constant-length array field", "");
         } else {
           builder.field(
-              ctx.mk_ident(toStr(f->getName()), std::move(floc)),
+              ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
               trTypeAttrs(
                   f->getAttrs(),
                   trQualType(f->getType(), f->getSourceRange(), liftStructs)));
@@ -490,7 +493,13 @@ public:
         // continue to error case
       }
     } else if (auto m = dyn_cast<MemberExpr>(e)) {
-      auto id = ctx.mk_ident(toStr(m->getMemberDecl()->getName()), loc.clone());
+      auto *md = m->getMemberDecl();
+      std::string nameStr;
+      if (auto *fd = dyn_cast<FieldDecl>(md))
+        nameStr = fieldNameStr(fd);
+      else
+        nameStr = md->getName().str();
+      auto id = ctx.mk_ident(toStr(nameStr), loc.clone());
       auto base = m->isArrow() ? mk_deref(loc.clone(), trRValue(m->getBase()))
                                : trLValue(m->getBase());
       return mk_lvalue_member(std::move(loc), std::move(base), std::move(id));
@@ -545,7 +554,8 @@ public:
       auto *fieldInit = init->getInit(0);
       auto *field = init->getInitializedFieldInUnion();
       auto floc = getRange(fieldInit->getSourceRange());
-      auto fieldName = ctx.mk_ident(toStr(field->getName()), std::move(floc));
+      auto fieldName =
+          ctx.mk_ident(toStr(fieldNameStr(field)), std::move(floc));
       return mk_union_init(std::move(loc), std::move(unionName),
                            std::move(fieldName), trRValue(fieldInit));
     }
@@ -561,7 +571,8 @@ public:
       auto *fieldInit = init->getInit(i);
       auto *field = *std::next(decl->field_begin(), i);
       auto floc = getRange(fieldInit->getSourceRange());
-      auto fieldName = ctx.mk_ident(toStr(field->getName()), std::move(floc));
+      auto fieldName =
+          ctx.mk_ident(toStr(fieldNameStr(field)), std::move(floc));
       builder.field(std::move(fieldName), trRValue(fieldInit));
     }
     return builder.build();
