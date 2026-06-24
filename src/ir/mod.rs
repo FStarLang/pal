@@ -315,6 +315,15 @@ pub enum ExprT {
     MallocArray(Rc<Type>, Rc<Expr>),
     Calloc(Rc<Type>),
     CallocArray(Rc<Type>, Rc<Expr>),
+    /// `memset(ptr, value, sizeof(T) * count)` — element type, destination
+    /// pointer, fill value, and element count. Emitted as
+    /// `Pulse.Lib.C.Array.memset`.
+    Memset(Rc<Type>, Rc<Expr>, Rc<Expr>, Rc<Expr>),
+    /// `memset(ptr, 0, sizeof(T))` — zeroing a single object of type `T`
+    /// (struct, scalar, etc.) through `ptr`. Only the zero value is supported,
+    /// for any type with a `has_zero_default` instance. Emitted as a whole
+    /// object write `(*ptr) := zero_default`.
+    MemsetZero(Rc<Type>, Rc<Expr>),
     Free(Rc<Expr>),
     PreIncr(Rc<Expr>),
     PostIncr(Rc<Expr>),

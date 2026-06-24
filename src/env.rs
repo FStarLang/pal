@@ -373,6 +373,8 @@ impl Env {
                 .reuse_loc(TypeT::Pointer(ty.clone(), PointerKind::Array))
                 .into()),
             ExprT::Free(_) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
+            ExprT::Memset(_, _, _, _) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
+            ExprT::MemsetZero(_, _) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)
             | ExprT::PreDecr(val)

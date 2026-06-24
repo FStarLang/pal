@@ -466,6 +466,16 @@ impl<'a> Checker<'a> {
                 self.check_type(env, ty);
                 self.check_rvalue(env, count);
             }
+            ExprT::Memset(ty, ptr, value, count) => {
+                self.check_type(env, ty);
+                self.check_rvalue(env, ptr);
+                self.check_rvalue(env, value);
+                self.check_rvalue(env, count);
+            }
+            ExprT::MemsetZero(ty, ptr) => {
+                self.check_type(env, ty);
+                self.check_rvalue(env, ptr);
+            }
             ExprT::Free(val) => self.check_rvalue(env, val),
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)
