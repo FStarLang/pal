@@ -729,6 +729,18 @@ fn mk_calloc(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
 fn mk_calloc_array(loc: Rc<SourceInfo>, ty: Rc<Type>, count: Rc<Expr>) -> Rc<Expr> {
     mk_ast(loc, ExprT::CallocArray(ty, count))
 }
+fn mk_memset(
+    loc: Rc<SourceInfo>,
+    ty: Rc<Type>,
+    ptr: Rc<Expr>,
+    value: Rc<Expr>,
+    count: Rc<Expr>,
+) -> Rc<Expr> {
+    mk_ast(loc, ExprT::Memset(ty, ptr, value, count))
+}
+fn mk_memset_zero(loc: Rc<SourceInfo>, ty: Rc<Type>, ptr: Rc<Expr>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::MemsetZero(ty, ptr))
+}
 fn mk_free(loc: Rc<SourceInfo>, val: Rc<Expr>) -> Rc<Expr> {
     mk_ast(loc, ExprT::Free(val))
 }

@@ -130,6 +130,17 @@ fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} 
   ensures freeable_array r
   ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SizeT.v sz) zero_default)
 
+// Fill every cell of a fully-initialized array with `v` (C `memset`).
+// Only byte-sized element types are translated to this (the transpiler rejects
+// multi-byte element types), so an element-wise fill matches C's byte-wise
+// semantics. The array must already be fully masked and initialized: array
+// function parameters satisfy this (`array_pts_to_full`).
+fn memset (#t: Type0) (a: array t) (v: t) (n: SizeT.t)
+  (#s: erased (array_spec t) { array_spec_full s /\ array_spec_len s == SizeT.v n })
+  requires array_pts_to a 1.0R s
+  ensures array_pts_to_full a 1.0R (array_spec_zeroed t (SizeT.v n) v)
+
+
 ghost fn length_of u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
   preserves array_pts_to x p y
   returns n: nat

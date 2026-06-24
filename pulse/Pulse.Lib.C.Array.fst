@@ -220,6 +220,40 @@ fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} 
   r
 }
 
+// memset: fill every cell of a fully-initialized array with `v`, mirroring the
+// C `memset(a, v, sizeof(t) * n)` idiom. Built on Pulse.Lib.Array.fill, so the
+// array must already be fully masked and initialized (e.g. an array function
+// parameter, which is handed in as `array_pts_to_full`). The transpiler only
+// targets this for byte-sized element types, so the element-wise fill matches
+// C's byte-wise memset semantics.
+
+// A fully-masked, fully-initialized spec projects to an all-masked, all-`Some`
+// backing sequence, which is exactly `from_mask`'s precondition.
+let full_to_mask_seq #t (s: array_spec t) (i: nat)
+  : Lemma (requires array_spec_full s)
+          (ensures i < array_spec_len s ==>
+            to_mask s i /\ Some? (Seq.index (to_seq s) i))
+= if i < array_spec_len s then begin
+    assert (array_spec_initd s i);
+    assert (array_spec_mask s i)
+  end
+
+fn memset (#t: Type0) (a: array t) (v: t) (n: SZ.t)
+  (#s: erased (array_spec t) { array_spec_full s /\ array_spec_len s == SZ.v n })
+  requires array_pts_to a 1.0R s
+  ensures array_pts_to_full a 1.0R (array_spec_zeroed t (SZ.v n) v)
+{
+  unfold array_pts_to a 1.0R s;
+  Classical.forall_intro (Classical.move_requires (full_to_mask_seq s));
+  A.from_mask a;
+  A.pts_to_len a;
+  fill n a v;
+  A.to_mask a;
+  mask_mext a (to_mask (array_spec_zeroed t (SZ.v n) v));
+  mask_vext a (to_seq (array_spec_zeroed t (SZ.v n) v));
+  fold array_pts_to a 1.0R (array_spec_zeroed t (SZ.v n) v);
+}
+
 ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: array_spec a)
   preserves array_pts_to r p v
   ensures pure (not (array_is_null r))

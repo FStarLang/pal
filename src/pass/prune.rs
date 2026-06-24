@@ -165,6 +165,16 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             scan_type(deps, ty);
             scan_expr(deps, count);
         }
+        ExprT::Memset(ty, ptr, value, count) => {
+            scan_type(deps, ty);
+            scan_expr(deps, ptr);
+            scan_expr(deps, value);
+            scan_expr(deps, count);
+        }
+        ExprT::MemsetZero(ty, ptr) => {
+            scan_type(deps, ty);
+            scan_expr(deps, ptr);
+        }
         ExprT::Free(val) => scan_expr(deps, val),
         ExprT::PreIncr(val) | ExprT::PostIncr(val) | ExprT::PreDecr(val) | ExprT::PostDecr(val) => {
             scan_expr(deps, val)

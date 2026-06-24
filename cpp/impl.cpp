@@ -925,6 +925,98 @@ public:
           }
           return mk_free(std::move(loc), trRValue(arg));
         }
+        // Detect memset(ptr, 0, ...). Only a zero fill value is supported:
+        // C `memset` writes raw bytes, and the only fill we can faithfully
+        // model for arbitrary types is the all-zero one. Two shapes are
+        // recognized:
+        //   * memset(ptr, 0, sizeof(T))      — zero a single object of type T
+        //     (struct, scalar, ...), emitted as a whole-object write of
+        //     `zero_default`.
+        //   * memset(ptr, 0, sizeof(T) * n)  — zero an array of byte-sized
+        //     element type (e.g. uint8_t, char).
+        // Non-zero fill values are rejected with a clear diagnostic.
+        if (fd->getName() == "memset" && c->getNumArgs() == 3) {
+          auto *ptrArg = c->getArg(0);
+          // Strip implicit void* cast
+          if (auto *ic = dyn_cast<ImplicitCastExpr>(ptrArg)) {
+            if (ic->getCastKind() == CK_BitCast) {
+              ptrArg = ic->getSubExpr();
+            }
+          }
+          auto *valArg = c->getArg(1);
+          auto *sizeArg = c->getArg(2)->IgnoreParenImpCasts();
+          Expr::EvalResult valRes;
+          bool valIsZero = valArg->EvaluateAsInt(valRes, *astCtx) &&
+                           valRes.Val.isInt() && valRes.Val.getInt() == 0;
+          if (!valIsZero) {
+            reportUnsupported(e->getSourceRange(), loc,
+                              "memset is only supported with a zero fill value",
+                              std::string());
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
+          }
+          // Zeroing a single object: memset(ptr, 0, sizeof(T)) where the size
+          // is a bare sizeof (no multiplication) whose type matches the
+          // pointee of `ptr`. Works for any type with a `has_zero_default`
+          // instance (structs, scalars, ...): it is emitted as a whole-object
+          // write of `zero_default`.
+          if (auto *szof = dyn_cast<UnaryExprOrTypeTraitExpr>(sizeArg)) {
+            if (szof->getKind() == UETT_SizeOf) {
+              auto objQt = szof->getTypeOfArgument();
+              auto pointeeQt = ptrArg->getType()->getPointeeType();
+              if (!pointeeQt.isNull() &&
+                  astCtx->hasSameUnqualifiedType(objQt, pointeeQt)) {
+                auto objTy = trQualType(pointeeQt, szof->getSourceRange());
+                return mk_memset_zero(std::move(loc), std::move(objTy),
+                                      trRValue(ptrArg));
+              }
+            }
+          }
+          if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
+            if (binOp->getOpcode() == BO_Mul) {
+              auto *lhs = binOp->getLHS()->IgnoreParenImpCasts();
+              auto *rhs = binOp->getRHS()->IgnoreParenImpCasts();
+              const UnaryExprOrTypeTraitExpr *sizeofSide = nullptr;
+              Expr *countSide = nullptr;
+              if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(lhs)) {
+                if (s->getKind() == UETT_SizeOf && s->isArgumentType()) {
+                  sizeofSide = s;
+                  countSide = binOp->getRHS();
+                }
+              }
+              if (!sizeofSide) {
+                if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(rhs)) {
+                  if (s->getKind() == UETT_SizeOf && s->isArgumentType()) {
+                    sizeofSide = s;
+                    countSide = binOp->getLHS();
+                  }
+                }
+              }
+              if (sizeofSide && countSide) {
+                auto elemQt = sizeofSide->getArgumentType();
+                bool byteSized =
+                    !elemQt->isIncompleteType() && !elemQt->isDependentType() &&
+                    astCtx->getTypeSizeInChars(elemQt).getQuantity() == 1;
+                if (byteSized) {
+                  auto elemTy =
+                      trQualType(elemQt, sizeofSide->getSourceRange());
+                  auto countExpr = trRValue(countSide);
+                  return mk_memset(std::move(loc), std::move(elemTy),
+                                   trRValue(ptrArg), trRValue(valArg),
+                                   std::move(countExpr));
+                }
+                reportUnsupported(
+                    e->getSourceRange(), loc,
+                    "memset is only supported on byte-sized element types "
+                    "(e.g. uint8_t, char); element type ",
+                    elemQt.getAsString());
+                return mk_rvalue_err(
+                    std::move(loc),
+                    trQualType(c->getType(), c->getSourceRange()));
+              }
+            }
+          }
+        }
         auto fn = ctx.mk_ident(toStr(fd->getName()),
                                getRange(c->getCallee()->getSourceRange()));
         auto args = Vec<Rc<ir::Expr>>::new_();

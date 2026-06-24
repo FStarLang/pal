@@ -140,6 +140,16 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
             rename_type_in_place(Rc::make_mut(ty), renames);
             rename_expr_in_place(Rc::make_mut(count), renames);
         }
+        ExprT::Memset(ty, ptr, value, count) => {
+            rename_type_in_place(Rc::make_mut(ty), renames);
+            rename_expr_in_place(Rc::make_mut(ptr), renames);
+            rename_expr_in_place(Rc::make_mut(value), renames);
+            rename_expr_in_place(Rc::make_mut(count), renames);
+        }
+        ExprT::MemsetZero(ty, ptr) => {
+            rename_type_in_place(Rc::make_mut(ty), renames);
+            rename_expr_in_place(Rc::make_mut(ptr), renames);
+        }
         ExprT::BoolLit(_) => {}
     }
 }
@@ -502,6 +512,16 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
         ExprT::MallocArray(ty, n) | ExprT::CallocArray(ty, n) => {
             collect_type_refs(ty, out);
             collect_refs_expr(n, out);
+        }
+        ExprT::Memset(ty, ptr, value, n) => {
+            collect_type_refs(ty, out);
+            collect_refs_expr(ptr, out);
+            collect_refs_expr(value, out);
+            collect_refs_expr(n, out);
+        }
+        ExprT::MemsetZero(ty, ptr) => {
+            collect_type_refs(ty, out);
+            collect_refs_expr(ptr, out);
         }
     }
 }

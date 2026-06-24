@@ -272,6 +272,8 @@ mod crate::clang {
     fn mk_malloc_array(Rc<SourceInfo>, Rc<Type>, Rc<Expr>) -> Rc<Expr>;
     fn mk_calloc(Rc<SourceInfo>, Rc<Type>) -> Rc<Expr>;
     fn mk_calloc_array(Rc<SourceInfo>, Rc<Type>, Rc<Expr>) -> Rc<Expr>;
+    fn mk_memset(Rc<SourceInfo>, Rc<Type>, Rc<Expr>, Rc<Expr>, Rc<Expr>) -> Rc<Expr>;
+    fn mk_memset_zero(Rc<SourceInfo>, Rc<Type>, Rc<Expr>) -> Rc<Expr>;
     fn mk_free(Rc<SourceInfo>, Rc<Expr>) -> Rc<Expr>;
     fn mk_pre_incr(Rc<SourceInfo>, Rc<Expr>) -> Rc<Expr>;
     fn mk_post_incr(Rc<SourceInfo>, Rc<Expr>) -> Rc<Expr>;

@@ -382,6 +382,26 @@ impl<'a> Elaborator<'a> {
                     }
                 }
             }
+            ExprT::Memset(ty, ptr, value, count) => {
+                self.elab_type(env, Rc::make_mut(ty));
+                self.elab_rvalue(env, Rc::make_mut(ptr), None);
+                self.elab_rvalue(env, Rc::make_mut(value), Some(ty));
+                if let Ok(value_ty) = env.infer_expr(value) {
+                    if !env.vtype_eq(value_ty, ty.clone().into()) {
+                        cast_to(value, ty.clone());
+                    }
+                }
+                self.elab_rvalue(env, Rc::make_mut(count), None);
+                if let Ok(count_ty) = env.infer_expr(count) {
+                    if !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT) {
+                        cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                    }
+                }
+            }
+            ExprT::MemsetZero(ty, ptr) => {
+                self.elab_type(env, Rc::make_mut(ty));
+                self.elab_rvalue(env, Rc::make_mut(ptr), None);
+            }
             ExprT::Free(val) => self.elab_rvalue(env, Rc::make_mut(val), None),
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)

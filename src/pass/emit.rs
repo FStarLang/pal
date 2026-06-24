@@ -816,6 +816,14 @@ impl<'a> Emitter<'a> {
             ExprT::MallocArray(_, count) | ExprT::CallocArray(_, count) => {
                 self.subst_this_rvalue(env, Rc::make_mut(count), this);
             }
+            ExprT::Memset(_, ptr, value, count) => {
+                self.subst_this_rvalue(env, Rc::make_mut(ptr), this);
+                self.subst_this_rvalue(env, Rc::make_mut(value), this);
+                self.subst_this_rvalue(env, Rc::make_mut(count), this);
+            }
+            ExprT::MemsetZero(_, ptr) => {
+                self.subst_this_rvalue(env, Rc::make_mut(ptr), this);
+            }
             ExprT::Free(val) => self.subst_this_rvalue(env, Rc::make_mut(val), this),
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)
@@ -2621,6 +2629,26 @@ impl<'a> Emitter<'a> {
                         .append(self.emit_type(env, ty))
                         .append(Doc::line())
                         .append(self.emit_rvalue(env, count)),
+                ),
+                ExprT::Memset(_, ptr, value, count) => parens(
+                    Doc::text("Pulse.Lib.C.Array.memset")
+                        .append(Doc::line())
+                        .append(self.emit_rvalue(env, ptr))
+                        .append(Doc::line())
+                        .append(self.emit_rvalue(env, value))
+                        .append(Doc::line())
+                        .append(self.emit_rvalue(env, count))
+                        .group()
+                        .nest(2),
+                ),
+                ExprT::MemsetZero(_, ptr) => parens(
+                    self.emit_rvalue(env, ptr)
+                        .append(Doc::line())
+                        .append(":=")
+                        .append(Doc::line())
+                        .append("zero_default")
+                        .group()
+                        .nest(2),
                 ),
                 ExprT::Free(val) => {
                     let is_array = env
