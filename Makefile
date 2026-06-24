@@ -22,3 +22,7 @@ format-check:
 test: rust lib -testsuite
 # Only run formatting checks when tests succeed
 	$(MAKE) format-check
+
+.PHONY: clean
+clean:
+	$(MAKE) -C test clean
