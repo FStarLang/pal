@@ -39,3 +39,16 @@ void caller_out(_array int *a, size_t i)
     _ghost_stmt(array_return_cell $(a) $(i));
 }
 
+// Borrow a *genuinely uninitialized* array cell and write through it.
+// `_out _array int *a` means PAL requires `a` uninitialized on entry and fully
+// initialized on exit. With length 1, the cell at index 0 starts uninitialized;
+// passing `&a[0]` to the `_out` parameter `init_cell` borrows it with
+// `array_borrow_cell_uninit`, `init_cell` writes 42 through it, and returning
+// the cell leaves the (length-1) array fully initialized.
+void fill_first(_out _array int *a)
+  _requires(a._length == 1)
+{
+    init_cell(&a[0]);
+    _ghost_stmt(array_return_cell $(a) 0sz);
+}
+
