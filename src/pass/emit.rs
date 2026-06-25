@@ -2841,6 +2841,43 @@ impl<'a> Emitter<'a> {
                                     TypeT::Pointer(_, PointerKind::Array)
                                 )
                             });
+                            // `&a[i]` passed into a plain `int *` param (a Pulse
+                            // `ref`) where `a` is a real `_array`: borrow a `ref`
+                            // from the array cell at index `i`. The borrow is
+                            // effectful, so it is let-bound as a call prelude and
+                            // the fresh binding is passed in place of the
+                            // address-of expression. The returning side is invoked
+                            // manually by the user via inline Pulse.
+                            let borrow_cell = match &arg.val {
+                                ExprT::Ref(inner) => match &inner.val {
+                                    ExprT::Index(arr, idx) => {
+                                        let param_is_ref =
+                                            fn_decl.args.get(i).is_some_and(|fn_arg| {
+                                                matches!(
+                                                    env.vtype_whnf(fn_arg.ty.clone().into()).val,
+                                                    TypeT::Pointer(_, PointerKind::Ref)
+                                                )
+                                            });
+                                        let arr_is_array = env
+                                            .infer_expr(arr)
+                                            .ok()
+                                            .map(|t| env.vtype_whnf(t))
+                                            .is_some_and(|t| {
+                                                matches!(
+                                                    &t.val,
+                                                    TypeT::Pointer(_, PointerKind::Array)
+                                                )
+                                            });
+                                        if param_is_ref && arr_is_array {
+                                            Some((arr.clone(), idx.clone()))
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
                             let array_init = match &arg.val {
                                 ExprT::ArrayInit(elem_ty, _) => Some((elem_ty, arg)),
                                 ExprT::Cast(inner, _)
@@ -2853,7 +2890,27 @@ impl<'a> Emitter<'a> {
                                 }
                                 _ => None,
                             };
-                            if callee_expects_array && let Some((elem_ty, spec_arg)) = array_init {
+                            if let Some((arr, idx)) = borrow_cell {
+                                let tmp = self.fresh_tmp("borrow");
+                                let arr_doc = self.emit_rvalue(env, &arr);
+                                let idx_doc = self.emit_rvalue(env, &idx);
+                                let borrow = Doc::text("let ")
+                                    .append(tmp.clone())
+                                    .append(Doc::text(" ="))
+                                    .append(Doc::line())
+                                    .append(naryfn([
+                                        Doc::text("array_borrow_cell"),
+                                        arr_doc,
+                                        idx_doc,
+                                    ]))
+                                    .append(";")
+                                    .nest(2)
+                                    .group();
+                                prelude.push(borrow);
+                                emitted_args.push(tmp);
+                            } else if callee_expects_array
+                                && let Some((elem_ty, spec_arg)) = array_init
+                            {
                                 let tmp = self.fresh_tmp("arraylit");
                                 let elem_ty_doc = self.emit_type(env, elem_ty);
                                 let spec_doc = self.emit_rvalue(env, spec_arg);

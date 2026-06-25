@@ -2,6 +2,7 @@ module Pulse.Lib.C.Array
 open Pulse
 open Pulse.Lib.C.Inhabited
 module A = Pulse.Lib.Array
+module R = Pulse.Lib.Reference
 module SZ = FStar.SizeT
 #lang-pulse
 
@@ -453,3 +454,78 @@ let arrayptr_lte #t x z = admit ()
 
 let arrayptr_lt #t x z = admit ()
 // Stuck: need a concrete pointer comparison primitive.
+
+// ---------------------------------------------------------------------------
+// Borrowing a single cell of an array as a `ref` (and returning it).
+//
+// PAL emits `array_borrow_cell` when a C `&a[i]` (address of an array element)
+// flows into a parameter typed as a plain pointer (Pulse `ref`). The cell is
+// removed from the array's mask while it is borrowed (`array_pts_to_except`),
+// and `array_return_cell` puts it back, possibly with an updated value.
+//
+// These wrap `Pulse.Lib.Reference.array_at` / `return_array_at`, which operate
+// on the very `pts_to_mask` that backs `array_pts_to`.
+// ---------------------------------------------------------------------------
+
+// `array_pts_to a p s` with cell `i` removed from the mask (lent out as a ref).
+let array_pts_to_except (#a: Type u#a) (x: array a) (p: perm) (s: array_spec a) (i: nat) : slprop =
+  A.pts_to_mask x #p (to_seq s) (fun k -> to_mask s k /\ k <> i)
+
+// Total (refinement-free) view of the ghost ref that aliases cell `i` of `a`.
+// `R.array_at_ghost` needs `i < length a`, which the abstract `array_pts_to`
+// hides from spec contexts; wrapping it in a default lets us name the borrowed
+// cell's ref in specs without a length hypothesis. When the array resource is
+// in scope (so `i < length a`), it coincides with `R.array_at_ghost a i`.
+let array_cell_ref (#t: Type u#a) (a: array t) (i: nat) : GTot (ref t) =
+  if i < A.length a then R.array_at_ghost a i else R.null
+
+// When cell `i` is initialized, the backing sequence holds `Some` of its value.
+let to_seq_initd #t (s: array_spec t) (i: nat)
+  : Lemma (requires array_spec_initd s i)
+          (ensures i < array_spec_len s /\ Some? (Seq.index (to_seq s) i) /\
+            Some?.v (Seq.index (to_seq s) i) == array_spec_idx s i)
+= assert (array_spec_initd s i)
+
+// Updating cell `i` of a spec updates the backing sequence at `i` to `Some v`.
+let to_seq_upd #t (s: array_spec t) (i: nat) (v: t)
+  : Lemma (requires i < array_spec_len s)
+          (ensures to_seq (array_spec_upd s i v) `Seq.equal` Seq.upd (to_seq s) i (Some v))
+= ()
+
+fn array_borrow_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#p: perm)
+  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
+  requires array_pts_to a p s
+  returns r: ref t
+  ensures (r |-> Frac p (array_spec_idx s (SZ.v i)))
+  ensures array_pts_to_except a p s (SZ.v i)
+  ensures rewrites_to r (array_cell_ref a (SZ.v i))
+{
+  unfold array_pts_to a p s;
+  A.pts_to_mask_len a;
+  to_seq_initd s (SZ.v i);
+  let r = R.array_at a i;
+  fold (array_pts_to_except a p s (SZ.v i));
+  r
+}
+
+ghost
+fn array_return_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#p: perm)
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
+  (#v: t)
+  requires (array_cell_ref a (SZ.v i) |-> Frac p v)
+  requires array_pts_to_except a p s (SZ.v i)
+  ensures array_pts_to a p (array_spec_upd s (SZ.v i) v)
+{
+  unfold array_pts_to_except a p s (SZ.v i);
+  A.pts_to_mask_len a;
+  rewrite (array_cell_ref a (SZ.v i) |-> Frac p v)
+       as (R.array_at_ghost a (SZ.v i) |-> Frac p v);
+  R.return_array_at a (SZ.v i);
+  let s' = hide (array_spec_upd s (SZ.v i) v);
+  to_seq_upd s (SZ.v i) v;
+  A.mask_mext a (to_mask s');
+  A.mask_vext a (to_seq s');
+  fold (array_pts_to a p s');
+}
