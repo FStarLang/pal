@@ -19,3 +19,23 @@ void caller(_array int *a, size_t i)
     write_to(&a[i]);
     _ghost_stmt(array_return_cell $(a) $(i));
 }
+
+// `init_cell` takes an `_out int *` — an *uninitialized* `ref`
+// (`pts_to_uninit`) that it initializes by writing through.
+void init_cell(_out int *p)
+  _ensures(*p == 42)
+{
+    *p = 42;
+}
+
+// Passing `&a[i]` into an `_out` parameter borrows the cell as an
+// *uninitialized* `ref` (PAL emits `array_borrow_cell_uninit`, which forgets
+// the cell's value). Once `init_cell` writes through it, the cell is returned
+// (now initialized) with the same manual `array_return_cell`.
+void caller_out(_array int *a, size_t i)
+  _requires(i < a._length)
+{
+    init_cell(&a[i]);
+    _ghost_stmt(array_return_cell $(a) $(i));
+}
+

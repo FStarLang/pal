@@ -529,3 +529,26 @@ fn array_return_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   A.mask_vext a (to_seq s');
   fold (array_pts_to a p s');
 }
+
+// Uninitialized counterpart of `array_borrow_cell`. PAL emits this when the
+// borrowed cell flows into an `_out` parameter, which expects an uninitialized
+// `ref` (`pts_to_uninit`) rather than a readable one. The cell need not be
+// initialized (only masked/owned), so the refinement drops `array_spec_initd`;
+// in exchange the borrow requires full permission (the underlying
+// `R.array_at_uninit` hands out a writable, value-forgetting ref). Once the
+// callee writes through the ref, the resulting initialized cell is put back
+// with the ordinary `array_return_cell`.
+fn array_borrow_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
+  requires array_pts_to a 1.0R s
+  returns r: ref t
+  ensures R.pts_to_uninit r
+  ensures array_pts_to_except a 1.0R s (SZ.v i)
+  ensures rewrites_to r (array_cell_ref a (SZ.v i))
+{
+  unfold array_pts_to a 1.0R s;
+  A.pts_to_mask_len a;
+  let r = R.array_at_uninit a i;
+  fold (array_pts_to_except a 1.0R s (SZ.v i));
+  r
+}

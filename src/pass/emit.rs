@@ -2848,16 +2848,24 @@ impl<'a> Emitter<'a> {
                             // the fresh binding is passed in place of the
                             // address-of expression. The returning side is invoked
                             // manually by the user via inline Pulse.
+                            //
+                            // When the callee parameter is `_out` it expects an
+                            // uninitialized `ref` (`pts_to_uninit`), so the cell is
+                            // borrowed with `array_borrow_cell_uninit` (which does
+                            // not require the cell to be initialized); otherwise the
+                            // initialized borrow `array_borrow_cell` is used.
                             let borrow_cell = match &arg.val {
                                 ExprT::Ref(inner) => match &inner.val {
                                     ExprT::Index(arr, idx) => {
-                                        let param_is_ref =
-                                            fn_decl.args.get(i).is_some_and(|fn_arg| {
-                                                matches!(
-                                                    env.vtype_whnf(fn_arg.ty.clone().into()).val,
-                                                    TypeT::Pointer(_, PointerKind::Ref)
-                                                )
-                                            });
+                                        let param = fn_decl.args.get(i);
+                                        let param_is_ref = param.is_some_and(|fn_arg| {
+                                            matches!(
+                                                env.vtype_whnf(fn_arg.ty.clone().into()).val,
+                                                TypeT::Pointer(_, PointerKind::Ref)
+                                            )
+                                        });
+                                        let param_is_out = param
+                                            .is_some_and(|fn_arg| fn_arg.mode == ParamMode::Out);
                                         let arr_is_array = env
                                             .infer_expr(arr)
                                             .ok()
@@ -2869,7 +2877,7 @@ impl<'a> Emitter<'a> {
                                                 )
                                             });
                                         if param_is_ref && arr_is_array {
-                                            Some((arr.clone(), idx.clone()))
+                                            Some((arr.clone(), idx.clone(), param_is_out))
                                         } else {
                                             None
                                         }
@@ -2890,19 +2898,20 @@ impl<'a> Emitter<'a> {
                                 }
                                 _ => None,
                             };
-                            if let Some((arr, idx)) = borrow_cell {
+                            if let Some((arr, idx, is_out)) = borrow_cell {
                                 let tmp = self.fresh_tmp("borrow");
                                 let arr_doc = self.emit_rvalue(env, &arr);
                                 let idx_doc = self.emit_rvalue(env, &idx);
+                                let borrow_fn = if is_out {
+                                    "array_borrow_cell_uninit"
+                                } else {
+                                    "array_borrow_cell"
+                                };
                                 let borrow = Doc::text("let ")
                                     .append(tmp.clone())
                                     .append(Doc::text(" ="))
                                     .append(Doc::line())
-                                    .append(naryfn([
-                                        Doc::text("array_borrow_cell"),
-                                        arr_doc,
-                                        idx_doc,
-                                    ]))
+                                    .append(naryfn([Doc::text(borrow_fn), arr_doc, idx_doc]))
                                     .append(";")
                                     .nest(2)
                                     .group();

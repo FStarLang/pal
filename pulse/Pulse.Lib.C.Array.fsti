@@ -399,3 +399,15 @@ fn array_return_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   requires (array_cell_ref a (SZ.v i) |-> Frac p v)
   requires array_pts_to_except a p s (SZ.v i)
   ensures array_pts_to a p (array_spec_upd s (SZ.v i) v)
+
+/// Uninitialized counterpart of `array_borrow_cell`, emitted by PAL when the
+/// borrowed cell flows into an `_out` parameter (which expects `pts_to_uninit`).
+/// The cell need not be initialized, but the borrow requires full permission.
+/// After the callee writes through the ref, return it with `array_return_cell`.
+fn array_borrow_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
+  requires array_pts_to a 1.0R s
+  returns r: ref t
+  ensures R.pts_to_uninit r
+  ensures array_pts_to_except a 1.0R s (SZ.v i)
+  ensures rewrites_to r (array_cell_ref a (SZ.v i))
