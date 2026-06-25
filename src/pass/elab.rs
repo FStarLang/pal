@@ -315,16 +315,26 @@ impl<'a> Elaborator<'a> {
                 // element. The index would otherwise be lost in the
                 // implicit Array→ArrayPtr coercion at the call site.
                 if let ExprT::Index(arr, idx) = &v.val {
-                    let arr_is_array_ptr = env
+                    let arr_kind = env
                         .infer_expr(arr)
                         .ok()
                         .map(|t| env.vtype_whnf(t))
-                        .is_some_and(|t| {
-                            matches!(
-                                &t.val,
-                                TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                            )
+                        .and_then(|t| match &t.val {
+                            TypeT::Pointer(_, k @ (PointerKind::Array | PointerKind::ArrayPtr)) => {
+                                Some(k.clone())
+                            }
+                            _ => None,
                         });
+                    // When `&a[i]` is expected to produce a plain `int *`
+                    // (PointerKind::Ref) and `a` is a real `_array`, keep the
+                    // node as `Ref(Index)`. Emission borrows a Pulse `ref` from
+                    // the array cell at that index. The default rewrite to
+                    // `a + i` (an arrayptr) only applies otherwise.
+                    let expected_is_ref = expected
+                        .map(|t| env.vtype_whnf(t.clone().into()))
+                        .is_some_and(|t| matches!(&t.val, TypeT::Pointer(_, PointerKind::Ref)));
+                    let borrow_to_ref = expected_is_ref && arr_kind == Some(PointerKind::Array);
+                    let arr_is_array_ptr = arr_kind.is_some() && !borrow_to_ref;
                     if arr_is_array_ptr {
                         let arr = arr.clone();
                         let idx = idx.clone();

@@ -3,6 +3,7 @@ open Pulse
 open Pulse.Lib.C.Inhabited
 open Pulse.Lib.SmallType
 module SZ = FStar.SizeT
+module R = Pulse.Lib.Reference
 
 #lang-pulse
 
@@ -361,3 +362,64 @@ val arrayptr_lt (#t: Type) (x z: array t) :
 ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
   requires arrayptr_pts_to x y
 {}
+// ---------------------------------------------------------------------------
+// Borrowing a single cell of an array as a `ref`.
+//
+// PAL emits `array_borrow_cell` to turn a C `&a[i]` (address of an array
+// element) into a Pulse `ref` when it flows into a plain-pointer parameter.
+// The borrowed cell is removed from the array's mask (`array_pts_to_except`)
+// until `array_return_cell` puts it back, possibly with an updated value.
+// ---------------------------------------------------------------------------
+
+/// `array_pts_to a p s` with cell `i` lent out (removed from the mask).
+val array_pts_to_except (#a: Type u#a) (x: array a) (p: perm) (s: array_spec a) (i: nat) : slprop
+
+/// Ghost ref aliasing cell `i` of `a` (defaulted so it is well-typed without a
+/// `i < length a` hypothesis). Used to name the borrowed cell across the
+/// borrow/return boundary.
+val array_cell_ref (#t: Type u#a) (a: array t) (i: nat) : GTot (ref t)
+
+/// Borrow cell `i` of `a` as a `ref`, removing it from the array's mask.
+fn array_borrow_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#p: perm)
+  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
+  requires array_pts_to a p s
+  returns r: ref t
+  ensures (r |-> Frac p (array_spec_idx s (SZ.v i)))
+  ensures array_pts_to_except a p s (SZ.v i)
+  ensures rewrites_to r (array_cell_ref a (SZ.v i))
+
+/// Return a borrowed cell, restoring it (with its possibly-updated value `v`)
+/// into the array. Invoked manually from C via `_ghost_stmt`.
+ghost
+fn array_return_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#p: perm)
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
+  (#v: t)
+  requires (array_cell_ref a (SZ.v i) |-> Frac p v)
+  requires array_pts_to_except a p s (SZ.v i)
+  ensures array_pts_to a p (array_spec_upd s (SZ.v i) v)
+
+/// Uninitialized counterpart of `array_borrow_cell`, emitted by PAL when the
+/// borrowed cell flows into an `_out` parameter (which expects `pts_to_uninit`).
+/// The cell need not be initialized, but the borrow requires full permission.
+/// After the callee writes through the ref, return it with `array_return_cell`.
+fn array_borrow_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
+  requires array_pts_to a 1.0R s
+  returns r: ref t
+  ensures R.pts_to_uninit r
+  ensures array_pts_to_except a 1.0R s (SZ.v i)
+  ensures rewrites_to r (array_cell_ref a (SZ.v i))
+
+/// Return a cell handed back *still uninitialized* (the borrower never wrote
+/// through the `ref`). Counterpart of `array_return_cell` for the case where
+/// the ref comes back as `pts_to_uninit`. The cell's value is unknown, so the
+/// array is restored as the packaged uninitialized array `array_pts_to_uninit'`
+/// (requires the rest of the array to be fully masked).
+ghost
+fn array_return_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#s: erased (array_spec t) { array_spec_full_mask s /\ array_spec_mask s (SZ.v i) })
+  requires R.pts_to_uninit (array_cell_ref a (SZ.v i))
+  requires array_pts_to_except a 1.0R s (SZ.v i)
+  ensures array_pts_to_uninit' a
