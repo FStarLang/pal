@@ -911,6 +911,18 @@ impl<'a> Elaborator<'a> {
         self.elab_slprops(env, ensures);
         if let Some(dec) = decreases {
             self.elab_rvalue(env, Rc::make_mut(dec), None);
+            // Machine-integer decreases measures (e.g. `hi - lo` of type
+            // size_t) are not well-founded under F*'s `<<` relation, so
+            // termination checking fails. Coerce them to mathematical
+            // integers (`SpecInt`), which emits e.g. `SizeT.v (...)`.
+            if let Ok(dec_ty) = env.infer_expr(dec) {
+                if matches!(
+                    &env.vtype_whnf(dec_ty).val,
+                    TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT
+                ) {
+                    cast_to(dec, TypeT::SpecInt.with_loc(dec.loc.clone()));
+                }
+            }
         }
     }
 
