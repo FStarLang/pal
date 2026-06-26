@@ -247,6 +247,13 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
             scan_expr(deps, lhs);
             scan_expr(deps, v);
         }
+        StmtT::BorrowCell {
+            arr, idx, elem_ty, ..
+        } => {
+            scan_expr(deps, arr);
+            scan_expr(deps, idx);
+            scan_type(deps, elem_ty);
+        }
         StmtT::If {
             cond,
             then_branch,

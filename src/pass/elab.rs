@@ -738,6 +738,10 @@ impl<'a> Elaborator<'a> {
                 self.elab_stmts(env, Rc::make_mut(body));
             }
             StmtT::Break | StmtT::Continue => {}
+            StmtT::BorrowCell { .. } => {
+                // Introduced by `elab_stmts` after the contained expressions
+                // have already been elaborated; nothing further to do.
+            }
             StmtT::Return(x) => {
                 if let Some(x) = x {
                     let expected_ret = env.return_type.as_ref().map(|t| t.as_ref());

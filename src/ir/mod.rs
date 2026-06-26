@@ -356,6 +356,20 @@ pub enum StmtT {
         size: Rc<Expr>,
     },
     Assign(Rc<Expr>, Rc<Expr>),
+    /// Binds `name` to the single-cell borrow
+    /// `array_borrow_cell[_uninit] arr idx`. Introduced by elaboration to lower
+    /// `&a[i]` (the address of an array element) into a Pulse `ref`. `elem_ty`
+    /// is the cell's element type, so `name : ref elem_ty` (a plain pointer).
+    /// `uninit` selects `array_borrow_cell_uninit`, used when the borrowed cell
+    /// flows into an `_out` parameter (which expects `pts_to_uninit`). The
+    /// matching `array_return_cell` is invoked manually by the user.
+    BorrowCell {
+        name: Rc<Ident>,
+        arr: Rc<Expr>,
+        idx: Rc<Expr>,
+        elem_ty: Rc<Type>,
+        uninit: bool,
+    },
     If {
         cond: Rc<Expr>,
         then_branch: Rc<Stmts>,

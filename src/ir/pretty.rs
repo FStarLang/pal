@@ -429,6 +429,26 @@ impl PrettyIR for StmtT {
                 .append(";")
                 .nest(2)
                 .group(),
+            StmtT::BorrowCell {
+                name,
+                arr,
+                idx,
+                uninit,
+                ..
+            } => (name.to_doc())
+                .append(" = ")
+                .append(if *uninit {
+                    "array_borrow_cell_uninit"
+                } else {
+                    "array_borrow_cell"
+                })
+                .append("(&")
+                .append(arr.to_doc())
+                .append("[")
+                .append(idx.to_doc())
+                .append("]);")
+                .nest(2)
+                .group(),
             StmtT::If {
                 cond,
                 then_branch,

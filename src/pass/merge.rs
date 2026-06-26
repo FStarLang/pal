@@ -561,6 +561,13 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
             collect_refs_expr(a, out);
             collect_refs_expr(b, out);
         }
+        StmtT::BorrowCell {
+            arr, idx, elem_ty, ..
+        } => {
+            collect_refs_expr(arr, out);
+            collect_refs_expr(idx, out);
+            collect_type_refs(elem_ty, out);
+        }
         StmtT::If {
             cond,
             then_branch,
