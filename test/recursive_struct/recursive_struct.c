@@ -105,7 +105,9 @@ _include_pulse(Recursive_struct_include2,
  *    to _plain parameter. Regression: without elaborating fn_decl types before
  *    pre-registration, this gets a spurious (node[?]) cast → assert False. */
 _rec void traverse(const list head)
-    _decreases(_elements_of(head))
+    // Pulse can't currently prove termination from the opaque _elements_of
+    // accessor, so we measure on the predicate's spec value directly.
+    _decreases((spec_list) _inline_pulse(reveal $`val_head_0))
 {
     if (head == NULL) {
         _ghost_stmt(Recursive_struct_include2.is_list_nil_case $(head));

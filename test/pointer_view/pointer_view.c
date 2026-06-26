@@ -101,7 +101,9 @@ bool ptr_is_null(_plain node *n) {
 /* Recursive traversal: `node *` parameter resolves to the `list` view; the
  * `node *nx` local does too. */
 _rec void traverse(const node *head)
-    _decreases(_elements_of(head))
+    // Pulse can't currently prove termination from the opaque _elements_of
+    // accessor, so we measure on the predicate's spec value directly.
+    _decreases((spec_list) _inline_pulse(reveal $`val_head_0))
 {
     if (head == NULL) {
         _ghost_stmt(Pointer_view_include2.is_list_nil_case $(head));

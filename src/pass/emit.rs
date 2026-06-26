@@ -3542,7 +3542,8 @@ impl<'a> Emitter<'a> {
             .push_this(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()))
             .with_loc(name.loc.clone());
         let this_arg = parens(
-            self.emit_name(Name::Var(this.val.clone()))
+            Doc::text("[@@@mkey] ")
+                .append(self.emit_name(Name::Var(this.val.clone())))
                 .append(":")
                 .append(Doc::line())
                 .append(t),
