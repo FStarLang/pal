@@ -425,8 +425,15 @@ const UNION_NS: u8 = 2;
 /// these layers and references each referenced type's predicate (including
 /// through pointers), so the referenced type's declaration must be emitted
 /// first to register its spec parameters.
+///
+/// `core_ref` pointers are the exception: they erase their pointee type and
+/// contribute no predicate/spec at emission, so they impose no ordering
+/// constraint and are deliberately not descended into (doing so would create a
+/// false dependency cycle for the recursive structs core_ref exists to break).
 fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
     match &ty.val {
+        // See the doc comment: `core_ref` imposes no emission-order dependency.
+        TypeT::Pointer(_, PointerKind::Core) => {}
         TypeT::Pointer(inner, _) | TypeT::FixedArray(inner, _) | TypeT::Plain(inner) => {
             collect_type_refs(inner, out)
         }
