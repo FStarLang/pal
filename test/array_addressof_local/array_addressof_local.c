@@ -1,0 +1,67 @@
+#include "pal.h"
+#include <stdint.h>
+#include <stddef.h>
+
+// `&a[i]` over a real `_array` whose result is used as a plain `int *`
+// (a Pulse `ref`) is *not* desugared to `a + i`; instead PAL borrows exactly
+// cell `i` with `array_borrow_cell`. The borrow is effectful, so it is hoisted
+// into a preceding statement and the binding is reused wherever `&a[i]`
+// appeared. The matching `array_return_cell` is invoked manually via inline
+// Pulse. These tests cover the general (non-call-argument) contexts.
+
+// A helper taking a plain `int *` (a Pulse `ref`), to exercise a borrowed
+// cell stored in a local being forwarded to a call argument.
+void store7(int *p)
+  _ensures(*p == 7)
+{
+    *p = 7;
+}
+
+// Pattern 1: bind `&a[i]` to a local `int *` and write through it.
+void write_via_local(_array int *a, size_t i)
+  _requires(i < a._length)
+{
+    int *p = &a[i];
+    *p = 7;
+    _ghost_stmt(array_return_cell $(a) $(i));
+}
+
+// Pattern 2: bind `&a[i]` to a local and read through it (then write the
+// value back so the cell stays initialized).
+void read_via_local(_array int *a, size_t i)
+  _requires(i < a._length)
+{
+    int *p = &a[i];
+    int x = *p;
+    *p = x;
+    _ghost_stmt(array_return_cell $(a) $(i));
+}
+
+// Pattern 3: constant index.
+void const_index(_array int *a)
+  _requires(a._length > 0)
+{
+    int *p = &a[0];
+    *p = 3;
+    _ghost_stmt(array_return_cell $(a) 0sz);
+}
+
+// Pattern 4: the borrowed local is forwarded to a function expecting `int *`.
+void forward_to_call(_array int *a, size_t i)
+  _requires(i < a._length)
+{
+    int *p = &a[i];
+    store7(p);
+    _ghost_stmt(array_return_cell $(a) $(i));
+}
+
+// Pattern 5: index held in a `size_t` variable (a non-literal index where the
+// borrow and the manual return use the same value).
+void var_index(_array int *a, size_t i)
+  _requires(i < a._length)
+{
+    size_t j = i;
+    int *p = &a[j];
+    *p = 5;
+    _ghost_stmt(array_return_cell $(a) $(j));
+}
