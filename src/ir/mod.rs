@@ -338,6 +338,22 @@ pub enum ExprT {
     SizeOf(Rc<Type>),
     /// `_Alignof(T)` / `__alignof__(T)` — translated to `c_alignof T`.
     AlignOf(Rc<Type>),
+    /// Single-cell array borrow `array_borrow_cell[_uninit] arr idx`, introduced
+    /// by elaboration to lower `&a[i]` (the address of an array element) into a
+    /// Pulse `ref`. `elem_ty` is the cell's element type, so the expression has
+    /// type `ref elem_ty` (a plain pointer). It is an effectful rvalue: it
+    /// consumes the array's `array_pts_to` and rewrites it to
+    /// `array_pts_to_except`, so it is emitted inline in value position (Pulse
+    /// allows effectful sub-expressions). `uninit` selects
+    /// `array_borrow_cell_uninit`, used when the borrowed cell flows into an
+    /// `_out` parameter (which expects `pts_to_uninit`). The matching
+    /// `array_return_cell` is invoked manually by the user.
+    BorrowCell {
+        arr: Rc<Expr>,
+        idx: Rc<Expr>,
+        elem_ty: Rc<Type>,
+        uninit: bool,
+    },
     Error(Rc<Type>),
 }
 
@@ -356,20 +372,6 @@ pub enum StmtT {
         size: Rc<Expr>,
     },
     Assign(Rc<Expr>, Rc<Expr>),
-    /// Binds `name` to the single-cell borrow
-    /// `array_borrow_cell[_uninit] arr idx`. Introduced by elaboration to lower
-    /// `&a[i]` (the address of an array element) into a Pulse `ref`. `elem_ty`
-    /// is the cell's element type, so `name : ref elem_ty` (a plain pointer).
-    /// `uninit` selects `array_borrow_cell_uninit`, used when the borrowed cell
-    /// flows into an `_out` parameter (which expects `pts_to_uninit`). The
-    /// matching `array_return_cell` is invoked manually by the user.
-    BorrowCell {
-        name: Rc<Ident>,
-        arr: Rc<Expr>,
-        idx: Rc<Expr>,
-        elem_ty: Rc<Type>,
-        uninit: bool,
-    },
     If {
         cond: Rc<Expr>,
         then_branch: Rc<Stmts>,

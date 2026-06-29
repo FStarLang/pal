@@ -278,6 +278,18 @@ impl PrettyIR for ExprT {
                 .nest(2)
                 .group(),
             ExprT::Error(_) => RcDoc::text("???"),
+            ExprT::BorrowCell {
+                arr, idx, uninit, ..
+            } => RcDoc::text(if *uninit {
+                "array_borrow_cell_uninit"
+            } else {
+                "array_borrow_cell"
+            })
+            .append("(&")
+            .append(arr.to_doc())
+            .append("[")
+            .append(idx.to_doc())
+            .append("])"),
             ExprT::Malloc(ty) => RcDoc::text("malloc(sizeof(")
                 .append(ty.to_doc())
                 .append("))")
@@ -427,26 +439,6 @@ impl PrettyIR for StmtT {
                 .append(RcDoc::line())
                 .append(v.to_doc())
                 .append(";")
-                .nest(2)
-                .group(),
-            StmtT::BorrowCell {
-                name,
-                arr,
-                idx,
-                uninit,
-                ..
-            } => (name.to_doc())
-                .append(" = ")
-                .append(if *uninit {
-                    "array_borrow_cell_uninit"
-                } else {
-                    "array_borrow_cell"
-                })
-                .append("(&")
-                .append(arr.to_doc())
-                .append("[")
-                .append(idx.to_doc())
-                .append("]);")
                 .nest(2)
                 .group(),
             StmtT::If {

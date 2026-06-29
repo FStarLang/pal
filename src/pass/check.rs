@@ -497,6 +497,13 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => self.check_type(env, ty),
+            ExprT::BorrowCell {
+                arr, idx, elem_ty, ..
+            } => {
+                self.check_rvalue(env, arr);
+                self.check_rvalue(env, idx);
+                self.check_type(env, elem_ty);
+            }
             ExprT::Error(ty) => self.check_type(env, ty),
         }
     }
@@ -556,13 +563,6 @@ impl<'a> Checker<'a> {
                 {
                     self.check_type_eq(env, v_ty.into(), x_ty.into());
                 }
-            }
-            StmtT::BorrowCell {
-                arr, idx, elem_ty, ..
-            } => {
-                self.check_rvalue(env, arr);
-                self.check_rvalue(env, idx);
-                self.check_type(env, elem_ty);
             }
             StmtT::If {
                 cond,

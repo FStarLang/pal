@@ -844,6 +844,10 @@ impl<'a> Emitter<'a> {
                 self.subst_this_rvalue(env, Rc::make_mut(rhs), this);
             }
             ExprT::SizeOf(_) | ExprT::AlignOf(_) => {}
+            ExprT::BorrowCell { arr, idx, .. } => {
+                self.subst_this_rvalue(env, Rc::make_mut(arr), this);
+                self.subst_this_rvalue(env, Rc::make_mut(idx), this);
+            }
         }
     }
 
@@ -2809,6 +2813,21 @@ impl<'a> Emitter<'a> {
                     };
                     unaryfn(Doc::text("Pulse.Lib.C.Sizeof.c_alignof"), ty_doc)
                 }
+                ExprT::BorrowCell {
+                    arr, idx, uninit, ..
+                } => {
+                    // `&a[i]` lowered to a single-cell array borrow, emitted
+                    // inline as an effectful rvalue. The matching
+                    // `array_return_cell` is invoked manually by the user.
+                    let borrow_fn = if *uninit {
+                        "array_borrow_cell_uninit"
+                    } else {
+                        "array_borrow_cell"
+                    };
+                    let arr_doc = self.emit_rvalue(env, arr);
+                    let idx_doc = self.emit_rvalue(env, idx);
+                    naryfn([Doc::text(borrow_fn), arr_doc, idx_doc])
+                }
             }
         })
     }
@@ -3012,32 +3031,6 @@ impl<'a> Emitter<'a> {
                         .append(defer)
                         .append(Doc::hardline())
                         .append(redecl)
-                }
-                StmtT::BorrowCell {
-                    name,
-                    arr,
-                    idx,
-                    uninit,
-                    ..
-                } => {
-                    // `&a[i]` lowered to a Pulse cell borrow. The matching
-                    // `array_return_cell` is invoked manually by the user.
-                    let borrow_fn = if *uninit {
-                        "array_borrow_cell_uninit"
-                    } else {
-                        "array_borrow_cell"
-                    };
-                    let name_doc = self.emit_name(Name::Var(name.val.clone()));
-                    let arr_doc = self.emit_rvalue(env, arr);
-                    let idx_doc = self.emit_rvalue(env, idx);
-                    Doc::text("let ")
-                        .append(name_doc)
-                        .append(Doc::text(" ="))
-                        .append(Doc::line())
-                        .append(naryfn([Doc::text(borrow_fn), arr_doc, idx_doc]))
-                        .append(";")
-                        .nest(2)
-                        .group()
                 }
                 StmtT::Assign(x, t) => {
                     // a[i].field = val → array_update / arrayptr_update

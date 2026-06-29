@@ -224,6 +224,13 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             scan_expr(deps, lhs);
             scan_expr(deps, rhs);
         }
+        ExprT::BorrowCell {
+            arr, idx, elem_ty, ..
+        } => {
+            scan_expr(deps, arr);
+            scan_expr(deps, idx);
+            scan_type(deps, elem_ty);
+        }
     }
 }
 
@@ -246,13 +253,6 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
         StmtT::Assign(lhs, v) => {
             scan_expr(deps, lhs);
             scan_expr(deps, v);
-        }
-        StmtT::BorrowCell {
-            arr, idx, elem_ty, ..
-        } => {
-            scan_expr(deps, arr);
-            scan_expr(deps, idx);
-            scan_type(deps, elem_ty);
         }
         StmtT::If {
             cond,

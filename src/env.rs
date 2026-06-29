@@ -268,13 +268,6 @@ impl Env {
                     .with_loc(name.loc.clone());
                 self.push_var_decl(name, array_ty, LocalDeclKind::LValue);
             }
-            StmtT::BorrowCell { name, elem_ty, .. } => {
-                // The borrowed cell is a plain pointer (`ref elem_ty`), bound by
-                // an immutable `let`, so it is an RValue local.
-                let ref_ty =
-                    TypeT::Pointer(elem_ty.clone(), PointerKind::Ref).with_loc(name.loc.clone());
-                self.push_var_decl(name, ref_ty, LocalDeclKind::RValue);
-            }
             _ => {}
         }
     }
@@ -371,6 +364,9 @@ impl Env {
                 None => Err(InferError::NotAFunction(f.clone())),
             },
             ExprT::Cast(_, ty) => Ok(ty.clone().into()),
+            ExprT::BorrowCell { elem_ty, .. } => Ok(expr
+                .reuse_loc(TypeT::Pointer(elem_ty.clone(), PointerKind::Ref))
+                .into()),
             ExprT::Error(ty) => Ok(ty.clone().into()),
             ExprT::SizeOf(_) | ExprT::AlignOf(_) => Ok(expr.reuse_loc(TypeT::SizeT).into()),
             ExprT::Malloc(ty) | ExprT::Calloc(ty) => Ok(expr

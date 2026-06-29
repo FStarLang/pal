@@ -55,9 +55,6 @@ struct Elaborator<'a> {
     /// When true, the next type visited is exempt from pointer-view substitution
     /// (set by `_plain` to keep the directly-wrapped pointer bare).
     suppress_next_view: bool,
-    /// Counter for generating fresh temporary names when hoisting `&a[i]`
-    /// borrows into `BorrowCell` statements.
-    borrow_counter: usize,
 }
 
 fn cast_to(rval: &mut Rc<Expr>, ty: Rc<Type>) {
@@ -315,8 +312,8 @@ impl<'a> Elaborator<'a> {
                 //
                 //  - When the result is used as a plain `int *` (a Pulse `ref`)
                 //    and `a` is a real `_array`, keep the node as `Ref(Index)`
-                //    so that `elab_stmts` hoists it into a single-cell borrow
-                //    (`array_borrow_cell`).
+                //    so that `elab_stmts` lowers it in place to an
+                //    `ExprT::BorrowCell` single-cell borrow (`array_borrow_cell`).
                 //
                 //  - Otherwise (the result is an `_arrayptr`, or `a` is itself
                 //    an arrayptr), rewrite to `a + i` so emission goes through
@@ -384,6 +381,10 @@ impl<'a> Elaborator<'a> {
                 // TODO: check that actual_ty can be casted to ty
             }
             ExprT::Error(ty) => self.elab_type(env, Rc::make_mut(ty)),
+            ExprT::BorrowCell { .. } => {
+                // Introduced post-elaboration by `lower_borrows_in_*`, with
+                // already-elaborated sub-expressions; nothing to do.
+            }
             ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::Malloc(ty) | ExprT::Calloc(ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
@@ -741,10 +742,6 @@ impl<'a> Elaborator<'a> {
                 self.elab_stmts(env, Rc::make_mut(body));
             }
             StmtT::Break | StmtT::Continue => {}
-            StmtT::BorrowCell { .. } => {
-                // Introduced by `elab_stmts` after the contained expressions
-                // have already been elaborated; nothing further to do.
-            }
             StmtT::Return(x) => {
                 if let Some(x) = x {
                     let expected_ret = env.return_type.as_ref().map(|t| t.as_ref());
@@ -867,26 +864,13 @@ impl<'a> Elaborator<'a> {
         false
     }
 
-    /// Generate a fresh local name for a hoisted `&a[i]` cell borrow.
-    fn fresh_borrow_name(&mut self, loc: &Rc<SourceInfo>) -> Rc<Ident> {
-        let name: Rc<str> = Rc::from(format!("__pal_borrow_{}", self.borrow_counter));
-        self.borrow_counter += 1;
-        name.with_loc(loc.clone())
-    }
-
-    /// Replace every `&a[i]` (address of an array element) inside `expr` with a
-    /// fresh temporary and push a `BorrowCell` statement (binding that temporary
-    /// to `array_borrow_cell[_uninit] a i`) onto `out`. The borrows are appended
-    /// in evaluation order so they can be emitted right before the statement
-    /// that contains `expr`. `uninit` is true when `expr` flows into an `_out`
-    /// parameter, which requires the uninitialized borrow.
-    fn hoist_borrows_in_expr(
-        &mut self,
-        env: &Env,
-        expr: &mut Rc<Expr>,
-        uninit: bool,
-        out: &mut Vec<Rc<Stmt>>,
-    ) {
+    /// Lower every `&a[i]` (address of an array element) inside `expr` in place
+    /// to an `ExprT::BorrowCell` node, which emits the effectful single-cell
+    /// borrow `array_borrow_cell[_uninit] a i` directly in value position
+    /// (Pulse allows effectful sub-expressions, so no temporary is needed).
+    /// `uninit` is true when `expr` flows into an `_out` parameter, which
+    /// requires the uninitialized borrow.
+    fn lower_borrows_in_expr(&self, env: &Env, expr: &mut Rc<Expr>, uninit: bool) {
         // Match `&a[i]`, cloning out the pieces so we can mutate `expr` after.
         let index_parts = match &expr.val {
             ExprT::Ref(inner) => match &inner.val {
@@ -896,9 +880,9 @@ impl<'a> Elaborator<'a> {
             _ => None,
         };
         if let Some((inner, mut arr, mut idx)) = index_parts {
-            // Hoist any nested borrows in the array/index sub-expressions first.
-            self.hoist_borrows_in_expr(env, &mut arr, false, out);
-            self.hoist_borrows_in_expr(env, &mut idx, false, out);
+            // Lower any nested borrows in the array/index sub-expressions first.
+            self.lower_borrows_in_expr(env, &mut arr, false);
+            self.lower_borrows_in_expr(env, &mut idx, false);
             // The element type of `a[i]` is the type of the borrowed cell.
             let Ok(elem_ty) = env.infer_expr(&inner) else {
                 // Type unknown (e.g. `a` is not array-shaped); leave the node so
@@ -907,33 +891,22 @@ impl<'a> Elaborator<'a> {
             };
             let elem_ty = elem_ty.to_rc();
             let loc = expr.loc.clone();
-            let name = self.fresh_borrow_name(&loc);
-            out.push(Rc::new(
-                StmtT::BorrowCell {
-                    name: name.clone(),
-                    arr,
-                    idx,
-                    elem_ty,
-                    uninit,
-                }
-                .with_loc_core(loc.clone()),
-            ));
-            *expr = ExprT::Var(name).with_loc(loc);
+            *expr = ExprT::BorrowCell {
+                arr,
+                idx,
+                elem_ty,
+                uninit,
+            }
+            .with_loc(loc);
             return;
         }
-        self.hoist_borrows_in_children(env, expr, uninit, out);
+        self.lower_borrows_in_children(env, expr, uninit);
     }
 
     /// Recurse into the executable sub-expressions of `expr` looking for `&a[i]`
     /// borrows. `uninit` is inherited from the parent (it propagates through
     /// `Cast`); call arguments override it from the callee's parameter modes.
-    fn hoist_borrows_in_children(
-        &mut self,
-        env: &Env,
-        expr: &mut Rc<Expr>,
-        uninit: bool,
-        out: &mut Vec<Rc<Stmt>>,
-    ) {
+    fn lower_borrows_in_children(&self, env: &Env, expr: &mut Rc<Expr>, uninit: bool) {
         // Look up callee parameter `_out` modes before borrowing `expr` mutably.
         let arg_uninit: Option<Vec<bool>> = match &expr.val {
             ExprT::FnCall(f, args) => env.lookup_fn(f).map(|decl| {
@@ -957,11 +930,11 @@ impl<'a> Elaborator<'a> {
                         .and_then(|v| v.get(i))
                         .copied()
                         .unwrap_or(false);
-                    self.hoist_borrows_in_expr(env, arg, arg_uninit, out);
+                    self.lower_borrows_in_expr(env, arg, arg_uninit);
                 }
             }
             // A cast is transparent to the borrow context (`(int*)&a[i]`).
-            ExprT::Cast(inner, _) => self.hoist_borrows_in_expr(env, inner, uninit, out),
+            ExprT::Cast(inner, _) => self.lower_borrows_in_expr(env, inner, uninit),
             ExprT::UnOp(_, e)
             | ExprT::Deref(e)
             | ExprT::Member(e, _)
@@ -973,48 +946,50 @@ impl<'a> Elaborator<'a> {
             | ExprT::Free(e)
             | ExprT::MemsetZero(_, e)
             | ExprT::MallocArray(_, e)
-            | ExprT::CallocArray(_, e) => self.hoist_borrows_in_expr(env, e, false, out),
+            | ExprT::CallocArray(_, e) => self.lower_borrows_in_expr(env, e, false),
             ExprT::BinOp(_, a, b) | ExprT::Index(a, b) | ExprT::AssignExpr(a, b) => {
-                self.hoist_borrows_in_expr(env, a, false, out);
-                self.hoist_borrows_in_expr(env, b, false, out);
+                self.lower_borrows_in_expr(env, a, false);
+                self.lower_borrows_in_expr(env, b, false);
             }
             ExprT::Memset(_, a, b, c) => {
-                self.hoist_borrows_in_expr(env, a, false, out);
-                self.hoist_borrows_in_expr(env, b, false, out);
-                self.hoist_borrows_in_expr(env, c, false, out);
+                self.lower_borrows_in_expr(env, a, false);
+                self.lower_borrows_in_expr(env, b, false);
+                self.lower_borrows_in_expr(env, c, false);
             }
             ExprT::Cond(c, a, b) => {
-                self.hoist_borrows_in_expr(env, c, false, out);
-                self.hoist_borrows_in_expr(env, a, false, out);
-                self.hoist_borrows_in_expr(env, b, false, out);
+                self.lower_borrows_in_expr(env, c, false);
+                self.lower_borrows_in_expr(env, a, false);
+                self.lower_borrows_in_expr(env, b, false);
             }
             ExprT::StructInit(_, fields) => {
                 for (_fld, val) in fields.iter_mut() {
-                    self.hoist_borrows_in_expr(env, val, false, out);
+                    self.lower_borrows_in_expr(env, val, false);
                 }
             }
             ExprT::UnionInit(_, _, val) => {
-                self.hoist_borrows_in_expr(env, val, false, out);
+                self.lower_borrows_in_expr(env, val, false);
             }
             ExprT::ArrayInit(_, elems) => {
                 for val in elems.iter_mut() {
-                    self.hoist_borrows_in_expr(env, val, false, out);
+                    self.lower_borrows_in_expr(env, val, false);
                 }
             }
             // Leaves and ghost/spec-only constructs (`Old`, `Live`, quantifiers,
-            // inline Pulse, literals, `Ref`, …): nothing executable to hoist.
+            // inline Pulse, literals, `Ref`, …): nothing executable to lower.
             _ => {}
         }
     }
 
-    /// Hoist `&a[i]` borrows out of the executable value positions of `stmt`,
-    /// returning the `BorrowCell` statements to insert immediately before it.
-    fn hoist_borrows_in_stmt(&mut self, env: &Env, stmt: &mut Stmt, out: &mut Vec<Rc<Stmt>>) {
+    /// Lower `&a[i]` borrows in the executable value positions of `stmt` in
+    /// place to `ExprT::BorrowCell` nodes. Loop/branch *conditions* are
+    /// intentionally omitted: an effectful borrow there would have to be hoisted
+    /// out of the loop, which is unsound.
+    fn lower_borrows_in_stmt(&self, env: &Env, stmt: &mut Stmt) {
         match &mut stmt.val {
-            StmtT::Call(e) => self.hoist_borrows_in_expr(env, e, false, out),
-            StmtT::Assign(_, v) => self.hoist_borrows_in_expr(env, v, false, out),
-            StmtT::Return(Some(e)) => self.hoist_borrows_in_expr(env, e, false, out),
-            StmtT::DeclStackArray { size, .. } => self.hoist_borrows_in_expr(env, size, false, out),
+            StmtT::Call(e) => self.lower_borrows_in_expr(env, e, false),
+            StmtT::Assign(_, v) => self.lower_borrows_in_expr(env, v, false),
+            StmtT::Return(Some(e)) => self.lower_borrows_in_expr(env, e, false),
+            StmtT::DeclStackArray { size, .. } => self.lower_borrows_in_expr(env, size, false),
             _ => {}
         }
     }
@@ -1027,16 +1002,9 @@ impl<'a> Elaborator<'a> {
 
             self.elab_stmt(&env, Rc::make_mut(&mut stmts[i]));
             Self::lower_expr(&mut stmts[i]);
-            // Hoist `&a[i]` borrows out of the (now elaborated) statement into
-            // preceding `BorrowCell` statements that bind the borrowed cells.
-            let mut borrows = Vec::new();
-            self.hoist_borrows_in_stmt(&env, Rc::make_mut(&mut stmts[i]), &mut borrows);
-            let inserted = borrows.len();
-            for (k, b) in borrows.into_iter().enumerate() {
-                stmts.insert(i + k, b);
-                env.push_stmt(&stmts[i + k]);
-            }
-            i += inserted;
+            // Lower `&a[i]` borrows in the (now elaborated) statement in place to
+            // `ExprT::BorrowCell` rvalues emitted inline at their use site.
+            self.lower_borrows_in_stmt(&env, Rc::make_mut(&mut stmts[i]));
 
             env.push_stmt(&stmts[i]);
             i += 1;
@@ -1241,7 +1209,6 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         in_inline_pulse: false,
         in_view_body: false,
         suppress_next_view: false,
-        borrow_counter: 0,
     };
     // Pre-pass: elaborate the type-level parts of each declaration (function
     // signatures, typedef bodies, struct/union fields, etc.) and re-register

@@ -150,6 +150,13 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
             rename_type_in_place(Rc::make_mut(ty), renames);
             rename_expr_in_place(Rc::make_mut(ptr), renames);
         }
+        ExprT::BorrowCell {
+            arr, idx, elem_ty, ..
+        } => {
+            rename_expr_in_place(Rc::make_mut(arr), renames);
+            rename_expr_in_place(Rc::make_mut(idx), renames);
+            rename_type_in_place(Rc::make_mut(elem_ty), renames);
+        }
         ExprT::BoolLit(_) => {}
     }
 }
@@ -523,6 +530,13 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
             collect_type_refs(ty, out);
             collect_refs_expr(ptr, out);
         }
+        ExprT::BorrowCell {
+            arr, idx, elem_ty, ..
+        } => {
+            collect_refs_expr(arr, out);
+            collect_refs_expr(idx, out);
+            collect_type_refs(elem_ty, out);
+        }
     }
 }
 
@@ -560,13 +574,6 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
         StmtT::Assign(a, b) => {
             collect_refs_expr(a, out);
             collect_refs_expr(b, out);
-        }
-        StmtT::BorrowCell {
-            arr, idx, elem_ty, ..
-        } => {
-            collect_refs_expr(arr, out);
-            collect_refs_expr(idx, out);
-            collect_type_refs(elem_ty, out);
         }
         StmtT::If {
             cond,
