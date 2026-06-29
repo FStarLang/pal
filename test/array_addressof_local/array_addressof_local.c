@@ -94,3 +94,21 @@ int read_via_returned_ptr(_array int *a, size_t i)
     int *p = nth_ptr(a, i);
     return *p;
 }
+
+// Pattern 8: the *uninitialized-source* borrow. When `&a[i]` borrows from an
+// `_out _array` (whose cells start uninitialized), PAL picks the borrow from
+// the SOURCE array, not from how the result is used: it emits the write-only
+// `array_borrow_cell_uninit`, which hands back a `pts_to_uninit` cell. Writing
+// through the borrowed local initializes it. This inline pattern previously
+// failed -- PAL forced the *initialized* borrow (`array_borrow_cell`, requiring
+// `array_spec_initd`) from the use site -- and now verifies because the borrow
+// follows the source array's init-state and `pts_to_maybe_uninit` defers the
+// init/uninit choice to the consumer. (`_length == 1` so writing the one cell
+// fully initializes the `_out` array, satisfying its postcondition.)
+void write_via_local_uninit(_out _array int *a)
+  _requires(a._length == 1)
+{
+    int *p = &a[0];
+    *p = 9;
+    _ghost_stmt(array_return_cell $(a) 0sz);
+}
