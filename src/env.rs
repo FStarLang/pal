@@ -28,6 +28,13 @@ pub struct LocalDecl {
 pub struct Env {
     globals: Rc<Globals>,
     locals: HashMap<Rc<str>, LocalDecl>,
+    /// Names of in-scope array parameters PAL knows to be fully initialized on
+    /// entry: a regular `_array` param (mode is not `_out`, type is a bare array
+    /// pointer, not `_plain`-wrapped). PAL auto-generates `array_pts_to_full` for
+    /// these. Borrowing one of their cells (`&a[i]`) can use the initialized cell
+    /// borrow (`array_borrow_cell`); any other array (`_out`, `_plain`, or
+    /// otherwise untracked) is borrowed with the uninitialized cell borrow.
+    init_arrays: HashSet<Rc<str>>,
     pub loop_depth: usize,
     pub return_type: Option<Rc<Type>>,
 }
@@ -210,7 +217,38 @@ impl Env {
 
     pub fn push_arg(&mut self, arg: &FnArg, is_rvalue: LocalDeclKind) {
         if let Some(n) = &arg.name {
-            self.push_var_decl(n, arg.ty.clone(), is_rvalue)
+            self.push_var_decl(n, arg.ty.clone(), is_rvalue);
+            // Remember regular `_array` params (auto-initialized full arrays):
+            // their cells are initialized, so `&a[i]` borrows can use the
+            // initialized cell borrow. `_out` arrays (uninitialized) and
+            // `_plain` arrays (ownership stated by hand) are excluded.
+            let is_array_ptr = matches!(
+                self.vtype_whnf(arg.ty.clone().into()).val,
+                TypeT::Pointer(_, PointerKind::Array)
+            );
+            if is_array_ptr && arg.mode != ParamMode::Out && !Self::is_plain_wrapped(self, &arg.ty)
+            {
+                self.init_arrays.insert(n.val.clone());
+            }
+        }
+    }
+
+    /// Whether `ty` has a top-level `_plain` wrapper above its pointer (looking
+    /// through refinements, nullable, and typedefs, but not through the pointer).
+    /// `_plain` opts out of PAL's automatic ownership spec, so PAL cannot assume
+    /// such an array is initialized.
+    fn is_plain_wrapped(&self, ty: &Type) -> bool {
+        match &ty.val {
+            TypeT::Plain(_) => true,
+            TypeT::Refine(inner, _)
+            | TypeT::RefineAlways(inner, _)
+            | TypeT::RefineUninit(inner, _)
+            | TypeT::RefineValue(inner, ..)
+            | TypeT::Nullable(inner) => self.is_plain_wrapped(inner),
+            TypeT::TypeRef(TypeRefKind::Typedef(n)) => self
+                .lookup_type(n)
+                .is_some_and(|defn| self.is_plain_wrapped(&defn.body)),
+            _ => false,
         }
     }
 
@@ -246,6 +284,14 @@ impl Env {
 
     pub fn lookup_var(&self, ident: &Ident) -> Option<&LocalDecl> {
         self.locals.get(&ident.val)
+    }
+
+    /// Whether `ident` names a regular `_array` parameter that PAL knows to be
+    /// fully initialized (so `&ident[i]` may use the initialized cell borrow).
+    /// Returns false for `_out`/`_plain`/untracked arrays, which must use the
+    /// uninitialized cell borrow.
+    pub fn is_init_array(&self, ident: &Ident) -> bool {
+        self.init_arrays.contains(&ident.val)
     }
 
     pub fn lookup_global_var(&self, ident: &Ident) -> Option<&GlobalVar> {

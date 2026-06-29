@@ -2817,8 +2817,12 @@ impl<'a> Emitter<'a> {
                     arr, idx, uninit, ..
                 } => {
                     // `&a[i]` lowered to a single-cell array borrow, emitted
-                    // inline as an effectful rvalue. The matching
-                    // `array_return_cell` is invoked manually by the user.
+                    // inline as an effectful rvalue. `uninit` (set in elab from
+                    // the source array's init-state) picks the write-only borrow
+                    // for uninitialized/`_plain` arrays; an initialized `_array`
+                    // uses `array_borrow_cell`, whose `pts_to_maybe_uninit` result
+                    // adapts to either use. The matching `array_return_cell` is
+                    // invoked manually by the user.
                     let borrow_fn = if *uninit {
                         "array_borrow_cell_uninit"
                     } else {

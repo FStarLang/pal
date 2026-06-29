@@ -345,9 +345,13 @@ pub enum ExprT {
     /// consumes the array's `array_pts_to` and rewrites it to
     /// `array_pts_to_except`, so it is emitted inline in value position (Pulse
     /// allows effectful sub-expressions). `uninit` selects
-    /// `array_borrow_cell_uninit`, used when the borrowed cell flows into an
-    /// `_out` parameter (which expects `pts_to_uninit`). The matching
-    /// `array_return_cell` is invoked manually by the user.
+    /// `array_borrow_cell_uninit` (a write-only `pts_to_uninit` borrow), chosen
+    /// when the *source* array is not a known-initialized `_array` (i.e. it is an
+    /// `_out`/`_plain`/untracked array, whose cell may be uninitialized). A
+    /// known-initialized array uses `array_borrow_cell`, which hands back
+    /// `pts_to_maybe_uninit ... (Some _)` and is adapted to a readable or
+    /// write-only use by Pulse's `reveal_maybe`/`forget_maybe` coercions. The
+    /// matching `array_return_cell` is invoked manually by the user.
     BorrowCell {
         arr: Rc<Expr>,
         idx: Rc<Expr>,

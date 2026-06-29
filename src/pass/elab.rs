@@ -868,9 +868,15 @@ impl<'a> Elaborator<'a> {
     /// to an `ExprT::BorrowCell` node, which emits the effectful single-cell
     /// borrow `array_borrow_cell[_uninit] a i` directly in value position
     /// (Pulse allows effectful sub-expressions, so no temporary is needed).
-    /// `uninit` is true when `expr` flows into an `_out` parameter, which
-    /// requires the uninitialized borrow.
-    fn lower_borrows_in_expr(&self, env: &Env, expr: &mut Rc<Expr>, uninit: bool) {
+    ///
+    /// The choice of borrow is driven by the *source* array, not by where the
+    /// borrowed `ref` flows: cells of an `_out` array start uninitialized, so
+    /// they are borrowed with `array_borrow_cell_uninit` (handing out a
+    /// write-only `pts_to_uninit`). Cells of a regular `_array` are borrowed with
+    /// `array_borrow_cell`, which hands back `pts_to_maybe_uninit ... (Some _)`;
+    /// Pulse's `reveal_maybe`/`forget_maybe` coercions then adapt that single
+    /// borrow to either a readable or a write-only use at the consumer.
+    fn lower_borrows_in_expr(&self, env: &Env, expr: &mut Rc<Expr>) {
         // Match `&a[i]`, cloning out the pieces so we can mutate `expr` after.
         let index_parts = match &expr.val {
             ExprT::Ref(inner) => match &inner.val {
@@ -881,8 +887,8 @@ impl<'a> Elaborator<'a> {
         };
         if let Some((inner, mut arr, mut idx)) = index_parts {
             // Lower any nested borrows in the array/index sub-expressions first.
-            self.lower_borrows_in_expr(env, &mut arr, false);
-            self.lower_borrows_in_expr(env, &mut idx, false);
+            self.lower_borrows_in_expr(env, &mut arr);
+            self.lower_borrows_in_expr(env, &mut idx);
             // The element type of `a[i]` is the type of the borrowed cell.
             let Ok(elem_ty) = env.infer_expr(&inner) else {
                 // Type unknown (e.g. `a` is not array-shaped); leave the node so
@@ -890,6 +896,7 @@ impl<'a> Elaborator<'a> {
                 return;
             };
             let elem_ty = elem_ty.to_rc();
+            let uninit = Self::borrow_source_is_uninit(env, &arr);
             let loc = expr.loc.clone();
             *expr = ExprT::BorrowCell {
                 arr,
@@ -900,41 +907,33 @@ impl<'a> Elaborator<'a> {
             .with_loc(loc);
             return;
         }
-        self.lower_borrows_in_children(env, expr, uninit);
+        self.lower_borrows_in_children(env, expr);
+    }
+
+    /// Whether the array being borrowed from must use the *uninitialized* cell
+    /// borrow. It must, unless the source is a regular `_array` parameter that
+    /// PAL knows to be fully initialized. Looks through casts to find the root
+    /// array variable; an unrecognized source conservatively uses the
+    /// uninitialized borrow (which is valid for any cell).
+    fn borrow_source_is_uninit(env: &Env, arr: &Expr) -> bool {
+        match &arr.val {
+            ExprT::Var(ident) => !env.is_init_array(ident),
+            ExprT::Cast(inner, _) => Self::borrow_source_is_uninit(env, inner),
+            _ => true,
+        }
     }
 
     /// Recurse into the executable sub-expressions of `expr` looking for `&a[i]`
-    /// borrows. `uninit` is inherited from the parent (it propagates through
-    /// `Cast`); call arguments override it from the callee's parameter modes.
-    fn lower_borrows_in_children(&self, env: &Env, expr: &mut Rc<Expr>, uninit: bool) {
-        // Look up callee parameter `_out` modes before borrowing `expr` mutably.
-        let arg_uninit: Option<Vec<bool>> = match &expr.val {
-            ExprT::FnCall(f, args) => env.lookup_fn(f).map(|decl| {
-                (0..args.len())
-                    .map(|i| {
-                        decl.args
-                            .get(i)
-                            .map(|a| a.mode == ParamMode::Out)
-                            .unwrap_or(false)
-                    })
-                    .collect()
-            }),
-            _ => None,
-        };
+    /// borrows.
+    fn lower_borrows_in_children(&self, env: &Env, expr: &mut Rc<Expr>) {
         match &mut Rc::make_mut(expr).val {
-            // A borrow flowing into an `_out` parameter must be uninitialized.
             ExprT::FnCall(_, args) => {
-                for (i, arg) in args.iter_mut().enumerate() {
-                    let arg_uninit = arg_uninit
-                        .as_ref()
-                        .and_then(|v| v.get(i))
-                        .copied()
-                        .unwrap_or(false);
-                    self.lower_borrows_in_expr(env, arg, arg_uninit);
+                for arg in args.iter_mut() {
+                    self.lower_borrows_in_expr(env, arg);
                 }
             }
             // A cast is transparent to the borrow context (`(int*)&a[i]`).
-            ExprT::Cast(inner, _) => self.lower_borrows_in_expr(env, inner, uninit),
+            ExprT::Cast(inner, _) => self.lower_borrows_in_expr(env, inner),
             ExprT::UnOp(_, e)
             | ExprT::Deref(e)
             | ExprT::Member(e, _)
@@ -946,32 +945,32 @@ impl<'a> Elaborator<'a> {
             | ExprT::Free(e)
             | ExprT::MemsetZero(_, e)
             | ExprT::MallocArray(_, e)
-            | ExprT::CallocArray(_, e) => self.lower_borrows_in_expr(env, e, false),
+            | ExprT::CallocArray(_, e) => self.lower_borrows_in_expr(env, e),
             ExprT::BinOp(_, a, b) | ExprT::Index(a, b) | ExprT::AssignExpr(a, b) => {
-                self.lower_borrows_in_expr(env, a, false);
-                self.lower_borrows_in_expr(env, b, false);
+                self.lower_borrows_in_expr(env, a);
+                self.lower_borrows_in_expr(env, b);
             }
             ExprT::Memset(_, a, b, c) => {
-                self.lower_borrows_in_expr(env, a, false);
-                self.lower_borrows_in_expr(env, b, false);
-                self.lower_borrows_in_expr(env, c, false);
+                self.lower_borrows_in_expr(env, a);
+                self.lower_borrows_in_expr(env, b);
+                self.lower_borrows_in_expr(env, c);
             }
             ExprT::Cond(c, a, b) => {
-                self.lower_borrows_in_expr(env, c, false);
-                self.lower_borrows_in_expr(env, a, false);
-                self.lower_borrows_in_expr(env, b, false);
+                self.lower_borrows_in_expr(env, c);
+                self.lower_borrows_in_expr(env, a);
+                self.lower_borrows_in_expr(env, b);
             }
             ExprT::StructInit(_, fields) => {
                 for (_fld, val) in fields.iter_mut() {
-                    self.lower_borrows_in_expr(env, val, false);
+                    self.lower_borrows_in_expr(env, val);
                 }
             }
             ExprT::UnionInit(_, _, val) => {
-                self.lower_borrows_in_expr(env, val, false);
+                self.lower_borrows_in_expr(env, val);
             }
             ExprT::ArrayInit(_, elems) => {
                 for val in elems.iter_mut() {
-                    self.lower_borrows_in_expr(env, val, false);
+                    self.lower_borrows_in_expr(env, val);
                 }
             }
             // Leaves and ghost/spec-only constructs (`Old`, `Live`, quantifiers,
@@ -986,10 +985,10 @@ impl<'a> Elaborator<'a> {
     /// out of the loop, which is unsound.
     fn lower_borrows_in_stmt(&self, env: &Env, stmt: &mut Stmt) {
         match &mut stmt.val {
-            StmtT::Call(e) => self.lower_borrows_in_expr(env, e, false),
-            StmtT::Assign(_, v) => self.lower_borrows_in_expr(env, v, false),
-            StmtT::Return(Some(e)) => self.lower_borrows_in_expr(env, e, false),
-            StmtT::DeclStackArray { size, .. } => self.lower_borrows_in_expr(env, size, false),
+            StmtT::Call(e) => self.lower_borrows_in_expr(env, e),
+            StmtT::Assign(_, v) => self.lower_borrows_in_expr(env, v),
+            StmtT::Return(Some(e)) => self.lower_borrows_in_expr(env, e),
+            StmtT::DeclStackArray { size, .. } => self.lower_borrows_in_expr(env, size),
             _ => {}
         }
     }
