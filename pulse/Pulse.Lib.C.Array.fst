@@ -517,20 +517,44 @@ let array_spec_full_mask_upd_opt #t (s: array_spec t) (i: nat) (vi: option t)
   in
   Classical.forall_intro aux
 
+[@@pulse_intro]
+ghost fn forget_maybe u#a (#t: Type u#a) (r: ref t) (#v: option t)
+  requires pts_to_maybe_uninit r v
+  ensures R.pts_to_uninit r
+{
+  match v {
+    Some x -> {
+      unfold (pts_to_maybe_uninit r (Some x));
+      R.forget_init r;
+    }
+    None -> {
+      unfold (pts_to_maybe_uninit r None);
+    }
+  }
+}
+
+[@@pulse_intro]
+ghost fn reveal_maybe u#a (#t: Type u#a) (r: ref t) (#x: t)
+  requires pts_to_maybe_uninit r (Some x)
+  ensures R.pts_to r x
+{
+  unfold (pts_to_maybe_uninit r (Some x));
+}
+
 fn array_borrow_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#p: perm)
   (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
-  requires array_pts_to a p s
+  requires array_pts_to a 1.0R s
   returns r: ref t
-  ensures (r |-> Frac p (array_spec_idx s (SZ.v i)))
-  ensures array_pts_to_except a p s (SZ.v i)
+  ensures pts_to_maybe_uninit r (Some (array_spec_idx s (SZ.v i)))
+  ensures array_pts_to_except a 1.0R s (SZ.v i)
   ensures rewrites_to r (array_cell_ref a (SZ.v i))
 {
-  unfold array_pts_to a p s;
+  unfold array_pts_to a 1.0R s;
   A.pts_to_mask_len a;
   to_seq_initd s (SZ.v i);
   let r = R.array_at a i;
-  fold (array_pts_to_except a p s (SZ.v i));
+  fold (array_pts_to_except a 1.0R s (SZ.v i));
+  fold (pts_to_maybe_uninit r (Some (array_spec_idx s (SZ.v i))));
   r
 }
 

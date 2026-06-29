@@ -366,9 +366,12 @@ ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
 // Borrowing a single cell of an array as a `ref`.
 //
 // PAL emits `array_borrow_cell` to turn a C `&a[i]` (address of an array
-// element) into a Pulse `ref` when it flows into a plain-pointer parameter.
-// The borrowed cell is removed from the array's mask (`array_pts_to_except`)
-// until `array_return_cell` puts it back, possibly with an updated value.
+// element) into a Pulse `ref`. The borrowed cell is removed from the array's
+// mask (`array_pts_to_except`) until `array_return_cell` puts it back, possibly
+// with an updated value. An initialized array uses `array_borrow_cell`, whose
+// `pts_to_maybe_uninit` result is adapted to a readable (`*p`/plain-`ref`) or a
+// write-only (`*p = ...`/`_out`) use by the `reveal_maybe`/`forget_maybe`
+// coercions; a genuinely uninitialized cell uses `array_borrow_cell_uninit`.
 // ---------------------------------------------------------------------------
 
 /// `array_pts_to a p s` with cell `i` lent out (removed from the mask).
@@ -379,14 +382,46 @@ val array_pts_to_except (#a: Type u#a) (x: array a) (p: perm) (s: array_spec a) 
 /// borrow/return boundary.
 val array_cell_ref (#t: Type u#a) (a: array t) (i: nat) : GTot (ref t)
 
-/// Borrow cell `i` of `a` as a `ref`, removing it from the array's mask.
+/// Ownership of a `ref` whose initialization is *deferred*: `Some x` is a
+/// readable cell holding `x` (`R.pts_to`), `None` is a write-only uninitialized
+/// cell (`R.pts_to_uninit`). Both carry full permission. Borrowing `&a[i]`
+/// produces this, so a single borrow lemma serves both readable and write-only
+/// uses without committing to one up front (see `array_borrow_cell`).
+let pts_to_maybe_uninit (#t: Type u#a) (r: ref t) (v: option t) : slprop =
+  match v with
+  | Some x -> R.pts_to r x
+  | None -> R.pts_to_uninit r
+
+/// Forget the value of a maybe-initialized cell, recovering the write-only
+/// `pts_to_uninit`. Marked `[@@pulse_intro]` so Pulse applies it automatically
+/// when a borrowed cell flows into a write-only position (a `*p = ...` store or
+/// an `_out` parameter), whichever the cell's actual value.
+[@@pulse_intro]
+ghost fn forget_maybe u#a (#t: Type u#a) (r: ref t) (#v: option t)
+  requires pts_to_maybe_uninit r v
+  ensures R.pts_to_uninit r
+
+/// Recover the readable `pts_to` of a maybe-initialized cell that is known to
+/// hold a value. Marked `[@@pulse_intro]` so Pulse applies it automatically when
+/// a borrowed cell flows into a readable position (a `*p` load or a plain-`ref`
+/// parameter).
+[@@pulse_intro]
+ghost fn reveal_maybe u#a (#t: Type u#a) (r: ref t) (#x: t)
+  requires pts_to_maybe_uninit r (Some x)
+  ensures R.pts_to r x
+
+/// Borrow cell `i` of `a` as a `ref`, removing it from the array's mask. The
+/// borrowed (initialized) cell is handed back as `pts_to_maybe_uninit ... (Some
+/// _)`, so Pulse's `reveal_maybe`/`forget_maybe` coercions adapt it to either a
+/// readable (`*p`/plain-`ref`) or write-only (`*p = ...`/`_out`) use without the
+/// borrow committing to one up front. Requires full permission. For a borrow of
+/// a *genuinely uninitialized* cell, see `array_borrow_cell_uninit`.
 fn array_borrow_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#p: perm)
   (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
-  requires array_pts_to a p s
+  requires array_pts_to a 1.0R s
   returns r: ref t
-  ensures (r |-> Frac p (array_spec_idx s (SZ.v i)))
-  ensures array_pts_to_except a p s (SZ.v i)
+  ensures pts_to_maybe_uninit r (Some (array_spec_idx s (SZ.v i)))
+  ensures array_pts_to_except a 1.0R s (SZ.v i)
   ensures rewrites_to r (array_cell_ref a (SZ.v i))
 
 /// Return a borrowed cell, restoring it (with its possibly-updated value `v`)
