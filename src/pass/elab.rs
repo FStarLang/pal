@@ -797,7 +797,13 @@ impl<'a> Elaborator<'a> {
             let TypeT::Pointer(_, rhs_kind) = &env.vtype_whnf(v_ty).val else {
                 break;
             };
-            if *rhs_kind == PointerKind::Unknown {
+            // A Core (`_core_ref`) initializer must not retype the local: the
+            // local keeps its declared `ref T` kind, and the Core→Ref mismatch
+            // is reconciled by an explicit `core_to_ref` coercion inserted at
+            // the assignment (see elab_stmt/Assign + emit's Cast lowering).
+            // Without this, the local would silently become an untyped
+            // `core_ref` and lose its pointee type.
+            if matches!(rhs_kind, PointerKind::Unknown | PointerKind::Core) {
                 break;
             }
             if let StmtT::Decl(_, decl_ty) = &mut Rc::make_mut(&mut stmts[decl_idx]).val {

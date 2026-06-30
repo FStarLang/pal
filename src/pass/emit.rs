@@ -2243,6 +2243,22 @@ impl<'a> Emitter<'a> {
                             TypeT::FixedArray(_, _),
                             TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
                         ) => val_doc,
+                        // `core_ref` (raw `_core_ref` back-pointer) → typed `ref T`:
+                        // recover the typed reference. The pointee type is known
+                        // from the cast target. Mirrors array_to_arrayptr below.
+                        (
+                            TypeT::Pointer(_, PointerKind::Core),
+                            TypeT::Pointer(to_pointee, PointerKind::Ref | PointerKind::Unknown),
+                        ) => parens(naryfn([
+                            Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
+                            self.emit_type(env, to_pointee),
+                            val_doc,
+                        ])),
+                        // typed `ref T` → `core_ref`: erase the pointee type.
+                        (
+                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
+                            TypeT::Pointer(_, PointerKind::Core),
+                        ) => unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val_doc),
                         (TypeT::Pointer(_, _), TypeT::Pointer(_, to_kind)) => {
                             // Pointer kind change (e.g., Ref→ArrayPtr for null)
                             if matches!(&val.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) {
