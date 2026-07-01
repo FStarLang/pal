@@ -84,7 +84,8 @@ uint32_t nested_continue(uint32_t n)
     uint32_t i = 0;
     do
         _do_while_first(first)
-        _invariant(_live(i) && _live(n) && _live(first))
+        _do_while_cond(cont)
+        _invariant(_live(i) && _live(n) && _live(first) && _live(cont))
         _invariant(first ==> (_specint) i < n)
         _invariant((_specint) i <= n)
     {
@@ -103,27 +104,41 @@ uint32_t nested_continue(uint32_t n)
     return i;
 }
 
-/* f: a bool-returning function whose postcondition guarantees `return == true`.
- */
-bool f(void)
-    _ensures(return == true)
+struct counter {
+    int x;
+};
+
+/* f: increment the struct's field by 1 and return whether the new value is
+ * still < 10. Its postcondition pins both the mutation and the returned flag,
+ * which is what lets g_loop reason about the loop. */
+bool f(struct counter *s)
+    _requires(s->x >= 0 && s->x < 10)
+    _ensures(s->x == _old(s->x) + 1)
+    _ensures(return == (s->x < 10))
 {
-    return true;
+    s->x = s->x + 1;
+    return s->x < 10;
 }
 
-/* g_loop: a do-while whose *guard is a function call* `f()`, with an empty
- * body (so it takes the clean desugaring path). Because the guard has side
- * effects, PAL omits the `cont == (first || cond)` linking invariant (a
- * function call cannot appear in a pure `with_pure` invariant); `cont` simply
- * carries the guard's value. Ported from ../loopback-new/pal-tests/bool_call. */
+/* g_loop: a do-while whose guard is the impure call `f(&s)`, with an empty body
+ * (so it takes the clean desugaring path). Because the guard has side effects,
+ * PAL omits the auto `cont == (first || cond)` linking invariant. Instead we
+ * name the continuation flag with `_do_while_cond(cont)` and supply our own
+ * *pure* linking invariant `cont == (s.x < 10)` (justified by f's
+ * postcondition). At loop exit the solver knows `not cont`, which via that
+ * invariant gives `s.x >= 10`; combined with `s.x <= 10` this proves the
+ * struct's field is exactly 10 on termination. */
 int g_loop(void)
+    _ensures(return == 10)
 {
-    int r = 0;
+    struct counter s = { .x = 0 };
     do
+        _do_while_cond(cont)
         _do_while_first(first)
-        _invariant(_live(r) && _live(first))
-        _invariant((_specint) r == 0)
+        _invariant(_live(s.x) && _live(cont) && _live(first))
+        _invariant((_specint) s.x >= 0 && (_specint) s.x <= 10)
+        _invariant(cont == ((_specint) s.x < 10))
     {
-    } while (f());
-    return r;
+    } while (f(&s));
+    return s.x;
 }
