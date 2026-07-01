@@ -84,8 +84,7 @@ uint32_t nested_continue(uint32_t n)
     uint32_t i = 0;
     do
         _do_while_first(first)
-        _do_while_cond(cont)
-        _invariant(_live(i) && _live(n) && _live(first) && _live(cont))
+        _invariant(_live(i) && _live(n) && _live(first))
         _invariant(first ==> (_specint) i < n)
         _invariant((_specint) i <= n)
     {
@@ -121,23 +120,18 @@ bool f(struct counter *s)
 }
 
 /* g_loop: a do-while whose guard is the impure call `f(&s)`, with an empty body
- * (so it takes the clean desugaring path). Because the guard has side effects,
- * PAL omits the auto `cont == (first || cond)` linking invariant. Instead we
- * name the continuation flag with `_do_while_cond(cont)` and supply our own
- * *pure* linking invariant `cont == (s.x < 10)` (justified by f's
- * postcondition). At loop exit the solver knows `not cont`, which via that
- * invariant gives `s.x >= 10`; combined with `s.x <= 10` this proves the
- * struct's field is exactly 10 on termination. */
+ * (so it takes the clean desugaring path). NOTE: with the auto-linking invariant
+ * and the `_do_while_cond` naming feature removed, there is no way to relate the
+ * internal continuation flag to `s.x`, so the `_ensures(return == 10)`
+ * postcondition can no longer be proved -- this test is expected to FAIL. */
 int g_loop(void)
     _ensures(return == 10)
 {
     struct counter s = { .x = 0 };
     do
-        _do_while_cond(cont)
         _do_while_first(first)
-        _invariant(_live(s.x) && _live(cont) && _live(first))
+        _invariant(_live(s.x) && _live(first))
         _invariant((_specint) s.x >= 0 && (_specint) s.x <= 10)
-        _invariant(cont == ((_specint) s.x < 10))
     {
     } while (f(&s));
     return s.x;

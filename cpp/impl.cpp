@@ -1302,20 +1302,15 @@ public:
       // inner loop, not to us) but descends into if/switch/blocks/labels, since
       // a `continue` there does target this do-while.
       //
-      // Annotations:
-      //   * `_do_while_first(name)` names the first-iteration flag so the user
-      //     can mention it in invariants (e.g. `first ==> i < n`).
-      //   * `_do_while_cond(name)` names the continuation flag `cont`; see the
-      //     clean-path comment on the linking invariant below for why this is
-      //     needed for impure guards.
+      // The `_do_while_first(name)` annotation names the first-iteration flag
+      // so the user can mention it in invariants (e.g. `first ==> i < n`).
 
-      // Extract annotations and check for _do_while_first / _do_while_cond
+      // Extract annotations and check for _do_while_first
       auto body = d->getBody();
       auto invs = Vec<Rc<ir::Expr>>::new_();
       auto reqs = Vec<Rc<ir::Expr>>::new_();
       auto enss = Vec<Rc<ir::Expr>>::new_();
       std::string flagName;
-      std::string condName;
       if (auto attrBody = dyn_cast<AttributedStmt>(body)) {
         for (auto attr : attrBody->getAttrs()) {
           if (auto inv = isUnaryAttrOf(attr, "pal-invariant")) {
@@ -1330,12 +1325,6 @@ public:
               auto *arg = (*ann->args_begin())->IgnoreParenImpCasts();
               if (auto *sl = dyn_cast<StringLiteral>(arg)) {
                 flagName = sl->getString().str();
-              }
-            } else if (ann->getAnnotation() == "pal-do-while-cond" &&
-                       ann->args_size() == 1) {
-              auto *arg = (*ann->args_begin())->IgnoreParenImpCasts();
-              if (auto *sl = dyn_cast<StringLiteral>(arg)) {
-                condName = sl->getString().str();
               }
             }
           }
@@ -1355,16 +1344,10 @@ public:
       }
       auto firstId = ctx.mk_ident(toStr(flagName), loc.clone());
 
-      // Continuation flag `cont`: named by _do_while_cond, else auto-generated.
-      // As with `first`, `_live(cont)` is auto-injected only when the name is
-      // auto-generated; a user-named `cont` is expected to appear (with its own
-      // `_live`) in the user's invariants.
-      bool condIsAuto = condName.empty();
-      if (condIsAuto) {
-        static int doContCounter = 0;
-        condName = "__do_cont_" + std::to_string(doContCounter++);
-      }
-      auto contId = ctx.mk_ident(toStr(condName), loc.clone());
+      // Continuation flag `cont`: always internal/auto-generated.
+      static int doContCounter = 0;
+      auto contId = ctx.mk_ident(
+          toStr("__do_cont_" + std::to_string(doContCounter++)), loc.clone());
 
       if (!hasTopLevelContinue(body)) {
         // Clean desugaring: no top-level `continue`.
@@ -1386,49 +1369,14 @@ public:
         auto whileCond = mk_rvalue_lvalue(
             loc.clone(), mk_lvalue_var(loc.clone(), contId.clone()));
 
-        // Inject _live(cont) and _live(first) when the respective flag name was
-        // auto-generated (a user-named flag carries its own _live).
-        if (condIsAuto) {
-          invs.push(
-              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), contId.clone())));
-        }
+        // Inject _live(cont) (always auto-generated) and _live(first) when the
+        // first-flag name was auto-generated (a user-named flag carries its own
+        // _live).
+        invs.push(
+            mk_live(loc.clone(), mk_lvalue_var(loc.clone(), contId.clone())));
         if (firstIsAuto) {
           invs.push(mk_live(loc.clone(),
                             mk_lvalue_var(loc.clone(), firstId.clone())));
-        }
-
-        // Link the internal `cont` flag to the loop condition so the body knows
-        // `cond` holds on re-entry. The guard `while (cont)` alone conveys
-        // nothing to the solver about `cond`, yet many bodies rely on it (e.g.
-        // a body doing `i = i + 1` needs `i < n` to maintain `i <= n`). We
-        // inject:
-        //     cont == (first || cond)
-        // which, together with the guard `cont == true`, re-supplies exactly
-        // the `first || cond` fact the original do-while guard would have
-        // provided.
-        //
-        // This is only sound to emit when `cond` is a *pure* expression: the
-        // invariant is a `with_pure` proposition, so an impure guard (e.g. a
-        // function call like `while (f())`) cannot appear in it. When the guard
-        // has side effects we omit the linking invariant entirely. For such
-        // impure guards the user can instead name the flag with
-        // `_do_while_cond(cont)` and write their own *pure* linking invariant
-        // that relates `cont` to program state rather than to the call itself
-        // (e.g. `cont == (s.x < 10)`, justified by the callee's postcondition).
-        // That user-written invariant is what makes post-loop facts provable:
-        // at loop exit the solver knows `not cont`, and the invariant turns
-        // that into a fact about the state (e.g. `s.x >= 10`).
-        if (!d->getCond()->HasSideEffects(*astCtx)) {
-          auto firstRead = mk_rvalue_lvalue(
-              loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone()));
-          auto contReadInv = mk_rvalue_lvalue(
-              loc.clone(), mk_lvalue_var(loc.clone(), contId.clone()));
-          auto firstOrCond =
-              mk_rvalue_binop(loc.clone(), ir::BinOp::LogOr(),
-                              std::move(firstRead), trRValue(d->getCond()));
-          invs.push(mk_rvalue_binop(loc.clone(), ir::BinOp::Eq(),
-                                    std::move(contReadInv),
-                                    std::move(firstOrCond)));
         }
 
         // Build body: original_body; first = false; cont = cond;
@@ -1451,18 +1399,7 @@ public:
 
       // Legacy desugaring: body has a top-level `continue`.
       //
-      // The `cont` flag plays no role here (the guard is `first || cond`), but
-      // if the user named it via `_do_while_cond(cont)` we still declare and
-      // initialize it. That way an invariant / `_live` referencing `cont`
-      // resolves to a real, initialized variable and the generated F* file does
-      // not break -- even though nothing in this desugaring reads `cont`.
-      if (!condIsAuto) {
-        stmts.push(mk_var_decl(loc.clone(), contId.clone(),
-                               mk_bool_type(loc.clone())));
-        stmts.push(mk_assign(loc.clone(),
-                             mk_lvalue_var(loc.clone(), contId.clone()),
-                             mk_bool_lit(loc.clone(), true)));
-      }
+      // The `cont` flag plays no role here (the guard is `first || cond`).
 
       // bool first; first = true;
       stmts.push(
