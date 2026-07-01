@@ -71,6 +71,7 @@ fn in_main_file(main_files: &[Rc<str>], loc: &SourceInfo) -> bool {
 fn scan_field(deps: &mut HashSet<DeclName>, field: &Field) {
     match &field.val {
         FieldT::Plain { name: _, ty } => scan_type(deps, ty),
+        FieldT::BitField { name: _, ty, .. } => scan_type(deps, ty),
     }
 }
 

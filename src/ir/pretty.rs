@@ -561,6 +561,14 @@ impl PrettyIR for FieldT {
                 .group()
                 .nest(2)
                 .append(RcDoc::hardline()),
+            FieldT::BitField { name, ty, width } => ty
+                .to_doc()
+                .append(RcDoc::line())
+                .append(name.to_doc())
+                .append(format!(" : {width};"))
+                .group()
+                .nest(2)
+                .append(RcDoc::hardline()),
         }
     }
 }

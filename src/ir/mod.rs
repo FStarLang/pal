@@ -424,18 +424,30 @@ pub enum FieldT {
     /// A regular field: `T name;`
     /// For fixed-size C array fields (`T name[length]`), the type is `FixedArray(T, length)`.
     Plain { name: Ident, ty: Rc<Type> },
+    /// An unsigned bit-field: `T name : width;`. `ty` is the declared underlying
+    /// integer type (e.g. `unsigned int`); `width` is the number of bits. The
+    /// value is stored directly in the struct record as a range-refined machine
+    /// value `(v:UIntW.t{UIntW.v v < pow2 width})` and is not separately
+    /// addressable (no extra `ref`/`pts_to` beyond the usual scalar cell).
+    BitField {
+        name: Ident,
+        ty: Rc<Type>,
+        width: u32,
+    },
 }
 
 impl FieldT {
     pub fn name(&self) -> &Ident {
         match self {
             FieldT::Plain { name, .. } => name,
+            FieldT::BitField { name, .. } => name,
         }
     }
 
     pub fn is_array(&self) -> bool {
         match self {
             FieldT::Plain { ty, .. } => matches!(ty.val, TypeT::FixedArray(_, _)),
+            FieldT::BitField { .. } => false,
         }
     }
 
@@ -446,13 +458,17 @@ impl FieldT {
                 TypeT::FixedArray(elem_ty, length) => Some((elem_ty, *length)),
                 _ => None,
             },
+            FieldT::BitField { .. } => None,
         }
     }
 
-    /// Returns the "logical" type of the field.
+    /// Returns the "logical" type of the field. For a bit-field this is the
+    /// declared underlying integer type (e.g. `unsigned int`), which is what a
+    /// member access evaluates to before integer promotion.
     pub fn logical_type(&self, _loc: &Rc<SourceInfo>) -> Rc<Type> {
         match self {
             FieldT::Plain { ty, .. } => ty.clone(),
+            FieldT::BitField { ty, .. } => ty.clone(),
         }
     }
 }

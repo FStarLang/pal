@@ -721,6 +721,42 @@ impl<'a> Emitter<'a> {
     fn emit_field_default(&mut self, env: &Env, field: &Field) -> Doc {
         match &field.val {
             FieldT::Plain { ty, .. } => self.emit_type_default(env, ty),
+            // A bit-field's record cell has the refined machine type, so its
+            // default must be a concrete machine zero (e.g. `UInt16.uint_to_t 0`,
+            // `0` for width `N >= 1`) that visibly satisfies the `< pow2 N`
+            // refinement — not the generic `zero_default`, which has no instance
+            // for the refined type. Resolve typedefs to reach the machine int.
+            FieldT::BitField { ty, .. } => {
+                self.emit_type_default(env, &env.vtype_whnf(ty.clone().into()))
+            }
+        }
+    }
+
+    /// Emit the range-refined machine type backing an unsigned bit-field of the
+    /// given declared underlying integer type and bit-width:
+    /// `(v:UIntW.t{UIntW.v v < pow2 N})`. The declared type may be a typedef
+    /// (e.g. `uint16_t`), so it is resolved to weak-head normal form to find the
+    /// underlying machine width for the `UIntW.v` projection in the refinement.
+    fn emit_bitfield_value_type(&mut self, env: &Env, ty: &Type, width: u32) -> Doc {
+        let base = self.emit_type(env, ty);
+        let modu = match &env.vtype_whnf(ty.clone().into()).val {
+            TypeT::Int {
+                signed: false,
+                width: w,
+            } => get_int_mod(&false, w),
+            _ => None,
+        };
+        match modu {
+            Some(m) => parens(
+                Doc::text("v:")
+                    .append(Doc::line())
+                    .append(base)
+                    .append(Doc::line())
+                    .append(Doc::text(format!("{{{}.v v < pow2 {}}}", m, width))),
+            ),
+            // Should not happen for a well-formed unsigned bit-field; fall back
+            // to the unrefined machine type.
+            None => base,
         }
     }
 
@@ -729,6 +765,7 @@ impl<'a> Emitter<'a> {
     fn emit_field_record_type(&mut self, env: &Env, field: &Field) -> Doc {
         match &field.val {
             FieldT::Plain { name: _, ty } => self.emit_type(env, ty),
+            FieldT::BitField { ty, width, .. } => self.emit_bitfield_value_type(env, ty, *width),
         }
     }
 
@@ -758,6 +795,10 @@ impl<'a> Emitter<'a> {
         } else {
             match &field.val {
                 FieldT::Plain { name: _, ty } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
+                FieldT::BitField { ty, width, .. } => unaryfn(
+                    Doc::text("ref"),
+                    self.emit_bitfield_value_type(env, ty, *width),
+                ),
             }
         }
     }

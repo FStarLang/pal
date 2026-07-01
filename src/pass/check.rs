@@ -72,6 +72,7 @@ impl<'a> Checker<'a> {
     fn check_field(&mut self, env: &Env, field: &Field) {
         match &field.val {
             FieldT::Plain { name: _, ty } => self.check_type(env, ty),
+            FieldT::BitField { name: _, ty, .. } => self.check_type(env, ty),
         }
     }
 

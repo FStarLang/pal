@@ -86,6 +86,7 @@ impl<'a> Elaborator<'a> {
     fn elab_field(&mut self, env: &Env, field: &mut Field) {
         match &mut field.val {
             FieldT::Plain { name: _, ty } => self.elab_type(env, Rc::make_mut(ty)),
+            FieldT::BitField { name: _, ty, .. } => self.elab_type(env, Rc::make_mut(ty)),
         }
     }
 
