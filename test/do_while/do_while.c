@@ -1,5 +1,6 @@
 #include "pal.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 /* do-while with user-named flag variable for first-iteration invariant */
 uint32_t simple_do(uint32_t n)
@@ -100,4 +101,29 @@ uint32_t nested_continue(uint32_t n)
         i = i + 1;
     } while (i < n);
     return i;
+}
+
+/* f: a bool-returning function whose postcondition guarantees `return == true`.
+ */
+bool f(void)
+    _ensures(return == true)
+{
+    return true;
+}
+
+/* g_loop: a do-while whose *guard is a function call* `f()`, with an empty
+ * body (so it takes the clean desugaring path). Because the guard has side
+ * effects, PAL omits the `cont == (first || cond)` linking invariant (a
+ * function call cannot appear in a pure `with_pure` invariant); `cont` simply
+ * carries the guard's value. Ported from ../loopback-new/pal-tests/bool_call. */
+int g_loop(void)
+{
+    int r = 0;
+    do
+        _do_while_first(first)
+        _invariant(_live(r) && _live(first))
+        _invariant((_specint) r == 0)
+    {
+    } while (f());
+    return r;
 }

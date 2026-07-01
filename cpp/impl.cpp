@@ -1361,7 +1361,14 @@ public:
         // `cond` holds on re-entry (the guard `while (cont)` alone conveys
         // nothing to the solver). We inject:
         //     cont == (first || cond)
-        {
+        //
+        // This is only sound to emit when `cond` is a *pure* expression: the
+        // invariant is a `with_pure` proposition, so an impure guard (e.g. a
+        // function call like `while (f())`) cannot appear in it. When the guard
+        // has side effects we omit the linking invariant entirely; `cont`
+        // already holds the guard's most recent value (assigned at the end of
+        // the body), which is all an impure guard can convey.
+        if (!d->getCond()->HasSideEffects(*astCtx)) {
           auto firstRead = mk_rvalue_lvalue(
               loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone()));
           auto contReadInv = mk_rvalue_lvalue(
