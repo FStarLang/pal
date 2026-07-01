@@ -66,6 +66,8 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::StructDirectFieldName(s, _) => Some(format!("Struct_{}", s)),
         Name::StructGhostFieldProj(s, _) => Some(format!("Struct_{}", s)),
         Name::StructAuxFn(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructContainerFn(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructContainerInv(s, _) => Some(format!("Struct_{}", s)),
         Name::UnionFieldConstructor(u, _) => Some(format!("Union_{}", u)),
         Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
@@ -324,6 +326,11 @@ enum Name {
     StructDirectFieldName(Rc<IdentT>, Rc<IdentT>),
     StructGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
     StructAuxFn(Rc<IdentT>, String),
+    /// Inverse of the field-address projection: maps a `ref` of an embedded
+    /// (by-value) struct/union field back to a `ref` of the enclosing struct.
+    StructContainerFn(Rc<IdentT>, Rc<IdentT>),
+    /// Left-inverse lemma tying `StructContainerFn` to `StructGhostFieldProj`.
+    StructContainerInv(Rc<IdentT>, Rc<IdentT>),
 
     UnionFieldConstructor(Rc<IdentT>, Rc<IdentT>),
     UnionGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
@@ -382,6 +389,12 @@ impl Name {
             Name::StructDirectFieldName(str, fld) => format!("{}__{}", struct_to_string(str), fld),
             Name::StructGhostFieldProj(str, fld) => format!("{}__{}", struct_to_string(str), fld),
             Name::StructAuxFn(str, f) => format!("{}__aux_{}", struct_to_string(str), f),
+            Name::StructContainerFn(str, fld) => {
+                format!("{}__{}_container", struct_to_string(str), fld)
+            }
+            Name::StructContainerInv(str, fld) => {
+                format!("{}__{}_container_inv", struct_to_string(str), fld)
+            }
             Name::UnionFieldConstructor(u, fld) => {
                 format!("Field_{}__{}", u, fld)
             }
@@ -4185,6 +4198,60 @@ impl<'a> Emitter<'a> {
                 Doc::text("GTot")
                     .append(Doc::line())
                     .append(projected_type)
+                    .group(),
+            ));
+        }
+
+        // For every field, emit the inverse of the field-address projection: a
+        // total function mapping the field's `ref` (or, for inline-array fields,
+        // the array handle) back to a `ref` of the enclosing struct, plus a
+        // left-inverse lemma (`container (proj p) == p`). The `SMTPat` triggers
+        // on the round-trip term `container (proj p)` rather than the bare
+        // projection, so the equality is injected only where a `container_of`
+        // was actually formed — not in every proof that mentions a field
+        // projection. The user composes `container_of` out of these symbols.
+        for f in fields {
+            let fld = f.val.name();
+            let projected_type = self.emit_field_projection_type(env, f);
+            let container_name =
+                self.emit_name(Name::StructContainerFn(name.val.clone(), fld.val.clone()));
+
+            ses.push(mk_assume_val(
+                vec![],
+                container_name.clone(),
+                &[parens(
+                    Doc::text("r:").append(Doc::line()).append(projected_type),
+                )],
+                ref_struct_type.clone(),
+            ));
+
+            let proj_name = self.emit_name(ghost_fld(fld));
+            let inv_name =
+                self.emit_name(Name::StructContainerInv(name.val.clone(), fld.val.clone()));
+            let proj_app = unaryfn(proj_name, Doc::text("p"));
+            let container_app = unaryfn(container_name, proj_app);
+            let ensures = parens(
+                Doc::text("ensures")
+                    .append(Doc::line())
+                    .append(container_app.clone())
+                    .append(Doc::text(" == p")),
+            );
+            let smtpat = Doc::text("[SMTPat ")
+                .append(container_app)
+                .append(Doc::text("]"));
+
+            ses.push(mk_assume_val(
+                vec![],
+                inv_name,
+                &[parens(
+                    Doc::text("p:")
+                        .append(Doc::line())
+                        .append(ref_struct_type.clone()),
+                )],
+                Doc::text("Lemma")
+                    .append(Doc::line().append(ensures))
+                    .append(Doc::line().append(smtpat))
+                    .nest(2)
                     .group(),
             ));
         }
