@@ -724,6 +724,42 @@ public:
           }
         }
 
+        // Detect the standard `container_of` idiom, i.e.
+        //   (T *)((char *)ptr - offsetof(T, field))
+        // as produced by the `_container_of` macro, Linux's `container_of`,
+        // MsQuic's `CXPLAT_CONTAINING_RECORD`, etc. The outer `(T *)` cast is a
+        // CK_BitCast off a char-pointer subtraction whose right operand is an
+        // `OffsetOfExpr` with a single field component. Recover the field
+        // pointer, enclosing struct, and field name and build a container
+        // projection node. Matching the idiom directly means user code needs no
+        // PAL-specific spelling of `container_of`.
+        if (ic->getCastKind() == CK_BitCast) {
+          if (auto *sub = dyn_cast<BinaryOperator>(
+                  ic->getSubExpr()->IgnoreParenImpCasts());
+              sub && sub->getOpcode() == BO_Sub) {
+            if (auto *ooe = dyn_cast<OffsetOfExpr>(
+                    sub->getRHS()->IgnoreParenImpCasts());
+                ooe && ooe->getNumComponents() == 1 &&
+                ooe->getComponent(0).getKind() == OffsetOfNode::Field) {
+              if (auto *field = ooe->getComponent(0).getField()) {
+                auto *recordDecl = field->getParent();
+                auto structTy = trQualType(astCtx->getRecordType(recordDecl),
+                                           ooe->getSourceRange());
+                auto fieldId = ctx.mk_ident(toStr(fieldNameStr(field)),
+                                            getRange(ooe->getSourceRange()));
+                // Strip the `(char *)` cast off the left operand to recover the
+                // original field pointer rvalue.
+                auto *ptrExpr = sub->getLHS()->IgnoreParenImpCasts();
+                if (auto *ptrCast = dyn_cast<CastExpr>(ptrExpr)) {
+                  ptrExpr = ptrCast->getSubExpr();
+                }
+                return mk_container_of(std::move(loc), trRValue(ptrExpr),
+                                       std::move(structTy), std::move(fieldId));
+              }
+            }
+          }
+        }
+
         // BitCast (e.g., T* → void*): pass through after malloc/calloc
         // detection. F* functions like memcpy are type-polymorphic.
         if (ic->getCastKind() == CK_BitCast) {

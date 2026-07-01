@@ -838,6 +838,7 @@ impl<'a> Emitter<'a> {
                 self.subst_this_rvalue(env, Rc::make_mut(ptr), this);
             }
             ExprT::Free(val) => self.subst_this_rvalue(env, Rc::make_mut(val), this),
+            ExprT::ContainerOf(ptr, _, _) => self.subst_this_rvalue(env, Rc::make_mut(ptr), this),
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)
             | ExprT::PreDecr(val)
@@ -2699,6 +2700,25 @@ impl<'a> Emitter<'a> {
                             .append(Doc::line())
                             .append(self.emit_rvalue(env, val)),
                     )
+                }
+                ExprT::ContainerOf(ptr, struct_ty, field) => {
+                    let resolved = env.vtype_whnf(struct_ty.clone().into());
+                    match &resolved.val {
+                        TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => {
+                            let container = self.emit_name(Name::StructContainerFn(
+                                struct_name.val.clone(),
+                                field.val.clone(),
+                            ));
+                            parens(unaryfn(container, self.emit_rvalue(env, ptr)))
+                        }
+                        _ => {
+                            self.report(
+                                format!("_container_of expects a struct type, got {}", struct_ty),
+                                &struct_ty.loc,
+                            );
+                            Doc::text("(admit())")
+                        }
+                    }
                 }
                 ExprT::PreIncr(val)
                 | ExprT::PostIncr(val)

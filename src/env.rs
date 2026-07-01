@@ -364,6 +364,9 @@ impl Env {
                 None => Err(InferError::NotAFunction(f.clone())),
             },
             ExprT::Cast(_, ty) => Ok(ty.clone().into()),
+            ExprT::ContainerOf(_, struct_ty, _) => Ok(expr
+                .reuse_loc(TypeT::Pointer(struct_ty.clone(), PointerKind::Ref))
+                .into()),
             ExprT::Error(ty) => Ok(ty.clone().into()),
             ExprT::SizeOf(_) | ExprT::AlignOf(_) => Ok(expr.reuse_loc(TypeT::SizeT).into()),
             ExprT::Malloc(ty) | ExprT::Calloc(ty) => Ok(expr

@@ -176,6 +176,10 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             scan_expr(deps, ptr);
         }
         ExprT::Free(val) => scan_expr(deps, val),
+        ExprT::ContainerOf(ptr, struct_ty, _) => {
+            scan_expr(deps, ptr);
+            scan_type(deps, struct_ty);
+        }
         ExprT::PreIncr(val) | ExprT::PostIncr(val) | ExprT::PreDecr(val) | ExprT::PostDecr(val) => {
             scan_expr(deps, val)
         }

@@ -413,6 +413,10 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(ptr), None);
             }
             ExprT::Free(val) => self.elab_rvalue(env, Rc::make_mut(val), None),
+            ExprT::ContainerOf(ptr, struct_ty, _) => {
+                self.elab_rvalue(env, Rc::make_mut(ptr), None);
+                self.elab_type(env, Rc::make_mut(struct_ty));
+            }
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)
             | ExprT::PreDecr(val)

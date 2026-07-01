@@ -267,6 +267,7 @@ mod crate::clang {
     fn mk_rvalue_binop(Rc<SourceInfo>, BinOp, Rc<Expr>, Rc<Expr>) -> Rc<Expr>;
     fn mk_rvalue_fncall(Rc<SourceInfo>, Rc<Ident>, Vec<Rc<Expr>>) -> Rc<Expr>;
     fn mk_cast(Rc<SourceInfo>, Rc<Expr>, Rc<Type>) -> Rc<Expr>;
+    fn mk_container_of(Rc<SourceInfo>, Rc<Expr>, Rc<Type>, Rc<Ident>) -> Rc<Expr>;
     fn mk_rvalue_err(Rc<SourceInfo>, Rc<Type>) -> Rc<Expr>;
     fn mk_malloc(Rc<SourceInfo>, Rc<Type>) -> Rc<Expr>;
     fn mk_malloc_array(Rc<SourceInfo>, Rc<Type>, Rc<Expr>) -> Rc<Expr>;

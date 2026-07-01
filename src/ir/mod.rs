@@ -301,6 +301,11 @@ pub enum ExprT {
     BinOp(BinOp, Rc<Expr>, Rc<Expr>),
     FnCall(Rc<Ident>, Exprs),
     Cast(Rc<Expr>, Rc<Type>),
+    /// `_container_of(ptr, struct T, field)` — recover a `ref` to the enclosing
+    /// struct `T` from a `ref` to its `field` (the CONTAINING_RECORD / offsetof
+    /// idiom). Holds the field pointer, the enclosing struct type, and the field
+    /// name. Emitted as the generated `struct_T__field_container ptr`.
+    ContainerOf(Rc<Expr>, Rc<Type>, Rc<Ident>),
     InlinePulse(Rc<InlinePulseCode>, Rc<Type>),
     Live(Rc<Expr>),
     Old(Rc<Expr>),

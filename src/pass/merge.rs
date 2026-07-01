@@ -95,6 +95,10 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
             rename_expr_in_place(Rc::make_mut(a), renames);
             rename_expr_in_place(Rc::make_mut(b), renames);
         }
+        ExprT::ContainerOf(ptr, struct_ty, _) => {
+            rename_expr_in_place(Rc::make_mut(ptr), renames);
+            rename_type_in_place(Rc::make_mut(struct_ty), renames);
+        }
         ExprT::Cond(a, b, c) => {
             rename_expr_in_place(Rc::make_mut(a), renames);
             rename_expr_in_place(Rc::make_mut(b), renames);
@@ -478,6 +482,10 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
         ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
             collect_refs_expr(a, out);
             collect_refs_expr(b, out);
+        }
+        ExprT::ContainerOf(ptr, struct_ty, _) => {
+            collect_refs_expr(ptr, out);
+            collect_type_refs(struct_ty, out);
         }
         ExprT::Cond(a, b, c) => {
             collect_refs_expr(a, out);

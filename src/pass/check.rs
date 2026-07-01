@@ -477,6 +477,31 @@ impl<'a> Checker<'a> {
                 self.check_rvalue(env, ptr);
             }
             ExprT::Free(val) => self.check_rvalue(env, val),
+            ExprT::ContainerOf(ptr, struct_ty, field) => {
+                self.check_rvalue(env, ptr);
+                self.check_type(env, struct_ty);
+                if self.check_types {
+                    match &env.vtype_whnf(struct_ty.clone().into()).val {
+                        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                            let Some(s) = env.lookup_struct(n) else {
+                                return self.report(format!("unknown structure {}", n), &rval.loc);
+                            };
+                            if s.get_field(field).is_none() {
+                                return self.report(
+                                    format!("no field {} in structure {}", field, n),
+                                    &rval.loc,
+                                );
+                            }
+                        }
+                        t => {
+                            return self.report(
+                                format!("_container_of expects a struct type, got {}", t),
+                                &struct_ty.loc,
+                            );
+                        }
+                    }
+                }
+            }
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)
             | ExprT::PreDecr(val)

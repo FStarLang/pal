@@ -89,6 +89,14 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 
 #endif
 
+// The standard `container_of` idiom (Linux `container_of`, MsQuic
+// `CXPLAT_CONTAINING_RECORD`): recover a pointer to the enclosing `type` from a
+// pointer to its `field`. This is the portable definition; under C2PULSE the
+// translator pattern-matches this exact construct and lowers it to a verified
+// container projection, so no PAL-specific spelling is required.
+#define _container_of(ptr, type, field) \
+    ((type *)((char *)(ptr) - __builtin_offsetof(type, field)))
+
 #define _preserves(p) _requires(p) _ensures(p)
 #define _allocated _refine((_slprop) _inline_pulse(freeable $(this)))
 
