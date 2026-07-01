@@ -460,16 +460,44 @@ let arrayptr_lt #t x z = admit ()
 //
 // PAL emits `array_borrow_cell` when a C `&a[i]` (address of an array element)
 // flows into a parameter typed as a plain pointer (Pulse `ref`). The cell is
-// removed from the array's mask while it is borrowed (`array_pts_to_except`),
-// and `array_return_cell` puts it back, possibly with an updated value.
+// removed from the array's mask while it is borrowed by moving its spec cell to
+// `OutOfMask` (`array_spec_borrow`); the array then holds `array_pts_to a p
+// (array_spec_borrow s i)`. `array_return_cell` puts it back, possibly with an
+// updated value. No dedicated predicate is needed: the mask that backs
+// `array_pts_to` already exists to lend a single cell's ownership out.
 //
 // These wrap `Pulse.Lib.Reference.array_at` / `return_array_at`, which operate
 // on the very `pts_to_mask` that backs `array_pts_to`.
 // ---------------------------------------------------------------------------
 
-// `array_pts_to a p s` with cell `i` removed from the mask (lent out as a ref).
-let array_pts_to_except (#a: Type u#a) (x: array a) (p: perm) (s: array_spec a) (i: nat) : slprop =
-  A.pts_to_mask x #p (to_seq s) (fun k -> to_mask s k /\ k <> i)
+// `array_spec_borrow s i`: cell `i` moved out of the mask (its ownership lent
+// out as a ref). Reuses the `OutOfMask` spec cell, so `array_pts_to a p
+// (array_spec_borrow s i)` is exactly the array owning every cell but `i`.
+let array_spec_borrow (#a: Type u#a) (s: array_spec a) (i: nat) : array_spec a =
+  if i < Seq.length s then Seq.upd s i OutOfMask else s
+
+// Borrowing changes only one cell, so the length is preserved.
+let array_spec_borrow_len #t (s: array_spec t) (i: nat)
+  : Lemma (Seq.length (array_spec_borrow s i) == Seq.length s)
+          [SMTPat (Seq.length (array_spec_borrow s i))]
+= ()
+
+// Cell `i` reads back as `OutOfMask`; every other cell is untouched. This
+// SMTPat lets the solver derive the mask/initd/idx facts about a borrowed spec.
+let array_spec_borrow_index #t (s: array_spec t) (i: nat) (k: nat { k < Seq.length s })
+  : Lemma (requires i < Seq.length s)
+          (ensures Seq.index (array_spec_borrow s i) k ==
+            (if k = i then OutOfMask else Seq.index s k))
+          [SMTPat (Seq.index (array_spec_borrow s i) k)]
+= if k = i then Seq.lemma_index_upd1 s i OutOfMask
+  else Seq.lemma_index_upd2 s i OutOfMask k
+
+// The backing sequence of a borrowed spec: cell `i` reads back as `None`
+// (unowned), the rest unchanged.
+let to_seq_borrow #t (s: array_spec t) (i: nat)
+  : Lemma (requires i < Seq.length s)
+          (ensures to_seq (array_spec_borrow s i) `Seq.equal` Seq.upd (to_seq s) i None)
+= ()
 
 // Total (refinement-free) view of the ghost ref that aliases cell `i` of `a`.
 // `R.array_at_ghost` needs `i < length a`, which the abstract `array_pts_to`
@@ -523,14 +551,17 @@ fn array_borrow_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   requires array_pts_to a p s
   returns r: ref t
   ensures (r |-> Frac p (array_spec_idx s (SZ.v i)))
-  ensures array_pts_to_except a p s (SZ.v i)
+  ensures array_pts_to a p (array_spec_borrow s (SZ.v i))
   ensures rewrites_to r (array_cell_ref a (SZ.v i))
 {
   unfold array_pts_to a p s;
   A.pts_to_mask_len a;
   to_seq_initd s (SZ.v i);
   let r = R.array_at a i;
-  fold (array_pts_to_except a p s (SZ.v i));
+  to_seq_borrow s (SZ.v i);
+  A.mask_vext a (to_seq (array_spec_borrow s (SZ.v i)));
+  A.mask_mext a (to_mask (array_spec_borrow s (SZ.v i)));
+  fold (array_pts_to a p (array_spec_borrow s (SZ.v i)));
   r
 }
 
@@ -540,15 +571,16 @@ fn array_return_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   (#v: t)
   requires (array_cell_ref a (SZ.v i) |-> Frac p v)
-  requires array_pts_to_except a p s (SZ.v i)
+  requires array_pts_to a p (array_spec_borrow s (SZ.v i))
   ensures array_pts_to a p (array_spec_upd s (SZ.v i) v)
 {
-  unfold array_pts_to_except a p s (SZ.v i);
+  unfold array_pts_to a p (array_spec_borrow s (SZ.v i));
   A.pts_to_mask_len a;
   rewrite (array_cell_ref a (SZ.v i) |-> Frac p v)
        as (R.array_at_ghost a (SZ.v i) |-> Frac p v);
   R.return_array_at a (SZ.v i);
   let s' = hide (array_spec_upd s (SZ.v i) v);
+  to_seq_borrow s (SZ.v i);
   to_seq_upd s (SZ.v i) v;
   A.mask_mext a (to_mask s');
   A.mask_vext a (to_seq s');
@@ -568,13 +600,16 @@ fn array_borrow_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   requires array_pts_to a 1.0R s
   returns r: ref t
   ensures R.pts_to_uninit r
-  ensures array_pts_to_except a 1.0R s (SZ.v i)
+  ensures array_pts_to a 1.0R (array_spec_borrow s (SZ.v i))
   ensures rewrites_to r (array_cell_ref a (SZ.v i))
 {
   unfold array_pts_to a 1.0R s;
   A.pts_to_mask_len a;
   let r = R.array_at_uninit a i;
-  fold (array_pts_to_except a 1.0R s (SZ.v i));
+  to_seq_borrow s (SZ.v i);
+  A.mask_vext a (to_seq (array_spec_borrow s (SZ.v i)));
+  A.mask_mext a (to_mask (array_spec_borrow s (SZ.v i)));
+  fold (array_pts_to a 1.0R (array_spec_borrow s (SZ.v i)));
   r
 }
 
@@ -589,16 +624,17 @@ ghost
 fn array_return_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#s: erased (array_spec t) { array_spec_full_mask s /\ array_spec_mask s (SZ.v i) })
   requires R.pts_to_uninit (array_cell_ref a (SZ.v i))
-  requires array_pts_to_except a 1.0R s (SZ.v i)
+  requires array_pts_to a 1.0R (array_spec_borrow s (SZ.v i))
   ensures array_pts_to_uninit' a
 {
-  unfold array_pts_to_except a 1.0R s (SZ.v i);
+  unfold array_pts_to a 1.0R (array_spec_borrow s (SZ.v i));
   A.pts_to_mask_len a;
   rewrite (R.pts_to_uninit (array_cell_ref a (SZ.v i)))
        as (R.pts_to_uninit (R.array_at_ghost a (SZ.v i)));
   R.return_array_at_uninit a (SZ.v i);
-  with vi. assert A.pts_to_mask a (Seq.upd (to_seq s) (SZ.v i) vi) _;
+  with vi. assert A.pts_to_mask a (Seq.upd (to_seq (array_spec_borrow s (SZ.v i))) (SZ.v i) vi) _;
   let y : array_spec t = Seq.upd s (SZ.v i) (opt_cell vi);
+  to_seq_borrow s (SZ.v i);
   to_seq_upd_opt s (SZ.v i) vi;
   array_spec_full_mask_upd_opt s (SZ.v i) vi;
   A.mask_vext a (to_seq y);
