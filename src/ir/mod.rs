@@ -451,6 +451,15 @@ impl FieldT {
         }
     }
 
+    /// For a bit-field, the number of bits in its declared width; `None` for a
+    /// plain field. Doubles as a "this is a bit-field" predicate.
+    pub fn bit_width(&self) -> Option<u32> {
+        match self {
+            FieldT::BitField { width, .. } => Some(*width),
+            FieldT::Plain { .. } => None,
+        }
+    }
+
     /// For array fields, return the element type and length.
     pub fn fixed_array_info(&self) -> Option<(&Rc<Type>, u64)> {
         match self {

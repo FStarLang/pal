@@ -760,6 +760,34 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// If `lhs` is a struct member access (`s->f` / `s.f`) whose field is an
+    /// unsigned bit-field, return its bit-width and the fully-qualified masking
+    /// helper (`Pulse.Lib.C.BitField.mask_uW`) for its underlying machine width.
+    /// A write to a bit-field stores `mask_uW width rhs` so the masked value
+    /// satisfies the cell's `< pow2 width` refinement (C unsigned truncation).
+    fn bitfield_member_mask(&self, env: &Env, lhs: &Expr) -> Option<(u32, &'static str)> {
+        let ExprT::Member(base, fld) = &lhs.val else {
+            return None;
+        };
+        let base_ty = env.vtype_whnf(env.infer_expr(base).ok()?);
+        let struct_name = match &base_ty.val {
+            TypeT::TypeRef(TypeRefKind::Struct(s)) => s.clone(),
+            _ => return None,
+        };
+        let sdef = env.lookup_struct(&struct_name)?;
+        let field = sdef.fields.iter().find(|f| f.val.name().val == fld.val)?;
+        let width = field.val.bit_width()?;
+        let underlying = env.vtype_whnf(field.val.logical_type(&field.loc).into());
+        let mask_fn = match &underlying.val {
+            TypeT::Int {
+                signed: false,
+                width: mw,
+            } => get_bitfield_mask_fn(mw)?,
+            _ => return None,
+        };
+        Some((width, mask_fn))
+    }
+
     /// Render the F* type appearing in a struct/union's noeq record for
     /// `field`. For `Plain` fields this is the stored type
     fn emit_field_record_type(&mut self, env: &Env, field: &Field) -> Doc {
@@ -1638,6 +1666,19 @@ fn get_uint_wrap_mod(width: &u32) -> Option<&'static str> {
         16 => "Pulse.Lib.C.UInt16",
         32 => "Pulse.Lib.C.UInt32",
         64 => "Pulse.Lib.C.UInt64",
+        _ => return None,
+    })
+}
+
+/// Fully-qualified bit-field truncation (masking) helper for each unsigned
+/// machine width. `mask_uW n v` returns the low `n` bits of `v` as a value
+/// provably `< pow2 n` (C unsigned modular truncation on a bit-field write).
+fn get_bitfield_mask_fn(machine_width: &u32) -> Option<&'static str> {
+    Some(match machine_width {
+        8 => "Pulse.Lib.C.BitField.mask_u8",
+        16 => "Pulse.Lib.C.BitField.mask_u16",
+        32 => "Pulse.Lib.C.BitField.mask_u32",
+        64 => "Pulse.Lib.C.BitField.mask_u64",
         _ => return None,
     })
 }
@@ -3273,13 +3314,24 @@ impl<'a> Emitter<'a> {
                                     .nest(2);
                             }
                         }
-                        // Fall through to normal assignment for struct members
+                        // Fall through to normal assignment for struct members.
+                        // For an unsigned bit-field, mask the RHS to its width so
+                        // the stored value satisfies the cell's `< pow2 N`
+                        // refinement (C unsigned modular truncation on write).
+                        let rhs = match self.bitfield_member_mask(env, x) {
+                            Some((width, mask_fn)) => naryfn([
+                                Doc::text(mask_fn),
+                                Doc::text(width.to_string()),
+                                self.emit_rvalue(env, t),
+                            ]),
+                            None => self.emit_rvalue(env, t),
+                        };
                         self.emit_lvalue(env, x)
                             .append(Doc::line())
                             .append(":=")
                             .group()
                             .append(Doc::line())
-                            .append(self.emit_rvalue(env, t))
+                            .append(rhs)
                             .append(";")
                             .group()
                             .nest(2)
