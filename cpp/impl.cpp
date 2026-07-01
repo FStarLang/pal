@@ -35,6 +35,24 @@ Ref<rust::Str> toStr(std::string const &str) {
   return str_from_parts((uint8_t const *)str.data(), str.size());
 }
 
+// Returns true if `s` contains a `continue` that binds to the enclosing loop,
+// i.e. a `continue` that is not nested inside another loop. Nested `for`,
+// `while`, and `do-while` loops act as boundaries (their `continue` belongs to
+// them), so we do not descend into them. A `switch` does NOT capture `continue`
+// in C, so we descend into it (and into `if`, blocks, labels, etc.).
+static bool hasTopLevelContinue(const Stmt *s) {
+  if (!s)
+    return false;
+  if (isa<ContinueStmt>(s))
+    return true;
+  if (isa<ForStmt>(s) || isa<WhileStmt>(s) || isa<DoStmt>(s))
+    return false;
+  for (const Stmt *child : s->children())
+    if (hasTopLevelContinue(child))
+      return true;
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -1258,10 +1276,15 @@ public:
                                  std::move(invs), std::move(reqs),
                                  std::move(enss), std::move(bodyStmts)));
     } else if (auto *d = dyn_cast<DoStmt>(stmt)) {
-      // Desugar: do { body } while (cond)
-      //      --> bool flag = true;
-      //          while (flag || cond) { flag = false; body; }
-      // If _do_while_first(name) is provided, use that name for the flag.
+      // Desugar `do { body } while (cond)`. If the body has no top-level
+      // `continue` we use the "clean" desugaring:
+      //      --> bool cont = true; bool first = true;
+      //          while (cont) { body; first = false; cont = cond; }
+      // Otherwise (a top-level `continue` would skip the trailing `cont = cond`
+      // update) we fall back to the legacy desugaring:
+      //      --> bool first = true;
+      //          while (first || cond) { first = false; body; }
+      // In both cases `_do_while_first(name)` names the first-iteration flag.
 
       // Extract annotations and check for _do_while_first
       auto body = d->getBody();
@@ -1290,39 +1313,115 @@ public:
         body = attrBody->getSubStmt();
       }
 
-      if (flagName.empty()) {
+      // First-iteration flag: named by _do_while_first, else auto-generated.
+      // Its
+      // `_live` invariant is auto-injected only when the name is auto-generated
+      // (a user-named flag is expected to be mentioned in the user's
+      // invariant).
+      bool firstIsAuto = flagName.empty();
+      if (firstIsAuto) {
         static int doCounter = 0;
         flagName = "__do_first_" + std::to_string(doCounter++);
       }
-      auto flagId = ctx.mk_ident(toStr(flagName), loc.clone());
+      auto firstId = ctx.mk_ident(toStr(flagName), loc.clone());
 
-      // bool flag; flag = true;
+      if (!hasTopLevelContinue(body)) {
+        // Clean desugaring: no top-level `continue`.
+        static int doContCounter = 0;
+        std::string contName = "__do_cont_" + std::to_string(doContCounter++);
+        auto contId = ctx.mk_ident(toStr(contName), loc.clone());
+
+        // bool cont; cont = true;
+        stmts.push(mk_var_decl(loc.clone(), contId.clone(),
+                               mk_bool_type(loc.clone())));
+        stmts.push(mk_assign(loc.clone(),
+                             mk_lvalue_var(loc.clone(), contId.clone()),
+                             mk_bool_lit(loc.clone(), true)));
+        // bool first; first = true;
+        stmts.push(mk_var_decl(loc.clone(), firstId.clone(),
+                               mk_bool_type(loc.clone())));
+        stmts.push(mk_assign(loc.clone(),
+                             mk_lvalue_var(loc.clone(), firstId.clone()),
+                             mk_bool_lit(loc.clone(), true)));
+
+        // while condition: cont
+        auto whileCond = mk_rvalue_lvalue(
+            loc.clone(), mk_lvalue_var(loc.clone(), contId.clone()));
+
+        // Always inject _live(cont) (internal flag), and _live(first) when the
+        // first flag was auto-generated.
+        invs.push(
+            mk_live(loc.clone(), mk_lvalue_var(loc.clone(), contId.clone())));
+        if (firstIsAuto) {
+          invs.push(mk_live(loc.clone(),
+                            mk_lvalue_var(loc.clone(), firstId.clone())));
+        }
+
+        // Link the internal `cont` flag to the loop condition so the body knows
+        // `cond` holds on re-entry (the guard `while (cont)` alone conveys
+        // nothing to the solver). We inject:
+        //     cont == (first || cond)
+        {
+          auto firstRead = mk_rvalue_lvalue(
+              loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone()));
+          auto contReadInv = mk_rvalue_lvalue(
+              loc.clone(), mk_lvalue_var(loc.clone(), contId.clone()));
+          auto firstOrCond =
+              mk_rvalue_binop(loc.clone(), ir::BinOp::LogOr(),
+                              std::move(firstRead), trRValue(d->getCond()));
+          invs.push(mk_rvalue_binop(loc.clone(), ir::BinOp::Eq(),
+                                    std::move(contReadInv),
+                                    std::move(firstOrCond)));
+        }
+
+        // Build body: original_body; first = false; cont = cond;
+        auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+        auto savedIncrement = forLoopIncrement;
+        forLoopIncrement = nullptr;
+        trStmt(bodyStmts, body);
+        forLoopIncrement = savedIncrement;
+        bodyStmts.push(mk_assign(loc.clone(),
+                                 mk_lvalue_var(loc.clone(), firstId.clone()),
+                                 mk_bool_lit(loc.clone(), false)));
+        bodyStmts.push(mk_assign(loc.clone(),
+                                 mk_lvalue_var(loc.clone(), contId.clone()),
+                                 trRValue(d->getCond())));
+
+        return stmts.push(mk_while(std::move(loc), std::move(whileCond),
+                                   std::move(invs), std::move(reqs),
+                                   std::move(enss), std::move(bodyStmts)));
+      }
+
+      // Legacy desugaring: body has a top-level `continue`.
+      // bool first; first = true;
       stmts.push(
-          mk_var_decl(loc.clone(), flagId.clone(), mk_bool_type(loc.clone())));
+          mk_var_decl(loc.clone(), firstId.clone(), mk_bool_type(loc.clone())));
       stmts.push(mk_assign(loc.clone(),
-                           mk_lvalue_var(loc.clone(), flagId.clone()),
+                           mk_lvalue_var(loc.clone(), firstId.clone()),
                            mk_bool_lit(loc.clone(), true)));
 
-      // while condition: flag || cond
+      // while condition: first || cond
       auto flagRead = mk_rvalue_lvalue(
-          loc.clone(), mk_lvalue_var(loc.clone(), flagId.clone()));
+          loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone()));
       auto whileCond =
           mk_rvalue_binop(loc.clone(), ir::BinOp::LogOr(), std::move(flagRead),
                           trRValue(d->getCond()));
 
-      // Add _live(flag) to invariants (skip if user provided _do_while_first,
-      // since user is expected to include it in their own invariant)
-      if (flagName.find("__do_first_") == 0) {
+      // Add _live(first) to invariants when the name is auto-generated.
+      if (firstIsAuto) {
         invs.push(
-            mk_live(loc.clone(), mk_lvalue_var(loc.clone(), flagId.clone())));
+            mk_live(loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone())));
       }
 
-      // Build body: flag = false; original_body;
+      // Build body: first = false; original_body;
       auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
       bodyStmts.push(mk_assign(loc.clone(),
-                               mk_lvalue_var(loc.clone(), flagId.clone()),
+                               mk_lvalue_var(loc.clone(), firstId.clone()),
                                mk_bool_lit(loc.clone(), false)));
+      auto savedIncrement = forLoopIncrement;
+      forLoopIncrement = nullptr;
       trStmt(bodyStmts, body);
+      forLoopIncrement = savedIncrement;
 
       return stmts.push(mk_while(std::move(loc), std::move(whileCond),
                                  std::move(invs), std::move(reqs),
