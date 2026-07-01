@@ -179,6 +179,15 @@ A `TranslationUnit` is the top-level container: a list of
 `main_file_names` (the input `.c` files) and a flat list of `Decl`
 nodes.
 
+**Bit-fields.** An unsigned struct bit-field (`unsigned int a : N;`) is
+modeled by `FieldT::BitField { name, ty, width }`. It is encoded like an
+ordinary scalar field but its backing cell is range-refined to the width,
+`(v:UIntW.t{UIntW.v v < pow2 N})`, and a write `s->a = e` stores
+`Pulse.Lib.C.BitField.mask_uW N e` (C unsigned modular truncation), so the
+stored value always satisfies the refinement. Reads need no conversion.
+Anonymous and zero-width padding bit-fields are dropped; signed bit-fields
+and union bit-fields are rejected with a diagnostic.
+
 ---
 
 ## 3. Zngur FFI
@@ -281,6 +290,7 @@ hand-written library code that ships with PAL.
 | `Pulse.Lib.C.UnaryOps` | negation, bitwise not |
 | `Pulse.Lib.C.Sizeof` | compile-time `sizeof` |
 | `Pulse.Lib.C.Inhabited` | inhabitedness proofs (needed for memory allocation) |
+| `Pulse.Lib.C.BitField` | `mask_uW` truncation helpers for unsigned bit-field writes |
 | `Pulse.Lib.C.Assumptions` | axioms bridging C semantics and F* |
 
 The top-level module `Pulse.Lib.C` re-exports the core subset:
