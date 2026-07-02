@@ -2259,6 +2259,19 @@ impl<'a> Emitter<'a> {
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
                             TypeT::Pointer(_, PointerKind::Core),
                         ) => unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val_doc),
+                        // array/arrayptr → `core_ref`: convert the arrayptr to a
+                        // `ref` of the same handle (`array_to_ref`, the identity
+                        // coercion) and erase it to the raw base+offset address
+                        // with the single `ref_to_core` primitive. Emitted for a
+                        // mixed arrayptr/ref `==`, so the two pointer kinds
+                        // compare via `core_ref_eq`.
+                        (
+                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
+                            TypeT::Pointer(_, PointerKind::Core),
+                        ) => unaryfn(
+                            Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                            unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
+                        ),
                         (TypeT::Pointer(_, _), TypeT::Pointer(_, to_kind)) => {
                             // Pointer kind change (e.g., Ref→ArrayPtr for null)
                             if matches!(&val.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) {
@@ -2858,18 +2871,33 @@ impl<'a> Emitter<'a> {
                                 )
                             });
                             // `&a[i]` passed into a plain `int *` param (a Pulse
-                            // `ref`) where `a` is a real `_array`: borrow a `ref`
-                            // from the array cell at index `i`. The borrow is
-                            // effectful, so it is let-bound as a call prelude and
-                            // the fresh binding is passed in place of the
-                            // address-of expression. The returning side is invoked
-                            // manually by the user via inline Pulse.
+                            // `ref`) where `a` is a real `_array`: borrow cell `i`
+                            // out of the array with `array_borrow_cell`. The
+                            // borrow is emitted as a call prelude and the fresh
+                            // binding passed in place of the address-of
+                            // expression. (The name is not strictly required --
+                            // an inline `f (array_borrow_cell a i)` would be
+                            // A-normalized by Pulse to the same binding.) The
+                            // returning side is invoked manually by the user via
+                            // inline Pulse.
                             //
-                            // When the callee parameter is `_out` it expects an
-                            // uninitialized `ref` (`pts_to_uninit`), so the cell is
-                            // borrowed with `array_borrow_cell_uninit` (which does
-                            // not require the cell to be initialized); otherwise the
-                            // initialized borrow `array_borrow_cell` is used.
+                            // The cell is handed out as `pts_to_maybe_uninit`
+                            // carrying its current optional value. At the call the
+                            // maybe-cell adapts to whatever the callee expects via
+                            // the `[@@pulse_intro]` coercions -- `reveal_maybe` for
+                            // a readable `pts_to` (when the cell is known `Some`),
+                            // `forget_maybe` for a write-only `pts_to_uninit`
+                            // (`_out`) -- so the call itself typechecks with no
+                            // ghost step. PAL does NOT, however, emit the matching
+                            // return: after the call the (now written) cell is left
+                            // carved out of the array, so a function whose
+                            // postcondition owns the *whole* array cannot
+                            // re-establish it and F* reports leftover resources.
+                            // Handing a cell to such a function therefore requires
+                            // borrowing into a local (`T* p = &a[i];`) and giving
+                            // the cell back explicitly (`intro_maybe_some` + the
+                            // index-inferring `array_return_cell`); the direct
+                            // `f(&a[i])` form carries the borrow one way only.
                             let borrow_cell = match &arg.val {
                                 ExprT::Ref(inner) => match &inner.val {
                                     ExprT::Index(arr, idx) => {
@@ -2880,8 +2908,6 @@ impl<'a> Emitter<'a> {
                                                 TypeT::Pointer(_, PointerKind::Ref)
                                             )
                                         });
-                                        let param_is_out = param
-                                            .is_some_and(|fn_arg| fn_arg.mode == ParamMode::Out);
                                         let arr_is_array = env
                                             .infer_expr(arr)
                                             .ok()
@@ -2893,7 +2919,7 @@ impl<'a> Emitter<'a> {
                                                 )
                                             });
                                         if param_is_ref && arr_is_array {
-                                            Some((arr.clone(), idx.clone(), param_is_out))
+                                            Some((arr.clone(), idx.clone()))
                                         } else {
                                             None
                                         }
@@ -2914,20 +2940,19 @@ impl<'a> Emitter<'a> {
                                 }
                                 _ => None,
                             };
-                            if let Some((arr, idx, is_out)) = borrow_cell {
+                            if let Some((arr, idx)) = borrow_cell {
                                 let tmp = self.fresh_tmp("borrow");
                                 let arr_doc = self.emit_rvalue(env, &arr);
                                 let idx_doc = self.emit_rvalue(env, &idx);
-                                let borrow_fn = if is_out {
-                                    "array_borrow_cell_uninit"
-                                } else {
-                                    "array_borrow_cell"
-                                };
                                 let borrow = Doc::text("let ")
                                     .append(tmp.clone())
                                     .append(Doc::text(" ="))
                                     .append(Doc::line())
-                                    .append(naryfn([Doc::text(borrow_fn), arr_doc, idx_doc]))
+                                    .append(naryfn([
+                                        Doc::text("array_borrow_cell"),
+                                        arr_doc,
+                                        idx_doc,
+                                    ]))
                                     .append(";")
                                     .nest(2)
                                     .group();
@@ -2973,7 +2998,7 @@ impl<'a> Emitter<'a> {
                             }
                         }
                         if !prelude.is_empty() {
-                            return Doc::concat(
+                            let call_doc = Doc::concat(
                                 prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
                             )
                             .append(
@@ -2991,6 +3016,7 @@ impl<'a> Emitter<'a> {
                                     .nest(2)
                                     .group(),
                             );
+                            return call_doc;
                         }
                     }
                     discard_lead
@@ -3096,6 +3122,88 @@ impl<'a> Emitter<'a> {
                         .append(redecl)
                 }
                 StmtT::Assign(x, t) => {
+                    // `x = &a[i]` where `a` is an `_array` and `x` is a `ref`
+                    // local: borrow cell `i` out of the array as a `ref` and
+                    // bind it to `x`. This is the non-argument counterpart of
+                    // the call-site cell borrow above: `array_borrow_cell` hands
+                    // the cell out as `pts_to_maybe_uninit`, leaving the array
+                    // with that cell carved out. The user then adapts the
+                    // maybe-cell (e.g. `forget_maybe` to fill an uninitialized
+                    // struct field-by-field through `x`) and later returns it to
+                    // the array with `array_return_cell`. The borrow call is
+                    // stored directly into the (mutable) `ref` local `x`.
+                    if let ExprT::Ref(inner) = &t.val
+                        && let ExprT::Index(arr, idx) = &inner.val
+                        && env
+                            .infer_expr(arr)
+                            .ok()
+                            .map(|ty| env.vtype_whnf(ty))
+                            .is_some_and(|ty| {
+                                matches!(ty.val, TypeT::Pointer(_, PointerKind::Array))
+                            })
+                        && env
+                            .infer_expr(x)
+                            .ok()
+                            .map(|ty| env.vtype_whnf(ty))
+                            .is_some_and(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Ref)))
+                    {
+                        let arr_doc = self.emit_rvalue(env, arr);
+                        let idx_doc = self.emit_rvalue(env, idx);
+                        return self
+                            .emit_lvalue(env, x)
+                            .append(Doc::line())
+                            .append(":=")
+                            .group()
+                            .append(Doc::line())
+                            .append(naryfn([Doc::text("array_borrow_cell"), arr_doc, idx_doc]))
+                            .append(";")
+                            .group()
+                            .nest(2);
+                    }
+                    // `x = <arrayptr>` where `x` is a `ref` local: borrow the
+                    // cell the arrayptr points at out of its (still-live) parent
+                    // array as a `ref` and bind it to `x`. This is the arrayptr
+                    // counterpart of the `&a[i]` borrow-to-local above -- e.g. a
+                    // helper *returns* an arrayptr and the caller stores it in a
+                    // plain-pointer local before writing through it. The
+                    // elaborator leaves the plain-pointer local as a `ref` and
+                    // inserts an `ArrayPtr -> Ref` cast on the initializer; the
+                    // arrayptr is the cast's operand (often an inlined,
+                    // anonymous call result). `arrayptr_borrow_cell` hands the
+                    // cell out as `pts_to_maybe_uninit`; the user then adapts it
+                    // (e.g. `forget_maybe` to fill an uninitialized struct
+                    // field-by-field) and later returns it to the parent array
+                    // with `array_return_cell` -- whose cell index is inferred,
+                    // so it reconciles the borrowed cell's symbolic arrayptr
+                    // offset even though no named arrayptr handle survives the
+                    // inlined borrow. PAL never guesses the cell's
+                    // initialization state.
+                    if let ExprT::Cast(inner, _) = &t.val
+                        && env
+                            .infer_expr(inner)
+                            .ok()
+                            .map(|ty| env.vtype_whnf(ty))
+                            .is_some_and(|ty| {
+                                matches!(ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr))
+                            })
+                        && env
+                            .infer_expr(x)
+                            .ok()
+                            .map(|ty| env.vtype_whnf(ty))
+                            .is_some_and(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Ref)))
+                    {
+                        let ap_doc = self.emit_rvalue(env, inner);
+                        return self
+                            .emit_lvalue(env, x)
+                            .append(Doc::line())
+                            .append(":=")
+                            .group()
+                            .append(Doc::line())
+                            .append(naryfn([Doc::text("arrayptr_borrow_cell"), ap_doc]))
+                            .append(";")
+                            .group()
+                            .nest(2);
+                    }
                     // a[i].field = val → array_update / arrayptr_update
                     // (*p).field = val → array_update / arrayptr_update at index 0
                     //   (the `p->field` form, where `p` is an array/arrayptr)
