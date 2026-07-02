@@ -35,6 +35,24 @@ Ref<rust::Str> toStr(std::string const &str) {
   return str_from_parts((uint8_t const *)str.data(), str.size());
 }
 
+// Returns true if `s` contains a `continue` that binds to the enclosing loop,
+// i.e. a `continue` that is not nested inside another loop. Nested `for`,
+// `while`, and `do-while` loops act as boundaries (their `continue` belongs to
+// them), so we do not descend into them. A `switch` does NOT capture `continue`
+// in C, so we descend into it (and into `if`, blocks, labels, etc.).
+static bool hasTopLevelContinue(const Stmt *s) {
+  if (!s)
+    return false;
+  if (isa<ContinueStmt>(s))
+    return true;
+  if (isa<ForStmt>(s) || isa<WhileStmt>(s) || isa<DoStmt>(s))
+    return false;
+  for (const Stmt *child : s->children())
+    if (hasTopLevelContinue(child))
+      return true;
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -1258,17 +1276,48 @@ public:
                                  std::move(invs), std::move(reqs),
                                  std::move(enss), std::move(bodyStmts)));
     } else if (auto *d = dyn_cast<DoStmt>(stmt)) {
-      // Desugar: do { body } while (cond)
-      //      --> bool flag = true;
-      //          while (flag || cond) { flag = false; body; }
-      // If _do_while_first(name) is provided, use that name for the flag.
+      // Desugar `do { body } while (cond)` into a `while` loop. There are two
+      // desugarings, and the presence of a *top-level* `continue` in the body
+      // selects between them:
+      //
+      //   * Clean desugaring (no top-level `continue`):
+      //         bool cont = true; bool first = true;
+      //         while (cont) { body; first = false; cont = cond; }
+      //     Here `cont` (the "continuation" flag) drives the loop: it is forced
+      //     true so the body runs at least once (do-while semantics), then the
+      //     guard is re-evaluated at the *end* of the body via `cont = cond`.
+      //
+      //   * Legacy desugaring (a top-level `continue` is present):
+      //         bool first = true;
+      //         while (first || cond) { first = false; body; }
+      //     We cannot use the clean form here: a top-level `continue` would
+      //     jump past the trailing `cont = cond` update, so the guard would
+      //     never be re-evaluated and the loop could spin forever. The legacy
+      //     form keeps the guard `cond` in the `while` condition (re-evaluated
+      //     on each iteration, side effects and all) where `continue` cannot
+      //     skip it.
+      //
+      // `hasTopLevelContinue` decides which form to use. It treats a nested
+      // for/while/do-while as a boundary (a `continue` inside one binds to that
+      // inner loop, not to us) but descends into if/switch/blocks/labels, since
+      // a `continue` there does target this do-while.
+      //
+      // Annotations:
+      //   * `_do_while_first(name)` names the first-iteration flag so the user
+      //     can mention it in invariants (e.g. `first ==> i < n`).
+      //   * `_do_while_cond(name)` names the continuation flag `cont`. This is
+      //     needed for impure guards: the auto-linking invariant (below) is
+      //     omitted when the guard has side effects, so the user must name
+      //     `cont` and supply their own *pure* linking invariant relating it to
+      //     program state (e.g. `cont == (s.x < 10)`).
 
-      // Extract annotations and check for _do_while_first
+      // Extract annotations and check for _do_while_first / _do_while_cond
       auto body = d->getBody();
       auto invs = Vec<Rc<ir::Expr>>::new_();
       auto reqs = Vec<Rc<ir::Expr>>::new_();
       auto enss = Vec<Rc<ir::Expr>>::new_();
       std::string flagName;
+      std::string condName;
       if (auto attrBody = dyn_cast<AttributedStmt>(body)) {
         for (auto attr : attrBody->getAttrs()) {
           if (auto inv = isUnaryAttrOf(attr, "pal-invariant")) {
@@ -1284,45 +1333,162 @@ public:
               if (auto *sl = dyn_cast<StringLiteral>(arg)) {
                 flagName = sl->getString().str();
               }
+            } else if (ann->getAnnotation() == "pal-do-while-cond" &&
+                       ann->args_size() == 1) {
+              auto *arg = (*ann->args_begin())->IgnoreParenImpCasts();
+              if (auto *sl = dyn_cast<StringLiteral>(arg)) {
+                condName = sl->getString().str();
+              }
             }
           }
         }
         body = attrBody->getSubStmt();
       }
 
-      if (flagName.empty()) {
+      // First-iteration flag: named by _do_while_first, else auto-generated.
+      // Its
+      // `_live` invariant is auto-injected only when the name is auto-generated
+      // (a user-named flag is expected to be mentioned in the user's
+      // invariant).
+      bool firstIsAuto = flagName.empty();
+      if (firstIsAuto) {
         static int doCounter = 0;
         flagName = "__do_first_" + std::to_string(doCounter++);
       }
-      auto flagId = ctx.mk_ident(toStr(flagName), loc.clone());
+      auto firstId = ctx.mk_ident(toStr(flagName), loc.clone());
 
-      // bool flag; flag = true;
+      // Continuation flag `cont`: named by _do_while_cond, else auto-generated.
+      // As with `first`, `_live(cont)` is auto-injected only when the name is
+      // auto-generated; a user-named `cont` is expected to appear (with its own
+      // `_live`) in the user's invariants.
+      bool condIsAuto = condName.empty();
+      if (condIsAuto) {
+        static int doContCounter = 0;
+        condName = "__do_cont_" + std::to_string(doContCounter++);
+      }
+      auto contId = ctx.mk_ident(toStr(condName), loc.clone());
+
+      if (!hasTopLevelContinue(body)) {
+        // Clean desugaring: no top-level `continue`.
+
+        // bool cont; cont = true;
+        stmts.push(mk_var_decl(loc.clone(), contId.clone(),
+                               mk_bool_type(loc.clone())));
+        stmts.push(mk_assign(loc.clone(),
+                             mk_lvalue_var(loc.clone(), contId.clone()),
+                             mk_bool_lit(loc.clone(), true)));
+        // bool first; first = true;
+        stmts.push(mk_var_decl(loc.clone(), firstId.clone(),
+                               mk_bool_type(loc.clone())));
+        stmts.push(mk_assign(loc.clone(),
+                             mk_lvalue_var(loc.clone(), firstId.clone()),
+                             mk_bool_lit(loc.clone(), true)));
+
+        // while condition: cont
+        auto whileCond = mk_rvalue_lvalue(
+            loc.clone(), mk_lvalue_var(loc.clone(), contId.clone()));
+
+        // Inject _live(cont) and _live(first) when the respective flag name was
+        // auto-generated (a user-named flag carries its own _live).
+        if (condIsAuto) {
+          invs.push(
+              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), contId.clone())));
+        }
+        if (firstIsAuto) {
+          invs.push(mk_live(loc.clone(),
+                            mk_lvalue_var(loc.clone(), firstId.clone())));
+        }
+
+        // Link the internal `cont` flag back to the loop condition so the body
+        // knows `cond` held on re-entry. The guard `while (cont)` alone conveys
+        // nothing to the solver about `cond`, yet many bodies rely on it (e.g.
+        // a body doing `i = i + 1` needs `i < n` to maintain `i <= n`). We
+        // inject:
+        //     cont == (first || cond)
+        // which, together with the guard `cont == true`, re-supplies exactly
+        // the `first || cond` fact the original do-while guard would have
+        // provided.
+        //
+        // This is only sound when `cond` is a *pure* expression: the invariant
+        // is a `with_pure` proposition, so an impure guard (e.g. `while (f())`)
+        // cannot appear in it. When the guard has side effects we omit the
+        // linking invariant entirely (such loops must instead carry a
+        // user-written invariant relating program state to the guard's result).
+        if (!d->getCond()->HasSideEffects(*astCtx)) {
+          auto firstRead = mk_rvalue_lvalue(
+              loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone()));
+          auto contReadInv = mk_rvalue_lvalue(
+              loc.clone(), mk_lvalue_var(loc.clone(), contId.clone()));
+          auto firstOrCond =
+              mk_rvalue_binop(loc.clone(), ir::BinOp::LogOr(),
+                              std::move(firstRead), trRValue(d->getCond()));
+          invs.push(mk_rvalue_binop(loc.clone(), ir::BinOp::Eq(),
+                                    std::move(contReadInv),
+                                    std::move(firstOrCond)));
+        }
+
+        // Build body: original_body; first = false; cont = cond;
+        auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+        auto savedIncrement = forLoopIncrement;
+        forLoopIncrement = nullptr;
+        trStmt(bodyStmts, body);
+        forLoopIncrement = savedIncrement;
+        bodyStmts.push(mk_assign(loc.clone(),
+                                 mk_lvalue_var(loc.clone(), firstId.clone()),
+                                 mk_bool_lit(loc.clone(), false)));
+        bodyStmts.push(mk_assign(loc.clone(),
+                                 mk_lvalue_var(loc.clone(), contId.clone()),
+                                 trRValue(d->getCond())));
+
+        return stmts.push(mk_while(std::move(loc), std::move(whileCond),
+                                   std::move(invs), std::move(reqs),
+                                   std::move(enss), std::move(bodyStmts)));
+      }
+
+      // Legacy desugaring: body has a top-level `continue`.
+      //
+      // The `cont` flag plays no role here (the guard is `first || cond`), but
+      // if the user named it via `_do_while_cond(cont)` we still declare and
+      // initialize it. That way an invariant / `_live` referencing `cont`
+      // resolves to a real, initialized variable and the generated F* file does
+      // not break -- even though nothing in this desugaring reads `cont`.
+      if (!condIsAuto) {
+        stmts.push(mk_var_decl(loc.clone(), contId.clone(),
+                               mk_bool_type(loc.clone())));
+        stmts.push(mk_assign(loc.clone(),
+                             mk_lvalue_var(loc.clone(), contId.clone()),
+                             mk_bool_lit(loc.clone(), true)));
+      }
+
+      // bool first; first = true;
       stmts.push(
-          mk_var_decl(loc.clone(), flagId.clone(), mk_bool_type(loc.clone())));
+          mk_var_decl(loc.clone(), firstId.clone(), mk_bool_type(loc.clone())));
       stmts.push(mk_assign(loc.clone(),
-                           mk_lvalue_var(loc.clone(), flagId.clone()),
+                           mk_lvalue_var(loc.clone(), firstId.clone()),
                            mk_bool_lit(loc.clone(), true)));
 
-      // while condition: flag || cond
+      // while condition: first || cond
       auto flagRead = mk_rvalue_lvalue(
-          loc.clone(), mk_lvalue_var(loc.clone(), flagId.clone()));
+          loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone()));
       auto whileCond =
           mk_rvalue_binop(loc.clone(), ir::BinOp::LogOr(), std::move(flagRead),
                           trRValue(d->getCond()));
 
-      // Add _live(flag) to invariants (skip if user provided _do_while_first,
-      // since user is expected to include it in their own invariant)
-      if (flagName.find("__do_first_") == 0) {
+      // Add _live(first) to invariants when the name is auto-generated.
+      if (firstIsAuto) {
         invs.push(
-            mk_live(loc.clone(), mk_lvalue_var(loc.clone(), flagId.clone())));
+            mk_live(loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone())));
       }
 
-      // Build body: flag = false; original_body;
+      // Build body: first = false; original_body;
       auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
       bodyStmts.push(mk_assign(loc.clone(),
-                               mk_lvalue_var(loc.clone(), flagId.clone()),
+                               mk_lvalue_var(loc.clone(), firstId.clone()),
                                mk_bool_lit(loc.clone(), false)));
+      auto savedIncrement = forLoopIncrement;
+      forLoopIncrement = nullptr;
       trStmt(bodyStmts, body);
+      forLoopIncrement = savedIncrement;
 
       return stmts.push(mk_while(std::move(loc), std::move(whileCond),
                                  std::move(invs), std::move(reqs),
