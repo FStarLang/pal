@@ -432,7 +432,11 @@ impl Env {
             ExprT::BoolLit(_) => Ok(TypeT::Bool.with_loc_core(expr.loc.clone()).into()),
             ExprT::Live(_) => Ok(TypeT::SLProp.with_loc_core(expr.loc.clone()).into()),
             ExprT::Old(v) => self.infer_expr(v),
-            ExprT::Forall(_, _, body) | ExprT::Exists(_, _, body) => self.infer_expr(body),
+            ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
+                let mut env = self.clone();
+                env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
+                env.infer_expr(body)
+            }
             ExprT::StructInit(name, _) => Ok(expr
                 .reuse_loc(TypeT::TypeRef(TypeRefKind::Struct(name.clone())))
                 .into()),
