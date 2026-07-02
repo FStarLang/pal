@@ -830,7 +830,49 @@ fn expr_parser<
                     }),
             ));
 
-            and_then!(type_name.delimited_by(punct(Punct::LParen), punct(Punct::RParen)), {
+            // The C `_container_of(ptr, T, field)` macro is expanded by the
+            // preprocessor before it reaches this parser, to
+            //   (T *)((char *)(ptr) - __builtin_offsetof(T, field))
+            // Recognize that expanded shape and lower it to the same
+            // `ContainerOf` node the C-body intrinsic produces, so specs and
+            // inline Pulse can recover a `ref` to an enclosing struct from a
+            // field pointer without spelling the generated
+            // `struct_T__field_container` symbol by hand.
+            let container_of_idiom = type_name
+                .clone()
+                .delimited_by(punct(Punct::LParen), punct(Punct::RParen)) // outer (T *) cast, ignored
+                .ignore_then(
+                    type_name
+                        .clone()
+                        .delimited_by(punct(Punct::LParen), punct(Punct::RParen)) // inner (char *) cast, ignored
+                        .ignore_then(
+                            assignment_expression
+                                .clone()
+                                .delimited_by(punct(Punct::LParen), punct(Punct::RParen)), // (ptr)
+                        )
+                        .then_ignore(punct(Punct::Dash))
+                        .then_ignore(
+                            select! { Token::Ident("__builtin_offsetof") => () }.padded_by(ws()),
+                        )
+                        .then(
+                            type_name
+                                .clone()
+                                .then_ignore(punct(Punct::Comma))
+                                .then(ident.clone())
+                                .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
+                        )
+                        .delimited_by(punct(Punct::LParen), punct(Punct::RParen)), // ( ... ) around the subtraction
+                )
+                .map_with(
+                    |(ptr, (struct_ty, field)): (Expr, (Rc<Type>, Rc<Ident>)), extra| -> Expr {
+                        ExprT::ContainerOf(ptr.to_rvalue(), struct_ty, field)
+                            .with_loc(sift.resolve_source_info(&extra.span()))
+                            .into()
+                    },
+                )
+                .boxed();
+
+            container_of_idiom.or(and_then!(type_name.delimited_by(punct(Punct::LParen), punct(Punct::RParen)), {
                 InlinePulse(ty, code: Rc<InlinePulseCode>: inline_pulse) = e =>
                     ExprT::InlinePulse(code, ty).with_loc(sift.resolve_source_info(&e.span())).into(),
                 CompoundLit(ty, fields: Vec<(Rc<Ident>, Expr)>:
@@ -866,7 +908,7 @@ fn expr_parser<
                 },
                 Plain(ty, x: Expr: cast_expression) = e =>
                     ExprT::Cast(x.to_rvalue(), ty).with_loc(sift.resolve_source_info(&e.span())).into(),
-            }).or(unary_expression)
+            }).or(unary_expression))
         });
 
         let multiplicative_expression = left_rec_binop!(cast_expression, {

@@ -714,6 +714,14 @@ fn mk_rvalue_fncall(loc: Rc<SourceInfo>, f: Rc<Ident>, args: Vec<Rc<Expr>>) -> R
 fn mk_cast(loc: Rc<SourceInfo>, val: Rc<Expr>, ty: Rc<Type>) -> Rc<Expr> {
     mk_ast(loc, ExprT::Cast(val, ty))
 }
+fn mk_container_of(
+    loc: Rc<SourceInfo>,
+    ptr: Rc<Expr>,
+    struct_ty: Rc<Type>,
+    field: Rc<Ident>,
+) -> Rc<Expr> {
+    mk_ast(loc, ExprT::ContainerOf(ptr, struct_ty, field))
+}
 fn mk_rvalue_err(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
     mk_ast(loc, ExprT::Error(ty))
 }

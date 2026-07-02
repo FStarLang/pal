@@ -326,6 +326,15 @@ impl PrettyIR for ExprT {
                 .append(")")
                 .nest(2)
                 .group(),
+            ExprT::ContainerOf(ptr, struct_ty, field) => RcDoc::text("_container_of(")
+                .append(ptr.to_doc())
+                .append(", ")
+                .append(struct_ty.to_doc())
+                .append(", ")
+                .append(field.to_doc())
+                .append(")")
+                .nest(2)
+                .group(),
             ExprT::PreIncr(val) => RcDoc::text("++").append(val.to_doc()),
             ExprT::PostIncr(val) => val.to_doc().append("++"),
             ExprT::PreDecr(val) => RcDoc::text("--").append(val.to_doc()),
