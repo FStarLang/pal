@@ -16,10 +16,11 @@
 // `set_value_via_node` / `read_value_via_node` take a pointer to the embedded
 // `node` field, recover the enclosing `outer` with `_container_of`, and then
 // write / read the sibling `value` field. Ownership of the whole `outer`
-// reachable through `node` is required and handed back, named with the same
-// `struct_outer__node_container` term the intrinsic emits (so no separate
-// linkage fact is needed). The postconditions also state the *functional*
-// effect: after `set_value_via_node` the recovered parent's `value` is `v`, and
+// reachable through `node` is required and handed back, named in the spec with
+// the same `_container_of(node, struct outer, node)` intrinsic used in the body
+// (so no generated symbol has to be spelled by hand, and no separate linkage
+// fact is needed). The postconditions also state the *functional* effect: after
+// `set_value_via_node` the recovered parent's `value` is `v`, and
 // `read_value_via_node` returns the parent's current `value`.
 
 #include "pal.h"
@@ -38,14 +39,14 @@ struct outer {
 void set_value_via_node(_plain struct inner *node, int32_t v)
     _requires(_inline_pulse(
       exists* (ov: $type(struct outer)).
-        pts_to (Struct_outer.struct_outer__node_container $(node)) #1.0R ov **
+        pts_to $(_container_of(node, struct outer, node)) #1.0R ov **
         Struct_outer.struct_outer__pred
-          (!(Struct_outer.struct_outer__node_container $(node))) 1.0R))
+          (!$(_container_of(node, struct outer, node))) 1.0R))
     _ensures(_inline_pulse(
       exists* (ov: $type(struct outer)).
-        pts_to (Struct_outer.struct_outer__node_container $(node)) #1.0R ov **
+        pts_to $(_container_of(node, struct outer, node)) #1.0R ov **
         Struct_outer.struct_outer__pred
-          (!(Struct_outer.struct_outer__node_container $(node))) 1.0R **
+          (!$(_container_of(node, struct outer, node))) 1.0R **
         pure (ov.Struct_outer.struct_outer__value == $(v))))
 {
     struct outer *parent = _container_of(node, struct outer, node);
@@ -58,13 +59,13 @@ void set_value_via_node(_plain struct inner *node, int32_t v)
 int32_t read_value_via_node(_plain struct inner *node)
     _preserves(_inline_pulse(
       exists* (ov: $type(struct outer)).
-        pts_to (Struct_outer.struct_outer__node_container $(node)) #1.0R ov **
+        pts_to $(_container_of(node, struct outer, node)) #1.0R ov **
         Struct_outer.struct_outer__pred
-          (!(Struct_outer.struct_outer__node_container $(node))) 1.0R))
+          (!$(_container_of(node, struct outer, node))) 1.0R))
     _ensures(_inline_pulse(
       pure ($(return) ==
         !(Struct_outer.struct_outer__get_value
-            (Struct_outer.struct_outer__node_container $(node))))))
+            $(_container_of(node, struct outer, node))))))
 {
     struct outer *parent = _container_of(node, struct outer, node);
     return parent->value;
