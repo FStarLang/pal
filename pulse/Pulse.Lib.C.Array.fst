@@ -1,8 +1,10 @@
 module Pulse.Lib.C.Array
+friend Pulse.Lib.Reference
 open Pulse
 open Pulse.Lib.C.Inhabited
 module A = Pulse.Lib.Array
 module R = Pulse.Lib.Reference
+module MU = Pulse.Lib.C.MaybeUninit
 module SZ = FStar.SizeT
 #lang-pulse
 
@@ -96,6 +98,28 @@ let array_spec_upd_idx1 #a s n x i = ()
 let array_spec_upd_idx2 #a s (n:nat) x = ()
 
 let array_spec_full_mask_upd #a s n x = ()
+
+// The spec cell corresponding to an `option` value held by `pts_to_mask`:
+// `None` (no value) is an `Uninit` cell, `Some x` is `Val x`. Both are masked.
+let opt_cell #t (v: option t) : array_spec_cell t =
+  match v with
+  | None -> Uninit
+  | Some x -> Val x
+
+// `array_spec_set s i w`: cell `i` set to the optional value `w`. `Some x`
+// initializes it to `x` (`Val x`); `None` leaves it masked-but-uninitialized
+// (`Uninit`). Both are masked, so this is exactly the spec that returning a cell
+// borrowed by `array_borrow_cell` (as `pts_to_maybe_uninit ... w`) restores.
+let array_spec_set (#a: Type) (s: array_spec a) (n: nat) (w: option a) : array_spec a =
+  if n < Seq.length s then Seq.upd s n (opt_cell w) else s
+
+let array_spec_set_len #a s n w = ()
+let array_spec_set_mask #a s n w i = ()
+let array_spec_set_initd #a s n w i = ()
+let array_spec_set_idx1 #a s n w i = ()
+let array_spec_set_idx2 #a s (n:nat) x = ()
+
+let array_spec_get_spec #a s i = ()
 
 let array_spec_of_list xs =
   Seq.init (List.length xs) fun i -> Val (List.Tot.index xs i)
@@ -455,6 +479,13 @@ let arrayptr_lte #t x z = admit ()
 let arrayptr_lt #t x z = admit ()
 // Stuck: need a concrete pointer comparison primitive.
 
+let array_to_ref #t r = r
+// An arrayptr/array and a `ref` share the same underlying handle
+// (`ref a == array a`, exposed here via `friend Pulse.Lib.Reference`), so this
+// coercion is the identity -- no primitive needed. It lets a mixed
+// arrayptr/ref `==` erase the arrayptr operand to a `ref` and then reuse the
+// single raw-address primitive `CR.ref_to_core` (cf. `array_to_arrayptr`).
+
 // ---------------------------------------------------------------------------
 // Borrowing a single cell of an array as a `ref` (and returning it).
 //
@@ -507,25 +538,13 @@ let to_seq_borrow #t (s: array_spec t) (i: nat)
 let array_cell_ref (#t: Type u#a) (a: array t) (i: nat) : GTot (ref t) =
   if i < A.length a then R.array_at_ghost a i else R.null
 
-// When cell `i` is initialized, the backing sequence holds `Some` of its value.
-let to_seq_initd #t (s: array_spec t) (i: nat)
-  : Lemma (requires array_spec_initd s i)
-          (ensures i < array_spec_len s /\ Some? (Seq.index (to_seq s) i) /\
-            Some?.v (Seq.index (to_seq s) i) == array_spec_idx s i)
-= assert (array_spec_initd s i)
-
-// Updating cell `i` of a spec updates the backing sequence at `i` to `Some v`.
-let to_seq_upd #t (s: array_spec t) (i: nat) (v: t)
-  : Lemma (requires i < array_spec_len s)
-          (ensures to_seq (array_spec_upd s i v) `Seq.equal` Seq.upd (to_seq s) i (Some v))
+// The internal backing sequence `to_seq` coincides with the public projection
+// `array_spec_seq` (both map `Val x -> Some x`, everything else -> `None`). This
+// bridges `MU.array_at_maybe`'s result (stated over `to_seq`) to the public
+// `array_spec_get` in `array_borrow_cell`'s postcondition.
+let to_seq_eq_spec_seq #t (s: array_spec t)
+  : Lemma (to_seq s `Seq.equal` array_spec_seq s)
 = ()
-
-// The spec cell corresponding to an `option` value held by `pts_to_mask`:
-// `None` (no value) is an `Uninit` cell, `Some x` is `Val x`. Both are masked.
-let opt_cell #t (v: option t) : array_spec_cell t =
-  match v with
-  | None -> Uninit
-  | Some x -> Val x
 
 // Setting cell `i` to `opt_cell vi` makes the backing sequence hold `vi` at `i`.
 let to_seq_upd_opt #t (s: array_spec t) (i: nat) (vi: option t)
@@ -533,79 +552,32 @@ let to_seq_upd_opt #t (s: array_spec t) (i: nat) (vi: option t)
           (ensures to_seq (Seq.upd s i (opt_cell vi)) `Seq.equal` Seq.upd (to_seq s) i vi)
 = ()
 
-// `opt_cell` is always masked, so updating a fully-masked spec at a valid index
-// with `opt_cell vi` keeps the spec fully masked.
-let array_spec_full_mask_upd_opt #t (s: array_spec t) (i: nat) (vi: option t)
-  : Lemma (requires array_spec_full_mask s /\ i < array_spec_len s)
-          (ensures array_spec_full_mask (Seq.upd s i (opt_cell vi)))
-= let s' = Seq.upd s i (opt_cell vi) in
-  let aux (j: nat { j < array_spec_len s' }) : Lemma (array_spec_mask s' j) =
-    if j = i then ()
-    else (Seq.lemma_index_upd2 s i (opt_cell vi) j; assert (array_spec_mask s j))
-  in
-  Classical.forall_intro aux
+// The backing sequence of `array_spec_set s i w`: cell `i` reads back as `w`.
+let to_seq_set #t (s: array_spec t) (i: nat) (w: option t)
+  : Lemma (requires i < array_spec_len s)
+          (ensures to_seq (array_spec_set s i w) `Seq.equal` Seq.upd (to_seq s) i w)
+= to_seq_upd_opt s i w
 
+// Borrow cell `i` of `a` as a `ref`, for any initialization state. The cell is
+// carved out of the array's mask (`array_spec_borrow`) and handed back as
+// `MU.pts_to_maybe_uninit` carrying its current optional value: `Some x` for an
+// initialized cell (recoverable as a readable `ref` via `MU.reveal_maybe`),
+// `None` for an uninitialized one. This is the single generalization of the old
+// init/uninit borrows; the executable carve is the same, so no run-time branch
+// on the (ghost) init state is needed. Requires full permission, because the
+// uninitialized case yields a writable, full-permission cell.
 fn array_borrow_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#p: perm)
-  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
-  requires array_pts_to a p s
-  returns r: ref t
-  ensures (r |-> Frac p (array_spec_idx s (SZ.v i)))
-  ensures array_pts_to a p (array_spec_borrow s (SZ.v i))
-  ensures rewrites_to r (array_cell_ref a (SZ.v i))
-{
-  unfold array_pts_to a p s;
-  A.pts_to_mask_len a;
-  to_seq_initd s (SZ.v i);
-  let r = R.array_at a i;
-  to_seq_borrow s (SZ.v i);
-  A.mask_vext a (to_seq (array_spec_borrow s (SZ.v i)));
-  A.mask_mext a (to_mask (array_spec_borrow s (SZ.v i)));
-  fold (array_pts_to a p (array_spec_borrow s (SZ.v i)));
-  r
-}
-
-ghost
-fn array_return_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#p: perm)
-  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
-  (#v: t)
-  requires (array_cell_ref a (SZ.v i) |-> Frac p v)
-  requires array_pts_to a p (array_spec_borrow s (SZ.v i))
-  ensures array_pts_to a p (array_spec_upd s (SZ.v i) v)
-{
-  unfold array_pts_to a p (array_spec_borrow s (SZ.v i));
-  A.pts_to_mask_len a;
-  rewrite (array_cell_ref a (SZ.v i) |-> Frac p v)
-       as (R.array_at_ghost a (SZ.v i) |-> Frac p v);
-  R.return_array_at a (SZ.v i);
-  let s' = hide (array_spec_upd s (SZ.v i) v);
-  to_seq_borrow s (SZ.v i);
-  to_seq_upd s (SZ.v i) v;
-  A.mask_mext a (to_mask s');
-  A.mask_vext a (to_seq s');
-  fold (array_pts_to a p s');
-}
-
-// Uninitialized counterpart of `array_borrow_cell`. PAL emits this when the
-// borrowed cell flows into an `_out` parameter, which expects an uninitialized
-// `ref` (`pts_to_uninit`) rather than a readable one. The cell need not be
-// initialized (only masked/owned), so the refinement drops `array_spec_initd`;
-// in exchange the borrow requires full permission (the underlying
-// `R.array_at_uninit` hands out a writable, value-forgetting ref). Once the
-// callee writes through the ref, the resulting initialized cell is put back
-// with the ordinary `array_return_cell`.
-fn array_borrow_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   requires array_pts_to a 1.0R s
   returns r: ref t
-  ensures R.pts_to_uninit r
+  ensures MU.pts_to_maybe_uninit r (array_spec_get s (SZ.v i))
   ensures array_pts_to a 1.0R (array_spec_borrow s (SZ.v i))
   ensures rewrites_to r (array_cell_ref a (SZ.v i))
 {
   unfold array_pts_to a 1.0R s;
   A.pts_to_mask_len a;
-  let r = R.array_at_uninit a i;
+  let r = MU.array_at_maybe a i;
+  to_seq_eq_spec_seq s;
   to_seq_borrow s (SZ.v i);
   A.mask_vext a (to_seq (array_spec_borrow s (SZ.v i)));
   A.mask_mext a (to_mask (array_spec_borrow s (SZ.v i)));
@@ -613,32 +585,96 @@ fn array_borrow_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   r
 }
 
-// Return a cell that is being given back *still uninitialized* (the borrower
-// never wrote a value through the `ref`). This is the counterpart of
-// `array_return_cell` for the case where the borrowed ref is handed back as
-// `pts_to_uninit` rather than `r |-> v`. Because the returned cell's value is
-// unknown, the array comes back as the existentially-packaged uninitialized
-// array `array_pts_to_uninit'`; this needs the rest of the array to be fully
-// masked (`array_spec_full_mask s`), which holds for uninitialized arrays.
+// Adapt a cell borrowed via `array_borrow_cell` that is known initialized into a
+// readable `ref` (`pts_to`). `array_borrow_cell` always hands the cell out as
+// `pts_to_maybe_uninit`; the user applies this (via inline Pulse) when the
+// borrowed cell must flow into a readable pointer parameter, as the readable-side
+// dual of `MU.forget_maybe` (which auto-fires via `[@@pulse_intro]` for `_out`
+// parameters). The array resource left by the borrow pins down the erased spec
+// `s`, and the `array_spec_initd` refinement (from the
+// caller's full-array knowledge) turns the maybe value into `Some`, so
+// `MU.reveal_maybe` applies.
 ghost
-fn array_return_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#s: erased (array_spec t) { array_spec_full_mask s /\ array_spec_mask s (SZ.v i) })
-  requires R.pts_to_uninit (array_cell_ref a (SZ.v i))
+fn array_cell_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) })
   requires array_pts_to a 1.0R (array_spec_borrow s (SZ.v i))
-  ensures array_pts_to_uninit' a
+  requires MU.pts_to_maybe_uninit (array_cell_ref a (SZ.v i)) (array_spec_get s (SZ.v i))
+  ensures array_pts_to a 1.0R (array_spec_borrow s (SZ.v i))
+  ensures (array_cell_ref a (SZ.v i) |-> array_spec_idx s (SZ.v i))
 {
-  unfold array_pts_to a 1.0R (array_spec_borrow s (SZ.v i));
+  array_spec_get_spec s (SZ.v i);
+  rewrite (MU.pts_to_maybe_uninit (array_cell_ref a (SZ.v i)) (array_spec_get s (SZ.v i)))
+       as (MU.pts_to_maybe_uninit (array_cell_ref a (SZ.v i)) (Some (array_spec_idx s (SZ.v i))));
+  MU.reveal_maybe (array_cell_ref a (SZ.v i));
+}
+
+// Return a cell borrowed with `array_borrow_cell`, writing its optional value
+// `w` back into the array. `Some x` restores an initialized cell (`Val x`),
+// `None` an uninitialized one (`Uninit`); either way the array comes back as
+// `array_spec_set s i w`, with no `full_mask` side condition. This is the single
+// generalization of the old init/uninit returns. Invoked manually from C via
+// `_ghost_stmt` (the borrower packages the ref as `pts_to_maybe_uninit`, e.g.
+// with `MU.intro_maybe_some` after writing a value).
+ghost
+fn array_return_cell u#a (#t: Type u#a) (a: array t)
+  (#i: nat)
+  (#w: option t)
+  (#s: erased (array_spec t) { array_spec_mask s i })
+  requires MU.pts_to_maybe_uninit (array_cell_ref a i) w
+  requires array_pts_to a 1.0R (array_spec_borrow s i)
+  ensures array_pts_to a 1.0R (array_spec_set s i w)
+{
+  unfold array_pts_to a 1.0R (array_spec_borrow s i);
   A.pts_to_mask_len a;
-  rewrite (R.pts_to_uninit (array_cell_ref a (SZ.v i)))
-       as (R.pts_to_uninit (R.array_at_ghost a (SZ.v i)));
-  R.return_array_at_uninit a (SZ.v i);
-  with vi. assert A.pts_to_mask a (Seq.upd (to_seq (array_spec_borrow s (SZ.v i))) (SZ.v i) vi) _;
-  let y : array_spec t = Seq.upd s (SZ.v i) (opt_cell vi);
-  to_seq_borrow s (SZ.v i);
-  to_seq_upd_opt s (SZ.v i) vi;
-  array_spec_full_mask_upd_opt s (SZ.v i) vi;
+  rewrite (MU.pts_to_maybe_uninit (array_cell_ref a i) w)
+       as (MU.pts_to_maybe_uninit (R.array_at_ghost a i) w);
+  MU.return_array_at_maybe a i;
+  let y : array_spec t = hide (array_spec_set s i w);
+  to_seq_borrow s i;
+  to_seq_set s i w;
   A.mask_vext a (to_seq y);
   A.mask_mext a (to_mask y);
   fold (array_pts_to a 1.0R y);
-  intro_array_pts_to_uninit' a;
 }
+
+// Borrow the cell an arrayptr `x` points at, out of its live parent array `y`.
+// The runtime carve is the same mask reshape as `array_borrow_cell`, only keyed
+// on the arrayptr's own offset (`arrayptr_off x y`) instead of an explicit
+// index; producing the concrete cell pointer from `x` needs the same concrete
+// pointer-arithmetic primitive the rest of the arrayptr layer is still waiting
+// on (cf. `array_to_arrayptr`, `arrayptr_read`, `arrayptr_diff`), so this is
+// admitted like its siblings. The spec is the sound borrow contract PAL relies
+// on.
+fn arrayptr_borrow_cell u#a (#t: Type u#a) (x: array t)
+  (#y: erased (array t))
+  (#s: erased (array_spec t) { 0 <= arrayptr_off x y /\ array_spec_mask s (arrayptr_off x y) })
+  requires arrayptr_pts_to x y
+  requires array_pts_to y 1.0R s
+  returns r: ref t
+  ensures arrayptr_pts_to x y
+  ensures MU.pts_to_maybe_uninit r (array_spec_get s (arrayptr_off x y))
+  ensures array_pts_to y 1.0R (array_spec_borrow s (arrayptr_off x y))
+  ensures rewrites_to r (array_cell_ref y (arrayptr_off x y))
+{
+  admit ()
+}
+
+// Return a cell borrowed with `arrayptr_borrow_cell` (dual of the above). Unlike
+// its executable borrow counterpart, this is a ghost lemma: it needs no runtime
+// pointer, so it is *not* admitted. It simply delegates to `array_return_cell` at
+// index `arrayptr_off x y` (a nat by the `#s` refinement); the pure
+// `arrayptr_pts_to x y` witness is untouched and frames through.
+ghost
+fn arrayptr_return_cell u#a (#t: Type u#a) (x: array t)
+  (#w: option t)
+  (#y: erased (array t))
+  (#s: erased (array_spec t) { 0 <= arrayptr_off x y /\ array_spec_mask s (arrayptr_off x y) })
+  requires arrayptr_pts_to x y
+  requires MU.pts_to_maybe_uninit (array_cell_ref y (arrayptr_off x y)) w
+  requires array_pts_to y 1.0R (array_spec_borrow s (arrayptr_off x y))
+  ensures arrayptr_pts_to x y
+  ensures array_pts_to y 1.0R (array_spec_set s (arrayptr_off x y) w)
+{
+  array_return_cell y #(arrayptr_off x y) #w #s;
+}
+

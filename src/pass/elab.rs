@@ -472,6 +472,35 @@ impl<'a> Elaborator<'a> {
                             return;
                         }
                     }
+                    // Mixed pointer-kind equality (e.g. arrayptr == ref): the two
+                    // abstract pointer types are not directly comparable, so
+                    // erase both operands to raw `core_ref` addresses and compare
+                    // there (emit lowers `(Eq, Core)` to `core_ref_eq`). Only
+                    // fires when the pointees agree so we never bridge unrelated
+                    // pointers.
+                    let lhs_w = env.vtype_whnf(lhs_ty.clone());
+                    let rhs_w = env.vtype_whnf(rhs_ty.clone());
+                    if let (
+                        TypeT::Pointer(lhs_pointee, lhs_kind),
+                        TypeT::Pointer(rhs_pointee, rhs_kind),
+                    ) = (&lhs_w.val, &rhs_w.val)
+                        && lhs_kind != rhs_kind
+                        && *lhs_kind != PointerKind::Core
+                        && *rhs_kind != PointerKind::Core
+                        && env.vtype_eq(lhs_pointee.clone().into(), rhs_pointee.clone().into())
+                    {
+                        cast_to(
+                            lhs,
+                            TypeT::Pointer(lhs_pointee.clone(), PointerKind::Core)
+                                .with_loc(lhs.loc.clone()),
+                        );
+                        cast_to(
+                            rhs,
+                            TypeT::Pointer(rhs_pointee.clone(), PointerKind::Core)
+                                .with_loc(rhs.loc.clone()),
+                        );
+                        return;
+                    }
                 }
                 match bin_op {
                     BinOp::LogAnd | BinOp::LogOr | BinOp::Implies => {
@@ -807,7 +836,18 @@ impl<'a> Elaborator<'a> {
             // the assignment (see elab_stmt/Assign + emit's Cast lowering).
             // Without this, the local would silently become an untyped
             // `core_ref` and lose its pointee type.
-            if matches!(rhs_kind, PointerKind::Unknown | PointerKind::Core) {
+            //
+            // An ArrayPtr initializer likewise must not retype a plain-pointer
+            // (`ref T`) local to an arrayptr: a plain-pointer declaration is
+            // taken to mean "borrow the pointed-at cell into a `ref`" (the
+            // ArrayPtr→Ref mismatch is reconciled by a cast at the assignment,
+            // which emit lowers to `arrayptr_borrow_cell`). Locals that should
+            // stay arrayptrs -- e.g. ones built by pointer arithmetic -- must be
+            // declared `_arrayptr` explicitly.
+            if matches!(
+                rhs_kind,
+                PointerKind::Unknown | PointerKind::Core | PointerKind::ArrayPtr
+            ) {
                 break;
             }
             if let StmtT::Decl(_, decl_ty) = &mut Rc::make_mut(&mut stmts[decl_idx]).val {

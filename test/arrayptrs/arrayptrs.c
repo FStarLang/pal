@@ -82,7 +82,7 @@ _arrayptr const int *binary_search(_arrayptr const int *lo, _arrayptr const int 
     _invariant((bool) _inline_pulse(Arrayptrs_include2.is_slice_prop $(lo) $(hi) $`arr $`v_arr))
     _invariant((bool) _inline_pulse(old (offset_of $(lo)) <= offset_of $(lo) && offset_of $(hi) <= old (offset_of $(hi))))
   {
-      const int *mid = lo + (hi - lo) / 2;
+      _arrayptr const int *mid = lo + (hi - lo) / 2;
       if (*mid == target)
         return mid;
       else if (*mid < target)

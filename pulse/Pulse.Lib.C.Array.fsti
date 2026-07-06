@@ -4,6 +4,8 @@ open Pulse.Lib.C.Inhabited
 open Pulse.Lib.SmallType
 module SZ = FStar.SizeT
 module R = Pulse.Lib.Reference
+module MU = Pulse.Lib.C.MaybeUninit
+module CR = Pulse.Lib.C.CoreRef
 
 #lang-pulse
 
@@ -55,6 +57,12 @@ val array_pts_to #a ([@@@mkey] x: array a) (p: perm) (y: array_spec a) : slprop
 
 let array_spec_seq #a (s: array_spec a) : GTot (Seq.seq (option a)) =
   Seq.init_ghost (array_spec_len s) fun i -> if array_spec_initd s i then Some (array_spec_idx s i) else None
+
+// The optional value of cell `i`: `Some x` if initialized to `x`, `None` if
+// masked-but-uninitialized or out of bounds. This is the ownership value handed
+// out by `array_borrow_cell` (as `MU.pts_to_maybe_uninit`).
+let array_spec_get #a (s: array_spec a) (i: nat) : GTot (option a) =
+  if i < array_spec_len s then Seq.index (array_spec_seq s) i else None
 
 let array_spec_of #a (x: array a) #p #y =
   observe (array_pts_to x p) #y
@@ -175,6 +183,26 @@ val array_spec_upd_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_s
 val array_spec_full_mask_upd #a (s: array_spec a) (n: nat) (x: a) :
   Lemma (requires array_spec_full_mask s)
         (ensures  array_spec_full_mask (array_spec_upd s n x))
+
+// `array_spec_set s n w`: set cell `n` to the optional value `w`. Generalizes
+// `array_spec_upd` to allow setting a cell back to uninitialized (`None`); it is
+// the spec restored by returning a cell borrowed via `array_borrow_cell`.
+val array_spec_set (#a: Type) (s: array_spec a) (n: nat) (w: option a) : array_spec a
+val array_spec_set_len #a s n w : Lemma (array_spec_len (array_spec_set #a s n w) == array_spec_len s) [SMTPat (array_spec_len (array_spec_set #a s n w))]
+val array_spec_set_mask #a s n w (i:nat) :
+  Lemma (array_spec_mask (array_spec_set #a s n w) i <==> array_spec_mask s i \/ (i == n /\ n < array_spec_len s)) [SMTPat (array_spec_mask (array_spec_set #a s n w) i)]
+val array_spec_set_initd #a s n w (i:nat) :
+  Lemma (array_spec_initd (array_spec_set #a s n w) i <==> (i == n /\ i < array_spec_len s /\ Some? w) \/ (i =!= n /\ array_spec_initd s i)) [SMTPat (array_spec_initd (array_spec_set #a s n w) i)]
+val array_spec_set_idx1 #a s n w (i:nat) : Lemma (i =!= n /\ array_spec_initd s i ==> (array_spec_idx (array_spec_set #a s n w) i == array_spec_idx s i)) [SMTPat (array_spec_idx (array_spec_set #a s n w) i)]
+val array_spec_set_idx2 #a s (n:nat) x : Lemma (n < array_spec_len s ==> array_spec_idx (array_spec_set #a s n (Some x)) n == x) [SMTPat (array_spec_idx (array_spec_set #a s n (Some x)) n)]
+
+// `array_spec_get` in terms of the primitive projections: an initialized cell
+// reads back as `Some` of its value, anything else as `None`. Lets callers of
+// `array_borrow_cell` recover a readable `ref` (via `MU.reveal_maybe`) when the
+// borrowed cell is known initialized.
+val array_spec_get_spec #a (s: array_spec a) (i: nat) :
+  Lemma (array_spec_get s i == (if array_spec_initd s i then Some (array_spec_idx s i) else None))
+    [SMTPat (array_spec_get s i)]
 
 let list_length_nil #a : Lemma (List.length ([] <: list a) == 0) [SMTPat (List.length ([] <: list a))] = ()
 let list_length_cons #a (x: a) (xs: list a) : Lemma (List.length (x :: xs) == List.length xs + 1) [SMTPat (List.length (x :: xs))] = ()
@@ -358,6 +386,16 @@ val arrayptr_lte (#t: Type) (x z: array t) :
 val arrayptr_lt (#t: Type) (x z: array t) :
   Pure bool (requires base_of x == base_of z) (ensures fun r -> offset_of x < offset_of z)
 
+/// View an array/arrayptr as a `ref` of the same pointee. An arrayptr and a
+/// `ref` share the same underlying handle (`ref t == array t`), so this is the
+/// identity coercion -- no runtime primitive is required. PAL emits it when a
+/// mixed arrayptr/ref `==` is elaborated: the arrayptr operand is converted to
+/// a `ref` and then both operands erase to their raw machine address via the
+/// single `CR.ref_to_core` primitive, compared with `CR.core_ref_eq` -- true
+/// iff they name the same location. It reads nothing (needs no `pts_to`), so a
+/// non-owning arrayptr may be converted.
+val array_to_ref (#t: Type u#a) (r: array t) : R.ref t
+
 /// Drop an arrayptr_pts_to predicate (for scope exit / cleanup).
 ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
   requires arrayptr_pts_to x y
@@ -373,6 +411,13 @@ ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
 // it back, possibly with an updated value. No separate `pts_to` predicate is
 // needed -- the mask in `array_pts_to` already exists to lend a cell's
 // ownership out of the array.
+//
+// A single pair of lemmas handles both initialized and uninitialized cells: the
+// borrowed cell is handed out as `MU.pts_to_maybe_uninit r (array_spec_get s i)`
+// (`Some x` for an initialized cell, recoverable as a readable `ref` via
+// `MU.reveal_maybe`; `None` for an uninitialized one, usable as an `_out` ref via
+// `MU.forget_maybe`), and returned as `MU.pts_to_maybe_uninit ... w`, restoring
+// the cell to `array_spec_set s i w`.
 // ---------------------------------------------------------------------------
 
 /// `s` with cell `i` removed from the mask (its ownership lent out). This is
@@ -386,47 +431,94 @@ val array_spec_borrow (#a: Type u#a) (s: array_spec a) (i: nat) : array_spec a
 /// borrow/return boundary.
 val array_cell_ref (#t: Type u#a) (a: array t) (i: nat) : GTot (ref t)
 
-/// Borrow cell `i` of `a` as a `ref`, removing it from the array's mask.
+/// Borrow cell `i` of `a` as a `ref`, for any initialization state, removing it
+/// from the array's mask. The cell is handed out as `MU.pts_to_maybe_uninit`
+/// carrying its current optional value. Requires full permission (the
+/// uninitialized case yields a writable, full-permission cell).
 fn array_borrow_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#p: perm)
-  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
-  requires array_pts_to a p s
-  returns r: ref t
-  ensures (r |-> Frac p (array_spec_idx s (SZ.v i)))
-  ensures array_pts_to a p (array_spec_borrow s (SZ.v i))
-  ensures rewrites_to r (array_cell_ref a (SZ.v i))
-
-/// Return a borrowed cell, restoring it (with its possibly-updated value `v`)
-/// into the array. Invoked manually from C via `_ghost_stmt`.
-ghost
-fn array_return_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#p: perm)
-  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
-  (#v: t)
-  requires (array_cell_ref a (SZ.v i) |-> Frac p v)
-  requires array_pts_to a p (array_spec_borrow s (SZ.v i))
-  ensures array_pts_to a p (array_spec_upd s (SZ.v i) v)
-
-/// Uninitialized counterpart of `array_borrow_cell`, emitted by PAL when the
-/// borrowed cell flows into an `_out` parameter (which expects `pts_to_uninit`).
-/// The cell need not be initialized, but the borrow requires full permission.
-/// After the callee writes through the ref, return it with `array_return_cell`.
-fn array_borrow_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   requires array_pts_to a 1.0R s
   returns r: ref t
-  ensures R.pts_to_uninit r
+  ensures MU.pts_to_maybe_uninit r (array_spec_get s (SZ.v i))
   ensures array_pts_to a 1.0R (array_spec_borrow s (SZ.v i))
   ensures rewrites_to r (array_cell_ref a (SZ.v i))
 
-/// Return a cell handed back *still uninitialized* (the borrower never wrote
-/// through the `ref`). Counterpart of `array_return_cell` for the case where
-/// the ref comes back as `pts_to_uninit`. The cell's value is unknown, so the
-/// array is restored as the packaged uninitialized array `array_pts_to_uninit'`
-/// (requires the rest of the array to be fully masked).
+/// Adapt a cell borrowed by `array_borrow_cell` (handed out as
+/// `MU.pts_to_maybe_uninit`) that is known initialized into a readable `ref`
+/// (`pts_to`). Applied by the user (via inline Pulse) when a borrowed cell must
+/// flow into a readable pointer parameter; the readable-side dual of
+/// `MU.forget_maybe` (which auto-fires via `[@@pulse_intro]` for `_out`
+/// parameters). The array resource pins down the erased spec `s`.
 ghost
-fn array_return_cell_uninit u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#s: erased (array_spec t) { array_spec_full_mask s /\ array_spec_mask s (SZ.v i) })
-  requires R.pts_to_uninit (array_cell_ref a (SZ.v i))
+fn array_cell_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) })
   requires array_pts_to a 1.0R (array_spec_borrow s (SZ.v i))
-  ensures array_pts_to_uninit' a
+  requires MU.pts_to_maybe_uninit (array_cell_ref a (SZ.v i)) (array_spec_get s (SZ.v i))
+  ensures array_pts_to a 1.0R (array_spec_borrow s (SZ.v i))
+  ensures (array_cell_ref a (SZ.v i) |-> array_spec_idx s (SZ.v i))
+
+/// Return a borrowed cell, writing its optional value `w` back into the array
+/// (`Some x` restores an initialized cell, `None` an uninitialized one).
+/// Invoked manually from C via `_ghost_stmt`. The cell index `i` is *inferred*
+/// from the borrowed-cell / carved-array resources in context rather than passed
+/// explicitly, so this returns a cell borrowed at any index -- including the
+/// symbolic offset of a cell borrowed via an arrayptr (`arrayptr_off x a`),
+/// which a hard-coded literal index could not unify against.
+ghost
+fn array_return_cell u#a (#t: Type u#a) (a: array t)
+  (#i: nat)
+  (#w: option t)
+  (#s: erased (array_spec t) { array_spec_mask s i })
+  requires MU.pts_to_maybe_uninit (array_cell_ref a i) w
+  requires array_pts_to a 1.0R (array_spec_borrow s i)
+  ensures array_pts_to a 1.0R (array_spec_set s i w)
+
+// ---------------------------------------------------------------------------
+// Borrowing the cell an arrayptr points at, out of its live parent array.
+//
+// An arrayptr `x` into `y` (`arrayptr_pts_to x y`) names a location but owns
+// nothing (`arrayptr_pts_to` is pure and duplicable). To pass such a pointer
+// where a plain `ref` is expected, the ownership of the pointed-at cell is
+// *borrowed* from the still-live parent array `y` (which must be in scope as
+// `array_pts_to y 1.0R s`) -- exactly as `array_borrow_cell` does for a literal
+// `&a[i]`, but with the index taken from the arrayptr's own offset into its
+// parent, `arrayptr_off x y`. The cell is given back by the user (via
+// `_ghost_stmt`) with either `arrayptr_return_cell` (which needs the arrayptr
+// handle) or, when no named arrayptr survives, the index-inferring
+// `array_return_cell`. PAL emits `arrayptr_borrow_cell` for a plain-pointer
+// local initialized from an arrayptr (`T* p = <arrayptr>;`); it emits no ghost
+// return of its own.
+// ---------------------------------------------------------------------------
+
+/// Borrow the cell at arrayptr `x`'s position out of its parent array `y`, as a
+/// `ref` handed out as `MU.pts_to_maybe_uninit` (the arrayptr analogue of
+/// `array_borrow_cell`). The parent must be live at full permission; the
+/// arrayptr link `arrayptr_pts_to x y` is preserved so the cell can later be
+/// returned with `arrayptr_return_cell` (or, when the arrayptr handle does not
+/// survive -- e.g. the arrayptr was an anonymous, inlined call result -- with
+/// the index-inferring `array_return_cell`).
+fn arrayptr_borrow_cell u#a (#t: Type u#a) (x: array t)
+  (#y: erased (array t))
+  (#s: erased (array_spec t) { 0 <= arrayptr_off x y /\ array_spec_mask s (arrayptr_off x y) })
+  requires arrayptr_pts_to x y
+  requires array_pts_to y 1.0R s
+  returns r: ref t
+  ensures arrayptr_pts_to x y
+  ensures MU.pts_to_maybe_uninit r (array_spec_get s (arrayptr_off x y))
+  ensures array_pts_to y 1.0R (array_spec_borrow s (arrayptr_off x y))
+  ensures rewrites_to r (array_cell_ref y (arrayptr_off x y))
+
+/// Return a cell borrowed with `arrayptr_borrow_cell`, writing its optional
+/// value `w` back into the parent array `y` (the arrayptr analogue of
+/// `array_return_cell`). Invoked manually by the user (via `_ghost_stmt`); the
+/// index-inferring `array_return_cell` is the more common choice.
+ghost
+fn arrayptr_return_cell u#a (#t: Type u#a) (x: array t)
+  (#w: option t)
+  (#y: erased (array t))
+  (#s: erased (array_spec t) { 0 <= arrayptr_off x y /\ array_spec_mask s (arrayptr_off x y) })
+  requires arrayptr_pts_to x y
+  requires MU.pts_to_maybe_uninit (array_cell_ref y (arrayptr_off x y)) w
+  requires array_pts_to y 1.0R (array_spec_borrow s (arrayptr_off x y))
+  ensures arrayptr_pts_to x y
+  ensures array_pts_to y 1.0R (array_spec_set s (arrayptr_off x y) w)
