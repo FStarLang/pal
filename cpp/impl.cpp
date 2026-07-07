@@ -778,6 +778,69 @@ public:
           }
         }
 
+        // Detect a cast between a struct pointer and a pointer to its FIRST
+        // field, in either direction. C guarantees this round-trips only for
+        // the initial member (C17 6.7.2.1p17): "A pointer to a structure
+        // object, suitably converted, points to its initial member ... and
+        // vice versa. There may be unnamed padding within a structure object,
+        // but not at its beginning." A `field -> struct` cast lowers to the
+        // per-field container projection (the node `_container_of` produces); a
+        // `struct -> field` cast lowers to `&base->firstfield`. Both reuse
+        // machinery PAL already emits, so nothing downstream changes.
+        if (ic->getCastKind() == CK_BitCast) {
+          QualType dstTy = ic->getType();
+          QualType srcTy = ic->getSubExpr()->getType();
+          if (dstTy->isPointerType() && srcTy->isPointerType()) {
+            QualType dstPointee = dstTy->getPointeeType();
+            QualType srcPointee = srcTy->getPointeeType();
+
+            // The non-bitfield first field of a struct pointee, or null.
+            auto firstField = [&](QualType pointee) -> FieldDecl * {
+              auto *rt = pointee->getAs<RecordType>();
+              if (!rt)
+                return nullptr;
+              auto *rd = rt->getDecl()->getDefinition();
+              if (!rd || rd->getTagKind() != TagTypeKind::Struct)
+                return nullptr;
+              auto it = rd->field_begin();
+              if (it == rd->field_end() || it->isBitField())
+                return nullptr;
+              return *it;
+            };
+            auto sameType = [&](QualType a, QualType b) {
+              return astCtx->hasSameUnqualifiedType(a, b);
+            };
+
+            FieldDecl *toStructField = firstField(dstPointee);
+            bool fieldToStruct =
+                toStructField && sameType(srcPointee, toStructField->getType());
+            FieldDecl *toFieldField = firstField(srcPointee);
+            bool structToField =
+                toFieldField && sameType(dstPointee, toFieldField->getType());
+
+            // (struct S *)p  where p : F *, F = first field of S.
+            if (fieldToStruct && !structToField) {
+              auto structTy =
+                  trQualType(astCtx->getRecordType(toStructField->getParent()),
+                             ic->getSourceRange());
+              auto fieldId = ctx.mk_ident(toStr(fieldNameStr(toStructField)),
+                                          getRange(ic->getSourceRange()));
+              return mk_container_of(std::move(loc), trRValue(ic->getSubExpr()),
+                                     std::move(structTy), std::move(fieldId));
+            }
+
+            // (F *)s  where s : struct S *, F = first field of S.
+            if (structToField && !fieldToStruct) {
+              auto fieldId = ctx.mk_ident(toStr(fieldNameStr(toFieldField)),
+                                          getRange(ic->getSourceRange()));
+              auto base = mk_deref(loc.clone(), trRValue(ic->getSubExpr()));
+              auto member = mk_lvalue_member(loc.clone(), std::move(base),
+                                             std::move(fieldId));
+              return mk_rvalue_ref(std::move(loc), std::move(member));
+            }
+          }
+        }
+
         // BitCast (e.g., T* → void*): pass through after malloc/calloc
         // detection. F* functions like memcpy are type-polymorphic.
         if (ic->getCastKind() == CK_BitCast) {
