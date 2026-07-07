@@ -60,3 +60,51 @@ int32_t read_second_via_cast(_plain int32_t *q)
     struct pair *p = (struct pair *)q;
     return p->second;
 }
+
+// ---------------------------------------------------------------------------
+// First field is another (anonymous) struct.
+//
+// The embedded aggregate is defined without a struct tag and named only
+// through a typedef, so the pointer cast can still spell its type. Casting the
+// outer pointer yields a pointer to this initial member, and casting such a
+// member pointer back recovers the outer struct.
+
+typedef struct {
+    int32_t x;
+    int32_t y;
+} point_t;
+
+struct boxed_point {
+    point_t p;      // first field: an anonymous struct
+    int32_t label;
+};
+
+// struct -> first-field pointer, where the first field is the anonymous struct:
+// `(point_t *)b` recovers &b->p. Write the embedded struct's subfields through
+// the recovered pointer.
+void set_point_via_cast(struct boxed_point *b, int32_t nx, int32_t ny)
+    _ensures(b->p.x == nx)
+    _ensures(b->p.y == ny)
+{
+    point_t *pp = (point_t *)b;
+    pp->x = nx;
+    pp->y = ny;
+}
+
+// first-field(anonymous struct) pointer -> struct: `(struct boxed_point *)pp`
+// recovers the enclosing boxed_point from a pointer to its embedded point, then
+// reads the sibling `label`.
+int32_t label_via_cast(_plain point_t *pp)
+    _preserves(_inline_pulse(
+      exists* (bv: $type(struct boxed_point)).
+        pts_to $(_container_of(pp, struct boxed_point, p)) #1.0R bv **
+        Struct_boxed_point.struct_boxed_point__pred
+          (!$(_container_of(pp, struct boxed_point, p))) 1.0R))
+    _ensures(_inline_pulse(
+      pure ($(return) ==
+        !(Struct_boxed_point.struct_boxed_point__get_label
+            $(_container_of(pp, struct boxed_point, p))))))
+{
+    struct boxed_point *b = (struct boxed_point *)pp;
+    return b->label;
+}
