@@ -480,6 +480,18 @@ impl DeclBuilder {
         })
     }
 
+    fn field_bitfield(&mut self, name: Rc<Ident>, ty: Rc<Type>, width: u32) {
+        let loc = name.loc.clone();
+        self.fields.push(Ast {
+            loc,
+            val: FieldT::BitField {
+                name: (*name).clone(),
+                ty,
+                width,
+            },
+        })
+    }
+
     fn requires(&mut self, p: Rc<Expr>) {
         self.requires.push(p)
     }

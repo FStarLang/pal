@@ -242,6 +242,54 @@ public:
     ctx.report_diag(loc.clone(), true, toStr(std::string(msg) + extra));
   }
 
+  // Translate a single struct/union field into the IR, pushing it onto the
+  // given builder. Handles plain fields and unsigned bit-fields; rejects
+  // signed bit-fields and skips anonymous/zero-width padding bit-fields.
+  void addRecordField(DeclBuilder &builder, FieldDecl *f,
+                      AnonNameGen *liftStructs, bool inUnion) {
+    auto floc = getRange(f->getSourceRange());
+    if (f->isBitField()) {
+      // Anonymous / zero-width bit-fields are pure padding with no accessible
+      // value; drop them entirely.
+      if (f->isUnnamedBitField())
+        return;
+      // Bit-fields are only modeled inside structs; union bit-fields would need
+      // the same value-based encoding layered on the union variant model.
+      if (inUnion) {
+        reportUnsupported(f->getSourceRange(), floc,
+                          "unsupported bit-field in union", "");
+        return;
+      }
+      // Only unsigned (and _Bool) bit-fields are modeled. Signed bit-fields
+      // would need sign-extension on read and have implementation-defined
+      // out-of-range write semantics (C11 6.3.1.3p3), so reject them.
+      if (!f->getType()->isUnsignedIntegerType()) {
+        reportUnsupported(
+            f->getSourceRange(), floc,
+            "unsupported signed bit-field (only unsigned bit-fields are "
+            "supported)",
+            "");
+        return;
+      }
+      unsigned width = f->getBitWidthValue();
+      builder.field_bitfield(
+          ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
+          trQualType(f->getType(), f->getSourceRange(), liftStructs), width);
+      return;
+    }
+    auto qt = f->getType();
+    auto *qtPtr = qt.IgnoreParens().getTypePtr();
+    if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
+      reportUnsupported(f->getSourceRange(), floc,
+                        "unsupported non-constant-length array field", "");
+    } else {
+      builder.field(ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
+                    trTypeAttrs(f->getAttrs(),
+                                trQualType(f->getType(), f->getSourceRange(),
+                                           liftStructs)));
+    }
+  }
+
   void trRecordDecl(Rc<ir::Ident> ident, RecordDecl *decl,
                     AnonNameGen *liftStructs) {
     auto key = recordKey(decl);
@@ -281,19 +329,7 @@ public:
         }
       }
       for (auto f : decl->fields()) {
-        auto floc = getRange(f->getSourceRange());
-        auto qt = f->getType();
-        auto *qtPtr = qt.IgnoreParens().getTypePtr();
-        if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
-          reportUnsupported(f->getSourceRange(), floc,
-                            "unsupported non-constant-length array field", "");
-        } else {
-          builder.field(
-              ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
-              trTypeAttrs(
-                  f->getAttrs(),
-                  trQualType(f->getType(), f->getSourceRange(), liftStructs)));
-        }
+        addRecordField(builder, f, liftStructs, /*inUnion=*/false);
       }
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
@@ -310,19 +346,7 @@ public:
         }
       }
       for (auto f : decl->fields()) {
-        auto floc = getRange(f->getSourceRange());
-        auto qt = f->getType();
-        auto *qtPtr = qt.IgnoreParens().getTypePtr();
-        if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
-          reportUnsupported(f->getSourceRange(), floc,
-                            "unsupported non-constant-length array field", "");
-        } else {
-          builder.field(
-              ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
-              trTypeAttrs(
-                  f->getAttrs(),
-                  trQualType(f->getType(), f->getSourceRange(), liftStructs)));
-        }
+        addRecordField(builder, f, liftStructs, /*inUnion=*/true);
       }
       ctx.add_union(std::move(builder));
     } else {

@@ -734,7 +734,71 @@ impl<'a> Emitter<'a> {
     fn emit_field_default(&mut self, env: &Env, field: &Field) -> Doc {
         match &field.val {
             FieldT::Plain { ty, .. } => self.emit_type_default(env, ty),
+            // A bit-field's record cell has the refined machine type, so its
+            // default must be a concrete machine zero (e.g. `UInt16.uint_to_t 0`,
+            // `0` for width `N >= 1`) that visibly satisfies the `< pow2 N`
+            // refinement — not the generic `zero_default`, which has no instance
+            // for the refined type. Resolve typedefs to reach the machine int.
+            FieldT::BitField { ty, .. } => {
+                self.emit_type_default(env, &env.vtype_whnf(ty.clone().into()))
+            }
         }
+    }
+
+    /// Emit the range-refined machine type backing an unsigned bit-field of the
+    /// given declared underlying integer type and bit-width:
+    /// `(v:UIntW.t{UIntW.v v < pow2 N})`. The declared type may be a typedef
+    /// (e.g. `uint16_t`), so it is resolved to weak-head normal form to find the
+    /// underlying machine width for the `UIntW.v` projection in the refinement.
+    fn emit_bitfield_value_type(&mut self, env: &Env, ty: &Type, width: u32) -> Doc {
+        let base = self.emit_type(env, ty);
+        let modu = match &env.vtype_whnf(ty.clone().into()).val {
+            TypeT::Int {
+                signed: false,
+                width: w,
+            } => get_int_mod(&false, w),
+            _ => None,
+        };
+        match modu {
+            Some(m) => parens(
+                Doc::text("v:")
+                    .append(Doc::line())
+                    .append(base)
+                    .append(Doc::line())
+                    .append(Doc::text(format!("{{{}.v v < pow2 {}}}", m, width))),
+            ),
+            // Should not happen for a well-formed unsigned bit-field; fall back
+            // to the unrefined machine type.
+            None => base,
+        }
+    }
+
+    /// If `lhs` is a struct member access (`s->f` / `s.f`) whose field is an
+    /// unsigned bit-field, return its bit-width and the fully-qualified masking
+    /// helper (`Pulse.Lib.C.BitField.mask_uW`) for its underlying machine width.
+    /// A write to a bit-field stores `mask_uW width rhs` so the masked value
+    /// satisfies the cell's `< pow2 width` refinement (C unsigned truncation).
+    fn bitfield_member_mask(&self, env: &Env, lhs: &Expr) -> Option<(u32, &'static str)> {
+        let ExprT::Member(base, fld) = &lhs.val else {
+            return None;
+        };
+        let base_ty = env.vtype_whnf(env.infer_expr(base).ok()?);
+        let struct_name = match &base_ty.val {
+            TypeT::TypeRef(TypeRefKind::Struct(s)) => s.clone(),
+            _ => return None,
+        };
+        let sdef = env.lookup_struct(&struct_name)?;
+        let field = sdef.fields.iter().find(|f| f.val.name().val == fld.val)?;
+        let width = field.val.bit_width()?;
+        let underlying = env.vtype_whnf(field.val.logical_type(&field.loc).into());
+        let mask_fn = match &underlying.val {
+            TypeT::Int {
+                signed: false,
+                width: mw,
+            } => get_bitfield_mask_fn(mw)?,
+            _ => return None,
+        };
+        Some((width, mask_fn))
     }
 
     /// Render the F* type appearing in a struct/union's noeq record for
@@ -742,6 +806,7 @@ impl<'a> Emitter<'a> {
     fn emit_field_record_type(&mut self, env: &Env, field: &Field) -> Doc {
         match &field.val {
             FieldT::Plain { name: _, ty } => self.emit_type(env, ty),
+            FieldT::BitField { ty, width, .. } => self.emit_bitfield_value_type(env, ty, *width),
         }
     }
 
@@ -771,6 +836,10 @@ impl<'a> Emitter<'a> {
         } else {
             match &field.val {
                 FieldT::Plain { name: _, ty } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
+                FieldT::BitField { ty, width, .. } => unaryfn(
+                    Doc::text("ref"),
+                    self.emit_bitfield_value_type(env, ty, *width),
+                ),
             }
         }
     }
@@ -1611,6 +1680,19 @@ fn get_uint_wrap_mod(width: &u32) -> Option<&'static str> {
         16 => "Pulse.Lib.C.UInt16",
         32 => "Pulse.Lib.C.UInt32",
         64 => "Pulse.Lib.C.UInt64",
+        _ => return None,
+    })
+}
+
+/// Fully-qualified bit-field truncation (masking) helper for each unsigned
+/// machine width. `mask_uW n v` returns the low `n` bits of `v` as a value
+/// provably `< pow2 n` (C unsigned modular truncation on a bit-field write).
+fn get_bitfield_mask_fn(machine_width: &u32) -> Option<&'static str> {
+    Some(match machine_width {
+        8 => "Pulse.Lib.C.BitField.mask_u8",
+        16 => "Pulse.Lib.C.BitField.mask_u16",
+        32 => "Pulse.Lib.C.BitField.mask_u32",
+        64 => "Pulse.Lib.C.BitField.mask_u64",
         _ => return None,
     })
 }
@@ -3389,13 +3471,24 @@ impl<'a> Emitter<'a> {
                                     .nest(2);
                             }
                         }
-                        // Fall through to normal assignment for struct members
+                        // Fall through to normal assignment for struct members.
+                        // For an unsigned bit-field, mask the RHS to its width so
+                        // the stored value satisfies the cell's `< pow2 N`
+                        // refinement (C unsigned modular truncation on write).
+                        let rhs = match self.bitfield_member_mask(env, x) {
+                            Some((width, mask_fn)) => naryfn([
+                                Doc::text(mask_fn),
+                                Doc::text(width.to_string()),
+                                self.emit_rvalue(env, t),
+                            ]),
+                            None => self.emit_rvalue(env, t),
+                        };
                         self.emit_lvalue(env, x)
                             .append(Doc::line())
                             .append(":=")
                             .group()
                             .append(Doc::line())
-                            .append(self.emit_rvalue(env, t))
+                            .append(rhs)
                             .append(";")
                             .group()
                             .nest(2)
