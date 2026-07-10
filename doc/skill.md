@@ -1,4 +1,4 @@
-# Proving C with PAL (Proof-oriented Annotation Language) + F*/Pulse
+# Proving C with PAL (Proof Annotated Language for C) + F*/Pulse
 
 A high-level guide for adding and verifying proof annotations on C code using
 PAL → F*/Pulse. It covers **compiling/verifying**, **writing specs** (ownership
@@ -134,7 +134,7 @@ ghost fn loop_inv_fold (#v) (#e) (#spec) r ...
 When writing struct invariants, first deeply understand the the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components seperately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For more information on `_refine`, see the documentation in the PAL repo.
 
 ## 4.4 Annotations for functions
-The last step in adding specs is to add functions pre and post conditions using the appropriate annotations. Note that PAL by default generates for every function argument a precondition requiring the full ownership of that argument and a post condition returning the ownership. In many cases, this might be a sufficient spec for the memory safety property. However, in many other cases, this contract might be too strong. In these cases, each argument can be prefixed with `_consumes`, `_out` or `_plain` tags. `_consumes` tag instruct PAL to only require the ownership of that argument but not return, `_out` tag instructs PAL to return the ownership of that argument, and `_plain` tag instructs PAL to not generate any ownership annotations for that argument. These tags must only be used when the default is truly too strong for the function.
+The last step in adding specs is to add each function's pre- and post-conditions using the appropriate annotations. Note that PAL by default generates, for every function argument, a precondition requiring full ownership of that argument and a postcondition returning that ownership. In many cases this is a sufficient spec for the memory-safety property. However, in many other cases this contract is too strong. In these cases, each argument can be prefixed with a `_consumes`, `_out`, or `_plain` tag. The `_consumes` tag instructs PAL to require ownership of the argument but not return it; the `_out` tag instructs PAL to require only *uninitialized* storage for the argument (a `pts_to_uninit` precondition) and return it initialized (a `pts_to` postcondition); and the `_plain` tag instructs PAL not to generate any ownership annotations for that argument. These tags must only be used when the default is truly too strong for the function.
 In the case that `_plain` truly has to be used, custom pre and post conditions can be added using the `_requires` and `_ensures` annotations.
 
 ## 4.5 Importance of readable specification
