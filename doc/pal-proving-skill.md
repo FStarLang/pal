@@ -109,15 +109,119 @@ representation; **functional** contracts constrain values. Get ownership right
 
 ### Antiquotation inside `_inline_pulse(...)`
 
-- `$(x)` — value of a parameter or local `x`. For a mutable parameter it becomes
-  `!var_x` in body context and `var_x` in spec context.
-- `` $`name `` — introduces a fresh existential of inferred type bound in the
-  surrounding `exists*`. Use for spec values you can't otherwise name.
-- `$(return)` — the function's return value (use inside `_ensures`).
-- `$&(local)` — address-of a local (for `pts_to`-style refs to stack locals).
-- `$unfold-uninit(T)` / `$fold-uninit(T)` — open/close per-field *uninit* reps
-  for typedef `T`. `$unfold-uninit` is **not** auto-applied.
-- `$unfold(T)` / `$fold(T)` — same for *initialized* reps.
+Inside `_inline_pulse(...)` — and every annotation macro built on it
+(`_requires`, `_ensures`, `_invariant`, `_refine`/`_refine_value`/`_refine_uninit`/`_refine_always`,
+`_decreases`, `_assert`, `_ghost_stmt`, `_include_pulse`, `_let`/`_letimpure`, `_type`) —
+most text is passed through **verbatim** into the generated Pulse/F\* code
+(`pts_to`, `exists*`, `**`, `pure`, module names, …). *Antiquotations*, all
+introduced by `$`, are the escape hatch that splices a PAL-resolved C-level
+entity (a value, address, type, field name, or generated lemma) into that text.
+
+#### Quick reference
+
+| Form | Emits |
+|---|---|
+| `$(expr)` | the **value** (rvalue) of a C expression |
+| `$&(expr)` | the **reference cell** (`ref a`, not dereferenced) |
+| `$type(c-type)` | the F\* type for a C type |
+| `$field(Type::f)` | a struct field accessor / a union field constructor |
+| `` $`ident `` | `'ident` (an F\* implicit / ticked name) |
+| `` pfx$`sfx ``, `` pfx$` `` | `pfx'sfx`, `pfx'` |
+| `$declare(Type id)` | *nothing*; binds `id : Type` in the annotation's scope |
+| `$unfold(T)` / `$fold(T)` | generated raw unfold/fold lemma for `T`'s ownership predicate |
+| `$unfold-uninit(T)` / `$fold-uninit(T)` | the uninit-variant unfold/fold lemma |
+| `$unfold(U::f)` / `$fold(U::f)` | the unfold/fold lemma for union field `f` |
+
+#### `$(expr)` — rvalue
+
+Emits the F\* **value** of any C expression: a variable, a dereference, a field
+access, `_container_of(...)`, or the special names `this` and `return`.
+
+```c
+_ensures(_inline_pulse(pure (Int32.v $(*x) > 0)))   // value behind pointer x
+Repro.s_inv $(this) p $(lds)                          // this = the refined value
+nd.$field(node::data) :: $(x.a)                       // field-access expressions are fine
+```
+
+> **Context sensitivity / the spill.** In *spec* position (a function's
+> `_requires`/`_ensures`) `$(p)` is the parameter value `var_p`. In *body*
+> position (a block/`if` `_ensures`, a loop `_invariant`, a `_ghost_stmt`) PAL
+> has spilled the parameter to `let mut var_p = var_p;`, so `$(p)` correctly
+> becomes `(!var_p)`. **Always antiquote `$(p)`** — never hand-write the raw
+> `var_p` binder in body context: it has type `ref (ref S)` and is ill-typed
+> (the classic F\* Error 189).
+
+#### `$&(expr)` — lvalue / address
+
+Emits the **reference cell** itself (no dereference), i.e. the F\* `ref a`. Use
+it when you need the location rather than the value it holds — e.g. a `pts_to`
+over a stack local.
+
+```c
+_assert(_inline_pulse($&(x) |-> $(x) ** $&(*x) |-> $(*x)));
+//                    ^cell   ^value  ^inner cell ^inner value
+```
+
+#### `$type(c-type)` — type
+
+Emits the F\* type for a C type: `$type(int *)`, `$type(my_pair)`,
+`$type(struct outer)`, `$type(node)`. **Note:** inside inline Pulse the default
+`_pointer_view` substitution is suppressed, so `$type(node *)` stays the bare
+`ref node`, not the refined view.
+
+#### `$field(Type::f)` — field
+
+For a **struct**, emits the direct field accessor; for a **union**, the field
+constructor (often followed by `?` for F\*'s discriminator).
+
+```c
+nd.$field(node::data)      // struct: project field `data`
+$field(my_union::a)?       // union: `A?` discriminator
+```
+
+#### `` $`ident `` — tick (lexical)
+
+Rewrites `` $`ident `` to `'ident`. In an `exists*`/implicit position this ticked
+name acts as a fresh existential/implicit of inferred type — the usual way to
+name a spec value you can't otherwise bind. Infix forms: `` pfx$`sfx `` → `pfx'sfx`,
+`` pfx$` `` → `pfx'`.
+
+```c
+Repro.is_list head $`p l                            // $`p -> 'p (erased perm)
+_decreases((spec_list) _inline_pulse(reveal $`val_head_0))
+```
+
+#### `$declare(Type id)` — declare
+
+Introduces `id : Type` into the annotation's scope and emits **nothing**; makes a
+later `$(id)` resolve — used to name a binder inside a `let`/`fn` in an
+`_include_pulse` block.
+
+```c
+$declare(my_pair x)
+let test_access ($(x): $type(my_pair)) = $(x.a)
+```
+
+#### `$unfold` / `$fold` (and `-uninit`) — fold/unfold lemmas
+
+Emit the names of PAL's auto-generated fold/unfold lemmas for a type's ownership
+predicate (handy in `_ghost_stmt` proofs). `$unfold-uninit`/`$fold-uninit` are
+**not** auto-applied.
+
+- **Struct `T`:** `$unfold(T)`, `$fold(T)`, `$unfold-uninit(T)`, `$fold-uninit(T)`
+  → `raw_unfold`, `raw_fold`, `raw_unfold_uninit`, `raw_fold_uninit`.
+- **Union `U`:** requires a field — `$unfold(U::f)`, `$fold(U::f)`; the `-uninit`
+  variants are **not** available for unions.
+
+```c
+_ghost_stmt($unfold-uninit(SUBRANGE) $(Sub));
+_ghost_stmt($fold(SUBRANGE) $(Sub) _ _);
+```
+
+**Special names:** `this` (inside `_refine*`, the value being refined — reach
+fields with `this.f`) and `return` (inside `_ensures`/trailing ghost stmts, the
+returned value). PAL's own test `test/antiquot/antiquot.c` exercises every form
+above.
 
 ## 4. Pulse mechanics you must know
 
