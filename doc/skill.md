@@ -84,7 +84,7 @@ invocation when `--ext fly_deps` is on. Verify each file with a separate call.
 ## 3. Ideal workflow
 
 ### 3.1 Understanding the problem
-First, understand the C code you are analyzing and the properties you want to prove about it. Ask the user if needed for clarification on whether the target is memory safety or full functioncal correctness.
+First, understand the C code you are analyzing and the properties you want to prove about it. Ask the user if needed for clarification on whether the target is memory safety or full functional correctness.
 ### 3.2 Phase 1: Translation
 Next, having identified the target of verification, first use PAL to only translate the relevant C code into F*. This may generate some `admit()` calls for the features that PAL does not yet support. Report these admits to the user before beginning any verification work.
 ### 3.3 Phase 2: Verification
@@ -100,19 +100,19 @@ When verifying a function, start with the simplest spec and gradually increase t
 Stating the correctness of C code involves stating the specification for functions as annotations in the C code. These annotations encode the pre and postconditions for the functions. Additionally, PAL annotations can also be used to state invariants on data types such as structs, unions, typedefs etc. Finally, all loops in the C code need to be annotated with appropriate loop invariants. (Loop invariants and if-ensures are discussed in 6)
 
 ## 4.1 Differentiating between raw pointers and arrays
-The first step in writing specifications it to use the `_array` and `_arrayptr` annotations for differentiating between type pointers and arrays. PAL by default treats all pointers as references, the `_array` and `_arrayptr` tags tell PAL to treat them as arrays and array pointers, respectively. For more information on how arrays are modelled in PAL, refer to the documentation in the PAL repo.
+The first step in writing specifications is to use the `_array` and `_arrayptr` annotations for differentiating between type pointers and arrays. PAL by default treats all pointers as references, the `_array` and `_arrayptr` tags tell PAL to treat them as arrays and array pointers, respectively. For more information on how arrays are modelled in PAL, refer to the documentation in the PAL repo.
 
 The second step can be either to add the type invariants or to write the function specifications. Suppose the module under consideration heavily involves passing around and modifying a complex data structure then first write the invariant for that data structure. Both of these involve writing accompanying Pulse code. First, we take a look at best practices for writing such code.
 
 ## 4.1 Writing Pulse code used in function definitions
-Writing specifications often involves writing pure pulse code for definitions and possible accompanying unfolding and folding lemmas. These defintions and accompanying lemmas must be stated in a seperate helper file.
+Writing specifications often involves writing pure pulse code for definitions and possible accompanying unfolding and folding lemmas. These definitions and accompanying lemmas must be stated in a separate helper file.
 
-Every custom slprop definition that you add needs to either by declared auto unfold or have associated unfolding and folding lemmas. Use `[@@pulse_unfold]` / `[@@pulse_eager_unfold]` tags
+Every custom slprop definition that you add needs to either be declared auto unfold or have associated unfolding and folding lemmas. Use `[@@pulse_unfold]` / `[@@pulse_eager_unfold]` tags
 for slprop definitions you want Pulse to silently unfold at use sites.
 Without one of these, loop-condition reads (e.g., `obj->Count > 0`) fail with
 **Error 228** because the opaque slprop hides the `pts_to`.
 
-However, sometimes making definitons auto unfold can lead to performance issues or make the proof more difficult to manage. In such cases, it might be better to explicitly unfold the slprop at specific points in the code. An example: 
+However, sometimes making definitions auto unfold can lead to performance issues or make the proof more difficult to manage. In such cases, it might be better to explicitly unfold the slprop at specific points in the code. An example:
 
 ```fst
 [@@pulse_unfold]
@@ -131,14 +131,14 @@ ghost fn loop_inv_fold (#v) (#e) (#spec) r ...
 ```
 
 ## 4.3 Writing struct invaraints
-When writing struct invariants, first deeply understand the the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components seperately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For more information on `_refine`, see the documentation in the PAL repo.
+When writing struct invariants, first deeply understand the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components separately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For more information on `_refine`, see the documentation in the PAL repo.
 
 ## 4.4 Annotations for functions
 The last step in adding specs is to add each function's pre- and post-conditions using the appropriate annotations. Note that PAL by default generates, for every function argument, a precondition requiring full ownership of that argument and a postcondition returning that ownership. In many cases this is a sufficient spec for the memory-safety property. However, in many other cases this contract is too strong. In these cases, each argument can be prefixed with a `_consumes`, `_out`, or `_plain` tag. The `_consumes` tag instructs PAL to require ownership of the argument but not return it; the `_out` tag instructs PAL to require only *uninitialized* storage for the argument (a `pts_to_uninit` precondition) and return it initialized (a `pts_to` postcondition); and the `_plain` tag instructs PAL not to generate any ownership annotations for that argument. These tags must only be used when the default is truly too strong for the function.
 In the case that `_plain` truly has to be used, custom pre and post conditions can be added using the `_requires` and `_ensures` annotations.
 
 ## 4.5 Importance of readable specification
-A good specification is not just the most precise one but also a readable and accessble one. To that end, never use numeric constants directly in the specifications. Instead use names constants to express the maximum values for each type. These are easily available in F* as well as in the header exported by PAL.
+A good specification is not just the most precise one but also a readable and accessible one. To that end, never use numeric constants directly in the specifications. Instead use named constants to express the maximum values for each type. These are easily available in F* as well as in the header exported by PAL.
 
 
 ## 5. Progressing the Proof
@@ -168,7 +168,7 @@ Doing any of this requires understanding the methods PAL provides for referring 
   (see §13).
 
 ### 5.2 Debugging a stuck proof
-Whenever a proof gets stuck carefully try to debug the root issue. Often the fastest way is to work at the level of the F* file. When a proof gets stuck, try to progress the proof by adding the right assert or lemma application to the F* file. Then just rewrite the right Pulse statement in the `_ghost_smtm()` blocks in the C code.
+Whenever a proof gets stuck carefully try to debug the root issue. Often the fastest way is to work at the level of the F* file. When a proof gets stuck, try to progress the proof by adding the right assert or lemma application to the F* file. Then just rewrite the right Pulse statement in the `_ghost_stmt()` blocks in the C code.
 
 After `make translate`, each C entity becomes one F* module. **Read them** — the C
 annotation is concise, but the generated F* is what Pulse actually checks.
@@ -285,7 +285,7 @@ isolation (single-file loop, §2), then re-verify the caller. Treat the `.fsti` 
 the negotiated interface between the two proofs.
 
 ## 6. Loops: invariants, ensures, and `break`
-Adding the right loop invariants is part of both writing the specification  and progressing the proof. Each loop needs to be annotated with the right loop invariant.
+Adding the right loop invariants is part of both writing the specification and progressing the proof. Each loop needs to be annotated with the right loop invariant.
 
 ```
 while (cond)
