@@ -13,7 +13,7 @@ This doc explains how structs are modelled in pal. Whenever you define a struct 
 11. `struct_foo__get_field`: A getter for the fields of the struct. Its precondition is that the struct must be in the unfolded state.
 12. `has_zero_default_struct_foo` : A typeclass instance defining the default 0 values for the struct (according to the C standard).
 
-Unions are emitted analogously to `Union_foo.fst`, with a sum-type constructor in place of the record.
+Unions are emitted analogously to `Union_foo.fst`, with a sum-type constructor in place of the record. See [`unions.md`](unions.md) for the full picture.
 
 ## Typedefs that wrap a struct
 

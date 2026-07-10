@@ -15,4 +15,10 @@ Scalar types are the easy case: `int`, `unsigned`, `char`, … map directly to F
 Compound types need more machinery because they combine a runtime value with the resources it owns. Each has its own doc:
 
 - [`arrays.md`](arrays.md) — array representation, the three points-to flavors, and the `_array` / `_arrayptr` distinction.
-- [`structs.md`](structs.md) — what gets emitted per `struct` (and unions, briefly).
+- [`structs.md`](structs.md) — what gets emitted per `struct`.
+- [`unions.md`](unions.md) — what gets emitted per `union`.
+
+## Proving and internals
+
+- [`skill.md`](skill.md) — a practical guide to writing specs and progressing proofs with PAL.
+- [`internals.md`](internals.md) — how PAL translates C into Pulse/F*: the compiler pipeline, IR, diagnostics, and output layout.
