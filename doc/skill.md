@@ -99,12 +99,12 @@ When verifying a function, start with the simplest spec and gradually increase t
 ## 4. Writing Specifications
 Stating the correctness of C code involves stating the specification for functions as annotations in the C code. These annotations encode the pre and postconditions for the functions. Additionally, PAL annotations can also be used to state invariants on data types such as structs, unions, typedefs etc. Finally, all loops in the C code need to be annotated with appropriate loop invariants. (Loop invariants and if-ensures are discussed in 6)
 
-## 4.1 Differentiating between raw pointers and arrays
+### 4.1 Differentiating between raw pointers and arrays
 The first step in writing specifications is to use the `_array` and `_arrayptr` annotations for differentiating between type pointers and arrays. PAL by default treats all pointers as references, the `_array` and `_arrayptr` tags tell PAL to treat them as arrays and array pointers, respectively. For more information on how arrays are modelled in PAL, refer to the documentation in the PAL repo.
 
 The second step can be either to add the type invariants or to write the function specifications. Suppose the module under consideration heavily involves passing around and modifying a complex data structure then first write the invariant for that data structure. Both of these involve writing accompanying Pulse code. First, we take a look at best practices for writing such code.
 
-## 4.1 Writing Pulse code used in function definitions
+### 4.2 Writing Pulse code used in function definitions
 Writing specifications often involves writing pure pulse code for definitions and possible accompanying unfolding and folding lemmas. These definitions and accompanying lemmas must be stated in a separate helper file.
 
 Every custom slprop definition that you add needs to either be declared auto unfold or have associated unfolding and folding lemmas. Use `[@@pulse_unfold]` / `[@@pulse_eager_unfold]` tags
@@ -130,14 +130,14 @@ ghost fn loop_inv_fold (#v) (#e) (#spec) r ...
 { fold (loop_inv r ...) }
 ```
 
-## 4.3 Writing struct invaraints
+### 4.3 Writing struct invariants
 When writing struct invariants, first deeply understand the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components separately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For more information on `_refine`, see the documentation in the PAL repo.
 
-## 4.4 Annotations for functions
+### 4.4 Annotations for functions
 The last step in adding specs is to add each function's pre- and post-conditions using the appropriate annotations. Note that PAL by default generates, for every function argument, a precondition requiring full ownership of that argument and a postcondition returning that ownership. In many cases this is a sufficient spec for the memory-safety property. However, in many other cases this contract is too strong. In these cases, each argument can be prefixed with a `_consumes`, `_out`, or `_plain` tag. The `_consumes` tag instructs PAL to require ownership of the argument but not return it; the `_out` tag instructs PAL to require only *uninitialized* storage for the argument (a `pts_to_uninit` precondition) and return it initialized (a `pts_to` postcondition); and the `_plain` tag instructs PAL not to generate any ownership annotations for that argument. These tags must only be used when the default is truly too strong for the function.
 In the case that `_plain` truly has to be used, custom pre and post conditions can be added using the `_requires` and `_ensures` annotations.
 
-## 4.5 Importance of readable specification
+### 4.5 Importance of readable specification
 A good specification is not just the most precise one but also a readable and accessible one. To that end, never use numeric constants directly in the specifications. Instead use named constants to express the maximum values for each type. These are easily available in F* as well as in the header exported by PAL.
 
 
@@ -222,7 +222,7 @@ applies them **automatically** when it needs the corresponding shape:
 
 **The one exception**: `Struct_X__aux_raw_unfold_uninit` is emitted **without**
 `[@@pulse_intro]`. To open a *fresh, uninitialized* struct you must apply it by
-hand — that is exactly what `$unfold-uninit(X) $&(local)` does (§7). Forgetting
+hand — that is exactly what `$unfold-uninit(X) $&(local)` does. Forgetting
 this is a common "why won't my per-field writes type-check" stall.
 
 You can add `[@@pulse_intro]` to your *own* helper lemmas to have Pulse apply them
@@ -245,17 +245,17 @@ When a function won't verify, **localize before you theorize**:
    suspect point to confirm everything *before* it verifies, then move it earlier
    to bracket the failure. Remove every admit before declaring success.
 4. **Identical-looking goal and context ⇒ implicit drift, not a missing fact.**
-   Re-run with `--print_full_names --print_implicits` (§10.1) before adding a
+   Re-run with `--print_full_names --print_implicits` before adding a
    single lemma — you are usually one type-ascription away.
 5. **Slow, not failing? Suspect structure first.** An opaque slprop hiding a
-   `pts_to`, an existential keyed on the wrong name (§4 matcher), or a quantified
+   `pts_to`, an existential keyed on the wrong name, or a quantified
    invariant with a bad trigger. Only after ruling those out, raise the budget —
-   prefer a *target-specific* `--z3rlimit_factor` (§8.1) over a global bump, and
+   prefer a *target-specific* `--z3rlimit_factor` over a global bump, and
    keep it as low as still passes.
 6. **Flaky (passes sometimes)?** The proof is unstable — usually an
    under-constrained quantifier or a fragile trigger. Measure with `--quake 5`
    (or `--retry`), then stabilize: name intermediate facts with `assert pure
-   (...)`, pin equality types (§10.1), or make a hot slprop opaque so the matcher
+   (...)`, pin equality types, or make a hot slprop opaque so the matcher
    can't wander. A stable proof is worth more than a fast one.
 7. **Read the dump structurally.** In an Error 19/228 dump the `_pure` facts are
    your hypotheses, `_if_hyp` is the active branch condition, and the goal is the
@@ -346,7 +346,7 @@ enclosing function body**, Pulse infers the if's post-state by joining the two
 branches and unifying them. The unifier wraps shared `pure` slprops as
 `match cond with | true -> p | false -> p` **even when both branches end in the
 identical state**. The wrap survives across opaque slprop boundaries
-(`[@@"opaque_to_smt"]` definitions like the case-split helpers in §10.2) and
+(`[@@"opaque_to_smt"]` definitions like the case-split helpers) and
 walls off every downstream helper call whose precondition expects a clean
 `pure p` — Error 228 fires at the next call site with the printed wrap visible
 in the "In the context" dump.
@@ -453,9 +453,9 @@ return FALSE;
 ## 7. Manipulating existentials (early returns + disjunctive posts)
 
 `exists*` postconditions are auto-introduced by Pulse's matcher creating uvars
-and solving them. This breaks down in two common situations.
+and solving them. This breaks down in a few common situations, addressed below.
 
-### 13.1 Disjunctive post with `if-then-else` and early `return`
+### 7.1 Disjunctive post with `if-then-else` and early `return`
 
 If a function's post is
 `exists* val_post. (if cond_on_return then sl_failure else sl_success) ** ...`
@@ -480,11 +480,9 @@ return NULL;
 ```
 
 Once witnesses are explicit, the `match` reduces and the matcher only has to match
-`obj_inv var_obj 1.0R var_val_pre` against the context. For the **consumer** side
-— eliminating such a disjunctive post in the *caller* via per-arm ghost helpers —
-see §10.13.
+`obj_inv var_obj 1.0R var_val_pre` against the context. For the **consumer** side, eliminate such a disjunctive post in the *caller* via per-arm ghost helpers.
 
-### 13.2 Eliminating an existential to give it a name (`with x. assert ...`)
+### 7.2 Eliminating an existential to give it a name (`with x. assert ...`)
 
 When the context contains `exists* x. p x` and the next operation must refer to
 `x` by name (pass it to a ghost helper, satisfy a pure equation):
@@ -495,11 +493,11 @@ with w. assert (p w);   // binds w : erased _, brings p (reveal w) into context
 
 This is the eliminator for `exists*`. Common uses: after unfolding a slprop with
 an existential, name its witness before calling a helper; after a function call
-whose post is `exists* val_post. ...`, name `val_post` to pin it. **Gotcha**
-(§10.7): `with x. _` (anonymous body) requires *exactly one* `exists*` in the
+whose post is `exists* val_post. ...`, name `val_post` to pin it. **Gotcha:**
+`with x. _` (anonymous body) requires *exactly one* `exists*` in the
 goal; if multiple, name each.
 
-### 13.3 Introducing an existential with explicit witnesses
+### 7.3 Introducing an existential with explicit witnesses
 
 When the post has an `exists*` whose witnesses Pulse can't infer (opaque slprops,
 `match`/`if` discriminants on uninferrable values, syntactic context mismatch),
@@ -512,7 +510,7 @@ introduce exists* x1 ... xn. p with w1 ... wn;
 This *replaces* the matcher's uvar guess with the supplied terms; the matcher
 then only discharges `p[w1/x1, ...]`.
 
-### 13.4 Pattern combinator: name-then-introduce
+### 7.4 Pattern combinator: name-then-introduce
 
 `with v. assert q v; introduce exists* x. p x with v;` re-packages a context-form
 existential into a goal-form existential when the two shapes differ but the
@@ -520,7 +518,7 @@ witness mapping is the identity (or a simple expression in `v`). Useful when the
 context has `exists* v. q v` (e.g. from a call's post) and the goal needs
 `exists* x. p x` (the enclosing function's post).
 
-### 13.5 When to reach for explicit existentials
+### 7.5 When to reach for explicit existentials
 
 Default: let the matcher auto-introduce. Reach for explicit
 `introduce exists* ... with ...` when you see:
