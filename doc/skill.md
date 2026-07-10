@@ -151,21 +151,16 @@ To manually help along the proof, you can
 Doing any of this requires understanding the methods PAL provides for referring to the variables in the code.
 
 ### 5.1 Antiquotation inside `_inline_pulse(...)`
-- `$(x)` — value of a parameter or local `x`. For a mutable parameter it becomes
-  `!var_x` in body context and `var_x` in spec context.
-- `` $`name `` — introduces a fresh existential of inferred type bound in the
-  surrounding `exists*`. Use for spec values you can't otherwise name.
-- `$(return)` — the function's return value (use inside `_ensures`).
-- `$&(local)` — address-of a local (for `pts_to`-style refs to stack locals).
-- `$unfold-uninit(T)` / `$fold-uninit(T)` — open/close per-field *uninit* reps
-  for typedef `T`. `$unfold-uninit` is **not** auto-applied.
-- `$unfold(T)` / `$fold(T)` — same for *initialized* reps.
+For the full antiquotation reference — `$(expr)`, `$&(expr)`, `$type`, `$field`, `` $`tick ``, `$declare`, and the `$fold` / `$unfold` families — see the **Antiquotation** section of [`pal_surface_syntax.md`](pal_surface_syntax.md).
+
+Pulse ghost-fn body syntax you will write inside `_ghost_stmt(...)`:
+
 - `let x = e;` (statement form, semicolon, **not** `let x = e in`).
 - `fold (P args)` / `unfold (P args)` — must include args, not a bare name.
 - `rewrite slprop1 as slprop2` — spatial rewrite using a `pure` equality already
   in scope.
 - `with x. P` and `introduce exists* ... with ...` for explicit existentials
-  (see §13).
+  (see §7).
 
 ### 5.2 Debugging a stuck proof
 Whenever a proof gets stuck carefully try to debug the root issue. Often the fastest way is to work at the level of the F* file. When a proof gets stuck, try to progress the proof by adding the right assert or lemma application to the F* file. Then just rewrite the right Pulse statement in the `_ghost_stmt()` blocks in the C code.
