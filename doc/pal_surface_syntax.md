@@ -44,7 +44,7 @@ Inside any of these predicates the following spec-only constructs are available:
 - `x._length` — runtime length of an array.
 - `_specint` — arbitrary-precision integer (ghost arithmetic).
 - `_slprop` — type cast used in `_refine` to declare a separation-logic predicate.
-- `$(x)` — antiquotation: splice a C-level identifier into an `_inline_pulse` body.
+- `$(...)` — antiquotation: splice a C-level entity into an `_inline_pulse` body (see the Antiquotation section under Pulse interop).
 
 ### Loop invariants
 
@@ -154,6 +154,30 @@ PAL exposes two ghost constructs for proof assistance that have no runtime effec
 - `_include_pulse(Mod, snippet)` — drop a verbatim Pulse block (definitions, lemmas, helpers) into a module `Mod`.
 - `_let(sig, body)` / `_let_rec(sig, body)` / `_letimpure(sig, body)` — Pulse-level top-level bindings.
 - `_type(name, body)` — Pulse-level type definition.
+
+### Antiquotation
+
+Inside an `_inline_pulse(...)` body — and the spec macros built on it — text is emitted to Pulse **verbatim**; antiquotations are the `$`-prefixed forms PAL rewrites into C-level entities (`pts_to`, `exists*`, `**`, `pure`, module names, etc. pass through untouched).
+
+| form | emits |
+|------|-------|
+| `$(expr)`                                 | the **value** (rvalue) of a C expression — variable, `*p`, `x.f`, `_container_of(...)`, `this`, `return` |
+| `$&(expr)`                                | the **reference cell** (`ref a`), not dereferenced — e.g. for a `pts_to` over a local |
+| `$type(c-type)`                           | the F* type for a C type (`$type(int *)`, `$type(struct s)`) |
+| `$field(Type::f)`                         | a struct field accessor, or a union field constructor |
+| `` $`ident ``                             | `'ident` (an F* implicit / ticked name); in an `exists*` position, a fresh existential of inferred type. Infix: `` pfx$`sfx `` → `pfx'sfx` |
+| `$declare(Type id)`                       | nothing — binds `id : Type` in the annotation's scope so a later `$(id)` resolves |
+| `$unfold(T)` / `$fold(T)`                 | the generated raw unfold / fold lemma for `T`'s ownership predicate |
+| `$unfold-uninit(T)` / `$fold-uninit(T)`   | the uninit-variant lemma (struct only; **not** auto-applied) |
+| `$unfold(U::f)` / `$fold(U::f)`           | the unfold / fold lemma for union field `f` |
+
+Notes:
+
+- **Context sensitivity.** A parameter `p` is rebound as `let mut var_p = var_p;`, so `$(p)` is the parameter *value*: `var_p` in a function's own `_requires` / `_ensures`, and `(!var_p)` in body position (a block / `if` `_ensures`, or a `_ghost_stmt`). In an `_inline_pulse` slprop-term position, name the cell `var_p` directly and bind its value via an existential — `$(p)` there is a read action, not a term.
+- **View suppression.** Inside inline Pulse the default `_pointer_view` substitution is off, so `$type(node *)` stays the bare `ref node`.
+- **Special names.** `this` (inside `_refine*`, the value being refined; reach fields with `this.f`) and `return` (inside `_ensures`, the returned value).
+
+`test/antiquot/antiquot.c` exercises every form.
 
 ## Function attributes
 
