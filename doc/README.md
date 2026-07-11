@@ -20,5 +20,5 @@ Compound types need more machinery because they combine a runtime value with the
 
 ## Proving and internals
 
-- [`skill.md`](skill.md) — a practical guide to writing specs and progressing proofs with PAL.
+- [`skill.md`](skill.md) — A skill for getting agents to work with PAL
 - [`internals.md`](internals.md) — how PAL translates C into Pulse/F*: the compiler pipeline, IR, diagnostics, and output layout.
