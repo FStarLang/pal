@@ -1,3 +1,8 @@
+---
+name: pal-proving
+description: Verify C code with PAL (Proof Annotated Language for C), which compiles annotated C into F*/Pulse. Use when verifying C code using PAL. This guide covers spec writing idioms as well as tips on how to progress stuck proofs.
+---
+
 # Proving C with PAL (Proof Annotated Language for C) + F*/Pulse
 
 A high-level guide for adding and verifying proof annotations on C code using
@@ -30,7 +35,9 @@ naming suggestions.
   function (`Func_*.fst{,i}`), per struct (`Struct_*.fst`), and per typedef
   (`Typedef_*.fst`) into a generated output directory (e.g. `build/pal-core/`).
 - **Pulse**: F*'s separation-logic DSL (`#lang-pulse`). All ownership/heap
-  reasoning runs in Pulse; pure math is plain F*.
+  reasoning runs in Pulse; pure math is plain F*. The C-interop types you will
+  meet (`ref`/`pts_to`, `array`, the integer modules) come from PAL's
+  hand-written support library — see §6 (The Pulse Support Library) of `doc/internals.md` in the PAL repo.
 - **Hand-authored helpers**: put your Pulse proof lemmas/ghost fns in a
   `Helpers_<MODULE>.fst` next to the generated output (e.g. under
   `src/core/proofs/`). The build picks them up via a proofs include dir. Prefer
@@ -92,15 +99,15 @@ Next, analyze the verification target function by function. Identify the easiest
 When verifying a function, start with the simplest spec and gradually increase the complexity as you gain confidence in the proof. Latter parts of the guide give information on writing good specifications and guidelines for progressing the proof by defining and applying helper lemmas.
 
 ### 3.4 Extremely Important Guidelines
-- DO NOT MODIFY THE C CODE UNLESS EXPLICITLY ASKED: Our goal is to modify the C code as is. Therefore, do not change the C code for verification unless the user explicitly asks.
-- BE AWARE OF BUGS: Often times verification might be stalled due to bugs in PAL or Pulse. In these cases STOP and report the error to the user instead of struggling ahead.
+- DO NOT MODIFY THE C CODE UNLESS EXPLICITLY ASKED: Our goal is to verify the C code as is. Therefore, do not change the C code for verification unless the user explicitly asks. Adding annotations in the C code for verification purposes is fine, but changing the actual logic is not.
+- BE AWARE OF BUGS: Often times verification might be stalled due to bugs in PAL or Pulse. In these cases STOP and report the error to the user instead of struggling ahead and devising work arounds.
 
 
 ## 4. Writing Specifications
-Stating the correctness of C code involves stating the specification for functions as annotations in the C code. These annotations encode the pre and postconditions for the functions. Additionally, PAL annotations can also be used to state invariants on data types such as structs, unions, typedefs etc. Finally, all loops in the C code need to be annotated with appropriate loop invariants. (Loop invariants and if-ensures are discussed in 6)
+Stating the correctness of C code involves stating the specification for functions as annotations in the C code. These annotations encode the pre and postconditions for the functions. Additionally, PAL annotations can also be used to state invariants on data types such as structs, unions, typedefs etc. Finally, all loops in the C code need to be annotated with appropriate loop invariants (covered in [§6](#6-loops-invariants-ensures-and-break)). For the full annotation reference — contracts, ownership, refinements, ghost code — see `doc/pal_surface_syntax.md` in the PAL repo.
 
 ### 4.1 Differentiating between raw pointers and arrays
-The first step in writing specifications is to use the `_array` and `_arrayptr` annotations for differentiating between type pointers and arrays. PAL by default treats all pointers as references, the `_array` and `_arrayptr` tags tell PAL to treat them as arrays and array pointers, respectively. For more information on how arrays are modelled in PAL, refer to the documentation in the PAL repo.
+The first step in writing specifications is to distinguish array pointers from single-element references: PAL treats every `T*` as a reference by default, so tag array parameters with `_array` (a full array) or `_arrayptr` (a sub-array pointer). See `doc/arrays.md` in the PAL repo for the representation, the three points-to flavors, and the `_array` / `_arrayptr` distinction; the PAL tests `test/arrayptrs` and `test/array_test` are worked examples.
 
 The second step can be either to add the type invariants or to write the function specifications. Suppose the module under consideration heavily involves passing around and modifying a complex data structure then first write the invariant for that data structure. Both of these involve writing accompanying Pulse code. First, we take a look at best practices for writing such code.
 
@@ -131,11 +138,11 @@ ghost fn loop_inv_fold (#v) (#e) (#spec) r ...
 ```
 
 ### 4.3 Writing struct invariants
-When writing struct invariants, first deeply understand the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components separately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For more information on `_refine`, see the documentation in the PAL repo.
+When writing struct invariants, first deeply understand the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components separately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For the `_refine` family (`_refine`, `_refine_always`, `_refine_uninit`, `_refine_value`) and exactly where the predicate fires, see the *Refinements for data types* section of `doc/pal_surface_syntax.md` and `doc/structs.md` in the PAL repo; the PAL tests `test/refine_typedef_pred` and `test/refine_always` are worked examples.
 
 ### 4.4 Annotations for functions
-The last step in adding specs is to add each function's pre- and post-conditions using the appropriate annotations. Note that PAL by default generates, for every function argument, a precondition requiring full ownership of that argument and a postcondition returning that ownership. In many cases this is a sufficient spec for the memory-safety property. However, in many other cases this contract is too strong. In these cases, each argument can be prefixed with a `_consumes`, `_out`, or `_plain` tag. The `_consumes` tag instructs PAL to require ownership of the argument but not return it; the `_out` tag instructs PAL to require only *uninitialized* storage for the argument (a `pts_to_uninit` precondition) and return it initialized (a `pts_to` postcondition); and the `_plain` tag instructs PAL not to generate any ownership annotations for that argument. These tags must only be used when the default is truly too strong for the function.
-In the case that `_plain` truly has to be used, custom pre and post conditions can be added using the `_requires` and `_ensures` annotations.
+The last step in adding specs is to add each function's pre- and post-conditions. By default PAL requires full ownership of every argument and returns it; override that per-argument when the default is too strong: `_consumes` (require ownership but do **not** return it), `_out` (require only *uninitialized* storage — a `pts_to_uninit` precondition — and return it initialized), or `_plain` (emit no ownership annotation at all). See the *Annotating function arguments* section of `doc/pal_surface_syntax.md` in the PAL repo for the exact pre/post each tag generates; in the PAL repo, `test/out_param` exercises `_out` and `test/refine_typedef_pred` uses `_plain`.
+With `_plain`, supply the argument's contract yourself via the `_requires` and `_ensures` annotations.
 
 ### 4.5 Importance of readable specification
 A good specification is not just the most precise one but also a readable and accessible one. To that end, never use numeric constants directly in the specifications. Instead use named constants to express the maximum values for each type. These are easily available in F* as well as in the header exported by PAL.
@@ -148,10 +155,10 @@ To manually help along the proof, you can
 (1)define additional lemmas and apply them by using `_ghost_stmt(...)` in the C function body, 
 (2)insert the right asserts and 
 (3) do manual rewrites using `_ghost_stmt(rewrite x as y in ...)`.
-Doing any of this requires understanding the methods PAL provides for referring to the variables in the code.
+Doing any of this requires understanding the methods PAL provides for referring to the variables in the code. (`_ghost_stmt` and `_ghost_arg` are defined in the *Ghost code* section of `doc/pal_surface_syntax.md` in the PAL repo.)
 
 ### 5.1 Antiquotation inside `_inline_pulse(...)`
-For the full antiquotation reference — `$(expr)`, `$&(expr)`, `$type`, `$field`, `` $`tick ``, `$declare`, and the `$fold` / `$unfold` families — see the **Antiquotation** section of [`pal_surface_syntax.md`](pal_surface_syntax.md).
+For the full antiquotation reference — `$(expr)`, `$&(expr)`, `$type`, `$field`, `` $`tick ``, `$declare`, and the `$fold` / `$unfold` families — see the **Antiquotation** section of `doc/pal_surface_syntax.md` in the PAL repo.
 
 Pulse ghost-fn body syntax you will write inside `_ghost_stmt(...)`:
 
@@ -166,7 +173,7 @@ Pulse ghost-fn body syntax you will write inside `_ghost_stmt(...)`:
 Whenever a proof gets stuck carefully try to debug the root issue. Often the fastest way is to work at the level of the F* file. When a proof gets stuck, try to progress the proof by adding the right assert or lemma application to the F* file. Then just rewrite the right Pulse statement in the `_ghost_stmt()` blocks in the C code.
 
 After `make translate`, each C entity becomes one F* module. **Read them** — the C
-annotation is concise, but the generated F* is what Pulse actually checks.
+annotation is concise, but the generated F* is what Pulse actually checks. For the complete emitted-file layout see §5 (Output Structure) of `doc/internals.md`, and `doc/structs.md` for everything generated per `struct` and typedef (both in the PAL repo).
 
 | Generated file | Contains |
 |---|---|
@@ -205,15 +212,7 @@ names it needs.
 
 ### 5.4 `[@@pulse_intro]`: which fold/unfold lemmas Pulse applies for you
 
-PAL tags most generated struct fold/unfold lemmas with `[@@pulse_intro]`, so Pulse
-applies them **automatically** when it needs the corresponding shape:
-
-| Lemma | Auto-applied when Pulse needs… |
-|---|---|
-| `Struct_X__aux_raw_unfold` | per-field `pts_to` / `array_pts_to` of a struct value |
-| `Struct_X__aux_raw_fold` | a whole-struct `pts_to x (MkX …)` |
-| `Struct_X__aux_raw_fold_uninit` | a `pts_to_uninit x` from per-field uninit reps |
-| `Struct_X__pred_unfold` / `__pred_fold` | to (de)compose `Struct_X__pred` |
+PAL tags most generated struct fold/unfold lemmas (`__aux_raw_fold` / `__aux_raw_unfold`, `__pred_fold` / `__pred_unfold`) with `[@@pulse_intro]`, so Pulse applies them **automatically** whenever it needs the corresponding shape — you rarely invoke them by hand. See `doc/structs.md` in the PAL repo for what each generated lemma does.
 
 **The one exception**: `Struct_X__aux_raw_unfold_uninit` is emitted **without**
 `[@@pulse_intro]`. To open a *fresh, uninitialized* struct you must apply it by
@@ -280,7 +279,7 @@ isolation (single-file loop, §2), then re-verify the caller. Treat the `.fsti` 
 the negotiated interface between the two proofs.
 
 ## 6. Loops: invariants, ensures, and `break`
-Adding the right loop invariants is part of both writing the specification and progressing the proof. Each loop needs to be annotated with the right loop invariant.
+Adding the right loop invariants is part of both writing the specification and progressing the proof. Each loop needs to be annotated with the right loop invariant. See the *Loop invariants* section of `doc/pal_surface_syntax.md` in the PAL repo for the `_invariant` / `_ensures` loop syntax; the PAL tests `test/do_while`, `test/for_loop`, and `test/break_continue` are worked loop examples.
 
 ```
 while (cond)
@@ -348,7 +347,7 @@ in the "In the context" dump.
 
 **Fix**: ascribe the if's post-state with `_ensures(_inline_pulse(...))`
 (requires a recent PAL with the if-`_ensures` feature). Pulse then checks each
-branch directly against the ensures, skipping the inferred join.
+branch directly against the ensures, skipping the inferred join. See the PAL test `test/if_ensures` for a worked if-`_ensures` example.
 
 ```c
 if (cond)
@@ -448,7 +447,7 @@ return FALSE;
 ## 7. Manipulating existentials (early returns + disjunctive posts)
 
 `exists*` postconditions are auto-introduced by Pulse's matcher creating uvars
-and solving them. This breaks down in a few common situations, addressed below.
+and solving them. This breaks down in a few common situations, addressed below. Worked examples of ghost statements and existential manipulation live in the PAL tests `test/return_ghost` and `test/ghost_arg`.
 
 ### 7.1 Disjunctive post with `if-then-else` and early `return`
 
