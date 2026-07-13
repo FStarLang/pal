@@ -279,7 +279,21 @@ public:
     }
     auto qt = f->getType();
     auto *qtPtr = qt.IgnoreParens().getTypePtr();
-    if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
+    // Flexible and zero-length struct members have no static length in PAL.
+    // Field refinements, if any, remain responsible for runtime constraints.
+    auto *constantArray = dyn_cast<ConstantArrayType>(qtPtr);
+    bool isVLA = isa<VariableArrayType>(qtPtr) ||
+                 isa<IncompleteArrayType>(qtPtr) ||
+                 (constantArray && constantArray->getSize().isZero());
+    if (isVLA && !inUnion) {
+      auto *array = cast<ArrayType>(qtPtr);
+      auto ty = mk_pointer_array(floc.clone(),
+                                 trQualType(array->getElementType(),
+                                            f->getSourceRange(), liftStructs));
+      builder.field(ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
+                    trTypeAttrs(f->getAttrs(), std::move(ty)));
+    } else if (isa<VariableArrayType>(qtPtr) ||
+               isa<IncompleteArrayType>(qtPtr)) {
       reportUnsupported(f->getSourceRange(), floc,
                         "unsupported non-constant-length array field", "");
     } else {

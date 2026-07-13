@@ -1,4 +1,4 @@
-.PHONY: all translate verify compile clean
+.PHONY: all translate check verify compile clean
 
 C2PULSE ?= ../../target/debug/pal
 FSTAR_EXE ?= ../../opt/run-fstar.sh
@@ -8,6 +8,7 @@ OBJ_DIR ?= obj
 
 C_FILES := $(wildcard *.c)
 H_FILES := $(wildcard *.h)
+CHECKS := $(wildcard check-*.sh)
 PAL_OPTS :=
 
 # If there's an include/ directory, add -I include
@@ -16,7 +17,10 @@ INCLUDES += -I include
 endif
 PAL_OPTS += $(INCLUDES)
 
-all: verify compile
+all: check verify compile
+
+check:
+	@for check in $(CHECKS); do ./$$check; done
 
 translate: $(OUT_DIR)/.stamp
 
