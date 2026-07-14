@@ -291,7 +291,8 @@ public:
                                  trQualType(array->getElementType(),
                                             f->getSourceRange(), liftStructs));
       builder.field(ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
-                    trTypeAttrs(f->getAttrs(), std::move(ty)));
+                    trTypeAttrs(f->getAttrs(), std::move(ty), false));
+      addFieldRefinements(builder, f->getAttrs());
     } else if (isa<VariableArrayType>(qtPtr) ||
                isa<IncompleteArrayType>(qtPtr)) {
       reportUnsupported(f->getSourceRange(), floc,
@@ -300,7 +301,10 @@ public:
       builder.field(ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
                     trTypeAttrs(f->getAttrs(),
                                 trQualType(f->getType(), f->getSourceRange(),
-                                           liftStructs)));
+                                           liftStructs),
+                                inUnion));
+      if (!inUnion)
+        addFieldRefinements(builder, f->getAttrs());
     }
   }
 
@@ -459,11 +463,12 @@ public:
     return mk_type_err(std::move(loc));
   }
 
-  Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty) {
+  Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty,
+                           bool includeRefine = true) {
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
       if (auto ann = dyn_cast<AnnotateAttr>(*it)) {
         auto loc = getRange(ann->getRange());
-        if (auto ref = isUnaryAttrOf(ann, "pal-refine")) {
+        if (auto ref = isUnaryAttrOf(ann, "pal-refine"); ref && includeRefine) {
           ty = mk_type_refine(std::move(loc), std::move(ty),
                               std::move(ref.value()));
         } else if (auto ref = isUnaryAttrOf(ann, "pal-refine-always")) {
@@ -504,6 +509,16 @@ public:
       }
     }
     return ty;
+  }
+
+  void addFieldRefinements(DeclBuilder &builder, AttrVec const &attrs) {
+    for (auto *attr : attrs) {
+      if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
+        if (auto refinement = isUnaryAttrOf(ann, "pal-refine")) {
+          builder.field_refinement(std::move(refinement.value()));
+        }
+      }
+    }
   }
 
   bool hasConsumesAttr(AttrVec const &attrs) {

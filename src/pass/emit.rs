@@ -805,7 +805,7 @@ impl<'a> Emitter<'a> {
     /// `field`. For `Plain` fields this is the stored type
     fn emit_field_record_type(&mut self, env: &Env, field: &Field) -> Doc {
         match &field.val {
-            FieldT::Plain { name: _, ty } => self.emit_type(env, ty),
+            FieldT::Plain { ty, .. } => self.emit_type(env, ty),
             FieldT::BitField { ty, width, .. } => self.emit_bitfield_value_type(env, ty, *width),
         }
     }
@@ -835,7 +835,7 @@ impl<'a> Emitter<'a> {
             self.emit_field_array_handle_type(env, field)
         } else {
             match &field.val {
-                FieldT::Plain { name: _, ty } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
+                FieldT::Plain { ty, .. } => unaryfn(Doc::text("ref"), self.emit_type(env, ty)),
                 FieldT::BitField { ty, width, .. } => unaryfn(
                     Doc::text("ref"),
                     self.emit_bitfield_value_type(env, ty, *width),
@@ -4131,10 +4131,23 @@ impl<'a> Emitter<'a> {
                 .insert(TypeRef::from(k), vec![spec_type_name_qualified.clone()]);
         }
 
-        // Collect init props from field specs
+        let field_refinements: Vec<Doc> = fields
+            .iter()
+            .flat_map(|field| match &field.val {
+                FieldT::Plain { refinements, .. } => refinements
+                    .iter()
+                    .map(|refinement| self.emit_rvalue(env, refinement))
+                    .collect(),
+                FieldT::BitField { .. } => vec![],
+            })
+            .collect();
+
+        // Collect ownership/type propositions and enclosing-struct FieldDecl
+        // refinements. The latter apply even when a field has no spec binding.
         let init_props: Vec<Doc> = field_specs
             .iter()
             .flat_map(|fs| fs.init_props.clone())
+            .chain(field_refinements)
             .collect();
 
         // Emit __pred directly (no indirection via __pred')
@@ -4181,11 +4194,11 @@ impl<'a> Emitter<'a> {
                 );
             }
         } else {
-            // No spec bindings - emit a simple pred with just this and perm
+            // No spec bindings - emit a simple pred with just this and perm.
             ses.push(mk_eager_unfold_slprop(
                 pred_name.clone(),
                 &[this_arg.clone(), parens(Doc::text("p: perm"))],
-                Doc::text("emp"),
+                mk_star(init_props.iter().cloned()),
             ));
         }
 
@@ -4308,7 +4321,15 @@ impl<'a> Emitter<'a> {
             let mut fold_requires = vec![];
             for f in fields {
                 if f.val.is_array() {
-                    // Inline array fields are not tracked in the pred / spec record.
+                    // Inline array fields have no ownership/spec-record entry,
+                    // but their FieldDecl refinements still constrain the struct.
+                    if let FieldT::Plain { refinements, .. } = &f.val {
+                        fold_requires.extend(
+                            refinements
+                                .iter()
+                                .map(|refinement| self.emit_rvalue(env, refinement)),
+                        );
+                    }
                     continue;
                 }
                 let fld = f.val.name();
@@ -4330,8 +4351,14 @@ impl<'a> Emitter<'a> {
                     &mut fold_requires,
                     &field_expr,
                 );
+                if let FieldT::Plain { refinements, .. } = &f.val {
+                    fold_requires.extend(
+                        refinements
+                            .iter()
+                            .map(|refinement| self.emit_rvalue(env, refinement)),
+                    );
+                }
             }
-
             // Build the spec record literal for ensures
             let spec_record_literal = parens(
                 Doc::text("{")

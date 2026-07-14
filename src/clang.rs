@@ -476,8 +476,18 @@ impl DeclBuilder {
             val: FieldT::Plain {
                 name: (*name).clone(),
                 ty,
+                refinements: vec![],
             },
         })
+    }
+
+    fn field_refinement(&mut self, refinement: Rc<Expr>) {
+        let Some(field) = self.fields.last_mut() else {
+            return;
+        };
+        if let FieldT::Plain { refinements, .. } = &mut field.val {
+            refinements.push(refinement);
+        }
     }
 
     fn field_bitfield(&mut self, name: Rc<Ident>, ty: Rc<Type>, width: u32) {

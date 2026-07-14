@@ -69,10 +69,21 @@ impl<'a> Checker<'a> {
         self.check_has_type(env, p, TypeT::Bool.with_loc_core(p.loc.clone()).into());
     }
 
-    fn check_field(&mut self, env: &Env, field: &Field) {
+    fn check_field(&mut self, env: &Env, field: &Field, enclosing: Option<Rc<Type>>) {
         match &field.val {
-            FieldT::Plain { name: _, ty } => self.check_type(env, ty),
-            FieldT::BitField { name: _, ty, .. } => self.check_type(env, ty),
+            FieldT::Plain {
+                ty, refinements, ..
+            } => {
+                self.check_type(env, ty);
+                if let Some(enclosing) = enclosing {
+                    let env = &mut env.clone();
+                    env.push_this(enclosing);
+                    for refinement in refinements {
+                        self.check_slprop(env, refinement);
+                    }
+                }
+            }
+            FieldT::BitField { ty, .. } => self.check_type(env, ty),
         }
     }
 
@@ -726,17 +737,17 @@ impl<'a> Checker<'a> {
                 body,
                 is_pointer_view: _,
             }) => self.check_type(env, body),
-            DeclT::StructDefn(StructDefn {
-                name: _, fields, ..
-            }) => {
+            DeclT::StructDefn(StructDefn { name, fields, .. }) => {
+                let enclosing =
+                    TypeT::TypeRef(TypeRefKind::Struct(name.clone())).with_loc(name.loc.clone());
                 for f in fields {
-                    self.check_field(env, f);
+                    self.check_field(env, f, Some(enclosing.clone()));
                 }
             }
             DeclT::StructDecl(_) => {}
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
                 for f in fields {
-                    self.check_field(env, f);
+                    self.check_field(env, f, None);
                 }
             }
             DeclT::IncludeDecl(_) => {}

@@ -562,14 +562,23 @@ impl PrettyIR for Stmts {
 impl PrettyIR for FieldT {
     fn to_doc(&self) -> RcDoc<'_, ()> {
         match self {
-            FieldT::Plain { name, ty } => ty
-                .to_doc()
-                .append(RcDoc::line())
-                .append(name.to_doc())
-                .append(";")
-                .group()
-                .nest(2)
-                .append(RcDoc::hardline()),
+            FieldT::Plain {
+                name,
+                ty,
+                refinements,
+            } => RcDoc::concat(refinements.iter().map(|p| {
+                RcDoc::text("_refine(")
+                    .append(p.to_doc())
+                    .append(")")
+                    .append(RcDoc::line())
+            }))
+            .append(ty.to_doc())
+            .append(RcDoc::line())
+            .append(name.to_doc())
+            .append(";")
+            .group()
+            .nest(2)
+            .append(RcDoc::hardline()),
             FieldT::BitField { name, ty, width } => ty
                 .to_doc()
                 .append(RcDoc::line())

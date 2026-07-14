@@ -428,7 +428,13 @@ pub type Field = Ast<FieldT>;
 pub enum FieldT {
     /// A regular field: `T name;`
     /// For fixed-size C array fields (`T name[length]`), the type is `FixedArray(T, length)`.
-    Plain { name: Ident, ty: Rc<Type> },
+    /// `refinements` are annotations attached to the Clang `FieldDecl`; unlike
+    /// type refinements, their `this` denotes the enclosing struct value.
+    Plain {
+        name: Ident,
+        ty: Rc<Type>,
+        refinements: Vec<Rc<Expr>>,
+    },
     /// An unsigned bit-field: `T name : width;`. `ty` is the declared underlying
     /// integer type (e.g. `unsigned int`); `width` is the number of bits. The
     /// value is stored directly in the struct record as a range-refined machine

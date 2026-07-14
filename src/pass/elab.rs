@@ -83,10 +83,23 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    fn elab_field(&mut self, env: &Env, field: &mut Field) {
+    fn elab_field(&mut self, env: &Env, field: &mut Field, enclosing: Option<Rc<Type>>) {
         match &mut field.val {
-            FieldT::Plain { name: _, ty } => self.elab_type(env, Rc::make_mut(ty)),
-            FieldT::BitField { name: _, ty, .. } => self.elab_type(env, Rc::make_mut(ty)),
+            FieldT::Plain {
+                ty, refinements, ..
+            } => {
+                self.elab_type(env, Rc::make_mut(ty));
+                if let Some(enclosing) = enclosing {
+                    let env = &mut env.clone();
+                    env.push_this(enclosing);
+                    for refinement in refinements {
+                        let slprop_ty = TypeT::SLProp.with_loc(refinement.loc.clone());
+                        self.elab_rvalue(env, Rc::make_mut(refinement), Some(&slprop_ty));
+                        self.cast_to_slprop(env, refinement);
+                    }
+                }
+            }
+            FieldT::BitField { ty, .. } => self.elab_type(env, Rc::make_mut(ty)),
         }
     }
 
@@ -992,17 +1005,17 @@ impl<'a> Elaborator<'a> {
                 self.elab_type(env, Rc::make_mut(&mut typedef.body));
                 self.in_view_body = false;
             }
-            DeclT::StructDefn(StructDefn {
-                name: _, fields, ..
-            }) => {
+            DeclT::StructDefn(StructDefn { name, fields, .. }) => {
+                let enclosing =
+                    TypeT::TypeRef(TypeRefKind::Struct(name.clone())).with_loc(name.loc.clone());
                 for f in fields {
-                    self.elab_field(env, f);
+                    self.elab_field(env, f, Some(enclosing.clone()));
                 }
             }
             DeclT::StructDecl(_) => {}
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
                 for f in fields {
-                    self.elab_field(env, f);
+                    self.elab_field(env, f, None);
                 }
             }
             DeclT::IncludeDecl(include_decl) => {
@@ -1160,12 +1173,14 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             }
             DeclT::StructDefn(StructDefn { fields, .. }) => {
                 for f in fields {
-                    elab.elab_field(&env, f);
+                    // Field-level predicates need the complete enclosing struct,
+                    // which is registered and elaborated in the main pass.
+                    elab.elab_field(&env, f, None);
                 }
             }
             DeclT::UnionDefn(UnionDefn { fields, .. }) => {
                 for f in fields {
-                    elab.elab_field(&env, f);
+                    elab.elab_field(&env, f, None);
                 }
             }
             DeclT::LetDecl(let_decl) => {
