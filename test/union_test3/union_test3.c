@@ -17,6 +17,13 @@
  * following `$unfold-uninit` exposes the per-field uninitialized cells so the
  * write can initialize just `a`; `b` stays uninitialized. The final per-field
  * initialization state is stated manually in `_ensures`.
+ *
+ * `build_full` shows the complementary case: writing *both* sub-fields fully
+ * initializes the arm, so it can be re-folded back into a complete `union u2`
+ * value. The re-fold happens automatically (the per-arm/-field fold lemmas are
+ * `pulse_intro`), driven by the postcondition. Because the arm is complete at
+ * exit, no annotations are needed — the default parameter mode's implicit
+ * round-trip (`exists* v. pts_to u v`) is re-established.
  */
 
 struct inner {
@@ -42,4 +49,12 @@ int write_subfield(union u2 *u _consumes, int v)
     _ghost_stmt($unfold-uninit(struct inner) $&(u->x));
     u->x.a = v;
     return u->x.a;
+}
+
+void build_full(union u2 *u, int v1, int v2)
+{
+    _ghost_stmt($activate(union u2::x) $(u));
+    _ghost_stmt($unfold-uninit(struct inner) $&(u->x));
+    u->x.a = v1;
+    u->x.b = v2;
 }
