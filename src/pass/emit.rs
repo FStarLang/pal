@@ -72,6 +72,7 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionAuxFn(u, _, _) => Some(format!("Union_{}", u)),
+        Name::UnionActivateFn(u, _) => Some(format!("Union_{}", u)),
         Name::TypeRefDefault(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
         Name::TypeRefDefault(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefDefault(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
@@ -336,6 +337,9 @@ enum Name {
     UnionGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
     UnionFieldProj(Rc<IdentT>, Rc<IdentT>),
     UnionAuxFn(Rc<IdentT>, &'static str, Rc<IdentT>),
+    /// Proven (non-ghost) primitive that activates a struct-typed union arm,
+    /// used before a partial sub-field write `u->arm.field = v`.
+    UnionActivateFn(Rc<IdentT>, Rc<IdentT>),
 
     TypeRefDefault(TypeRef),
 }
@@ -401,6 +405,9 @@ impl Name {
             Name::UnionGhostFieldProj(u, fld) => format!("{}__{}", union_to_string(u), fld),
             Name::UnionFieldProj(u, fld) => format!("{}__get_{}", union_to_string(u), fld),
             Name::UnionAuxFn(u, f, fld) => format!("{}__aux_{}_{}", union_to_string(u), f, fld),
+            Name::UnionActivateFn(u, fld) => {
+                format!("{}__activate_{}", union_to_string(u), fld)
+            }
             Name::TypeRefDefault(type_ref) => {
                 format!("has_zero_default_{}", typeref_to_string(type_ref))
             }
@@ -1392,6 +1399,32 @@ impl<'a> Emitter<'a> {
 
     fn emit_var(&mut self, v: &Ident) -> Doc {
         annotated(v, || self.emit_name(Name::Var(v.val.clone())))
+    }
+
+    /// If assigning to `lv` is a *partial* sub-field write into a union arm
+    /// (e.g. `u->arm.field = v`), find the innermost enclosing union-arm
+    /// access `Member(union_base, arm)` where `union_base` has union type and
+    /// return `(union_base, union_name, arm)`. The caller emits an activation
+    /// call on `union_base` before the write so the arm is active. Returns
+    /// `None` for plain struct member writes and whole-arm union writes
+    /// (which are handled separately as a direct constructor store).
+    fn find_write_union_arm<'lv>(
+        &self,
+        env: &Env,
+        lv: &'lv Expr,
+    ) -> Option<(&'lv Expr, Rc<IdentT>, Rc<IdentT>)> {
+        match &lv.val {
+            ExprT::Member(base, arm) => {
+                if let Ok(ty) = env.infer_expr(base) {
+                    if let TypeT::TypeRef(TypeRefKind::Union(uname)) = &env.vtype_whnf(ty).val {
+                        return Some((base, uname.val.clone(), arm.val.clone()));
+                    }
+                }
+                self.find_write_union_arm(env, base)
+            }
+            ExprT::Deref(inner) => self.find_write_union_arm(env, inner),
+            _ => None,
+        }
     }
 
     fn emit_lvalue(&mut self, env: &Env, v: &Expr) -> Doc {
@@ -3472,6 +3505,22 @@ impl<'a> Emitter<'a> {
                             }
                         }
                         // Fall through to normal assignment for struct members.
+                        // If this is a *partial* sub-field write into a union
+                        // arm (`u->arm.field = v`), the arm's getter requires
+                        // the arm be active; emit a proven activation call on
+                        // the union reference first to make it so.
+                        let activate = self.find_write_union_arm(env, x).map(
+                            |(union_base, union_name, arm)| {
+                                let arg = self.emit_lvalue(env, union_base);
+                                naryfn([
+                                    self.emit_name(Name::UnionActivateFn(union_name, arm)),
+                                    arg,
+                                ])
+                                .append(";")
+                                .group()
+                                .append(Doc::hardline())
+                            },
+                        );
                         // For an unsigned bit-field, mask the RHS to its width so
                         // the stored value satisfies the cell's `< pow2 N`
                         // refinement (C unsigned modular truncation on write).
@@ -3483,7 +3532,8 @@ impl<'a> Emitter<'a> {
                             ]),
                             None => self.emit_rvalue(env, t),
                         };
-                        self.emit_lvalue(env, x)
+                        let write = self
+                            .emit_lvalue(env, x)
                             .append(Doc::line())
                             .append(":=")
                             .group()
@@ -3491,7 +3541,11 @@ impl<'a> Emitter<'a> {
                             .append(rhs)
                             .append(";")
                             .group()
-                            .nest(2)
+                            .nest(2);
+                        match activate {
+                            Some(a) => a.append(write).group(),
+                            None => write,
+                        }
                     } else {
                         self.emit_lvalue(env, x)
                             .append(Doc::line())
@@ -5096,6 +5150,146 @@ impl<'a> Emitter<'a> {
                     ),
                 ]),
             ))
+        }
+
+        // Proven (non-ghost) activation fn for each struct-typed arm.
+        //
+        // A partial sub-field write `u->arm.field = v` needs arm `arm`
+        // active, but at an arbitrary program point the active arm is
+        // unknown, so the arm's getter (which requires `Field_?  vx`) is
+        // unusable. C semantics say the write *activates* the arm; that is
+        // a genuine state change on the union reference, so it must be a
+        // real `stt` op — it cannot be a ghost/annotation-only step
+        // without unsoundness.
+        //
+        // The fn unconditionally overwrites the union with the arm's
+        // `zero_default` constructor and then unfolds it. Because the
+        // overwrite is unconditional, the non-written sub-fields become
+        // existential in the postcondition (`exists* sx`), so no stale
+        // value about them can be proven — this is what keeps it sound.
+        // The `#v` argument is `Ghost.erased` so the fn body composes as a
+        // plain stateful write (a non-erased binder would trip Pulse's
+        // ghost-composition check).
+        for f in fields {
+            let is_struct_arm = match &f.val {
+                FieldT::Plain { ty, .. } => matches!(
+                    env.vtype_whnf(ty.clone().into()).val,
+                    TypeT::TypeRef(TypeRefKind::Struct(_))
+                ),
+                FieldT::BitField { .. } => false,
+            };
+            if !is_struct_arm {
+                continue;
+            }
+            let fld = f.val.name();
+            let activate_name =
+                self.emit_name(Name::UnionActivateFn(name.val.clone(), fld.val.clone()));
+            let ctor_default = parens(
+                self.emit_name(field_ctor(fld))
+                    .append(Doc::line())
+                    .append(self.emit_field_default(env, f))
+                    .group(),
+            );
+            let unfolded = naryfn([
+                self.emit_name(unfolded_tok(fld)),
+                Doc::text("x"),
+                Doc::text("1.0R"),
+            ]);
+            let arm_ty = self.emit_field_record_type(env, f);
+            let ghost_proj = unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x"));
+            let unfold_lemma = self.emit_name(Name::UnionAuxFn(
+                name.val.clone(),
+                "raw_unfold",
+                fld.val.clone(),
+            ));
+
+            let sig = Doc::text("fn")
+                .append(Doc::line())
+                .append(activate_name)
+                .append(
+                    Doc::line()
+                        .append(parens(
+                            Doc::text("x:")
+                                .append(Doc::line())
+                                .append(ref_union_type.clone()),
+                        ))
+                        .append(Doc::line())
+                        .append(parens(
+                            Doc::text("#v: Ghost.erased")
+                                .append(Doc::line())
+                                .append(union_type_name.clone()),
+                        ))
+                        .nest(2),
+                )
+                .group();
+            let requires_doc = Doc::text("requires")
+                .append(Doc::line())
+                .append(naryfn([
+                    Doc::text("Pulse.Lib.Reference.pts_to"),
+                    Doc::text("x"),
+                    Doc::text("#1.0R"),
+                    Doc::text("v"),
+                ]))
+                .nest(2)
+                .group();
+            let returns_doc = Doc::text("returns _:")
+                .append(Doc::line())
+                .append("unit")
+                .group();
+            let ensures_doc = Doc::text("ensures")
+                .append(Doc::line())
+                .append(parens(
+                    Doc::text("exists*")
+                        .append(Doc::line())
+                        .append(parens(Doc::text("sx:").append(Doc::line()).append(arm_ty)))
+                        .append(".")
+                        .append(Doc::line())
+                        .append(mk_star([
+                            unfolded,
+                            naryfn([
+                                Doc::text("Pulse.Lib.Reference.pts_to"),
+                                ghost_proj,
+                                Doc::text("#1.0R"),
+                                Doc::text("sx"),
+                            ]),
+                        ]))
+                        .group(),
+                ))
+                .nest(2)
+                .group();
+            let body = Doc::text("{")
+                .append(
+                    Doc::hardline()
+                        .append(
+                            Doc::text("x")
+                                .append(Doc::line())
+                                .append(":=")
+                                .append(Doc::line())
+                                .append(ctor_default.clone())
+                                .append(";")
+                                .group(),
+                        )
+                        .append(Doc::hardline())
+                        .append(
+                            naryfn([unfold_lemma, Doc::text("x"), ctor_default])
+                                .append(";")
+                                .group(),
+                        )
+                        .nest(2),
+                )
+                .append(Doc::hardline())
+                .append("}");
+            ses.push(
+                sig.append(Doc::hardline())
+                    .append(requires_doc)
+                    .append(Doc::hardline())
+                    .append(returns_doc)
+                    .append(Doc::hardline())
+                    .append(ensures_doc)
+                    .append(Doc::hardline())
+                    .append(body)
+                    .group(),
+            );
         }
 
         // has_zero_default instance (uses first field's constructor).
