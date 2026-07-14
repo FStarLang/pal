@@ -24,13 +24,15 @@ void constrain_zero_length_member(struct zero_length_member *s, size_t length)
 {
 }
 
-// Runtime length constraints are explicit refinements on the struct field.
-struct explicitly_refined_member {
-    int tag;
-    int member[0] _refine(this._length == 2);
-};
+// Runtime length constraints are explicit refinements relating the VLA field
+// to the struct's length field; no length comes from the array spelling.
+_refine(this.member._length == this.len)
+typedef struct explicitly_refined_member {
+    size_t len;
+    int member[];
+} explicitly_refined_member;
 
-void use_explicitly_refined_member(struct explicitly_refined_member *s)
-    _requires(s->member._length == 2)
+void use_explicitly_refined_member(explicitly_refined_member *s)
+    _ensures(s->member._length == s->len)
 {
 }
