@@ -551,6 +551,10 @@ pub enum AuxFnKind {
     UnfoldUninit,
     Fold,
     FoldUninit,
+    /// `$activate(union U::arm)` — activates a union arm, leaving its payload
+    /// uninitialized. Union-only; has no struct form. Emits the per-arm
+    /// activation fn `union_<U>__activate_<arm>`.
+    Activate,
 }
 
 impl AuxFnKind {
@@ -560,15 +564,19 @@ impl AuxFnKind {
             AuxFnKind::UnfoldUninit => "unfold-uninit",
             AuxFnKind::Fold => "fold",
             AuxFnKind::FoldUninit => "fold-uninit",
+            AuxFnKind::Activate => "activate",
         }
     }
 
-    pub fn struct_aux_name(self) -> &'static str {
+    /// The struct-level aux fn infix, if this kind has a struct form.
+    /// `Activate` is union-only and has none.
+    pub fn struct_aux_name(self) -> Option<&'static str> {
         match self {
-            AuxFnKind::Unfold => "raw_unfold",
-            AuxFnKind::UnfoldUninit => "raw_unfold_uninit",
-            AuxFnKind::Fold => "raw_fold",
-            AuxFnKind::FoldUninit => "raw_fold_uninit",
+            AuxFnKind::Unfold => Some("raw_unfold"),
+            AuxFnKind::UnfoldUninit => Some("raw_unfold_uninit"),
+            AuxFnKind::Fold => Some("raw_fold"),
+            AuxFnKind::FoldUninit => Some("raw_fold_uninit"),
+            AuxFnKind::Activate => None,
         }
     }
 
@@ -576,7 +584,7 @@ impl AuxFnKind {
         match self {
             AuxFnKind::Unfold => Some("raw_unfold"),
             AuxFnKind::Fold => Some("raw_fold"),
-            AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit => None,
+            AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit | AuxFnKind::Activate => None,
         }
     }
 }
