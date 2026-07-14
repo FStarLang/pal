@@ -157,6 +157,34 @@ To manually help along the proof, you can
 (3) do manual rewrites using `_ghost_stmt(rewrite x as y in ...)`.
 Doing any of this requires understanding the methods PAL provides for referring to the variables in the code. (`_ghost_stmt` and `_ghost_arg` are defined in the *Ghost code* section of `doc/pal_surface_syntax.md` in the PAL repo.)
 
+> **⚠️ `_ghost_stmt` is ghost-only — it must NEVER perform effectful code.**
+> A `_ghost_stmt(...)` may only contain **ghost functions, pure functions, ghost
+> updates, or lemmas**. It must not mutate memory, allocate, perform I/O, or run
+> any other computationally effectful operation. Ghost code is erased and cannot
+> change the running program's state; using it to do so is unsound.
+>
+> **Not allowed** — here `force_zero` is an *effectful* fn (it does `r := ...`),
+> so invoking it from a `_ghost_stmt` is an unsound misuse:
+>
+> ```c
+> _include_pulse(ForceZero,
+>   fn force_zero (r: (ref Int32.t)) (#v: Ghost.erased Int32.t)
+>     requires Pulse.Lib.Reference.pts_to r #1.0R v
+>     returns _: unit
+>     ensures Pulse.Lib.Reference.pts_to r #1.0R (Int32.int_to_t 0)
+>   {
+>     r := Int32.int_to_t 0;
+>   }
+> )
+>
+> int ghost_write_unsound(int *p)
+>     _ensures(return == 0)
+> {
+>     _ghost_stmt(ForceZero.force_zero $(p));   // ❌ effectful mutation in ghost code
+>     return *p;
+> }
+> ```
+
 ### 5.1 Antiquotation inside `_inline_pulse(...)`
 For the full antiquotation reference — `$(expr)`, `$&(expr)`, `$type`, `$field`, `` $`tick ``, `$declare`, and the `$fold` / `$unfold` families — see the **Antiquotation** section of `doc/pal_surface_syntax.md` in the PAL repo.
 
