@@ -5138,33 +5138,30 @@ impl<'a> Emitter<'a> {
             ))
         }
 
-        // Proven (non-ghost) activation fn for each struct-typed arm.
+        // Proven (non-ghost) activation fn for each arm.
         //
-        // A partial sub-field write `u->arm.field = v` needs arm `arm`
-        // active, but at an arbitrary program point the active arm is
-        // unknown, so the arm's getter (which requires `Field_?  vx`) is
-        // unusable. C semantics say the write *activates* the arm.
+        // A write through a union arm `u->arm... = v` needs arm `arm` active,
+        // but at an arbitrary program point the active arm is unknown, so the
+        // arm's getter (which requires `Field_? vx`) is unusable. C semantics
+        // say the write *activates* the arm.
         //
         // Activation is user-driven via `_ghost_stmt($activate(union U::arm) $(u))`.
         // The fn sets the arm *tag* (overwrite with the arm constructor) and then
         // immediately downgrades the payload to *uninitialized* via `forget_init`,
         // so it commits to NO field values: the postcondition only claims the arm
         // is active with an uninitialized payload (`pts_to_uninit`). Sub-fields
-        // become readable only once physically written. This matches C: the real
-        // `u->arm.field = v` write realizes the tag at runtime (C17 6.2.6.1p7),
-        // so erasing the ghost activation at extraction is sound.
+        // (or the scalar payload) become readable only once physically written.
+        // This matches C: the real arm write realizes the tag at runtime (C17
+        // 6.2.6.1p7), so erasing the ghost activation at extraction is sound.
         // The `#v` argument is `Ghost.erased` so the fn body composes as a
         // plain stateful write (a non-erased binder would trip Pulse's
         // ghost-composition check).
+        //
+        // Emitted for every `Plain` arm (struct- or scalar-typed); bit-field
+        // arms are skipped (their cell has a width refinement and no matching
+        // uninit `forget_init`/getter shape).
         for f in fields {
-            let is_struct_arm = match &f.val {
-                FieldT::Plain { ty, .. } => matches!(
-                    env.vtype_whnf(ty.clone().into()).val,
-                    TypeT::TypeRef(TypeRefKind::Struct(_))
-                ),
-                FieldT::BitField { .. } => false,
-            };
-            if !is_struct_arm {
+            if matches!(&f.val, FieldT::BitField { .. }) {
                 continue;
             }
             let fld = f.val.name();
