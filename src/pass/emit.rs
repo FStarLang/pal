@@ -72,6 +72,7 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionAuxFn(u, _, _) => Some(format!("Union_{}", u)),
+        Name::UnionActivateFn(u, _) => Some(format!("Union_{}", u)),
         Name::TypeRefDefault(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
         Name::TypeRefDefault(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefDefault(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
@@ -336,6 +337,9 @@ enum Name {
     UnionGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
     UnionFieldProj(Rc<IdentT>, Rc<IdentT>),
     UnionAuxFn(Rc<IdentT>, &'static str, Rc<IdentT>),
+    /// Ghost axiom (`assume val ... : stt_ghost ...`) that activates a union
+    /// arm, used before a partial sub-field write `u->arm.field = v`.
+    UnionActivateFn(Rc<IdentT>, Rc<IdentT>),
 
     TypeRefDefault(TypeRef),
 }
@@ -401,6 +405,9 @@ impl Name {
             Name::UnionGhostFieldProj(u, fld) => format!("{}__{}", union_to_string(u), fld),
             Name::UnionFieldProj(u, fld) => format!("{}__get_{}", union_to_string(u), fld),
             Name::UnionAuxFn(u, f, fld) => format!("{}__aux_{}_{}", union_to_string(u), f, fld),
+            Name::UnionActivateFn(u, fld) => {
+                format!("{}__activate_{}", union_to_string(u), fld)
+            }
             Name::TypeRefDefault(type_ref) => {
                 format!("has_zero_default_{}", typeref_to_string(type_ref))
             }
@@ -1000,18 +1007,46 @@ impl<'a> Emitter<'a> {
                     let resolved = env.vtype_whnf(ty.clone().into());
                     match &resolved.val {
                         TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => {
-                            if field_name.is_some() {
-                                self.report(
-                                    format!("${}: struct type does not take a field name", kind.keyword()),
-                                    &ty.loc,
-                                );
+                            match kind.struct_aux_name() {
+                                None => {
+                                    self.report(
+                                        format!("${}: not supported for struct types", kind.keyword()),
+                                        &ty.loc,
+                                    );
+                                    Doc::text(*before).append(format!("(* ${}: not supported for structs *)", kind.keyword()))
+                                }
+                                Some(aux_name) => {
+                                    if field_name.is_some() {
+                                        self.report(
+                                            format!("${}: struct type does not take a field name", kind.keyword()),
+                                            &ty.loc,
+                                        );
+                                    }
+                                    Doc::text(*before).append(self.emit_name(Name::StructAuxFn(
+                                        struct_name.val.clone(),
+                                        aux_name.into(),
+                                    )))
+                                }
                             }
-                            Doc::text(*before).append(self.emit_name(Name::StructAuxFn(
-                                struct_name.val.clone(),
-                                kind.struct_aux_name().into(),
-                            )))
                         }
                         TypeT::TypeRef(TypeRefKind::Union(union_name)) => {
+                            if matches!(kind, AuxFnKind::Activate) {
+                                match field_name {
+                                    Some(fld) => Doc::text(*before).append(self.emit_name(
+                                        Name::UnionActivateFn(
+                                            union_name.val.clone(),
+                                            fld.val.clone(),
+                                        ),
+                                    )),
+                                    None => {
+                                        self.report(
+                                            "$activate: union type requires an arm name (use type::arm syntax)".to_string(),
+                                            &ty.loc,
+                                        );
+                                        Doc::text(*before).append("(* $activate: missing arm name *)")
+                                    }
+                                }
+                            } else {
                             match (kind.union_aux_name(), field_name) {
                                 (Some(aux_name), Some(fld)) => {
                                     Doc::text(*before).append(self.emit_name(Name::UnionAuxFn(
@@ -1034,6 +1069,7 @@ impl<'a> Emitter<'a> {
                                     );
                                     Doc::text(*before).append(format!("(* ${}: missing field name *)", kind.keyword()))
                                 }
+                            }
                             }
                         }
                         _ => {
@@ -3472,6 +3508,10 @@ impl<'a> Emitter<'a> {
                             }
                         }
                         // Fall through to normal assignment for struct members.
+                        // A *partial* sub-field write into a union arm
+                        // (`u->arm.field = v`) requires the arm be active; this
+                        // is now the user's responsibility via
+                        // `_ghost_stmt($activate(union U::arm) $(u))`.
                         // For an unsigned bit-field, mask the RHS to its width so
                         // the stored value satisfies the cell's `< pow2 N`
                         // refinement (C unsigned modular truncation on write).
@@ -5096,6 +5136,73 @@ impl<'a> Emitter<'a> {
                     ),
                 ]),
             ))
+        }
+
+        // Ghost-axiom activation lemma for each arm.
+        //
+        // A write through a union arm `u->arm... = v` needs arm `arm` active,
+        // but at an arbitrary program point the active arm is unknown, so the
+        // arm's getter (which requires `Field_? vx`) is unusable. C semantics
+        // say the write *activates* the arm.
+        //
+        // Activation is user-driven via `_ghost_stmt($activate(union U::arm) $(u))`.
+        // We emit it as a ghost axiom (`assume val ... : stt_ghost ...`): given an
+        // *uninitialized* union cell at `x` (`pts_to_uninit x`), it yields the arm
+        // active with an *uninitialized* payload (`pts_to_uninit`). It commits to
+        // NO field values -- sub-fields (or the scalar payload) become readable
+        // only once physically written.
+        //
+        // The precondition is `pts_to_uninit x` (not full `pts_to x val`): a
+        // caller holding an initialized union satisfies it automatically because
+        // `Pulse.Lib.Reference.forget_init` is `[@@pulse_intro]`
+        // (`pts_to r n |- pts_to_uninit r`), so its stored value is downgraded to
+        // uninitialized on the way in. This mirrors C, where writing through a
+        // union member leaves the previously-stored value unspecified.
+        //
+        // A ghost axiom (rather than a proven stateful `fn`) is used so that
+        // activation is a pure specification step, *erased* at extraction with no
+        // runtime effect. This matches C: the real arm write realizes the tag at
+        // runtime (C17 6.2.6.1p7).
+        //
+        // Not `[@@pulse_intro]`: activation must stay explicit, never auto-fired.
+        //
+        // Emitted for every `Plain` arm (struct- or scalar-typed); bit-field
+        // arms are skipped (their cell has a width refinement and no matching
+        // uninit `forget_init`/getter shape).
+        for f in fields {
+            if matches!(&f.val, FieldT::BitField { .. }) {
+                continue;
+            }
+            let fld = f.val.name();
+            let unfolded = naryfn([
+                self.emit_name(unfolded_tok(fld)),
+                Doc::text("x"),
+                Doc::text("1.0R"),
+            ]);
+            let ghost_proj = unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x"));
+
+            ses.push(mk_assume_val(
+                vec![],
+                self.emit_name(Name::UnionActivateFn(name.val.clone(), fld.val.clone())),
+                &[parens(
+                    Doc::text("x:")
+                        .append(Doc::line())
+                        .append(ref_union_type.clone()),
+                )],
+                naryfn([
+                    Doc::text("stt_ghost"),
+                    Doc::text("unit"),
+                    Doc::text("emp_inames"),
+                    naryfn([
+                        Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
+                        Doc::text("x"),
+                    ]),
+                    mk_thunk(mk_star([
+                        unfolded,
+                        naryfn([Doc::text("Pulse.Lib.Reference.pts_to_uninit"), ghost_proj]),
+                    ])),
+                ]),
+            ));
         }
 
         // has_zero_default instance (uses first field's constructor).

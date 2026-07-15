@@ -441,6 +441,11 @@ fn type_parser<
         .ignore_then(ident.clone())
         .map(|name| TypeT::TypeRef(TypeRefKind::Struct(name)));
 
+    let union_type = select! { Token::Ident("union") => () }
+        .padded_by(ws())
+        .ignore_then(ident.clone())
+        .map(|name| TypeT::TypeRef(TypeRefKind::Union(name)));
+
     let base_type = choice((
         select! {
             Token::Ident("_slprop") => TypeT::SLProp,
@@ -458,6 +463,7 @@ fn type_parser<
         }
         .padded_by(ws()),
         struct_type,
+        union_type,
         integer_type,
         ident
             .clone()
@@ -556,6 +562,11 @@ fn expr_parser<
             .ignore_then(ident.clone())
             .map(|name| TypeT::TypeRef(TypeRefKind::Struct(name)));
 
+        let union_type = select! { Token::Ident("union") => () }
+            .padded_by(ws())
+            .ignore_then(ident.clone())
+            .map(|name| TypeT::TypeRef(TypeRefKind::Union(name)));
+
         let base_type = choice((
             select! {
                 Token::Ident("_slprop") => TypeT::SLProp,
@@ -573,6 +584,7 @@ fn expr_parser<
             }
             .padded_by(ws()),
             struct_type,
+            union_type,
             integer_type,
             ident
                 .clone()
@@ -1680,6 +1692,13 @@ pub fn process_inline_pulse(
             kind: AuxFnKind::Fold,
         });
 
+    let activate_antiquot =
+        dollar_keyword("activate").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
+            dollar_span,
+            body_span,
+            kind: AuxFnKind::Activate,
+        });
+
     let unfold_uninit_antiquot =
         dollar_keyword_uninit("unfold").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
             dollar_span,
@@ -1730,6 +1749,7 @@ pub fn process_inline_pulse(
         fold_uninit_antiquot,
         unfold_antiquot,
         fold_antiquot,
+        activate_antiquot,
         ident_tick_antiquot,
         tick_antiquot,
         antiquot,
