@@ -18,15 +18,19 @@
 
 typedef struct packet_space packet_space;
 
+#define ENCRYPT_LEVEL_COUNT 3
+
 typedef struct connection {
-    /* Models one selected Connection->Packets[] pointer slot. */
-    packet_space* packet_space;
+    /* Models Connection->Packets[QUIC_ENCRYPT_LEVEL_COUNT]. */
+    packet_space* packets[ENCRYPT_LEVEL_COUNT];
     uint32_t last_acknowledged;
     uint32_t send_flags;
 } connection;
 
 struct packet_space {
     _core_ref connection* connection;
+    /* Which Packets[] slot (encryption level) this packet space lives in. */
+    uint32_t encrypt_level;
     uint32_t largest_acknowledged;
     uint32_t ack_needed;
 };
@@ -42,19 +46,19 @@ PalPacketSpaceConnectionUpdate(
     uint32_t PacketNumber
     )
     _requires(_inline_pulse(
-        exists* back_ref back.
+        exists* back_ref back lvl pk.
             Helpers_PACKET_SPACE_CONNECTION.packet_space_to_connection
-                $(PacketSpace) back back_ref
-            ** pure ($(PacketSpace->connection) == back_ref)))
+                $(PacketSpace) back back_ref lvl pk
+            ** pure ($(PacketSpace->connection) == back_ref
+                  /\ $(PacketSpace->encrypt_level) == lvl)))
     _ensures(_inline_pulse(
-        exists* ps_v conn_v.
+        exists* ps_v back_ref lvl pk conn_v.
             Helpers_PACKET_SPACE_CONNECTION.connection_owner
-                $(PacketSpace) ps_v conn_v
+                $(PacketSpace) ps_v back_ref lvl pk conn_v
             ** pure (
-                 $(PacketSpace->largest_acknowledged) == $(PacketNumber)
-              /\ UInt32.v $(PacketSpace->ack_needed) == 0
-              /\ conn_v.Struct_connection.struct_connection__packet_space
-                     == $(PacketSpace)
+                 ps_v.Struct_packet_space.struct_packet_space__largest_acknowledged
+                     == $(PacketNumber)
+              /\ UInt32.v ps_v.Struct_packet_space.struct_packet_space__ack_needed == 0
               /\ conn_v.Struct_connection.struct_connection__last_acknowledged
                      == $(PacketNumber)
               /\ UInt32.v conn_v.Struct_connection.struct_connection__send_flags == 3)))
@@ -87,14 +91,13 @@ PalPacketSpaceConnectionOwnerUpdate(
     _requires(_inline_pulse(
         Helpers_PACKET_SPACE_CONNECTION.connection_owner_exists $(PacketSpace)))
     _ensures(_inline_pulse(
-        exists* ps_v conn_v.
+        exists* ps_v back_ref lvl pk conn_v.
             Helpers_PACKET_SPACE_CONNECTION.connection_owner
-                $(PacketSpace) ps_v conn_v
+                $(PacketSpace) ps_v back_ref lvl pk conn_v
             ** pure (
-                 $(PacketSpace->largest_acknowledged) == $(PacketNumber)
-              /\ UInt32.v $(PacketSpace->ack_needed) == 0
-              /\ conn_v.Struct_connection.struct_connection__packet_space
-                     == $(PacketSpace)
+                 ps_v.Struct_packet_space.struct_packet_space__largest_acknowledged
+                     == $(PacketNumber)
+              /\ UInt32.v ps_v.Struct_packet_space.struct_packet_space__ack_needed == 0
               /\ conn_v.Struct_connection.struct_connection__last_acknowledged
                      == $(PacketNumber)
               /\ UInt32.v conn_v.Struct_connection.struct_connection__send_flags == 3)))
