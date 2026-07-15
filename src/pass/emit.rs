@@ -337,8 +337,8 @@ enum Name {
     UnionGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
     UnionFieldProj(Rc<IdentT>, Rc<IdentT>),
     UnionAuxFn(Rc<IdentT>, &'static str, Rc<IdentT>),
-    /// Proven (non-ghost) primitive that activates a struct-typed union arm,
-    /// used before a partial sub-field write `u->arm.field = v`.
+    /// Ghost axiom (`assume val ... : stt_ghost ...`) that activates a union
+    /// arm, used before a partial sub-field write `u->arm.field = v`.
     UnionActivateFn(Rc<IdentT>, Rc<IdentT>),
 
     TypeRefDefault(TypeRef),
@@ -5138,7 +5138,7 @@ impl<'a> Emitter<'a> {
             ))
         }
 
-        // Proven (non-ghost) activation fn for each arm.
+        // Ghost-axiom activation lemma for each arm.
         //
         // A write through a union arm `u->arm... = v` needs arm `arm` active,
         // but at an arbitrary program point the active arm is unknown, so the
@@ -5146,16 +5146,22 @@ impl<'a> Emitter<'a> {
         // say the write *activates* the arm.
         //
         // Activation is user-driven via `_ghost_stmt($activate(union U::arm) $(u))`.
-        // The fn sets the arm *tag* (overwrite with the arm constructor) and then
-        // immediately downgrades the payload to *uninitialized* via `forget_init`,
-        // so it commits to NO field values: the postcondition only claims the arm
-        // is active with an uninitialized payload (`pts_to_uninit`). Sub-fields
-        // (or the scalar payload) become readable only once physically written.
-        // This matches C: the real arm write realizes the tag at runtime (C17
-        // 6.2.6.1p7), so erasing the ghost activation at extraction is sound.
-        // The `#v` argument is `Ghost.erased` so the fn body composes as a
-        // plain stateful write (a non-erased binder would trip Pulse's
-        // ghost-composition check).
+        // We emit it as a ghost axiom (`assume val ... : stt_ghost ...`): given
+        // ownership of an arbitrary union value at `x`, it yields the arm active
+        // with an *uninitialized* payload (`pts_to_uninit`). It commits to NO
+        // field values -- sub-fields (or the scalar payload) become readable only
+        // once physically written.
+        //
+        // A ghost axiom (rather than a proven stateful `fn`) is used so that
+        // activation is a pure specification step, *erased* at extraction with no
+        // runtime effect. This matches C: the real arm write realizes the tag at
+        // runtime (C17 6.2.6.1p7). The previously-proven body did exactly this
+        // (set the tag, then `forget_init` to drop all field values), so assuming
+        // it loses no soundness while avoiding a spurious extracted write.
+        // The `#v` argument is `Ghost.erased` (the input value is irrelevant --
+        // activation overwrites the tag).
+        //
+        // Not `[@@pulse_intro]`: activation must stay explicit, never auto-fired.
         //
         // Emitted for every `Plain` arm (struct- or scalar-typed); bit-field
         // arms are skipped (their cell has a width refinement and no matching
@@ -5165,112 +5171,44 @@ impl<'a> Emitter<'a> {
                 continue;
             }
             let fld = f.val.name();
-            let activate_name =
-                self.emit_name(Name::UnionActivateFn(name.val.clone(), fld.val.clone()));
-            let ctor_default = parens(
-                self.emit_name(field_ctor(fld))
-                    .append(Doc::line())
-                    .append(self.emit_field_default(env, f))
-                    .group(),
-            );
             let unfolded = naryfn([
                 self.emit_name(unfolded_tok(fld)),
                 Doc::text("x"),
                 Doc::text("1.0R"),
             ]);
             let ghost_proj = unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x"));
-            let unfold_lemma = self.emit_name(Name::UnionAuxFn(
-                name.val.clone(),
-                "raw_unfold",
-                fld.val.clone(),
-            ));
 
-            let sig = Doc::text("fn")
-                .append(Doc::line())
-                .append(activate_name)
-                .append(
-                    Doc::line()
-                        .append(parens(
-                            Doc::text("x:")
-                                .append(Doc::line())
-                                .append(ref_union_type.clone()),
-                        ))
-                        .append(Doc::line())
-                        .append(parens(
-                            Doc::text("#v: Ghost.erased")
-                                .append(Doc::line())
-                                .append(union_type_name.clone()),
-                        ))
-                        .nest(2),
-                )
-                .group();
-            let requires_doc = Doc::text("requires")
-                .append(Doc::line())
-                .append(naryfn([
-                    Doc::text("Pulse.Lib.Reference.pts_to"),
-                    Doc::text("x"),
-                    Doc::text("#1.0R"),
-                    Doc::text("v"),
-                ]))
-                .nest(2)
-                .group();
-            let returns_doc = Doc::text("returns _:")
-                .append(Doc::line())
-                .append("unit")
-                .group();
-            let ensures_doc = Doc::text("ensures")
-                .append(Doc::line())
-                .append(parens(
-                    mk_star([
+            ses.push(mk_assume_val(
+                vec![],
+                self.emit_name(Name::UnionActivateFn(name.val.clone(), fld.val.clone())),
+                &[
+                    parens(
+                        Doc::text("x:")
+                            .append(Doc::line())
+                            .append(ref_union_type.clone()),
+                    ),
+                    parens(
+                        Doc::text("#v: Ghost.erased")
+                            .append(Doc::line())
+                            .append(union_type_name.clone()),
+                    ),
+                ],
+                naryfn([
+                    Doc::text("stt_ghost"),
+                    Doc::text("unit"),
+                    Doc::text("emp_inames"),
+                    naryfn([
+                        Doc::text("Pulse.Lib.Reference.pts_to"),
+                        Doc::text("x"),
+                        Doc::text("#1.0R"),
+                        Doc::text("v"),
+                    ]),
+                    mk_thunk(mk_star([
                         unfolded,
-                        naryfn([
-                            Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
-                            ghost_proj.clone(),
-                        ]),
-                    ])
-                    .group(),
-                ))
-                .nest(2)
-                .group();
-            let body = Doc::text("{")
-                .append(
-                    Doc::hardline()
-                        .append(
-                            Doc::text("x")
-                                .append(Doc::line())
-                                .append(":=")
-                                .append(Doc::line())
-                                .append(ctor_default.clone())
-                                .append(";")
-                                .group(),
-                        )
-                        .append(Doc::hardline())
-                        .append(
-                            naryfn([unfold_lemma, Doc::text("x"), ctor_default])
-                                .append(";")
-                                .group(),
-                        )
-                        .append(Doc::hardline())
-                        .append(
-                            naryfn([Doc::text("Pulse.Lib.Reference.forget_init"), ghost_proj])
-                                .append(";")
-                                .group(),
-                        )
-                        .nest(2),
-                )
-                .append(Doc::hardline())
-                .append("}");
-            ses.push(
-                sig.append(Doc::hardline())
-                    .append(requires_doc)
-                    .append(Doc::hardline())
-                    .append(returns_doc)
-                    .append(Doc::hardline())
-                    .append(ensures_doc)
-                    .append(Doc::hardline())
-                    .append(body)
-                    .group(),
-            );
+                        naryfn([Doc::text("Pulse.Lib.Reference.pts_to_uninit"), ghost_proj]),
+                    ])),
+                ]),
+            ));
         }
 
         // has_zero_default instance (uses first field's constructor).
