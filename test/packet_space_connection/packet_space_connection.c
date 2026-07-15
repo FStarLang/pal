@@ -106,3 +106,61 @@ PalPacketSpaceConnectionOwnerUpdate(
         Helpers_PACKET_SPACE_CONNECTION.create_packet_space_trade $(PacketSpace));
     PalPacketSpaceConnectionUpdate(PacketSpace, PacketNumber);
 }
+
+/*
+ * Models QuicPacketSpaceInitialize's create + install lifecycle FAITHFULLY, in
+ * one step, producing the full owner.
+ *
+ * Faithfulness point (why `PacketSpace` comes in UNINITIALIZED): in real MsQuic
+ * the packet space is FRESHLY ALLOCATED (`CxPlatPoolAlloc`), so its memory is
+ * uninitialized when initialization begins -- the packet-space invariant does
+ * NOT hold yet, and it would be nonsensical to require it. A `_consumes
+ * packet_space*` would instead demand a fully-formed packet space (`__pred`
+ * already holding) BEFORE the call, i.e. require the very invariant that
+ * initialization is supposed to establish. So the storage comes in as
+ * `pts_to_uninit` (raw memory, exactly the `_pal_pool_alloc_*` wrapper shape),
+ * and the body ESTABLISHES the representation by writing every field, installs
+ * it into the connection's NULL slot, and deposits into the full owner.
+ *
+ * Postcondition: `connection_owner_exists` -- the connection now owns the
+ * connection allocation, every previously-owned slot, AND the freshly created
+ * packet space in slot `EncryptLevel` (None/NULL -> Some ps). This is the exact
+ * shape the mutate-existing owner functions consume, so the full lifecycle
+ * chains: Initialize => connection_owner_exists => (borrow / mutate / restore).
+ *
+ * `PacketSpace` is `_plain` so PAL emits no automatic `_out`/`_consumes`
+ * ownership: the uninitialized precondition is stated by hand, and the
+ * packet-space pointer is CONSUMED into the owner (no residual standalone
+ * ownership to return).
+ */
+void
+PalPacketSpaceInitialize(
+    _plain connection* Connection,
+    uint32_t EncryptLevel,
+    _plain packet_space* PacketSpace
+    )
+    _requires(_inline_pulse(
+        Helpers_PACKET_SPACE_CONNECTION.connection_slot_empty
+            $(Connection) $(EncryptLevel)
+        ** Pulse.Lib.Reference.pts_to_uninit $(PacketSpace)))
+    _ensures(_inline_pulse(
+        Helpers_PACKET_SPACE_CONNECTION.connection_owner_exists $(PacketSpace)))
+{
+    /* Turn raw memory into a valid packet space: open the per-field uninit reps,
+     * populate every field, then fold to ESTABLISH the representation. */
+    _ghost_stmt($unfold-uninit(packet_space) $(PacketSpace));
+    PacketSpace->connection = Connection;
+    PacketSpace->encrypt_level = EncryptLevel;
+    PacketSpace->largest_acknowledged = 0;
+    PacketSpace->ack_needed = PACKET_SPACE_ACK_NOT_NEEDED;
+    _ghost_stmt($fold(packet_space) $(PacketSpace) _ _ _ _);
+
+    /* Install into the connection's slot and deposit into the full owner. */
+    Connection->packets[EncryptLevel] = PacketSpace;
+    /* A live `pts_to PacketSpace _` proves the pointer is non-NULL, which the
+     * deposit needs to record `slot_at ... == Some PacketSpace` with a live slot. */
+    _ghost_stmt(Pulse.Lib.Reference.pts_to_not_null $(PacketSpace));
+    _ghost_stmt(
+        Helpers_PACKET_SPACE_CONNECTION.deposit
+            $(PacketSpace) $(Connection) $(EncryptLevel));
+}

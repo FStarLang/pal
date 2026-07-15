@@ -274,3 +274,126 @@ ghost fn consume_packet_space_trade (ps: ref PS.struct_packet_space)
     with (reveal ps_v) (reveal back_ref) (reveal lvl) (reveal pk)
          ((reveal back) (reveal ps_v))
 }
+// ============================================================================
+//  Create + install lifecycle (models QuicPacketSpaceInitialize).
+//
+//  The theory above is borrow/return of an ALREADY-owned focused packet space.
+//  Initialization is a different lifecycle: it turns a connection whose target
+//  slot is NULL (owning nothing there) into a full owner of a FRESHLY created
+//  packet space in that slot (None/NULL -> Some ps). The two helpers below are
+//  the entry predicate and the deposit that folds the new packet space into
+//  `connection_owner`.
+// ============================================================================
+
+// The pre-state of initialization. The connection is owned BY VALUE (so its
+// `packets[]` array field is writable through PAL's auto fold/unfold), the
+// target slot `lvl` is NULL (owns nothing), and every other slot is already
+// owned. The reverse core reference is the connection's own `ref_to_core conn`,
+// matching the value the fresh packet space will store in its back-pointer.
+[@@pulse_unfold]
+let connection_slot_empty (conn: ref C.struct_connection) (lvl: U32.t) : slprop =
+  exists* (conn_v: C.struct_connection) (pk: packets_t).
+    R.pts_to conn conn_v
+    ** other_slots (CR.ref_to_core conn) pk (U32.v lvl)
+    ** pure (conn_v.C.struct_connection__packets == pk
+             /\ U32.v lvl < 3
+             /\ slot_at pk (U32.v lvl) == Some (R.null #PS.struct_packet_space))
+
+// Writing slot `i` leaves every OTHER slot's ownership untouched: `other_slots`
+// only reads slots =/= i, and `array_spec_set ... i ...` agrees with the
+// original spec off `i` (array_spec_set_idx1 / _get_spec fire as SMT patterns).
+ghost fn other_slots_set_stable
+  (br: CR.core_ref) (pk: packets_t) (i: nat) (newptr: ref PS.struct_packet_space)
+  requires other_slots br pk i ** pure (i < 3)
+  ensures other_slots br (CA.array_spec_set pk i (Some newptr)) i
+{
+  if (i = 0) {
+    rewrite (other_slots br pk i) as (other_slots br pk 0);
+    unfold (other_slots br pk 0);
+    rewrite (slot_owner br (slot_at pk 1))
+         as (slot_owner br (slot_at (CA.array_spec_set pk 0 (Some newptr)) 1));
+    rewrite (slot_owner br (slot_at pk 2))
+         as (slot_owner br (slot_at (CA.array_spec_set pk 0 (Some newptr)) 2));
+    fold (other_slots br (CA.array_spec_set pk 0 (Some newptr)) 0);
+    rewrite (other_slots br (CA.array_spec_set pk 0 (Some newptr)) 0)
+         as (other_slots br (CA.array_spec_set pk i (Some newptr)) i)
+  } else if (i = 1) {
+    rewrite (other_slots br pk i) as (other_slots br pk 1);
+    unfold (other_slots br pk 1);
+    rewrite (slot_owner br (slot_at pk 0))
+         as (slot_owner br (slot_at (CA.array_spec_set pk 1 (Some newptr)) 0));
+    rewrite (slot_owner br (slot_at pk 2))
+         as (slot_owner br (slot_at (CA.array_spec_set pk 1 (Some newptr)) 2));
+    fold (other_slots br (CA.array_spec_set pk 1 (Some newptr)) 1);
+    rewrite (other_slots br (CA.array_spec_set pk 1 (Some newptr)) 1)
+         as (other_slots br (CA.array_spec_set pk i (Some newptr)) i)
+  } else {
+    rewrite (other_slots br pk i) as (other_slots br pk 2);
+    unfold (other_slots br pk 2);
+    rewrite (slot_owner br (slot_at pk 0))
+         as (slot_owner br (slot_at (CA.array_spec_set pk 2 (Some newptr)) 0));
+    rewrite (slot_owner br (slot_at pk 1))
+         as (slot_owner br (slot_at (CA.array_spec_set pk 2 (Some newptr)) 1));
+    fold (other_slots br (CA.array_spec_set pk 2 (Some newptr)) 2);
+    rewrite (other_slots br (CA.array_spec_set pk 2 (Some newptr)) 2)
+         as (other_slots br (CA.array_spec_set pk i (Some newptr)) i)
+  }
+}
+
+// PAL's `array_write` emits `array_spec_upd s i v` (a RAW value write); the
+// ownership theory speaks in `array_spec_set s i (Some v)` (an OPTIONAL value, so
+// that NULL/absent slots read back as `None`). The two agree pointwise -- same
+// length, mask, initialized-ness and value at every index, on and off `i` -- so
+// they are extensionally equal (all four `array_spec_ext` hypotheses discharge
+// from the matching `_upd_*`/`_set_*` SMT-pattern lemmas). Exposed as an SMT
+// rewrite so the deposit call at the initializer site (whose context carries
+// `conn_v.packets == array_spec_upd old_pk (v lvl) ps`) matches deposit's
+// `array_spec_set old_pk (v lvl) (Some ps)` precondition.
+let array_spec_upd_set_eq (#a: Type) (s: CA.array_spec a) (n: nat) (x: a)
+  : Lemma (CA.array_spec_upd s n x == CA.array_spec_set s n (Some x))
+          [SMTPat (CA.array_spec_upd s n x)]
+  = CA.array_spec_ext (CA.array_spec_upd s n x) (CA.array_spec_set s n (Some x))
+
+// Deposit the freshly created + installed packet space into the connection
+// owner. Given the packet space (back-pointer/level already written), the
+// connection whose slot `lvl` now holds it, and the untouched other slots,
+// reassemble a full `connection_owner`. Reuses `restore_connection_owner`.
+ghost fn deposit
+  (#ps_v: PS.struct_packet_space)
+  (#conn_v: C.struct_connection)
+  (#old_pk: packets_t)
+  (ps: ref PS.struct_packet_space)
+  (conn: ref C.struct_connection)
+  (lvl: U32.t)
+  requires R.pts_to ps ps_v
+  requires R.pts_to conn conn_v
+  requires other_slots (CR.ref_to_core conn) old_pk (U32.v lvl)
+  requires pure (
+     ps_v.PS.struct_packet_space__connection == CR.ref_to_core conn
+     /\ ps_v.PS.struct_packet_space__encrypt_level == lvl
+     /\ conn_v.C.struct_connection__packets
+          == CA.array_spec_set old_pk (U32.v lvl) (Some ps)
+     /\ U32.v lvl < 3
+     /\ not (R.is_null ps))
+  ensures connection_owner_exists ps
+{
+  other_slots_set_stable (CR.ref_to_core conn) old_pk (U32.v lvl) ps;
+  // Re-key the residual slots and the connection allocation onto the focused
+  // packet space's OWN projections (back-pointer + level), so that
+  // `restore_connection_owner` yields exactly `connection_owner_exists`'s body
+  // (coords == ps_v.connection / ps_v.encrypt_level). Each rewrite is a pure
+  // equality already in scope: ref_to_core conn == ps_v.connection,
+  // array_spec_set old_pk (v lvl) (Some ps) == conn_v.packets, lvl == ps_v level.
+  rewrite (other_slots (CR.ref_to_core conn)
+             (CA.array_spec_set old_pk (U32.v lvl) (Some ps)) (U32.v lvl))
+       as (other_slots ps_v.PS.struct_packet_space__connection
+             conn_v.C.struct_connection__packets
+             (U32.v ps_v.PS.struct_packet_space__encrypt_level));
+  rewrite (R.pts_to conn conn_v)
+       as (R.pts_to (CR.core_to_ref C.struct_connection
+                       ps_v.PS.struct_packet_space__connection) conn_v);
+  restore_connection_owner ps ps_v
+    ps_v.PS.struct_packet_space__connection
+    ps_v.PS.struct_packet_space__encrypt_level
+    conn_v.C.struct_connection__packets conn_v
+}
