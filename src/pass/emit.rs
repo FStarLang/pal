@@ -5146,20 +5146,23 @@ impl<'a> Emitter<'a> {
         // say the write *activates* the arm.
         //
         // Activation is user-driven via `_ghost_stmt($activate(union U::arm) $(u))`.
-        // We emit it as a ghost axiom (`assume val ... : stt_ghost ...`): given
-        // ownership of an arbitrary union value at `x`, it yields the arm active
-        // with an *uninitialized* payload (`pts_to_uninit`). It commits to NO
-        // field values -- sub-fields (or the scalar payload) become readable only
-        // once physically written.
+        // We emit it as a ghost axiom (`assume val ... : stt_ghost ...`): given an
+        // *uninitialized* union cell at `x` (`pts_to_uninit x`), it yields the arm
+        // active with an *uninitialized* payload (`pts_to_uninit`). It commits to
+        // NO field values -- sub-fields (or the scalar payload) become readable
+        // only once physically written.
+        //
+        // The precondition is `pts_to_uninit x` (not full `pts_to x val`): a
+        // caller holding an initialized union satisfies it automatically because
+        // `Pulse.Lib.Reference.forget_init` is `[@@pulse_intro]`
+        // (`pts_to r n |- pts_to_uninit r`), so its stored value is downgraded to
+        // uninitialized on the way in. This mirrors C, where writing through a
+        // union member leaves the previously-stored value unspecified.
         //
         // A ghost axiom (rather than a proven stateful `fn`) is used so that
         // activation is a pure specification step, *erased* at extraction with no
         // runtime effect. This matches C: the real arm write realizes the tag at
-        // runtime (C17 6.2.6.1p7). The previously-proven body did exactly this
-        // (set the tag, then `forget_init` to drop all field values), so assuming
-        // it loses no soundness while avoiding a spurious extracted write.
-        // The `#v` argument is `Ghost.erased` (the input value is irrelevant --
-        // activation overwrites the tag).
+        // runtime (C17 6.2.6.1p7).
         //
         // Not `[@@pulse_intro]`: activation must stay explicit, never auto-fired.
         //
@@ -5181,27 +5184,18 @@ impl<'a> Emitter<'a> {
             ses.push(mk_assume_val(
                 vec![],
                 self.emit_name(Name::UnionActivateFn(name.val.clone(), fld.val.clone())),
-                &[
-                    parens(
-                        Doc::text("x:")
-                            .append(Doc::line())
-                            .append(ref_union_type.clone()),
-                    ),
-                    parens(
-                        Doc::text("#v: Ghost.erased")
-                            .append(Doc::line())
-                            .append(union_type_name.clone()),
-                    ),
-                ],
+                &[parens(
+                    Doc::text("x:")
+                        .append(Doc::line())
+                        .append(ref_union_type.clone()),
+                )],
                 naryfn([
                     Doc::text("stt_ghost"),
                     Doc::text("unit"),
                     Doc::text("emp_inames"),
                     naryfn([
-                        Doc::text("Pulse.Lib.Reference.pts_to"),
+                        Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
                         Doc::text("x"),
-                        Doc::text("#1.0R"),
-                        Doc::text("v"),
                     ]),
                     mk_thunk(mk_star([
                         unfolded,
