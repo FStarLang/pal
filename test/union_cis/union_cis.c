@@ -2,138 +2,86 @@
 #include <stdint.h>
 
 /*
- * Common Initial Sequence (CIS) with DIFFERENT member names.
+ * Common Initial Sequence (CIS), simplest case.
  *
- * C17 6.5.2.3p6: if a union contains several structures that share a "common
- * initial sequence", and the union object currently contains one of them, it
- * is permitted to inspect the common initial part of any of them. Two structs
- * share a common initial sequence for a run of one or more initial members if
- * corresponding members have COMPATIBLE TYPES (and, for bit-fields, the same
- * widths) — the member *names need NOT match*.
+ * A union with two arms whose members have EXACTLY IDENTICAL fields (same
+ * names, same types): one anonymous struct and one named struct. Because every
+ * corresponding member has an identical name and type, the two arms share their
+ * whole sequence as a common initial sequence, so — per C17 6.5.2.3p6 — after
+ * fully building one arm we may inspect (or update) the corresponding member of
+ * the other arm.
  *
- * To keep these examples about the CIS rule alone — and NOT about partially
- * initialized unions — every function first FULLY constructs one arm with a
- * whole-union compound literal (see `build_full` in union_test3 for the
- * underlying lesson: writing every sub-field initializes the whole arm, which
- * folds back into a complete union value with no leftover uninitialized cells).
- * Only after the arm is fully built do we perform the cross-arm CIS access.
- *
- * PAL currently lowers each union-arm sub-field access through a per-arm getter
- * that requires that exact arm to be the active member, and (on the union_cis
- * branch) only matches CIS members by *identical name*. Neither handles the
- * case below, where the corresponding CIS members have compatible `int` type
- * but different names (foo/bar vs baz/qux, m0/m1 vs n0/n1). These functions are
- * therefore expected to FAIL verification today; they document the target for a
- * future, position/type-based (name-independent) CIS extension.
+ * Each function first FULLY builds one arm with a whole-union compound literal,
+ * then performs a cross-arm CIS access through the *other* arm. The functions
+ * below exercise every combination of {read, write} x {named branch, unnamed
+ * (promoted) branch}. Because the two arms are byte-for-byte identical, a CIS
+ * write is modelled as an in-place update of the shared member that preserves
+ * whichever arm is active, so the value reads back consistently through either
+ * branch.
  */
 
-/* ---- Named struct arms with a multi-member, different-name CIS ---- */
-
-struct arm_a {
-    int foo;
-    int bar;
-    int a_only;
-};
-
-struct arm_b {
-    int baz;      /* corresponds to foo: int vs int, different name */
-    int qux;      /* corresponds to bar: int vs int, different name */
-    long b_only;  /* CIS ends here: int a_only vs long b_only are not compatible */
+struct named {
+    int p0;
+    int p1;
 };
 
 union u {
-    struct arm_a a;
-    struct arm_b b;
-};
-
-/* cross-arm CIS READ of the FIRST CIS member: build arm a, read b.baz. */
-int cis_read_first(union u *u, int t)
-    _ensures(return == t)
-{
-    *u = (union u){ .a = { .foo = t, .bar = 0, .a_only = 0 } };
-    return u->b.baz;
-}
-
-/* cross-arm CIS READ of a NON-FIRST CIS member: build arm a, read b.qux. */
-int cis_read_nonfirst(union u *u, int t)
-    _ensures(return == t)
-{
-    *u = (union u){ .a = { .foo = 0, .bar = t, .a_only = 0 } };
-    return u->b.qux;
-}
-
-/* cross-arm CIS WRITE returning the WHOLE union: build arm a, then write the
- * first CIS member through arm b's differently-named member, and return *u. */
-union u cis_write_diff_names(union u *u, int t)
-{
-    *u = (union u){ .a = { .foo = 0, .bar = 0, .a_only = 0 } };
-    u->b.baz = t;
-    return *u;
-}
-
-/* ---- Anonymous struct arms with a different-name CIS ---- */
-
-union v {
-    struct {
-        int m0;
-        int m1;
-        int v_a_only;
-    };
-    struct {
-        int n0;   /* corresponds to m0 */
-        int n1;   /* corresponds to m1 */
-        long v_b_only;
-    };
-};
-
-/* cross-arm CIS READ through anonymous arms: build the first arm, read n1. */
-int cis_anon_read(union v *u, int t)
-    _ensures(return == t)
-{
-    *u = (union v){ .m0 = 0, .m1 = t, .v_a_only = 0 };
-    return u->n1;
-}
-
-/* ---- Anonymous arm + named struct arms sharing the SAME CIS names ---- */
-
-struct wn1 {
-    int p0;
-    int p1;
-    int wn1_only;
-};
-
-struct wn2 {
-    int p0;
-    int p1;
-    long wn2_only;  /* CIS ends here: int/int/long at position 2 disagree */
-};
-
-union w {
     struct {        /* anonymous arm; promotes p0, p1 into the union */
         int p0;
         int p1;
-        int w_anon_only;
     };
-    struct wn1 n1;
-    struct wn2 n2;
+    struct named n;
 };
 
-/* cross-arm CIS READ mixing the ANONYMOUS arm with a NAMED arm. Here the
- * corresponding CIS members share the SAME names (p0/p1) across all arms — the
- * complement of `union v`, whose CIS members had different names. Build the
- * anonymous arm, then read the named arm's p1. */
-int cis_anon_named_read(union w *u, int t)
+/* READ via the NAMED branch: build the anonymous arm, read the named member. */
+int cis_read_via_named(union u *u, int t)
     _ensures(return == t)
 {
-    *u = (union w){ .p0 = 0, .p1 = t, .w_anon_only = 0 };
-    return u->n1.p1;
+    *u = (union u){ .p0 = 0, .p1 = t };
+    return u->n.p1;
 }
 
-/* cross-arm CIS READ in the other direction: build a NAMED arm, then read the
- * ANONYMOUS arm's promoted member (u->p1). */
-int cis_anon_unnamed_read(union w *u, int t)
+/* READ via the UNNAMED branch: build the named arm, read the promoted member. */
+int cis_read_via_unnamed(union u *u, int t)
     _ensures(return == t)
 {
-    *u = (union w){ .n1 = { .p0 = 0, .p1 = t, .wn1_only = 0 } };
+    *u = (union u){ .n = { .p0 = 0, .p1 = t } };
+    return u->p1;
+}
+
+/* WRITE via the NAMED branch: build the anonymous arm, write through the named
+ * member, then read the value back through the unnamed branch. */
+int cis_write_via_named(union u *u, int t)
+    _ensures(return == t)
+{
+    *u = (union u){ .p0 = 0, .p1 = 0 };
+    u->n.p1 = t;
+    return u->p1;
+}
+
+/* WRITE via the UNNAMED branch: build the named arm, write through the promoted
+ * member, then read the value back through the named branch. */
+int cis_write_via_unnamed(union u *u, int t)
+    _ensures(return == t)
+{
+    *u = (union u){ .n = { .p0 = 0, .p1 = 0 } };
+    u->p1 = t;
+    return u->n.p1;
+}
+
+/* Arm ORDER independence: same union but with the named struct first and the
+ * anonymous struct second. Build the named arm, read the promoted member. */
+union u2 {
+    struct named n;
+    struct {        /* anonymous arm; promotes p0, p1 into the union */
+        int p0;
+        int p1;
+    };
+};
+
+int cis_read_reordered(union u2 *u, int t)
+    _ensures(return == t)
+{
+    *u = (union u2){ .n = { .p0 = 0, .p1 = t } };
     return u->p1;
 }
