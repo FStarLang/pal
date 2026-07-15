@@ -1,85 +1,95 @@
 # PAL packet-space / connection ownership test
 
-This self-contained PAL regression test verifies the direct two-resource
-interface of `PalPacketSpaceConnectionUpdate`. Its inputs are
+This isolated PAL regression test verifies a bidirectional `packet_space` /
+`connection` ownership transfer. Its inputs are
 [`packet_space_connection.c`](packet_space_connection.c) and
 [`helpers/Helpers_PACKET_SPACE_CONNECTION.fst`](helpers/Helpers_PACKET_SPACE_CONNECTION.fst).
-It follows the standard local PAL test layout: the local `pal.h` and Makefile
-are links to the test-suite support files, and helper proofs live in `helpers/`.
-No MS-Quic repository files are required.
 
-## Direct update interface
+## Quantified capability
 
-`PacketSpace` is a `_consumes packet_space*` parameter. PAL therefore generates
-its raw full-ownership requirement; the C-side custom `_requires` carries only
-the separate trade and a pure witness link (not another raw ownership resource):
+`PalPacketSpaceConnectionUpdate` receives PAL's automatic ownership for its
+`_consumes packet_space*` parameter and exactly one additional capability. This
+is the whiteboard capability, quantified over the **current** packet-space
+value:
 
 ```text
-exists* ps_v conn_v.
-  Helpers_PACKET_SPACE_CONNECTION.packet_space_to_connection
-    $(PacketSpace) ps_v conn_v **
-  pure(ps_v == $(*PacketSpace))
+packet_space_to_connection ps back back_ref =
+  forall* ps_v.
+    Trade.trade
+      (R.pts_to ps ps_v ** pure (ps_v.connection == back_ref))
+      (connection_owner ps ps_v (back ps_v))
 ```
 
-The generated interface has the corresponding automatic input requirement:
+`back` is a ghost function (`PS.struct_packet_space -> GTot C.struct_connection`)
+mapping the current packet-space value to the connection value the owner still
+holds; `GTot` is the faithful ghost form of the whiteboard's
+`PS.struct_packet_space -> C.struct_connection`, so `back ps_v` is used directly
+with no `reveal`/`erased` noise.
+
+Quantifying over `ps_v` is exactly what keeps the packet space **mutable**. A
+monomorphic trade pins one pre-mutation `ps_v` in its antecedent, so once the
+scalar fields are written the pinned trade can no longer be fired — it forces the
+packet space to be const. The `forall*` family instead carries one trade per
+`ps_v`, and only the one whose antecedent `pts_to ps ps_v` the caller can supply
+is ever fired, so the caller may mutate the scalar fields first.
+
+### The one necessary deviation: `back_ref`
+
+The whiteboard writes the capability with a single `back` parameter and the bare
+antecedent `pts_to ps ps_v`. The extra `back_ref` parameter and the
+`pure (ps_v.connection == back_ref)` conjunct are the single unavoidable
+adaptation to the real `_core_ref` layout:
 
 ```text
-exists* val_packetspace_0.
-  Pulse.Lib.Reference.pts_to var_packetspace #1.0R val_packetspace_0 **
-  Typedef_packet_space.ty_packet_space__pred (!var_packetspace) 1.0R
+connection_owner ps ps_v conn_v =
+  R.pts_to ps ps_v
+  ** R.pts_to (CoreRef.core_to_ref ps_v.connection) conn_v
+  ** pure (conn_v.packet_space == ps)
 ```
 
-There is no automatic `PacketSpace` ownership `ensures`: `_consumes` transfers
-that raw allocation into the concrete postcondition below. The direct API is
-thus automatic consumed packet-space ownership plus one separate
-`Pulse.Lib.Trade` capability.
+`connection_owner` locates the connection through the reverse `_core_ref` field
+`ps_v.connection`. Because the trade quantifies over **every** `ps_v`, without
+pinning that field `create_packet_space_trade` is genuinely unprovable: for an
+arbitrary `ps_v` it would have to produce
+`pts_to (core_to_ref ps_v.connection) conn_v` from the single owned connection at
+`core_to_ref back_ref` (F* rejects this with Error 228). The
+`pure (ps_v.connection == back_ref)` premise supplies exactly the core_ref
+equality each instance needs. The `connection` member is never written, so the C
+precondition seeds it directly as `pure($(PacketSpace->connection) == back_ref)`
+and it survives the two scalar writes.
 
-`packet_space_to_connection` uses the installed `Pulse.Lib.Trade.trade` API:
+The owner-side creator captures the immutable core reference as `back_ref` and
+fixes the ghost `back` function to the owned connection value, then uses
+`forall*` introduction to build every permitted trade instance from the same
+connection root. No axiom, admit, unsafe escape, or monomorphic wrapper is used.
 
-```text
-packet_space_to_connection ps ps_v conn_v =
-  Trade.trade (R.pts_to ps ps_v) (connection_owner ps ps_v conn_v)
-```
+## Update ordering and result
 
-The trade conclusion is the complete `connection_owner` root:
+The direct C update is intentionally ordered as follows:
 
-```text
-R.pts_to ps ps_v **
-R.pts_to (CoreRef.core_to_ref(connection, ps_v.connection)) conn_v **
-pure(conn_v.packet_space == ps)
-```
+1. write `largest_acknowledged` and `ack_needed`;
+2. instantiate and eliminate the quantified trade using the current,
+   post-mutation packet-space ownership and the `pure` core_ref equality;
+3. reify the already-written packet scalar snapshot in PAL's returned owner
+   root (the C values are unchanged);
+4. follow `PacketSpace->connection`, then write `last_acknowledged` and
+   `send_flags`.
 
-It includes the packet-space allocation as well as the converted connection
-allocation and reverse link, so spending the trade cannot lose packet-space
-ownership. `packet_space.connection` has the actual `_core_ref connection*`
-layout; `connection.packet_space` is the ordinary selected `packet_space*` slot,
-so only the first direction uses `CoreRef.core_to_ref`.
-
-After spending the trade, the C postcondition is concrete and keeps the exact
-`connection_owner` root:
-
-```text
-exists* ps_v conn_v.
-  connection_owner(PacketSpace, ps_v, conn_v) **
-  pure(ps_v.largest_acknowledged == PacketNumber /\
-       UInt32.v ps_v.ack_needed == 0 /\
-       conn_v.last_acknowledged == PacketNumber /\
-       UInt32.v conn_v.send_flags == 3)
-```
-
-The small consumer helper matches the trade before PAL's automatic consumed
-ownership, introduces the shared witnesses, and calls `Trade.elim_trade`; the
-owner-only helper creates the separate trade before calling the update.
+Step 2 is the regression point: `forall*` does not commit the trade to the
+pre-write `ps_v`, unlike the former monomorphic capability. The precise
+postcondition states the two packet-space scalar values, the two connection
+scalar values, and the reverse `connection.packet_space == PacketSpace` link.
+`connection_owner` additionally owns the connection at
+`CoreRef.core_to_ref(ps_v.connection)`, completing the other link direction.
 
 ## Validation
 
-Run from this directory using PAL-repository-local tooling:
+Run from this directory:
 
 ```sh
 make clean && make verify
 ```
 
-This invokes `../../target/debug/pal` and `../../opt/run-fstar.sh` through the
-standard test Makefile. See [`RESULT.md`](RESULT.md) for the recorded command
-and result. Generated PAL modules, F* cache files, and C objects remain local
-under `out/`, `_cache/`, and `obj/`.
+The local Makefile invokes only the repository-local PAL translator and F*
+verification harness. See [`RESULT.md`](RESULT.md) for the recorded result and
+additional focused checks.
