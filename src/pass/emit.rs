@@ -16,6 +16,19 @@ use crate::{
 
 pub type SourceRangeMap = Vec<(Location, Range)>;
 
+/// Normalize a possibly-negative integer literal into the unsigned range
+/// [0, 2^width).
+///
+/// clang hands us the signed interpretation of an N-bit bit pattern (see
+/// `toBigInt` in `cpp/impl.cpp`, which uses `toStringSigned`), so an unsigned
+/// literal with the high bit set arrives as a negative `BigInt` (e.g. the u32
+/// value 0xFFFFFFFF as -1). F* unsigned literals must be non-negative, so we
+/// reduce the value modulo 2^width before emitting it.
+fn normalize_unsigned(val: &BigInt, width: u32) -> BigInt {
+    let modulus = BigInt::from(1u32) << width;
+    ((val % &modulus) + &modulus) % &modulus
+}
+
 /// Determines the output module name for a given top-level declaration.
 pub fn module_name_for_decl(decl: &Decl) -> String {
     match &decl.val {
@@ -1985,8 +1998,20 @@ impl<'a> Emitter<'a> {
                 ExprT::IntLit(val, ty) => {
                     let resolved = env.vtype_whnf(ty.clone().into());
                     match resolved.val {
-                        TypeT::Int { signed, width: 32 } => {
-                            Doc::text(format!("{}{}l", val, if signed { "" } else { "u" }))
+                        TypeT::Int {
+                            signed: true,
+                            width: 32,
+                        } => Doc::text(format!("{}l", val)),
+                        TypeT::Int {
+                            signed: false,
+                            width: 32,
+                        } => {
+                            // clang hands us the signed interpretation of the
+                            // bit pattern (see toBigInt in cpp/impl.cpp), so a
+                            // u32 literal with the high bit set arrives as a
+                            // negative BigInt (e.g. 0xFFFFFFFF as -1). F*'s `ul`
+                            // literals must lie in [0, 2^32), so normalize first.
+                            Doc::text(format!("{}ul", normalize_unsigned(val, 32)))
                         }
                         TypeT::Int {
                             signed: true,
@@ -1995,7 +2020,11 @@ impl<'a> Emitter<'a> {
                         TypeT::Int {
                             signed: false,
                             width,
-                        } => Doc::text(format!("(UInt{}.uint_to_t {})", width, val)),
+                        } => Doc::text(format!(
+                            "(UInt{}.uint_to_t {})",
+                            width,
+                            normalize_unsigned(val, width)
+                        )),
                         TypeT::SizeT => Doc::text(format!("{}sz", val)),
                         TypeT::SpecInt | TypeT::SpecNat => Doc::text(format!("{}", val)),
                         TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
