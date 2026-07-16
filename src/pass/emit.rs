@@ -73,7 +73,6 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionAuxFn(u, _, _) => Some(format!("Union_{}", u)),
         Name::UnionActivateFn(u, _) => Some(format!("Union_{}", u)),
-        Name::UnionCisFn(u, _, _) => Some(format!("Union_{}", u)),
         Name::TypeRefDefault(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
         Name::TypeRefDefault(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefDefault(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
@@ -92,148 +91,6 @@ fn module_for_name(name: &Name) -> Option<String> {
         // Local names (Var, Val, Perm) are not cross-module references
         Name::Var(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
     }
-}
-
-/// A single member of a union's common initial sequence (CIS), together with the
-/// per-arm information needed to project/update it. `arms` lists, in union
-/// declaration order, each arm's constructor field name (`arm`) and the struct
-/// type (`struct_name`) whose record holds this member.
-struct CisMember {
-    name: Rc<IdentT>,
-    ty: Rc<Type>,
-    arms: Vec<CisArm>,
-}
-
-/// One arm of a union participating in the CIS: `arm` is the union member
-/// (constructor) name, `struct_name` is the arm's struct type.
-#[derive(Clone)]
-struct CisArm {
-    arm: Rc<IdentT>,
-    struct_name: Rc<IdentT>,
-}
-
-/// Location-insensitive structural type compatibility, used to decide whether
-/// two arms share a member for the common initial sequence (C17 6.5.2.3p6). The
-/// derived `PartialEq` on `TypeT` compares embedded source locations, so it
-/// cannot be used directly. Inputs should already be in WHNF (typedefs
-/// resolved).
-fn cis_type_compatible(a: &TypeT, b: &TypeT) -> bool {
-    match (a, b) {
-        (TypeT::Void, TypeT::Void)
-        | (TypeT::Bool, TypeT::Bool)
-        | (TypeT::SizeT, TypeT::SizeT)
-        | (TypeT::PtrdiffT, TypeT::PtrdiffT)
-        | (TypeT::SpecInt, TypeT::SpecInt)
-        | (TypeT::SpecNat, TypeT::SpecNat)
-        | (TypeT::SLProp, TypeT::SLProp) => true,
-        (
-            TypeT::Int {
-                signed: s1,
-                width: w1,
-            },
-            TypeT::Int {
-                signed: s2,
-                width: w2,
-            },
-        ) => s1 == s2 && w1 == w2,
-        (TypeT::Float { width: w1 }, TypeT::Float { width: w2 }) => w1 == w2,
-        (TypeT::Pointer(t1, k1), TypeT::Pointer(t2, k2)) => {
-            k1 == k2 && cis_type_compatible(&t1.val, &t2.val)
-        }
-        (TypeT::FixedArray(t1, l1), TypeT::FixedArray(t2, l2)) => {
-            l1 == l2 && cis_type_compatible(&t1.val, &t2.val)
-        }
-        (TypeT::TypeRef(k1), TypeT::TypeRef(k2)) => k1.alpha_eq(k2),
-        _ => false,
-    }
-}
-
-/// Computes the common initial sequence for the *restricted* shape supported
-/// here (C17 6.5.2.3p6, minimal case): a union with **exactly two** struct-typed
-/// arms whose complete field lists are **identical** (same length; each position
-/// the same name and a compatible type; no bit-fields or inline arrays). This is
-/// the simplest CIS: one anonymous struct arm plus one named struct arm with
-/// byte-for-byte identical members. Returns the shared members (in order), or
-/// `None` for any union outside this shape.
-fn union_cis_fields(env: &Env, union_name: &Ident) -> Option<Vec<CisMember>> {
-    let u = env.lookup_union(union_name)?;
-    if u.fields.len() != 2 {
-        return None;
-    }
-    let mut arms = Vec::new();
-    let mut arm_field_lists: Vec<Vec<Field>> = Vec::new();
-    for f in &u.fields {
-        let arm_name = f.val.name().val.clone();
-        let ty = f.val.logical_type(&f.loc);
-        let wty = env.vtype_whnf(ty.into());
-        let sname = match &wty.val {
-            TypeT::TypeRef(TypeRefKind::Struct(s)) => s.val.clone(),
-            _ => return None,
-        };
-        let sdef = env.lookup_struct(&sname.clone().with_loc(f.loc.clone()))?;
-        arms.push(CisArm {
-            arm: arm_name,
-            struct_name: sname,
-        });
-        arm_field_lists.push(sdef.fields.clone());
-    }
-
-    // Both arms must have identical-length field lists.
-    if arm_field_lists[0].len() != arm_field_lists[1].len() || arm_field_lists[0].is_empty() {
-        return None;
-    }
-
-    let mut members = Vec::new();
-    for k in 0..arm_field_lists[0].len() {
-        let f0 = &arm_field_lists[0][k];
-        let f1 = &arm_field_lists[1][k];
-        // Bit-fields / inline arrays are not modelled as plain reference cells.
-        if f0.val.bit_width().is_some()
-            || f0.val.is_array()
-            || f1.val.bit_width().is_some()
-            || f1.val.is_array()
-        {
-            return None;
-        }
-        if f0.val.name().val != f1.val.name().val {
-            return None;
-        }
-        let ty0 = env.vtype_whnf(f0.val.logical_type(&f0.loc).into());
-        let ty1 = env.vtype_whnf(f1.val.logical_type(&f1.loc).into());
-        if !cis_type_compatible(&ty0.val, &ty1.val) {
-            return None;
-        }
-        members.push(CisMember {
-            name: f0.val.name().val.clone(),
-            ty: f0.val.logical_type(&f0.loc),
-            arms: arms.clone(),
-        });
-    }
-
-    Some(members)
-}
-
-/// If `base` is syntactically a union-arm access `Member(u_expr, arm)` whose
-/// receiver has union type `U`, and `field` is one of `U`'s common-initial-
-/// sequence members, returns `(u_expr, U, field-type)`. This routes a cross-arm
-/// CIS read/write through the arm-agnostic getter/setter instead of the per-arm
-/// projection (which would require a known active arm).
-fn cis_member_access<'e>(
-    env: &Env,
-    base: &'e Rc<Expr>,
-    field: &Ident,
-) -> Option<(&'e Rc<Expr>, Rc<IdentT>, Rc<Type>)> {
-    let ExprT::Member(u_expr, _arm) = &base.val else {
-        return None;
-    };
-    let uty = env.infer_expr(u_expr).ok()?;
-    let uty = env.vtype_whnf(uty);
-    let TypeT::TypeRef(TypeRefKind::Union(union_name)) = &uty.val else {
-        return None;
-    };
-    let members = union_cis_fields(env, union_name)?;
-    let member = members.iter().find(|m| m.name == field.val)?;
-    Some((u_expr, union_name.val.clone(), member.ty.clone()))
 }
 
 /// Builds a map from function/let/global/opaque-type identifiers to their owning module name.
@@ -483,10 +340,6 @@ enum Name {
     /// Ghost axiom (`assume val ... : stt_ghost ...`) that activates a union
     /// arm, used before a partial sub-field write `u->arm.field = v`.
     UnionActivateFn(Rc<IdentT>, Rc<IdentT>),
-    /// Common-initial-sequence (CIS) helper for a union: `union_<u>__cis_<tag>_<fld>`.
-    /// `tag` selects the artifact (`proj`, `setv`, `get`, `set`, `projset`);
-    /// `fld` is the CIS member name.
-    UnionCisFn(Rc<IdentT>, &'static str, Rc<IdentT>),
 
     TypeRefDefault(TypeRef),
 }
@@ -555,7 +408,6 @@ impl Name {
             Name::UnionActivateFn(u, fld) => {
                 format!("{}__activate_{}", union_to_string(u), fld)
             }
-            Name::UnionCisFn(u, f, fld) => format!("{}__cis_{}_{}", union_to_string(u), f, fld),
             Name::TypeRefDefault(type_ref) => {
                 format!("has_zero_default_{}", typeref_to_string(type_ref))
             }
@@ -1643,137 +1495,118 @@ impl<'a> Emitter<'a> {
                     ExprKind::LValue(annotated(v, || self.emit_expr(env, inner).to_rvalue()))
                 }
             }
-            ExprT::Member(x, a) => {
-                // Common-initial-sequence (CIS) read routing (C17 6.5.2.3p6):
-                // when the base is a union-arm access and `a` is a CIS member,
-                // read it through the union's arm-agnostic getter instead of the
-                // per-arm projection (which would require a known active arm).
-                if let Some((u_expr, union_name, _ty)) = cis_member_access(env, x, a) {
-                    let u_doc = self.emit_lvalue(env, u_expr);
-                    let get = self.emit_name(Name::UnionCisFn(union_name, "get", a.val.clone()));
-                    return ExprKind::RValue(annotated(v, || parens(unaryfn(get, u_doc))));
-                }
-                match env.infer_expr(x) {
-                    Ok(ty) => {
-                        let ty = env.vtype_whnf(ty);
-                        match &ty.val {
-                            TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => {
-                                let is_inline_array = env
-                                    .lookup_struct(struct_name)
-                                    .and_then(|s| {
-                                        s.fields.iter().find(|f| f.val.name().val == a.val)
-                                    })
-                                    .map(|f| f.val.is_array())
-                                    .unwrap_or(false);
-                                match self.emit_expr(env, x) {
-                                    ExprKind::ArrayLValue(_) => unreachable!(
-                                        "emitting an expression of structure type cannot produce an array"
-                                    ),
-                                    ExprKind::LValue(x_doc) => {
-                                        if is_inline_array {
-                                            // Inline array fields are not stored behind a `ref` —
-                                            // the field projection already yields the array handle
-                                            // (an rvalue).
-                                            ExprKind::ArrayLValue(annotated(v, || {
-                                                unaryfn(
-                                                    self.emit_name(Name::StructFieldProj(
-                                                        struct_name.val.clone(),
-                                                        a.val.clone(),
-                                                    )),
-                                                    x_doc,
-                                                )
-                                            }))
-                                        } else {
-                                            ExprKind::LValue(annotated(v, || {
-                                                unaryfn(
-                                                    self.emit_name(Name::StructFieldProj(
-                                                        struct_name.val.clone(),
-                                                        a.val.clone(),
-                                                    )),
-                                                    x_doc,
-                                                )
-                                            }))
-                                        }
-                                    }
-                                    ExprKind::RValue(x_doc) => {
-                                        ExprKind::RValue(annotated(v, || {
-                                            x_doc.append(Doc::text(".")).append(self.emit_name(
-                                                Name::StructDirectFieldName(
+            ExprT::Member(x, a) => match env.infer_expr(x) {
+                Ok(ty) => {
+                    let ty = env.vtype_whnf(ty);
+                    match &ty.val {
+                        TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => {
+                            let is_inline_array = env
+                                .lookup_struct(struct_name)
+                                .and_then(|s| s.fields.iter().find(|f| f.val.name().val == a.val))
+                                .map(|f| f.val.is_array())
+                                .unwrap_or(false);
+                            match self.emit_expr(env, x) {
+                                ExprKind::ArrayLValue(_) => unreachable!(
+                                    "emitting an expression of structure type cannot produce an array"
+                                ),
+                                ExprKind::LValue(x_doc) => {
+                                    if is_inline_array {
+                                        // Inline array fields are not stored behind a `ref` —
+                                        // the field projection already yields the array handle
+                                        // (an rvalue).
+                                        ExprKind::ArrayLValue(annotated(v, || {
+                                            unaryfn(
+                                                self.emit_name(Name::StructFieldProj(
                                                     struct_name.val.clone(),
                                                     a.val.clone(),
-                                                ),
-                                            ))
+                                                )),
+                                                x_doc,
+                                            )
+                                        }))
+                                    } else {
+                                        ExprKind::LValue(annotated(v, || {
+                                            unaryfn(
+                                                self.emit_name(Name::StructFieldProj(
+                                                    struct_name.val.clone(),
+                                                    a.val.clone(),
+                                                )),
+                                                x_doc,
+                                            )
                                         }))
                                     }
                                 }
+                                ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
+                                    x_doc.append(Doc::text(".")).append(self.emit_name(
+                                        Name::StructDirectFieldName(
+                                            struct_name.val.clone(),
+                                            a.val.clone(),
+                                        ),
+                                    ))
+                                })),
                             }
-                            TypeT::TypeRef(TypeRefKind::Union(union_name)) => {
-                                let is_inline_array = env
-                                    .lookup_union(union_name)
-                                    .and_then(|u| {
-                                        u.fields.iter().find(|f| f.val.name().val == a.val)
-                                    })
-                                    .map(|f| f.val.is_array())
-                                    .unwrap_or(false);
-                                match self.emit_expr(env, x) {
-                                    ExprKind::ArrayLValue(_) => unreachable!(
-                                        "emitting an expression of union type cannot produce an array"
-                                    ),
-                                    ExprKind::LValue(x_doc) => {
-                                        if is_inline_array {
-                                            ExprKind::ArrayLValue(annotated(v, || {
-                                                unaryfn(
-                                                    self.emit_name(Name::UnionFieldProj(
-                                                        union_name.val.clone(),
-                                                        a.val.clone(),
-                                                    )),
-                                                    x_doc,
-                                                )
-                                            }))
-                                        } else {
-                                            ExprKind::LValue(unaryfn(
+                        }
+                        TypeT::TypeRef(TypeRefKind::Union(union_name)) => {
+                            let is_inline_array = env
+                                .lookup_union(union_name)
+                                .and_then(|u| u.fields.iter().find(|f| f.val.name().val == a.val))
+                                .map(|f| f.val.is_array())
+                                .unwrap_or(false);
+                            match self.emit_expr(env, x) {
+                                ExprKind::ArrayLValue(_) => unreachable!(
+                                    "emitting an expression of union type cannot produce an array"
+                                ),
+                                ExprKind::LValue(x_doc) => {
+                                    if is_inline_array {
+                                        ExprKind::ArrayLValue(annotated(v, || {
+                                            unaryfn(
                                                 self.emit_name(Name::UnionFieldProj(
                                                     union_name.val.clone(),
                                                     a.val.clone(),
                                                 )),
                                                 x_doc,
-                                            ))
-                                        }
-                                    }
-                                    ExprKind::RValue(x_doc) => {
-                                        ExprKind::RValue(annotated(v, || {
-                                            parens(
-                                                self.emit_name(Name::UnionFieldConstructor(
-                                                    union_name.val.clone(),
-                                                    a.val.clone(),
-                                                ))
-                                                .append("?._0")
-                                                .append(Doc::line())
-                                                .append(x_doc)
-                                                .group(),
                                             )
                                         }))
+                                    } else {
+                                        ExprKind::LValue(unaryfn(
+                                            self.emit_name(Name::UnionFieldProj(
+                                                union_name.val.clone(),
+                                                a.val.clone(),
+                                            )),
+                                            x_doc,
+                                        ))
                                     }
                                 }
-                            }
-                            _ => {
-                                self.report(
-                                    format!("unsupported struct field access on {}", ty),
-                                    &v.loc,
-                                );
-                                ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                                ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
+                                    parens(
+                                        self.emit_name(Name::UnionFieldConstructor(
+                                            union_name.val.clone(),
+                                            a.val.clone(),
+                                        ))
+                                        .append("?._0")
+                                        .append(Doc::line())
+                                        .append(x_doc)
+                                        .group(),
+                                    )
+                                })),
                             }
                         }
-                    }
-                    Err(error) => {
-                        self.report(
-                            format!("cannot infer type of {}: {}\n{}", x, error, env),
-                            &x.loc,
-                        );
-                        ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                        _ => {
+                            self.report(
+                                format!("unsupported struct field access on {}", ty),
+                                &v.loc,
+                            );
+                            ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                        }
                     }
                 }
-            }
+                Err(error) => {
+                    self.report(
+                        format!("cannot infer type of {}: {}\n{}", x, error, env),
+                        &x.loc,
+                    );
+                    ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
+                }
+            },
             ExprT::VAttr(VAttr::Length, x) => ExprKind::RValue(annotated(v, || {
                 // For FixedArray, emit the statically known length as a plain integer
                 let x_ty = env.infer_expr(x).ok().map(|ty| env.vtype_whnf(ty));
@@ -3654,23 +3487,6 @@ impl<'a> Emitter<'a> {
                                 .nest(2)
                         }
                     } else if let ExprT::Member(base, fld) = &x.val {
-                        // Common-initial-sequence (CIS) write routing (C17
-                        // 6.5.2.3p6): a cross-arm write `u->arm.field = v` (or a
-                        // promoted `u->field = v`) to a CIS member is emitted
-                        // through the union's arm-agnostic setter, which updates
-                        // only that member and preserves the active arm.
-                        if let Some((u_expr, union_name, _ty)) = cis_member_access(env, base, fld) {
-                            let set = self.emit_name(Name::UnionCisFn(
-                                union_name,
-                                "set",
-                                fld.val.clone(),
-                            ));
-                            let u_doc = self.emit_lvalue(env, u_expr);
-                            return naryfn([set, u_doc, self.emit_rvalue(env, t)])
-                                .append(";")
-                                .group()
-                                .nest(2);
-                        }
                         // Check if base is a union type — if so, emit x := Ctor val
                         if let Ok(base_ty) = env.infer_expr(base) {
                             let base_ty = env.vtype_whnf(base_ty);
@@ -5387,212 +5203,6 @@ impl<'a> Emitter<'a> {
                     ])),
                 ]),
             ));
-        }
-
-        // Common-initial-sequence (CIS) support (C17 6.5.2.3p6), restricted to
-        // the minimal shape: a union with exactly two struct-typed arms whose
-        // complete field lists are identical (one anonymous + one named struct
-        // with byte-for-byte identical members). For each shared member we emit
-        // arm-agnostic read/write machinery so a cross-arm access verifies with
-        // no known active arm. A CIS write updates only that member and keeps
-        // whichever arm is active — observably equivalent to C precisely because
-        // the two arms are identical.
-        if let Some(cis) = union_cis_fields(env, &name) {
-            let pts_to = || Doc::text("Pulse.Lib.Reference.pts_to");
-            for m in &cis {
-                let m_ty = self.emit_type(env, &m.ty);
-                let proj =
-                    self.emit_name(Name::UnionCisFn(name.val.clone(), "proj", m.name.clone()));
-                let setv =
-                    self.emit_name(Name::UnionCisFn(name.val.clone(), "setv", m.name.clone()));
-                let cis_name_projset = self.emit_name(Name::UnionCisFn(
-                    name.val.clone(),
-                    "projset",
-                    m.name.clone(),
-                ));
-                let cis_name_get =
-                    self.emit_name(Name::UnionCisFn(name.val.clone(), "get", m.name.clone()));
-                let cis_name_set =
-                    self.emit_name(Name::UnionCisFn(name.val.clone(), "set", m.name.clone()));
-
-                // Per-arm match branches for `proj` (read) and `setv` (update).
-                let proj_arms = Doc::concat(m.arms.iter().map(|arm| {
-                    let ctor = self.emit_name(Name::UnionFieldConstructor(
-                        name.val.clone(),
-                        arm.arm.clone(),
-                    ));
-                    let fldname = self.emit_name(Name::StructDirectFieldName(
-                        arm.struct_name.clone(),
-                        m.name.clone(),
-                    ));
-                    Doc::hardline()
-                        .append("| ")
-                        .append(ctor)
-                        .append(" s -> ")
-                        .append(Doc::text("s.").append(fldname))
-                        .group()
-                }));
-                let setv_arms = Doc::concat(m.arms.iter().map(|arm| {
-                    let ctor = self.emit_name(Name::UnionFieldConstructor(
-                        name.val.clone(),
-                        arm.arm.clone(),
-                    ));
-                    let fldname = self.emit_name(Name::StructDirectFieldName(
-                        arm.struct_name.clone(),
-                        m.name.clone(),
-                    ));
-                    Doc::hardline()
-                        .append("| ")
-                        .append(ctor.clone())
-                        .append(" s -> ")
-                        .append(
-                            ctor.append(" ({ s with ")
-                                .append(fldname)
-                                .append(" = nv })"),
-                        )
-                        .group()
-                }));
-
-                // pure projection: union -> field value (total over both arms)
-                ses.push(mk_let(
-                    proj.clone(),
-                    &[parens(
-                        Doc::text("v:")
-                            .append(Doc::line())
-                            .append(union_type_name.clone()),
-                    )],
-                    m_ty.clone(),
-                    Doc::text("match v with").append(proj_arms).group(),
-                ));
-
-                // pure setter: preserve the active arm, update only this member
-                ses.push(mk_let(
-                    setv.clone(),
-                    &[
-                        parens(
-                            Doc::text("v:")
-                                .append(Doc::line())
-                                .append(union_type_name.clone()),
-                        ),
-                        parens(Doc::text("nv:").append(Doc::line()).append(m_ty.clone())),
-                    ],
-                    union_type_name.clone(),
-                    Doc::text("match v with").append(setv_arms).group(),
-                ));
-
-                // proj (setv v nv) == nv — discharges `return == v`-style specs
-                // after a CIS write.
-                let proj_of_setv = naryfn([
-                    proj.clone(),
-                    parens(naryfn([setv.clone(), Doc::text("v"), Doc::text("nv")])),
-                ]);
-                ses.push(mk_assume_val(
-                    vec![],
-                    cis_name_projset,
-                    &[
-                        parens(
-                            Doc::text("v:")
-                                .append(Doc::line())
-                                .append(union_type_name.clone()),
-                        ),
-                        parens(Doc::text("nv:").append(Doc::line()).append(m_ty.clone())),
-                    ],
-                    Doc::text("Lemma (ensures (")
-                        .append(proj_of_setv.clone())
-                        .append(" == nv)) [SMTPat (")
-                        .append(proj_of_setv)
-                        .append(")]"),
-                ));
-
-                // getter: read the CIS member arm-agnostically. Its precondition
-                // is the real reference predicate already in scope after the
-                // whole-union store `x := Ctor {...}`.
-                ses.push(mk_assume_val(
-                    vec![],
-                    cis_name_get,
-                    &[
-                        parens(
-                            Doc::text("x:")
-                                .append(Doc::line())
-                                .append(ref_union_type.clone()),
-                        ),
-                        parens(Doc::text("#p: perm")),
-                        parens(
-                            Doc::text("#vx: Ghost.erased")
-                                .append(Doc::line())
-                                .append(union_type_name.clone()),
-                        ),
-                    ],
-                    naryfn([
-                        Doc::text("stt_atomic"),
-                        m_ty.clone(),
-                        Doc::text("#PulseCore.Observability.Neutral"),
-                        Doc::text("emp_inames"),
-                        naryfn([pts_to(), Doc::text("x"), Doc::text("#p"), Doc::text("vx")]),
-                        mk_fun(
-                            Doc::text("r"),
-                            mk_star([
-                                naryfn([
-                                    pts_to(),
-                                    Doc::text("x"),
-                                    Doc::text("#p"),
-                                    Doc::text("vx"),
-                                ]),
-                                unaryfn(
-                                    Doc::text("pure"),
-                                    parens(Doc::text("r == ").append(unaryfn(
-                                        proj.clone(),
-                                        Doc::text("(Ghost.reveal vx)"),
-                                    ))),
-                                ),
-                            ]),
-                        ),
-                    ]),
-                ));
-
-                // setter: update the CIS member arm-agnostically (full
-                // permission, like any write). Yields the updated union value.
-                ses.push(mk_assume_val(
-                    vec![],
-                    cis_name_set,
-                    &[
-                        parens(
-                            Doc::text("x:")
-                                .append(Doc::line())
-                                .append(ref_union_type.clone()),
-                        ),
-                        parens(Doc::text("nv:").append(Doc::line()).append(m_ty.clone())),
-                        parens(
-                            Doc::text("#vx: Ghost.erased")
-                                .append(Doc::line())
-                                .append(union_type_name.clone()),
-                        ),
-                    ],
-                    naryfn([
-                        Doc::text("stt"),
-                        Doc::text("unit"),
-                        naryfn([
-                            pts_to(),
-                            Doc::text("x"),
-                            Doc::text("#1.0R"),
-                            Doc::text("vx"),
-                        ]),
-                        mk_fun(
-                            Doc::text("_"),
-                            naryfn([
-                                pts_to(),
-                                Doc::text("x"),
-                                Doc::text("#1.0R"),
-                                parens(naryfn([
-                                    setv.clone(),
-                                    Doc::text("(Ghost.reveal vx)"),
-                                    Doc::text("nv"),
-                                ])),
-                            ]),
-                        ),
-                    ]),
-                ));
-            }
         }
 
         // has_zero_default instance (uses first field's constructor).

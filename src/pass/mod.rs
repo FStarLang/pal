@@ -1,6 +1,7 @@
 pub mod check;
 pub mod decay;
 pub mod elab;
+pub mod elim_cis;
 pub mod emit;
 pub mod merge;
 pub mod prune;

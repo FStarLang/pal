@@ -212,6 +212,18 @@ fn main() {
         eprintln!("  check (post-elab): {:.3}s", t.elapsed().as_secs_f64());
     }
 
+    let t = Instant::now();
+    pass::elim_cis::elim_simple_cis(&mut diags, &mut combined_tu);
+    if cli.time_passes {
+        eprintln!("  elim_cis: {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
+    pass::check::check(&mut diags, &mut combined_tu, "elim_cis", true);
+    if cli.time_passes {
+        eprintln!("  check (post-elim_cis): {:.3}s", t.elapsed().as_secs_f64());
+    }
+
     if cli.print_ir {
         println!("{}", combined_tu);
         return;
