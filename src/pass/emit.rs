@@ -81,6 +81,7 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::StructAuxFn(s, _) => Some(format!("Struct_{}", s)),
         Name::StructContainerFn(s, _) => Some(format!("Struct_{}", s)),
         Name::StructContainerInv(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructProjContainerInv(s, _) => Some(format!("Struct_{}", s)),
         Name::StructProjNull(s, _) => Some(format!("Struct_{}", s)),
         Name::UnionFieldConstructor(u, _) => Some(format!("Union_{}", u)),
         Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
@@ -346,6 +347,10 @@ enum Name {
     StructContainerFn(Rc<IdentT>, Rc<IdentT>),
     /// Left-inverse lemma tying `StructContainerFn` to `StructGhostFieldProj`.
     StructContainerInv(Rc<IdentT>, Rc<IdentT>),
+    /// Right-inverse (dual) lemma: `proj (container r) == r`. Lets a caller that
+    /// owns a struct *via* `container_of(field_ref)` still address the field
+    /// through the original `field_ref`.
+    StructProjContainerInv(Rc<IdentT>, Rc<IdentT>),
     /// Ground axiom `proj (null #outer) == null #inner` for the offset-0 member:
     /// `container_of` on a struct's first field is pointer identity, so the
     /// field projection maps the null enclosing pointer to the null inner one.
@@ -418,6 +423,9 @@ impl Name {
             }
             Name::StructContainerInv(str, fld) => {
                 format!("{}__{}_container_inv", struct_to_string(str), fld)
+            }
+            Name::StructProjContainerInv(str, fld) => {
+                format!("{}__{}_proj_container_inv", struct_to_string(str), fld)
             }
             Name::StructProjNull(str, fld) => {
                 format!("{}__{}_proj_null", struct_to_string(str), fld)
@@ -4718,6 +4726,47 @@ impl<'a> Emitter<'a> {
                 Doc::text("Lemma")
                     .append(Doc::line().append(ensures))
                     .append(Doc::line().append(smtpat))
+                    .nest(2)
+                    .group(),
+            ));
+
+            // Dual (right-inverse) lemma: `proj (container r) == r`. Sound for
+            // the same reason as `container_inv` -- both compose the field
+            // offset with its negation. Needed so a caller owning the struct via
+            // `container_of(field_ref)` can still address the field through the
+            // original `field_ref`: the SMTPat rewrites the round-trip term
+            // `proj (container r)` back to `r`.
+            let projected_type_dual = self.emit_field_projection_type(env, f);
+            let container_name_dual =
+                self.emit_name(Name::StructContainerFn(name.val.clone(), fld.val.clone()));
+            let proj_name_dual = self.emit_name(ghost_fld(fld));
+            let dual_name = self.emit_name(Name::StructProjContainerInv(
+                name.val.clone(),
+                fld.val.clone(),
+            ));
+            let container_app_r = unaryfn(container_name_dual, Doc::text("r"));
+            let proj_container_app = unaryfn(proj_name_dual, container_app_r);
+            let ensures_dual = parens(
+                Doc::text("ensures")
+                    .append(Doc::line())
+                    .append(proj_container_app.clone())
+                    .append(Doc::text(" == r")),
+            );
+            let smtpat_dual = Doc::text("[SMTPat ")
+                .append(proj_container_app)
+                .append(Doc::text("]"));
+
+            ses.push(mk_assume_val(
+                vec![],
+                dual_name,
+                &[parens(
+                    Doc::text("r:")
+                        .append(Doc::line())
+                        .append(projected_type_dual),
+                )],
+                Doc::text("Lemma")
+                    .append(Doc::line().append(ensures_dual))
+                    .append(Doc::line().append(smtpat_dual))
                     .nest(2)
                     .group(),
             ));
