@@ -941,6 +941,9 @@ impl<'a> Emitter<'a> {
             ExprT::MallocArray(_, count) | ExprT::CallocArray(_, count) => {
                 self.subst_this_rvalue(env, Rc::make_mut(count), this);
             }
+            ExprT::MallocFlex(_, count) | ExprT::CallocFlex(_, count) => {
+                self.subst_this_rvalue(env, Rc::make_mut(count), this);
+            }
             ExprT::Memset(_, ptr, value, count) => {
                 self.subst_this_rvalue(env, Rc::make_mut(ptr), this);
                 self.subst_this_rvalue(env, Rc::make_mut(value), this);
@@ -2891,6 +2894,31 @@ impl<'a> Emitter<'a> {
                         .append(Doc::line())
                         .append(self.emit_rvalue(env, count)),
                 ),
+                ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
+                    let flex_kind = if matches!(&v.val, ExprT::MallocFlex(..)) {
+                        "malloc_flex"
+                    } else {
+                        "calloc_flex"
+                    };
+                    let resolved = env.vtype_whnf(ty.clone().into());
+                    match &resolved.val {
+                        TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => parens(
+                            self.emit_name(Name::StructAuxFn(
+                                struct_name.val.clone(),
+                                flex_kind.into(),
+                            ))
+                            .append(Doc::line())
+                            .append(self.emit_rvalue(env, count)),
+                        ),
+                        _ => {
+                            self.report(
+                                "flexible-array-member allocation of a non-struct type".to_string(),
+                                &ty.loc,
+                            );
+                            Doc::text("()")
+                        }
+                    }
+                }
                 ExprT::Memset(_, ptr, value, count) => parens(
                     Doc::text("Pulse.Lib.C.Array.memset")
                         .append(Doc::line())
@@ -4927,6 +4955,76 @@ impl<'a> Emitter<'a> {
                 }),
             ]),
         ));
+
+        // Sized flexible-array-member allocators. When the struct has a
+        // flexible array member, `malloc(sizeof(S) + n*sizeof(E))` and
+        // `calloc(1, sizeof(S) + n*sizeof(E))` thread the tail length `n`.
+        // Each axiom returns the struct in UNFOLDED form: the `aux_raw_unfolded`
+        // token, every non-flex field uninitialized, and the flexible tail as a
+        // length-`n` `array_pts_to` (uninitialized for malloc, zeroed for
+        // calloc), plus `freeable`. The caller sets the length field and, for
+        // malloc, fills the tail; the `[@@pulse_intro]` `aux_raw_fold` then
+        // auto-folds back into a valid struct at escape.
+        if fields.iter().any(|f| f.val.flex_array_info().is_some()) {
+            for (flex_kind, zeroed) in [("malloc_flex", false), ("calloc_flex", true)] {
+                let mut post = vec![naryfn([
+                    unfolded_tok.clone(),
+                    Doc::text("r"),
+                    Doc::text("1.0R"),
+                ])];
+                for f in fields {
+                    let fld = f.val.name();
+                    if let Some((elem_ty, _)) = f.val.flex_array_info() {
+                        let elem_doc = self.emit_type(env, elem_ty);
+                        let spec = if zeroed {
+                            naryfn([
+                                Doc::text("array_spec_zeroed"),
+                                elem_doc,
+                                parens(Doc::text("FStar.SizeT.v n")),
+                                Doc::text("zero_default"),
+                            ])
+                        } else {
+                            naryfn([
+                                Doc::text("array_spec_uninit"),
+                                elem_doc,
+                                parens(Doc::text("FStar.SizeT.v n")),
+                            ])
+                        };
+                        post.push(naryfn([
+                            Doc::text("array_pts_to"),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("r")),
+                            Doc::text("1.0R"),
+                            spec,
+                        ]));
+                    } else if f.val.is_array() {
+                        post.push(naryfn([
+                            Doc::text("array_pts_to_uninit'"),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("r")),
+                        ]));
+                    } else {
+                        post.push(naryfn([
+                            Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("r")),
+                        ]));
+                    }
+                }
+                post.push(naryfn([
+                    Doc::text("Pulse.Lib.C.Ref.freeable"),
+                    Doc::text("r"),
+                ]));
+                ses.push(mk_assume_val(
+                    vec![],
+                    self.emit_name(Name::StructAuxFn(name.val.clone(), flex_kind.into())),
+                    &[parens(Doc::text("n: FStar.SizeT.t"))],
+                    naryfn([
+                        Doc::text("stt"),
+                        ref_struct_type.clone(),
+                        Doc::text("emp"),
+                        mk_fun(Doc::text("r"), mk_star(post)),
+                    ]),
+                ));
+            }
+        }
 
         for f in fields {
             let fld = f.val.name();

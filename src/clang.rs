@@ -752,6 +752,12 @@ fn mk_calloc(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
 fn mk_calloc_array(loc: Rc<SourceInfo>, ty: Rc<Type>, count: Rc<Expr>) -> Rc<Expr> {
     mk_ast(loc, ExprT::CallocArray(ty, count))
 }
+fn mk_malloc_flex(loc: Rc<SourceInfo>, ty: Rc<Type>, count: Rc<Expr>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::MallocFlex(ty, count))
+}
+fn mk_calloc_flex(loc: Rc<SourceInfo>, ty: Rc<Type>, count: Rc<Expr>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::CallocFlex(ty, count))
+}
 fn mk_memset(
     loc: Rc<SourceInfo>,
     ty: Rc<Type>,

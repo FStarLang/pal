@@ -327,6 +327,15 @@ pub enum ExprT {
     MallocArray(Rc<Type>, Rc<Expr>),
     Calloc(Rc<Type>),
     CallocArray(Rc<Type>, Rc<Expr>),
+    /// Flexible-array-member allocation `malloc(sizeof(struct S) + n*sizeof(E))`:
+    /// the struct type `S` and the trailing array length `n`. Unlike `Malloc`,
+    /// this threads `n` so the emitted allocator yields a struct whose flexible
+    /// tail has length `n`. Emitted as the per-struct `struct_S__aux_malloc_flex`.
+    MallocFlex(Rc<Type>, Rc<Expr>),
+    /// Zeroing counterpart of `MallocFlex` for
+    /// `calloc(1, sizeof(struct S) + n*sizeof(E))`. Emitted as
+    /// `struct_S__aux_calloc_flex`; the flexible tail comes back zeroed.
+    CallocFlex(Rc<Type>, Rc<Expr>),
     /// `memset(ptr, value, sizeof(T) * count)` — element type, destination
     /// pointer, fill value, and element count. Emitted as
     /// `Pulse.Lib.C.Array.memset`.

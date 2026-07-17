@@ -38,14 +38,50 @@ _allocated typedef struct vec *vec_ptr;
 // calloc: `calloc(1, sizeof(struct vec) + n * sizeof(int))`. This is the
 // zeroing counterpart of the FAM malloc idiom and mirrors MsQuic's
 // `QuicCidNewNullSource`, which allocates the sized block and zeroes it. It
-// translates to a plain zeroed struct allocation (`calloc_ref`); the trailing
-// `n * sizeof(int)` term is dropped since the flexible array is modeled inline,
-// and the zeroed struct starts with `len == 0` and an empty `data` array (which
-// satisfies the `_refines` length relation). Whole-struct assignment
+// translates to a sized FAM allocation (`struct_vec__aux_calloc_flex n`) that
+// threads the tail length `n`: the returned struct is unfolded, with `len`
+// uninitialized and the flexible `data` array zeroed with length `n`. Setting
+// `v->len = n` initializes the length field and satisfies the `_refines` length
+// relation (`array_spec_len data == len`), after which the struct auto-folds
+// into a valid `struct vec` on return. Whole-struct assignment
 // (`*v = (struct vec){ ... }`) is rejected for FAM structs since C does not copy
 // the flexible array contents, so the struct must be constructed this way.
 vec_ptr vec_new(unsigned n)
 {
     struct vec *v = calloc(1, sizeof(struct vec) + n * sizeof(int));
+    v->len = n;
+    return v;
+}
+// Allocate a vec using the idiomatic flexible-array-member malloc
+// `malloc(sizeof(struct vec) + n * sizeof(int))` and fill it. This mirrors
+// MsQuic's `QuicCidNewSource`, which mallocs the sized block and then populates
+// the trailing array. It translates to a sized FAM allocation
+// (`struct_vec__aux_malloc_flex n`) that threads the tail length `n`: the
+// returned struct is unfolded, with `len` uninitialized and the flexible `data`
+// array *uninitialized* with length `n`. Unlike the calloc idiom, the caller
+// must fully initialize `data` before the struct can fold, so the fill loop
+// carries an `_inline_pulse` frontier invariant stating the flexible array is
+// initialized up to `i`. The invariant references PAL-internal names: the ghost
+// array handle `Struct_vec.struct_vec__data_1 $(v)` and the unfolded-struct
+// token `Struct_vec.struct_vec__aux_raw_unfolded $(v)` (both applied to the
+// under-construction struct pointer `v`). Once `i == n` every element is
+// initialized, so the tail is a full array and the struct auto-folds on return.
+vec_ptr vec_new_filled(unsigned n, int x)
+{
+    struct vec *v = malloc(sizeof(struct vec) + n * sizeof(int));
+    v->len = n;
+    for (unsigned i = 0; i < n; i = i + 1)
+        _invariant(_live(i))
+        _invariant(_inline_pulse(
+            exists* s.
+              (Struct_vec.struct_vec__aux_raw_unfolded $(v) 1.0R) **
+              (array_pts_to (Struct_vec.struct_vec__data_1 $(v)) 1.0R s) **
+              (pure (array_spec_len s == UInt32.v $(n))) **
+              (pure (array_spec_full_mask s)) **
+              (pure (forall (k: nat). {:pattern (array_spec_initd s k)} k < UInt32.v $(i) ==> array_spec_initd s k))
+        ))
+    {
+        v->data[i] = x;
+    }
     return v;
 }

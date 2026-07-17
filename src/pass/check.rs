@@ -497,6 +497,10 @@ impl<'a> Checker<'a> {
                 self.check_type(env, ty);
                 self.check_rvalue(env, count);
             }
+            ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
+                self.check_type(env, ty);
+                self.check_rvalue(env, count);
+            }
             ExprT::Memset(ty, ptr, value, count) => {
                 self.check_type(env, ty);
                 self.check_rvalue(env, ptr);

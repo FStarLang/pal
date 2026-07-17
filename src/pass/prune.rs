@@ -169,6 +169,10 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             scan_type(deps, ty);
             scan_expr(deps, count);
         }
+        ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
+            scan_type(deps, ty);
+            scan_expr(deps, count);
+        }
         ExprT::Memset(ty, ptr, value, count) => {
             scan_type(deps, ty);
             scan_expr(deps, ptr);

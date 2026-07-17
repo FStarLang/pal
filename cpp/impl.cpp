@@ -649,6 +649,25 @@ public:
     return builder.build();
   }
 
+  // For a flexible-array-member allocation's trailing size term, return the
+  // count operand `n` of `n * sizeof(elem)` or `sizeof(elem) * n` (the
+  // non-sizeof multiplicand). Returns nullptr if the term is not a recognized
+  // product with a type-sizeof factor.
+  static Expr *flexArrayCountSide(Expr *e) {
+    auto *mul = dyn_cast<BinaryOperator>(e->IgnoreParenImpCasts());
+    if (!mul || mul->getOpcode() != BO_Mul)
+      return nullptr;
+    auto isTypeSizeof = [](Expr *x) {
+      auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(x->IgnoreParenImpCasts());
+      return s && s->getKind() == UETT_SizeOf && s->isArgumentType();
+    };
+    if (isTypeSizeof(mul->getLHS()))
+      return mul->getRHS();
+    if (isTypeSizeof(mul->getRHS()))
+      return mul->getLHS();
+    return nullptr;
+  }
+
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
 
@@ -718,11 +737,24 @@ public:
                   };
                   const UnaryExprOrTypeTraitExpr *structSide =
                       structSizeofSide(binOp->getLHS());
-                  if (!structSide)
+                  Expr *arrayTerm = binOp->getRHS();
+                  if (!structSide) {
                     structSide = structSizeofSide(binOp->getRHS());
+                    arrayTerm = binOp->getLHS();
+                  }
                   if (structSide) {
                     auto allocTy = trQualType(structSide->getArgumentType(),
                                               structSide->getSourceRange());
+                    // Extract `n` from the trailing array term `n *
+                    // sizeof(elem)` or `sizeof(elem) * n`, so the flexible tail
+                    // is sized `n`.
+                    if (Expr *countSide = flexArrayCountSide(arrayTerm)) {
+                      auto countExpr = trRValue(countSide);
+                      return mk_malloc_flex(std::move(loc), std::move(allocTy),
+                                            std::move(countExpr));
+                    }
+                    // Unrecognized array term: fall back to an empty flexible
+                    // tail (plain struct malloc).
                     return mk_malloc(std::move(loc), std::move(allocTy));
                   }
                 }
@@ -803,11 +835,24 @@ public:
                       };
                       const UnaryExprOrTypeTraitExpr *structSide =
                           structSizeofSide(binOp->getLHS());
-                      if (!structSide)
+                      Expr *arrayTerm = binOp->getRHS();
+                      if (!structSide) {
                         structSide = structSizeofSide(binOp->getRHS());
+                        arrayTerm = binOp->getLHS();
+                      }
                       if (structSide) {
                         auto allocTy = trQualType(structSide->getArgumentType(),
                                                   structSide->getSourceRange());
+                        // Extract `n` from the trailing array term so the
+                        // zeroed flexible tail is sized `n`.
+                        if (Expr *countSide = flexArrayCountSide(arrayTerm)) {
+                          auto countExpr = trRValue(countSide);
+                          return mk_calloc_flex(std::move(loc),
+                                                std::move(allocTy),
+                                                std::move(countExpr));
+                        }
+                        // Unrecognized array term: fall back to an empty
+                        // flexible tail (plain zeroed struct calloc).
                         return mk_calloc(std::move(loc), std::move(allocTy));
                       }
                     }

@@ -304,6 +304,22 @@ impl PrettyIR for ExprT {
                 .append("))")
                 .nest(4)
                 .group(),
+            ExprT::MallocFlex(ty, count) => RcDoc::text("malloc(sizeof(")
+                .append(ty.to_doc())
+                .nest(2)
+                .append(") + ")
+                .append(count.to_doc())
+                .append(" * sizeof(elem))")
+                .nest(2)
+                .group(),
+            ExprT::CallocFlex(ty, count) => RcDoc::text("calloc(1, sizeof(")
+                .append(ty.to_doc())
+                .nest(2)
+                .append(") + ")
+                .append(count.to_doc())
+                .append(" * sizeof(elem))")
+                .nest(2)
+                .group(),
             ExprT::Memset(ty, ptr, value, count) => RcDoc::text("memset(")
                 .append(ptr.to_doc())
                 .append(", ")

@@ -388,6 +388,9 @@ impl Env {
             ExprT::MallocArray(ty, _) | ExprT::CallocArray(ty, _) => Ok(expr
                 .reuse_loc(TypeT::Pointer(ty.clone(), PointerKind::Array))
                 .into()),
+            ExprT::MallocFlex(ty, _) | ExprT::CallocFlex(ty, _) => Ok(expr
+                .reuse_loc(TypeT::Pointer(ty.clone(), PointerKind::Ref))
+                .into()),
             ExprT::Free(_) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
             ExprT::Memset(_, _, _, _) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
             ExprT::MemsetZero(_, _) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),

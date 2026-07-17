@@ -444,6 +444,15 @@ impl<'a> Elaborator<'a> {
                     }
                 }
             }
+            ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
+                self.elab_type(env, Rc::make_mut(ty));
+                self.elab_rvalue(env, Rc::make_mut(count), None);
+                if let Ok(count_ty) = env.infer_expr(count) {
+                    if !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT) {
+                        cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                    }
+                }
+            }
             ExprT::Memset(ty, ptr, value, count) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 self.elab_rvalue(env, Rc::make_mut(ptr), None);
