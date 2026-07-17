@@ -124,7 +124,9 @@ _include_pulse(Container_of_include,
 
   // --- Right-inverse (dual) lemmas: `proj (container r) == r`, one per field
   // kind. Each is discharged automatically by the generated
-  // `..._proj_container_inv` SMTPat firing on the round-trip term. ---
+  // `..._proj_container_inv` SMTPat firing on the round-trip term. For a
+  // translated-C function whose verification depends on this lemma, see
+  // `test/container_field_read`. ---
 
   fn dual_tracker (var_tracker: $type(ack_tracker_t *))
     requires emp
