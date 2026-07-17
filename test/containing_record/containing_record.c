@@ -23,8 +23,9 @@
 // `set_value_via_node` the recovered parent's `value` is `v`, and
 // `read_value_via_node` returns the parent's current `value`.
 
-#include "pal.h"
+#include <assert.h>
 #include <stdint.h>
+#include "pal.h"
 
 struct inner {
     int32_t marker;
@@ -69,4 +70,41 @@ int32_t read_value_via_node(_plain struct inner *node)
 {
     struct outer *parent = _container_of(node, struct outer, node);
     return parent->value;
+}
+
+// ---------------------------------------------------------------------------
+// Offset-0 `container_of` null preservation, written in plain C.
+//
+// `struct outer`'s first member `value` sits at offset 0, so recovering the
+// enclosing `outer` from a `&outer->value` pointer — or projecting back down to
+// that field — is pointer identity (C 6.7.2.1: no leading padding). PAL lowers a
+// first-field pointer cast to exactly this recovery: `(struct outer *)fieldptr`
+// becomes the generated `struct_outer__value_container` map, and `(int32_t *)
+// nodeptr` becomes the field projection `struct_outer__value_1`.
+//
+// This idiom is pervasive in MsQuic, where CXPLAT_CONTAINING_RECORD walks
+// intrusive lists whose link sits at offset 0 and whose NULL `next` terminates
+// the walk: the recovery MUST preserve NULL, or the terminator could never be
+// detected. That termination fact is the emitted `struct_outer__value_proj_null`
+// axiom (`proj(NULL) == NULL`). Its dual, `container(NULL) == NULL`, is not
+// emitted separately — it follows from `struct_outer__value_container_inv` at
+// `p = NULL` rewritten with `proj_null` — which is why the container-direction
+// assertion below still verifies with only the one axiom.
+
+// Projection direction: `(int32_t *)y` takes the address of the offset-0 field.
+// On NULL this is `proj(NULL) == NULL` — the emitted axiom, and the fact that
+// gives this assertion its teeth (remove the axiom and this stops verifying).
+void value_proj_null_fires(void) {
+    int32_t *x = 0;
+    struct outer *y = 0;
+    assert(x == (int32_t *)y);
+}
+
+// Container direction: `(struct outer *)x` recovers the enclosing node from a
+// pointer to its offset-0 field. On NULL this is `container(NULL) == NULL`,
+// derived from `proj_null` and `struct_outer__value_container_inv`.
+void value_container_null_fires(void) {
+    int32_t *x = 0;
+    struct outer *y = 0;
+    assert((struct outer *)x == y);
 }
