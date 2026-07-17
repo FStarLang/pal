@@ -81,6 +81,7 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::StructAuxFn(s, _) => Some(format!("Struct_{}", s)),
         Name::StructContainerFn(s, _) => Some(format!("Struct_{}", s)),
         Name::StructContainerInv(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructProjNull(s, _) => Some(format!("Struct_{}", s)),
         Name::UnionFieldConstructor(u, _) => Some(format!("Union_{}", u)),
         Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
@@ -345,6 +346,12 @@ enum Name {
     StructContainerFn(Rc<IdentT>, Rc<IdentT>),
     /// Left-inverse lemma tying `StructContainerFn` to `StructGhostFieldProj`.
     StructContainerInv(Rc<IdentT>, Rc<IdentT>),
+    /// Ground axiom `proj (null #outer) == null #inner` for the offset-0 member:
+    /// `container_of` on a struct's first field is pointer identity, so the
+    /// field projection maps the null enclosing pointer to the null inner one.
+    /// The dual `container (null #inner) == null #outer` is not emitted: it
+    /// follows from `StructContainerInv` at `p = null`.
+    StructProjNull(Rc<IdentT>, Rc<IdentT>),
 
     UnionFieldConstructor(Rc<IdentT>, Rc<IdentT>),
     UnionGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
@@ -411,6 +418,9 @@ impl Name {
             }
             Name::StructContainerInv(str, fld) => {
                 format!("{}__{}_container_inv", struct_to_string(str), fld)
+            }
+            Name::StructProjNull(str, fld) => {
+                format!("{}__{}_proj_null", struct_to_string(str), fld)
             }
             Name::UnionFieldConstructor(u, fld) => {
                 format!("Field_{}__{}", u, fld)
@@ -4544,6 +4554,51 @@ impl<'a> Emitter<'a> {
                     .nest(2)
                     .group(),
             ));
+        }
+
+        // Offset-0 `container_of` null-preservation axiom.
+        //
+        // `container_of` on a struct's *first* (offset-0) member is pointer
+        // identity (C 6.7.2.1: no leading padding). We capture this for the
+        // null pointer with a single ground `squash` axiom on the field
+        // projection (which fires automatically into the SMT context):
+        //
+        //   proj (null #outer) == null #inner
+        //
+        // The dual direction, `container (null #inner) == null #outer`, is NOT
+        // emitted separately: it follows automatically from the `container_inv`
+        // lemma (`container (proj p) == p`, carrying an SMTPat) instantiated at
+        // `p = null`, rewritten with the axiom above. Sound ONLY at offset 0 —
+        // a nonzero-offset `container_of(NULL)` is undefined behaviour — so we
+        // restrict to the first field, and only when it is a `Plain`
+        // (non-array, non-bitfield) member whose projection is a genuine `ref`.
+        if let Some(f0) = fields.first() {
+            if !f0.val.is_array() {
+                if let FieldT::Plain { ty, .. } = &f0.val {
+                    let fld = f0.val.name();
+                    let inner_ty = self.emit_type(env, ty);
+                    let null_inner =
+                        parens(Doc::text("Pulse.Lib.Reference.null #").append(parens(inner_ty)));
+                    let null_outer = parens(
+                        Doc::text("Pulse.Lib.Reference.null #")
+                            .append(parens(struct_type_name.clone())),
+                    );
+
+                    let proj_name = self.emit_name(ghost_fld(fld));
+                    let proj_eq = parens(
+                        unaryfn(proj_name, null_outer)
+                            .append(Doc::text(" =="))
+                            .append(Doc::line())
+                            .append(null_inner),
+                    );
+                    ses.push(mk_assume_val(
+                        vec![],
+                        self.emit_name(Name::StructProjNull(name.val.clone(), fld.val.clone())),
+                        &[],
+                        unaryfn(Doc::text("squash"), proj_eq),
+                    ));
+                }
+            }
         }
 
         ses.push(mk_assume_val(
