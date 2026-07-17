@@ -83,9 +83,30 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    fn elab_field(&mut self, env: &Env, field: &mut Field) {
+    fn elab_field(&mut self, env: &Env, field: &mut Field, siblings: &[Field]) {
         match &mut field.val {
-            FieldT::Plain { name: _, ty } => self.elab_type(env, Rc::make_mut(ty)),
+            FieldT::Plain { name, ty } => {
+                // A flexible-array-member `_refines(...)` length refinement may
+                // reference sibling fields (e.g. `len`) by name, so bring the
+                // other fields into scope before elaborating the refinement.
+                if matches!(&ty.val, TypeT::RefineAlways(inner, _) if matches!(peel_type(inner).val, TypeT::FlexArray(_)))
+                {
+                    let env = &mut env.clone();
+                    for s in siblings {
+                        let sname = s.val.name();
+                        if sname.val != name.val {
+                            env.push_var_decl(
+                                sname,
+                                s.val.logical_type(&s.loc),
+                                LocalDeclKind::RValue,
+                            );
+                        }
+                    }
+                    self.elab_type(env, Rc::make_mut(ty));
+                } else {
+                    self.elab_type(env, Rc::make_mut(ty));
+                }
+            }
             FieldT::BitField { name: _, ty, .. } => self.elab_type(env, Rc::make_mut(ty)),
         }
     }
@@ -136,6 +157,9 @@ impl<'a> Elaborator<'a> {
                 }
             }
             TypeT::FixedArray(elem_ty, _) => {
+                self.elab_type(env, Rc::make_mut(elem_ty));
+            }
+            TypeT::FlexArray(elem_ty) => {
                 self.elab_type(env, Rc::make_mut(elem_ty));
             }
             TypeT::Unknown => {}
@@ -263,6 +287,9 @@ impl<'a> Elaborator<'a> {
                             rval.val = ExprT::VAttr(VAttr::Length, x.clone());
                         }
                         TypeT::FixedArray(_, _) if &*a.val == "_length" => {
+                            rval.val = ExprT::VAttr(VAttr::Length, x.clone());
+                        }
+                        TypeT::FlexArray(_) if &*a.val == "_length" => {
                             rval.val = ExprT::VAttr(VAttr::Length, x.clone());
                         }
                         TypeT::TypeRef(TypeRefKind::Struct(n)) => {
@@ -995,14 +1022,16 @@ impl<'a> Elaborator<'a> {
             DeclT::StructDefn(StructDefn {
                 name: _, fields, ..
             }) => {
+                let siblings = fields.clone();
                 for f in fields {
-                    self.elab_field(env, f);
+                    self.elab_field(env, f, &siblings);
                 }
             }
             DeclT::StructDecl(_) => {}
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
+                let siblings = fields.clone();
                 for f in fields {
-                    self.elab_field(env, f);
+                    self.elab_field(env, f, &siblings);
                 }
             }
             DeclT::IncludeDecl(include_decl) => {
@@ -1159,13 +1188,15 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 elab.in_view_body = false;
             }
             DeclT::StructDefn(StructDefn { fields, .. }) => {
+                let siblings = fields.clone();
                 for f in fields {
-                    elab.elab_field(&env, f);
+                    elab.elab_field(&env, f, &siblings);
                 }
             }
             DeclT::UnionDefn(UnionDefn { fields, .. }) => {
+                let siblings = fields.clone();
                 for f in fields {
-                    elab.elab_field(&env, f);
+                    elab.elab_field(&env, f, &siblings);
                 }
             }
             DeclT::LetDecl(let_decl) => {

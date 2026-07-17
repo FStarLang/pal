@@ -242,6 +242,7 @@ mod crate::clang {
     fn mk_pointer_unknown(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_pointer_array(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_fixed_array_type(Rc<SourceInfo>, Rc<Type>, u64) -> Rc<Type>;
+    fn mk_flex_array_type(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_struct(Rc<SourceInfo>, Rc<Ident>) -> Rc<Type>;
     fn mk_type_union(Rc<SourceInfo>, Rc<Ident>) -> Rc<Type>;
     fn mk_type_typedef(Rc<SourceInfo>, Rc<Ident>) -> Rc<Type>;

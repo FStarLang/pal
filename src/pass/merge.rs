@@ -180,6 +180,7 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
     match &mut ty.val {
         TypeT::Pointer(inner, _)
         | TypeT::FixedArray(inner, _)
+        | TypeT::FlexArray(inner)
         | TypeT::Plain(inner)
         | TypeT::Nullable(inner) => rename_type_in_place(Rc::make_mut(inner), renames),
         TypeT::Refine(inner, pred)

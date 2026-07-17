@@ -137,6 +137,7 @@ impl PrettyIR for TypeT {
             TypeT::Pointer(ty, PointerKind::Core) => ty.to_doc().append(RcDoc::text("*[core]")),
             TypeT::Pointer(ty, PointerKind::Unknown) => ty.to_doc().append(RcDoc::text("[?]")),
             TypeT::FixedArray(ty, len) => ty.to_doc().append(RcDoc::text(format!("[{}]", len))),
+            TypeT::FlexArray(ty) => ty.to_doc().append(RcDoc::text("[]")),
             TypeT::SpecInt => RcDoc::text("_specint"),
             TypeT::SpecNat => RcDoc::text("_specnat"),
             TypeT::SLProp => RcDoc::text("_slprop"),

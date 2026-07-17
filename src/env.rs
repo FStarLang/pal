@@ -348,6 +348,7 @@ impl Env {
                         Ok(elem.clone().into())
                     }
                     TypeT::FixedArray(elem, _) => Ok(elem.clone().into()),
+                    TypeT::FlexArray(elem) => Ok(elem.clone().into()),
                     _ => Err(InferError::CannotIndex(arr_ty)),
                 }
             }
@@ -557,6 +558,7 @@ impl Env {
             either_side!(TypeT::Float { .. }) => None,
             either_side!(TypeT::Pointer(_, _)) => None,
             either_side!(TypeT::FixedArray(_, _)) => None,
+            either_side!(TypeT::FlexArray(_)) => None,
 
             either_side!(TypeT::TypeRef(_)) => None,
 
@@ -589,6 +591,7 @@ impl Env {
             | TypeT::PtrdiffT
             | TypeT::Pointer(_, _)
             | TypeT::FixedArray(_, _)
+            | TypeT::FlexArray(_)
             | TypeT::SpecInt
             | TypeT::SpecNat
             | TypeT::SLProp

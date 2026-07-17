@@ -279,7 +279,24 @@ public:
     }
     auto qt = f->getType();
     auto *qtPtr = qt.IgnoreParens().getTypePtr();
-    if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
+    if (auto *iat = dyn_cast<IncompleteArrayType>(qtPtr)) {
+      // Flexible array member: `T name[]` as the last field of a struct (C11
+      // 6.7.2.1). Clang guarantees it is the last field. Model it inline as an
+      // unsized `array_spec T` in the noeq record; a `_refines(...)` clause on
+      // the field supplies an optional length refinement.
+      if (inUnion) {
+        reportUnsupported(f->getSourceRange(), floc,
+                          "unsupported flexible array member in union", "");
+        return;
+      }
+      auto elemTy =
+          trQualType(iat->getElementType(), f->getSourceRange(), liftStructs);
+      builder.field(
+          ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
+          trTypeAttrs(f->getAttrs(),
+                      mk_flex_array_type(getRange(f->getSourceRange()),
+                                         std::move(elemTy))));
+    } else if (isa<VariableArrayType>(qtPtr)) {
       reportUnsupported(f->getSourceRange(), floc,
                         "unsupported non-constant-length array field", "");
     } else {
@@ -455,6 +472,13 @@ public:
         } else if (auto ref = isUnaryAttrOf(ann, "pal-refine-always")) {
           ty = mk_type_refine_always(std::move(loc), std::move(ty),
                                      std::move(ref.value()));
+        } else if (auto ref = isUnaryAttrOf(ann, "pal-refines")) {
+          // `_refines(p)` on a flexible array member: an always-true length
+          // refinement (relating the FAM length to a sibling field). Modeled
+          // as `RefineAlways`; emit lifts the relation into a `pure` fact in
+          // the struct predicate.
+          ty = mk_type_refine_always(std::move(loc), std::move(ty),
+                                     std::move(ref.value()));
         } else if (auto ref = isUnaryAttrOf(ann, "pal-refine-uninit")) {
           ty = mk_type_refine_uninit(std::move(loc), std::move(ty),
                                      std::move(ref.value()));
@@ -612,6 +636,11 @@ public:
     for (unsigned i = 0; i < init->getNumInits(); ++i) {
       auto *fieldInit = init->getInit(i);
       auto *field = *std::next(decl->field_begin(), i);
+      // A flexible array member cannot be initialized in a C compound literal;
+      // Clang supplies an implicit (empty) initializer for it. Skip it here so
+      // the emitter fills it with its default (a length-0 array).
+      if (field->getType()->isIncompleteArrayType())
+        continue;
       auto floc = getRange(fieldInit->getSourceRange());
       auto fieldName =
           ctx.mk_ident(toStr(fieldNameStr(field)), std::move(floc));
@@ -668,6 +697,34 @@ public:
                   auto allocTy = trQualType(sizeofExpr->getArgumentType(),
                                             sizeofExpr->getSourceRange());
                   return mk_malloc(std::move(loc), std::move(allocTy));
+                }
+              }
+              // Flexible array member allocation:
+              //   malloc(sizeof(struct foo) + n * sizeof(elem))
+              // The trailing-array term is runtime sizing that Pulse models via
+              // the inline ghost `array_spec`; translate identically to a plain
+              // struct malloc of the header type (dropping the array term).
+              if (auto *binOp = dyn_cast<BinaryOperator>(arg)) {
+                if (binOp->getOpcode() == BO_Add) {
+                  auto structSizeofSide =
+                      [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
+                    auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
+                        e->IgnoreParenImpCasts());
+                    if (s && s->getKind() == UETT_SizeOf &&
+                        s->isArgumentType() &&
+                        s->getArgumentType()->isRecordType())
+                      return s;
+                    return nullptr;
+                  };
+                  const UnaryExprOrTypeTraitExpr *structSide =
+                      structSizeofSide(binOp->getLHS());
+                  if (!structSide)
+                    structSide = structSizeofSide(binOp->getRHS());
+                  if (structSide) {
+                    auto allocTy = trQualType(structSide->getArgumentType(),
+                                              structSide->getSourceRange());
+                    return mk_malloc(std::move(loc), std::move(allocTy));
+                  }
                 }
               }
               // Array: malloc(sizeof(T) * n) or malloc(n * sizeof(T))

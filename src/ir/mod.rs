@@ -154,6 +154,13 @@ pub enum TypeT {
     /// Fixed-size C array type `T[N]`. Decays to `Pointer(T, Array)` in
     /// function parameters (handled by the decay pass).
     FixedArray(Rc<Type>, u64),
+    /// Flexible (unsized) array member `T[]` appearing as the last field of a
+    /// struct. Modeled inline as a ghost `array_spec T` in the struct's noeq
+    /// record with no static length pin. An optional length refinement (e.g.
+    /// relating it to a sibling `len` field) is attached via `_refines`, which
+    /// wraps this in `RefineAlways`; emit lifts that relation into a `pure`
+    /// fact in the struct predicate.
+    FlexArray(Rc<Type>),
 
     SpecInt,
     SpecNat,
@@ -441,6 +448,21 @@ pub enum FieldT {
     },
 }
 
+/// Strip refinement / plain / nullable wrappers from a type to reveal the
+/// underlying structural type (e.g. to detect an array field regardless of an
+/// enclosing `_refines` / `_plain` annotation).
+pub fn peel_type(ty: &Rc<Type>) -> &Rc<Type> {
+    match &ty.val {
+        TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, ..)
+        | TypeT::Plain(inner)
+        | TypeT::Nullable(inner) => peel_type(inner),
+        _ => ty,
+    }
+}
+
 impl FieldT {
     pub fn name(&self) -> &Ident {
         match self {
@@ -448,10 +470,14 @@ impl FieldT {
             FieldT::BitField { name, .. } => name,
         }
     }
-
     pub fn is_array(&self) -> bool {
         match self {
-            FieldT::Plain { ty, .. } => matches!(ty.val, TypeT::FixedArray(_, _)),
+            FieldT::Plain { ty, .. } => {
+                matches!(
+                    peel_type(ty).val,
+                    TypeT::FixedArray(_, _) | TypeT::FlexArray(_)
+                )
+            }
             FieldT::BitField { .. } => false,
         }
     }
@@ -468,11 +494,27 @@ impl FieldT {
     /// For array fields, return the element type and length.
     pub fn fixed_array_info(&self) -> Option<(&Rc<Type>, u64)> {
         match self {
-            FieldT::Plain { ty, .. } => match &ty.val {
+            FieldT::Plain { ty, .. } => match &peel_type(ty).val {
                 TypeT::FixedArray(elem_ty, length) => Some((elem_ty, *length)),
                 _ => None,
             },
             FieldT::BitField { .. } => None,
+        }
+    }
+
+    /// For a flexible array member field, return the element type and the
+    /// optional length refinement predicate supplied via `_refines`.
+    pub fn flex_array_info(&self) -> Option<(&Rc<Type>, Option<&Rc<Expr>>)> {
+        let FieldT::Plain { ty, .. } = self else {
+            return None;
+        };
+        let refine = match &ty.val {
+            TypeT::RefineAlways(_, p) => Some(p),
+            _ => None,
+        };
+        match &peel_type(ty).val {
+            TypeT::FlexArray(elem_ty) => Some((elem_ty, refine)),
+            _ => None,
         }
     }
 
