@@ -5210,6 +5210,39 @@ impl<'a> Emitter<'a> {
             ]);
             let ghost_proj = unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x"));
 
+            // The arm's storage handed back on activation.
+            //
+            // For a scalar/struct arm the ghost projection is a `ref T`, so the
+            // uninitialised cell is `Pulse.Lib.Reference.pts_to_uninit`.
+            //
+            // For an inline-array arm the projection is an array *handle*
+            // (`array T`). `array_pts_to_uninit'` is well-typed but unusable:
+            // it existentially hides the array length, so a subsequent indexed
+            // write (`a->arm[i] = ...`) cannot discharge `i < length`. Instead
+            // we mirror the arm's `aux_raw_unfold` and hand back a full
+            // `array_pts_to` over an existential `full_array_lspec T n` value of
+            // the arm's *static* length, so the length is known and in-bounds
+            // writes verify. The contents stay existentially quantified, so
+            // activation still commits to no element values (matching C, where
+            // the previously-stored bytes are unspecified).
+            let arm_uninit = if f.val.is_array() {
+                let v_name = Doc::text(format!("v_{}", fld));
+                wrap_exists(
+                    &[ExBinding {
+                        name: v_name.clone(),
+                        ty: self.emit_field_record_type(env, f),
+                    }],
+                    vec![naryfn([
+                        Doc::text("array_pts_to"),
+                        ghost_proj,
+                        Doc::text("1.0R"),
+                        v_name,
+                    ])],
+                )
+            } else {
+                naryfn([Doc::text("Pulse.Lib.Reference.pts_to_uninit"), ghost_proj])
+            };
+
             ses.push(mk_assume_val(
                 vec![],
                 self.emit_name(Name::UnionActivateFn(name.val.clone(), fld.val.clone())),
@@ -5226,10 +5259,7 @@ impl<'a> Emitter<'a> {
                         Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
                         Doc::text("x"),
                     ]),
-                    mk_thunk(mk_star([
-                        unfolded,
-                        naryfn([Doc::text("Pulse.Lib.Reference.pts_to_uninit"), ghost_proj]),
-                    ])),
+                    mk_thunk(mk_star([unfolded, arm_uninit])),
                 ]),
             ));
         }
