@@ -780,6 +780,40 @@ public:
                                          std::move(countExpr));
                 }
               }
+              // Flexible array member allocation:
+              //   calloc(1, sizeof(struct foo) + n * sizeof(elem))
+              // Zeroing counterpart of the malloc FAM idiom above (mirrors
+              // MsQuic's `QuicCidNewNullSource`, which allocates the sized
+              // block and zeroes it). Translate to a single zeroed struct
+              // allocation of the header type, dropping the runtime array term;
+              // the zeroed struct's flexible array starts empty (length 0).
+              if (auto *intLit = dyn_cast<IntegerLiteral>(countArg)) {
+                if (intLit->getValue() == 1) {
+                  if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
+                    if (binOp->getOpcode() == BO_Add) {
+                      auto structSizeofSide =
+                          [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
+                        auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
+                            e->IgnoreParenImpCasts());
+                        if (s && s->getKind() == UETT_SizeOf &&
+                            s->isArgumentType() &&
+                            s->getArgumentType()->isRecordType())
+                          return s;
+                        return nullptr;
+                      };
+                      const UnaryExprOrTypeTraitExpr *structSide =
+                          structSizeofSide(binOp->getLHS());
+                      if (!structSide)
+                        structSide = structSizeofSide(binOp->getRHS());
+                      if (structSide) {
+                        auto allocTy = trQualType(structSide->getArgumentType(),
+                                                  structSide->getSourceRange());
+                        return mk_calloc(std::move(loc), std::move(allocTy));
+                      }
+                    }
+                  }
+                }
+              }
               // calloc(1, n * sizeof(T)) or calloc(1, sizeof(T) * n) → array
               // (e.g. CXPLAT_ALLOC_NONPAGED(n * sizeof(T), ...) → calloc(1,
               // ...))

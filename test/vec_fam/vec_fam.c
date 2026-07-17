@@ -31,3 +31,21 @@ void vec_set(struct vec *v, unsigned i, int x)
 {
     v->data[i] = x;
 }
+
+_allocated typedef struct vec *vec_ptr;
+
+// Allocate and zero-initialize a vec using the idiomatic flexible-array-member
+// calloc: `calloc(1, sizeof(struct vec) + n * sizeof(int))`. This is the
+// zeroing counterpart of the FAM malloc idiom and mirrors MsQuic's
+// `QuicCidNewNullSource`, which allocates the sized block and zeroes it. It
+// translates to a plain zeroed struct allocation (`calloc_ref`); the trailing
+// `n * sizeof(int)` term is dropped since the flexible array is modeled inline,
+// and the zeroed struct starts with `len == 0` and an empty `data` array (which
+// satisfies the `_refines` length relation). Whole-struct assignment
+// (`*v = (struct vec){ ... }`) is rejected for FAM structs since C does not copy
+// the flexible array contents, so the struct must be constructed this way.
+vec_ptr vec_new(unsigned n)
+{
+    struct vec *v = calloc(1, sizeof(struct vec) + n * sizeof(int));
+    return v;
+}

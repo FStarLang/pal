@@ -240,6 +240,18 @@ impl Env {
         self.globals.structs.get(&ident.val)
     }
 
+    /// Whether `ty` resolves to a struct that contains a flexible array member.
+    /// A whole-object value of such a struct cannot be copied by assignment,
+    /// since C does not copy the flexible array contents.
+    pub fn type_has_flex_array_member(&self, ty: MaybeRc<Type>) -> bool {
+        match &self.vtype_whnf(ty).val {
+            TypeT::TypeRef(TypeRefKind::Struct(name)) => self
+                .lookup_struct(name)
+                .is_some_and(|s| s.has_flex_array_member()),
+            _ => false,
+        }
+    }
+
     pub fn lookup_union(&self, ident: &Ident) -> Option<&UnionDefn> {
         self.globals.unions.get(&ident.val)
     }

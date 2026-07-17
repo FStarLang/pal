@@ -413,6 +413,15 @@ impl StructDefn {
             .find(|f| f.val.name().val == name.val)
             .map(|f| f.val.logical_type(&f.loc))
     }
+
+    /// Whether this struct has a flexible array member (a trailing unsized
+    /// array). Such a struct cannot be soundly copied by a whole-object
+    /// assignment: in C the flexible array contents are not copied.
+    pub fn has_flex_array_member(&self) -> bool {
+        self.fields
+            .iter()
+            .any(|f| f.val.flex_array_info().is_some())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]

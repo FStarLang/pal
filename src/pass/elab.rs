@@ -83,6 +83,30 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    /// Reject a whole-object assignment whose target is a struct containing a
+    /// flexible array member. In C such an assignment copies only the fixed
+    /// part of the struct, not the flexible array contents (whether any of the
+    /// array is copied at all depends on padding/alignment), so PAL cannot
+    /// model it soundly. This covers both a copy from another object
+    /// (`*a = *b`) and a compound-literal initializer (`*v = (struct vec){…}`):
+    /// a struct with a flexible array member may not appear as the target of a
+    /// whole-object assignment. Construct such a struct by zero-initializing it
+    /// (e.g. `calloc`) and writing its fixed fields individually instead.
+    fn check_flex_array_assign(&mut self, env: &Env, lhs: &Expr, _rhs: &Expr) {
+        if let Ok(lhs_ty) = env.infer_expr(lhs)
+            && env.type_has_flex_array_member(lhs_ty)
+        {
+            self.report(
+                "assignment of a struct with a flexible array member is not supported: \
+                 the flexible array contents are not copied by assignment in C; \
+                 zero-initialize the struct (e.g. via calloc) and set its fixed fields \
+                 individually instead"
+                    .to_string(),
+                &lhs.loc,
+            );
+        }
+    }
+
     fn elab_field(&mut self, env: &Env, field: &mut Field, siblings: &[Field]) {
         match &mut field.val {
             FieldT::Plain { name, ty } => {
@@ -707,6 +731,7 @@ impl<'a> Elaborator<'a> {
                 let lhs_ty = env.infer_expr(lhs).ok();
                 let expected_rhs = lhs_ty.as_deref();
                 self.elab_rvalue(env, Rc::make_mut(rhs), expected_rhs);
+                self.check_flex_array_assign(env, lhs, rhs);
                 // Cast RHS to LHS type if needed
                 if let (Ok(x_ty), Ok(v_ty)) = (env.infer_expr(lhs), env.infer_expr(rhs)) {
                     if !env.vtype_eq(x_ty.clone(), v_ty) {
@@ -740,6 +765,7 @@ impl<'a> Elaborator<'a> {
                 let x_ty = env.infer_expr(x).ok();
                 let expected_v = x_ty.as_deref();
                 self.elab_rvalue(env, Rc::make_mut(v), expected_v);
+                self.check_flex_array_assign(env, x, v);
                 let Ok(x_ty) = env.infer_expr(x) else {
                     return;
                 };
