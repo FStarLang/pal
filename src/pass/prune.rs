@@ -97,6 +97,9 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
         TypeT::FixedArray(elem_ty, _) => {
             scan_type(deps, elem_ty);
         }
+        TypeT::FlexArray(elem_ty) => {
+            scan_type(deps, elem_ty);
+        }
         TypeT::Unknown => {}
         TypeT::Error => {}
         TypeT::Void => {}
@@ -163,6 +166,10 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
         ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => scan_type(deps, ty),
         ExprT::Malloc(ty) | ExprT::Calloc(ty) => scan_type(deps, ty),
         ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
+            scan_type(deps, ty);
+            scan_expr(deps, count);
+        }
+        ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
             scan_type(deps, ty);
             scan_expr(deps, count);
         }

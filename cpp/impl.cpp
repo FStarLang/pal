@@ -279,7 +279,24 @@ public:
     }
     auto qt = f->getType();
     auto *qtPtr = qt.IgnoreParens().getTypePtr();
-    if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
+    if (auto *iat = dyn_cast<IncompleteArrayType>(qtPtr)) {
+      // Flexible array member: `T name[]` as the last field of a struct (C11
+      // 6.7.2.1). Clang guarantees it is the last field. Model it inline as an
+      // unsized `array_spec T` in the noeq record; a `_refines(...)` clause on
+      // the field supplies an optional length refinement.
+      if (inUnion) {
+        reportUnsupported(f->getSourceRange(), floc,
+                          "unsupported flexible array member in union", "");
+        return;
+      }
+      auto elemTy =
+          trQualType(iat->getElementType(), f->getSourceRange(), liftStructs);
+      builder.field(
+          ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
+          trTypeAttrs(f->getAttrs(),
+                      mk_flex_array_type(getRange(f->getSourceRange()),
+                                         std::move(elemTy))));
+    } else if (isa<VariableArrayType>(qtPtr)) {
       reportUnsupported(f->getSourceRange(), floc,
                         "unsupported non-constant-length array field", "");
     } else {
@@ -455,6 +472,13 @@ public:
         } else if (auto ref = isUnaryAttrOf(ann, "pal-refine-always")) {
           ty = mk_type_refine_always(std::move(loc), std::move(ty),
                                      std::move(ref.value()));
+        } else if (auto ref = isUnaryAttrOf(ann, "pal-refines")) {
+          // `_refines(p)` on a flexible array member: an always-true length
+          // refinement (relating the FAM length to a sibling field). Modeled
+          // as `RefineAlways`; emit lifts the relation into a `pure` fact in
+          // the struct predicate.
+          ty = mk_type_refine_always(std::move(loc), std::move(ty),
+                                     std::move(ref.value()));
         } else if (auto ref = isUnaryAttrOf(ann, "pal-refine-uninit")) {
           ty = mk_type_refine_uninit(std::move(loc), std::move(ty),
                                      std::move(ref.value()));
@@ -612,12 +636,36 @@ public:
     for (unsigned i = 0; i < init->getNumInits(); ++i) {
       auto *fieldInit = init->getInit(i);
       auto *field = *std::next(decl->field_begin(), i);
+      // A flexible array member cannot be initialized in a C compound literal;
+      // Clang supplies an implicit (empty) initializer for it. Skip it here so
+      // the emitter fills it with its default (a length-0 array).
+      if (field->getType()->isIncompleteArrayType())
+        continue;
       auto floc = getRange(fieldInit->getSourceRange());
       auto fieldName =
           ctx.mk_ident(toStr(fieldNameStr(field)), std::move(floc));
       builder.field(std::move(fieldName), trRValue(fieldInit));
     }
     return builder.build();
+  }
+
+  // For a flexible-array-member allocation's trailing size term, return the
+  // count operand `n` of `n * sizeof(elem)` or `sizeof(elem) * n` (the
+  // non-sizeof multiplicand). Returns nullptr if the term is not a recognized
+  // product with a type-sizeof factor.
+  static Expr *flexArrayCountSide(Expr *e) {
+    auto *mul = dyn_cast<BinaryOperator>(e->IgnoreParenImpCasts());
+    if (!mul || mul->getOpcode() != BO_Mul)
+      return nullptr;
+    auto isTypeSizeof = [](Expr *x) {
+      auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(x->IgnoreParenImpCasts());
+      return s && s->getKind() == UETT_SizeOf && s->isArgumentType();
+    };
+    if (isTypeSizeof(mul->getLHS()))
+      return mul->getRHS();
+    if (isTypeSizeof(mul->getRHS()))
+      return mul->getLHS();
+    return nullptr;
   }
 
   Rc<ir::Expr> trRValue(Expr *e) {
@@ -668,6 +716,47 @@ public:
                   auto allocTy = trQualType(sizeofExpr->getArgumentType(),
                                             sizeofExpr->getSourceRange());
                   return mk_malloc(std::move(loc), std::move(allocTy));
+                }
+              }
+              // Flexible array member allocation:
+              //   malloc(sizeof(struct foo) + n * sizeof(elem))
+              // The trailing-array term is runtime sizing that Pulse models via
+              // the inline ghost `array_spec`; translate identically to a plain
+              // struct malloc of the header type (dropping the array term).
+              if (auto *binOp = dyn_cast<BinaryOperator>(arg)) {
+                if (binOp->getOpcode() == BO_Add) {
+                  auto structSizeofSide =
+                      [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
+                    auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
+                        e->IgnoreParenImpCasts());
+                    if (s && s->getKind() == UETT_SizeOf &&
+                        s->isArgumentType() &&
+                        s->getArgumentType()->isRecordType())
+                      return s;
+                    return nullptr;
+                  };
+                  const UnaryExprOrTypeTraitExpr *structSide =
+                      structSizeofSide(binOp->getLHS());
+                  Expr *arrayTerm = binOp->getRHS();
+                  if (!structSide) {
+                    structSide = structSizeofSide(binOp->getRHS());
+                    arrayTerm = binOp->getLHS();
+                  }
+                  if (structSide) {
+                    auto allocTy = trQualType(structSide->getArgumentType(),
+                                              structSide->getSourceRange());
+                    // Extract `n` from the trailing array term `n *
+                    // sizeof(elem)` or `sizeof(elem) * n`, so the flexible tail
+                    // is sized `n`.
+                    if (Expr *countSide = flexArrayCountSide(arrayTerm)) {
+                      auto countExpr = trRValue(countSide);
+                      return mk_malloc_flex(std::move(loc), std::move(allocTy),
+                                            std::move(countExpr));
+                    }
+                    // Unrecognized array term: fall back to an empty flexible
+                    // tail (plain struct malloc).
+                    return mk_malloc(std::move(loc), std::move(allocTy));
+                  }
                 }
               }
               // Array: malloc(sizeof(T) * n) or malloc(n * sizeof(T))
@@ -721,6 +810,53 @@ public:
                   auto countExpr = trRValue(countArg);
                   return mk_calloc_array(std::move(loc), std::move(allocTy),
                                          std::move(countExpr));
+                }
+              }
+              // Flexible array member allocation:
+              //   calloc(1, sizeof(struct foo) + n * sizeof(elem))
+              // Zeroing counterpart of the malloc FAM idiom above (mirrors
+              // MsQuic's `QuicCidNewNullSource`, which allocates the sized
+              // block and zeroes it). Translate to a single zeroed struct
+              // allocation of the header type, dropping the runtime array term;
+              // the zeroed struct's flexible array starts empty (length 0).
+              if (auto *intLit = dyn_cast<IntegerLiteral>(countArg)) {
+                if (intLit->getValue() == 1) {
+                  if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
+                    if (binOp->getOpcode() == BO_Add) {
+                      auto structSizeofSide =
+                          [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
+                        auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
+                            e->IgnoreParenImpCasts());
+                        if (s && s->getKind() == UETT_SizeOf &&
+                            s->isArgumentType() &&
+                            s->getArgumentType()->isRecordType())
+                          return s;
+                        return nullptr;
+                      };
+                      const UnaryExprOrTypeTraitExpr *structSide =
+                          structSizeofSide(binOp->getLHS());
+                      Expr *arrayTerm = binOp->getRHS();
+                      if (!structSide) {
+                        structSide = structSizeofSide(binOp->getRHS());
+                        arrayTerm = binOp->getLHS();
+                      }
+                      if (structSide) {
+                        auto allocTy = trQualType(structSide->getArgumentType(),
+                                                  structSide->getSourceRange());
+                        // Extract `n` from the trailing array term so the
+                        // zeroed flexible tail is sized `n`.
+                        if (Expr *countSide = flexArrayCountSide(arrayTerm)) {
+                          auto countExpr = trRValue(countSide);
+                          return mk_calloc_flex(std::move(loc),
+                                                std::move(allocTy),
+                                                std::move(countExpr));
+                        }
+                        // Unrecognized array term: fall back to an empty
+                        // flexible tail (plain zeroed struct calloc).
+                        return mk_calloc(std::move(loc), std::move(allocTy));
+                      }
+                    }
+                  }
                 }
               }
               // calloc(1, n * sizeof(T)) or calloc(1, sizeof(T) * n) → array
