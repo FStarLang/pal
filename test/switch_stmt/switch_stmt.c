@@ -45,3 +45,27 @@ int32_t classify(int32_t x)
     }
     return r;
 }
+
+static void write_result(int32_t* _out result)
+{
+    *result = 42;
+}
+
+/* A switch join contract preserves resources across an output-writing call. */
+int32_t call_in_case(int32_t x)
+{
+    int32_t result = 0;
+
+    switch (x)
+        _ensures(_live(x) && _live(result))
+    {
+    case 0:
+        write_result(&result);
+        break;
+    default:
+        result = 1;
+        break;
+    }
+
+    return result;
+}

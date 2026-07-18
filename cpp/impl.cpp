@@ -1627,8 +1627,18 @@ public:
       auto brkIdHeap = new Rc<ir::Ident>(brkId.clone());
       switchBreakId = brkIdHeap;
 
-      // Collect cases from the switch body
+      // Collect cases from the switch body. A switch postcondition is used as
+      // the join invariant for every desugared case test.
       auto *body = sw->getBody();
+      std::vector<Rc<ir::Expr>> switchEnss;
+      if (auto attrBody = dyn_cast<AttributedStmt>(body)) {
+        for (auto attr : attrBody->getAttrs()) {
+          if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
+            switchEnss.push_back(std::move(ens.value()));
+          }
+        }
+        body = attrBody->getSubStmt();
+      }
       auto *comp = dyn_cast<CompoundStmt>(body);
       if (!comp) {
         reportUnsupported(body->getSourceRange(), loc,
@@ -1637,6 +1647,29 @@ public:
         switchBreakId = savedSwitchBreak;
         return {};
       }
+      auto caseEnss = [&]() {
+        auto enss = Vec<Rc<ir::Expr>>::new_();
+        if (!switchEnss.empty()) {
+          auto combined = switchEnss.front().clone();
+          for (size_t i = 1; i < switchEnss.size(); i++) {
+            combined =
+                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
+                                std::move(combined), switchEnss[i].clone());
+          }
+          combined = mk_rvalue_binop(
+              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
+              mk_live(loc.clone(),
+                      mk_lvalue_var(loc.clone(), scrutId.clone())));
+          combined = mk_rvalue_binop(
+              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
+              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), hitId.clone())));
+          combined = mk_rvalue_binop(
+              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
+              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), brkId.clone())));
+          enss.push(std::move(combined));
+        }
+        return enss;
+      };
 
       // Clang attaches only the first statement after a label to CaseStmt or
       // DefaultStmt. The remaining statements are siblings in the compound
@@ -1723,7 +1756,7 @@ public:
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(cond),
                            std::move(thenStmts), std::move(elseStmts),
-                           Vec<Rc<ir::Expr>>::new_()));
+                           caseEnss()));
 
         } else {
           // Condition: !brk
@@ -1742,7 +1775,7 @@ public:
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(notBrk),
                            std::move(thenStmts), std::move(elseStmts),
-                           Vec<Rc<ir::Expr>>::new_()));
+                           caseEnss()));
         }
       }
 
