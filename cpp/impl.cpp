@@ -1681,6 +1681,22 @@ public:
         std::vector<Stmt *> body;
       };
       std::vector<SwitchGroup> groups;
+
+      auto containsSwitchBreak = [&](auto &self, Stmt *s) -> bool {
+        if (dyn_cast<BreakStmt>(s))
+          return true;
+        if (dyn_cast<SwitchStmt>(s) || dyn_cast<ForStmt>(s) ||
+            dyn_cast<WhileStmt>(s) || dyn_cast<DoStmt>(s))
+          return false;
+        for (auto *child : s->children()) {
+          if (child && self(self, child))
+            return true;
+        }
+        return false;
+      };
+      bool switchCanBreak = false;
+      for (auto *child : comp->body())
+        switchCanBreak |= containsSwitchBreak(containsSwitchBreak, child);
       bool seenDefault = false;
       SwitchGroup *currentGroup = nullptr;
       for (auto *child : comp->body()) {
@@ -1758,6 +1774,14 @@ public:
                            std::move(thenStmts), std::move(elseStmts),
                            caseEnss()));
 
+        } else if (!switchCanBreak) {
+          // With no break belonging to this switch, reaching default means its
+          // body runs. Emitting it directly also preserves terminating returns.
+          stmts.push(mk_assign(childLoc.clone(),
+                               mk_lvalue_var(childLoc.clone(), hitId.clone()),
+                               mk_bool_lit(childLoc.clone(), true)));
+          for (auto *bodyStmt : group.body)
+            trStmt(stmts, bodyStmt);
         } else {
           // Condition: !brk
           auto notBrk = mk_rvalue_unop(
