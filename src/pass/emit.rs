@@ -909,7 +909,7 @@ impl<'a> Emitter<'a> {
             ExprT::UnionInit(_, _, val) => {
                 self.subst_this_rvalue(env, Rc::make_mut(val), this);
             }
-            ExprT::ArrayInit(_, elems) => {
+            ExprT::ArrayInit(_, elems, _) => {
                 for elem in elems {
                     self.subst_this_rvalue(env, Rc::make_mut(elem), this);
                 }
@@ -2404,6 +2404,20 @@ impl<'a> Emitter<'a> {
                             TypeT::FixedArray(_, _),
                             TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
                         ) => val_doc,
+                        // A fixed array can decay to an ordinary C pointer.
+                        (
+                            TypeT::FixedArray(_, _),
+                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
+                        ) => {
+                            let fn_name = if matches!(&val.val, ExprT::ArrayInit(_, _, true)) {
+                                // String literals have static storage duration,
+                                // unlike local fixed-size arrays.
+                                "Pulse.Lib.C.Array.array_literal_to_ref"
+                            } else {
+                                "Pulse.Lib.C.Array.array_to_ref"
+                            };
+                            unaryfn(Doc::text(fn_name), val_doc)
+                        }
                         // `core_ref` (raw `_core_ref` back-pointer) → typed `ref T`:
                         // recover the typed reference. The pointee type is known
                         // from the cast target. Mirrors array_to_arrayptr below.
@@ -2755,7 +2769,7 @@ impl<'a> Emitter<'a> {
                     )),
                     self.emit_rvalue(env, val),
                 ),
-                ExprT::ArrayInit(elem_ty, elems) => {
+                ExprT::ArrayInit(elem_ty, elems, _) => {
                     let elem_ty_doc = self.emit_type(env, elem_ty);
                     let elem_ty_arg = Doc::text("#").append(elem_ty_doc);
                     naryfn([
@@ -3109,12 +3123,16 @@ impl<'a> Emitter<'a> {
                                 _ => None,
                             };
                             let array_init = match &arg.val {
-                                ExprT::ArrayInit(elem_ty, _) => Some((elem_ty, arg)),
+                                ExprT::ArrayInit(elem_ty, _, is_static) => {
+                                    Some((elem_ty, arg, *is_static))
+                                }
                                 ExprT::Cast(inner, _)
-                                    if matches!(inner.val, ExprT::ArrayInit(_, _)) =>
+                                    if matches!(inner.val, ExprT::ArrayInit(_, _, _)) =>
                                 {
                                     match &inner.val {
-                                        ExprT::ArrayInit(elem_ty, _) => Some((elem_ty, inner)),
+                                        ExprT::ArrayInit(elem_ty, _, is_static) => {
+                                            Some((elem_ty, inner, *is_static))
+                                        }
                                         _ => None,
                                     }
                                 }
@@ -3138,8 +3156,8 @@ impl<'a> Emitter<'a> {
                                     .group();
                                 prelude.push(borrow);
                                 emitted_args.push(tmp);
-                            } else if callee_expects_array
-                                && let Some((elem_ty, spec_arg)) = array_init
+                            } else if let Some((elem_ty, spec_arg, is_static)) = array_init
+                                && (callee_expects_array || !is_static)
                             {
                                 let tmp = self.fresh_tmp("arraylit");
                                 let elem_ty_doc = self.emit_type(env, elem_ty);
@@ -3172,7 +3190,11 @@ impl<'a> Emitter<'a> {
                                     .group();
                                 prelude.push(alloc);
                                 prelude.push(defer);
-                                emitted_args.push(tmp);
+                                emitted_args.push(if callee_expects_array {
+                                    tmp
+                                } else {
+                                    unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), tmp)
+                                });
                             } else {
                                 emitted_args.push(self.emit_rvalue(env, arg));
                             }

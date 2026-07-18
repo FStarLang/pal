@@ -27,6 +27,9 @@ let array_spec_initd #a (s: array_spec a) (i: nat) : prop = i < Seq.length s /\ 
 let array_spec_mask #a (s: array_spec a) (i: nat) : prop = i < Seq.length s /\ ~(OutOfMask? (Seq.index s i))
 let array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : Tot a = let Val x = Seq.index s i in x
 
+let array_literal_to_ref #a #n (_: full_array_lspec a n) : Tot (R.ref a) =
+  admit ()
+
 let to_mask #t (s: array_spec t) (i: nat) : prop = array_spec_mask s i
 
 let to_seq #t (s: array_spec t) : GTot (Seq.seq (option t)) =
@@ -677,4 +680,3 @@ fn arrayptr_return_cell u#a (#t: Type u#a) (x: array t)
 {
   array_return_cell y #(arrayptr_off x y) #w #s;
 }
-
