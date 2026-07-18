@@ -127,7 +127,7 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
             }
         }
         ExprT::UnionInit(_, _, value) => rename_expr_in_place(Rc::make_mut(value), renames),
-        ExprT::ArrayInit(ty, elems) => {
+        ExprT::ArrayInit(ty, elems, _) => {
             rename_type_in_place(Rc::make_mut(ty), renames);
             for elem in elems {
                 rename_expr_in_place(Rc::make_mut(elem), renames);
@@ -515,7 +515,7 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
             }
         }
         ExprT::UnionInit(_, _, v) => collect_refs_expr(v, out),
-        ExprT::ArrayInit(ty, elems) => {
+        ExprT::ArrayInit(ty, elems, _) => {
             collect_type_refs(ty, out);
             for el in elems {
                 collect_refs_expr(el, out);

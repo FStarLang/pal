@@ -315,7 +315,7 @@ pub enum ExprT {
     UnionInit(Rc<Ident>, Rc<Ident>, Rc<Expr>),
     /// Array initializer: element type + list of element values.
     /// Emitted as nested `array_spec_upd` on an `array_spec_zeroed` base.
-    ArrayInit(Rc<Type>, Vec<Rc<Expr>>),
+    ArrayInit(Rc<Type>, Vec<Rc<Expr>>, bool),
     Malloc(Rc<Type>),
     MallocArray(Rc<Type>, Rc<Expr>),
     Calloc(Rc<Type>),
