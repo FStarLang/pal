@@ -584,6 +584,7 @@ struct Emitter<'a> {
     /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
     typedef_override_map: HashMap<Rc<str>, String>,
     tmp_counter: usize,
+    string_literal_ids: HashMap<*const Expr, usize>,
 }
 
 impl<'a> Emitter<'a> {
@@ -599,6 +600,15 @@ impl<'a> Emitter<'a> {
         let tmp = Doc::text(format!("__pal_{}_{}", prefix, self.tmp_counter));
         self.tmp_counter += 1;
         tmp
+    }
+
+    fn string_literal_identity(&mut self, literal: &Rc<Expr>) -> String {
+        let next_id = self.string_literal_ids.len();
+        let id = *self
+            .string_literal_ids
+            .entry(Rc::as_ptr(literal))
+            .or_insert(next_id);
+        format!("{}:{id}", self.current_module)
     }
 
     /// Emit a Name with full module qualification when it refers to a different module.
@@ -2471,7 +2481,7 @@ impl<'a> Emitter<'a> {
                             TypeT::FixedArray(_, _),
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
                         ) => {
-                            let fn_name = if matches!(
+                            if matches!(
                                 &val.val,
                                 ExprT::ArrayInit {
                                     is_static: true,
@@ -2479,12 +2489,16 @@ impl<'a> Emitter<'a> {
                                 }
                             ) {
                                 // String literals have static storage duration,
-                                // unlike local fixed-size arrays.
-                                "Pulse.Lib.C.Array.array_literal_to_ref"
+                                // unlike local fixed-size arrays. The trusted
+                                // model exposes no contents or ownership.
+                                let literal_identity = self.string_literal_identity(val);
+                                unaryfn(
+                                    Doc::text("Pulse.Lib.C.Array.string_literal_to_ref"),
+                                    Doc::text(format!("{literal_identity:?}")),
+                                )
                             } else {
-                                "Pulse.Lib.C.Array.array_to_ref"
-                            };
-                            unaryfn(Doc::text(fn_name), val_doc)
+                                unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc)
+                            }
                         }
                         // `core_ref` (raw `_core_ref` back-pointer) → typed `ref T`:
                         // recover the typed reference. The pointee type is known
@@ -6633,6 +6647,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         fn_module_map,
         typedef_override_map,
         tmp_counter: 0,
+        string_literal_ids: HashMap::new(),
     };
 
     for decl in &tu.decls {

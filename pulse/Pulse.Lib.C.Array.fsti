@@ -39,10 +39,14 @@ let array_spec_full #a (s: array_spec a) =
 let full_array_spec a = s: array_spec a { array_spec_full s }
 let full_array_lspec a (l: nat) = s:full_array_spec a { array_spec_len s == l }
 
-// C string literals have static storage duration. PAL exposes only their address
-// here; clients still need an explicit model before dereferencing a literal
-// returned through an ownership-free (`_plain`) pointer.
-val array_literal_to_ref #a #n (s: full_array_lspec a n) : Tot (R.ref a)
+// C string literals have static storage duration. PAL exposes only their
+// non-null address here; clients still need an explicit ownership model before
+// dereferencing a literal returned through an ownership-free (`_plain`) pointer.
+//
+// The literal identity keeps repeated evaluations of one literal stable without
+// asserting whether distinct literals are merged by the C implementation.
+val string_literal_to_ref #a (literal_identity: string) :
+  Tot (r:R.ref a { not (r == R.null) })
 
 val array_spec_ext #a (s1 s2: array_spec a) :
   Lemma (requires
