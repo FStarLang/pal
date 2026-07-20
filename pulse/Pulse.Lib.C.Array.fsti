@@ -42,7 +42,7 @@ let full_array_lspec a (l: nat) = s:full_array_spec a { array_spec_len s == l }
 // C string literals have static storage duration. PAL exposes only their address
 // here; clients still need an explicit model before dereferencing a literal
 // returned through an ownership-free (`_plain`) pointer.
-val array_literal_to_ref #a #n (s: full_array_lspec a n) : Tot (R.ref a)
+val array_literal_to_ref #a : Tot (R.ref a)
 
 val array_spec_ext #a (s1 s2: array_spec a) :
   Lemma (requires

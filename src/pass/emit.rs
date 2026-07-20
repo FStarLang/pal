@@ -2667,7 +2667,7 @@ impl<'a> Emitter<'a> {
                             TypeT::FixedArray(_, _),
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
                         ) => {
-                            let fn_name = if matches!(
+                            if matches!(
                                 &val.val,
                                 ExprT::ArrayInit {
                                     is_static: true,
@@ -2675,12 +2675,12 @@ impl<'a> Emitter<'a> {
                                 }
                             ) {
                                 // String literals have static storage duration,
-                                // unlike local fixed-size arrays.
-                                "Pulse.Lib.C.Array.array_literal_to_ref"
+                                // unlike local fixed-size arrays. The trusted
+                                // model exposes no contents or ownership.
+                                Doc::text("Pulse.Lib.C.Array.array_literal_to_ref")
                             } else {
-                                "Pulse.Lib.C.Array.array_to_ref"
-                            };
-                            unaryfn(Doc::text(fn_name), val_doc)
+                                unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc)
+                            }
                         }
                         // `core_ref` (raw `_core_ref` back-pointer) → typed `ref T`:
                         // recover the typed reference. The pointee type is known
