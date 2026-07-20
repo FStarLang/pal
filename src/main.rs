@@ -207,9 +207,18 @@ fn main() {
     }
 
     let t = Instant::now();
-    pass::check::check(&mut diags, &mut combined_tu, "elab", true);
+    pass::normalize_casts::normalize_casts(&mut combined_tu);
     if cli.time_passes {
-        eprintln!("  check (post-elab): {:.3}s", t.elapsed().as_secs_f64());
+        eprintln!("  normalize_casts: {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
+    pass::check::check(&mut diags, &mut combined_tu, "normalize_casts", true);
+    if cli.time_passes {
+        eprintln!(
+            "  check (post-normalize_casts): {:.3}s",
+            t.elapsed().as_secs_f64()
+        );
     }
 
     let t = Instant::now();
