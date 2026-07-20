@@ -14,20 +14,9 @@ use crate::{
     mayberc::MaybeRc,
 };
 
-pub type SourceRangeMap = Vec<(Location, Range)>;
+use super::normalize_casts::normalize_unsigned;
 
-/// Normalize a possibly-negative integer literal into the unsigned range
-/// [0, 2^width).
-///
-/// clang hands us the signed interpretation of an N-bit bit pattern (see
-/// `toBigInt` in `cpp/impl.cpp`, which uses `toStringSigned`), so an unsigned
-/// literal with the high bit set arrives as a negative `BigInt` (e.g. the u32
-/// value 0xFFFFFFFF as -1). F* unsigned literals must be non-negative, so we
-/// reduce the value modulo 2^width before emitting it.
-fn normalize_unsigned(val: &BigInt, width: u32) -> BigInt {
-    let modulus = BigInt::from(1u32) << width;
-    ((val % &modulus) + &modulus) % &modulus
-}
+pub type SourceRangeMap = Vec<(Location, Range)>;
 
 /// The module holding a function's fnptr wrapper (`func_<g>__fp`), whose type
 /// carries the inlined pre/post spec. Kept separate from the function's own
@@ -35,6 +24,41 @@ fn normalize_unsigned(val: &BigInt, width: u32) -> BigInt {
 /// when the function's address is taken.
 fn funcptr_module_name(g: &str) -> String {
     format!("Funcptr_{}", g)
+}
+
+fn machine_int_suffix(signed: bool, width: u32) -> Option<&'static str> {
+    match (signed, width) {
+        (true, 8) => Some("y"),
+        (false, 8) => Some("uy"),
+        (true, 16) => Some("s"),
+        (false, 16) => Some("us"),
+        (true, 32) => Some("l"),
+        (false, 32) => Some("ul"),
+        (true, 64) => Some("L"),
+        (false, 64) => Some("UL"),
+        _ => None,
+    }
+}
+
+fn emit_machine_int_literal(val: &BigInt, signed: bool, width: u32) -> Doc {
+    let normalized = if signed {
+        val.clone()
+    } else {
+        normalize_unsigned(val, width)
+    };
+
+    let Some(suffix) = machine_int_suffix(signed, width) else {
+        let module = if signed { "Int" } else { "UInt" };
+        let conversion = if signed { "int_to_t" } else { "uint_to_t" };
+        return Doc::text(format!("({module}{width}.{conversion} {normalized})"));
+    };
+
+    let literal = format!("{normalized}{suffix}");
+    if signed && normalized < BigInt::ZERO {
+        parens(Doc::text(literal))
+    } else {
+        Doc::text(literal)
+    }
 }
 
 /// Determines the output module name for a given top-level declaration.
@@ -2196,44 +2220,12 @@ impl<'a> Emitter<'a> {
     fn emit_pattern(&mut self, env: &Env, pattern: &Expr) -> Doc {
         if let ExprT::IntLit(val, ty) = &pattern.val {
             let resolved = env.vtype_whnf(ty.clone().into());
-            let literal = match resolved.val {
-                TypeT::Int {
-                    signed: true,
-                    width: 8,
-                } => Some(format!("{}y", val)),
-                TypeT::Int {
-                    signed: false,
-                    width: 8,
-                } => Some(format!("{}uy", normalize_unsigned(val, 8))),
-                TypeT::Int {
-                    signed: true,
-                    width: 16,
-                } => Some(format!("{}s", val)),
-                TypeT::Int {
-                    signed: false,
-                    width: 16,
-                } => Some(format!("{}us", normalize_unsigned(val, 16))),
-                TypeT::Int {
-                    signed: true,
-                    width: 32,
-                } => Some(format!("{}l", val)),
-                TypeT::Int {
-                    signed: false,
-                    width: 32,
-                } => Some(format!("{}ul", normalize_unsigned(val, 32))),
-                TypeT::Int {
-                    signed: true,
-                    width: 64,
-                } => Some(format!("{}L", val)),
-                TypeT::Int {
-                    signed: false,
-                    width: 64,
-                } => Some(format!("{}uL", normalize_unsigned(val, 64))),
-                TypeT::SizeT => Some(format!("{}sz", val)),
-                _ => None,
-            };
-            if let Some(literal) = literal {
-                return Doc::text(literal);
+            match resolved.val {
+                TypeT::Int { signed, width } => {
+                    return emit_machine_int_literal(val, signed, width);
+                }
+                TypeT::SizeT => return Doc::text(format!("{}sz", val)),
+                _ => {}
             }
         }
         self.emit_rvalue(env, pattern)
@@ -2246,33 +2238,9 @@ impl<'a> Emitter<'a> {
                 ExprT::IntLit(val, ty) => {
                     let resolved = env.vtype_whnf(ty.clone().into());
                     match resolved.val {
-                        TypeT::Int {
-                            signed: true,
-                            width: 32,
-                        } => Doc::text(format!("{}l", val)),
-                        TypeT::Int {
-                            signed: false,
-                            width: 32,
-                        } => {
-                            // clang hands us the signed interpretation of the
-                            // bit pattern (see toBigInt in cpp/impl.cpp), so a
-                            // u32 literal with the high bit set arrives as a
-                            // negative BigInt (e.g. 0xFFFFFFFF as -1). F*'s `ul`
-                            // literals must lie in [0, 2^32), so normalize first.
-                            Doc::text(format!("{}ul", normalize_unsigned(val, 32)))
+                        TypeT::Int { signed, width } => {
+                            emit_machine_int_literal(val, signed, width)
                         }
-                        TypeT::Int {
-                            signed: true,
-                            width,
-                        } => Doc::text(format!("(Int{}.int_to_t {})", width, val)),
-                        TypeT::Int {
-                            signed: false,
-                            width,
-                        } => Doc::text(format!(
-                            "(UInt{}.uint_to_t {})",
-                            width,
-                            normalize_unsigned(val, width)
-                        )),
                         TypeT::SizeT => Doc::text(format!("{}sz", val)),
                         TypeT::SpecInt | TypeT::SpecNat => Doc::text(format!("{}", val)),
                         TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
@@ -2346,6 +2314,7 @@ impl<'a> Emitter<'a> {
                         // Same underlying type, no cast necessary.
                         return val_doc;
                     }
+
                     let default_msg = format!("unsupported cast from {} to {}", from_ty, to_ty);
                     match (&from_ty.val, &to_ty.val) {
                         (TypeT::Bool, TypeT::Int { signed, width }) => {
