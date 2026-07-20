@@ -26,6 +26,9 @@ int32_t day_type(int32_t day)
 /* Switch with fall-through */
 int32_t classify(int32_t x)
     _requires(x >= 0 && x <= 3)
+    _ensures(x == 0 ==> return == 10)
+    _ensures((x == 1 || x == 2) ==> return == 20)
+    _ensures(x == 3 ==> return == 30)
 {
     int32_t r = 0;
     switch (x) {

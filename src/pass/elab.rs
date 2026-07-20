@@ -83,9 +83,54 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    fn elab_field(&mut self, env: &Env, field: &mut Field) {
+    /// Reject a whole-object assignment whose target is a struct containing a
+    /// flexible array member. In C such an assignment copies only the fixed
+    /// part of the struct, not the flexible array contents (whether any of the
+    /// array is copied at all depends on padding/alignment), so PAL cannot
+    /// model it soundly. This covers both a copy from another object
+    /// (`*a = *b`) and a compound-literal initializer (`*v = (struct vec){…}`):
+    /// a struct with a flexible array member may not appear as the target of a
+    /// whole-object assignment. Construct such a struct by zero-initializing it
+    /// (e.g. `calloc`) and writing its fixed fields individually instead.
+    fn check_flex_array_assign(&mut self, env: &Env, lhs: &Expr, _rhs: &Expr) {
+        if let Ok(lhs_ty) = env.infer_expr(lhs)
+            && env.type_has_flex_array_member(lhs_ty)
+        {
+            self.report(
+                "assignment of a struct with a flexible array member is not supported: \
+                 the flexible array contents are not copied by assignment in C; \
+                 zero-initialize the struct (e.g. via calloc) and set its fixed fields \
+                 individually instead"
+                    .to_string(),
+                &lhs.loc,
+            );
+        }
+    }
+
+    fn elab_field(&mut self, env: &Env, field: &mut Field, siblings: &[Field]) {
         match &mut field.val {
-            FieldT::Plain { name: _, ty } => self.elab_type(env, Rc::make_mut(ty)),
+            FieldT::Plain { name, ty } => {
+                // A flexible-array-member `_refines(...)` length refinement may
+                // reference sibling fields (e.g. `len`) by name, so bring the
+                // other fields into scope before elaborating the refinement.
+                if matches!(&ty.val, TypeT::RefineAlways(inner, _) if matches!(peel_type(inner).val, TypeT::FlexArray(_)))
+                {
+                    let env = &mut env.clone();
+                    for s in siblings {
+                        let sname = s.val.name();
+                        if sname.val != name.val {
+                            env.push_var_decl(
+                                sname,
+                                s.val.logical_type(&s.loc),
+                                LocalDeclKind::RValue,
+                            );
+                        }
+                    }
+                    self.elab_type(env, Rc::make_mut(ty));
+                } else {
+                    self.elab_type(env, Rc::make_mut(ty));
+                }
+            }
             FieldT::BitField { name: _, ty, .. } => self.elab_type(env, Rc::make_mut(ty)),
         }
     }
@@ -136,6 +181,9 @@ impl<'a> Elaborator<'a> {
                 }
             }
             TypeT::FixedArray(elem_ty, _) => {
+                self.elab_type(env, Rc::make_mut(elem_ty));
+            }
+            TypeT::FlexArray(elem_ty) => {
                 self.elab_type(env, Rc::make_mut(elem_ty));
             }
             TypeT::Unknown => {}
@@ -265,6 +313,9 @@ impl<'a> Elaborator<'a> {
                         TypeT::FixedArray(_, _) if &*a.val == "_length" => {
                             rval.val = ExprT::VAttr(VAttr::Length, x.clone());
                         }
+                        TypeT::FlexArray(_) if &*a.val == "_length" => {
+                            rval.val = ExprT::VAttr(VAttr::Length, x.clone());
+                        }
                         TypeT::TypeRef(TypeRefKind::Struct(n)) => {
                             let Some(s) = env.lookup_struct(n) else {
                                 return self.report(format!("unknown structure {}", n), &rval.loc);
@@ -385,6 +436,15 @@ impl<'a> Elaborator<'a> {
             ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::Malloc(ty) | ExprT::Calloc(ty) => self.elab_type(env, Rc::make_mut(ty)),
             ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
+                self.elab_type(env, Rc::make_mut(ty));
+                self.elab_rvalue(env, Rc::make_mut(count), None);
+                if let Ok(count_ty) = env.infer_expr(count) {
+                    if !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT) {
+                        cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                    }
+                }
+            }
+            ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 self.elab_rvalue(env, Rc::make_mut(count), None);
                 if let Ok(count_ty) = env.infer_expr(count) {
@@ -680,6 +740,7 @@ impl<'a> Elaborator<'a> {
                 let lhs_ty = env.infer_expr(lhs).ok();
                 let expected_rhs = lhs_ty.as_deref();
                 self.elab_rvalue(env, Rc::make_mut(rhs), expected_rhs);
+                self.check_flex_array_assign(env, lhs, rhs);
                 // Cast RHS to LHS type if needed
                 if let (Ok(x_ty), Ok(v_ty)) = (env.infer_expr(lhs), env.infer_expr(rhs)) {
                     if !env.vtype_eq(x_ty.clone(), v_ty) {
@@ -713,6 +774,7 @@ impl<'a> Elaborator<'a> {
                 let x_ty = env.infer_expr(x).ok();
                 let expected_v = x_ty.as_deref();
                 self.elab_rvalue(env, Rc::make_mut(v), expected_v);
+                self.check_flex_array_assign(env, x, v);
                 let Ok(x_ty) = env.infer_expr(x) else {
                     return;
                 };
@@ -995,14 +1057,16 @@ impl<'a> Elaborator<'a> {
             DeclT::StructDefn(StructDefn {
                 name: _, fields, ..
             }) => {
+                let siblings = fields.clone();
                 for f in fields {
-                    self.elab_field(env, f);
+                    self.elab_field(env, f, &siblings);
                 }
             }
             DeclT::StructDecl(_) => {}
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
+                let siblings = fields.clone();
                 for f in fields {
-                    self.elab_field(env, f);
+                    self.elab_field(env, f, &siblings);
                 }
             }
             DeclT::IncludeDecl(include_decl) => {
@@ -1159,13 +1223,15 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 elab.in_view_body = false;
             }
             DeclT::StructDefn(StructDefn { fields, .. }) => {
+                let siblings = fields.clone();
                 for f in fields {
-                    elab.elab_field(&env, f);
+                    elab.elab_field(&env, f, &siblings);
                 }
             }
             DeclT::UnionDefn(UnionDefn { fields, .. }) => {
+                let siblings = fields.clone();
                 for f in fields {
-                    elab.elab_field(&env, f);
+                    elab.elab_field(&env, f, &siblings);
                 }
             }
             DeclT::LetDecl(let_decl) => {
