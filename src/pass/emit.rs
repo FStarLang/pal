@@ -14,20 +14,9 @@ use crate::{
     mayberc::MaybeRc,
 };
 
-pub type SourceRangeMap = Vec<(Location, Range)>;
+use super::normalize_casts::normalize_unsigned;
 
-/// Normalize a possibly-negative integer literal into the unsigned range
-/// [0, 2^width).
-///
-/// clang hands us the signed interpretation of an N-bit bit pattern (see
-/// `toBigInt` in `cpp/impl.cpp`, which uses `toStringSigned`), so an unsigned
-/// literal with the high bit set arrives as a negative `BigInt` (e.g. the u32
-/// value 0xFFFFFFFF as -1). F* unsigned literals must be non-negative, so we
-/// reduce the value modulo 2^width before emitting it.
-fn normalize_unsigned(val: &BigInt, width: u32) -> BigInt {
-    let modulus = BigInt::from(1u32) << width;
-    ((val % &modulus) + &modulus) % &modulus
-}
+pub type SourceRangeMap = Vec<(Location, Range)>;
 
 /// The module holding a function's fnptr wrapper (`func_<g>__fp`), whose type
 /// carries the inlined pre/post spec. Kept separate from the function's own
@@ -36,6 +25,8 @@ fn normalize_unsigned(val: &BigInt, width: u32) -> BigInt {
 fn funcptr_module_name(g: &str) -> String {
     format!("Funcptr_{}", g)
 }
+
+
 
 /// Determines the output module name for a given top-level declaration.
 pub fn module_name_for_decl(decl: &Decl) -> String {
@@ -2346,6 +2337,7 @@ impl<'a> Emitter<'a> {
                         // Same underlying type, no cast necessary.
                         return val_doc;
                     }
+
                     let default_msg = format!("unsupported cast from {} to {}", from_ty, to_ty);
                     match (&from_ty.val, &to_ty.val) {
                         (TypeT::Bool, TypeT::Int { signed, width }) => {
