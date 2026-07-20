@@ -31,7 +31,7 @@ let array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : Tot 
 // discharge this admit while turning an honest gap into a silent extraction
 // bug. The real fix is to give it a spec (an immutable pts_to at the literal's
 // contents), which is a design change, not a proof.
-let array_literal_to_ref #a #n (_: full_array_lspec a n) : Tot (R.ref a) =
+let array_literal_to_ref #a : Tot (R.ref a) =
   admit ()
 
 let to_mask #t (s: array_spec t) (i: nat) : prop = array_spec_mask s i
