@@ -1774,30 +1774,57 @@ public:
         return {};
       }
 
-      // Walk the compound statement collecting case/default groups
+      // Clang attaches only the first statement after a label to CaseStmt or
+      // DefaultStmt. The remaining statements are siblings in the compound
+      // body, but are still controlled by that label in C.
+      struct SwitchGroup {
+        Stmt *label;
+        bool isDefault;
+        std::vector<Expr *> caseValues;
+        std::vector<Stmt *> body;
+      };
+      std::vector<SwitchGroup> groups;
       bool seenDefault = false;
+      SwitchGroup *currentGroup = nullptr;
       for (auto *child : comp->body()) {
-        auto childLoc = getRange(child->getSourceRange());
-
         if (auto *cs = dyn_cast<CaseStmt>(child)) {
+          auto childLoc = getRange(child->getSourceRange());
           if (seenDefault) {
             reportUnsupported(cs->getSourceRange(), childLoc,
                               "default must be the last case in switch", "");
             break;
           }
 
-          // Collect all case values from chained cases (case 1: case 2: ...)
-          // and find the final sub-statement
-          std::vector<Expr *> caseValues;
+          groups.push_back({child, false, {}, {}});
+          currentGroup = &groups.back();
           Stmt *caseBody = child;
           while (auto *innerCs = dyn_cast<CaseStmt>(caseBody)) {
-            caseValues.push_back(innerCs->getLHS());
+            currentGroup->caseValues.push_back(innerCs->getLHS());
             caseBody = innerCs->getSubStmt();
           }
+          if (caseBody)
+            currentGroup->body.push_back(caseBody);
+        } else if (auto *ds = dyn_cast<DefaultStmt>(child)) {
+          seenDefault = true;
+          groups.push_back({child, true, {}, {}});
+          currentGroup = &groups.back();
+          if (ds->getSubStmt())
+            currentGroup->body.push_back(ds->getSubStmt());
+        } else if (currentGroup) {
+          currentGroup->body.push_back(child);
+        } else {
+          // Statements before the first label are unreachable in C, but retain
+          // the old behavior so malformed inputs still receive diagnostics.
+          trStmt(stmts, child);
+        }
+      }
 
+      for (auto &group : groups) {
+        auto childLoc = getRange(group.label->getSourceRange());
+        if (!group.isDefault) {
           // Build match condition: scrut == v1 || scrut == v2 || ...
           Rc<ir::Expr> matchCond = mk_bool_lit(childLoc.clone(), false);
-          for (auto *cv : caseValues) {
+          for (auto *cv : group.caseValues) {
             auto scrutRead = mk_rvalue_lvalue(
                 childLoc.clone(),
                 mk_lvalue_var(childLoc.clone(), scrutId.clone()));
@@ -1826,18 +1853,15 @@ public:
           thenStmts.push(mk_assign(
               childLoc.clone(), mk_lvalue_var(childLoc.clone(), hitId.clone()),
               mk_bool_lit(childLoc.clone(), true)));
-          if (caseBody)
-            trStmt(thenStmts, caseBody);
+          for (auto *bodyStmt : group.body)
+            trStmt(thenStmts, bodyStmt);
 
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(cond),
                            std::move(thenStmts), std::move(elseStmts),
                            Vec<Rc<ir::Expr>>::new_()));
 
-        } else if (dyn_cast<DefaultStmt>(child)) {
-          seenDefault = true;
-          auto *ds = dyn_cast<DefaultStmt>(child);
-
+        } else {
           // Condition: !brk
           auto notBrk = mk_rvalue_unop(
               childLoc.clone(), ir::UnOp::Not(),
@@ -1848,17 +1872,13 @@ public:
           thenStmts.push(mk_assign(
               childLoc.clone(), mk_lvalue_var(childLoc.clone(), hitId.clone()),
               mk_bool_lit(childLoc.clone(), true)));
-          if (ds->getSubStmt())
-            trStmt(thenStmts, ds->getSubStmt());
+          for (auto *bodyStmt : group.body)
+            trStmt(thenStmts, bodyStmt);
 
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(notBrk),
                            std::move(thenStmts), std::move(elseStmts),
                            Vec<Rc<ir::Expr>>::new_()));
-
-        } else {
-          // Bare statement outside case/default — translate directly
-          trStmt(stmts, child);
         }
       }
 
