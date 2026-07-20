@@ -289,10 +289,13 @@ let disjoint_ranges (a1: ptr) (n1: nat) (a2: ptr) (n2: nat) : prop =
 val literal_addr (#a: Type0) (xs: list a) : ptr
 
 (* A literal is an object, and no object is at NULL. Without this a caller
-   whose `_plain` parameter is not `_nullable` could not pass one. *)
+   whose `_plain` parameter is not `_nullable` could not pass one, and a
+   function could not promise `return != NULL` when it returns one. The
+   pattern is the literal itself rather than `is_null` of it, since a contract
+   compares with `null` directly as well as through `is_null`. *)
 val literal_addr_not_null (#a: Type0) (xs: list a)
-  : Lemma (~(is_null (literal_addr xs)))
-          [SMTPat (is_null (literal_addr xs))]
+  : Lemma (~(literal_addr xs == null) /\ ~(is_null (literal_addr xs)))
+          [SMTPat (literal_addr xs)]
 
 (* ---------------------------------------------------------------------------
    GNU `a ?: b`
