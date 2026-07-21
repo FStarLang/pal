@@ -240,6 +240,18 @@ impl Env {
         self.globals.structs.get(&ident.val)
     }
 
+    /// Whether `ty` resolves to a struct that contains a flexible array member.
+    /// A whole-object value of such a struct cannot be copied by assignment,
+    /// since C does not copy the flexible array contents.
+    pub fn type_has_flex_array_member(&self, ty: MaybeRc<Type>) -> bool {
+        match &self.vtype_whnf(ty).val {
+            TypeT::TypeRef(TypeRefKind::Struct(name)) => self
+                .lookup_struct(name)
+                .is_some_and(|s| s.has_flex_array_member()),
+            _ => false,
+        }
+    }
+
     pub fn lookup_union(&self, ident: &Ident) -> Option<&UnionDefn> {
         self.globals.unions.get(&ident.val)
     }
@@ -348,6 +360,7 @@ impl Env {
                         Ok(elem.clone().into())
                     }
                     TypeT::FixedArray(elem, _) => Ok(elem.clone().into()),
+                    TypeT::FlexArray(elem) => Ok(elem.clone().into()),
                     _ => Err(InferError::CannotIndex(arr_ty)),
                 }
             }
@@ -374,6 +387,9 @@ impl Env {
                 .into()),
             ExprT::MallocArray(ty, _) | ExprT::CallocArray(ty, _) => Ok(expr
                 .reuse_loc(TypeT::Pointer(ty.clone(), PointerKind::Array))
+                .into()),
+            ExprT::MallocFlex(ty, _) | ExprT::CallocFlex(ty, _) => Ok(expr
+                .reuse_loc(TypeT::Pointer(ty.clone(), PointerKind::Ref))
                 .into()),
             ExprT::Free(_) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
             ExprT::Memset(_, _, _, _) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
@@ -557,6 +573,7 @@ impl Env {
             either_side!(TypeT::Float { .. }) => None,
             either_side!(TypeT::Pointer(_, _)) => None,
             either_side!(TypeT::FixedArray(_, _)) => None,
+            either_side!(TypeT::FlexArray(_)) => None,
 
             either_side!(TypeT::TypeRef(_)) => None,
 
@@ -589,6 +606,7 @@ impl Env {
             | TypeT::PtrdiffT
             | TypeT::Pointer(_, _)
             | TypeT::FixedArray(_, _)
+            | TypeT::FlexArray(_)
             | TypeT::SpecInt
             | TypeT::SpecNat
             | TypeT::SLProp

@@ -69,9 +69,30 @@ impl<'a> Checker<'a> {
         self.check_has_type(env, p, TypeT::Bool.with_loc_core(p.loc.clone()).into());
     }
 
-    fn check_field(&mut self, env: &Env, field: &Field) {
+    fn check_field(&mut self, env: &Env, field: &Field, siblings: &[Field]) {
         match &field.val {
-            FieldT::Plain { name: _, ty } => self.check_type(env, ty),
+            FieldT::Plain { name, ty } => {
+                // A flexible-array-member `_refines(...)` length refinement may
+                // reference sibling fields (e.g. `len`) by name, so bring the
+                // other fields into scope before checking the refinement.
+                if matches!(&ty.val, TypeT::RefineAlways(inner, _) if matches!(peel_type(inner).val, TypeT::FlexArray(_)))
+                {
+                    let env = &mut env.clone();
+                    for s in siblings {
+                        let sname = s.val.name();
+                        if sname.val != name.val {
+                            env.push_var_decl(
+                                sname,
+                                s.val.logical_type(&s.loc),
+                                LocalDeclKind::RValue,
+                            );
+                        }
+                    }
+                    self.check_type(env, ty);
+                } else {
+                    self.check_type(env, ty);
+                }
+            }
             FieldT::BitField { name: _, ty, .. } => self.check_type(env, ty),
         }
     }
@@ -91,6 +112,9 @@ impl<'a> Checker<'a> {
                 self.check_type(env, ty);
             }
             TypeT::FixedArray(elem_ty, _) => {
+                self.check_type(env, elem_ty);
+            }
+            TypeT::FlexArray(elem_ty) => {
                 self.check_type(env, elem_ty);
             }
             TypeT::SpecInt | TypeT::SpecNat => {}
@@ -141,6 +165,7 @@ impl<'a> Checker<'a> {
             TypeT::PtrdiffT => true,
             TypeT::Pointer(_, _) => true, // == 0 ?
             TypeT::FixedArray(_, _) => false,
+            TypeT::FlexArray(_) => false,
             TypeT::SpecInt | TypeT::SpecNat => true,
             TypeT::SLProp => true, // true/false
             TypeT::TypeRef(_) => false,
@@ -252,6 +277,7 @@ impl<'a> Checker<'a> {
                         match &arr_ty.val {
                             TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => {}
                             TypeT::FixedArray(_, _) => {}
+                            TypeT::FlexArray(_) => {}
                             TypeT::Error => {}
                             _ => self.report(format!("not an array type: {}", arr_ty), &rval.loc),
                         }
@@ -415,7 +441,11 @@ impl<'a> Checker<'a> {
                     return;
                 };
                 if self.check_types {
-                    if fields.len() != s.fields.len() {
+                    // Fields may be omitted (e.g. a flexible array member, or a
+                    // partial designated initializer); omitted fields are filled
+                    // with their default by the emitter. Only reject supplying
+                    // more fields than the struct declares.
+                    if fields.len() > s.fields.len() {
                         self.report(
                             format!(
                                 "struct {} has {} fields, but {} were given",
@@ -464,6 +494,10 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
+                self.check_type(env, ty);
+                self.check_rvalue(env, count);
+            }
+            ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
                 self.check_type(env, ty);
                 self.check_rvalue(env, count);
             }
@@ -730,13 +764,13 @@ impl<'a> Checker<'a> {
                 name: _, fields, ..
             }) => {
                 for f in fields {
-                    self.check_field(env, f);
+                    self.check_field(env, f, fields);
                 }
             }
             DeclT::StructDecl(_) => {}
             DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
                 for f in fields {
-                    self.check_field(env, f);
+                    self.check_field(env, f, fields);
                 }
             }
             DeclT::IncludeDecl(_) => {}

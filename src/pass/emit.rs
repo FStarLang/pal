@@ -81,6 +81,8 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::StructAuxFn(s, _) => Some(format!("Struct_{}", s)),
         Name::StructContainerFn(s, _) => Some(format!("Struct_{}", s)),
         Name::StructContainerInv(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructProjContainerInv(s, _) => Some(format!("Struct_{}", s)),
+        Name::StructProjNull(s, _) => Some(format!("Struct_{}", s)),
         Name::UnionFieldConstructor(u, _) => Some(format!("Union_{}", u)),
         Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
@@ -345,6 +347,16 @@ enum Name {
     StructContainerFn(Rc<IdentT>, Rc<IdentT>),
     /// Left-inverse lemma tying `StructContainerFn` to `StructGhostFieldProj`.
     StructContainerInv(Rc<IdentT>, Rc<IdentT>),
+    /// Right-inverse (dual) lemma: `proj (container r) == r`. Lets a caller that
+    /// owns a struct *via* `container_of(field_ref)` still address the field
+    /// through the original `field_ref`.
+    StructProjContainerInv(Rc<IdentT>, Rc<IdentT>),
+    /// Ground axiom `proj (null #outer) == null #inner` for the offset-0 member:
+    /// `container_of` on a struct's first field is pointer identity, so the
+    /// field projection maps the null enclosing pointer to the null inner one.
+    /// The dual `container (null #inner) == null #outer` is not emitted: it
+    /// follows from `StructContainerInv` at `p = null`.
+    StructProjNull(Rc<IdentT>, Rc<IdentT>),
 
     UnionFieldConstructor(Rc<IdentT>, Rc<IdentT>),
     UnionGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
@@ -411,6 +423,12 @@ impl Name {
             }
             Name::StructContainerInv(str, fld) => {
                 format!("{}__{}_container_inv", struct_to_string(str), fld)
+            }
+            Name::StructProjContainerInv(str, fld) => {
+                format!("{}__{}_proj_container_inv", struct_to_string(str), fld)
+            }
+            Name::StructProjNull(str, fld) => {
+                format!("{}__{}_proj_null", struct_to_string(str), fld)
             }
             Name::UnionFieldConstructor(u, fld) => {
                 format!("Field_{}__{}", u, fld)
@@ -689,6 +707,13 @@ impl<'a> Emitter<'a> {
                     self.emit_type(env, elem_ty),
                     Doc::text(len.to_string()),
                 ]),
+                // A flexible array member is modelled like a fixed inline array
+                // but without a statically known length, so it lacks the length
+                // pin of `full_array_lspec`. Any length relation to a sibling
+                // field is expressed as a `pure` fact in the struct predicate.
+                TypeT::FlexArray(elem_ty) => {
+                    unaryfn(Doc::text("full_array_spec"), self.emit_type(env, elem_ty))
+                }
                 TypeT::Unknown => Doc::text("unit"),
                 TypeT::Error => Doc::text("unit"),
 
@@ -732,6 +757,15 @@ impl<'a> Emitter<'a> {
                 Doc::text("array_spec_zeroed"),
                 self.emit_type(env, elem_ty),
                 parens(Doc::text(format!("SizeT.v {}sz", length))),
+                self.emit_type_default(env, elem_ty),
+            ])),
+            // Zero-length flexible array member default (a `full_array_spec` of
+            // length 0), satisfying any `array_spec_len == 0` relation to a
+            // zeroed sibling length field.
+            TypeT::FlexArray(elem_ty) => parens(naryfn([
+                Doc::text("array_spec_zeroed"),
+                self.emit_type(env, elem_ty),
+                Doc::text("0"),
                 self.emit_type_default(env, elem_ty),
             ])),
             TypeT::Void => Doc::text("()"),
@@ -834,6 +868,13 @@ impl<'a> Emitter<'a> {
     /// *handle* itself (no `ref` wrapper), refined to the same static
     /// length as the noeq contents. Panics if called on a non-array field.
     fn emit_field_array_handle_type(&mut self, env: &Env, field: &Field) -> Doc {
+        // Flexible array members have no statically known length, so their
+        // handle type carries no `{ length a == N }` pin. Without a refinement
+        // there is no need for the `a:` binder either (and F* warns about the
+        // unused binder), so emit the bare `array` handle type.
+        if let Some((elem_ty, _)) = field.val.flex_array_info() {
+            return unaryfn(Doc::text("array"), self.emit_type(env, elem_ty));
+        }
         let (elem_ty, length) = field
             .val
             .fixed_array_info()
@@ -916,6 +957,9 @@ impl<'a> Emitter<'a> {
             }
             ExprT::Malloc(_) | ExprT::Calloc(_) => {}
             ExprT::MallocArray(_, count) | ExprT::CallocArray(_, count) => {
+                self.subst_this_rvalue(env, Rc::make_mut(count), this);
+            }
+            ExprT::MallocFlex(_, count) | ExprT::CallocFlex(_, count) => {
                 self.subst_this_rvalue(env, Rc::make_mut(count), this);
             }
             ExprT::Memset(_, ptr, value, count) => {
@@ -1217,6 +1261,7 @@ impl<'a> Emitter<'a> {
             | TypeT::SpecNat
             | TypeT::SLProp
             | TypeT::FixedArray(_, _)
+            | TypeT::FlexArray(_)
             | TypeT::Unknown => {}
             TypeT::Pointer(pointee_ty, kind) => {
                 let this_doc = self.emit_rvalue(env, this);
@@ -1627,6 +1672,15 @@ impl<'a> Emitter<'a> {
                     if let TypeT::FixedArray(_, length) = &ty.val {
                         return Doc::text(format!("{}", length));
                     }
+                    // A flexible array member is an inline `array_spec`, so its
+                    // length is `array_spec_len` of the stored contents.
+                    if matches!(&ty.val, TypeT::FlexArray(_)) {
+                        return parens(
+                            Doc::text("array_spec_len")
+                                .append(Doc::line())
+                                .append(self.emit_rvalue(env, x)),
+                        );
+                    }
                 }
                 unaryfn(
                     Doc::text("reveal"),
@@ -1982,7 +2036,8 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
         | (_, TypeT::SLProp)
         | (_, TypeT::Error)
         | (_, TypeT::Unknown)
-        | (_, TypeT::FixedArray(_, _)) => return None,
+        | (_, TypeT::FixedArray(_, _))
+        | (_, TypeT::FlexArray(_)) => return None,
     })
 }
 
@@ -2747,21 +2802,58 @@ impl<'a> Emitter<'a> {
                             .append(self.emit_rvalue(&env, body)),
                     )
                 }
-                ExprT::StructInit(name, fields) => Doc::text("{")
-                    .append(Doc::concat(fields.iter().map(|(fld, val)| {
-                        Doc::line()
-                            .append(self.emit_name(Name::StructDirectFieldName(
-                                name.val.clone(),
-                                fld.val.clone(),
-                            )))
-                            .append("=")
-                            .append(self.emit_rvalue(env, val))
-                            .append(";")
-                    })))
-                    .nest(2)
-                    .append(Doc::line())
-                    .append("}")
-                    .group(),
+                ExprT::StructInit(name, fields) => {
+                    // Emit every field of the struct in declaration order: use
+                    // the provided initializer if present, otherwise the field's
+                    // zero default. This handles fields omitted from a C
+                    // compound literal — notably a flexible array member, which
+                    // cannot be initialized in C and defaults to a length-0
+                    // array (`array_spec_zeroed elem 0 ..`).
+                    let sdef = env.lookup_struct(name).cloned();
+                    let entries: Vec<Doc> = if let Some(sdef) = sdef {
+                        sdef.fields
+                            .iter()
+                            .map(|f| {
+                                let fname = f.val.name().val.clone();
+                                let val_doc = if let Some((_, val)) =
+                                    fields.iter().find(|(fld, _)| fld.val == fname)
+                                {
+                                    self.emit_rvalue(env, val)
+                                } else {
+                                    self.emit_field_default(env, f)
+                                };
+                                Doc::line()
+                                    .append(self.emit_name(Name::StructDirectFieldName(
+                                        name.val.clone(),
+                                        fname,
+                                    )))
+                                    .append("=")
+                                    .append(val_doc)
+                                    .append(";")
+                            })
+                            .collect()
+                    } else {
+                        fields
+                            .iter()
+                            .map(|(fld, val)| {
+                                Doc::line()
+                                    .append(self.emit_name(Name::StructDirectFieldName(
+                                        name.val.clone(),
+                                        fld.val.clone(),
+                                    )))
+                                    .append("=")
+                                    .append(self.emit_rvalue(env, val))
+                                    .append(";")
+                            })
+                            .collect()
+                    };
+                    Doc::text("{")
+                        .append(Doc::concat(entries))
+                        .nest(2)
+                        .append(Doc::line())
+                        .append("}")
+                        .group()
+                }
                 ExprT::UnionInit(name, fld, val) => unaryfn(
                     self.emit_name(Name::UnionFieldConstructor(
                         name.val.clone(),
@@ -2834,6 +2926,31 @@ impl<'a> Emitter<'a> {
                         .append(Doc::line())
                         .append(self.emit_rvalue(env, count)),
                 ),
+                ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
+                    let flex_kind = if matches!(&v.val, ExprT::MallocFlex(..)) {
+                        "malloc_flex"
+                    } else {
+                        "calloc_flex"
+                    };
+                    let resolved = env.vtype_whnf(ty.clone().into());
+                    match &resolved.val {
+                        TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => parens(
+                            self.emit_name(Name::StructAuxFn(
+                                struct_name.val.clone(),
+                                flex_kind.into(),
+                            ))
+                            .append(Doc::line())
+                            .append(self.emit_rvalue(env, count)),
+                        ),
+                        _ => {
+                            self.report(
+                                "flexible-array-member allocation of a non-struct type".to_string(),
+                                &ty.loc,
+                            );
+                            Doc::text("()")
+                        }
+                    }
+                }
                 ExprT::Memset(_, ptr, value, count) => parens(
                     Doc::text("Pulse.Lib.C.Array.memset")
                         .append(Doc::line())
@@ -3856,6 +3973,51 @@ fn mk_rvar(n: &Rc<Ident>) -> Rc<Expr> {
     ExprT::Var(n.clone()).with_loc(n.loc.clone())
 }
 
+/// Rewrite a flexible-array-member `_refines` predicate (elaborated with the
+/// array itself bound to `this` and sibling fields referenced by name) into a
+/// struct-relative predicate for use inside the struct predicate: the array
+/// `this` becomes `this.<fam_field>` and every sibling field reference `f`
+/// becomes `this.<f>`, where `this` is the struct value bound in the predicate.
+fn subst_flex_refine_pred(expr: &Expr, fam_field: &Rc<Ident>, this: &Rc<Ident>) -> Rc<Expr> {
+    let loc = expr.loc.clone();
+    match &expr.val {
+        ExprT::Var(x) => {
+            let field = if &*x.val == "this" {
+                fam_field.clone()
+            } else {
+                x.clone()
+            };
+            ExprT::Member(mk_rvar(this), field).with_loc(loc)
+        }
+        ExprT::VAttr(a, x) => {
+            ExprT::VAttr(a.clone(), subst_flex_refine_pred(x, fam_field, this)).with_loc(loc)
+        }
+        ExprT::BinOp(op, l, r) => ExprT::BinOp(
+            *op,
+            subst_flex_refine_pred(l, fam_field, this),
+            subst_flex_refine_pred(r, fam_field, this),
+        )
+        .with_loc(loc),
+        ExprT::UnOp(op, a) => {
+            ExprT::UnOp(*op, subst_flex_refine_pred(a, fam_field, this)).with_loc(loc)
+        }
+        ExprT::Cast(vv, t) => {
+            ExprT::Cast(subst_flex_refine_pred(vv, fam_field, this), t.clone()).with_loc(loc)
+        }
+        ExprT::Member(x, a) => {
+            ExprT::Member(subst_flex_refine_pred(x, fam_field, this), a.clone()).with_loc(loc)
+        }
+        ExprT::FnCall(f, args) => ExprT::FnCall(
+            f.clone(),
+            args.iter()
+                .map(|a| subst_flex_refine_pred(a, fam_field, this))
+                .collect(),
+        )
+        .with_loc(loc),
+        _ => Rc::new(expr.clone()),
+    }
+}
+
 impl<'a> Emitter<'a> {
     fn emit_typedef(
         &mut self,
@@ -4223,10 +4385,26 @@ impl<'a> Emitter<'a> {
         }
 
         // Collect init props from field specs
-        let init_props: Vec<Doc> = field_specs
+        let mut init_props: Vec<Doc> = field_specs
             .iter()
             .flat_map(|fs| fs.init_props.clone())
             .collect();
+
+        // A flexible array member with a `_refines(...)` length refinement
+        // contributes a `pure` length relation to the struct predicate (e.g.
+        // `array_spec_len this.data == UInt32.v this.len`). The refinement is
+        // elaborated with the array bound to `this`; rewrite it so the array
+        // becomes the struct field `this.<fam>` and sibling references become
+        // `this.<sibling>`.
+        for f in fields {
+            if let Some((_, Some(pred))) = f.val.flex_array_info() {
+                let fam_field: Rc<Ident> = Rc::new(f.val.name().clone());
+                let subst = subst_flex_refine_pred(pred, &fam_field, &this);
+                // The refinement is `_slprop`-typed, so `emit_rvalue` already
+                // renders it as an slprop (`with_pure (..)`).
+                init_props.push(self.emit_rvalue(env, &subst));
+            }
+        }
 
         // Emit __pred directly (no indirection via __pred')
         let pred_name = Doc::text(self.nm.mangle(&Name::TypeRefPred(k.into())).to_string());
@@ -4272,11 +4450,18 @@ impl<'a> Emitter<'a> {
                 );
             }
         } else {
-            // No spec bindings - emit a simple pred with just this and perm
+            // No spec bindings. Emit a simple pred with just this and perm; its
+            // body is `emp` unless a flexible-array-member length refinement
+            // contributes a `pure` fact.
+            let body = if init_props.is_empty() {
+                Doc::text("emp")
+            } else {
+                mk_star(init_props.iter().cloned())
+            };
             ses.push(mk_eager_unfold_slprop(
                 pred_name.clone(),
                 &[this_arg.clone(), parens(Doc::text("p: perm"))],
-                Doc::text("emp"),
+                body,
             ));
         }
 
@@ -4566,6 +4751,92 @@ impl<'a> Emitter<'a> {
                     .nest(2)
                     .group(),
             ));
+
+            // Dual (right-inverse) lemma: `proj (container r) == r`. Sound for
+            // the same reason as `container_inv` -- both compose the field
+            // offset with its negation. Needed so a caller owning the struct via
+            // `container_of(field_ref)` can still address the field through the
+            // original `field_ref`: the SMTPat rewrites the round-trip term
+            // `proj (container r)` back to `r`.
+            let projected_type_dual = self.emit_field_projection_type(env, f);
+            let container_name_dual =
+                self.emit_name(Name::StructContainerFn(name.val.clone(), fld.val.clone()));
+            let proj_name_dual = self.emit_name(ghost_fld(fld));
+            let dual_name = self.emit_name(Name::StructProjContainerInv(
+                name.val.clone(),
+                fld.val.clone(),
+            ));
+            let container_app_r = unaryfn(container_name_dual, Doc::text("r"));
+            let proj_container_app = unaryfn(proj_name_dual, container_app_r);
+            let ensures_dual = parens(
+                Doc::text("ensures")
+                    .append(Doc::line())
+                    .append(proj_container_app.clone())
+                    .append(Doc::text(" == r")),
+            );
+            let smtpat_dual = Doc::text("[SMTPat ")
+                .append(proj_container_app)
+                .append(Doc::text("]"));
+
+            ses.push(mk_assume_val(
+                vec![],
+                dual_name,
+                &[parens(
+                    Doc::text("r:")
+                        .append(Doc::line())
+                        .append(projected_type_dual),
+                )],
+                Doc::text("Lemma")
+                    .append(Doc::line().append(ensures_dual))
+                    .append(Doc::line().append(smtpat_dual))
+                    .nest(2)
+                    .group(),
+            ));
+        }
+
+        // Offset-0 `container_of` null-preservation axiom.
+        //
+        // `container_of` on a struct's *first* (offset-0) member is pointer
+        // identity (C 6.7.2.1: no leading padding). We capture this for the
+        // null pointer with a single ground `squash` axiom on the field
+        // projection (which fires automatically into the SMT context):
+        //
+        //   proj (null #outer) == null #inner
+        //
+        // The dual direction, `container (null #inner) == null #outer`, is NOT
+        // emitted separately: it follows automatically from the `container_inv`
+        // lemma (`container (proj p) == p`, carrying an SMTPat) instantiated at
+        // `p = null`, rewritten with the axiom above. Sound ONLY at offset 0 —
+        // a nonzero-offset `container_of(NULL)` is undefined behaviour — so we
+        // restrict to the first field, and only when it is a `Plain`
+        // (non-array, non-bitfield) member whose projection is a genuine `ref`.
+        if let Some(f0) = fields.first() {
+            if !f0.val.is_array() {
+                if let FieldT::Plain { ty, .. } = &f0.val {
+                    let fld = f0.val.name();
+                    let inner_ty = self.emit_type(env, ty);
+                    let null_inner =
+                        parens(Doc::text("Pulse.Lib.Reference.null #").append(parens(inner_ty)));
+                    let null_outer = parens(
+                        Doc::text("Pulse.Lib.Reference.null #")
+                            .append(parens(struct_type_name.clone())),
+                    );
+
+                    let proj_name = self.emit_name(ghost_fld(fld));
+                    let proj_eq = parens(
+                        unaryfn(proj_name, null_outer)
+                            .append(Doc::text(" =="))
+                            .append(Doc::line())
+                            .append(null_inner),
+                    );
+                    ses.push(mk_assume_val(
+                        vec![],
+                        self.emit_name(Name::StructProjNull(name.val.clone(), fld.val.clone())),
+                        &[],
+                        unaryfn(Doc::text("squash"), proj_eq),
+                    ));
+                }
+            }
         }
 
         ses.push(mk_assume_val(
@@ -4810,6 +5081,76 @@ impl<'a> Emitter<'a> {
                 }),
             ]),
         ));
+
+        // Sized flexible-array-member allocators. When the struct has a
+        // flexible array member, `malloc(sizeof(S) + n*sizeof(E))` and
+        // `calloc(1, sizeof(S) + n*sizeof(E))` thread the tail length `n`.
+        // Each axiom returns the struct in UNFOLDED form: the `aux_raw_unfolded`
+        // token, every non-flex field uninitialized, and the flexible tail as a
+        // length-`n` `array_pts_to` (uninitialized for malloc, zeroed for
+        // calloc), plus `freeable`. The caller sets the length field and, for
+        // malloc, fills the tail; the `[@@pulse_intro]` `aux_raw_fold` then
+        // auto-folds back into a valid struct at escape.
+        if fields.iter().any(|f| f.val.flex_array_info().is_some()) {
+            for (flex_kind, zeroed) in [("malloc_flex", false), ("calloc_flex", true)] {
+                let mut post = vec![naryfn([
+                    unfolded_tok.clone(),
+                    Doc::text("r"),
+                    Doc::text("1.0R"),
+                ])];
+                for f in fields {
+                    let fld = f.val.name();
+                    if let Some((elem_ty, _)) = f.val.flex_array_info() {
+                        let elem_doc = self.emit_type(env, elem_ty);
+                        let spec = if zeroed {
+                            naryfn([
+                                Doc::text("array_spec_zeroed"),
+                                elem_doc,
+                                parens(Doc::text("FStar.SizeT.v n")),
+                                Doc::text("zero_default"),
+                            ])
+                        } else {
+                            naryfn([
+                                Doc::text("array_spec_uninit"),
+                                elem_doc,
+                                parens(Doc::text("FStar.SizeT.v n")),
+                            ])
+                        };
+                        post.push(naryfn([
+                            Doc::text("array_pts_to"),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("r")),
+                            Doc::text("1.0R"),
+                            spec,
+                        ]));
+                    } else if f.val.is_array() {
+                        post.push(naryfn([
+                            Doc::text("array_pts_to_uninit'"),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("r")),
+                        ]));
+                    } else {
+                        post.push(naryfn([
+                            Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("r")),
+                        ]));
+                    }
+                }
+                post.push(naryfn([
+                    Doc::text("Pulse.Lib.C.Ref.freeable"),
+                    Doc::text("r"),
+                ]));
+                ses.push(mk_assume_val(
+                    vec![],
+                    self.emit_name(Name::StructAuxFn(name.val.clone(), flex_kind.into())),
+                    &[parens(Doc::text("n: FStar.SizeT.t"))],
+                    naryfn([
+                        Doc::text("stt"),
+                        ref_struct_type.clone(),
+                        Doc::text("emp"),
+                        mk_fun(Doc::text("r"), mk_star(post)),
+                    ]),
+                ));
+            }
+        }
 
         for f in fields {
             let fld = f.val.name();
@@ -5232,6 +5573,39 @@ impl<'a> Emitter<'a> {
             ]);
             let ghost_proj = unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x"));
 
+            // The arm's storage handed back on activation.
+            //
+            // For a scalar/struct arm the ghost projection is a `ref T`, so the
+            // uninitialised cell is `Pulse.Lib.Reference.pts_to_uninit`.
+            //
+            // For an inline-array arm the projection is an array *handle*
+            // (`array T`). `array_pts_to_uninit'` is well-typed but unusable:
+            // it existentially hides the array length, so a subsequent indexed
+            // write (`a->arm[i] = ...`) cannot discharge `i < length`. Instead
+            // we mirror the arm's `aux_raw_unfold` and hand back a full
+            // `array_pts_to` over an existential `full_array_lspec T n` value of
+            // the arm's *static* length, so the length is known and in-bounds
+            // writes verify. The contents stay existentially quantified, so
+            // activation still commits to no element values (matching C, where
+            // the previously-stored bytes are unspecified).
+            let arm_uninit = if f.val.is_array() {
+                let v_name = Doc::text(format!("v_{}", fld));
+                wrap_exists(
+                    &[ExBinding {
+                        name: v_name.clone(),
+                        ty: self.emit_field_record_type(env, f),
+                    }],
+                    vec![naryfn([
+                        Doc::text("array_pts_to"),
+                        ghost_proj,
+                        Doc::text("1.0R"),
+                        v_name,
+                    ])],
+                )
+            } else {
+                naryfn([Doc::text("Pulse.Lib.Reference.pts_to_uninit"), ghost_proj])
+            };
+
             ses.push(mk_assume_val(
                 vec![],
                 self.emit_name(Name::UnionActivateFn(name.val.clone(), fld.val.clone())),
@@ -5248,10 +5622,7 @@ impl<'a> Emitter<'a> {
                         Doc::text("Pulse.Lib.Reference.pts_to_uninit"),
                         Doc::text("x"),
                     ]),
-                    mk_thunk(mk_star([
-                        unfolded,
-                        naryfn([Doc::text("Pulse.Lib.Reference.pts_to_uninit"), ghost_proj]),
-                    ])),
+                    mk_thunk(mk_star([unfolded, arm_uninit])),
                 ]),
             ));
         }
@@ -5636,6 +6007,12 @@ impl<'a> Emitter<'a> {
             TypeT::FixedArray(_, _) => {
                 self.report(
                     format!("array parameters are not supported in pure functions"),
+                    &ty.loc,
+                );
+            }
+            TypeT::FlexArray(_) => {
+                self.report(
+                    format!("flexible array members are not supported in pure functions"),
                     &ty.loc,
                 );
             }
