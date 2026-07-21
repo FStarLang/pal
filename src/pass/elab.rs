@@ -711,7 +711,7 @@ impl<'a> Elaborator<'a> {
             ExprT::UnionInit(_, _, fld_val) => {
                 self.elab_rvalue(env, Rc::make_mut(fld_val), None);
             }
-            ExprT::ArrayInit(_, elems) => {
+            ExprT::ArrayInit { elems, .. } => {
                 for elem in elems {
                     self.elab_rvalue(env, Rc::make_mut(elem), None);
                 }

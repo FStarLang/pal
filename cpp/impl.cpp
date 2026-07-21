@@ -594,7 +594,8 @@ public:
       for (unsigned i = 0; i < init->getNumInits(); ++i) {
         elems.push(trRValue(init->getInit(i)));
       }
-      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems));
+      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
+                           false);
     }
     auto *rec = dyn_cast<RecordType>(qt.getTypePtr());
     if (!rec) {
@@ -682,11 +683,14 @@ public:
 
       case CK_NoOp:
         return trRValue(ic->getSubExpr());
-      case CK_ArrayToPointerDecay:
-        if (dyn_cast<StringLiteral>(ic->getSubExpr()->IgnoreParenImpCasts())) {
+      case CK_ArrayToPointerDecay: {
+        auto *subExpr = ic->getSubExpr()->IgnoreParenImpCasts();
+        if (dyn_cast<StringLiteral>(subExpr) ||
+            dyn_cast<CompoundLiteralExpr>(subExpr)) {
           return trRValue(ic->getSubExpr());
         }
         return mk_rvalue_lvalue(std::move(loc), trLValue(ic->getSubExpr()));
+      }
       case CK_IntegralCast:
       case CK_IntegralToBoolean:
       case CK_PointerToBoolean:
@@ -1059,7 +1063,8 @@ public:
       }
       elems.push(mkCharLit(0));
       auto elemTy = mkCharTy();
-      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems));
+      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
+                           true);
     } else if (auto uo = dyn_cast<UnaryOperator>(e)) {
       switch (uo->getOpcode()) {
       case UO_AddrOf:
