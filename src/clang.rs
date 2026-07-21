@@ -840,7 +840,12 @@ fn mk_array_init(
     elems: Vec<Rc<Expr>>,
     is_static: bool,
 ) -> Rc<Expr> {
-    ExprT::ArrayInit(elem_ty, elems, is_static).with_loc(loc)
+    ExprT::ArrayInit {
+        elem_ty,
+        elems,
+        is_static,
+    }
+    .with_loc(loc)
 }
 
 fn mk_lvalue_var(loc: Rc<SourceInfo>, name: Rc<Ident>) -> Rc<Expr> {

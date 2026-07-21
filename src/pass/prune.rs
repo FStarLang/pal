@@ -221,7 +221,7 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             deps.insert(DeclName::Union(name.val.clone()));
             scan_expr(deps, fld_val);
         }
-        ExprT::ArrayInit(elem_ty, elems, _) => {
+        ExprT::ArrayInit { elem_ty, elems, .. } => {
             scan_type(deps, elem_ty);
             for elem in elems {
                 scan_expr(deps, elem);

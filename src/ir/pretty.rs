@@ -380,7 +380,7 @@ impl PrettyIR for ExprT {
                 .append("}")
                 .nest(2)
                 .group(),
-            ExprT::ArrayInit(_elem_ty, elems, _) => RcDoc::text("{ ")
+            ExprT::ArrayInit { elems, .. } => RcDoc::text("{ ")
                 .append(RcDoc::intersperse(
                     elems.iter().map(|e| e.to_doc()),
                     RcDoc::text(",").append(RcDoc::line()),

@@ -298,7 +298,7 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
             rewrite_expr(env, Rc::make_mut(b), elim);
             rewrite_expr(env, Rc::make_mut(c), elim);
         }
-        ExprT::FnCall(_, args) | ExprT::ArrayInit(_, args, _) => {
+        ExprT::FnCall(_, args) | ExprT::ArrayInit { elems: args, .. } => {
             for a in args.iter_mut() {
                 rewrite_expr(env, Rc::make_mut(a), elim);
             }
@@ -540,7 +540,11 @@ fn rewrite_types_expr(e: &mut Expr, elim: &HashSet<Rc<IdentT>>) {
             rewrite_type(ty, elim);
             rewrite_types_expr(Rc::make_mut(x), elim);
         }
-        ExprT::ArrayInit(ty, args, _) => {
+        ExprT::ArrayInit {
+            elem_ty: ty,
+            elems: args,
+            ..
+        } => {
             rewrite_type(ty, elim);
             for a in args.iter_mut() {
                 rewrite_types_expr(Rc::make_mut(a), elim);

@@ -322,7 +322,14 @@ pub enum ExprT {
     UnionInit(Rc<Ident>, Rc<Ident>, Rc<Expr>),
     /// Array initializer: element type + list of element values.
     /// Emitted as nested `array_spec_upd` on an `array_spec_zeroed` base.
-    ArrayInit(Rc<Type>, Vec<Rc<Expr>>, bool),
+    ArrayInit {
+        elem_ty: Rc<Type>,
+        elems: Vec<Rc<Expr>>,
+        /// True for array literals with static storage duration (narrow
+        /// string literals), false for automatic ones (initializer lists and
+        /// compound literals).
+        is_static: bool,
+    },
     Malloc(Rc<Type>),
     MallocArray(Rc<Type>, Rc<Expr>),
     Calloc(Rc<Type>),

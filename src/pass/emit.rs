@@ -950,7 +950,7 @@ impl<'a> Emitter<'a> {
             ExprT::UnionInit(_, _, val) => {
                 self.subst_this_rvalue(env, Rc::make_mut(val), this);
             }
-            ExprT::ArrayInit(_, elems, _) => {
+            ExprT::ArrayInit { elems, .. } => {
                 for elem in elems {
                     self.subst_this_rvalue(env, Rc::make_mut(elem), this);
                 }
@@ -2464,7 +2464,13 @@ impl<'a> Emitter<'a> {
                             TypeT::FixedArray(_, _),
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
                         ) => {
-                            let fn_name = if matches!(&val.val, ExprT::ArrayInit(_, _, true)) {
+                            let fn_name = if matches!(
+                                &val.val,
+                                ExprT::ArrayInit {
+                                    is_static: true,
+                                    ..
+                                }
+                            ) {
                                 // String literals have static storage duration,
                                 // unlike local fixed-size arrays.
                                 "Pulse.Lib.C.Array.array_literal_to_ref"
@@ -2861,7 +2867,7 @@ impl<'a> Emitter<'a> {
                     )),
                     self.emit_rvalue(env, val),
                 ),
-                ExprT::ArrayInit(elem_ty, elems, _) => {
+                ExprT::ArrayInit { elem_ty, elems, .. } => {
                     let elem_ty_doc = self.emit_type(env, elem_ty);
                     let elem_ty_arg = Doc::text("#").append(elem_ty_doc);
                     naryfn([
@@ -3240,16 +3246,16 @@ impl<'a> Emitter<'a> {
                                 _ => None,
                             };
                             let array_init = match &arg.val {
-                                ExprT::ArrayInit(elem_ty, _, is_static) => {
-                                    Some((elem_ty, arg, *is_static))
-                                }
+                                ExprT::ArrayInit {
+                                    elem_ty, is_static, ..
+                                } => Some((elem_ty, arg, *is_static)),
                                 ExprT::Cast(inner, _)
-                                    if matches!(inner.val, ExprT::ArrayInit(_, _, _)) =>
+                                    if matches!(inner.val, ExprT::ArrayInit { .. }) =>
                                 {
                                     match &inner.val {
-                                        ExprT::ArrayInit(elem_ty, _, is_static) => {
-                                            Some((elem_ty, inner, *is_static))
-                                        }
+                                        ExprT::ArrayInit {
+                                            elem_ty, is_static, ..
+                                        } => Some((elem_ty, inner, *is_static)),
                                         _ => None,
                                     }
                                 }
