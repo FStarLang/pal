@@ -18,9 +18,10 @@ jobs:
 
     - name: Install clang
       run: |
-        wget https://apt.llvm.org/llvm.sh
-        chmod +x llvm.sh
-        sudo ./llvm.sh 20
+        wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+        chmod +x /tmp/llvm.sh
+        sudo /tmp/llvm.sh 20
+        rm -f /tmp/llvm.sh
         sudo apt update
         sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev
 
