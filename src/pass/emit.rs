@@ -1716,9 +1716,16 @@ impl<'a> Emitter<'a> {
                     .as_ref()
                     .is_some_and(|ty| matches!(&ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr)));
 
-                let (arr_doc, use_spec_idx) = match self.emit_expr(env, arr) {
-                    ExprKind::ArrayLValue(arr_doc) => (arr_doc, false),
-                    arr_doc => (arr_doc.to_rvalue(), is_fixed_array),
+                // A fixed-array value is a *pure* `array_spec` only when it is an
+                // RValue (e.g. a global pure array or a by-value struct field), in
+                // which case it must be indexed with `array_spec_idx`. A stack-local
+                // array is an LValue holding a runtime `array` handle, so it must be
+                // read with `array_read`/`arrayptr_read` like any other live array.
+                let arr_kind = self.emit_expr(env, arr);
+                let use_spec_idx = is_fixed_array && matches!(arr_kind, ExprKind::RValue(_));
+                let arr_doc = match arr_kind {
+                    ExprKind::ArrayLValue(arr_doc) => arr_doc,
+                    other => other.to_rvalue(),
                 };
                 let idx_doc = self.emit_rvalue(env, idx);
 
