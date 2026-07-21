@@ -626,20 +626,22 @@ int32_t reassign_join_call(int32_t use_sub)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-#if 0
-
-/* [not yet verified] Assignment from an aggregate that yields a function
-   pointer: read an element out of an array into a local, then call the local. */
+/* [verifies] Assignment from an aggregate that yields a function pointer: read
+   an element out of an array into a local, then call the local. Same recipe as
+   `use_array_slot`: the emitter let-binds the stored value so `array_spec_initd`
+   stays provable at the read, and `valid_cast` the read-back value before
+   calling. */
 int32_t assign_from_agg(void)
     _ensures(return == 5)
 {
     int32_t (*tbl[2])(int32_t, int32_t);
     tbl[0] = add;
     int32_t (*fp)(int32_t, int32_t) = tbl[0];
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(fp));
     return fp(2, 3);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
-
-#endif
 
 /* --------------------------------------------------------------------------
  * Stage 4 - Function pointers as data / control flow
@@ -724,44 +726,45 @@ void ptr_arg_cb(int32_t *p)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-#if 0
+/* [verifies] Function pointer stored in a fixed array element, then read back
+   and called. The store emits `array_write` and the read emits `array_read`
+   (stack-local fixed arrays are runtime `array` handles).
 
-/* [not yet verified — DEFERRED, emitter gap] Function pointer stored in a fixed
-   array element, then read back and called. The store (`array_write`) emits
-   fine, but PAL lowers the *read* of a stack-local fixed-array element via
-   `array_spec_idx (!var_tbl) i`, which is ill-typed: `array_spec_idx` expects a
-   pure `array_spec` (a Seq), but `!var_tbl` is a runtime `array` handle. This is
-   an emitter over-approximation in `src/pass/emit.rs` (`ExprT::Index`): it sets
-   `use_spec_idx = is_fixed_array` for any fixed-array-typed rvalue, but that is
-   only correct for genuinely pure spec values (globals / by-value struct fields),
-   not for stack-allocated fixed arrays which must use `array_read (!var_tbl) i`.
-   No source annotation can change the element-read lowering. */
+   Two ghost steps bridge the array's abstract spec to the concrete pointer:
+   the emitter let-binds the stored `of_fn` value so `array_write` updates the
+   spec against an opaque term (keeping `array_spec_initd` provable at the read),
+   and `valid_cast` re-keys the `is_valid (of_fn ..)` fact from `of_fn_valid` to
+   the value read back from the slot (which is only *provably* equal to it). */
 int32_t use_array_slot(void)
     _ensures(return == 5)
 {
     int32_t (*tbl[2])(int32_t, int32_t);
     tbl[0] = add;
-    return tbl[0](2, 3);
+    int32_t (*f)(int32_t, int32_t) = tbl[0];
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(f));
+    return f(2, 3);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-/* [not yet verified — DEFERRED, same emitter gap as use_array_slot] A function
-   pointer threaded through several layers (array element -> struct field)
-   before the eventual call. The struct-field store/read and its `of_fn` recovery
-   work (see `use_struct_field`), but the *source* of the value is `tbl[0]` — a
-   stack-local fixed-array element read — which PAL lowers to the ill-typed
-   `array_spec_idx (!var_tbl) 0`, exactly as in `use_array_slot`. Needs the same
-   `src/pass/emit.rs` `ExprT::Index` fix (emit `array_read` for stack arrays). */
+/* [verifies] A function pointer threaded through several layers (array element ->
+   struct field) before the eventual call. Combines the `use_array_slot` recipe
+   (`valid_cast` the array-read value) with the `use_struct_field` recipe
+   (unfold the uninitialised struct before writing its field). */
 int32_t multilayer(void)
     _ensures(return == 5)
 {
     int32_t (*tbl[2])(int32_t, int32_t);
     tbl[0] = add;
+    int32_t (*slot)(int32_t, int32_t) = tbl[0];
     struct ops o;
-    o.op = tbl[0];
+    _ghost_stmt($unfold-uninit(struct ops) $&(o));
+    o.op = slot;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(slot));
     return o.op(2, 3);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
-
-#endif
 
 /* --------------------------------------------------------------------------
  * Stage 5 - Advanced / edge cases (ACTIVE candidates)
@@ -854,10 +857,11 @@ int32_t use_dispatch(void)
  *
  * Cross-function dispatch, return values, and indirect recursion.
  * -------------------------------------------------------------------------- */
-#if 0
 
-/* [not yet verified] Array indexed by a runtime (non-constant) value, so no
-   single static target exists at the call site. */
+/* [verifies] Array indexed by a runtime (non-constant) value, so no single
+   static target exists at the call site. Both slots hold `add` and the index is
+   constrained to `{0,1}`, so the read-back value is provably `add`; the same
+   `valid_cast` recipe as `use_array_slot` re-keys its validity. */
 int32_t array_runtime_idx(int32_t i)
     _requires(i == 0 || i == 1)
     _ensures(return == 5)
@@ -865,8 +869,14 @@ int32_t array_runtime_idx(int32_t i)
     int32_t (*tbl[2])(int32_t, int32_t);
     tbl[0] = add;
     tbl[1] = add;
-    return tbl[i](2, 3);
+    int32_t (*f)(int32_t, int32_t) = tbl[i];
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(f));
+    return f(2, 3);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
+
+#if 0
 
 /* [not yet verified — DEFERRED, emitter mutual-recursion gap] Indirect recursion
    through a function pointer. Taking the address of the function under definition

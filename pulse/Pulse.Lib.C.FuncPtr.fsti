@@ -29,6 +29,26 @@ ghost fn drop_is_valid (#a #b: Type0) (f: func_ptr a b) (pre: a -> slprop) (post
   unfold (is_valid f pre post);
 }
 
+(* Transfer a validity fact across a provable value equality. `valid` is a pure
+   proposition of the pointer `f`, so if `f == g` then `is_valid f pre post`
+   entails `is_valid g pre post`. `f` is `[@@@mkey]`, so the surplus resource in
+   context is matched by the pointer and `pre`/`post` are inferred — the caller
+   supplies only the target pointer `g` (and the `f == g` fact discharged by SMT).
+
+   This is needed to call through a function pointer read back from an array
+   slot: `array_read` yields a value provably (but not syntactically) equal to
+   the stored `of_fn ..`, so the `is_valid (of_fn ..) ..` obtained from
+   `of_fn_valid` must be re-keyed to the read value before `call`. *)
+ghost fn valid_cast (#a #b: Type0) (#pre: a -> slprop) (#post: a -> b -> slprop)
+  (f g: func_ptr a b)
+  requires is_valid f pre post ** pure (f == g)
+  ensures is_valid g pre post
+{
+  unfold (is_valid f pre post);
+  fold (is_valid g pre post);
+}
+
+
 (* The null function pointer. *)
 val null (a b: Type0) : func_ptr a b
 
