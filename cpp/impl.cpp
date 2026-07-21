@@ -279,7 +279,24 @@ public:
     }
     auto qt = f->getType();
     auto *qtPtr = qt.IgnoreParens().getTypePtr();
-    if (isa<VariableArrayType>(qtPtr) || isa<IncompleteArrayType>(qtPtr)) {
+    if (auto *iat = dyn_cast<IncompleteArrayType>(qtPtr)) {
+      // Flexible array member: `T name[]` as the last field of a struct (C11
+      // 6.7.2.1). Clang guarantees it is the last field. Model it inline as an
+      // unsized `array_spec T` in the noeq record; a `_refines(...)` clause on
+      // the field supplies an optional length refinement.
+      if (inUnion) {
+        reportUnsupported(f->getSourceRange(), floc,
+                          "unsupported flexible array member in union", "");
+        return;
+      }
+      auto elemTy =
+          trQualType(iat->getElementType(), f->getSourceRange(), liftStructs);
+      builder.field(
+          ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
+          trTypeAttrs(f->getAttrs(),
+                      mk_flex_array_type(getRange(f->getSourceRange()),
+                                         std::move(elemTy))));
+    } else if (isa<VariableArrayType>(qtPtr)) {
       reportUnsupported(f->getSourceRange(), floc,
                         "unsupported non-constant-length array field", "");
     } else {
@@ -455,6 +472,13 @@ public:
         } else if (auto ref = isUnaryAttrOf(ann, "pal-refine-always")) {
           ty = mk_type_refine_always(std::move(loc), std::move(ty),
                                      std::move(ref.value()));
+        } else if (auto ref = isUnaryAttrOf(ann, "pal-refines")) {
+          // `_refines(p)` on a flexible array member: an always-true length
+          // refinement (relating the FAM length to a sibling field). Modeled
+          // as `RefineAlways`; emit lifts the relation into a `pure` fact in
+          // the struct predicate.
+          ty = mk_type_refine_always(std::move(loc), std::move(ty),
+                                     std::move(ref.value()));
         } else if (auto ref = isUnaryAttrOf(ann, "pal-refine-uninit")) {
           ty = mk_type_refine_uninit(std::move(loc), std::move(ty),
                                      std::move(ref.value()));
@@ -612,12 +636,36 @@ public:
     for (unsigned i = 0; i < init->getNumInits(); ++i) {
       auto *fieldInit = init->getInit(i);
       auto *field = *std::next(decl->field_begin(), i);
+      // A flexible array member cannot be initialized in a C compound literal;
+      // Clang supplies an implicit (empty) initializer for it. Skip it here so
+      // the emitter fills it with its default (a length-0 array).
+      if (field->getType()->isIncompleteArrayType())
+        continue;
       auto floc = getRange(fieldInit->getSourceRange());
       auto fieldName =
           ctx.mk_ident(toStr(fieldNameStr(field)), std::move(floc));
       builder.field(std::move(fieldName), trRValue(fieldInit));
     }
     return builder.build();
+  }
+
+  // For a flexible-array-member allocation's trailing size term, return the
+  // count operand `n` of `n * sizeof(elem)` or `sizeof(elem) * n` (the
+  // non-sizeof multiplicand). Returns nullptr if the term is not a recognized
+  // product with a type-sizeof factor.
+  static Expr *flexArrayCountSide(Expr *e) {
+    auto *mul = dyn_cast<BinaryOperator>(e->IgnoreParenImpCasts());
+    if (!mul || mul->getOpcode() != BO_Mul)
+      return nullptr;
+    auto isTypeSizeof = [](Expr *x) {
+      auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(x->IgnoreParenImpCasts());
+      return s && s->getKind() == UETT_SizeOf && s->isArgumentType();
+    };
+    if (isTypeSizeof(mul->getLHS()))
+      return mul->getRHS();
+    if (isTypeSizeof(mul->getRHS()))
+      return mul->getLHS();
+    return nullptr;
   }
 
   Rc<ir::Expr> trRValue(Expr *e) {
@@ -668,6 +716,47 @@ public:
                   auto allocTy = trQualType(sizeofExpr->getArgumentType(),
                                             sizeofExpr->getSourceRange());
                   return mk_malloc(std::move(loc), std::move(allocTy));
+                }
+              }
+              // Flexible array member allocation:
+              //   malloc(sizeof(struct foo) + n * sizeof(elem))
+              // The trailing-array term is runtime sizing that Pulse models via
+              // the inline ghost `array_spec`; translate identically to a plain
+              // struct malloc of the header type (dropping the array term).
+              if (auto *binOp = dyn_cast<BinaryOperator>(arg)) {
+                if (binOp->getOpcode() == BO_Add) {
+                  auto structSizeofSide =
+                      [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
+                    auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
+                        e->IgnoreParenImpCasts());
+                    if (s && s->getKind() == UETT_SizeOf &&
+                        s->isArgumentType() &&
+                        s->getArgumentType()->isRecordType())
+                      return s;
+                    return nullptr;
+                  };
+                  const UnaryExprOrTypeTraitExpr *structSide =
+                      structSizeofSide(binOp->getLHS());
+                  Expr *arrayTerm = binOp->getRHS();
+                  if (!structSide) {
+                    structSide = structSizeofSide(binOp->getRHS());
+                    arrayTerm = binOp->getLHS();
+                  }
+                  if (structSide) {
+                    auto allocTy = trQualType(structSide->getArgumentType(),
+                                              structSide->getSourceRange());
+                    // Extract `n` from the trailing array term `n *
+                    // sizeof(elem)` or `sizeof(elem) * n`, so the flexible tail
+                    // is sized `n`.
+                    if (Expr *countSide = flexArrayCountSide(arrayTerm)) {
+                      auto countExpr = trRValue(countSide);
+                      return mk_malloc_flex(std::move(loc), std::move(allocTy),
+                                            std::move(countExpr));
+                    }
+                    // Unrecognized array term: fall back to an empty flexible
+                    // tail (plain struct malloc).
+                    return mk_malloc(std::move(loc), std::move(allocTy));
+                  }
                 }
               }
               // Array: malloc(sizeof(T) * n) or malloc(n * sizeof(T))
@@ -721,6 +810,53 @@ public:
                   auto countExpr = trRValue(countArg);
                   return mk_calloc_array(std::move(loc), std::move(allocTy),
                                          std::move(countExpr));
+                }
+              }
+              // Flexible array member allocation:
+              //   calloc(1, sizeof(struct foo) + n * sizeof(elem))
+              // Zeroing counterpart of the malloc FAM idiom above (mirrors
+              // MsQuic's `QuicCidNewNullSource`, which allocates the sized
+              // block and zeroes it). Translate to a single zeroed struct
+              // allocation of the header type, dropping the runtime array term;
+              // the zeroed struct's flexible array starts empty (length 0).
+              if (auto *intLit = dyn_cast<IntegerLiteral>(countArg)) {
+                if (intLit->getValue() == 1) {
+                  if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
+                    if (binOp->getOpcode() == BO_Add) {
+                      auto structSizeofSide =
+                          [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
+                        auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
+                            e->IgnoreParenImpCasts());
+                        if (s && s->getKind() == UETT_SizeOf &&
+                            s->isArgumentType() &&
+                            s->getArgumentType()->isRecordType())
+                          return s;
+                        return nullptr;
+                      };
+                      const UnaryExprOrTypeTraitExpr *structSide =
+                          structSizeofSide(binOp->getLHS());
+                      Expr *arrayTerm = binOp->getRHS();
+                      if (!structSide) {
+                        structSide = structSizeofSide(binOp->getRHS());
+                        arrayTerm = binOp->getLHS();
+                      }
+                      if (structSide) {
+                        auto allocTy = trQualType(structSide->getArgumentType(),
+                                                  structSide->getSourceRange());
+                        // Extract `n` from the trailing array term so the
+                        // zeroed flexible tail is sized `n`.
+                        if (Expr *countSide = flexArrayCountSide(arrayTerm)) {
+                          auto countExpr = trRValue(countSide);
+                          return mk_calloc_flex(std::move(loc),
+                                                std::move(allocTy),
+                                                std::move(countExpr));
+                        }
+                        // Unrecognized array term: fall back to an empty
+                        // flexible tail (plain zeroed struct calloc).
+                        return mk_calloc(std::move(loc), std::move(allocTy));
+                      }
+                    }
+                  }
                 }
               }
               // calloc(1, n * sizeof(T)) or calloc(1, sizeof(T) * n) → array
@@ -1671,30 +1807,74 @@ public:
         return enss;
       };
 
-      // Walk the compound statement collecting case/default groups
-      bool seenDefault = false;
-      for (auto *child : comp->body()) {
-        auto childLoc = getRange(child->getSourceRange());
+      auto containsSwitchBreak = [&](auto &self, Stmt *s) -> bool {
+        if (dyn_cast<BreakStmt>(s))
+          return true;
+        if (dyn_cast<SwitchStmt>(s) || dyn_cast<ForStmt>(s) ||
+            dyn_cast<WhileStmt>(s) || dyn_cast<DoStmt>(s))
+          return false;
+        for (auto *child : s->children()) {
+          if (child && self(self, child))
+            return true;
+        }
+        return false;
+      };
+      bool switchCanBreak = false;
+      for (auto *child : comp->body())
+        switchCanBreak |= containsSwitchBreak(containsSwitchBreak, child);
 
+      // Walk the compound statement collecting case/default groups
+      // Clang attaches only the first statement after a label to CaseStmt or
+      // DefaultStmt. The remaining statements are siblings in the compound
+      // body, but are still controlled by that label in C.
+      struct SwitchGroup {
+        Stmt *label;
+        bool isDefault;
+        std::vector<Expr *> caseValues;
+        std::vector<Stmt *> body;
+      };
+      std::vector<SwitchGroup> groups;
+      bool seenDefault = false;
+      SwitchGroup *currentGroup = nullptr;
+      for (auto *child : comp->body()) {
         if (auto *cs = dyn_cast<CaseStmt>(child)) {
+          auto childLoc = getRange(child->getSourceRange());
           if (seenDefault) {
             reportUnsupported(cs->getSourceRange(), childLoc,
                               "default must be the last case in switch", "");
             break;
           }
 
-          // Collect all case values from chained cases (case 1: case 2: ...)
-          // and find the final sub-statement
-          std::vector<Expr *> caseValues;
+          groups.push_back({child, false, {}, {}});
+          currentGroup = &groups.back();
           Stmt *caseBody = child;
           while (auto *innerCs = dyn_cast<CaseStmt>(caseBody)) {
-            caseValues.push_back(innerCs->getLHS());
+            currentGroup->caseValues.push_back(innerCs->getLHS());
             caseBody = innerCs->getSubStmt();
           }
+          if (caseBody)
+            currentGroup->body.push_back(caseBody);
+        } else if (auto *ds = dyn_cast<DefaultStmt>(child)) {
+          seenDefault = true;
+          groups.push_back({child, true, {}, {}});
+          currentGroup = &groups.back();
+          if (ds->getSubStmt())
+            currentGroup->body.push_back(ds->getSubStmt());
+        } else if (currentGroup) {
+          currentGroup->body.push_back(child);
+        } else {
+          // Statements before the first label are unreachable in C, but retain
+          // the old behavior so malformed inputs still receive diagnostics.
+          trStmt(stmts, child);
+        }
+      }
 
+      for (auto &group : groups) {
+        auto childLoc = getRange(group.label->getSourceRange());
+        if (!group.isDefault) {
           // Build match condition: scrut == v1 || scrut == v2 || ...
           Rc<ir::Expr> matchCond = mk_bool_lit(childLoc.clone(), false);
-          for (auto *cv : caseValues) {
+          for (auto *cv : group.caseValues) {
             auto scrutRead = mk_rvalue_lvalue(
                 childLoc.clone(),
                 mk_lvalue_var(childLoc.clone(), scrutId.clone()));
@@ -1723,18 +1903,26 @@ public:
           thenStmts.push(mk_assign(
               childLoc.clone(), mk_lvalue_var(childLoc.clone(), hitId.clone()),
               mk_bool_lit(childLoc.clone(), true)));
-          if (caseBody)
-            trStmt(thenStmts, caseBody);
+          for (auto *bodyStmt : group.body)
+            trStmt(thenStmts, bodyStmt);
 
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(cond),
                            std::move(thenStmts), std::move(elseStmts),
                            caseEnss()));
 
-        } else if (dyn_cast<DefaultStmt>(child)) {
-          seenDefault = true;
-          auto *ds = dyn_cast<DefaultStmt>(child);
-
+        } else {
+          if (!switchCanBreak) {
+            // With no break belonging to this switch, reaching default means
+            // its body runs. Emitting it directly preserves terminating
+            // returns without introducing an unnecessary conditional join.
+            stmts.push(mk_assign(childLoc.clone(),
+                                 mk_lvalue_var(childLoc.clone(), hitId.clone()),
+                                 mk_bool_lit(childLoc.clone(), true)));
+            for (auto *bodyStmt : group.body)
+              trStmt(stmts, bodyStmt);
+            continue;
+          }
           // Condition: !brk
           auto notBrk = mk_rvalue_unop(
               childLoc.clone(), ir::UnOp::Not(),
@@ -1745,17 +1933,13 @@ public:
           thenStmts.push(mk_assign(
               childLoc.clone(), mk_lvalue_var(childLoc.clone(), hitId.clone()),
               mk_bool_lit(childLoc.clone(), true)));
-          if (ds->getSubStmt())
-            trStmt(thenStmts, ds->getSubStmt());
+          for (auto *bodyStmt : group.body)
+            trStmt(thenStmts, bodyStmt);
 
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(notBrk),
                            std::move(thenStmts), std::move(elseStmts),
                            caseEnss()));
-
-        } else {
-          // Bare statement outside case/default — translate directly
-          trStmt(stmts, child);
         }
       }
 

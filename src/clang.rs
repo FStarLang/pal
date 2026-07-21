@@ -597,6 +597,9 @@ fn mk_pointer_array(loc: Rc<SourceInfo>, to: Rc<Type>) -> Rc<Type> {
 fn mk_fixed_array_type(loc: Rc<SourceInfo>, elem_ty: Rc<Type>, length: u64) -> Rc<Type> {
     mk_ast(loc, TypeT::FixedArray(elem_ty, length))
 }
+fn mk_flex_array_type(loc: Rc<SourceInfo>, elem_ty: Rc<Type>) -> Rc<Type> {
+    mk_ast(loc, TypeT::FlexArray(elem_ty))
+}
 fn mk_type_struct(loc: Rc<SourceInfo>, n: Rc<Ident>) -> Rc<Type> {
     mk_ast(loc, TypeT::TypeRef(TypeRefKind::Struct(n)))
 }
@@ -748,6 +751,12 @@ fn mk_calloc(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
 }
 fn mk_calloc_array(loc: Rc<SourceInfo>, ty: Rc<Type>, count: Rc<Expr>) -> Rc<Expr> {
     mk_ast(loc, ExprT::CallocArray(ty, count))
+}
+fn mk_malloc_flex(loc: Rc<SourceInfo>, ty: Rc<Type>, count: Rc<Expr>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::MallocFlex(ty, count))
+}
+fn mk_calloc_flex(loc: Rc<SourceInfo>, ty: Rc<Type>, count: Rc<Expr>) -> Rc<Expr> {
+    mk_ast(loc, ExprT::CallocFlex(ty, count))
 }
 fn mk_memset(
     loc: Rc<SourceInfo>,

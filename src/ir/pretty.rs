@@ -137,6 +137,7 @@ impl PrettyIR for TypeT {
             TypeT::Pointer(ty, PointerKind::Core) => ty.to_doc().append(RcDoc::text("*[core]")),
             TypeT::Pointer(ty, PointerKind::Unknown) => ty.to_doc().append(RcDoc::text("[?]")),
             TypeT::FixedArray(ty, len) => ty.to_doc().append(RcDoc::text(format!("[{}]", len))),
+            TypeT::FlexArray(ty) => ty.to_doc().append(RcDoc::text("[]")),
             TypeT::SpecInt => RcDoc::text("_specint"),
             TypeT::SpecNat => RcDoc::text("_specnat"),
             TypeT::SLProp => RcDoc::text("_slprop"),
@@ -302,6 +303,22 @@ impl PrettyIR for ExprT {
                 .append(ty.to_doc())
                 .append("))")
                 .nest(4)
+                .group(),
+            ExprT::MallocFlex(ty, count) => RcDoc::text("malloc(sizeof(")
+                .append(ty.to_doc())
+                .nest(2)
+                .append(") + ")
+                .append(count.to_doc())
+                .append(" * sizeof(elem))")
+                .nest(2)
+                .group(),
+            ExprT::CallocFlex(ty, count) => RcDoc::text("calloc(1, sizeof(")
+                .append(ty.to_doc())
+                .nest(2)
+                .append(") + ")
+                .append(count.to_doc())
+                .append(" * sizeof(elem))")
+                .nest(2)
                 .group(),
             ExprT::Memset(ty, ptr, value, count) => RcDoc::text("memset(")
                 .append(ptr.to_doc())
