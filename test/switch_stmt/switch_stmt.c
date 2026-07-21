@@ -45,3 +45,14 @@ int32_t classify(int32_t x)
     }
     return r;
 }
+
+/* Every path terminates in the switch; no trailing return is required. */
+int32_t classify_with_returns(int32_t x)
+{
+    switch (x) {
+    case 0:
+        return 10;
+    default:
+        return 20;
+    }
+}

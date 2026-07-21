@@ -1774,6 +1774,23 @@ public:
         return {};
       }
 
+      auto containsSwitchBreak = [&](auto &self, Stmt *s) -> bool {
+        if (dyn_cast<BreakStmt>(s))
+          return true;
+        if (dyn_cast<SwitchStmt>(s) || dyn_cast<ForStmt>(s) ||
+            dyn_cast<WhileStmt>(s) || dyn_cast<DoStmt>(s))
+          return false;
+        for (auto *child : s->children()) {
+          if (child && self(self, child))
+            return true;
+        }
+        return false;
+      };
+      bool switchCanBreak = false;
+      for (auto *child : comp->body())
+        switchCanBreak |= containsSwitchBreak(containsSwitchBreak, child);
+
+      // Walk the compound statement collecting case/default groups
       // Clang attaches only the first statement after a label to CaseStmt or
       // DefaultStmt. The remaining statements are siblings in the compound
       // body, but are still controlled by that label in C.
@@ -1862,6 +1879,17 @@ public:
                            Vec<Rc<ir::Expr>>::new_()));
 
         } else {
+          if (!switchCanBreak) {
+            // With no break belonging to this switch, reaching default means
+            // its body runs. Emitting it directly preserves terminating
+            // returns without introducing an unnecessary conditional join.
+            stmts.push(mk_assign(childLoc.clone(),
+                                 mk_lvalue_var(childLoc.clone(), hitId.clone()),
+                                 mk_bool_lit(childLoc.clone(), true)));
+            for (auto *bodyStmt : group.body)
+              trStmt(stmts, bodyStmt);
+            continue;
+          }
           // Condition: !brk
           auto notBrk = mk_rvalue_unop(
               childLoc.clone(), ir::UnOp::Not(),
