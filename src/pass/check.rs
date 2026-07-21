@@ -724,6 +724,7 @@ impl<'a> Checker<'a> {
             ensures,
             is_pure: _,
             is_rec: _,
+            is_total: _,
             decreases,
         }: &FnDecl,
     ) {

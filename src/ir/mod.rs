@@ -585,6 +585,7 @@ pub struct FnDecl {
     pub ensures: Exprs,
     pub is_pure: bool,
     pub is_rec: bool,
+    pub is_total: bool,
     pub decreases: Option<Rc<Expr>>,
 }
 
