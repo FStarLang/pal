@@ -20,9 +20,3 @@ int stack_array_read()
     arr[0] = 42;
     return arr[0];
 }
-    _ensures(return == 42)
-{
-    int arr[2];
-    arr[0] = 42;
-    return arr[0];
-}
