@@ -65,6 +65,12 @@ mod crate::ir {
         fn push(&mut self, Rc<Expr>);
     }
 
+    type Vec<Rc<Type>> {
+        #heap_allocated;
+        fn new() -> Vec<Rc<Type>>;
+        fn push(&mut self, Rc<Type>);
+    }
+
     type Option<Rc<Expr>> {
         #layout(size=8, align=8);
         constructor None;
@@ -245,6 +251,7 @@ mod crate::clang {
     fn mk_pointer_array(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_fixed_array_type(Rc<SourceInfo>, Rc<Type>, u64) -> Rc<Type>;
     fn mk_flex_array_type(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
+    fn mk_type_fnptr(Rc<SourceInfo>, Vec<Rc<Type>>, Rc<Type>) -> Rc<Type>;
     fn mk_type_struct(Rc<SourceInfo>, Rc<Ident>) -> Rc<Type>;
     fn mk_type_union(Rc<SourceInfo>, Rc<Ident>) -> Rc<Type>;
     fn mk_type_typedef(Rc<SourceInfo>, Rc<Ident>) -> Rc<Type>;
@@ -270,6 +277,8 @@ mod crate::clang {
     fn mk_rvalue_unop(Rc<SourceInfo>, UnOp, Rc<Expr>) -> Rc<Expr>;
     fn mk_rvalue_binop(Rc<SourceInfo>, BinOp, Rc<Expr>, Rc<Expr>) -> Rc<Expr>;
     fn mk_rvalue_fncall(Rc<SourceInfo>, Rc<Ident>, Vec<Rc<Expr>>) -> Rc<Expr>;
+    fn mk_rvalue_fnref(Rc<SourceInfo>, Rc<Ident>) -> Rc<Expr>;
+    fn mk_rvalue_fnptr_call(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Expr>>) -> Rc<Expr>;
     fn mk_cast(Rc<SourceInfo>, Rc<Expr>, Rc<Type>) -> Rc<Expr>;
     fn mk_container_of(Rc<SourceInfo>, Rc<Expr>, Rc<Type>, Rc<Ident>) -> Rc<Expr>;
     fn mk_rvalue_err(Rc<SourceInfo>, Rc<Type>) -> Rc<Expr>;

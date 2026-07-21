@@ -109,6 +109,13 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
                 rename_expr_in_place(Rc::make_mut(arg), renames);
             }
         }
+        ExprT::FnRef(_) => {}
+        ExprT::FnPtrCall(f, args) => {
+            rename_expr_in_place(Rc::make_mut(f), renames);
+            for arg in args {
+                rename_expr_in_place(Rc::make_mut(arg), renames);
+            }
+        }
         ExprT::Cast(a, ty) => {
             rename_expr_in_place(Rc::make_mut(a), renames);
             rename_type_in_place(Rc::make_mut(ty), renames);
@@ -199,6 +206,12 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
             rename_type_in_place(Rc::make_mut(inner), renames);
             rename_type_in_place(Rc::make_mut(binder_ty), renames);
             rename_shadowed_expr(binder, pred, renames);
+        }
+        TypeT::FnPtr { args, ret } => {
+            for a in args {
+                rename_type_in_place(Rc::make_mut(a), renames);
+            }
+            rename_type_in_place(Rc::make_mut(ret), renames);
         }
         TypeT::Void
         | TypeT::Bool
@@ -535,6 +548,13 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
             collect_refs_expr(c, out);
         }
         ExprT::FnCall(_, args) => {
+            for a in args {
+                collect_refs_expr(a, out);
+            }
+        }
+        ExprT::FnRef(_) => {}
+        ExprT::FnPtrCall(f, args) => {
+            collect_refs_expr(f, out);
             for a in args {
                 collect_refs_expr(a, out);
             }

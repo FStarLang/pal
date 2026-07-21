@@ -372,6 +372,17 @@ public:
     }
   }
 
+  Rc<ir::Type> trFnPtrType(const FunctionProtoType *proto, SourceRange range,
+                           Rc<ir::SourceInfo> loc,
+                           AnonNameGen *liftStructs = nullptr) {
+    auto args = Vec<Rc<ir::Type>>::new_();
+    for (auto param : proto->getParamTypes()) {
+      args.push(trQualType(param, range, liftStructs));
+    }
+    auto ret = trQualType(proto->getReturnType(), range, liftStructs);
+    return mk_type_fnptr(std::move(loc), std::move(args), std::move(ret));
+  }
+
   Rc<ir::Type> trQualType(QualType t, SourceRange range,
                           AnonNameGen *liftStructs = nullptr) {
     t = t.IgnoreParens();
@@ -387,9 +398,19 @@ public:
       return trQualType(elab->desugar(), range, liftStructs);
 #endif
     } else if (auto ptr = dyn_cast<PointerType>(t)) {
+      // Pointer to a (prototyped) function: `R (*)(A0, A1, ...)`. Modeled as a
+      // dedicated function-pointer IR type with the argument types collected in
+      // order and tupled on emission.
+      if (auto proto = ptr->getPointeeType()->getAs<FunctionProtoType>()) {
+        return trFnPtrType(proto, range, loc.clone(), liftStructs);
+      }
       return mk_pointer_unknown(
           std::move(loc),
           trQualType(ptr->getPointeeType(), /*TODO*/ range, liftStructs));
+    } else if (auto proto = t->getAs<FunctionProtoType>()) {
+      // A bare (undecayed) function type reached as a value type — treat the
+      // function-to-pointer decay result the same as a function pointer.
+      return trFnPtrType(proto, range, std::move(loc), liftStructs);
     } else if (auto adj = dyn_cast<AdjustedType>(t)) {
       return trQualType(adj->getOriginalType(), range, liftStructs);
     } else if (auto cat = dyn_cast<ConstantArrayType>(t)) {
@@ -462,7 +483,13 @@ public:
     return mk_type_err(std::move(loc));
   }
 
-  Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty) {
+  Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty,
+                           QualType declQt = QualType(),
+                           SourceRange declRange = SourceRange()) {
+    (void)declQt;
+    (void)declRange;
+    bool sawNullable = false;
+    std::optional<Rc<ir::SourceInfo>> nullableLoc;
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
       if (auto ann = dyn_cast<AnnotateAttr>(*it)) {
         auto loc = getRange(ann->getRange());
@@ -500,6 +527,9 @@ public:
           ty = mk_type_plain(std::move(loc), std::move(ty));
         } else if (ann->getAnnotation() == "pal-nullable" &&
                    ann->args_size() == 0) {
+          sawNullable = true;
+          if (!nullableLoc)
+            nullableLoc = getRange(ann->getRange());
           ty = mk_type_nullable(std::move(loc), std::move(ty));
         } else if (ann->getAnnotation() == "pal-array" &&
                    ann->args_size() == 0) {
@@ -513,6 +543,8 @@ public:
         }
       }
     }
+    (void)sawNullable;
+    (void)nullableLoc;
     return ty;
   }
 
@@ -688,6 +720,11 @@ public:
         return mk_rvalue_lvalue(std::move(loc), trLValue(ic->getSubExpr()));
 
       case CK_NoOp:
+        return trRValue(ic->getSubExpr());
+      case CK_FunctionToPointerDecay:
+        // `add` used as a value decays to a function pointer; translate the
+        // underlying function reference directly (the DeclRefExpr arm below
+        // produces a FnRef for a FunctionDecl).
         return trRValue(ic->getSubExpr());
       case CK_ArrayToPointerDecay: {
         auto *subExpr = ic->getSubExpr()->IgnoreParenImpCasts();
@@ -1074,6 +1111,16 @@ public:
     } else if (auto uo = dyn_cast<UnaryOperator>(e)) {
       switch (uo->getOpcode()) {
       case UO_AddrOf:
+        // `&func` where `func` is a function: produce a function reference
+        // rather than address-of an lvalue. `&func` and bare `func` (decay)
+        // both denote the same function-pointer value.
+        if (auto *dre = dyn_cast<DeclRefExpr>(
+                uo->getSubExpr()->IgnoreParenImpCasts())) {
+          if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
+            auto id = ctx.mk_ident(toStr(fd->getName()), loc.clone());
+            return mk_rvalue_fnref(std::move(loc), std::move(id));
+          }
+        }
         return mk_rvalue_ref(std::move(loc), trLValue(uo->getSubExpr()));
 
       case UO_LNot:
@@ -1312,6 +1359,17 @@ public:
           args.push(trRValue(arg));
         }
         return mk_rvalue_fncall(std::move(loc), std::move(fn), std::move(args));
+      } else {
+        // Indirect call through a function-pointer value: `fptr(a, b, ...)`.
+        // Clang gives no direct callee; the callee is an rvalue of
+        // function-pointer type.
+        auto callee = trRValue(c->getCallee());
+        auto args = Vec<Rc<ir::Expr>>::new_();
+        for (auto arg : c->arguments()) {
+          args.push(trRValue(arg));
+        }
+        return mk_rvalue_fnptr_call(std::move(loc), std::move(callee),
+                                    std::move(args));
       }
     } else if (auto *cl = dyn_cast<CompoundLiteralExpr>(e)) {
       auto *init = dyn_cast<InitListExpr>(cl->getInitializer());
@@ -1334,6 +1392,12 @@ public:
         val.toString(valStr, 10, val.isSigned());
         return mk_int_lit(std::move(loc), mk_bigint(toStr(StringRef(valStr))),
                           trQualType(e->getType(), e->getSourceRange()));
+      }
+      // A bare reference to a function (function-to-pointer decay): produce a
+      // function reference, identical to `&func`.
+      if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
+        auto id = ctx.mk_ident(toStr(fd->getName()), loc.clone());
+        return mk_rvalue_fnref(std::move(loc), std::move(id));
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
       return mk_rvalue_lvalue(std::move(loc), trLValue(e));
@@ -2288,7 +2352,8 @@ public:
           DeclBuilder::new_(getRange(FD->getSourceRange()), ident.clone());
       for (auto param : FD->parameters()) {
         auto ty = trQualType(param->getType(), param->getSourceRange());
-        ty = trTypeAttrs(param->getAttrs(), std::move(ty));
+        ty = trTypeAttrs(param->getAttrs(), std::move(ty), param->getType(),
+                         param->getSourceRange());
         auto mode = hasConsumesAttr(param->getAttrs())
                         ? ir::ParamMode::Consumed()
                     : hasOutAttr(param->getAttrs())

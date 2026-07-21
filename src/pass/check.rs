@@ -117,6 +117,12 @@ impl<'a> Checker<'a> {
             TypeT::FlexArray(elem_ty) => {
                 self.check_type(env, elem_ty);
             }
+            TypeT::FnPtr { args, ret, .. } => {
+                for a in args {
+                    self.check_type(env, a);
+                }
+                self.check_type(env, ret);
+            }
             TypeT::SpecInt | TypeT::SpecNat => {}
             TypeT::SLProp => {}
             TypeT::TypeRef(TypeRefKind::Typedef(n)) => {
@@ -166,6 +172,7 @@ impl<'a> Checker<'a> {
             TypeT::Pointer(_, _) => true, // == 0 ?
             TypeT::FixedArray(_, _) => false,
             TypeT::FlexArray(_) => false,
+            TypeT::FnPtr { .. } => true, // == 0 (null check)
             TypeT::SpecInt | TypeT::SpecNat => true,
             TypeT::SLProp => true, // true/false
             TypeT::TypeRef(_) => false,
@@ -417,6 +424,17 @@ impl<'a> Checker<'a> {
                 }
                 for (decl_arg, arg) in fn_decl.args.iter().zip(args.iter()) {
                     self.check_has_type(env, arg, decl_arg.ty.clone().into());
+                }
+            }
+            ExprT::FnRef(f) => {
+                if env.lookup_fn(f).is_none() {
+                    self.report(format!("unknown function {}", f.val), &rval.loc);
+                }
+            }
+            ExprT::FnPtrCall(f, args) => {
+                self.check_rvalue(env, f);
+                for arg in args {
+                    self.check_rvalue(env, arg)
                 }
             }
             ExprT::Cast(rval, ty) => {

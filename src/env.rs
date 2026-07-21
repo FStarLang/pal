@@ -377,6 +377,28 @@ impl Env {
                 Some(f_decl) => Ok(f_decl.ret_type.clone().into()),
                 None => Err(InferError::NotAFunction(f.clone())),
             },
+            ExprT::FnRef(f) => match self.globals.fns.get(&f.val) {
+                Some(f_decl) => {
+                    let args = f_decl.args.iter().map(|a| a.ty.clone()).collect();
+                    Ok(expr
+                        .reuse_loc(TypeT::FnPtr {
+                            args,
+                            ret: f_decl.ret_type.clone(),
+                        })
+                        .into())
+                }
+                None => Err(InferError::NotAFunction(f.clone())),
+            },
+            ExprT::FnPtrCall(f, _args) => {
+                let f_ty = self.vtype_whnf(self.infer_expr(f)?);
+                match &f_ty.val {
+                    TypeT::FnPtr { ret, .. } => Ok(ret.clone().into()),
+                    _ => Err(InferError::NotAFunction(match &f.val {
+                        ExprT::Var(id) | ExprT::FnRef(id) => id.clone(),
+                        _ => Rc::new(f.reuse_loc(Rc::from("<indirect callee>"))),
+                    })),
+                }
+            }
             ExprT::Cast(_, ty) => Ok(ty.clone().into()),
             ExprT::ContainerOf(_, struct_ty, _) => Ok(expr
                 .reuse_loc(TypeT::Pointer(struct_ty.clone(), PointerKind::Ref))
@@ -575,6 +597,7 @@ impl Env {
             either_side!(TypeT::Pointer(_, _)) => None,
             either_side!(TypeT::FixedArray(_, _)) => None,
             either_side!(TypeT::FlexArray(_)) => None,
+            either_side!(TypeT::FnPtr { .. }) => None,
 
             either_side!(TypeT::TypeRef(_)) => None,
 
@@ -608,6 +631,7 @@ impl Env {
             | TypeT::Pointer(_, _)
             | TypeT::FixedArray(_, _)
             | TypeT::FlexArray(_)
+            | TypeT::FnPtr { .. }
             | TypeT::SpecInt
             | TypeT::SpecNat
             | TypeT::SLProp
@@ -651,6 +675,21 @@ impl Env {
             }
             (TypeT::FixedArray(t1, n1), TypeT::FixedArray(t2, n2)) => {
                 n1 == n2 && self.vtype_eq(t1.clone().into(), t2.clone().into())
+            }
+            (
+                TypeT::FnPtr {
+                    args: a1, ret: r1, ..
+                },
+                TypeT::FnPtr {
+                    args: a2, ret: r2, ..
+                },
+            ) => {
+                a1.len() == a2.len()
+                    && self.vtype_eq(r1.clone().into(), r2.clone().into())
+                    && a1
+                        .iter()
+                        .zip(a2.iter())
+                        .all(|(x, y)| self.vtype_eq(x.clone().into(), y.clone().into()))
             }
             (TypeT::SpecInt, TypeT::SpecInt) => true,
             (TypeT::SpecNat, TypeT::SpecNat) => true,

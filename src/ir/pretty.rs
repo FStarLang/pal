@@ -138,6 +138,15 @@ impl PrettyIR for TypeT {
             TypeT::Pointer(ty, PointerKind::Unknown) => ty.to_doc().append(RcDoc::text("[?]")),
             TypeT::FixedArray(ty, len) => ty.to_doc().append(RcDoc::text(format!("[{}]", len))),
             TypeT::FlexArray(ty) => ty.to_doc().append(RcDoc::text("[]")),
+            TypeT::FnPtr { args, ret } => ret
+                .to_doc()
+                .append(RcDoc::text(" (*)("))
+                .append(RcDoc::intersperse(
+                    args.iter().map(|a| a.to_doc()),
+                    RcDoc::text(", "),
+                ))
+                .append(RcDoc::text(")"))
+                .group(),
             TypeT::SpecInt => RcDoc::text("_specint"),
             TypeT::SpecNat => RcDoc::text("_specnat"),
             TypeT::SLProp => RcDoc::text("_slprop"),
@@ -226,6 +235,16 @@ impl PrettyIR for ExprT {
                 .nest(2)
                 .group(),
             ExprT::FnCall(f, args) => f
+                .to_doc()
+                .append("(")
+                .append(RcDoc::intersperse(
+                    args.iter().map(|arg| arg.to_doc()),
+                    RcDoc::text(",").append(RcDoc::line()),
+                ))
+                .append(")")
+                .group(),
+            ExprT::FnRef(f) => RcDoc::text("&").append(f.to_doc()),
+            ExprT::FnPtrCall(f, args) => f
                 .to_doc()
                 .append("(")
                 .append(RcDoc::intersperse(

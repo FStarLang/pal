@@ -151,6 +151,16 @@ pub enum TypeT {
     SizeT,
     PtrdiffT,
     Pointer(Rc<Type>, PointerKind),
+    /// C pointer-to-function type. `int (*)(int, int)` becomes
+    /// `FnPtr { args: [int, int], ret: int }`.
+    ///
+    /// In the deep (physical) model a function-pointer value is stored as a real
+    /// `Pulse.Lib.C.FuncPtr.func_ptr ARG RET` value, where `ARG` is the tupled
+    /// argument type and `RET` the return type.
+    FnPtr {
+        args: Vec<Rc<Type>>,
+        ret: Rc<Type>,
+    },
     /// Fixed-size C array type `T[N]`. Decays to `Pointer(T, Array)` in
     /// function parameters (handled by the decay pass).
     FixedArray(Rc<Type>, u64),
@@ -307,6 +317,16 @@ pub enum ExprT {
     UnOp(UnOp, Rc<Expr>),
     BinOp(BinOp, Rc<Expr>, Rc<Expr>),
     FnCall(Rc<Ident>, Exprs),
+    /// Reference to a named top-level C function used as a value (function-to-
+    /// pointer decay `add` or address-of `&add`). In the deep model this becomes
+    /// the concrete `Pulse.Lib.C.FuncPtr.of_fn func_<name>_pre func_<name>_post
+    /// func_<name>__fp` value.
+    FnRef(Rc<Ident>),
+    /// Indirect call through a function-pointer value: `fptr(a, b)`. Holds the
+    /// callee expression and the argument list. Emitted as a
+    /// `Pulse.Lib.C.FuncPtr.call` through the read physical value, at the spec of
+    /// the function the pointer currently holds.
+    FnPtrCall(Rc<Expr>, Exprs),
     Cast(Rc<Expr>, Rc<Type>),
     /// `_container_of(ptr, struct T, field)` — recover a `ref` to the enclosing
     /// struct `T` from a `ref` to its `field` (the CONTAINING_RECORD / offsetof

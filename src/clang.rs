@@ -607,6 +607,9 @@ fn mk_fixed_array_type(loc: Rc<SourceInfo>, elem_ty: Rc<Type>, length: u64) -> R
 fn mk_flex_array_type(loc: Rc<SourceInfo>, elem_ty: Rc<Type>) -> Rc<Type> {
     mk_ast(loc, TypeT::FlexArray(elem_ty))
 }
+fn mk_type_fnptr(loc: Rc<SourceInfo>, args: Vec<Rc<Type>>, ret: Rc<Type>) -> Rc<Type> {
+    mk_ast(loc, TypeT::FnPtr { args, ret })
+}
 fn mk_type_struct(loc: Rc<SourceInfo>, n: Rc<Ident>) -> Rc<Type> {
     mk_ast(loc, TypeT::TypeRef(TypeRefKind::Struct(n)))
 }
@@ -732,6 +735,12 @@ fn mk_rvalue_ref(loc: Rc<SourceInfo>, lval: Rc<Expr>) -> Rc<Expr> {
 }
 fn mk_rvalue_fncall(loc: Rc<SourceInfo>, f: Rc<Ident>, args: Vec<Rc<Expr>>) -> Rc<Expr> {
     ExprT::FnCall(f, args).with_loc(loc)
+}
+fn mk_rvalue_fnref(loc: Rc<SourceInfo>, f: Rc<Ident>) -> Rc<Expr> {
+    ExprT::FnRef(f).with_loc(loc)
+}
+fn mk_rvalue_fnptr_call(loc: Rc<SourceInfo>, f: Rc<Expr>, args: Vec<Rc<Expr>>) -> Rc<Expr> {
+    ExprT::FnPtrCall(f, args).with_loc(loc)
 }
 fn mk_cast(loc: Rc<SourceInfo>, val: Rc<Expr>, ty: Rc<Type>) -> Rc<Expr> {
     mk_ast(loc, ExprT::Cast(val, ty))
