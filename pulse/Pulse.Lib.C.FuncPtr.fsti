@@ -3,25 +3,40 @@ module Pulse.Lib.C.FuncPtr
 open Pulse
 open Pulse.Lib.C.Inhabited
 
-(* Axiomatized C function pointer. `a` is the (tupled) argument type, `b` the
-   return type. The type is abstract and inhabited by `null`, so it can be
-   stored in refs, struct fields, arrays and globals. *)
+(* ============================================================================
+   Function-pointer model: axioms vs. derived facts
+
+   A C function pointer is modelled as an abstract type equipped with a validity
+   relation to a Pulse spec. The primitives below fall into two groups.
+
+   AXIOMS (abstract `val`s with no body — the trusted core, taken on faith):
+     - func_ptr    : the abstract pointer type
+     - valid       : the (pure) "pointer meets this spec" relation
+     - null        : the null pointer
+     - of_fn       : reflect a concrete Pulse function as a pointer
+     - of_fn_valid : `of_fn` is valid at its own spec
+     - weaken      : move validity across a spec weakening
+     - call        : the single primitive for an indirect call
+     - is_null     : decidable null test
+
+   DERIVABLE (defined/proven from the axioms above — nothing new is assumed):
+     - is_valid      : `let`-definition, `pure (valid ..)`
+     - drop_is_valid : proven `ghost fn` (just `unfold`s `is_valid` to `emp`)
+     - valid_cast    : proven `ghost fn` (unfold/fold across a value equality)
+   ============================================================================ *)
+
+(* Abstract C function pointer: `a` is the (tupled) argument type, `b` the return
+   type. Inhabited by `null`, so it can be stored in refs, fields, arrays, globals. *)
 val func_ptr (a: Type0) (b: Type0) : Type0
 
-(* Validity: the pointer `f` meets the spec `(pre, post)`. A pure proposition,
-   so it can be threaded as a `squash` fact without touching the heap. *)
+(* `valid f pre post`: the pointer `f` meets the spec `(pre, post)`. A pure prop,
+   so `is_valid` is a persistent fact threadable without touching the heap. *)
 val valid (#a #b: Type0) (f: func_ptr a b) (pre: a -> slprop) (post: a -> b -> slprop) : prop
 let is_valid (#a #b: Type0) ([@@@mkey] f: func_ptr a b) (pre: a -> slprop) (post: a -> b -> slprop) : slprop = pure (valid f pre post)
 
-(* `is_valid` is a pure, persistent fact, so a surplus copy can be discarded
-   freely. This ghost step drops it back to `emp`. Because `call`'s postcondition
-   now returns `is_valid f pre post`, a caller that calls through a pointer but
-   does not itself export validity is left with a surplus `is_valid`; it discards
-   it with a source-level `_ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _)`
-   after the call (PAL does not insert this automatically). `f` is `[@@@mkey]`, so
-   the surplus resource in context is matched by the pointer and `pre`/`post` are
-   inferred. It is *proven* (not axiomatized): `is_valid` unfolds to `pure`, which
-   `elim_pure` discharges. *)
+(* Drop a surplus `is_valid` back to `emp` (it is persistent). Proven, not
+   axiomatized: `is_valid` unfolds to `pure`. `f` is `[@@@mkey]`, so the resource in
+   context is matched by the pointer and `pre`/`post` are inferred. *)
 ghost fn drop_is_valid (#a #b: Type0) (f: func_ptr a b) (pre: a -> slprop) (post: a -> b -> slprop)
   requires is_valid f pre post
   ensures emp
@@ -29,16 +44,9 @@ ghost fn drop_is_valid (#a #b: Type0) (f: func_ptr a b) (pre: a -> slprop) (post
   unfold (is_valid f pre post);
 }
 
-(* Transfer a validity fact across a provable value equality. `valid` is a pure
-   proposition of the pointer `f`, so if `f == g` then `is_valid f pre post`
-   entails `is_valid g pre post`. `f` is `[@@@mkey]`, so the surplus resource in
-   context is matched by the pointer and `pre`/`post` are inferred — the caller
-   supplies only the target pointer `g` (and the `f == g` fact discharged by SMT).
-
-   This is needed to call through a function pointer read back from an array
-   slot: `array_read` yields a value provably (but not syntactically) equal to
-   the stored `of_fn ..`, so the `is_valid (of_fn ..) ..` obtained from
-   `of_fn_valid` must be re-keyed to the read value before `call`. *)
+(* Move `is_valid` across a provable value equality `f == g`. Needed to call
+   through a pointer read back from an array slot, where the read value is only
+   provably (not syntactically) equal to the stored `of_fn ..`. *)
 ghost fn valid_cast (#a #b: Type0) (#pre: a -> slprop) (#post: a -> b -> slprop)
   (f g: func_ptr a b)
   requires is_valid f pre post ** pure (f == g)
@@ -52,27 +60,19 @@ ghost fn valid_cast (#a #b: Type0) (#pre: a -> slprop) (#post: a -> b -> slprop)
 (* The null function pointer. *)
 val null (a b: Type0) : func_ptr a b
 
-(* Reflect a concrete Pulse function (with a statically-known spec) as a
-   function pointer. pre/post are explicit to avoid higher-order-unification
-   failures. *)
+(* Reflect a concrete Pulse function as a pointer. pre/post are explicit to avoid
+   higher-order-unification failures. *)
 val of_fn (#a #b: Type0) (pre: a -> slprop) (post: a -> b -> slprop)
   (f: (x:a -> stt b (pre x) (fun r -> post x r))) : func_ptr a b
 
-(* `of_fn` produces a pointer valid at its own spec. This ghost step introduces
-   the `is_valid` resource directly, so callers can obtain `is_valid (of_fn ..) ..`
-   without folding a pure `valid` fact by hand. *)
+(* Ghost step yielding `is_valid (of_fn ..) ..`: `of_fn` is valid at its own spec. *)
 val of_fn_valid (#a #b: Type0) (pre: a -> slprop) (post: a -> b -> slprop)
   (f: (x:a -> stt b (pre x) (fun r -> post x r)))
   : stt_ghost unit emp_inames emp (fun _ -> is_valid (of_fn pre post f) pre post)
 
-(* Weaken the spec of a valid pointer: given ghost coercions turning the new
-   precondition into the old one and the old postcondition into the new one,
-   validity transfers from `(pre, post)` to `(pre', post')`.
-
-   (This is the `weaken` of func-pointer-spec.md, with its `stt_ghost` argument
-   types made well-formed: each coercion is a ghost computation consuming the
-   source slprop and producing the target slprop.) `valid` is abstract, so this
-   axiom is what lets a validity fact move across a spec change. *)
+(* Transfer validity across a spec weakening: given ghost coercions from the new
+   pre to the old pre and from the old post to the new post, `is_valid` moves from
+   `(pre, post)` to `(pre', post')`. *)
 val weaken (#a #b: Type0) (f: func_ptr a b)
   (pre: a -> slprop) (post: a -> b -> slprop)
   (pre': a -> slprop) (post': a -> b -> slprop)
@@ -82,32 +82,20 @@ val weaken (#a #b: Type0) (f: func_ptr a b)
       (is_valid f pre post)
       (fun _ -> (is_valid f pre' post'))
 
-(* Call through a valid function pointer. The validity witness is a squashed
-   proof argument. This is the single, uniform primitive for every indirect
-   call: the caller evaluates the callee to a `func_ptr` value and supplies the
-   `is_valid f pre post` fact (for a concrete `of_fn`, via the `of_fn_valid`
-   ghost step; for a callback parameter, from its precondition). `pre`/`post` are
-   explicit because SMT will not solve for the higher-order spec metavariables.
-
-   The postcondition also RETURNS `is_valid f pre post`: validity is a pure,
-   persistent fact (`is_valid f pre post = pure (valid f pre post)`), and calling
-   through a pointer does not invalidate it. Returning it lets a caller that
-   carries `is_valid` in both its pre- and postcondition (e.g. a callback
-   parameter annotated with a `_refine((_slprop) is_valid $(this) ..)`) thread the
-   fact across the call. Callers that do not need it afterwards simply drop the
-   surplus pure fact. *)
+(* The single primitive for an indirect call: consume `is_valid f pre post ** pre x`.
+   pre/post are explicit (SMT will not solve the higher-order metavariables). The
+   post also RETURNS `is_valid f pre post` (validity is persistent), so a caller can
+   thread it across the call; callers that do not need it drop the surplus. *)
 val call (#a #b: Type0) (pre: a -> slprop) (post: a -> b -> slprop)
   (f: func_ptr a b)  (x: a)
   : stt b (is_valid f pre post  ** pre x) (fun r -> is_valid f pre post ** post x r)
 
-(* Decidable null test, so C `if (fp)` / `fp == NULL` can be translated. *)
+(* Decidable null test, for C `if (fp)` / `fp == NULL`. *)
 val is_null (#a #b: Type0) (f: func_ptr a b) : (r: bool { r <==> f == null a b })
 
 instance inhabited_func_ptr (a b: Type0) : inhabited (func_ptr a b) = { witness = null a b }
 instance has_zero_default_func_ptr (a b: Type0) : has_zero_default (func_ptr a b) = { zero_default = null a b }
 
-(* `has_is_null` instance so a function-pointer parameter can be marked `_nullable`
-   (the `_refine` refinement is then wrapped in `unless_null`). Analogous to the
-   `ref`/`array` instances in `Pulse.Lib.C.Nullable`; `test_null` is just `is_null`. *)
+(* `has_is_null` instance so a func-pointer parameter can be marked `_nullable`. *)
 instance has_is_null_func_ptr (a b: Type0) : Pulse.Lib.C.Nullable.has_is_null (func_ptr a b) =
   { test_null = (fun f -> is_null f) }
