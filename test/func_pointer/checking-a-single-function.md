@@ -3,7 +3,7 @@
 `make verify` re-checks **every** generated `.fst`/`.fsti` in `out/`, which is
 slow and — while `func_pointer.c` still contains not-yet-verified examples —
 stops at the first module that fails. To iterate on one function, verify just
-that module.
+that module by calling the F\* runner directly on its `.fst`.
 
 ## Module-name mapping
 
@@ -16,18 +16,11 @@ Every C function becomes its own F\* module named `Func_<name>` (the file
 | `use_conditional` | `out/Func_use_conditional.fst` |
 | `add`             | `out/Func_add.fst`             |
 
-## The easy way: `make verify-one`
+## Verifying one module
 
-```sh
-make verify-one MODULE=Func_reassign_join
-```
-
-This translates `func_pointer.c`, builds the module's dependencies (in order),
-then verifies the target. Replace the module name as needed.
-
-## The manual way
-
-If you want to run F\* directly (e.g. to add extra flags):
+The test's `Makefile` (the shared `test/_templates/Makefile`) has only a
+`make verify` target that checks every module. To check a single module, run
+F\* directly on its `.fst`:
 
 1. **Translate** (regenerates `out/` from `func_pointer.c`):
 
@@ -39,7 +32,7 @@ If you want to run F\* directly (e.g. to add extra flags):
    reusing the same flags the Makefile uses:
 
    ```sh
-   ../opt/run-fstar.sh \
+   ../../opt/run-fstar.sh \
      --cache_checked_modules \
      --cache_dir _cache \
      --already_cached 'Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' \
@@ -76,16 +69,15 @@ has since changed. Two things go stale in practice:
 
 ```sh
 # Rebuild the Pulse support library after any change under pulse/ (or a pull):
-make -C .. lib          # runs `make -C pulse`; repopulates pulse/_cache/
+make -C ../.. lib          # runs `make -C pulse`; repopulates pulse/_cache/
 
 # Drop this workspace's stale module caches:
 rm -f _cache/Func_<name>.fst.checked      # one module
 rm -rf _cache .depend                     # everything, the safe default
 ```
 
-Then re-run `make verify-one MODULE=Func_<name>` (or the manual F\* command).
-When in doubt, `rm -rf _cache .depend` and let it rebuild from scratch — it is
-slower but always correct.
+Then re-run the F\* command above. When in doubt, `rm -rf _cache .depend` and
+let it rebuild from scratch — it is slower but always correct.
 
 ## Notes
 
@@ -96,6 +88,5 @@ slower but always correct.
   in `_cache/` is checked on the fly and its `*.fst.checked` written to `_cache/`,
   so subsequent runs sharing that dependency are fast (subject to the staleness
   caveat above).
-- The flags above are exactly what `make verify` / `make verify-one` pass and
-  what the editor uses (see `fstar.fst.config.json`), so a module that passes
-  here passes there too.
+- The flags above are exactly what `make verify` passes and what the editor uses
+  (see `fstar.fst.config.json`), so a module that passes here passes there too.

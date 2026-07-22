@@ -10,8 +10,8 @@ approach has two parts:
 2. Transpiler support (in `src/`) that lowers C function-pointer declarations,
    stores, and indirect calls onto that library.
 
-Test cases live in `func_pointer/func_pointer.c`; each C function becomes its own
-F* module `Func_<name>` (see `checking-a-single-function.md`).
+Test cases live in `test/func_pointer/func_pointer.c`; each C function becomes its
+own F* module `Func_<name>` (see `checking-a-single-function.md`).
 
 ## Storing a function into a pointer: `&` is optional
 
@@ -53,47 +53,79 @@ The core of `Pulse.Lib.C.FuncPtr.fsti`:
   concrete `of_fn ..` can introduce its `is_valid` resource with a single ghost
   step (no separate `fold` of a pure `valid` fact).
 - `call pre post (f: func_ptr a b) (x: a)
-  : stt b (is_valid f pre post ** pre x) (fun r -> post x r)` — the single,
-  uniform indirect-call primitive. Validity is consumed as the `is_valid` slprop
-  (no longer a `squash` proof argument). The emitter evaluates the callee to a
-  `func_ptr` value (an `!r` read for a mutable local) and hands it to `call`;
-  there is no separate ref-form primitive. `pre`/`post` are explicit because SMT
-  cannot solve for the higher-order spec metavariables.
+  : stt b (is_valid f pre post ** pre x) (fun r -> is_valid f pre post ** post x r)`
+  — the single, uniform indirect-call primitive. Validity is consumed as the
+  `is_valid` slprop (no longer a `squash` proof argument). The postcondition also
+  **returns** `is_valid f pre post` (validity is a pure, persistent fact — calling
+  through a pointer does not invalidate it), so a caller carrying `is_valid` in
+  both its pre- and postcondition (a `_refine`d callback parameter) can thread it
+  across the call. The emitter evaluates the callee to a `func_ptr` value (an `!r`
+  read for a mutable local) and hands it to `call`; there is no separate ref-form
+  primitive. `pre`/`post` are explicit because SMT cannot solve for the
+  higher-order spec metavariables.
+- `drop_is_valid f pre post` — a **proven** ghost step (not an axiom) discarding a
+  surplus `is_valid`. Because `call` returns `is_valid`, a caller that does not
+  itself export validity is left holding a leftover copy; a source-level
+  `_ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _)` after the call drops it
+  back to `emp` (`f` is `[@@@mkey]`, so `pre`/`post` are inferred). PAL does not
+  insert it automatically.
+- `valid_cast f g` — a **proven** ghost step transferring validity across a
+  provable value equality: `is_valid f pre post ** pure (f == g)` yields
+  `is_valid g pre post`. Used to call a pointer read back from an array slot,
+  where `array_read` yields a value only *provably* (not syntactically) equal to
+  the stored `of_fn ..` (`f` is `[@@@mkey]`; the caller supplies only `g`).
 - `weaken` — transfer validity from `(pre, post)` to a weaker `(pre', post')`
   given ghost coercions between the pre/postconditions; consumes
   `is_valid f pre post` and produces `is_valid f pre' post'`.
-- `is_null` / `fp_eq` — decidable null test and pointer equality, so C
-  `if (fp)`, `fp == NULL`, and `fp1 == fp2` translate.
+- `is_null` — decidable null test, so C `if (fp)` and `fp == NULL` translate.
+  (A `has_is_null (func_ptr a b)` instance is also provided so a fnptr parameter
+  can be marked `_nullable`; the `_refine` refinement is then wrapped in
+  `unless_null`.)
 
 ### Merging pointers across a control-flow join
 
 When a pointer is assigned *different* concrete targets in the two arms of a
 conditional and called after the join, the two arms must produce the *same*
-`slprop` so it merges cleanly. Two proved (non-axiom) lemmas support this by
-splitting on both the pointer and the spec:
+`slprop` so it merges cleanly. This is handled **at the annotation level** (no
+dedicated library lemma), as in `reassign_join` / `reassign_join_call`:
 
-- `valid_if cond f1 f2 pre1 pre2 post1 post2` — from
-  `if cond then valid f1 pre1 post1 else valid f2 pre2 post2`, derive
-  `valid (if cond then f1 else f2) (if cond then pre1 else pre2)
-        (if cond then post1 else post2)`.
-- `call_if` — the analogue for `call` with arbitrary (heapful) `slprop`
-  contracts: given the merged validity `valid_if` produces, call the merged
-  pointer once, with branched pre/post `if cond then p1 x else p2 x` /
-  `if cond then q1 x r else q2 x r`.
+- Read the guard into a pure value before the `if`
+  (`let g = ghost_read $&(use_sub)`), and put an `_ensures` on the `if` that
+  carries the join existential inline, keyed on that common guard:
+  `exists* v. pts_to $&(fp) v ** is_valid v (rj_pre g) (rj_post g)`. The existential
+  hides the branch-differing pointer value behind the shared guard.
+- In each arm, after `of_fn_valid` for the named target, one `FuncPtr.weaken` lands
+  that arm's validity directly on `(rj_pre g)(rj_post g)`. Pulse auto-introduces the
+  existential at the branch boundary and unfolds it after the merge for the
+  post-join `call`. With `rj_pre`/`rj_post` declared `unfold`, the call precondition
+  and the value postconditions discharge automatically.
+
+The same guard-keyed pattern also carries a **returned** pointer's validity out of a
+function (`select_op` → `return_fp`), reusing `rj_pre`/`rj_post` in an `_ensures` on
+the return value.
 
 ### Function-pointer arrays
 
-A `func_ptr` value alone is not callable — calling needs the separate `valid`
-fact. To recover callability of an array element at a *runtime* index (where no
-single static target exists), the library provides an array-level invariant:
-every initialised slot is valid at one common spec.
+A `func_ptr` value alone is not callable — calling needs the separate `is_valid`
+fact. Storing and reading back a pointer through a stack-local fixed array
+(`use_array_slot`, `assign_from_agg`, `multilayer`, `array_runtime_idx`) works
+through two mechanisms:
 
-- `array_all_valid s pre post : prop` — every initialised slot of the spec
-  sequence `s` is valid at `(pre, post)`.
-- `array_all_valid_idx s pre post i` — an in-bounds initialised slot is callable
-  at the common spec.
-- `array_all_valid_upd s pre post n x` — storing a valid pointer preserves the
-  invariant.
+- **Emitter let-binding.** Writing `tbl[k] = add` decays to storing a large
+  `of_fn pre post __fp` term. Inlining that into `array_write` makes the spec update
+  `array_spec_upd s k (of_fn ..)` too big for the `array_spec_upd_*` SMTPats to fire,
+  so the later `array_read` cannot prove `array_spec_initd`/`array_spec_mask`. The
+  emitter therefore let-binds the stored value first
+  (`let __pal_arrwr = of_fn ..; array_write a k __pal_arrwr`), keeping the spec
+  update opaque (`array_spec_upd s k v`). This is automatic — the C source is a plain
+  `tbl[k] = add`.
+- **`valid_cast` on read-back.** `array_read` yields a value only *provably* (not
+  syntactically) equal to the stored `of_fn ..`, so `of_fn_valid`'s
+  `is_valid (of_fn ..) ..` does not match the read value's `is_valid` key. A
+  `_ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(f))` re-keys the validity onto the
+  read-back value before the `call`. For `array_runtime_idx` (runtime index, both
+  slots `add`, `i ∈ {0,1}`), the read is still provably `add`, so the same recipe
+  applies.
 
 ## Feature roadmap (C surface to support)
 

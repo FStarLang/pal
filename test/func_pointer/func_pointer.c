@@ -7,7 +7,7 @@
  *
  * Layout:
  *   - The ACTIVE section holds every example that currently verifies
- *     (`make -C func_pointer verify-one MODULE=Func_<name>`).
+ *     (`make -C test/func_pointer`).
  *   - The STAGED section (`#if 0`) holds the examples that do NOT yet verify,
  *     grouped into stages that mirror STATUS.md:
  *       Stage 1  Callback parameters (abstract func_ptr param)
@@ -767,7 +767,10 @@ int32_t multilayer(void)
 }
 
 /* --------------------------------------------------------------------------
- * Stage 5 - Advanced / edge cases (ACTIVE candidates)
+ * Stage 5 - Advanced / edge cases
+ *
+ * Designated-init vtables, cross-function dispatch, returned pointers,
+ * runtime-indexed dispatch, and indirect recursion.
  * -------------------------------------------------------------------------- */
 
 /* Contract-carrying field, for the cross-function / vtable cases. */
@@ -851,12 +854,6 @@ int32_t use_dispatch(void)
     return dispatch(&o, 2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
-
-/* --------------------------------------------------------------------------
- * Stage 5 - Advanced / edge cases
- *
- * Cross-function dispatch, return values, and indirect recursion.
- * -------------------------------------------------------------------------- */
 
 /* [verifies] Array indexed by a runtime (non-constant) value, so no single
    static target exists at the call site. Both slots hold `add` and the index is
