@@ -71,7 +71,7 @@ int32_t use_no_amp(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -81,7 +81,7 @@ int32_t use_amp(void)
     _ensures(return == 7)
 {
     int32_t (*fp)(int32_t, int32_t) = &add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp(3, 4);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -92,7 +92,7 @@ int32_t use_transitive(void)
 {
     int32_t (*fp1)(int32_t, int32_t) = add;
     int32_t (*fp2)(int32_t, int32_t) = fp1;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp2(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -102,11 +102,11 @@ int32_t use_reassign(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     int32_t x = fp(1, 2);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     fp = subtract;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_subtract.func_subtract__fp);
     int32_t y = fp(8, 6);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     return y + x;
@@ -119,7 +119,7 @@ int32_t use_reassign_copy(void)
     int32_t (*fp)(int32_t, int32_t) = subtract;
     int32_t (*src)(int32_t, int32_t) = add;
     fp = src;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp(1, 2);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -131,7 +131,7 @@ int32_t use_inline_declarator(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -141,7 +141,7 @@ int32_t use_typedef(void)
     _ensures(return == 5)
 {
     binop fp = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -151,7 +151,7 @@ int32_t qualified_params(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(const int32_t, const int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -161,7 +161,7 @@ int32_t func_type_decay(void)
     _ensures(return == 5)
 {
     binop_fn *fp = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -171,7 +171,7 @@ int32_t use_cast(void)
     _ensures(return == 5)
 {
     binop fp = (binop) add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return fp(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -204,7 +204,7 @@ int32_t use_null_truthiness(void)
 void use_void_cb(void)
 {
     void (*cb)(void) = do_nothing;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_do_nothing.func_do_nothing_pre Func_do_nothing.func_do_nothing_post Func_do_nothing.func_do_nothing__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_do_nothing.func_do_nothing__fp);
     cb();
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -214,7 +214,7 @@ int32_t use_arity1(void)
     _ensures(return == -5)
 {
     int32_t (*g)(int32_t) = neg;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_neg.func_neg_pre Func_neg.func_neg_post Func_neg.func_neg__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_neg.func_neg__fp);
     return g(5);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -224,7 +224,7 @@ uint32_t use_arity3(void)
     _ensures(return == 15)
 {
     uint32_t (*fp3)(uint8_t, uint32_t, int32_t) = combine;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_combine.func_combine_pre Func_combine.func_combine_post Func_combine.func_combine__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_combine.func_combine__fp);
     return fp3(5, 10, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -234,7 +234,7 @@ uint32_t use_arity3_amp(void)
     _ensures(return == 15)
 {
     uint32_t (*fp3)(uint8_t, uint32_t, int32_t) = &combine;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_combine.func_combine_pre Func_combine.func_combine_post Func_combine.func_combine__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_combine.func_combine__fp);
     return fp3(5, 10, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -249,12 +249,12 @@ int32_t use_conditional(int32_t sub)
 {
     if (sub == 1) {
         int32_t (*f)(int32_t, int32_t) = subtract;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_subtract.func_subtract__fp);
         return f(8, 4);
         _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     } else {
         int32_t (*f)(int32_t, int32_t) = add;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
         return f(8, 4);
         _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     }
@@ -266,7 +266,7 @@ int32_t ptr_to_fp(void)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
     int32_t (**pp)(int32_t, int32_t) = &fp;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return (*pp)(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -292,7 +292,7 @@ int32_t apply(int32_t (*op)(int32_t, int32_t)
 int32_t use_apply_add(void)
     _ensures(return == 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return apply(add, 2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -313,7 +313,7 @@ int32_t apply1(int32_t (*op)(int32_t)
 int32_t use_apply_neg(void)
     _ensures(return == -5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_neg.func_neg_pre Func_neg.func_neg_post Func_neg.func_neg__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_neg.func_neg__fp);
     return apply1(neg, 5);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -334,7 +334,7 @@ int32_t apply_typedef(binop op
 int32_t typedef_callback(void)
     _ensures(return == 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return apply_typedef(add, 2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -403,7 +403,7 @@ int32_t apply_weaker(int32_t (*op)(int32_t, int32_t)
 int32_t weaken_callback(void)
     _ensures(return < 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_subtract.func_subtract__fp);
     _ghost_stmt(Apply_weaker_spec.weaken_sub_to_aw _);
     return apply_weaker(subtract, 5, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -517,12 +517,12 @@ int32_t reassign_join(int32_t use_sub)
     _ensures(_inline_pulse((exists* v. Pulse.Lib.Reference.pts_to $&(fp) v ** Pulse.Lib.C.FuncPtr.is_valid v (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub))) ** Pulse.Lib.Reference.pts_to $&(use_sub) (Ghost.reveal g_use_sub)))
     {
         fp = subtract;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp) Func_subtract.func_subtract_pre Func_subtract.func_subtract_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_subtract.func_subtract__fp);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn _ _ Func_subtract.func_subtract__fp) Func_subtract.func_subtract_pre Func_subtract.func_subtract_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp) Func_add.func_add_pre Func_add.func_add_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn _ _ Func_add.func_add__fp) Func_add.func_add_pre Func_add.func_add_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -540,12 +540,12 @@ int32_t reassign_join_call(int32_t use_sub)
     _ensures(_inline_pulse((exists* v. Pulse.Lib.Reference.pts_to $&(fp) v ** Pulse.Lib.C.FuncPtr.is_valid v (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub))) ** Pulse.Lib.Reference.pts_to $&(use_sub) (Ghost.reveal g_use_sub)))
     {
         fp = subtract;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp) Func_subtract.func_subtract_pre Func_subtract.func_subtract_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_subtract.func_subtract__fp);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn _ _ Func_subtract.func_subtract__fp) Func_subtract.func_subtract_pre Func_subtract.func_subtract_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp) Func_add.func_add_pre Func_add.func_add_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn _ _ Func_add.func_add__fp) Func_add.func_add_pre Func_add.func_add_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -560,12 +560,12 @@ binop select_op(int32_t use_sub)
 {
     _ghost_stmt(let g_use_sub = Pulse.Lib.C.Ref.ghost_read $&(use_sub));
     if (use_sub) {
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn Func_subtract.func_subtract_pre Func_subtract.func_subtract_post Func_subtract.func_subtract__fp) Func_subtract.func_subtract_pre Func_subtract.func_subtract_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_subtract.func_subtract__fp);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn _ _ Func_subtract.func_subtract__fp) Func_subtract.func_subtract_pre Func_subtract.func_subtract_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
         return subtract;
     } else {
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp) Func_add.func_add_pre Func_add.func_add_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn _ _ Func_add.func_add__fp) Func_add.func_add_pre Func_add.func_add_post (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
         return add;
     }
 }
@@ -597,7 +597,7 @@ int32_t use_struct_field(void)
     struct ops o;
     _ghost_stmt($unfold-uninit(struct ops) $&(o));
     o.op = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return o.op(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -613,7 +613,7 @@ int32_t union_field(void)
 {
     union op_or_int u;
     u.op = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return u.op(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -625,7 +625,7 @@ int32_t malloc_fp(void)
     int32_t (**pp)(int32_t, int32_t) =
         (int32_t (**)(int32_t, int32_t)) malloc(sizeof(int32_t (*)(int32_t, int32_t)));
     *pp = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     int32_t r = (*pp)(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     free(pp);
@@ -648,7 +648,7 @@ void ptr_arg_cb(int32_t *p)
     _ensures(*p == _old(*p) + 1)
 {
     void (*f)(int32_t *) = inc;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_inc.func_inc_pre Func_inc.func_inc_post Func_inc.func_inc__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_inc.func_inc__fp);
     f(p);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -660,7 +660,7 @@ int32_t assign_from_agg(void)
     int32_t (*tbl[2])(int32_t, int32_t);
     tbl[0] = add;
     int32_t (*fp)(int32_t, int32_t) = tbl[0];
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(fp));
     return fp(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -674,7 +674,7 @@ int32_t use_array_slot(void)
     int32_t (*tbl[2])(int32_t, int32_t);
     tbl[0] = add;
     int32_t (*f)(int32_t, int32_t) = tbl[0];
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(f));
     return f(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -690,7 +690,7 @@ int32_t array_runtime_idx(int32_t i)
     tbl[0] = add;
     tbl[1] = add;
     int32_t (*f)(int32_t, int32_t) = tbl[i];
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(f));
     return f(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -707,7 +707,7 @@ int32_t multilayer(void)
     struct ops o;
     _ghost_stmt($unfold-uninit(struct ops) $&(o));
     o.op = slot;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(slot));
     return o.op(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -728,7 +728,7 @@ int32_t designated_vtable(void)
     _ensures(return == 5)
 {
     struct ops_c o = { .op = add };
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return o.op(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -762,7 +762,7 @@ int32_t use_dispatch(void)
     struct ops_c o;
     _ghost_stmt($unfold-uninit(struct ops_c) $&(o));
     o.op = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid Func_add.func_add_pre Func_add.func_add_post Func_add.func_add__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return dispatch(&o, 2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
