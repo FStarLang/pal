@@ -147,6 +147,26 @@ fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
     map
 }
 
+/// Builds a map from function name to whether it is `_total` (terminating). Used
+/// to pick the divergence-aware FuncPtr primitives: an address-taken function's
+/// `__fp` wrapper is emitted as a total `fn` and reflected with `of_fn` when the
+/// function is `_total`, else as a `divergent fn` reflected with `of_fn_div`.
+fn build_fn_total_map(decls: &[Decl]) -> HashMap<Rc<str>, bool> {
+    let mut map = HashMap::new();
+    for decl in decls {
+        match &decl.val {
+            DeclT::FnDefn(fn_defn) => {
+                map.insert(fn_defn.decl.name.val.clone(), fn_defn.decl.is_total);
+            }
+            DeclT::FnDecl(fn_decl) => {
+                map.insert(fn_decl.name.val.clone(), fn_decl.is_total);
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
 /// Builds a map from typedef names that are actually OpaqueTypeDecls to their `Type_*` module.
 /// This overrides the default `Typedef_*` mapping from module_for_name for TypeRef lookups.
 fn build_typedef_override_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
@@ -629,6 +649,13 @@ struct Emitter<'a> {
     fn_module_map: HashMap<Rc<str>, String>,
     /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
     typedef_override_map: HashMap<Rc<str>, String>,
+    /// Maps each function name to whether it is `_total`. Consulted by `emit_of_fn`
+    /// to pick `of_fn` (total target) vs `of_fn_div` (divergent target).
+    fn_total_map: HashMap<Rc<str>, bool>,
+    /// Whether the function body currently being emitted is `_total`. Set at body
+    /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
+    /// body) vs `call_div` (divergent body).
+    current_fn_total: bool,
     /// Within the function body currently being emitted, maps a contracted
     /// function-pointer *parameter*'s name to its spec base (`<fn>_<param>`, used
     /// to name `func_<base>_pre`/`func_<base>_post`) and whether it is
@@ -2963,18 +2990,24 @@ impl<'a> Emitter<'a> {
                     // Indirect call `fp(args)`. We evaluate the callee to a
                     // `func_ptr` *value* (an `!r` read for a mutable local, or the
                     // bare value for a parameter/temporary) and hand it to the
-                    // value-form primitive `call`. `call` takes the validity spec
+                    // value-form primitive `call` (total body) or `call_div`
+                    // (divergent body). The primitive takes the validity spec
                     // `pre`/`post` explicitly (SMT cannot solve for the
                     // higher-order predicate). With no annotation to supply them,
                     // we emit inference holes `_ _`: the call type-checks
-                    // structurally and, when an `is_valid <value> ..` fact is in
-                    // scope (seeded by `of_fn_valid` for a concrete `of_fn`, or
+                    // structurally and, when an `is_valid <value> <div> ..` fact is
+                    // in scope (seeded by `of_fn_valid`/`of_fn_div_valid`, or
                     // carried in a callback parameter's precondition), the holes
                     // unify against it.
                     let arg_tuple = self.emit_fnptr_arg_tuple(env, args);
                     let callee_val = self.emit_rvalue(env, f);
+                    let call_prim = if self.current_fn_total {
+                        "Pulse.Lib.C.FuncPtr.call"
+                    } else {
+                        "Pulse.Lib.C.FuncPtr.call_div"
+                    };
                     parens(naryfn([
-                        Doc::text("Pulse.Lib.C.FuncPtr.call"),
+                        Doc::text(call_prim),
                         Doc::text("_"),
                         Doc::text("_"),
                         callee_val,
@@ -6026,17 +6059,19 @@ impl<'a> Emitter<'a> {
         self.emit_name(Name::Fn(Rc::from(format!("{}__fp", g))))
     }
 
-    /// `(Pulse.Lib.C.FuncPtr.of_fn func_<g>_pre func_<g>_post func_<g>__fp)`.
+    /// `(Pulse.Lib.C.FuncPtr.of_fn func_<g>_pre func_<g>_post func_<g>__fp)` for a
+    /// `_total` target, or `of_fn_div ..` for a divergent one (matching the `__fp`
+    /// wrapper's effect and the validity divergence bit).
     fn emit_of_fn(&mut self, g: Rc<str>) -> Doc {
+        let of_fn = if self.fn_total_map.get(&g).copied().unwrap_or(false) {
+            "Pulse.Lib.C.FuncPtr.of_fn"
+        } else {
+            "Pulse.Lib.C.FuncPtr.of_fn_div"
+        };
         let pre = self.fnptr_pre_name(&g);
         let post = self.fnptr_post_name(&g);
         let wrap = self.fnptr_wrap_name(&g);
-        parens(naryfn([
-            Doc::text("Pulse.Lib.C.FuncPtr.of_fn"),
-            pre,
-            post,
-            wrap,
-        ]))
+        parens(naryfn([Doc::text(of_fn), pre, post, wrap]))
     }
 
     /// Drain any pending callback-argument prelude statements into a `Doc`,
@@ -6580,7 +6615,12 @@ impl<'a> Emitter<'a> {
             projs,
         } = self.emit_fnptr_spec_core(env, decl, "unfold let ");
 
-        let wrap_sig = Doc::text("fn ")
+        let wrap_kw = if decl.is_total {
+            "fn "
+        } else {
+            "divergent fn "
+        };
+        let wrap_sig = Doc::text(wrap_kw)
             .append(wrap_name.clone())
             .append(" (x_fp: ")
             .append(domain.clone())
@@ -6918,6 +6958,7 @@ impl<'a> Emitter<'a> {
         if decl.is_pure {
             return self.emit_pure_fn(env, decl, body);
         }
+        self.current_fn_total = decl.is_total;
         let decl_doc = self.emit_fn_sig(env, decl).nest(2).append(Doc::hardline());
         let arg_redecl_as_mut = Doc::concat(decl.args.iter().filter_map(|arg| {
             arg.name.as_ref().map(|n| {
@@ -7577,6 +7618,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
 
     // Build the map from function/let/global identifiers to their owning modules
     let fn_module_map = build_fn_module_map(&tu.decls);
+    // Build the map from function name to `_total`-ness
+    let fn_total_map = build_fn_total_map(&tu.decls);
     // Build the override map for OpaqueTypeDecl typedef names
     let typedef_override_map = build_typedef_override_map(&tu.decls);
 
@@ -7610,6 +7653,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_module: String::new(),
         fn_module_map,
         typedef_override_map,
+        fn_total_map,
+        current_fn_total: false,
         fnptr_diverged: false,
         caller_cb_prelude: Vec::new(),
         tmp_counter: 0,
