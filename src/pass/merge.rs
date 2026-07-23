@@ -288,7 +288,9 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // Track moves: copy content from src to dst (applied after the analysis loop).
     let mut moves: Vec<(usize, usize)> = Vec::new();
     // Track FnDecl specs to copy into their matching FnDefn before moves/removals.
-    let mut spec_copies: Vec<(usize, Exprs, Exprs)> = Vec::new();
+    // The trailing Vec<GhostArg> holds the declaration's ghost arguments to
+    // reintroduce into a definition that declared none (see below).
+    let mut spec_copies: Vec<(usize, Exprs, Exprs, Vec<GhostArg>)> = Vec::new();
 
     // Build an Env for type comparison (need typedef resolution)
     let mut env = Env::new();
@@ -357,10 +359,40 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
 
                     if decl_has_specs && !defn_has_specs {
                         let renames = param_renames(fn_decl, &defn.decl);
+                        // The specs we copy below (and the definition's own body)
+                        // reference the declaration's ghost-argument variables. If
+                        // the definition declared no ghost args of its own, the
+                        // emitted `fn` signature would omit those binders and F*
+                        // would reject the module with "Identifier not found:
+                        // var_<ghost>". Reintroduce the declaration's ghost args in
+                        // that case. When the definition declares its own ghost args
+                        // they are canonical (its body is written against them and
+                        // `param_renames` maps the specs onto them), so keep them;
+                        // a nonzero-but-different count is a genuine inconsistency.
+                        let ghost_args_to_copy = if defn.decl.ghost_args.is_empty() {
+                            fn_decl.ghost_args.clone()
+                        } else {
+                            if fn_decl.ghost_args.len() != defn.decl.ghost_args.len() {
+                                report(
+                                    diags,
+                                    format!(
+                                        "declaration of {} lists {} ghost argument(s) but its \
+                                         definition lists {}; they must match (or the definition \
+                                         may omit them entirely to inherit the declaration's)",
+                                        fn_decl.name.val,
+                                        fn_decl.ghost_args.len(),
+                                        defn.decl.ghost_args.len()
+                                    ),
+                                    &fn_decl.name.loc,
+                                );
+                            }
+                            Vec::new()
+                        };
                         spec_copies.push((
                             defn_idx,
                             rename_specs(&fn_decl.requires, &renames),
                             rename_specs(&fn_decl.ensures, &renames),
+                            ghost_args_to_copy,
                         ));
                     }
 
@@ -395,11 +427,14 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     }
 
     // Copy specs from declarations into definitions before moving/removing them.
-    for (defn_idx, requires, ensures) in spec_copies {
+    for (defn_idx, requires, ensures, ghost_args) in spec_copies {
         if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
             if defn.decl.requires.is_empty() && defn.decl.ensures.is_empty() {
                 defn.decl.requires = requires;
                 defn.decl.ensures = ensures;
+            }
+            if defn.decl.ghost_args.is_empty() && !ghost_args.is_empty() {
+                defn.decl.ghost_args = ghost_args;
             }
         }
     }
