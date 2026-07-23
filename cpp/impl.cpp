@@ -545,7 +545,9 @@ public:
   Rc<ir::Expr> trLValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
 
-    if (auto dre = dyn_cast<DeclRefExpr>(e)) {
+    if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
+      return trLValue(generic->getResultExpr());
+    } else if (auto dre = dyn_cast<DeclRefExpr>(e)) {
       auto id = ctx.mk_ident(toStr(dre->getDecl()->getName()), loc.clone());
       return mk_lvalue_var(std::move(loc), std::move(id));
     } else if (auto p = dyn_cast<ParenExpr>(e)) {
@@ -671,6 +673,10 @@ public:
 
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
+
+    if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
+      return trRValue(generic->getResultExpr());
+    }
 
     if (auto ic = dyn_cast<CastExpr>(e)) {
       switch (ic->getCastKind()) {
