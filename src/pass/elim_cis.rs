@@ -21,10 +21,7 @@
 //! (no branches), reusing all existing struct machinery. Unions that do not
 //! match the strict shape are left completely untouched.
 
-use std::{
-    collections::{HashMap, HashSet},
-    rc::Rc,
-};
+use std::{collections::HashMap, rc::Rc};
 
 use crate::{diag::Diagnostics, env::Env, ir::*, mayberc::MaybeRc};
 
@@ -32,8 +29,27 @@ use crate::{diag::Diagnostics, env::Env, ir::*, mayberc::MaybeRc};
 struct ElimUnion {
     /// The two arm (field) names of the union.
     arm_names: Vec<Rc<IdentT>>,
-    /// The shared CIS fields that become the fields of the replacement struct.
+    /// The shared CIS fields that become the fields of the replacement struct
+    /// (used only when `named_struct` is `None`).
     cis_fields: Vec<Field>,
+    /// If the named arm's type is a directly-named struct, its name. When set,
+    /// the union collapses INTO that struct (reusing its nominal type) instead
+    /// of synthesizing a fresh struct, so pointers to the named arm keep the
+    /// arm's struct type (e.g. `&h->list : struct list*`).
+    named_struct: Option<Rc<IdentT>>,
+}
+
+/// If `f`'s type resolves directly to a named struct, return that struct's name.
+fn arm_struct_name(env: &Env, f: &Field) -> Option<Rc<IdentT>> {
+    if f.val.bit_width().is_some() {
+        return None;
+    }
+    let ty: MaybeRc<Type> = f.val.logical_type(&f.loc).into();
+    let ty = env.vtype_whnf(ty);
+    match &ty.val {
+        TypeT::TypeRef(TypeRefKind::Struct(sname)) => Some(sname.val.clone()),
+        _ => None,
+    }
 }
 
 /// If `f` is a plain field whose type resolves to a struct, return that struct's
@@ -86,7 +102,7 @@ fn type_alpha_eq(a: &Type, b: &Type) -> bool {
 
 /// Detect whether `u` is a simple-CIS union; if so return the shared CIS field
 /// list to use for the replacement struct.
-fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<Vec<Field>> {
+fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<(Vec<Field>, Option<Rc<IdentT>>)> {
     // Condition 1: exactly two arms.
     if u.fields.len() != 2 {
         return None;
@@ -116,7 +132,11 @@ fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<Vec<Field>> {
             return None;
         }
     }
-    Some(s0)
+    // If the named arm's type is a directly-named struct, reuse it as the
+    // collapse target so pointers to the arm keep the arm's struct type.
+    let named_arm = if is_anon(arm0) { arm1 } else { arm0 };
+    let named_struct = arm_struct_name(env, named_arm);
+    Some((s0, named_struct))
 }
 
 pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
@@ -131,13 +151,14 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     let mut elim: HashMap<Rc<IdentT>, ElimUnion> = HashMap::new();
     for decl in tu.decls.iter() {
         if let DeclT::UnionDefn(u) = &decl.val {
-            if let Some(cis_fields) = is_simple_cis(&env, u) {
+            if let Some((cis_fields, named_struct)) = is_simple_cis(&env, u) {
                 let arm_names = u.fields.iter().map(|f| f.val.name().val.clone()).collect();
                 elim.insert(
                     u.name.val.clone(),
                     ElimUnion {
                         arm_names,
                         cis_fields,
+                        named_struct,
                     },
                 );
             }
@@ -146,7 +167,16 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     if elim.is_empty() {
         return;
     }
-    let elim_names: HashSet<Rc<IdentT>> = elim.keys().cloned().collect();
+    // Map each eliminated union to the struct it collapses into: the named
+    // arm's struct when reusable, otherwise a fresh struct sharing the union's
+    // own name.
+    let elim_names: HashMap<Rc<IdentT>, Rc<IdentT>> = elim
+        .iter()
+        .map(|(uname, info)| {
+            let target = info.named_struct.clone().unwrap_or_else(|| uname.clone());
+            (uname.clone(), target)
+        })
+        .collect();
 
     // Phase 1: env-threaded expression rewrites (arm-access collapse + union
     // init -> struct init).
@@ -169,22 +199,36 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         }
     }
 
-    // Phase 2: rewrite all `Union(u)` type references to `Struct(u)`, then swap
-    // each eliminated `UnionDefn` for a `StructDefn` of the shared CIS fields.
+    // Phase 2: rewrite all `Union(u)` type references to the target struct
+    // type, then for each eliminated `UnionDefn` either drop it (when it reuses
+    // an existing named arm struct) or swap it for a fresh `StructDefn` holding
+    // the shared CIS fields.
     for decl in tu.decls.iter_mut() {
         rewrite_types_decl(&mut decl.val, &elim_names);
     }
     for decl in tu.decls.iter_mut() {
         if let DeclT::UnionDefn(u) = &decl.val {
             if let Some(info) = elim.get(&u.name.val) {
-                decl.val = DeclT::StructDefn(StructDefn {
-                    name: u.name.clone(),
-                    fields: info.cis_fields.clone(),
-                    eager_unfold_pred: false,
-                });
+                if info.named_struct.is_none() {
+                    decl.val = DeclT::StructDefn(StructDefn {
+                        name: u.name.clone(),
+                        fields: info.cis_fields.clone(),
+                        eager_unfold_pred: false,
+                    });
+                }
             }
         }
     }
+    // Drop the union defns that collapsed into an existing named arm struct;
+    // their type references have already been redirected to that struct.
+    tu.decls.retain(|decl| {
+        if let DeclT::UnionDefn(u) = &decl.val {
+            if let Some(info) = elim.get(&u.name.val) {
+                return info.named_struct.is_none();
+            }
+        }
+        true
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -320,11 +364,40 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
         | ExprT::Error(_) => {}
     }
 
-    // Rewrite `UnionInit(u, arm, StructInit(_, kvs))` -> `StructInit(u, kvs)`.
+    // Rewrite a cast `(struct F*)e` where `e : struct S*` and `S`'s first field
+    // is an eliminated simple-CIS union whose named arm is `struct F`. Per C, a
+    // pointer to a struct also points to its first member, so the cast is the
+    // well-defined `&e->firstfield`. The frontend leaves this as a `Cast`
+    // because at parse time the first field is still a union (not `struct F`);
+    // after this pass collapses the union the first field *is* `struct F`, so
+    // the coercion becomes valid and downstream `emit` handles the produced
+    // `&e->_unnamed0` member/ref node directly (a raw struct*->struct* `Cast`
+    // has no `emit` lowering).
+    let cast_rw = if let ExprT::Cast(inner, target_ty) = &e.val {
+        cast_to_first_member(env, inner, target_ty, &e.loc, elim)
+    } else {
+        None
+    };
+    if let Some(newval) = cast_rw {
+        e.val = newval;
+        return;
+    }
+
+    // Rewrite `UnionInit(u, arm, StructInit(_, kvs))` -> `StructInit(S, kvs)`,
+    // where `S` is the struct the union collapses into (the reused named arm
+    // struct, or the union's own name for the synthesize-fresh case).
     let uinit = if let ExprT::UnionInit(uname, _arm, val) = &e.val {
-        if elim.contains_key(&uname.val) {
+        if let Some(info) = elim.get(&uname.val) {
             if let ExprT::StructInit(_sname, kvs) = &val.val {
-                Some((uname.clone(), kvs.clone()))
+                let target = info
+                    .named_struct
+                    .clone()
+                    .unwrap_or_else(|| uname.val.clone());
+                let sname = Rc::new(Ast {
+                    val: target,
+                    loc: uname.loc.clone(),
+                });
+                Some((sname, kvs.clone()))
             } else {
                 None
             }
@@ -334,8 +407,8 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
     } else {
         None
     };
-    if let Some((uname, kvs)) = uinit {
-        e.val = ExprT::StructInit(uname, kvs);
+    if let Some((sname, kvs)) = uinit {
+        e.val = ExprT::StructInit(sname, kvs);
         return;
     }
 
@@ -364,15 +437,73 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
     }
 }
 
+/// For a cast `(struct F*)inner`, if `inner : struct S*` and `S`'s first field
+/// is an eliminated simple-CIS union whose named arm is `struct F`, build the
+/// equivalent `&(*inner).firstfield` node (the collapse turns that first field
+/// into `struct F`, so the member access has the cast's target type). Returns
+/// the replacement `ExprT`, or `None` when the shape does not match.
+fn cast_to_first_member(
+    env: &Env,
+    inner: &Rc<Expr>,
+    target_ty: &Rc<Type>,
+    loc: &Rc<SourceInfo>,
+    elim: &HashMap<Rc<IdentT>, ElimUnion>,
+) -> Option<ExprT> {
+    // Target must be a pointer to a named struct `F`.
+    let target = env.vtype_whnf(target_ty.clone().into());
+    let TypeT::Pointer(f_pointee, _) = &target.val else {
+        return None;
+    };
+    let f_pointee = env.vtype_whnf(f_pointee.clone().into());
+    let TypeT::TypeRef(TypeRefKind::Struct(fname)) = &f_pointee.val else {
+        return None;
+    };
+
+    // `inner` must be a pointer to a named struct `S`.
+    let src = env.vtype_whnf(env.infer_expr(inner).ok()?);
+    let TypeT::Pointer(s_pointee, _) = &src.val else {
+        return None;
+    };
+    let s_pointee = env.vtype_whnf(s_pointee.clone().into());
+    let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &s_pointee.val else {
+        return None;
+    };
+
+    // `S`'s first field must be an eliminated simple-CIS union whose named arm
+    // is `struct F`.
+    let s = env.lookup_struct(sname)?;
+    let first = s.fields.first()?;
+    let first_ty = env.vtype_whnf(first.val.logical_type(&first.loc).into());
+    let TypeT::TypeRef(TypeRefKind::Union(uname)) = &first_ty.val else {
+        return None;
+    };
+    let info = elim.get(&uname.val)?;
+    match &info.named_struct {
+        Some(n) if **n == *fname.val => {}
+        _ => return None,
+    }
+
+    // Build `&(*inner).firstfield`.
+    let field_name: Rc<Ident> = Rc::new(first.val.name().clone());
+    let deref = ExprT::Deref(inner.clone()).with_loc(loc.clone());
+    let member = ExprT::Member(deref, field_name).with_loc(loc.clone());
+    Some(ExprT::Ref(member))
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2: type-reference rewrites
 // ---------------------------------------------------------------------------
 
-fn rewrite_type(ty: &mut Rc<Type>, elim: &HashSet<Rc<IdentT>>) {
+fn rewrite_type(ty: &mut Rc<Type>, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     let t = Rc::make_mut(ty);
     match &mut t.val {
-        TypeT::TypeRef(TypeRefKind::Union(n)) if elim.contains(&n.val) => {
-            t.val = TypeT::TypeRef(TypeRefKind::Struct(n.clone()));
+        TypeT::TypeRef(TypeRefKind::Union(n)) if elim.contains_key(&n.val) => {
+            let target = elim.get(&n.val).unwrap().clone();
+            let name = Rc::new(Ast {
+                val: target,
+                loc: n.loc.clone(),
+            });
+            t.val = TypeT::TypeRef(TypeRefKind::Struct(name));
         }
         TypeT::Pointer(inner, _)
         | TypeT::FixedArray(inner, _)
@@ -389,7 +520,7 @@ fn rewrite_type(ty: &mut Rc<Type>, elim: &HashSet<Rc<IdentT>>) {
     }
 }
 
-fn rewrite_types_decl(decl: &mut DeclT, elim: &HashSet<Rc<IdentT>>) {
+fn rewrite_types_decl(decl: &mut DeclT, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     match decl {
         DeclT::FnDefn(FnDefn { decl, body }) => {
             rewrite_types_fn_decl(decl, elim);
@@ -423,13 +554,13 @@ fn rewrite_types_decl(decl: &mut DeclT, elim: &HashSet<Rc<IdentT>>) {
     }
 }
 
-fn rewrite_types_field(f: &mut Field, elim: &HashSet<Rc<IdentT>>) {
+fn rewrite_types_field(f: &mut Field, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     match &mut f.val {
         FieldT::Plain { ty, .. } | FieldT::BitField { ty, .. } => rewrite_type(ty, elim),
     }
 }
 
-fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashSet<Rc<IdentT>>) {
+fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     for ga in decl.ghost_args.iter_mut() {
         rewrite_type(&mut ga.ty, elim);
     }
@@ -442,13 +573,13 @@ fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashSet<Rc<IdentT>>) {
     }
 }
 
-fn rewrite_types_stmts(stmts: &mut Stmts, elim: &HashSet<Rc<IdentT>>) {
+fn rewrite_types_stmts(stmts: &mut Stmts, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     for stmt in stmts.iter_mut() {
         rewrite_types_stmt(Rc::make_mut(stmt), elim);
     }
 }
 
-fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashSet<Rc<IdentT>>) {
+fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     match &mut stmt.val {
         StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => {
             rewrite_types_expr(Rc::make_mut(e), elim)
@@ -514,7 +645,7 @@ fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashSet<Rc<IdentT>>) {
     }
 }
 
-fn rewrite_types_expr(e: &mut Expr, elim: &HashSet<Rc<IdentT>>) {
+fn rewrite_types_expr(e: &mut Expr, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     match &mut e.val {
         ExprT::IntLit(_, ty)
         | ExprT::FloatLit(_, ty)
