@@ -96,6 +96,7 @@ impl<'a> Ctx<'a> {
                 ensures: builder.ensures,
                 is_pure: builder.is_pure,
                 is_rec: builder.is_rec,
+                is_total: builder.is_total,
                 decreases: builder.decreases,
             }),
         })
@@ -114,6 +115,7 @@ impl<'a> Ctx<'a> {
                     ensures: builder.ensures,
                     is_pure: builder.is_pure,
                     is_rec: builder.is_rec,
+                    is_total: builder.is_total,
                     decreases: builder.decreases,
                 },
                 body: body,
@@ -428,6 +430,7 @@ struct DeclBuilder {
     ensures: Vec<Rc<Expr>>,
     is_pure: bool,
     is_rec: bool,
+    is_total: bool,
     decreases: Option<Rc<Expr>>,
     eager_unfold_pred: bool,
 }
@@ -445,6 +448,7 @@ impl DeclBuilder {
             ensures: vec![],
             is_pure: false,
             is_rec: false,
+            is_total: false,
             decreases: None,
             eager_unfold_pred: false,
         }
@@ -503,6 +507,9 @@ impl DeclBuilder {
     }
     fn set_rec(&mut self) {
         self.is_rec = true;
+    }
+    fn set_total(&mut self) {
+        self.is_total = true;
     }
     fn set_eager_unfold_pred(&mut self) {
         self.eager_unfold_pred = true;

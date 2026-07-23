@@ -5693,6 +5693,7 @@ impl<'a> Emitter<'a> {
             ensures,
             is_pure: _,
             is_rec,
+            is_total,
             decreases,
         }: &FnDecl,
         for_interface: bool,
@@ -5865,10 +5866,24 @@ impl<'a> Emitter<'a> {
 
         ensures_props.extend(ensures.iter().map(|r| self.emit_rvalue(env, r)));
 
-        let fn_keyword = if *is_rec {
-            Doc::text("fn rec")
+        // C functions are not guaranteed to terminate, and PAL emits `while`
+        // loops without a `decreases` measure. Since Pulse split `stt` into a
+        // terminating `stt` (`fn`) and a possibly-divergent `stt_div`
+        // (`divergent fn`), such loops (and their callers) must live in the
+        // divergent effect. We therefore default every emitted function to
+        // `divergent`; a divergent computation may still call terminating ones.
+        // The `_total` annotation opts a function back into termination
+        // checking, emitting a plain `fn` (which then requires any `while` loop
+        // or recursion to be well-founded).
+        let divergent = if *is_total {
+            Doc::nil()
         } else {
-            Doc::text("fn")
+            Doc::text("divergent ")
+        };
+        let fn_keyword = if *is_rec {
+            divergent.append(Doc::text("fn rec"))
+        } else {
+            divergent.append(Doc::text("fn"))
         };
 
         let hdr = Doc::group(

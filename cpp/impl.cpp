@@ -2336,6 +2336,11 @@ public:
             ann && ann->getAnnotation() == "pal-rec" && ann->args_size() == 0) {
           builder.set_rec();
         }
+        if (auto ann = dyn_cast<AnnotateAttr>(attr);
+            ann && ann->getAnnotation() == "pal-total" &&
+            ann->args_size() == 0) {
+          builder.set_total();
+        }
         if (auto ctr = isUnaryAttrCounter(attr, "pal-ghost-arg")) {
           ctx.parse_ghost_arg(builder, getRange(attr->getRange()), ctr.value(),
                               snippets);

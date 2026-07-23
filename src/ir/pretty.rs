@@ -634,7 +634,13 @@ impl PrettyIR for FnDecl {
         } else {
             RcDoc::nil()
         };
-        pure_prefix
+        let total_prefix = if self.is_total {
+            RcDoc::text("_total").append(RcDoc::line())
+        } else {
+            RcDoc::nil()
+        };
+        total_prefix
+            .append(pure_prefix)
             .append(self.ret_type.to_doc())
             .append(RcDoc::line())
             .append(self.name.to_doc())
