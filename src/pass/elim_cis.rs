@@ -364,6 +364,25 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
         | ExprT::Error(_) => {}
     }
 
+    // Rewrite a cast `(struct F*)e` where `e : struct S*` and `S`'s first field
+    // is an eliminated simple-CIS union whose named arm is `struct F`. Per C, a
+    // pointer to a struct also points to its first member, so the cast is the
+    // well-defined `&e->firstfield`. The frontend leaves this as a `Cast`
+    // because at parse time the first field is still a union (not `struct F`);
+    // after this pass collapses the union the first field *is* `struct F`, so
+    // the coercion becomes valid and downstream `emit` handles the produced
+    // `&e->_unnamed0` member/ref node directly (a raw struct*->struct* `Cast`
+    // has no `emit` lowering).
+    let cast_rw = if let ExprT::Cast(inner, target_ty) = &e.val {
+        cast_to_first_member(env, inner, target_ty, &e.loc, elim)
+    } else {
+        None
+    };
+    if let Some(newval) = cast_rw {
+        e.val = newval;
+        return;
+    }
+
     // Rewrite `UnionInit(u, arm, StructInit(_, kvs))` -> `StructInit(S, kvs)`,
     // where `S` is the struct the union collapses into (the reused named arm
     // struct, or the union's own name for the synthesize-fresh case).
@@ -416,6 +435,59 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
     if let Some(base) = collapse {
         *e = (*base).clone();
     }
+}
+
+/// For a cast `(struct F*)inner`, if `inner : struct S*` and `S`'s first field
+/// is an eliminated simple-CIS union whose named arm is `struct F`, build the
+/// equivalent `&(*inner).firstfield` node (the collapse turns that first field
+/// into `struct F`, so the member access has the cast's target type). Returns
+/// the replacement `ExprT`, or `None` when the shape does not match.
+fn cast_to_first_member(
+    env: &Env,
+    inner: &Rc<Expr>,
+    target_ty: &Rc<Type>,
+    loc: &Rc<SourceInfo>,
+    elim: &HashMap<Rc<IdentT>, ElimUnion>,
+) -> Option<ExprT> {
+    // Target must be a pointer to a named struct `F`.
+    let target = env.vtype_whnf(target_ty.clone().into());
+    let TypeT::Pointer(f_pointee, _) = &target.val else {
+        return None;
+    };
+    let f_pointee = env.vtype_whnf(f_pointee.clone().into());
+    let TypeT::TypeRef(TypeRefKind::Struct(fname)) = &f_pointee.val else {
+        return None;
+    };
+
+    // `inner` must be a pointer to a named struct `S`.
+    let src = env.vtype_whnf(env.infer_expr(inner).ok()?);
+    let TypeT::Pointer(s_pointee, _) = &src.val else {
+        return None;
+    };
+    let s_pointee = env.vtype_whnf(s_pointee.clone().into());
+    let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &s_pointee.val else {
+        return None;
+    };
+
+    // `S`'s first field must be an eliminated simple-CIS union whose named arm
+    // is `struct F`.
+    let s = env.lookup_struct(sname)?;
+    let first = s.fields.first()?;
+    let first_ty = env.vtype_whnf(first.val.logical_type(&first.loc).into());
+    let TypeT::TypeRef(TypeRefKind::Union(uname)) = &first_ty.val else {
+        return None;
+    };
+    let info = elim.get(&uname.val)?;
+    match &info.named_struct {
+        Some(n) if **n == *fname.val => {}
+        _ => return None,
+    }
+
+    // Build `&(*inner).firstfield`.
+    let field_name: Rc<Ident> = Rc::new(first.val.name().clone());
+    let deref = ExprT::Deref(inner.clone()).with_loc(loc.clone());
+    let member = ExprT::Member(deref, field_name).with_loc(loc.clone());
+    Some(ExprT::Ref(member))
 }
 
 // ---------------------------------------------------------------------------

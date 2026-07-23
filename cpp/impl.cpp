@@ -975,57 +975,6 @@ public:
               return astCtx->hasSameUnqualifiedType(a, b);
             };
 
-            // If `unionField`'s type is a *simple-CIS* union, return its named
-            // arm; otherwise null. This mirrors elim_cis::is_simple_cis: the
-            // union must have exactly two arms, one named and one anonymous,
-            // both struct-typed with identical field lists (same names, same
-            // bit-field-ness, same types). Keeping the check identical to the
-            // collapse pass ensures the frontend only rewrites casts for the
-            // very unions elim_cis will later collapse.
-            auto simpleCisNamedArm = [&](FieldDecl *unionField) -> FieldDecl * {
-              auto *ut = unionField->getType()->getAs<RecordType>();
-              if (!ut)
-                return nullptr;
-              auto *ud = ut->getDecl()->getDefinition();
-              if (!ud || !ud->isUnion())
-                return nullptr;
-              std::vector<FieldDecl *> arms(ud->field_begin(), ud->field_end());
-              if (arms.size() != 2)
-                return nullptr;
-              bool anon0 = !arms[0]->getIdentifier();
-              bool anon1 = !arms[1]->getIdentifier();
-              if (anon0 == anon1)
-                return nullptr;
-              FieldDecl *named = anon0 ? arms[1] : arms[0];
-              FieldDecl *anon = anon0 ? arms[0] : arms[1];
-              auto structDef = [&](FieldDecl *arm) -> RecordDecl * {
-                auto *rt = arm->getType()->getAs<RecordType>();
-                if (!rt)
-                  return nullptr;
-                auto *rd = rt->getDecl()->getDefinition();
-                if (!rd || rd->getTagKind() != TagTypeKind::Struct)
-                  return nullptr;
-                return rd;
-              };
-              RecordDecl *ns = structDef(named);
-              RecordDecl *as = structDef(anon);
-              if (!ns || !as)
-                return nullptr;
-              std::vector<FieldDecl *> nf(ns->field_begin(), ns->field_end());
-              std::vector<FieldDecl *> af(as->field_begin(), as->field_end());
-              if (nf.size() != af.size())
-                return nullptr;
-              for (size_t i = 0; i < nf.size(); ++i) {
-                if (fieldNameStr(nf[i]) != fieldNameStr(af[i]))
-                  return nullptr;
-                if (nf[i]->isBitField() != af[i]->isBitField())
-                  return nullptr;
-                if (!sameType(nf[i]->getType(), af[i]->getType()))
-                  return nullptr;
-              }
-              return named;
-            };
-
             FieldDecl *toStructField = firstField(dstPointee);
             bool fieldToStruct =
                 toStructField && sameType(srcPointee, toStructField->getType());
@@ -1052,33 +1001,6 @@ public:
               auto member = mk_lvalue_member(loc.clone(), std::move(base),
                                              std::move(fieldId));
               return mk_rvalue_ref(std::move(loc), std::move(member));
-            }
-
-            // (struct A *)s  where s : struct S *, and S's FIRST field is a
-            // simple-CIS union whose named arm has struct type A. The union
-            // sits at offset 0, so its named arm is S's initial member and the
-            // cast is the well-defined `&s->arm`. This produces the same node
-            // as writing `&s->arm` directly (see `list_of`), which elim_cis
-            // collapses to the named arm's struct type.
-            if (auto *srcRt = srcPointee->getAs<RecordType>()) {
-              auto *srcRd = srcRt->getDecl()->getDefinition();
-              if (srcRd && srcRd->getTagKind() == TagTypeKind::Struct &&
-                  srcRd->field_begin() != srcRd->field_end()) {
-                FieldDecl *unionField = *srcRd->field_begin();
-                FieldDecl *namedArm = simpleCisNamedArm(unionField);
-                if (namedArm && sameType(dstPointee, namedArm->getType())) {
-                  auto unionId = ctx.mk_ident(toStr(fieldNameStr(unionField)),
-                                              getRange(ic->getSourceRange()));
-                  auto armId = ctx.mk_ident(toStr(fieldNameStr(namedArm)),
-                                            getRange(ic->getSourceRange()));
-                  auto base = mk_deref(loc.clone(), trRValue(ic->getSubExpr()));
-                  auto unionMember = mk_lvalue_member(
-                      loc.clone(), std::move(base), std::move(unionId));
-                  auto armMember = mk_lvalue_member(
-                      loc.clone(), std::move(unionMember), std::move(armId));
-                  return mk_rvalue_ref(std::move(loc), std::move(armMember));
-                }
-              }
             }
           }
         }
