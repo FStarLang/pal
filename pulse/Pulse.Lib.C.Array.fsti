@@ -379,17 +379,21 @@ fn arrayptr_update u#a (#t #s: Type u#a) (x: array t) (i: SZ.t) (upd: (t -> s ->
 val arrayptr_diff (#t: Type) (x z: array t)
   : (r:Pulse.Lib.C.PtrdiffT.t{Pulse.Lib.C.PtrdiffT.v r == offset_of x - offset_of z})
 
-/// Compare two arrayptrs for equality.
+/// Compare two arrayptrs for equality. Two pointers are equal iff they share a
+/// base and offset. The result MUST be tied to the comparison: asserting the
+/// relation unconditionally (ignoring `r`) is unsound -- it would let a caller
+/// derive e.g. `offset_of x == offset_of z` for distinct pointers.
 val arrayptr_eq (#t: Type) (x z: array t) :
-  Pure bool (requires True) (ensures fun r -> offset_of x == offset_of z)
+  Pure bool (requires True)
+    (ensures fun r -> r <==> (base_of x == base_of z /\ offset_of x == offset_of z))
 
 /// Check if arrayptr x offset is <= z offset.
 val arrayptr_lte (#t: Type) (x z: array t) :
-  Pure bool (requires base_of x == base_of z) (ensures fun r -> offset_of x <= offset_of z)
+  Pure bool (requires base_of x == base_of z) (ensures fun r -> r <==> offset_of x <= offset_of z)
 
 /// Check if arrayptr x offset is < z offset.
 val arrayptr_lt (#t: Type) (x z: array t) :
-  Pure bool (requires base_of x == base_of z) (ensures fun r -> offset_of x < offset_of z)
+  Pure bool (requires base_of x == base_of z) (ensures fun r -> r <==> offset_of x < offset_of z)
 
 /// View an array/arrayptr as a `ref` of the same pointee. An arrayptr and a
 /// `ref` share the same underlying handle (`ref t == array t`), so this is the
