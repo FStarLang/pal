@@ -239,6 +239,18 @@ uint32_t use_arity3_amp(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
+/* Same pointer called twice off one `of_fn_valid` (validity persists). */
+int32_t call_twice(void)
+    _ensures(return == 10)
+{
+    int32_t (*fp)(int32_t, int32_t) = add;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
+    int32_t x = fp(2, 3);
+    int32_t y = fp(2, 3);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return x + y;
+}
+
 /* ---- control flow ---- */
 
 /* Branch-local dispatch: each branch binds and calls its own pointer. */
@@ -269,6 +281,31 @@ int32_t ptr_to_fp(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return (*pp)(2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* ---- loops ----
+   Validity is carried across iterations by an `_inline_pulse(is_valid ..)` loop
+   invariant; `call` returns `is_valid` so the fact survives each iteration. */
+
+/* Call a callback in a `while` loop; `_live` tracks the mutable counters. */
+int32_t loop_call(void)
+    _ensures(return == 6)
+{
+    int32_t (*fp)(int32_t, int32_t) = add;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
+    int32_t acc = 1;
+    int32_t i = 0;
+    while (i < 5)
+        _invariant(_live(i) && _live(acc))
+        _invariant(_inline_pulse(Pulse.Lib.C.FuncPtr.is_valid $(fp)
+            Func_add.func_add_pre Func_add.func_add_post))
+        _invariant(i >= 0 && i <= 5 && acc == i + 1)
+    {
+        acc = fp(acc, 1);
+        i = i + 1;
+    }
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return acc;
 }
 
 /* ---- callback parameters (abstract func_ptr params) ----
@@ -336,6 +373,54 @@ int32_t typedef_callback(void)
 {
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return apply_typedef(add, 2, 3);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Forward a callback parameter onward to another function (`apply`). */
+int32_t forward(int32_t (*op)(int32_t, int32_t)
+                    _refine((_slprop) _inline_pulse(
+                        Pulse.Lib.C.FuncPtr.is_valid $(this)
+                            Func_add.func_add_pre Func_add.func_add_post)),
+                int32_t a, int32_t b)
+    _requires(a > 0 && a < 100 && b > 0 && b < 100)
+    _ensures(return == a + b)
+{
+    return apply(op, a, b);
+}
+
+/* Passing concrete `add` through the forwarding callback. */
+int32_t use_forward(void)
+    _ensures(return == 5)
+{
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
+    return forward(add, 2, 3);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Higher-order: the callback `g` is itself a function that takes a function
+   pointer (like `apply`). After `g(add, ..)` returns, two `is_valid` facts are
+   live -- `g`'s own (exported here) and `add`'s (returned by `apply`'s ensures)
+   -- so the surplus `add` fact is dropped by pinning its `f`. */
+int32_t hof(int32_t (*g)(int32_t (*)(int32_t, int32_t), int32_t, int32_t)
+                _refine((_slprop) _inline_pulse(
+                    Pulse.Lib.C.FuncPtr.is_valid $(this)
+                        Func_apply.func_apply_pre Func_apply.func_apply_post)),
+            int32_t a, int32_t b)
+    _requires(a > 0 && a < 100 && b > 0 && b < 100)
+    _ensures(return == a + b)
+{
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
+    return g(add, a, b);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid
+        (Pulse.Lib.C.FuncPtr.of_fn _ _ Func_add.func_add__fp) _ _);
+}
+
+/* Passing concrete `apply` (itself a callback-taking function) to `hof`. */
+int32_t use_hof(void)
+    _ensures(return == 5)
+{
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_apply.func_apply__fp);
+    return hof(apply, 2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
@@ -765,6 +850,28 @@ int32_t use_dispatch(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
     return dispatch(&o, 2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* A vtable with two distinct fn-ptr fields (`bin`, `un`), each called. */
+struct vtable2 {
+    int32_t (*bin)(int32_t, int32_t);
+    int32_t (*un)(int32_t);
+};
+
+int32_t use_two_field_vtable(void)
+    _ensures(return == -5)
+{
+    struct vtable2 v;
+    _ghost_stmt($unfold-uninit(struct vtable2) $&(v));
+    v.bin = add;
+    v.un = neg;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_add.func_add__fp);
+    int32_t s = v.bin(2, 3);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Func_neg.func_neg__fp);
+    int32_t r = v.un(s);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return r;
 }
 
 #if 0
