@@ -375,9 +375,18 @@ fn arrayptr_update u#a (#t #s: Type u#a) (x: array t) (i: SZ.t) (upd: (t -> s ->
     pure (sp' == array_spec_upd sp (arrayptr_off x arr + SZ.v i)
       (upd (array_spec_idx sp (arrayptr_off x arr + SZ.v i)) y))
 
-/// Subtract two arrayptrs to get their offset difference.
-val arrayptr_diff (#t: Type) (x z: array t)
-  : (r:Pulse.Lib.C.PtrdiffT.t{Pulse.Lib.C.PtrdiffT.v r == offset_of x - offset_of z})
+/// Subtract two arrayptrs to get their offset difference. In C, pointer
+/// subtraction is only defined when both operands point into the *same* array
+/// object (C11 6.5.6p9), and the result must be representable in `ptrdiff_t`
+/// (6.5.6p9: otherwise the behavior is undefined). Both facts are required
+/// here: the same-base requirement mirrors the sibling comparisons
+/// `arrayptr_lt`/`arrayptr_lte`, and the `fits` requirement keeps the result
+/// type inhabited (`PtrdiffT.v` is bounded to `Int64`, but `offset_of` is an
+/// unbounded `nat`, so without it the postcondition could be uninhabited).
+val arrayptr_diff (#t: Type) (x z: array t) :
+  Pure Pulse.Lib.C.PtrdiffT.t
+    (requires base_of x == base_of z /\ Pulse.Lib.C.PtrdiffT.fits (offset_of x - offset_of z))
+    (ensures fun r -> Pulse.Lib.C.PtrdiffT.v r == offset_of x - offset_of z)
 
 /// Compare two arrayptrs for equality. Two pointers are equal iff they share a
 /// base and offset. The result MUST be tied to the comparison: asserting the
