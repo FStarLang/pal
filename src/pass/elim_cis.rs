@@ -364,17 +364,21 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
         | ExprT::Error(_) => {}
     }
 
-    // Rewrite a cast `(struct F*)e` where `e : struct S*` and `S`'s first field
-    // is an eliminated simple-CIS union whose named arm is `struct F`. Per C, a
-    // pointer to a struct also points to its first member, so the cast is the
-    // well-defined `&e->firstfield`. The frontend leaves this as a `Cast`
-    // because at parse time the first field is still a union (not `struct F`);
-    // after this pass collapses the union the first field *is* `struct F`, so
-    // the coercion becomes valid and downstream `emit` handles the produced
-    // `&e->_unnamed0` member/ref node directly (a raw struct*->struct* `Cast`
-    // has no `emit` lowering).
+    // Rewrite a cast between a struct pointer and a pointer to its leading
+    // CIS-union field, in either direction. Per C a pointer to a struct also
+    // points to its first member, so both directions are well defined. The
+    // frontend leaves these as a raw `Cast` because at parse time the first
+    // field is still a union (not `struct F`); after this pass collapses the
+    // union the first field *is* `struct F`, so the coercion becomes valid:
+    //   * `(struct F*)e` (struct -> leading field) lowers to `&e->firstfield`;
+    //   * `(struct S*)e` (leading field -> struct) lowers to the per-field
+    //     container-of projection.
+    // Downstream `emit` handles the produced member/ref and `ContainerOf` nodes
+    // directly (a raw struct*->struct* `Cast` has no `emit` lowering). The two
+    // shapes are mutually exclusive, so it is safe to try them in sequence.
     let cast_rw = if let ExprT::Cast(inner, target_ty) = &e.val {
         cast_to_first_member(env, inner, target_ty, &e.loc, elim)
+            .or_else(|| cast_to_container(env, inner, target_ty, &e.loc, elim))
     } else {
         None
     };
@@ -488,6 +492,62 @@ fn cast_to_first_member(
     let deref = ExprT::Deref(inner.clone()).with_loc(loc.clone());
     let member = ExprT::Member(deref, field_name).with_loc(loc.clone());
     Some(ExprT::Ref(member))
+}
+
+/// The reverse of `cast_to_first_member`: for a cast `(struct S*)inner`, if
+/// `inner : struct F*` and `S`'s first field is an eliminated simple-CIS union
+/// whose named arm is `struct F`, build the container-of projection recovering
+/// the enclosing `struct S*` from a pointer to its leading field (the same node
+/// `_container_of` produces). After the union collapses, `S`'s first field *is*
+/// `struct F`, so `emit` lowers this `ContainerOf` to the per-field container
+/// function PAL already generates. Returns the replacement `ExprT`, or `None`
+/// when the shape does not match.
+fn cast_to_container(
+    env: &Env,
+    inner: &Rc<Expr>,
+    target_ty: &Rc<Type>,
+    loc: &Rc<SourceInfo>,
+    elim: &HashMap<Rc<IdentT>, ElimUnion>,
+) -> Option<ExprT> {
+    // Target must be a pointer to a named struct `S`.
+    let target = env.vtype_whnf(target_ty.clone().into());
+    let TypeT::Pointer(s_pointee, _) = &target.val else {
+        return None;
+    };
+    let s_pointee = env.vtype_whnf(s_pointee.clone().into());
+    let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &s_pointee.val else {
+        return None;
+    };
+
+    // `inner` must be a pointer to a named struct `F`.
+    let src = env.vtype_whnf(env.infer_expr(inner).ok()?);
+    let TypeT::Pointer(f_pointee, _) = &src.val else {
+        return None;
+    };
+    let f_pointee = env.vtype_whnf(f_pointee.clone().into());
+    let TypeT::TypeRef(TypeRefKind::Struct(fname)) = &f_pointee.val else {
+        return None;
+    };
+
+    // `S`'s first field must be an eliminated simple-CIS union whose named arm
+    // is `struct F`.
+    let s = env.lookup_struct(sname)?;
+    let first = s.fields.first()?;
+    let first_ty = env.vtype_whnf(first.val.logical_type(&first.loc).into());
+    let TypeT::TypeRef(TypeRefKind::Union(uname)) = &first_ty.val else {
+        return None;
+    };
+    let info = elim.get(&uname.val)?;
+    match &info.named_struct {
+        Some(n) if **n == *fname.val => {}
+        _ => return None,
+    }
+
+    // Build `_container_of(inner, struct S, firstfield)`.
+    let field_name: Rc<Ident> = Rc::new(first.val.name().clone());
+    let struct_ty: Rc<Type> =
+        TypeT::TypeRef(TypeRefKind::Struct(sname.clone())).with_loc(loc.clone());
+    Some(ExprT::ContainerOf(inner.clone(), struct_ty, field_name))
 }
 
 // ---------------------------------------------------------------------------
