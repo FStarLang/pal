@@ -8,6 +8,10 @@ module I64 = FStar.Int64
 let t = I64.t
 let v (x: t) : int = I64.v x
 
+/// Whether an integer is representable in `ptrdiff_t`. Used to state the
+/// definedness precondition of pointer subtraction (C11 6.5.6p9).
+let fits (x: int) : prop = I64.fits x
+
 let zero : t = 0L
 let one : t = 1L
 
