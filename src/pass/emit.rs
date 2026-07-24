@@ -147,26 +147,6 @@ fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
     map
 }
 
-/// Builds a map from function name to whether it is `_total` (terminating). Used
-/// to pick the divergence-aware FuncPtr primitives: an address-taken function's
-/// `__fp` wrapper is emitted as a total `fn` and reflected with `of_fn` when the
-/// function is `_total`, else as a `divergent fn` reflected with `of_fn_div`.
-fn build_fn_total_map(decls: &[Decl]) -> HashMap<Rc<str>, bool> {
-    let mut map = HashMap::new();
-    for decl in decls {
-        match &decl.val {
-            DeclT::FnDefn(fn_defn) => {
-                map.insert(fn_defn.decl.name.val.clone(), fn_defn.decl.is_total);
-            }
-            DeclT::FnDecl(fn_decl) => {
-                map.insert(fn_decl.name.val.clone(), fn_decl.is_total);
-            }
-            _ => {}
-        }
-    }
-    map
-}
-
 /// Builds a map from typedef names that are actually OpaqueTypeDecls to their `Type_*` module.
 /// This overrides the default `Typedef_*` mapping from module_for_name for TypeRef lookups.
 fn build_typedef_override_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
@@ -649,9 +629,6 @@ struct Emitter<'a> {
     fn_module_map: HashMap<Rc<str>, String>,
     /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
     typedef_override_map: HashMap<Rc<str>, String>,
-    /// Maps each function name to whether it is `_total`. Consulted by `emit_of_fn`
-    /// to pick `of_fn` (total target) vs `of_fn_div` (divergent target).
-    fn_total_map: HashMap<Rc<str>, bool>,
     /// Whether the function body currently being emitted is `_total`. Set at body
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
@@ -2984,7 +2961,7 @@ impl<'a> Emitter<'a> {
                     // func_<g>__fp`. Emitting the resolved `of_fn` term (rather
                     // than an abstract handle) is what lets `of_fn_valid`'s
                     // SMTPat discharge validity at the call site.
-                    self.emit_of_fn(g.val.clone())
+                    self.emit_of_fn(env, g)
                 }
                 ExprT::FnPtrCall(f, args) => {
                     // Indirect call `fp(args)`. We evaluate the callee to a
@@ -6062,15 +6039,16 @@ impl<'a> Emitter<'a> {
     /// `(Pulse.Lib.C.FuncPtr.of_fn func_<g>_pre func_<g>_post func_<g>__fp)` for a
     /// `_total` target, or `of_fn_div ..` for a divergent one (matching the `__fp`
     /// wrapper's effect and the validity divergence bit).
-    fn emit_of_fn(&mut self, g: Rc<str>) -> Doc {
-        let of_fn = if self.fn_total_map.get(&g).copied().unwrap_or(false) {
+    fn emit_of_fn(&mut self, env: &Env, g: &Ident) -> Doc {
+        let is_total = env.lookup_fn(g).map(|d| d.is_total).unwrap_or(false);
+        let of_fn = if is_total {
             "Pulse.Lib.C.FuncPtr.of_fn"
         } else {
             "Pulse.Lib.C.FuncPtr.of_fn_div"
         };
-        let pre = self.fnptr_pre_name(&g);
-        let post = self.fnptr_post_name(&g);
-        let wrap = self.fnptr_wrap_name(&g);
+        let pre = self.fnptr_pre_name(&g.val);
+        let post = self.fnptr_post_name(&g.val);
+        let wrap = self.fnptr_wrap_name(&g.val);
         parens(naryfn([Doc::text(of_fn), pre, post, wrap]))
     }
 
@@ -7618,8 +7596,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
 
     // Build the map from function/let/global identifiers to their owning modules
     let fn_module_map = build_fn_module_map(&tu.decls);
-    // Build the map from function name to `_total`-ness
-    let fn_total_map = build_fn_total_map(&tu.decls);
     // Build the override map for OpaqueTypeDecl typedef names
     let typedef_override_map = build_typedef_override_map(&tu.decls);
 
@@ -7653,7 +7629,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_module: String::new(),
         fn_module_map,
         typedef_override_map,
-        fn_total_map,
         current_fn_total: false,
         fnptr_diverged: false,
         caller_cb_prelude: Vec::new(),
