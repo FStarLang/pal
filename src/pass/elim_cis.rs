@@ -364,17 +364,22 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
         | ExprT::Error(_) => {}
     }
 
-    // Rewrite a cast `(struct F*)e` where `e : struct S*` and `S`'s first field
-    // is an eliminated simple-CIS union whose named arm is `struct F`. Per C, a
-    // pointer to a struct also points to its first member, so the cast is the
-    // well-defined `&e->firstfield`. The frontend leaves this as a `Cast`
-    // because at parse time the first field is still a union (not `struct F`);
-    // after this pass collapses the union the first field *is* `struct F`, so
-    // the coercion becomes valid and downstream `emit` handles the produced
-    // `&e->_unnamed0` member/ref node directly (a raw struct*->struct* `Cast`
-    // has no `emit` lowering).
+    // Rewrite a cast between a struct pointer and a pointer to its leading
+    // CIS-union field, in either direction. Per C a pointer to a struct also
+    // points to its first member, so both directions are well defined. The
+    // frontend leaves these as a raw `Cast` because at parse time the first
+    // field is still a union (not `struct F`); after this pass collapses the
+    // union the first field *is* `struct F`, so the coercion becomes valid:
+    //   * `(struct F*)e` (struct -> leading field) lowers to `&e->firstfield`;
+    //   * `(struct S*)e` (leading field -> struct) lowers to the per-field
+    //     container-of projection.
+    // Downstream `emit` handles the produced member/ref and `ContainerOf` nodes
+    // directly (a raw struct*->struct* `Cast` has no `emit` lowering). This is
+    // the post-collapse analog of the frontend's first-field cast detector in
+    // `cpp/impl.cpp` (`firstField` + `sameType` -> `fieldToStruct` /
+    // `structToField`); see `cast_first_field`.
     let cast_rw = if let ExprT::Cast(inner, target_ty) = &e.val {
-        cast_to_first_member(env, inner, target_ty, &e.loc, elim)
+        cast_first_field(env, inner, target_ty, &e.loc, elim)
     } else {
         None
     };
@@ -437,57 +442,89 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
     }
 }
 
-/// For a cast `(struct F*)inner`, if `inner : struct S*` and `S`'s first field
-/// is an eliminated simple-CIS union whose named arm is `struct F`, build the
-/// equivalent `&(*inner).firstfield` node (the collapse turns that first field
-/// into `struct F`, so the member access has the cast's target type). Returns
-/// the replacement `ExprT`, or `None` when the shape does not match.
-fn cast_to_first_member(
+/// The named struct a pointer type points to, or `None`. Mirrors the
+/// `->getPointeeType()` + record-type check in the frontend detector
+/// (`cpp/impl.cpp`).
+fn struct_pointee(env: &Env, ty: MaybeRc<Type>) -> Option<Rc<Ident>> {
+    let whnf = env.vtype_whnf(ty);
+    let TypeT::Pointer(pointee, _) = &whnf.val else {
+        return None;
+    };
+    let pointee = env.vtype_whnf(pointee.clone().into());
+    let TypeT::TypeRef(TypeRefKind::Struct(name)) = &pointee.val else {
+        return None;
+    };
+    Some(name.clone())
+}
+
+/// The CIS analog of the frontend's `firstField` (`cpp/impl.cpp`): `sname`'s
+/// first field as `(field name, effective first-field struct)`. The effective
+/// struct is the field's struct directly when the first field is a plain named
+/// struct, or the eliminated CIS union's named arm (its post-collapse type)
+/// when the first field is an eliminated union. Returns `None` for any other
+/// first-field shape.
+fn first_field(
+    env: &Env,
+    sname: &Ident,
+    elim: &HashMap<Rc<IdentT>, ElimUnion>,
+) -> Option<(Rc<Ident>, Rc<IdentT>)> {
+    let s = env.lookup_struct(sname)?;
+    let first = s.fields.first()?;
+    let first_ty = env.vtype_whnf(first.val.logical_type(&first.loc).into());
+    let effective: Rc<IdentT> = match &first_ty.val {
+        TypeT::TypeRef(TypeRefKind::Struct(f)) => f.val.clone(),
+        TypeT::TypeRef(TypeRefKind::Union(uname)) => elim.get(&uname.val)?.named_struct.clone()?,
+        _ => return None,
+    };
+    Some((Rc::new(first.val.name().clone()), effective))
+}
+
+/// Lower a cast between a struct pointer and a pointer to its leading field, in
+/// either direction, mirroring the frontend first-field detector in
+/// `cpp/impl.cpp:951-1012` over the post-collapse view:
+///   * `(struct S*)p` where `p : F*` and `F` is `S`'s first field (`fieldToStruct`)
+///     lowers to the per-field container-of projection recovering `struct S*`;
+///   * `(F*)s` where `s : struct S*` and `F` is `S`'s first field (`structToField`)
+///     lowers to `&(*s).firstfield`.
+/// `first_field` supplies the effective (post-collapse) first-field struct, so
+/// the shape matches identically whether the leading member is a plain struct
+/// or an eliminated CIS union. Returns the replacement `ExprT`, or `None` when
+/// no first-field cast is recognized. The two shapes are mutually exclusive
+/// (the `&& !other` guards mirror the frontend).
+fn cast_first_field(
     env: &Env,
     inner: &Rc<Expr>,
     target_ty: &Rc<Type>,
     loc: &Rc<SourceInfo>,
     elim: &HashMap<Rc<IdentT>, ElimUnion>,
 ) -> Option<ExprT> {
-    // Target must be a pointer to a named struct `F`.
-    let target = env.vtype_whnf(target_ty.clone().into());
-    let TypeT::Pointer(f_pointee, _) = &target.val else {
-        return None;
-    };
-    let f_pointee = env.vtype_whnf(f_pointee.clone().into());
-    let TypeT::TypeRef(TypeRefKind::Struct(fname)) = &f_pointee.val else {
-        return None;
-    };
+    // Both sides must be pointers to named structs (dstPointee / srcPointee).
+    let dst = struct_pointee(env, target_ty.clone().into())?;
+    let src = struct_pointee(env, env.infer_expr(inner).ok()?)?;
 
-    // `inner` must be a pointer to a named struct `S`.
-    let src = env.vtype_whnf(env.infer_expr(inner).ok()?);
-    let TypeT::Pointer(s_pointee, _) = &src.val else {
-        return None;
-    };
-    let s_pointee = env.vtype_whnf(s_pointee.clone().into());
-    let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &s_pointee.val else {
-        return None;
-    };
+    // firstField(dstPointee) / firstField(srcPointee) with sameType checks
+    // against the opposite pointee (cpp/impl.cpp:984-989).
+    let to_struct = first_field(env, &dst, elim);
+    let field_to_struct = to_struct.as_ref().is_some_and(|(_, f)| **f == *src.val);
+    let to_field = first_field(env, &src, elim);
+    let struct_to_field = to_field.as_ref().is_some_and(|(_, f)| **f == *dst.val);
 
-    // `S`'s first field must be an eliminated simple-CIS union whose named arm
-    // is `struct F`.
-    let s = env.lookup_struct(sname)?;
-    let first = s.fields.first()?;
-    let first_ty = env.vtype_whnf(first.val.logical_type(&first.loc).into());
-    let TypeT::TypeRef(TypeRefKind::Union(uname)) = &first_ty.val else {
-        return None;
-    };
-    let info = elim.get(&uname.val)?;
-    match &info.named_struct {
-        Some(n) if **n == *fname.val => {}
-        _ => return None,
+    // `(struct S*)p` where `p : F*`, `F` = first field of `S`.
+    if field_to_struct && !struct_to_field {
+        let (field_name, _) = to_struct.unwrap();
+        let struct_ty: Rc<Type> = TypeT::TypeRef(TypeRefKind::Struct(dst)).with_loc(loc.clone());
+        return Some(ExprT::ContainerOf(inner.clone(), struct_ty, field_name));
     }
 
-    // Build `&(*inner).firstfield`.
-    let field_name: Rc<Ident> = Rc::new(first.val.name().clone());
-    let deref = ExprT::Deref(inner.clone()).with_loc(loc.clone());
-    let member = ExprT::Member(deref, field_name).with_loc(loc.clone());
-    Some(ExprT::Ref(member))
+    // `(F*)s` where `s : struct S*`, `F` = first field of `S`.
+    if struct_to_field && !field_to_struct {
+        let (field_name, _) = to_field.unwrap();
+        let deref = ExprT::Deref(inner.clone()).with_loc(loc.clone());
+        let member = ExprT::Member(deref, field_name).with_loc(loc.clone());
+        return Some(ExprT::Ref(member));
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------

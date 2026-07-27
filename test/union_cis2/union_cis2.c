@@ -55,3 +55,74 @@ int roundtrip_via_cast(struct head *h, int v)
     l->a = v;
     return l->a;
 }
+
+// Cast a pointer to the leading CIS field back to the enclosing struct pointer.
+// The `struct list *` view is obtained from a genuine `struct head`, so casting
+// it back to `struct head *` recovers the original object -- including the
+// trailing `qlen`, which lives beyond the leading CIS field. PAL lowers the
+// reverse cast `(struct head *)l` to the per-field container-of projection
+// `struct_head___unnamed0_container` (the inverse of the forward
+// `(struct list *)h -> &h->list` lowering); the emitted `_container_inv` SMTPat
+// proves the recovered pointer equals `h`, so writing `qlen` through it and
+// reading it back through `h` denote the same storage.
+//
+// Recovering the enclosing struct yields the ref in its container-projected
+// form `container(unnamed0_1 h)`. That is provably equal to `h`, but the Pulse
+// frame matcher will not fire the `_container_inv` SMTPat on its own to
+// re-address the whole-struct ownership (`aux_raw_unfolded` + the `qlen` cell)
+// from the `h` form to the `container(...)` form. The two ghost bridges below
+// steer that rewrite (their residual ref-equality goal is discharged by the
+// lemma), matching the pattern in test/container_field_read.
+_include_pulse(Union_cis2_include,
+  module H = Struct_head
+
+  // Re-address the whole-struct ownership from the `h` form to the
+  // container-projected form the recovered pointer carries.
+  ghost fn to_container (h: $type(struct head *)) (#qv: $type(int))
+    requires
+      (H.struct_head__aux_raw_unfolded h 1.0R) **
+      (pts_to (H.struct_head__qlen_1 h) qv)
+    ensures
+      (H.struct_head__aux_raw_unfolded
+         (H.struct_head___unnamed0_container (H.struct_head___unnamed0_1 h)) 1.0R) **
+      (pts_to (H.struct_head__qlen_1
+         (H.struct_head___unnamed0_container (H.struct_head___unnamed0_1 h))) qv)
+  {
+    rewrite (H.struct_head__aux_raw_unfolded h 1.0R)
+         as (H.struct_head__aux_raw_unfolded
+              (H.struct_head___unnamed0_container (H.struct_head___unnamed0_1 h)) 1.0R);
+    rewrite (pts_to (H.struct_head__qlen_1 h) qv)
+         as (pts_to (H.struct_head__qlen_1
+              (H.struct_head___unnamed0_container (H.struct_head___unnamed0_1 h))) qv);
+  }
+
+  // Re-address it back, restoring the caller's `h`-named ownership.
+  ghost fn from_container (h: $type(struct head *)) (#qv: $type(int))
+    requires
+      (H.struct_head__aux_raw_unfolded
+         (H.struct_head___unnamed0_container (H.struct_head___unnamed0_1 h)) 1.0R) **
+      (pts_to (H.struct_head__qlen_1
+         (H.struct_head___unnamed0_container (H.struct_head___unnamed0_1 h))) qv)
+    ensures
+      (H.struct_head__aux_raw_unfolded h 1.0R) **
+      (pts_to (H.struct_head__qlen_1 h) qv)
+  {
+    rewrite (H.struct_head__aux_raw_unfolded
+              (H.struct_head___unnamed0_container (H.struct_head___unnamed0_1 h)) 1.0R)
+         as (H.struct_head__aux_raw_unfolded h 1.0R);
+    rewrite (pts_to (H.struct_head__qlen_1
+              (H.struct_head___unnamed0_container (H.struct_head___unnamed0_1 h))) qv)
+         as (pts_to (H.struct_head__qlen_1 h) qv);
+  }
+)
+
+int cast_field_to_struct(struct head *h, int v)
+    _ensures(return == v)
+{
+    struct list *l = (struct list *)h;   // view of the leading CIS field
+    struct head *h2 = (struct head *)l;  // cast back to the enclosing struct
+    _ghost_stmt(Union_cis2_include.to_container $(h));
+    h2->qlen = v;
+    _ghost_stmt(Union_cis2_include.from_container $(h));
+    return h->qlen;
+}
