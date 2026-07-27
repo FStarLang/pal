@@ -9,12 +9,18 @@
 //!   3. both arms are struct-typed with identical field lists (same length,
 //!      same field names, same types).
 //!
-//! For a qualifying union the pass rewrites, across the whole translation unit:
-//!   - `Member(base, arm)` where `base` has the eliminated union type and `arm`
-//!     is one of its arm names  ->  `base` (collapses both `u->n.p1` and the
-//!     promoted `u->p1` down to `u.p1`);
-//!   - `UnionInit(u, arm, StructInit(_, kvs))`  ->  `StructInit(u, kvs)`;
-//!   - the `UnionDefn` itself  ->  a `StructDefn` holding the shared CIS fields;
+//! For a qualifying union the pass collapses it to a struct whose single field
+//! is the *named* arm, and reroutes every access through that named arm. Across
+//! the whole translation unit (bodies AND `_requires`/`_ensures`/`assert`/loop
+//! invariants) it rewrites:
+//!   - `Member(base, anon_arm)` where `base` has the eliminated union type  ->
+//!     `Member(base, named_arm)` (e.g. the promoted `h->a` becomes `h->list.a`);
+//!     a `Member(base, named_arm)` access is already valid and left unchanged;
+//!   - `UnionInit(u, arm, val)`  ->  `StructInit(u, [(named_arm, val')])`, where
+//!     an anonymous-arm struct-init payload is re-tagged with the named arm's
+//!     struct type (both arms share an identical field list);
+//!   - the `UnionDefn` itself  ->  a `StructDefn` of the same name holding only
+//!     the named arm as its field;
 //!   - every `TypeRef(Union(u))`  ->  `TypeRef(Struct(u))`.
 //!
 //! Downstream `emit` then produces an ordinary single-constructor struct record
@@ -25,18 +31,19 @@ use std::{collections::HashMap, rc::Rc};
 
 use crate::{diag::Diagnostics, env::Env, ir::*, mayberc::MaybeRc};
 
-/// Per-eliminated-union information.
+/// Per-eliminated-union information for a *simple CIS* union (see module docs).
 struct ElimUnion {
-    /// The two arm (field) names of the union.
-    arm_names: Vec<Rc<IdentT>>,
-    /// The shared CIS fields that become the fields of the replacement struct
-    /// (used only when `named_struct` is `None`).
-    cis_fields: Vec<Field>,
-    /// If the named arm's type is a directly-named struct, its name. When set,
-    /// the union collapses INTO that struct (reusing its nominal type) instead
-    /// of synthesizing a fresh struct, so pointers to the named arm keep the
-    /// arm's struct type (e.g. `&h->list : struct list*`).
-    named_struct: Option<Rc<IdentT>>,
+    /// The anonymous (promoted) arm's field name. Accesses through this arm are
+    /// rewritten to go through the named arm instead.
+    anon_arm: Rc<IdentT>,
+    /// The named arm's field name (e.g. `list`, `n`). Becomes the single field
+    /// of the replacement struct, and the arm every access is routed through.
+    named_arm: Rc<IdentT>,
+    /// The named arm's struct type name (e.g. `list`, `named`). Used to re-tag
+    /// anonymous-arm struct initializers with the named arm's struct type.
+    named_struct: Rc<IdentT>,
+    /// The named arm's `Field`, used verbatim as the replacement struct's field.
+    named_field: Field,
 }
 
 /// If `f`'s type resolves directly to a named struct, return that struct's name.
@@ -100,9 +107,9 @@ fn type_alpha_eq(a: &Type, b: &Type) -> bool {
     }
 }
 
-/// Detect whether `u` is a simple-CIS union; if so return the shared CIS field
-/// list to use for the replacement struct.
-pub(crate) fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<(Vec<Field>, Option<Rc<IdentT>>)> {
+/// Detect whether `u` is a simple-CIS union; if so return the info needed to
+/// collapse it to a struct holding only its named arm.
+fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<ElimUnion> {
     // Condition 1: exactly two arms.
     if u.fields.len() != 2 {
         return None;
@@ -114,14 +121,21 @@ pub(crate) fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<(Vec<Field>, Opt
     if is_anon(arm0) == is_anon(arm1) {
         return None;
     }
-    // Both arms must be struct-typed.
-    let s0 = arm_struct_fields(env, arm0)?;
-    let s1 = arm_struct_fields(env, arm1)?;
+    let (anon, named) = if is_anon(arm0) {
+        (arm0, arm1)
+    } else {
+        (arm1, arm0)
+    };
+    // Both arms must be struct-typed; the named arm's struct must be nominal so
+    // the collapsed field keeps a real struct type.
+    let anon_fields = arm_struct_fields(env, anon)?;
+    let named_fields = arm_struct_fields(env, named)?;
+    let named_struct = arm_struct_name(env, named)?;
     // Condition 3: identical field lists (same length, names and types).
-    if s0.len() != s1.len() {
+    if anon_fields.len() != named_fields.len() {
         return None;
     }
-    for (f0, f1) in s0.iter().zip(s1.iter()) {
+    for (f0, f1) in anon_fields.iter().zip(named_fields.iter()) {
         if f0.val.name().val != f1.val.name().val {
             return None;
         }
@@ -132,11 +146,12 @@ pub(crate) fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<(Vec<Field>, Opt
             return None;
         }
     }
-    // If the named arm's type is a directly-named struct, reuse it as the
-    // collapse target so pointers to the arm keep the arm's struct type.
-    let named_arm = if is_anon(arm0) { arm1 } else { arm0 };
-    let named_struct = arm_struct_name(env, named_arm);
-    Some((s0, named_struct))
+    Some(ElimUnion {
+        anon_arm: anon.val.name().val.clone(),
+        named_arm: named.val.name().val.clone(),
+        named_struct,
+        named_field: named.clone(),
+    })
 }
 
 pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
@@ -151,35 +166,18 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     let mut elim: HashMap<Rc<IdentT>, ElimUnion> = HashMap::new();
     for decl in tu.decls.iter() {
         if let DeclT::UnionDefn(u) = &decl.val {
-            if let Some((cis_fields, named_struct)) = is_simple_cis(&env, u) {
-                let arm_names = u.fields.iter().map(|f| f.val.name().val.clone()).collect();
-                elim.insert(
-                    u.name.val.clone(),
-                    ElimUnion {
-                        arm_names,
-                        cis_fields,
-                        named_struct,
-                    },
-                );
+            if let Some(info) = is_simple_cis(&env, u) {
+                elim.insert(u.name.val.clone(), info);
             }
         }
     }
     if elim.is_empty() {
         return;
     }
-    // Map each eliminated union to the struct it collapses into: the named
-    // arm's struct when reusable, otherwise a fresh struct sharing the union's
-    // own name.
-    let elim_names: HashMap<Rc<IdentT>, Rc<IdentT>> = elim
-        .iter()
-        .map(|(uname, info)| {
-            let target = info.named_struct.clone().unwrap_or_else(|| uname.clone());
-            (uname.clone(), target)
-        })
-        .collect();
 
-    // Phase 1: env-threaded expression rewrites (arm-access collapse + union
-    // init -> struct init).
+    // Phase 1: env-threaded expression rewrites (anon-arm access -> named-arm
+    // access, and union init -> struct init) across bodies and all spec
+    // positions (requires/ensures/asserts/invariants).
     for decl in tu.decls.iter_mut() {
         if let DeclT::FnDefn(FnDefn {
             decl: fn_decl,
@@ -199,36 +197,23 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         }
     }
 
-    // Phase 2: rewrite all `Union(u)` type references to the target struct
-    // type, then for each eliminated `UnionDefn` either drop it (when it reuses
-    // an existing named arm struct) or swap it for a fresh `StructDefn` holding
-    // the shared CIS fields.
+    // Phase 2: rewrite every `Union(u)` type reference to `Struct(u)`, then
+    // replace each eliminated `UnionDefn` with a `StructDefn` of the same name
+    // holding only the named arm as its field.
     for decl in tu.decls.iter_mut() {
-        rewrite_types_decl(&mut decl.val, &elim_names);
+        rewrite_types_decl(&mut decl.val, &elim);
     }
     for decl in tu.decls.iter_mut() {
         if let DeclT::UnionDefn(u) = &decl.val {
             if let Some(info) = elim.get(&u.name.val) {
-                if info.named_struct.is_none() {
-                    decl.val = DeclT::StructDefn(StructDefn {
-                        name: u.name.clone(),
-                        fields: info.cis_fields.clone(),
-                        eager_unfold_pred: false,
-                    });
-                }
+                decl.val = DeclT::StructDefn(StructDefn {
+                    name: u.name.clone(),
+                    fields: vec![info.named_field.clone()],
+                    eager_unfold_pred: false,
+                });
             }
         }
     }
-    // Drop the union defns that collapsed into an existing named arm struct;
-    // their type references have already been redirected to that struct.
-    tu.decls.retain(|decl| {
-        if let DeclT::UnionDefn(u) = &decl.val {
-            if let Some(info) = elim.get(&u.name.val) {
-                return info.named_struct.is_none();
-            }
-        }
-        true
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -364,68 +349,23 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
         | ExprT::Error(_) => {}
     }
 
-    // Rewrite a cast between a struct pointer and a pointer to its leading
-    // CIS-union field, in either direction. Per C a pointer to a struct also
-    // points to its first member, so both directions are well defined. The
-    // frontend leaves these as a raw `Cast` because at parse time the first
-    // field is still a union (not `struct F`); after this pass collapses the
-    // union the first field *is* `struct F`, so the coercion becomes valid:
-    //   * `(struct F*)e` (struct -> leading field) lowers to `&e->firstfield`;
-    //   * `(struct S*)e` (leading field -> struct) lowers to the per-field
-    //     container-of projection.
-    // Downstream `emit` handles the produced member/ref and `ContainerOf` nodes
-    // directly (a raw struct*->struct* `Cast` has no `emit` lowering). This is
-    // the post-collapse analog of the frontend's first-field cast detector in
-    // `cpp/impl.cpp` (`firstField` + `sameType` -> `fieldToStruct` /
-    // `structToField`); see `cast_first_field`.
-    let cast_rw = if let ExprT::Cast(inner, target_ty) = &e.val {
-        cast_first_field(env, inner, target_ty, &e.loc, elim)
-    } else {
-        None
-    };
-    if let Some(newval) = cast_rw {
-        e.val = newval;
-        return;
-    }
-
-    // Rewrite `UnionInit(u, arm, StructInit(_, kvs))` -> `StructInit(S, kvs)`,
-    // where `S` is the struct the union collapses into (the reused named arm
-    // struct, or the union's own name for the synthesize-fresh case).
-    let uinit = if let ExprT::UnionInit(uname, _arm, val) = &e.val {
-        if let Some(info) = elim.get(&uname.val) {
-            if let ExprT::StructInit(_sname, kvs) = &val.val {
-                let target = info
-                    .named_struct
-                    .clone()
-                    .unwrap_or_else(|| uname.val.clone());
-                let sname = Rc::new(Ast {
-                    val: target,
-                    loc: uname.loc.clone(),
-                });
-                Some((sname, kvs.clone()))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    if let Some((sname, kvs)) = uinit {
-        e.val = ExprT::StructInit(sname, kvs);
-        return;
-    }
-
-    // Collapse `Member(base, arm)` -> `base` when `base` is an eliminated-union
-    // type and `arm` is one of its arm names.
-    let collapse = if let ExprT::Member(base, arm) = &e.val {
+    // Rewrite `Member(base, anon_arm)` -> `Member(base, named_arm)` when `base`
+    // has an eliminated CIS union type and `arm` is its anonymous (promoted)
+    // arm. A named-arm access is already valid against the replacement struct
+    // and is left unchanged.
+    let member_rw = if let ExprT::Member(base, arm) = &e.val {
         match env.infer_expr(base) {
             Ok(t) => {
                 let t = env.vtype_whnf(t);
                 if let TypeT::TypeRef(TypeRefKind::Union(uname)) = &t.val {
                     match elim.get(&uname.val) {
-                        Some(info) if info.arm_names.contains(&arm.val) => Some(base.clone()),
+                        Some(info) if arm.val == info.anon_arm => {
+                            let named = Rc::new(Ast {
+                                val: info.named_arm.clone(),
+                                loc: arm.loc.clone(),
+                            });
+                            Some(ExprT::Member(base.clone(), named))
+                        }
                         _ => None,
                     }
                 } else {
@@ -437,110 +377,54 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
     } else {
         None
     };
-    if let Some(base) = collapse {
-        *e = (*base).clone();
-    }
-}
-
-/// The named struct a pointer type points to, or `None`. Mirrors the
-/// `->getPointeeType()` + record-type check in the frontend detector
-/// (`cpp/impl.cpp`).
-fn struct_pointee(env: &Env, ty: MaybeRc<Type>) -> Option<Rc<Ident>> {
-    let whnf = env.vtype_whnf(ty);
-    let TypeT::Pointer(pointee, _) = &whnf.val else {
-        return None;
-    };
-    let pointee = env.vtype_whnf(pointee.clone().into());
-    let TypeT::TypeRef(TypeRefKind::Struct(name)) = &pointee.val else {
-        return None;
-    };
-    Some(name.clone())
-}
-
-/// The CIS analog of the frontend's `firstField` (`cpp/impl.cpp`): `sname`'s
-/// first field as `(field name, effective first-field struct)`. The effective
-/// struct is the field's struct directly when the first field is a plain named
-/// struct, or the eliminated CIS union's named arm (its post-collapse type)
-/// when the first field is an eliminated union. Returns `None` for any other
-/// first-field shape.
-fn first_field(
-    env: &Env,
-    sname: &Ident,
-    elim: &HashMap<Rc<IdentT>, ElimUnion>,
-) -> Option<(Rc<Ident>, Rc<IdentT>)> {
-    let s = env.lookup_struct(sname)?;
-    let first = s.fields.first()?;
-    let first_ty = env.vtype_whnf(first.val.logical_type(&first.loc).into());
-    let effective: Rc<IdentT> = match &first_ty.val {
-        TypeT::TypeRef(TypeRefKind::Struct(f)) => f.val.clone(),
-        TypeT::TypeRef(TypeRefKind::Union(uname)) => elim.get(&uname.val)?.named_struct.clone()?,
-        _ => return None,
-    };
-    Some((Rc::new(first.val.name().clone()), effective))
-}
-
-/// Lower a cast between a struct pointer and a pointer to its leading field, in
-/// either direction, mirroring the frontend first-field detector in
-/// `cpp/impl.cpp:951-1012` over the post-collapse view:
-///   * `(struct S*)p` where `p : F*` and `F` is `S`'s first field (`fieldToStruct`)
-///     lowers to the per-field container-of projection recovering `struct S*`;
-///   * `(F*)s` where `s : struct S*` and `F` is `S`'s first field (`structToField`)
-///     lowers to `&(*s).firstfield`.
-/// `first_field` supplies the effective (post-collapse) first-field struct, so
-/// the shape matches identically whether the leading member is a plain struct
-/// or an eliminated CIS union. Returns the replacement `ExprT`, or `None` when
-/// no first-field cast is recognized. The two shapes are mutually exclusive
-/// (the `&& !other` guards mirror the frontend).
-fn cast_first_field(
-    env: &Env,
-    inner: &Rc<Expr>,
-    target_ty: &Rc<Type>,
-    loc: &Rc<SourceInfo>,
-    elim: &HashMap<Rc<IdentT>, ElimUnion>,
-) -> Option<ExprT> {
-    // Both sides must be pointers to named structs (dstPointee / srcPointee).
-    let dst = struct_pointee(env, target_ty.clone().into())?;
-    let src = struct_pointee(env, env.infer_expr(inner).ok()?)?;
-
-    // firstField(dstPointee) / firstField(srcPointee) with sameType checks
-    // against the opposite pointee (cpp/impl.cpp:984-989).
-    let to_struct = first_field(env, &dst, elim);
-    let field_to_struct = to_struct.as_ref().is_some_and(|(_, f)| **f == *src.val);
-    let to_field = first_field(env, &src, elim);
-    let struct_to_field = to_field.as_ref().is_some_and(|(_, f)| **f == *dst.val);
-
-    // `(struct S*)p` where `p : F*`, `F` = first field of `S`.
-    if field_to_struct && !struct_to_field {
-        let (field_name, _) = to_struct.unwrap();
-        let struct_ty: Rc<Type> = TypeT::TypeRef(TypeRefKind::Struct(dst)).with_loc(loc.clone());
-        return Some(ExprT::ContainerOf(inner.clone(), struct_ty, field_name));
+    if let Some(newval) = member_rw {
+        e.val = newval;
+        return;
     }
 
-    // `(F*)s` where `s : struct S*`, `F` = first field of `S`.
-    if struct_to_field && !field_to_struct {
-        let (field_name, _) = to_field.unwrap();
-        let deref = ExprT::Deref(inner.clone()).with_loc(loc.clone());
-        let member = ExprT::Member(deref, field_name).with_loc(loc.clone());
-        return Some(ExprT::Ref(member));
+    // Rewrite `UnionInit(u, arm, val)` -> `StructInit(u, [(named_arm, val')])`.
+    // For the named arm, `val` is reused as-is; for the anonymous arm, its
+    // struct-init payload is re-tagged with the named arm's struct type (the two
+    // arms share an identical field list).
+    let uinit = if let ExprT::UnionInit(uname, arm, val) = &e.val {
+        elim.get(&uname.val).map(|info| {
+            let field_val: Rc<Expr> = if arm.val == info.anon_arm {
+                match &val.val {
+                    ExprT::StructInit(_, kvs) => {
+                        let sname = Rc::new(Ast {
+                            val: info.named_struct.clone(),
+                            loc: val.loc.clone(),
+                        });
+                        ExprT::StructInit(sname, kvs.clone()).with_loc(val.loc.clone())
+                    }
+                    _ => val.clone(),
+                }
+            } else {
+                val.clone()
+            };
+            let named = Rc::new(Ast {
+                val: info.named_arm.clone(),
+                loc: uname.loc.clone(),
+            });
+            ExprT::StructInit(uname.clone(), vec![(named, field_val)])
+        })
+    } else {
+        None
+    };
+    if let Some(newval) = uinit {
+        e.val = newval;
     }
-
-    None
 }
 
 // ---------------------------------------------------------------------------
 // Phase 2: type-reference rewrites
 // ---------------------------------------------------------------------------
 
-fn rewrite_type(ty: &mut Rc<Type>, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
+fn rewrite_type(ty: &mut Rc<Type>, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     let t = Rc::make_mut(ty);
     match &mut t.val {
         TypeT::TypeRef(TypeRefKind::Union(n)) if elim.contains_key(&n.val) => {
-            let target = elim.get(&n.val).unwrap().clone();
-            let name = Rc::new(Ast {
-                val: target,
-                loc: n.loc.clone(),
-            });
-            t.val = TypeT::TypeRef(TypeRefKind::Struct(name));
+            t.val = TypeT::TypeRef(TypeRefKind::Struct(n.clone()));
         }
         TypeT::Pointer(inner, _)
         | TypeT::FixedArray(inner, _)
@@ -557,7 +441,7 @@ fn rewrite_type(ty: &mut Rc<Type>, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     }
 }
 
-fn rewrite_types_decl(decl: &mut DeclT, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
+fn rewrite_types_decl(decl: &mut DeclT, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     match decl {
         DeclT::FnDefn(FnDefn { decl, body }) => {
             rewrite_types_fn_decl(decl, elim);
@@ -591,13 +475,13 @@ fn rewrite_types_decl(decl: &mut DeclT, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) 
     }
 }
 
-fn rewrite_types_field(f: &mut Field, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
+fn rewrite_types_field(f: &mut Field, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     match &mut f.val {
         FieldT::Plain { ty, .. } | FieldT::BitField { ty, .. } => rewrite_type(ty, elim),
     }
 }
 
-fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
+fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     for ga in decl.ghost_args.iter_mut() {
         rewrite_type(&mut ga.ty, elim);
     }
@@ -610,13 +494,13 @@ fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashMap<Rc<IdentT>, Rc<IdentT
     }
 }
 
-fn rewrite_types_stmts(stmts: &mut Stmts, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
+fn rewrite_types_stmts(stmts: &mut Stmts, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     for stmt in stmts.iter_mut() {
         rewrite_types_stmt(Rc::make_mut(stmt), elim);
     }
 }
 
-fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
+fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     match &mut stmt.val {
         StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => {
             rewrite_types_expr(Rc::make_mut(e), elim)
@@ -682,7 +566,7 @@ fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
     }
 }
 
-fn rewrite_types_expr(e: &mut Expr, elim: &HashMap<Rc<IdentT>, Rc<IdentT>>) {
+fn rewrite_types_expr(e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     match &mut e.val {
         ExprT::IntLit(_, ty)
         | ExprT::FloatLit(_, ty)

@@ -572,31 +572,6 @@ impl Env {
 
             either_side!(TypeT::Void) => None,
             either_side!(TypeT::Float { .. }) => None,
-            (TypeT::Pointer(pa, _), TypeT::Pointer(pb, _)) => {
-                // CIS leading-field pointer meet: when one pointee struct's
-                // leading field is the other struct (via a collapsed
-                // common-initial-sequence union), a pointer to that field and a
-                // pointer to the enclosing struct address the same storage.
-                // Their meet is the enclosing (container) pointer, so equality
-                // and other `meet_type`-driven coercions cast the leading-field
-                // pointer up to it — exactly as assignment coerces such a
-                // pointer to its declared (container) type. `elim_cis` then
-                // lowers the inserted cast to a container-of projection.
-                let na = self.pointee_struct_name(pa.clone().into());
-                let nb = self.pointee_struct_name(pb.clone().into());
-                match (na, nb) {
-                    (Some(na), Some(nb)) if *na.val != *nb.val => {
-                        if self.cis_leading_field(&na).is_some_and(|f| *f == *nb.val) {
-                            Some(a0) // `a` is the container.
-                        } else if self.cis_leading_field(&nb).is_some_and(|f| *f == *na.val) {
-                            Some(b0) // `b` is the container.
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            }
             either_side!(TypeT::Pointer(_, _)) => None,
             either_side!(TypeT::FixedArray(_, _)) => None,
             either_side!(TypeT::FlexArray(_)) => None,
@@ -612,31 +587,6 @@ impl Env {
                     | TypeT::Nullable(..)
             ) => None,
         }
-    }
-
-    /// The named struct a pointer's pointee type resolves to, or `None`.
-    fn pointee_struct_name(&self, pointee: MaybeRc<Type>) -> Option<Rc<Ident>> {
-        let p = self.vtype_whnf(pointee);
-        let TypeT::TypeRef(TypeRefKind::Struct(name)) = &p.val else {
-            return None;
-        };
-        Some(name.clone())
-    }
-
-    /// If `sname`'s first field is a CIS-eliminable union, the union's named-arm
-    /// struct name — i.e. the type a `struct sname *` collapses its leading
-    /// field to after `elim_cis`. This lets a leading-field pointer and its
-    /// enclosing struct pointer be recognized as the two ends of a first-field
-    /// cast (see `meet_type`).
-    fn cis_leading_field(&self, sname: &Ident) -> Option<Rc<IdentT>> {
-        let s = self.lookup_struct(sname)?;
-        let first = s.fields.first()?;
-        let ty = self.vtype_whnf(first.val.logical_type(&first.loc).into());
-        let TypeT::TypeRef(TypeRefKind::Union(uname)) = &ty.val else {
-            return None;
-        };
-        let u = self.lookup_union(uname)?;
-        crate::pass::elim_cis::is_simple_cis(self, u)?.1
     }
 
     pub fn vtype_whnf(&self, a: MaybeRc<Type>) -> MaybeRc<Type> {
