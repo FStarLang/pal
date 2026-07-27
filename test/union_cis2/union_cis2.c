@@ -126,3 +126,32 @@ int cast_field_to_struct(struct head *h, int v)
     _ghost_stmt(Union_cis2_include.from_container $(h));
     return h->qlen;
 }
+
+// -------------------------------------------------------------------------
+// CIS leading-field cast used inside an equality comparison.
+//
+// A `struct list *` view of the leading CIS field and its enclosing
+// `struct head *` denote the same address, so casting between them and testing
+// equality yields true. The frontend drops the struct<->struct bitcast, so elab
+// re-inserts the coercion (mirroring how it already coerces assignment RHSs)
+// and `elim_cis` lowers it to the container-of projection.
+
+// (1a) Reverse cast (leading field -> enclosing struct) inside `==`. `l` views
+// the leading field of `h`, so `(struct head *)l` recovers `h`; the comparison
+// is therefore true.
+int cmp_reverse_cast(struct head *h)
+    _ensures(return == 1)
+{
+    struct list *l = (struct list *)h;
+    return (struct head *)l == h;
+}
+
+// (1b) Forward cast (enclosing struct -> leading field) inside `==`, the other
+// direction. `(struct list *)h` addresses the leading field, which is exactly
+// `l`, so the comparison is true.
+int cmp_forward_cast(struct head *h)
+    _ensures(return == 1)
+{
+    struct list *l = (struct list *)h;
+    return (struct list *)h == l;
+}

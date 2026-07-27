@@ -102,7 +102,7 @@ fn type_alpha_eq(a: &Type, b: &Type) -> bool {
 
 /// Detect whether `u` is a simple-CIS union; if so return the shared CIS field
 /// list to use for the replacement struct.
-fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<(Vec<Field>, Option<Rc<IdentT>>)> {
+pub(crate) fn is_simple_cis(env: &Env, u: &UnionDefn) -> Option<(Vec<Field>, Option<Rc<IdentT>>)> {
     // Condition 1: exactly two arms.
     if u.fields.len() != 2 {
         return None;
