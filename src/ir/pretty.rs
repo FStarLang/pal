@@ -436,6 +436,16 @@ impl PrettyIR for StmtT {
                 .append(";")
                 .nest(2)
                 .group(),
+            StmtT::Let(x, ty, value) => RcDoc::text("let ")
+                .append(x.to_doc())
+                .append(": ")
+                .append(ty.to_doc())
+                .append(" =")
+                .append(RcDoc::line())
+                .append(value.to_doc())
+                .append(";")
+                .nest(2)
+                .group(),
             StmtT::DeclStackArray {
                 name,
                 elem_type,
@@ -480,6 +490,42 @@ impl PrettyIR for StmtT {
                 .append(pretty_block(then_branch))
                 .append(" else ")
                 .append(pretty_block(else_branch))
+                .group(),
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => RcDoc::text("match (")
+                .append(scrutinee.to_doc())
+                .append(")")
+                .append(RcDoc::concat(ensures.iter().map(|e| {
+                    RcDoc::line().append(
+                        RcDoc::text("_ensures(")
+                            .append(e.to_doc())
+                            .append(")")
+                            .group(),
+                    )
+                })))
+                .append(" {")
+                .append(RcDoc::concat(branches.iter().map(|branch| {
+                    RcDoc::line()
+                        .append(RcDoc::intersperse(
+                            branch.patterns.iter().map(|pattern| pattern.to_doc()),
+                            RcDoc::text(", "),
+                        ))
+                        .append(":")
+                        .append(RcDoc::line())
+                        .append(branch.body.to_doc())
+                        .nest(2)
+                })))
+                .append(RcDoc::line())
+                .append("default:")
+                .append(RcDoc::line())
+                .append(default_branch.to_doc())
+                .nest(2)
+                .append(RcDoc::line())
+                .append("}")
                 .group(),
             StmtT::While {
                 cond,

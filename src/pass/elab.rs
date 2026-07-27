@@ -755,6 +755,15 @@ impl<'a> Elaborator<'a> {
         match &mut stmt.val {
             StmtT::Call(rval) => self.elab_rvalue(env, Rc::make_mut(rval), None),
             StmtT::Decl(_, ty) => self.elab_type(env, Rc::make_mut(ty)),
+            StmtT::Let(_, ty, value) => {
+                self.elab_type(env, Rc::make_mut(ty));
+                self.elab_rvalue(env, Rc::make_mut(value), Some(ty));
+                if let Ok(value_ty) = env.infer_expr(value)
+                    && !env.vtype_eq(value_ty, ty.clone().into())
+                {
+                    cast_to(value, ty.clone());
+                }
+            }
             StmtT::DeclStackArray {
                 elem_type, size, ..
             } => {
@@ -809,6 +818,24 @@ impl<'a> Elaborator<'a> {
                 self.elab_slprops(env, Rc::make_mut(ensures));
                 self.elab_stmts(env, Rc::make_mut(then_branch));
                 self.elab_stmts(env, Rc::make_mut(else_branch));
+            }
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => {
+                self.elab_rvalue(env, Rc::make_mut(scrutinee), None);
+                let scrutinee_ty = env.infer_expr(scrutinee).ok();
+                for branch in Rc::make_mut(branches) {
+                    let branch = Rc::make_mut(branch);
+                    for pattern in Rc::make_mut(&mut branch.patterns) {
+                        self.elab_rvalue(env, Rc::make_mut(pattern), scrutinee_ty.as_deref());
+                    }
+                    self.elab_stmts(env, Rc::make_mut(&mut branch.body));
+                }
+                self.elab_stmts(env, Rc::make_mut(default_branch));
+                self.elab_slprops(env, Rc::make_mut(ensures));
             }
             StmtT::While {
                 cond,
