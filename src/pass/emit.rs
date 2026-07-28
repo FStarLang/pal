@@ -615,11 +615,6 @@ struct Emitter<'a> {
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
-    // Set by `emit_stmts`/`emit_block` to report whether the block just emitted
-    // diverges on every path (ends in `return` on all control-flow paths). Read
-    // immediately by the enclosing `if`-join and statement loop so trailing
-    // dead code is not emitted.
-    fnptr_diverged: bool,
     tmp_counter: usize,
 }
 
@@ -3384,9 +3379,6 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
-        // Default: a statement does not diverge. Diverging constructs (an `if`
-        // whose arms all return, etc.) set this back to `true` while emitting.
-        self.fnptr_diverged = false;
         let body = annotated(stmt, || {
             match &stmt.val {
                 StmtT::Call(v) => {
@@ -3965,12 +3957,7 @@ impl<'a> Emitter<'a> {
                             .nest(2)
                     }));
                     let then_doc = self.emit_block(env, then_branch);
-                    let then_diverged = self.fnptr_diverged;
                     let else_doc = self.emit_block(env, else_branch);
-                    let else_diverged = self.fnptr_diverged;
-                    // The join is reachable unless both arms diverge (all paths
-                    // return); used only for trailing dead-code elision.
-                    self.fnptr_diverged = then_diverged && else_diverged;
                     Doc::text("if ")
                         .append(cond_doc)
                         .nest(2)
@@ -4013,9 +4000,7 @@ impl<'a> Emitter<'a> {
                                 .nest(2)
                                 .append(Doc::line())
                         })));
-                    // A loop as a whole does not diverge (it may run zero times).
                     let body_doc = self.emit_block(env, body);
-                    self.fnptr_diverged = false;
                     head.nest(2).append(body_doc).append(";").group()
                 }
                 StmtT::Break => Doc::text("break;"),
@@ -4078,10 +4063,6 @@ impl<'a> Emitter<'a> {
         let mut env = env.clone();
         let mut doc = Doc::nil();
         let mut idx = 0;
-        // Set when a `return` path breaks out below. Distinguishes an early
-        // return from natural fall-through and stops emission of trailing dead
-        // code.
-        let mut returned = false;
         while idx < stmts.len() {
             let stmt = &stmts[idx];
             // `return e;` immediately followed by ghost statement(s) needs a
@@ -4123,27 +4104,17 @@ impl<'a> Emitter<'a> {
                             .nest(2),
                     ),
                 );
-                returned = true;
                 break;
             }
             doc = doc.append(Doc::line().append(self.emit_stmt(&env, stmt)));
-            // A statement that diverges on every path (e.g. an `if` whose two
-            // arms both `return`) makes the rest of this block unreachable. Stop
-            // emitting so trailing dead code is not elaborated.
-            if self.fnptr_diverged {
-                returned = true;
-                break;
-            }
             env.push_stmt(stmt);
             idx += 1;
         }
-        self.fnptr_diverged = returned;
         doc
     }
 
     fn emit_block(&mut self, env: &Env, stmts: &Vec<Rc<Stmt>>) -> Doc {
         if stmts.is_empty() {
-            self.fnptr_diverged = false;
             return Doc::text("{}");
         }
         block(self.emit_stmts(env, stmts, false))
@@ -7316,7 +7287,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         fn_module_map,
         typedef_override_map,
         current_fn_total: false,
-        fnptr_diverged: false,
         tmp_counter: 0,
     };
 
