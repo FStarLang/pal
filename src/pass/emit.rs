@@ -3921,44 +3921,10 @@ impl<'a> Emitter<'a> {
                         };
                         let idx_doc = self.emit_rvalue(env, idx);
                         let val_doc = self.emit_rvalue(env, t);
-                        // When storing a function pointer, the value is a large
-                        // `of_fn pre post __fp` term. Inlining it into
-                        // `array_write` makes `array_spec_upd s i (of_fn ...)`
-                        // too big for the `array_spec_upd_*` SMTPats to fire,
-                        // so the subsequent `array_read` can't prove
-                        // `array_spec_initd`/`array_spec_mask` nor recover the
-                        // stored value. Let-binding the value first keeps the
-                        // spec update opaque (`array_spec_upd s i v`), which is
-                        // exactly what makes the read-back verifiable.
-                        let is_fnptr_val = env
-                            .infer_expr(t)
-                            .map(|ty| matches!(env.vtype_whnf(ty).val, TypeT::FnPtr { .. }))
-                            .unwrap_or(false);
-                        let write_doc = naryfn([
-                            Doc::text(fn_name),
-                            arr_doc,
-                            idx_doc,
-                            if is_fnptr_val {
-                                Doc::text("__pal_arrwr")
-                            } else {
-                                val_doc.clone()
-                            },
-                        ])
-                        .append(";")
-                        .nest(2)
-                        .group();
-                        if is_fnptr_val {
-                            Doc::text("let __pal_arrwr =")
-                                .append(Doc::line())
-                                .append(val_doc)
-                                .append(";")
-                                .nest(2)
-                                .group()
-                                .append(Doc::hardline())
-                                .append(write_doc)
-                        } else {
-                            write_doc
-                        }
+                        naryfn([Doc::text(fn_name), arr_doc, idx_doc, val_doc])
+                            .append(";")
+                            .nest(2)
+                            .group()
                     } else if let ExprT::Deref(inner) = &x.val {
                         // *array     = val → array_write    p 0sz val
                         // *arrayptr  = val → arrayptr_write p 0sz val
