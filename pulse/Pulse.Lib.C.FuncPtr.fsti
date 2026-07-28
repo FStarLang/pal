@@ -66,6 +66,27 @@ ghost fn valid_cast (#a #b: Type0) (#div: bool) (#pre: a -> slprop) (#post: a ->
 }
 
 
+(* Recover a function's pre/post directly from its *type*. PAL emits each `__fp`
+   wrapper with its contract inlined into `requires`/`ensures`, so the wrapper's
+   type is `x:a -> stt[_div] b (pre x) (fun r -> post x r)`; these projectors let
+   `of_fn`/`is_valid`/`call`/`weaken` name that pre/post without a separate `let`.
+   `pre`/`post` are inferred (as lambdas) from the applied function's type;
+   `pulse_eager_unfold` reduces `pre_of f` back to that lambda so slprop matching
+   still connects. Divergent (`stt_div`) and total (`stt`) variants are distinct
+   because the function value's effect differs. *)
+[@@pulse_eager_unfold]
+unfold let pre_of (#a #b: Type0) (#pre: a -> slprop) (#post: a -> b -> slprop)
+  (f: (x:a -> stt_div b (pre x) (fun r -> post x r))) : (a -> slprop) = pre
+[@@pulse_eager_unfold]
+unfold let post_of (#a #b: Type0) (#pre: a -> slprop) (#post: a -> b -> slprop)
+  (f: (x:a -> stt_div b (pre x) (fun r -> post x r))) : (a -> b -> slprop) = post
+[@@pulse_eager_unfold]
+unfold let pre_of_tot (#a #b: Type0) (#pre: a -> slprop) (#post: a -> b -> slprop)
+  (f: (x:a -> stt b (pre x) (fun r -> post x r))) : (a -> slprop) = pre
+[@@pulse_eager_unfold]
+unfold let post_of_tot (#a #b: Type0) (#pre: a -> slprop) (#post: a -> b -> slprop)
+  (f: (x:a -> stt b (pre x) (fun r -> post x r))) : (a -> b -> slprop) = post
+
 (* The null function pointer. *)
 val null (a b: Type0) : func_ptr a b
 

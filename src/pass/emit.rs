@@ -125,13 +125,13 @@ fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
             DeclT::FnDefn(fn_defn) => {
                 let m = format!("Func_{}", fn_defn.decl.name.val);
                 let n = &fn_defn.decl.name.val;
-                // Register the synthetic fnptr triple names so indirect calls in
-                // other modules qualify them to their defining module. The triple
+                // Register the synthetic fnptr wrapper name so indirect calls in
+                // other modules qualify it to its defining module. The wrapper
                 // lives in its own `Funcptr_<g>` module (emitted only when the
-                // function's address is taken), not in `Func_<g>`.
+                // function's address is taken), not in `Func_<g>`. The pre/post
+                // are no longer named declarations (they are inlined into the
+                // wrapper's type and recovered via `pre_of`/`post_of`).
                 let fp = funcptr_module_name(n);
-                map.insert(Rc::from(format!("{}_pre", n)), fp.clone());
-                map.insert(Rc::from(format!("{}_post", n)), fp.clone());
                 map.insert(Rc::from(format!("{}__fp", n)), fp);
                 map.insert(fn_defn.decl.name.val.clone(), m);
             }
@@ -175,10 +175,8 @@ type Doc = RcDoc<'static, Annotation>;
 /// The generated pieces of a function-pointer contract spec (`func_<g>_pre` /
 /// `func_<g>_post`), used by the address-taken triple (`emit_fnptr_triple`).
 struct FnPtrSpecCore {
-    pre_def: Doc,
-    post_def: Doc,
-    pre_name: Doc,
-    post_name: Doc,
+    pre_expr: Doc,
+    post_expr: Doc,
     wrap_name: Doc,
     callee: Doc,
     domain: Doc,
@@ -6034,21 +6032,35 @@ impl<'a> Emitter<'a> {
 
     // ---- Function-pointer emission helpers (deep model) ----
 
-    /// The names of the fnptr triple spec/wrapper functions for a C function `g`
-    /// (`func_<g>_pre`, `func_<g>_post`, `func_<g>__fp`), module-qualified.
-    fn fnptr_pre_name(&mut self, g: &str) -> Doc {
-        self.emit_name(Name::Fn(Rc::from(format!("{}_pre", g))))
-    }
-    fn fnptr_post_name(&mut self, g: &str) -> Doc {
-        self.emit_name(Name::Fn(Rc::from(format!("{}_post", g))))
-    }
+    /// The module-qualified name of the fnptr wrapper `func_<g>__fp`.
     fn fnptr_wrap_name(&mut self, g: &str) -> Doc {
         self.emit_name(Name::Fn(Rc::from(format!("{}__fp", g))))
     }
 
-    /// `(Pulse.Lib.C.FuncPtr.of_fn func_<g>_pre func_<g>_post func_<g>__fp)` for a
-    /// `_total` target, or `of_fn_div ..` for a divergent one (matching the `__fp`
-    /// wrapper's effect and the validity divergence bit).
+    /// `pre_of`/`post_of` (total: `pre_of_tot`/`post_of_tot`) applied to the
+    /// wrapper, recovering its inlined pre/post from its type.
+    fn fnptr_pre_of(&mut self, g: &str, is_total: bool) -> Doc {
+        let proj = if is_total {
+            "Pulse.Lib.C.FuncPtr.pre_of_tot "
+        } else {
+            "Pulse.Lib.C.FuncPtr.pre_of "
+        };
+        parens(Doc::text(proj).append(self.fnptr_wrap_name(g)))
+    }
+    fn fnptr_post_of(&mut self, g: &str, is_total: bool) -> Doc {
+        let proj = if is_total {
+            "Pulse.Lib.C.FuncPtr.post_of_tot "
+        } else {
+            "Pulse.Lib.C.FuncPtr.post_of "
+        };
+        parens(Doc::text(proj).append(self.fnptr_wrap_name(g)))
+    }
+
+    /// `(Pulse.Lib.C.FuncPtr.of_fn (pre_of func_<g>__fp) (post_of func_<g>__fp)
+    /// func_<g>__fp)` for a `_total` target, or `of_fn_div ..` for a divergent
+    /// one (matching the `__fp` wrapper's effect and the validity divergence
+    /// bit). The pre/post are recovered from the wrapper's type via the
+    /// `pre_of`/`post_of` projectors.
     fn emit_of_fn(&mut self, env: &Env, g: &Ident) -> Doc {
         let is_total = env.lookup_fn(g).map(|d| d.is_total).unwrap_or(false);
         let of_fn = if is_total {
@@ -6056,8 +6068,8 @@ impl<'a> Emitter<'a> {
         } else {
             "Pulse.Lib.C.FuncPtr.of_fn_div"
         };
-        let pre = self.fnptr_pre_name(&g.val);
-        let post = self.fnptr_post_name(&g.val);
+        let pre = self.fnptr_pre_of(&g.val, is_total);
+        let post = self.fnptr_post_of(&g.val, is_total);
         let wrap = self.fnptr_wrap_name(&g.val);
         parens(naryfn([Doc::text(of_fn), pre, post, wrap]))
     }
@@ -6151,12 +6163,7 @@ impl<'a> Emitter<'a> {
     /// existing pure-prop lowering. (For the scalar contracts exercised here this
     /// reduces to `pure (..)`; the shape generalises to ownership-carrying
     /// preconditions as callback/pointer-argument support lands.)
-    fn emit_fnptr_spec_core(
-        &mut self,
-        env: &Env,
-        decl: &FnDecl,
-        def_kw: &'static str,
-    ) -> FnPtrSpecCore {
+    fn emit_fnptr_spec_core(&mut self, env: &Env, decl: &FnDecl) -> FnPtrSpecCore {
         let env = &mut env.clone();
 
         let mut arg_names: Vec<Rc<Ident>> = vec![];
@@ -6537,46 +6544,18 @@ impl<'a> Emitter<'a> {
         // Spec emission done: deactivate the pointer-deref substitution.
         self.fnptr_ptr_subst = None;
 
-        let pre_name = self.fnptr_pre_name(&decl.name.val);
-        let post_name = self.fnptr_post_name(&decl.name.val);
         let wrap_name = self.fnptr_wrap_name(&decl.name.val);
         let callee = self.emit_name(Name::Fn(decl.name.val.clone()));
 
-        let pre_def = Doc::text(def_kw)
-            .append(pre_name.clone())
-            .append(" (x_fp: ")
-            .append(domain.clone())
-            .append(") : slprop =")
-            .append(Doc::hardline())
-            .append(
-                Doc::text("  ")
-                    .append(bind_prefix(&all_names))
-                    .append(pre_body)
-                    .nest(2),
-            );
-
-        let post_def = Doc::text(def_kw)
-            .append(post_name.clone())
-            .append(" (x_fp: ")
-            .append(domain.clone())
-            .append(") (")
-            .append(ret_name.clone())
-            .append(": ")
-            .append(ret_ty_doc.clone())
-            .append(") : slprop =")
-            .append(Doc::hardline())
-            .append(
-                Doc::text("  ")
-                    .append(bind_prefix(&all_names))
-                    .append(post_body)
-                    .nest(2),
-            );
+        // Inline pre/post slprops (bound over the tuple domain `x_fp` via the
+        // same projection prefix), to be spliced directly into the `__fp`
+        // wrapper's `requires`/`ensures` instead of being named `unfold let`s.
+        let pre_expr = parens(bind_prefix(&all_names).append(pre_body));
+        let post_expr = parens(bind_prefix(&all_names).append(post_body));
 
         FnPtrSpecCore {
-            pre_def,
-            post_def,
-            pre_name,
-            post_name,
+            pre_expr,
+            post_expr,
             wrap_name,
             callee,
             domain,
@@ -6591,17 +6570,15 @@ impl<'a> Emitter<'a> {
     /// shared pre/post generation).
     fn emit_fnptr_triple(&mut self, env: &Env, decl: &FnDecl) -> (Doc, Doc) {
         let FnPtrSpecCore {
-            pre_def,
-            post_def,
-            pre_name,
-            post_name,
+            pre_expr,
+            post_expr,
             wrap_name,
             callee,
             domain,
             ret_name,
             ret_ty_doc,
             projs,
-        } = self.emit_fnptr_spec_core(env, decl, "unfold let ");
+        } = self.emit_fnptr_spec_core(env, decl);
 
         let wrap_kw = if decl.is_total {
             "fn "
@@ -6615,8 +6592,7 @@ impl<'a> Emitter<'a> {
             .append(")")
             .append(Doc::hardline())
             .append("  requires ")
-            .append(pre_name.clone())
-            .append(" x_fp")
+            .append(pre_expr.nest(2))
             .append(Doc::hardline())
             .append("  returns ")
             .append(ret_name.clone())
@@ -6624,17 +6600,9 @@ impl<'a> Emitter<'a> {
             .append(ret_ty_doc)
             .append(Doc::hardline())
             .append("  ensures ")
-            .append(post_name.clone())
-            .append(" x_fp ")
-            .append(ret_name.clone());
+            .append(post_expr.nest(2));
 
         let fsti = Doc::hardline()
-            .append(Doc::hardline())
-            .append(pre_def)
-            .append(Doc::hardline())
-            .append(Doc::hardline())
-            .append(post_def)
-            .append(Doc::hardline())
             .append(Doc::hardline())
             .append(wrap_sig.clone());
 
