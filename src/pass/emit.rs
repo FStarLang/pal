@@ -231,35 +231,6 @@ impl ExprKind {
     }
 }
 
-/// The binder names standing in for a pointer parameter's pointee value while
-/// emitting a fnptr-triple pre/post `slprop`: `cur` is the current pointee (a
-/// fresh `exists*` binder in the post), `old` is the initial pointee threaded
-/// through the fnptr domain (a domain tuple component).
-struct PtrValNames {
-    cur: Rc<str>,
-    old: Rc<str>,
-}
-
-/// Active substitution while emitting a fnptr-triple pre/post `slprop`. Maps a
-/// pointer parameter's base identifier to the binder names that stand in for
-/// `*p` and `_old(*p)` (see `PtrValNames`), replacing the stateful `!var_p`
-/// read (which is ill-typed inside a plain `slprop` definition). `post` selects
-/// whether a bare `*p` resolves to the current (`cur`) or initial (`old`) value.
-struct FnptrPtrSubst {
-    map: HashMap<Rc<str>, PtrValNames>,
-    post: bool,
-}
-
-/// `Some(pointee)` when `ty` is an ownership pointer (`Ref`/`Unknown`) whose
-/// pointee is tracked by an automatic `pts_to`. Used to decide which fnptr
-/// parameters get an old-value threaded through the domain.
-fn ownership_ptr_pointee(env: &Env, ty: &Type) -> Option<Type> {
-    match &env.vtype_whnf(ty.clone().into()).val {
-        TypeT::Pointer(to, PointerKind::Ref | PointerKind::Unknown) => Some((**to).clone()),
-        _ => None,
-    }
-}
-
 struct StrWriter {
     buffer: String,
     line: usize,
@@ -655,9 +626,6 @@ struct Emitter<'a> {
     // arguments and drained/prepended at the enclosing statement boundary.
     caller_cb_prelude: Vec<Doc>,
     tmp_counter: usize,
-    /// Active pointer-deref substitution while emitting a fnptr-triple pre/post
-    /// `slprop` (see `FnptrPtrSubst`). `None` outside that context.
-    fnptr_ptr_subst: Option<FnptrPtrSubst>,
 }
 
 impl<'a> Emitter<'a> {
@@ -877,7 +845,7 @@ impl<'a> Emitter<'a> {
                 TypeT::Error => Doc::text("unit"),
 
                 TypeT::FnPtr { args, ret, .. } => {
-                    let domain = self.fnptr_domain_with_old(env, args);
+                    let domain = self.fnptr_domain(env, args);
                     let range = self.emit_type(env, ret);
                     naryfn([Doc::text("Pulse.Lib.C.FuncPtr.func_ptr"), domain, range])
                 }
@@ -939,7 +907,7 @@ impl<'a> Emitter<'a> {
             // (`has_zero_default_func_ptr` in the library). Uses the same
             // `func_ptr domain range` shaping as `emit_type`.
             TypeT::FnPtr { args, ret, .. } => {
-                let domain = self.fnptr_domain_with_old(env, args);
+                let domain = self.fnptr_domain(env, args);
                 let range = self.emit_type(env, ret);
                 naryfn([Doc::text("Pulse.Lib.C.FuncPtr.null"), domain, range])
             }
@@ -1717,20 +1685,6 @@ impl<'a> Emitter<'a> {
                 }
             }
             ExprT::Deref(inner) => {
-                // Inside a fnptr-triple pre/post slprop, a pointer parameter's
-                // dereference `*p` is not a runtime read (`!var_p` is ill-typed
-                // there); it stands for the pointee value threaded through the
-                // spec — the current value (`cur`) in the post, the initial
-                // value (`old`) in the pre.
-                if let ExprT::Var(x) = &inner.val {
-                    if let Some(subst) = &self.fnptr_ptr_subst {
-                        if let Some(names) = subst.map.get(&x.val) {
-                            let name = if subst.post { &names.cur } else { &names.old };
-                            let doc = Doc::text(name.to_string());
-                            return ExprKind::RValue(annotated(v, || doc));
-                        }
-                    }
-                }
                 // *array     → array_read at index 0
                 // *arrayptr  → arrayptr_read at index 0
                 let inner_kind = env.infer_expr(inner).map(|ty| {
@@ -3044,21 +2998,7 @@ impl<'a> Emitter<'a> {
                         unaryfn(Doc::text("live"), self.emit_lvalue(env, v))
                     }
                 }
-                ExprT::Old(v) => {
-                    // Inside a fnptr-triple pre/post slprop, `_old(*p)` names the
-                    // initial pointee value threaded through the domain, not the
-                    // stateful `old (!var_p)` (which needs a two-state `fn`).
-                    if let ExprT::Deref(inner) = &v.val {
-                        if let ExprT::Var(x) = &inner.val {
-                            if let Some(subst) = &self.fnptr_ptr_subst {
-                                if let Some(names) = subst.map.get(&x.val) {
-                                    return Doc::text(names.old.to_string());
-                                }
-                            }
-                        }
-                    }
-                    unaryfn(Doc::text("old"), self.emit_rvalue(env, v))
-                }
+                ExprT::Old(v) => unaryfn(Doc::text("old"), self.emit_rvalue(env, v)),
                 ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
                     let mut env = env.clone();
                     env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
@@ -6051,69 +5991,23 @@ impl<'a> Emitter<'a> {
         Doc::concat(stmts.into_iter().map(|s| s.append(Doc::line())))
     }
 
-    /// Toggle the pre/post phase of the active fnptr-triple pointer-deref
-    /// substitution (no-op if inactive). `post = true` makes `*p` resolve to the
-    /// current pointee (`cur`), `post = false` to the initial pointee (`old`).
-    fn set_fnptr_phase(&mut self, post: bool) {
-        if let Some(s) = self.fnptr_ptr_subst.as_mut() {
-            s.post = post;
-        }
-    }
-
-    /// The fnptr domain for the given argument types, extended with one
-    /// old-value component (the plain pointee type) per ownership-pointer
-    /// argument. This MUST agree with `emit_fnptr_spec_core`'s domain so that
-    /// a fnptr *type* (`emit_type` FnPtr) and the synthesized triple's specs
-    /// share the same `ARG`. The old-value components are appended after all
-    /// C-argument components, in argument order.
-    fn fnptr_domain_with_old(&mut self, env: &Env, args: &[Rc<Type>]) -> Doc {
-        let mut docs: Vec<Doc> = args.iter().map(|a| self.emit_type(env, a)).collect();
-        for a in args {
-            if let Some(pointee) = ownership_ptr_pointee(env, a) {
-                docs.push(self.emit_type(env, &pointee));
-            }
-        }
+    /// The fnptr domain for the given argument types. This MUST agree with
+    /// `emit_fnptr_spec_core`'s domain so that a fnptr *type* (`emit_type`
+    /// FnPtr) and the synthesized triple's specs share the same `ARG`.
+    fn fnptr_domain(&mut self, env: &Env, args: &[Rc<Type>]) -> Doc {
+        let docs: Vec<Doc> = args.iter().map(|a| self.emit_type(env, a)).collect();
         fnptr_domain_doc(docs)
     }
 
     fn emit_fnptr_arg_tuple(&mut self, env: &Env, args: &[Rc<Expr>]) -> Doc {
-        // Each ownership-pointer argument contributes an extra old-value
-        // component to the fnptr domain (see `fnptr_domain_with_old`): the
-        // pointer's *current* pointee value, which the callee's post refers to
-        // as `_old(*p)`. Both the ref and that value must be passed as *pure*
-        // tuple components — a bare `!r` read is stateful and an inference hole
-        // for the old value elaborates at a ghost effect — so we bind them in
-        // the caller prelude (emitted just before the call).
+        // One tuple component per C argument (its plain value). Pointer
+        // arguments pass their pointer value; the callee's spec carries the
+        // pointee ownership (`pts_to`) via the general type-slprop path. `_old`
+        // across an indirect call is not supported, so no old-value component
+        // is threaded here.
         let mut comps: Vec<Doc> = vec![];
         for a in args {
-            let is_ptr = env
-                .infer_expr(a)
-                .ok()
-                .and_then(|ty| ownership_ptr_pointee(env, &ty))
-                .is_some();
-            let val = self.emit_rvalue(env, a);
-            if is_ptr {
-                let ref_tmp = self.fresh_tmp("fpref");
-                let old_tmp = self.fresh_tmp("fpold");
-                self.caller_cb_prelude.push(
-                    Doc::text("let ")
-                        .append(ref_tmp.clone())
-                        .append(" = ")
-                        .append(val)
-                        .append(";"),
-                );
-                self.caller_cb_prelude.push(
-                    Doc::text("let ")
-                        .append(old_tmp.clone())
-                        .append(" = (!")
-                        .append(ref_tmp.clone())
-                        .append(");"),
-                );
-                comps.push(ref_tmp);
-                comps.push(old_tmp);
-            } else {
-                comps.push(val);
-            }
+            comps.push(self.emit_rvalue(env, a));
         }
         match comps.len() {
             0 => Doc::text("()"),
@@ -6125,10 +6019,12 @@ impl<'a> Emitter<'a> {
     /// Compute the shared pre/post spec pieces for a fnptr contract (used by both
     /// the address-taken triple and callback-parameter specs).
     ///
-    /// The pre/post are built from the decl's `requires`/`ensures` via the
-    /// existing pure-prop lowering. (For the scalar contracts exercised here this
-    /// reduces to `pure (..)`; the shape generalises to ownership-carrying
-    /// preconditions as callback/pointer-argument support lands.)
+    /// The pre/post are built from the decl's `requires`/`ensures` via the same
+    /// general lowering as `emit_fn_sig_inner`: each parameter's ownership
+    /// (`pts_to`/`__pred`) conjunct plus the pure requires/ensures. Pointer
+    /// parameters get their default `pts_to` permission this way. `_old(*p)`
+    /// across an indirect call is NOT supported (the FuncPtr contract
+    /// `pre: a->slprop`, `post: a->b->slprop` is non-relational).
     fn emit_fnptr_spec_core(&mut self, env: &Env, decl: &FnDecl) -> FnPtrSpecCore {
         let env = &mut env.clone();
 
@@ -6142,57 +6038,14 @@ impl<'a> Emitter<'a> {
             arg_names.push(n.clone());
             env.push_arg(arg, LocalDeclKind::RValue);
         }
-        // Ownership-pointer parameters get their initial pointee value threaded
-        // through the fnptr domain so the `post` slprop can name it (`_old(*p)`)
-        // — the FuncPtr contract (`pre: a->slprop`, `post: a->b->slprop`) is
-        // otherwise non-relational. See `fnptr_domain_with_old`.
-        let ptr_pointees: Vec<Option<Type>> = decl
-            .args
-            .iter()
-            .map(|a| ownership_ptr_pointee(env, &a.ty))
-            .collect();
-
-        // Domain: C-argument components, then one old-value component (the plain
-        // pointee type) per ownership-pointer argument, in argument order.
-        let mut domain_docs = arg_ty_docs.clone();
-        for pointee in ptr_pointees.iter().flatten() {
-            domain_docs.push(self.emit_type(env, pointee));
-        }
-        let domain = fnptr_domain_doc(domain_docs);
+        // Domain: one component per C argument, in argument order. Pointer
+        // arguments contribute their pointer type; the pointee ownership
+        // (`pts_to`) is carried by the general type-slprop lowering below.
+        let domain = fnptr_domain_doc(arg_ty_docs.clone());
 
         let name_docs: Vec<Doc> = arg_names
             .iter()
             .map(|n| self.emit_name(Name::Var(n.val.clone())))
-            .collect();
-
-        // Per ownership-pointer param, the binder names standing in for `*p`
-        // (`cur` — a fresh `exists*` in the post) and `_old(*p)` (`old` — the
-        // threaded domain component). The `old` binders are extra domain
-        // components bound (after the C params) by `bind_prefix`.
-        let mut subst_map: HashMap<Rc<str>, PtrValNames> = HashMap::new();
-        let mut old_binder_docs: Vec<Doc> = vec![];
-        // Per param (aligned with `decl.args`): `Some((old, cur))` binder names
-        // for an ownership pointer, else `None`.
-        let mut ptr_binders: Vec<Option<(Rc<str>, Rc<str>)>> = vec![];
-        for (n, pointee) in arg_names.iter().zip(ptr_pointees.iter()) {
-            if pointee.is_some() {
-                let base = Name::Var(n.val.clone()).to_string();
-                let old: Rc<str> = Rc::from(format!("{}_old", base));
-                let cur: Rc<str> = Rc::from(format!("{}_cur", base));
-                old_binder_docs.push(Doc::text(old.to_string()));
-                ptr_binders.push(Some((old.clone(), cur.clone())));
-                subst_map.insert(n.val.clone(), PtrValNames { cur, old });
-            } else {
-                ptr_binders.push(None);
-            }
-        }
-
-        // `bind_prefix` binds all domain components (C params and old values);
-        // the wrapper only uses the C-param bindings (`projs`).
-        let all_names: Vec<Doc> = name_docs
-            .iter()
-            .cloned()
-            .chain(old_binder_docs.iter().cloned())
             .collect();
 
         // Bind each tuple component to its parameter name via projections
@@ -6207,8 +6060,8 @@ impl<'a> Emitter<'a> {
         // `fst`/`snd`), and arity >= 3 is `a & b & c ...` (`tupleN`, which is
         // NOT nested `tuple2`s, so `fst`/`snd` do not apply — use the `tupleN`
         // field projectors `MktupleN?._i`).
-        let all_projs: Vec<Doc> = {
-            let n = all_names.len();
+        let projs: Vec<Doc> = {
+            let n = name_docs.len();
             (0..n)
                 .map(|i| {
                     if n == 1 {
@@ -6228,13 +6081,10 @@ impl<'a> Emitter<'a> {
                 })
                 .collect()
         };
-        // C-argument projections only (used by the wrapper to destructure and
-        // call `func_<g>`); the old-value components are witnesses for the spec.
-        let projs: Vec<Doc> = all_projs[..name_docs.len()].to_vec();
 
         // `let a = <proj0> in let b = <proj1> in ` prefix (empty for arity 0).
         let bind_prefix = |names: &[Doc]| -> Doc {
-            Doc::concat(names.iter().zip(all_projs.iter()).map(|(name, proj)| {
+            Doc::concat(names.iter().zip(projs.iter()).map(|(name, proj)| {
                 Doc::text("let ")
                     .append(name.clone())
                     .append(" = ")
@@ -6244,99 +6094,18 @@ impl<'a> Emitter<'a> {
             }))
         };
 
-        // Activate the pointer-deref substitution for the whole spec: `*p` and
-        // `_old(*p)` resolve to the threaded binders instead of the ill-typed
-        // `!var_p` read. Phase starts at `pre` (`post = false`).
-        self.fnptr_ptr_subst = Some(FnptrPtrSubst {
-            map: subst_map,
-            post: false,
-        });
-
         // Build requires/ensures slprops using the SAME general lowering as
         // `emit_fn_sig_inner` (ownership `pts_to`/`__pred` conjuncts for each
         // parameter plus the pure requires/ensures), so the wrapper body — a
-        // direct call to `func_<g>` — verifies by a definitional match, and so
-        // ownership-carrying (pointer/callback) contracts compose in the future.
+        // direct call to `func_<g>` — verifies by a definitional match. Pointer
+        // parameters thus carry their default `pts_to` permission across the
+        // FuncPtr.
         let mut requires_props: Vec<Doc> = vec![];
         let mut ensures_props: Vec<Doc> = vec![];
         let mut preserves_props: Vec<Doc> = vec![];
-        for ((n, arg), (pointee, binders)) in arg_names
-            .iter()
-            .zip(decl.args.iter())
-            .zip(ptr_pointees.iter().zip(ptr_binders.iter()))
-        {
+        for (n, arg) in arg_names.iter().zip(decl.args.iter()) {
             match arg.mode {
                 ParamMode::Regular | ParamMode::Consumed => {
-                    // Ownership pointer: emit a pinned `pts_to` over the threaded
-                    // old value in the pre and a fresh `exists*` over the current
-                    // value in the post, so `*p`/`_old(*p)` have referents (the
-                    // stateful `!var_p` read is ill-typed in a bare `slprop`).
-                    if let (Some(pointee_ty), Some((old, cur))) = (pointee, binders) {
-                        let this = mk_rvar(n);
-                        let derefed = ExprT::Deref(this.clone()).with_loc(this.loc.clone());
-                        let pointee_ty_doc = self.emit_type(env, pointee_ty);
-
-                        self.set_fnptr_phase(false);
-                        let this_doc = self.emit_rvalue(env, &this);
-                        let mut pre_props = vec![naryfn([
-                            Doc::text("Pulse.Lib.Reference.pts_to"),
-                            this_doc,
-                            Doc::text("#1.0R"),
-                            Doc::text(old.to_string()),
-                        ])];
-                        let mut pre_binds = vec![];
-                        let mut pre_naming = ValNaming::Standard {
-                            quote: false,
-                            bindings: &mut pre_binds,
-                        };
-                        self.emit_type_slprop(
-                            env,
-                            pointee_ty,
-                            SLPropVariant::Init {
-                                perm: &Doc::text("1.0R"),
-                            },
-                            &mut pre_naming,
-                            &mut pre_props,
-                            &derefed,
-                        );
-                        drop(pre_naming);
-                        requires_props.push(wrap_exists(&pre_binds, pre_props));
-
-                        if matches!(arg.mode, ParamMode::Regular) {
-                            self.set_fnptr_phase(true);
-                            let this_doc = self.emit_rvalue(env, &this);
-                            let mut post_props = vec![naryfn([
-                                Doc::text("Pulse.Lib.Reference.pts_to"),
-                                this_doc,
-                                Doc::text("#1.0R"),
-                                Doc::text(cur.to_string()),
-                            ])];
-                            let mut post_binds = vec![];
-                            let mut post_naming = ValNaming::Standard {
-                                quote: false,
-                                bindings: &mut post_binds,
-                            };
-                            self.emit_type_slprop(
-                                env,
-                                pointee_ty,
-                                SLPropVariant::Init {
-                                    perm: &Doc::text("1.0R"),
-                                },
-                                &mut post_naming,
-                                &mut post_props,
-                                &derefed,
-                            );
-                            drop(post_naming);
-                            let mut binds = vec![ExBinding {
-                                name: Doc::text(cur.to_string()),
-                                ty: pointee_ty_doc,
-                            }];
-                            binds.extend(post_binds);
-                            ensures_props.push(wrap_exists(&binds, post_props));
-                        }
-                        self.set_fnptr_phase(false);
-                        continue;
-                    }
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
@@ -6487,8 +6256,7 @@ impl<'a> Emitter<'a> {
                 ensures_props.push(wrap_exists(&ret_bindings, ret_props));
             }
         }
-        // Pure ensures reference the *current* pointee (`*p`) and `_old(*p)`.
-        self.set_fnptr_phase(true);
+        // Pure ensures reference the pointee value via the normal lowering.
         let ens_props_pure: Vec<Doc> = decl
             .ensures
             .iter()
@@ -6507,17 +6275,14 @@ impl<'a> Emitter<'a> {
         let pre_body = mk_star(requires_props);
         let post_body = mk_star(ensures_props);
 
-        // Spec emission done: deactivate the pointer-deref substitution.
-        self.fnptr_ptr_subst = None;
-
         let wrap_name = self.fnptr_wrap_name(&decl.name.val);
         let callee = self.emit_name(Name::Fn(decl.name.val.clone()));
 
         // Inline pre/post slprops (bound over the tuple domain `x_fp` via the
         // same projection prefix), to be spliced directly into the `__fp`
         // wrapper's `requires`/`ensures` instead of being named `unfold let`s.
-        let pre_expr = parens(bind_prefix(&all_names).append(pre_body));
-        let post_expr = parens(bind_prefix(&all_names).append(post_body));
+        let pre_expr = parens(bind_prefix(&name_docs).append(pre_body));
+        let post_expr = parens(bind_prefix(&name_docs).append(post_body));
 
         FnPtrSpecCore {
             pre_expr,
@@ -7577,7 +7342,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         fnptr_diverged: false,
         caller_cb_prelude: Vec::new(),
         tmp_counter: 0,
-        fnptr_ptr_subst: None,
     };
 
     let addr_taken = collect_addr_taken(&tu.decls);

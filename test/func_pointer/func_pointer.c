@@ -740,7 +740,9 @@ int32_t malloc_fp(void)
     return r;
 }
 
-/* Pointer/ownership callee, for ptr_arg_cb. */
+/* Pointer/ownership callee. Verifies as an ordinary function exercising a
+   relational `_old` contract. (No longer address-taken — see the disabled
+   ptr_arg_cb below — so no Funcptr_inc wrapper is generated.) */
 void inc(int32_t *p)
     _requires(*p < 100)
     _ensures(*p == _old(*p) + 1)
@@ -748,9 +750,18 @@ void inc(int32_t *p)
     *p = *p + 1;
 }
 
-/* Pointer/ownership argument threaded through an indirect call: the callee's
-   relational `*p == _old(*p) + 1` is carried by threading the pointer's initial
-   pointee value through the FuncPtr domain (see emit.rs `fnptr_domain_with_old`). */
+/* ---- DISABLED: relational `_old` on an ownership pointer through an
+   indirect (function-pointer) call ----
+   `ptr_arg_cb` passes an ownership pointer through a FuncPtr to a callee
+   (`inc`) whose contract is relational (`*p == _old(*p) + 1`). The pointer
+   still gets its default `pts_to` permission across the FuncPtr, but the
+   FuncPtr contract (`pre: a -> slprop`, `post: a -> b -> slprop`) is
+   non-relational: expressing `_old(*p)` would need the pointer's initial
+   pointee value threaded through the FuncPtr domain, which has been removed
+   (fnptr arguments are now always plain values). So `_old(*p)` across an
+   indirect call is unsupported. Disabled until first-class `_old` support in
+   FuncPtr contracts is reinstated.
+
 void ptr_arg_cb(int32_t *p)
     _requires(*p < 100)
     _ensures(*p == _old(*p) + 1)
@@ -760,6 +771,7 @@ void ptr_arg_cb(int32_t *p)
     f(p);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
+---- end DISABLED ptr_arg_cb ---- */
 
 /* ---- DISABLED: storing a function pointer into an array element ----
    The four functions below (assign_from_agg, use_array_slot, array_runtime_idx,
