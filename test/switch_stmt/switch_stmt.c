@@ -120,6 +120,84 @@ int32_t sparse_unsorted(int32_t x)
     return result;
 }
 
+int32_t terminal_break_i32(int32_t x)
+    _ensures(return == 0 || return == 1)
+{
+    int32_t result = 0;
+    switch (x)
+        _ensures(_live(x) && _live(result))
+        _ensures(result == 0 || result == 1)
+    {
+    case -10:
+    case 7:
+        result = 1;
+        break;
+    }
+    return result;
+}
+
+int32_t terminal_break_u32(uint32_t x)
+    _ensures(return == 0 || return == 1)
+{
+    int32_t result = 0;
+    switch (x)
+        _ensures(_live(x) && _live(result))
+        _ensures(result == 0 || result == 1)
+    {
+    case 0U:
+    case 4294967295U:
+        result = 1;
+        break;
+    }
+    return result;
+}
+
+int32_t terminal_break_promoted_u8(uint8_t x)
+    _ensures(return == 0 || return == 1)
+{
+    int32_t result = 0;
+    switch (x)
+        _ensures(_live(x) && _live(result))
+        _ensures(result == 0 || result == 1)
+    {
+    case 255:
+        result = 1;
+        break;
+    }
+    return result;
+}
+
+int32_t terminal_break_i64(int64_t x)
+    _ensures(return == 0 || return == 1)
+{
+    int32_t result = 0;
+    switch (x)
+        _ensures(_live(x) && _live(result))
+        _ensures(result == 0 || result == 1)
+    {
+    case -1LL:
+        result = 1;
+        break;
+    }
+    return result;
+}
+
+int32_t terminal_break_u64(uint64_t x)
+    _ensures(return == 0 || return == 1)
+{
+    int32_t result = 0;
+    switch (x)
+        _ensures(_live(x) && _live(result))
+        _ensures(result == 0 || result == 1)
+    {
+    case 0ULL:
+    case 18446744073709551615ULL:
+        result = 1;
+        break;
+    }
+    return result;
+}
+
 _plain const char *sparse_string_name(
     int32_t x,
     _plain const char *fallback)

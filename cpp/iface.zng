@@ -251,7 +251,6 @@ mod crate::clang {
 
     fn mk_void_type(Rc<SourceInfo>) -> Rc<Type>;
     fn mk_bool_type(Rc<SourceInfo>) -> Rc<Type>;
-    fn mk_spec_int_type(Rc<SourceInfo>) -> Rc<Type>;
     fn mk_int_type(Rc<SourceInfo>, bool, u32) -> Rc<Type>;
     fn mk_float_type(Rc<SourceInfo>, u32) -> Rc<Type>;
     fn mk_sizet(Rc<SourceInfo>) -> Rc<Type>;

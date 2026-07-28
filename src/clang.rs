@@ -580,9 +580,6 @@ fn mk_void_type(loc: Rc<SourceInfo>) -> Rc<Type> {
 fn mk_bool_type(loc: Rc<SourceInfo>) -> Rc<Type> {
     mk_ast(loc, TypeT::Bool)
 }
-fn mk_spec_int_type(loc: Rc<SourceInfo>) -> Rc<Type> {
-    mk_ast(loc, TypeT::SpecInt)
-}
 fn mk_int_type(loc: Rc<SourceInfo>, signed: bool, width: u32) -> Rc<Type> {
     mk_ast(
         loc,

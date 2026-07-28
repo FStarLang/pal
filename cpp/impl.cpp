@@ -1752,7 +1752,7 @@ public:
       auto switchIndex = switchCounter++;
       auto scrutName = "__switch_scrut_" + std::to_string(switchIndex);
       auto scrutId = ctx.mk_ident(toStr(scrutName), loc.clone());
-      stmts.push(mk_let_stmt(loc.clone(), scrutId.clone(), std::move(scrutTy),
+      stmts.push(mk_let_stmt(loc.clone(), scrutId.clone(), scrutTy.clone(),
                              std::move(scrutRval)));
 
       // Collect cases from the switch body. A switch postcondition is used as
@@ -1911,15 +1911,6 @@ public:
         }
 
         if (canUseMatch) {
-          auto valueTy = mk_spec_int_type(loc.clone());
-          auto valueName = "__switch_value_" + std::to_string(switchIndex);
-          auto valueId = ctx.mk_ident(toStr(valueName), loc.clone());
-          auto value = mk_rvalue_cast(
-              loc.clone(), mk_lvalue_var(loc.clone(), scrutId.clone()),
-              valueTy.clone());
-          stmts.push(mk_let_stmt(loc.clone(), valueId.clone(), valueTy.clone(),
-                                 std::move(value)));
-
           auto matchBranches = Vec<Rc<ir::MatchBranch>>::new_();
           for (auto *group : cases) {
             auto patterns = Vec<Rc<ir::Expr>>::new_();
@@ -1929,7 +1920,7 @@ public:
               assert(evaluated && result.Val.isInt());
               patterns.push(mk_int_lit(getRange(caseValue->getSourceRange()),
                                        toBigInt(result.Val.getInt()),
-                                       valueTy.clone()));
+                                       scrutTy.clone()));
             }
             matchBranches.push(
                 mk_match_branch(std::move(patterns), makeBody(*group)));
@@ -1946,7 +1937,7 @@ public:
           }
           matchEnss.push(std::move(combined));
           stmts.push(mk_match(loc.clone(),
-                              mk_lvalue_var(loc.clone(), valueId.clone()),
+                              mk_lvalue_var(loc.clone(), scrutId.clone()),
                               std::move(matchBranches), std::move(defaultBody),
                               std::move(matchEnss)));
           return {};

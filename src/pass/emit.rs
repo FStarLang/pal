@@ -2053,6 +2053,52 @@ impl<'a> Emitter<'a> {
         self.emit_expr(env, v).to_rvalue_decayed()
     }
 
+    fn emit_pattern(&mut self, env: &Env, pattern: &Expr) -> Doc {
+        if let ExprT::IntLit(val, ty) = &pattern.val {
+            let resolved = env.vtype_whnf(ty.clone().into());
+            let literal = match resolved.val {
+                TypeT::Int {
+                    signed: true,
+                    width: 8,
+                } => Some(format!("{}y", val)),
+                TypeT::Int {
+                    signed: false,
+                    width: 8,
+                } => Some(format!("{}uy", normalize_unsigned(val, 8))),
+                TypeT::Int {
+                    signed: true,
+                    width: 16,
+                } => Some(format!("{}s", val)),
+                TypeT::Int {
+                    signed: false,
+                    width: 16,
+                } => Some(format!("{}us", normalize_unsigned(val, 16))),
+                TypeT::Int {
+                    signed: true,
+                    width: 32,
+                } => Some(format!("{}l", val)),
+                TypeT::Int {
+                    signed: false,
+                    width: 32,
+                } => Some(format!("{}ul", normalize_unsigned(val, 32))),
+                TypeT::Int {
+                    signed: true,
+                    width: 64,
+                } => Some(format!("{}L", val)),
+                TypeT::Int {
+                    signed: false,
+                    width: 64,
+                } => Some(format!("{}uL", normalize_unsigned(val, 64))),
+                TypeT::SizeT => Some(format!("{}sz", val)),
+                _ => None,
+            };
+            if let Some(literal) = literal {
+                return Doc::text(literal);
+            }
+        }
+        self.emit_rvalue(env, pattern)
+    }
+
     fn emit_rvalue_inner(&mut self, env: &Env, v: &Expr) -> Doc {
         annotated(v, || {
             match &v.val {
@@ -3769,7 +3815,7 @@ impl<'a> Emitter<'a> {
                         for pattern in &*branch.patterns {
                             branch_docs.push(
                                 Doc::line()
-                                    .append(self.emit_rvalue(env, pattern))
+                                    .append(self.emit_pattern(env, pattern))
                                     .append(" -> ")
                                     .append(self.emit_block(env, &branch.body))
                                     .nest(2),
@@ -6183,7 +6229,7 @@ impl<'a> Emitter<'a> {
                         branch_docs.push(
                             Doc::line()
                                 .append("| ")
-                                .append(self.emit_rvalue(env, pattern))
+                                .append(self.emit_pattern(env, pattern))
                                 .append(" ->")
                                 .append(
                                     Doc::line()
