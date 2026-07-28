@@ -29,6 +29,13 @@ fn normalize_unsigned(val: &BigInt, width: u32) -> BigInt {
     ((val % &modulus) + &modulus) % &modulus
 }
 
+/// The module holding a function's fnptr triple (`func_<g>_pre`/`_post`/`__fp`).
+/// Kept separate from the function's own module `Func_<g>` so the triple is only
+/// materialized as its own artifact when the function's address is taken.
+fn funcptr_module_name(g: &str) -> String {
+    format!("Funcptr_{}", g)
+}
+
 /// Determines the output module name for a given top-level declaration.
 pub fn module_name_for_decl(decl: &Decl) -> String {
     match &decl.val {
@@ -119,10 +126,13 @@ fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
                 let m = format!("Func_{}", fn_defn.decl.name.val);
                 let n = &fn_defn.decl.name.val;
                 // Register the synthetic fnptr triple names so indirect calls in
-                // other modules qualify them to their defining module.
-                map.insert(Rc::from(format!("{}_pre", n)), m.clone());
-                map.insert(Rc::from(format!("{}_post", n)), m.clone());
-                map.insert(Rc::from(format!("{}__fp", n)), m.clone());
+                // other modules qualify them to their defining module. The triple
+                // lives in its own `Funcptr_<g>` module (emitted only when the
+                // function's address is taken), not in `Func_<g>`.
+                let fp = funcptr_module_name(n);
+                map.insert(Rc::from(format!("{}_pre", n)), fp.clone());
+                map.insert(Rc::from(format!("{}_post", n)), fp.clone());
+                map.insert(Rc::from(format!("{}__fp", n)), fp);
                 map.insert(fn_defn.decl.name.val.clone(), m);
             }
             DeclT::FnDecl(fn_decl) => {
@@ -7642,23 +7652,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         let mod_name = module_name_for_decl(decl);
         emitter.current_module = mod_name.clone();
 
-        // For an address-taken function, append its fnptr triple: the wrapper
-        // implementation goes in the `.fst` (alongside the function body), the
-        // `pre`/`post` definitions and wrapper signature go in the `.fsti`.
-        let fnptr_triple = match &decl.val {
-            DeclT::FnDefn(fn_defn)
-                if !fn_defn.decl.is_pure && addr_taken.contains(&fn_defn.decl.name.val) =>
-            {
-                Some(emitter.emit_fnptr_triple(&env, &fn_defn.decl))
-            }
-            _ => None,
-        };
-
         // Emit just the body (decl code)
-        let mut body_doc = emitter.emit_decl(&env, decl);
-        if let Some((fst_extra, _)) = &fnptr_triple {
-            body_doc = body_doc.append(fst_extra.clone());
-        }
+        let body_doc = emitter.emit_decl(&env, decl);
         let mut writer = StrWriter::new();
         body_doc.render_raw(100, &mut writer).unwrap();
 
@@ -7668,10 +7663,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
             if fn_defn.decl.is_pure {
                 None
             } else {
-                let mut iface_doc = emitter.emit_fn_sig_for_interface(&env, &fn_defn.decl);
-                if let Some((_, fsti_extra)) = &fnptr_triple {
-                    iface_doc = iface_doc.append(fsti_extra.clone());
-                }
+                let iface_doc = emitter.emit_fn_sig_for_interface(&env, &fn_defn.decl);
                 let mut iface_writer = StrWriter::new();
                 iface_doc.render_raw(100, &mut iface_writer).unwrap();
                 Some(iface_writer.buffer)
@@ -7695,8 +7687,43 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         if let Some(&idx) = seen_modules.get(&mod_name) {
             pending[idx] = new_module;
         } else {
-            seen_modules.insert(mod_name, pending.len());
+            seen_modules.insert(mod_name.clone(), pending.len());
             pending.push(new_module);
+        }
+
+        // For an address-taken function, emit its fnptr triple as its own module
+        // `Funcptr_<g>`: the wrapper implementation goes in the `.fst`, the
+        // `pre`/`post` definitions and wrapper signature go in the `.fsti`. The
+        // wrapper body's `func_<g>` reference qualifies to `Func_<g>.func_<g>`
+        // because `current_module` is the fnptr module while emitting.
+        if let DeclT::FnDefn(fn_defn) = &decl.val {
+            if !fn_defn.decl.is_pure && addr_taken.contains(&fn_defn.decl.name.val) {
+                let fp_mod = funcptr_module_name(&fn_defn.decl.name.val);
+                emitter.current_module = fp_mod.clone();
+                let (fst_extra, fsti_extra) = emitter.emit_fnptr_triple(&env, &fn_defn.decl);
+
+                let mut fp_writer = StrWriter::new();
+                fst_extra.render_raw(100, &mut fp_writer).unwrap();
+                let mut fp_fsti_writer = StrWriter::new();
+                fsti_extra.render_raw(100, &mut fp_fsti_writer).unwrap();
+
+                let fp_module = PendingModule {
+                    mod_name: fp_mod.clone(),
+                    body_code: fp_writer.buffer,
+                    fsti_body_code: Some(fp_fsti_writer.buffer),
+                    range_map: fp_writer.source_range_map,
+                    source_file: decl_loc.file_name.clone(),
+                    decl_name: decl_name(decl),
+                    decl_range: decl_loc.range,
+                };
+
+                if let Some(&idx) = seen_modules.get(&fp_mod) {
+                    pending[idx] = fp_module;
+                } else {
+                    seen_modules.insert(fp_mod, pending.len());
+                    pending.push(fp_module);
+                }
+            }
         }
     }
 
