@@ -61,6 +61,49 @@ fn cast_to(rval: &mut Rc<Expr>, ty: Rc<Type>) {
     *rval = ExprT::Cast(rval.clone(), ty).with_loc(rval.loc.clone())
 }
 
+/// Resolve a member access through anonymous (`_unnamed*`) struct/union members.
+///
+/// When a direct field lookup for `target` fails on the struct/union named by
+/// `container`, C's anonymous-member transparency allows the field to live in a
+/// nested anonymous member. This searches only anonymous members and returns the
+/// chain of intermediate anonymous member names leading to a container that
+/// directly holds `target` (`Some(vec![])` would mean `target` is direct — never
+/// returned here since callers only invoke it after a failed direct lookup), or
+/// `None` if `target` is unreachable this way.
+///
+/// This is needed for member accesses written in spec position (`_requires` /
+/// `_ensures` / `assert`), where PAL's own parser produces a flat member chain
+/// rather than the clang-resolved nested chain seen in function bodies.
+fn indirect_field_path(
+    env: &Env,
+    container: &TypeRefKind,
+    target: &Rc<Ident>,
+) -> Option<Vec<Rc<Ident>>> {
+    let fields: &[Field] = match container {
+        TypeRefKind::Struct(n) => &env.lookup_struct(n)?.fields,
+        TypeRefKind::Union(n) => &env.lookup_union(n)?.fields,
+        TypeRefKind::Typedef(_) => return None,
+    };
+    if fields.iter().any(|f| f.val.name().val == target.val) {
+        return Some(vec![]);
+    }
+    for f in fields {
+        let fname = f.val.name();
+        if !fname.val.starts_with("_unnamed") {
+            continue;
+        }
+        let fty = env.vtype_whnf(f.val.logical_type(&f.loc).into());
+        if let TypeT::TypeRef(inner) = &fty.val {
+            if let Some(mut sub) = indirect_field_path(env, inner, target) {
+                let mut path = vec![Rc::new(fname.clone())];
+                path.append(&mut sub);
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 impl<'a> Elaborator<'a> {
     fn report(&mut self, msg: String, loc: &SourceInfo) {
         self.diags.report(Diagnostic {
@@ -304,7 +347,11 @@ impl<'a> Elaborator<'a> {
                     }
                 }
                 if let Ok(t) = env.infer_expr(x) {
+                    // Own `x`/`a` so the branches below may reassign `rval.val`.
+                    let x = x.clone();
+                    let a = a.clone();
                     let t = env.vtype_whnf(t);
+                    let mut indirect: Option<Vec<Rc<Ident>>> = None;
                     match &t.val {
                         // Convert _length on array → VAttr::Length
                         TypeT::Pointer(_, PointerKind::Array) if &*a.val == "_length" => {
@@ -320,25 +367,49 @@ impl<'a> Elaborator<'a> {
                             let Some(s) = env.lookup_struct(n) else {
                                 return self.report(format!("unknown structure {}", n), &rval.loc);
                             };
-                            let Some(_f) = s.get_field(a) else {
-                                return self.report(
-                                    format!("no field {} in structure {}", a, n),
-                                    &rval.loc,
-                                );
-                            };
+                            if s.get_field(&a).is_none() {
+                                match indirect_field_path(env, &TypeRefKind::Struct(n.clone()), &a)
+                                {
+                                    Some(path) => indirect = Some(path),
+                                    None => {
+                                        return self.report(
+                                            format!("no field {} in structure {}", a, n),
+                                            &rval.loc,
+                                        );
+                                    }
+                                }
+                            }
                         }
                         TypeT::TypeRef(TypeRefKind::Union(n)) => {
                             let Some(u) = env.lookup_union(n) else {
                                 return self.report(format!("unknown union {}", n), &rval.loc);
                             };
-                            let Some(_f) = u.get_field(a) else {
-                                return self
-                                    .report(format!("no field {} in union {}", a, n), &rval.loc);
-                            };
+                            if u.get_field(&a).is_none() {
+                                match indirect_field_path(env, &TypeRefKind::Union(n.clone()), &a) {
+                                    Some(path) => indirect = Some(path),
+                                    None => {
+                                        return self.report(
+                                            format!("no field {} in union {}", a, n),
+                                            &rval.loc,
+                                        );
+                                    }
+                                }
+                            }
                         }
                         _ => {
                             return self.report(format!("not a structure type: {}", t), &rval.loc);
                         }
+                    }
+                    // A member reachable only through anonymous members (e.g. a
+                    // spec-position access parsed into a flat chain): rewrite it
+                    // into the nested chain and re-elaborate.
+                    if let Some(path) = indirect {
+                        let mut base = x.clone();
+                        for g in &path {
+                            base = ExprT::Member(base, g.clone()).with_loc(rval.loc.clone());
+                        }
+                        rval.val = ExprT::Member(base, a.clone());
+                        self.elab_rvalue(env, rval, expected);
                     }
                 }
             }
