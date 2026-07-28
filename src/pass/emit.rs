@@ -620,11 +620,6 @@ struct Emitter<'a> {
     // immediately by the enclosing `if`-join and statement loop so trailing
     // dead code is not emitted.
     fnptr_diverged: bool,
-    // Ghost statements that must be emitted *before* the current statement to
-    // set up a callback argument (a named function passed to a contracted
-    // fnptr parameter). Populated by the FnCall caller-side arm while emitting
-    // arguments and drained/prepended at the enclosing statement boundary.
-    caller_cb_prelude: Vec<Doc>,
     tmp_counter: usize,
 }
 
@@ -4066,11 +4061,7 @@ impl<'a> Emitter<'a> {
                 StmtT::Error => Doc::text("(admit());"),
             }
         });
-        // Prepend any callback-argument setup produced while emitting this
-        // statement's expressions (e.g. `apply(add, ..)`), so the ghost ref
-        // store / validity witness are in scope before the call.
-        let prelude = self.drain_cb_prelude();
-        prelude.append(body)
+        body
     }
 } // impl Emitter (group B)
 
@@ -4106,9 +4097,6 @@ impl<'a> Emitter<'a> {
             {
                 let ret_doc = self.emit_rvalue(&env, t);
                 let ret_name = self.emit_name(Name::Var(Rc::from("return")));
-                // Callback-argument setup produced while emitting `e` must run
-                // before the `let <ret> = ..` that consumes it.
-                doc = doc.append(Doc::line().append(self.drain_cb_prelude()));
                 doc = doc.append(
                     Doc::line().append(Doc::group(
                         Doc::text("let ")
@@ -5980,17 +5968,6 @@ impl<'a> Emitter<'a> {
         parens(naryfn([Doc::text(of_fn), pre, post, wrap]))
     }
 
-    /// Drain any pending callback-argument prelude statements into a `Doc`,
-    /// each on its own line, ready to be prepended to the current statement.
-    /// Returns `Doc::nil()` when there is nothing pending.
-    fn drain_cb_prelude(&mut self) -> Doc {
-        if self.caller_cb_prelude.is_empty() {
-            return Doc::nil();
-        }
-        let stmts = std::mem::take(&mut self.caller_cb_prelude);
-        Doc::concat(stmts.into_iter().map(|s| s.append(Doc::line())))
-    }
-
     /// The fnptr domain for the given argument types. This MUST agree with
     /// `emit_fnptr_spec_core`'s domain so that a fnptr *type* (`emit_type`
     /// FnPtr) and the synthesized triple's specs share the same `ARG`.
@@ -7340,7 +7317,6 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         typedef_override_map,
         current_fn_total: false,
         fnptr_diverged: false,
-        caller_cb_prelude: Vec::new(),
         tmp_counter: 0,
     };
 
