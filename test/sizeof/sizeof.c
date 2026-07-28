@@ -53,3 +53,17 @@ size_t size_of_int_array_zero(void)
 {
     return sizeof(int[0]);
 }
+
+#define ALIGN_OF(TypeOrExpression) _Alignof(__typeof__(TypeOrExpression))
+
+size_t align_of_typeof_type(void)
+    _ensures(return == _Alignof(two_ints))
+{
+    return ALIGN_OF(two_ints);
+}
+
+size_t align_of_typeof_expr(two_ints value)
+    _ensures(return == _Alignof(two_ints))
+{
+    return ALIGN_OF(value);
+}
