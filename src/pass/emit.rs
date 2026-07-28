@@ -29,9 +29,10 @@ fn normalize_unsigned(val: &BigInt, width: u32) -> BigInt {
     ((val % &modulus) + &modulus) % &modulus
 }
 
-/// The module holding a function's fnptr triple (`func_<g>_pre`/`_post`/`__fp`).
-/// Kept separate from the function's own module `Func_<g>` so the triple is only
-/// materialized as its own artifact when the function's address is taken.
+/// The module holding a function's fnptr wrapper (`func_<g>__fp`), whose type
+/// carries the inlined pre/post spec. Kept separate from the function's own
+/// module `Func_<g>` so the wrapper is only materialized as its own artifact
+/// when the function's address is taken.
 fn funcptr_module_name(g: &str) -> String {
     format!("Funcptr_{}", g)
 }
@@ -172,8 +173,10 @@ fn build_typedef_override_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
 type Annotation = Rc<SourceInfo>;
 type Doc = RcDoc<'static, Annotation>;
 
-/// The generated pieces of a function-pointer contract spec (`func_<g>_pre` /
-/// `func_<g>_post`), used by the address-taken triple (`emit_fnptr_triple`).
+/// The generated pieces of a function-pointer contract spec: the inlined
+/// pre/post `slprop` expressions (`pre_expr`/`post_expr`, spliced directly
+/// into the `__fp` wrapper's `requires`/`ensures`) plus the wrapper name and
+/// callee, used by the address-taken wrapper (`emit_fnptr_triple`).
 struct FnPtrSpecCore {
     pre_expr: Doc,
     post_expr: Doc,
@@ -641,10 +644,6 @@ struct Emitter<'a> {
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
-    /// Within the function body currently being emitted, maps a contracted
-    /// function-pointer *parameter*'s name to its spec base (`<fn>_<param>`, used
-    /// to name `func_<base>_pre`/`func_<base>_post`) and whether it is
-    /// `_nullable`. Populated once at body entry from the signature (never
     // Set by `emit_stmts`/`emit_block` to report whether the block just emitted
     // diverges on every path (ends in `return` on all control-flow paths). Read
     // immediately by the enclosing `if`-join and statement loop so trailing
@@ -751,8 +750,8 @@ fn fnptr_domain_doc(arg_docs: Vec<Doc>) -> Doc {
 
 /// Collect the set of C functions whose address is taken anywhere in the
 /// translation unit (`&f` or bare `f` decaying to a function pointer, both
-/// modeled as `ExprT::FnRef`). Each such function needs its fnptr triple
-/// (`func_<f>_pre/_post/__fp`) emitted in its module.
+/// modeled as `ExprT::FnRef`). Each such function needs its fnptr wrapper
+/// (`func_<f>__fp`) emitted in its module.
 fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
     fn walk_expr(e: &Expr, set: &mut HashSet<Rc<str>>) {
         match &e.val {
@@ -2965,10 +2964,11 @@ impl<'a> Emitter<'a> {
                 }
                 ExprT::FnRef(g) => {
                     // A function-to-pointer decay (`add` / `&add`): the concrete
-                    // function-pointer value `of_fn func_<g>_pre func_<g>_post
-                    // func_<g>__fp`. Emitting the resolved `of_fn` term (rather
-                    // than an abstract handle) is what lets `of_fn_valid`'s
-                    // SMTPat discharge validity at the call site.
+                    // function-pointer value `of_fn (pre_of func_<g>__fp)
+                    // (post_of func_<g>__fp) func_<g>__fp` (see `emit_of_fn`).
+                    // Emitting the resolved `of_fn` term (rather than an abstract
+                    // handle) is what lets `of_fn_valid`'s SMTPat discharge
+                    // validity at the call site.
                     self.emit_of_fn(env, g)
                 }
                 ExprT::FnPtrCall(f, args) => {
@@ -6437,8 +6437,8 @@ impl<'a> Emitter<'a> {
         // pure part is `req ==> ens`, not `ens`: the ensures is only guaranteed
         // when the precondition held, and stating it as an implication also
         // keeps partial operations in `ens` (e.g. `Int32.add`) well-defined,
-        // since the standalone `func_<g>_post` definition does not carry the
-        // precondition in scope.
+        // since the inlined post `slprop` does not carry the precondition in
+        // scope.
         let conj = |props: Vec<Doc>| -> Doc {
             if props.is_empty() {
                 Doc::text("True")
