@@ -319,8 +319,8 @@ pub enum ExprT {
     FnCall(Rc<Ident>, Exprs),
     /// Reference to a named top-level C function used as a value (function-to-
     /// pointer decay `add` or address-of `&add`). In the deep model this becomes
-    /// the concrete `Pulse.Lib.C.FuncPtr.of_fn func_<name>_pre func_<name>_post
-    /// func_<name>__fp` value.
+    /// the concrete `Pulse.Lib.C.FuncPtr.of_fn (pre_of func_<name>__fp)
+    /// (post_of func_<name>__fp) func_<name>__fp` value.
     FnRef(Rc<Ident>),
     /// Indirect call through a function-pointer value: `fptr(a, b)`. Holds the
     /// callee expression and the argument list. Emitted as a
