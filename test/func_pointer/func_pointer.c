@@ -535,6 +535,21 @@ int32_t guarded_call(int32_t (*fp)(int32_t, int32_t) _nullable
     return 0;
 }
 
+/* Bare `_nullable` callback, i.e. no `_refine`. Without a refinement there is no
+   `is_valid` to carry, so the parameter's slprop is the empty `unless_null fp emp`
+   -- the same shape a `_nullable` data pointer with a prop-less pointee gets. The
+   pointer can still be null-tested; it just cannot be called, since nothing
+   establishes its validity. This exercises the plain `unless_null` path for
+   function pointers, which relies on the `has_is_null_func_ptr` instance. */
+int32_t is_set(int32_t (*fp)(int32_t, int32_t) _nullable)
+    _ensures(return == 0 || return == 1)
+{
+    if (fp) {
+        return 1;
+    }
+    return 0;
+}
+
 /* ---- join family ----
    The pointer is bound to different functions across a control-flow join and
    called after the merge, so no single static target exists at the call site.

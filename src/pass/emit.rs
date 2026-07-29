@@ -1557,12 +1557,6 @@ impl<'a> Emitter<'a> {
             }
             TypeT::Plain(_) => {}
             TypeT::Nullable(inner) => {
-                // A `_nullable` function pointer cannot use a data-pointer
-                // `unless_null` slprop — `func_ptr` has no `has_is_null`
-                // instance. Emit nothing here for that case.
-                if matches!(&inner.val, TypeT::FnPtr { .. }) {
-                    return;
-                }
                 // Collect the inner type's props separately, then wrap the whole
                 // conjunction in `unless_null this (…)` so the resource is `emp`
                 // when the pointer is null. Val bindings (existentials) are still
@@ -3379,7 +3373,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
-        let body = annotated(stmt, || {
+        annotated(stmt, || {
             match &stmt.val {
                 StmtT::Call(v) => {
                     // A bare call statement whose value is not unit/void must
@@ -4031,7 +4025,7 @@ impl<'a> Emitter<'a> {
                     label,
                     ensures,
                 } => {
-                    let mut doc = block(self.emit_stmts(env, body, false));
+                    let mut doc = block(self.emit_stmts(env, body));
                     for e in ensures.iter() {
                         doc = doc
                             .append(Doc::hardline())
@@ -4045,8 +4039,7 @@ impl<'a> Emitter<'a> {
                 }
                 StmtT::Error => Doc::text("(admit());"),
             }
-        });
-        body
+        })
     }
 } // impl Emitter (group B)
 
@@ -4059,7 +4052,7 @@ fn block(stmts: Doc) -> Doc {
 }
 
 impl<'a> Emitter<'a> {
-    fn emit_stmts(&mut self, env: &Env, stmts: &Vec<Rc<Stmt>>, _is_fn_body: bool) -> Doc {
+    fn emit_stmts(&mut self, env: &Env, stmts: &Vec<Rc<Stmt>>) -> Doc {
         let mut env = env.clone();
         let mut doc = Doc::nil();
         let mut idx = 0;
@@ -4117,7 +4110,7 @@ impl<'a> Emitter<'a> {
         if stmts.is_empty() {
             return Doc::text("{}");
         }
-        block(self.emit_stmts(env, stmts, false))
+        block(self.emit_stmts(env, stmts))
     }
 } // impl Emitter (group C)
 
@@ -6611,7 +6604,7 @@ impl<'a> Emitter<'a> {
         }));
         let env = &mut env.clone();
         env.push_fn_decl_args_for_body(decl);
-        decl_doc.append(block(arg_redecl_as_mut.append(self.emit_stmts(env, body, true))).group())
+        decl_doc.append(block(arg_redecl_as_mut.append(self.emit_stmts(env, body))).group())
     }
 } // impl Emitter (group E)
 
