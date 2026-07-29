@@ -8,6 +8,7 @@
 #include <optional>
 #include <sstream>
 #include <unordered_set>
+#include <vector>
 
 using namespace clang;
 using namespace clang::tooling;
@@ -948,15 +949,21 @@ public:
           }
         }
 
-        // Detect a cast between a struct pointer and a pointer to its FIRST
-        // field, in either direction. C guarantees this round-trips only for
-        // the initial member (C17 6.7.2.1p17): "A pointer to a structure
-        // object, suitably converted, points to its initial member ... and
-        // vice versa. There may be unnamed padding within a structure object,
-        // but not at its beginning." A `field -> struct` cast lowers to the
-        // per-field container projection (the node `_container_of` produces); a
-        // `struct -> field` cast lowers to `&base->firstfield`. Both reuse
-        // machinery PAL already emits, so nothing downstream changes.
+        // Detect a cast between a struct pointer and a pointer to one of its
+        // transitively-initial members, in either direction. C guarantees a
+        // struct pointer round-trips with a pointer to its initial member
+        // (C17 6.7.2.1p17): "A pointer to a structure object, suitably
+        // converted, points to its initial member ... and vice versa. There
+        // may be unnamed padding within a structure object, but not at its
+        // beginning." Applying this recursively, a struct pointer is
+        // interconvertible with a pointer to the first field of the first
+        // field of ... its first field, arbitrarily deep. We recover this
+        // chain of initial members and lower a `field -> struct` cast to a
+        // nest of per-field container projections (the node `_container_of`
+        // produces) and a `struct -> field` cast to a nest of member accesses
+        // `&base->f0.f1...`. Both reuse machinery PAL already emits, so
+        // nothing downstream changes. A chain of length one reproduces the
+        // single-hop first-field cast exactly.
         if (ic->getCastKind() == CK_BitCast) {
           QualType dstTy = ic->getType();
           QualType srcTy = ic->getSubExpr()->getType();
@@ -964,6 +971,9 @@ public:
             QualType dstPointee = dstTy->getPointeeType();
             QualType srcPointee = srcTy->getPointeeType();
 
+            auto sameType = [&](QualType a, QualType b) {
+              return astCtx->hasSameUnqualifiedType(a, b);
+            };
             // The non-bitfield first field of a struct pointee, or null.
             auto firstField = [&](QualType pointee) -> FieldDecl * {
               auto *rt = pointee->getAs<RecordType>();
@@ -977,36 +987,66 @@ public:
                 return nullptr;
               return *it;
             };
-            auto sameType = [&](QualType a, QualType b) {
-              return astCtx->hasSameUnqualifiedType(a, b);
+            // The chain of initial members descending from `from` until one
+            // has type `target`, e.g. [outer::in, inner::x] for `outer` down
+            // to `int`. Empty if `target` is not a transitively-initial member
+            // of `from` (a non-struct/bitfield is reached first, or `from`
+            // already equals `target`). Depth-capped as a safety net against
+            // pathological (e.g. recursive) type graphs.
+            auto firstFieldChain =
+                [&](QualType from,
+                    QualType target) -> std::vector<FieldDecl *> {
+              std::vector<FieldDecl *> chain;
+              QualType cur = from;
+              for (int depth = 0; depth < 32; ++depth) {
+                if (sameType(cur, target))
+                  return chain;
+                FieldDecl *f = firstField(cur);
+                if (!f)
+                  return {};
+                chain.push_back(f);
+                if (sameType(f->getType(), target))
+                  return chain;
+                cur = f->getType();
+              }
+              return {};
             };
 
-            FieldDecl *toStructField = firstField(dstPointee);
-            bool fieldToStruct =
-                toStructField && sameType(srcPointee, toStructField->getType());
-            FieldDecl *toFieldField = firstField(srcPointee);
-            bool structToField =
-                toFieldField && sameType(dstPointee, toFieldField->getType());
+            // (struct S *)p  where p : F *, F transitively-initial member of S.
+            auto revChain = firstFieldChain(dstPointee, srcPointee);
+            // (F *)s  where s : struct S *, F transitively-initial member of S.
+            auto fwdChain = firstFieldChain(srcPointee, dstPointee);
 
-            // (struct S *)p  where p : F *, F = first field of S.
-            if (fieldToStruct && !structToField) {
-              auto structTy =
-                  trQualType(astCtx->getRecordType(toStructField->getParent()),
-                             ic->getSourceRange());
-              auto fieldId = ctx.mk_ident(toStr(fieldNameStr(toStructField)),
-                                          getRange(ic->getSourceRange()));
-              return mk_container_of(std::move(loc), trRValue(ic->getSubExpr()),
-                                     std::move(structTy), std::move(fieldId));
+            // At most one direction can match: both would require a cycle in
+            // the by-value initial-member graph, impossible as sizes strictly
+            // decrease. The `.empty()` guards are defensive.
+            if (!revChain.empty() && fwdChain.empty()) {
+              // Nest container projections innermost-first: the deepest field
+              // (whose parent owns `p`) is applied first.
+              auto expr = trRValue(ic->getSubExpr());
+              for (auto it = revChain.rbegin(); it != revChain.rend(); ++it) {
+                FieldDecl *f = *it;
+                auto structTy =
+                    trQualType(astCtx->getRecordType(f->getParent()),
+                               ic->getSourceRange());
+                auto fieldId = ctx.mk_ident(toStr(fieldNameStr(f)),
+                                            getRange(ic->getSourceRange()));
+                expr = mk_container_of(loc.clone(), std::move(expr),
+                                       std::move(structTy), std::move(fieldId));
+              }
+              return expr;
             }
 
-            // (F *)s  where s : struct S *, F = first field of S.
-            if (structToField && !fieldToStruct) {
-              auto fieldId = ctx.mk_ident(toStr(fieldNameStr(toFieldField)),
-                                          getRange(ic->getSourceRange()));
+            if (!fwdChain.empty() && revChain.empty()) {
+              // Nest member accesses outermost-first: &(*s).f0.f1...
               auto base = mk_deref(loc.clone(), trRValue(ic->getSubExpr()));
-              auto member = mk_lvalue_member(loc.clone(), std::move(base),
-                                             std::move(fieldId));
-              return mk_rvalue_ref(std::move(loc), std::move(member));
+              for (FieldDecl *f : fwdChain) {
+                auto fieldId = ctx.mk_ident(toStr(fieldNameStr(f)),
+                                            getRange(ic->getSourceRange()));
+                base = mk_lvalue_member(loc.clone(), std::move(base),
+                                        std::move(fieldId));
+              }
+              return mk_rvalue_ref(std::move(loc), std::move(base));
             }
           }
         }
