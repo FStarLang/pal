@@ -3144,14 +3144,15 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 ExprT::SizeOf(ty) => {
-                    // For FixedArray, emit as `array T` to match annotation parser output
-                    let ty_doc = match &ty.val {
-                        TypeT::FixedArray(elem, _) => {
-                            unaryfn(Doc::text("array"), self.emit_type(env, elem))
-                        }
-                        _ => self.emit_type(env, ty),
-                    };
-                    unaryfn(Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"), ty_doc)
+                    // `emit_type` renders a fixed-size array `T[N]` as
+                    // `full_array_lspec T N`, so `sizeof(T[N])` becomes
+                    // `c_sizeof (full_array_lspec T N)` and its length
+                    // participates in the size (see the `c_sizeof_array` axiom).
+                    // Other types size opaquely.
+                    unaryfn(
+                        Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"),
+                        self.emit_type(env, ty),
+                    )
                 }
                 ExprT::AlignOf(ty) => {
                     let ty_doc = match &ty.val {

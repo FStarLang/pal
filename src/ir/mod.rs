@@ -362,7 +362,9 @@ pub enum ExprT {
     /// Lowered to Assign statement + value in elab pass.
     AssignExpr(Rc<Expr>, Rc<Expr>),
     /// `sizeof(T)` — translated to an opaque `c_sizeof T` call where `T`
-    /// is the F* type PAL uses to represent the C type being measured.
+    /// is the F* type PAL uses to represent the C type being measured. A
+    /// fixed-size array `T[N]` is measured as `c_sizeof (full_array_lspec T N)`,
+    /// whose size is related to the element size by the `c_sizeof_array` axiom.
     SizeOf(Rc<Type>),
     /// `_Alignof(T)` / `__alignof__(T)` — translated to `c_alignof T`.
     AlignOf(Rc<Type>),
