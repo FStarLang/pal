@@ -733,24 +733,31 @@ fn expr_parser<
                 type_name
                     .clone()
                     .then(
-                        select! { Token::Integer(_, _) => () }
+                        select! { Token::Integer(i, _) => i }
                             .delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))
                             .or_not(),
                     )
                     .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
             )
-            .map_with(|(is_sizeof, (ty, arr_opt)), extra| -> Expr {
-                let loc = sift.resolve_source_info(&extra.span());
+            .try_map(|(is_sizeof, (ty, arr_opt)), span| {
+                let loc = sift.resolve_source_info(&span);
                 let inner_ty = match arr_opt {
                     None => ty,
-                    Some(()) => TypeT::Pointer(ty, PointerKind::Array).with_loc(loc.clone()),
+                    // `sizeof(T[N])` denotes the array type itself (no decay
+                    // under `sizeof`), so keep the length as a `FixedArray`.
+                    Some(i) => {
+                        let n = str::parse::<u64>(i).map_err(|_| {
+                            Rich::custom(span, format!("invalid array length: {i}"))
+                        })?;
+                        TypeT::FixedArray(ty, n).with_loc(loc.clone())
+                    }
                 };
                 let expr_t = if is_sizeof {
                     ExprT::SizeOf(inner_ty)
                 } else {
                     ExprT::AlignOf(inner_ty)
                 };
-                expr_t.with_loc(loc).into()
+                Ok(expr_t.with_loc(loc).into())
             })
             .boxed(),
             ident
