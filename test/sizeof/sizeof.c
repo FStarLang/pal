@@ -38,15 +38,15 @@ size_t align_of_int(void)
 }
 
 // Array sizeof related to element size. PAL translates `sizeof(int[8])` to
-// `c_sizeof (c_array int 8)`, and the `c_sizeof_array` axiom relates it to
-// `sizeof(int) * 8`.
+// `c_sizeof (full_array_lspec int 8)`, and the `c_sizeof_array` axiom relates
+// it to `sizeof(int) * 8`.
 size_t size_of_int_array_len(void)
     _ensures(return == sizeof(int) * 8)
 {
     return sizeof(int[8]);
 }
 
-// Zero-length array has size 0: `c_sizeof (c_array int 0)` reduces to
+// Zero-length array has size 0: `c_sizeof (full_array_lspec int 0)` reduces to
 // `sizeof(int) * 0 == 0` via the `c_sizeof_array` axiom.
 size_t size_of_int_array_zero(void)
     _ensures(return == 0)
