@@ -210,6 +210,7 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     name: u.name.clone(),
                     fields: vec![info.named_field.clone()],
                     eager_unfold_pred: false,
+                    occupies_space: u.occupies_space,
                 });
             }
         }

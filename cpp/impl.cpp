@@ -1,4 +1,5 @@
 #include "generated.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/MacroArgs.h"
@@ -321,6 +322,8 @@ public:
       return;
     auto loc = getRange(decl->getSourceRange());
     auto builder = DeclBuilder::new_(loc.clone(), ident.clone());
+    if (!astCtx->getASTRecordLayout(decl).getSize().isZero())
+      builder.set_occupies_space();
     if (decl->getTagKind() == TagTypeKind::Struct) {
       // Check for struct-level attributes
       if (decl->hasAttrs()) {

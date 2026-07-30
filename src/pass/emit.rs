@@ -111,6 +111,9 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::TypeRefPredFold(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
         Name::TypeRefPredFold(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefPredFold(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefSizeofPos(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefSizeofPos(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefSizeofPos(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
         // Local names (Var, Val, Perm) are not cross-module references
         Name::Var(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
     }
@@ -365,6 +368,7 @@ enum Name {
     TypeRefSpecField(TypeRef, String),
     TypeRefPredUnfold(TypeRef),
     TypeRefPredFold(TypeRef),
+    TypeRefSizeofPos(TypeRef),
 
     StructFieldProj(Rc<IdentT>, Rc<IdentT>),
     StructDirectFieldName(Rc<IdentT>, Rc<IdentT>),
@@ -434,6 +438,9 @@ impl Name {
             }
             Name::TypeRefPredFold(type_ref) => {
                 format!("{}__pred_fold", typeref_to_string(type_ref))
+            }
+            Name::TypeRefSizeofPos(type_ref) => {
+                format!("{}__sizeof_pos", typeref_to_string(type_ref))
             }
             Name::TypeRefSpec(type_ref) => format!("{}__spec", typeref_to_string(type_ref)),
             Name::TypeRefSpecField(type_ref, fld) => {
@@ -4360,6 +4367,33 @@ fn mk_assume_val(attrs: Vec<Doc>, n: Doc, args: &[Doc], ty: Doc) -> Doc {
         .group()
 }
 
+fn mk_sizeof_pos_axiom(name: Doc, ty: Doc) -> Doc {
+    let ty_arg = parens(
+        Doc::text("a: Type0 { a ==")
+            .append(Doc::line())
+            .append(ty)
+            .append(Doc::line())
+            .append("}")
+            .group(),
+    );
+    let sizeof = unaryfn(Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"), Doc::text("a"));
+    let sizeof_value = unaryfn(Doc::text("FStar.SizeT.v"), sizeof);
+    mk_assume_val(
+        vec![],
+        name,
+        &[ty_arg],
+        Doc::text("Lemma")
+            .append(Doc::line())
+            .append(parens(sizeof_value.clone().append(Doc::text(" > 0"))))
+            .append(Doc::line())
+            .append(
+                Doc::text("[SMTPat ")
+                    .append(sizeof_value)
+                    .append(Doc::text("]")),
+            ),
+    )
+}
+
 fn mk_fun(arg: Doc, body: Doc) -> Doc {
     parens(
         Doc::text("fun")
@@ -4495,6 +4529,12 @@ impl<'a> Emitter<'a> {
                 .append("}")
                 .group(),
         );
+        if decl.occupies_space {
+            ses.push(mk_sizeof_pos_axiom(
+                self.emit_name(Name::TypeRefSizeofPos(k.into())),
+                struct_type_name.clone(),
+            ));
+        }
 
         // Generate struct spec type and pred by gathering slprops from fields
         let env = &mut env.clone();
@@ -5451,7 +5491,11 @@ impl<'a> Emitter<'a> {
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
     }
 
-    fn emit_uniondefn(&mut self, env: &Env, decl @ UnionDefn { name, fields }: &UnionDefn) -> Doc {
+    fn emit_uniondefn(
+        &mut self,
+        env: &Env,
+        decl @ UnionDefn { name, fields, .. }: &UnionDefn,
+    ) -> Doc {
         let env = &mut env.clone();
         env.push_union(decl.clone());
 
@@ -5490,6 +5534,12 @@ impl<'a> Emitter<'a> {
                 })))
                 .group(),
         );
+        if decl.occupies_space {
+            ses.push(mk_sizeof_pos_axiom(
+                self.emit_name(Name::TypeRefSizeofPos(k.into())),
+                union_type_name.clone(),
+            ));
+        }
 
         // Emit predicate (emp for MVP)
         let env = &mut env.clone();

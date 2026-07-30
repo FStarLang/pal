@@ -217,6 +217,7 @@ mod crate::clang {
         fn set_rec(&mut self);
         fn set_total(&mut self);
         fn set_eager_unfold_pred(&mut self);
+        fn set_occupies_space(&mut self);
         fn decreases(&mut self, Rc<Expr>);
     }
 
