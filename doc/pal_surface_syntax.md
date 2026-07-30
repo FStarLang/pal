@@ -125,11 +125,17 @@ void f(uds_array a) { ... }
 
 `_refine_always` on a typedef is the form to use when the type also appears in `_out` position, since the refinement then has to hold in the uninit precondition too.
 
-**On a struct/union declaration** — `this` is the whole record; reach into fields with `this.<field>`. The refinement appears as a pure conjunct in `struct_S__pred` (and `__uninit_pred` for `_refine_always`).
+**On a struct declaration** — `this` is the whole record; reach into fields with `this.<field>`. Just like a typedef refinement, the refinement is carried by the struct type and so fires at every use of `struct S`; `struct_S__pred` itself is unchanged. The annotation must be written *after* the `struct` keyword, otherwise clang ignores it.
 
 ```c
 struct _refine(0 < this.x) simpler { int x; };
+
+void f(struct simpler s) { ... }
+// requires: struct_simpler__pred var_s 1.0R val_s_0
+//        ** with_pure (0 < var_s.struct_simpler__x)
 ```
+
+`_plain` composes here too, which is how a record-level `_refine(_inline_pulse ...)` can replace the default ownership predicate outright — see [`test/refine_struct/refine_struct.c`](../test/refine_struct/refine_struct.c). Record-level annotations on `union` declarations are not supported yet; use a typedef for those.
 
 **On a field type** — the refinement applies to that field's value; inside the predicate `this` is the field, not the surrounding record. The refinement is added to the per-field clause of the struct's pred when emitted.
 
@@ -139,7 +145,7 @@ struct s {
 };
 ```
 
-The record-level form (`struct _refine(0 < this.x) s { int x; }`) is the idiomatic style in the current test suite when the predicate touches a single field; field-level refinement composes the same way but appears less often.
+The record-level and field-level forms differ in scope: record-level binds `this` to the whole struct value (so the predicate may relate several fields), while field-level binds `this` to that one field and is folded into the field's clause of the struct's pred.
 
 ### Ghost code
 

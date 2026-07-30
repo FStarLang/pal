@@ -424,7 +424,11 @@ public:
       }
       switch (decl->getTagKind()) {
       case TagTypeKind::Struct: {
-        return mk_type_struct(std::move(loc), std::move(name));
+        auto ty = mk_type_struct(std::move(loc), std::move(name));
+        // Apply the record declaration's own PAL attributes (e.g. `_refine`)
+        // to the struct type, exactly as is done for typedefs.
+        return decl->hasAttrs() ? trTypeAttrs(decl->getAttrs(), std::move(ty))
+                                : std::move(ty);
       }
       case TagTypeKind::Union: {
         return mk_type_union(std::move(loc), std::move(name));

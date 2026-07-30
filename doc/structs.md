@@ -43,6 +43,14 @@ typedef struct { _array uint8_t *x; } b32_struct;
 
 `Typedef_b32_struct.fst` defines `ty_b32_struct__pred` as the inner struct's pred conjoined with the extra pure conjunct `length_of this.x = 32`. `ty_b32_struct__uninit_pred` is unchanged because `_refine` fires only in the init slprop (use `_refine_always` to extend it to the uninit pred as well). See [`test/array_test/array_test.c`](../test/array_test/array_test.c) for refined-typedef examples.
 
+The same annotations may also be written directly on a tag-only struct declaration, with no typedef:
+
+```c
+struct _refine(this.x._length == 32) b32_struct { _array unsigned char *x; };
+```
+
+PAL applies the record declaration's attributes to the struct type, so — exactly as for a typedef — the refinement fires at every use of `struct b32_struct` rather than being folded into `struct_b32_struct__pred`. The annotation has to come *after* the `struct` keyword or clang drops it. This form is not supported on `union` declarations yet. See [`test/refine_struct/refine_struct.c`](../test/refine_struct/refine_struct.c).
+
 ## Examples
 
 Tests exercising plain structs (without inline arrays):
