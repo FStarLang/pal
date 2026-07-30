@@ -332,12 +332,19 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
                 rewrite_expr(env, Rc::make_mut(a), elim);
             }
         }
+        ExprT::FnPtrCall(f, args) => {
+            rewrite_expr(env, Rc::make_mut(f), elim);
+            for a in args.iter_mut() {
+                rewrite_expr(env, Rc::make_mut(a), elim);
+            }
+        }
         ExprT::StructInit(_, kvs) => {
             for (_, v) in kvs.iter_mut() {
                 rewrite_expr(env, Rc::make_mut(v), elim);
             }
         }
         ExprT::Var(_)
+        | ExprT::FnRef(_)
         | ExprT::BoolLit(_)
         | ExprT::IntLit(_, _)
         | ExprT::FloatLit(_, _)
@@ -639,11 +646,17 @@ fn rewrite_types_expr(e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
                 rewrite_types_expr(Rc::make_mut(a), elim);
             }
         }
+        ExprT::FnPtrCall(f, args) => {
+            rewrite_types_expr(Rc::make_mut(f), elim);
+            for a in args.iter_mut() {
+                rewrite_types_expr(Rc::make_mut(a), elim);
+            }
+        }
         ExprT::StructInit(_, kvs) => {
             for (_, v) in kvs.iter_mut() {
                 rewrite_types_expr(Rc::make_mut(v), elim);
             }
         }
-        ExprT::Var(_) | ExprT::BoolLit(_) => {}
+        ExprT::Var(_) | ExprT::FnRef(_) | ExprT::BoolLit(_) => {}
     }
 }

@@ -100,6 +100,12 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
         TypeT::FlexArray(elem_ty) => {
             scan_type(deps, elem_ty);
         }
+        TypeT::FnPtr { args, ret } => {
+            for a in args {
+                scan_type(deps, a);
+            }
+            scan_type(deps, ret);
+        }
         TypeT::Unknown => {}
         TypeT::Error => {}
         TypeT::Void => {}
@@ -202,6 +208,13 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
         }
         ExprT::FnCall(f, args) => {
             deps.insert(DeclName::Fn(f.val.clone()));
+            scan_exprs(deps, args);
+        }
+        ExprT::FnRef(f) => {
+            deps.insert(DeclName::Fn(f.val.clone()));
+        }
+        ExprT::FnPtrCall(f, args) => {
+            scan_expr(deps, f);
             scan_exprs(deps, args);
         }
         ExprT::BoolLit(_) => {}

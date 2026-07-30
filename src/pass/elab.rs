@@ -229,6 +229,12 @@ impl<'a> Elaborator<'a> {
             TypeT::FlexArray(elem_ty) => {
                 self.elab_type(env, Rc::make_mut(elem_ty));
             }
+            TypeT::FnPtr { args, ret } => {
+                for a in args.iter_mut() {
+                    self.elab_type(env, Rc::make_mut(a));
+                }
+                self.elab_type(env, Rc::make_mut(ret));
+            }
             TypeT::Unknown => {}
             TypeT::Error => {}
             TypeT::Void => {}
@@ -478,6 +484,37 @@ impl<'a> Elaborator<'a> {
                 let param_types: Option<Vec<_>> = env
                     .lookup_fn(f)
                     .map(|fn_decl| fn_decl.args.iter().map(|arg| arg.ty.clone()).collect());
+                for (i, arg) in args.iter_mut().enumerate() {
+                    let expected_param = param_types
+                        .as_ref()
+                        .and_then(|pts| pts.get(i))
+                        .map(|t| t.as_ref());
+                    self.elab_rvalue(env, Rc::make_mut(arg), expected_param);
+                }
+                if let Some(param_types) = param_types {
+                    for (arg, param_ty) in args.iter_mut().zip(param_types.iter()) {
+                        let expected_ty = env.vtype_whnf(param_ty.clone().into());
+                        if let Ok(actual_ty) = env.infer_expr(arg) {
+                            if !env.vtype_eq(actual_ty, expected_ty.clone()) {
+                                cast_to(arg, (*expected_ty).clone().into());
+                            }
+                        }
+                    }
+                }
+            }
+            ExprT::FnRef(_) => {}
+            ExprT::FnPtrCall(f, args) => {
+                self.elab_rvalue(env, Rc::make_mut(f), None);
+                // Collect the callee's parameter types (tupled arg types of the
+                // FnPtr) to pass expected types into the arguments.
+                let param_types: Option<Vec<Rc<Type>>> = env
+                    .infer_expr(f)
+                    .ok()
+                    .map(|t| env.vtype_whnf(t))
+                    .and_then(|t| match &t.val {
+                        TypeT::FnPtr { args, .. } => Some(args.clone()),
+                        _ => None,
+                    });
                 for (i, arg) in args.iter_mut().enumerate() {
                     let expected_param = param_types
                         .as_ref()
