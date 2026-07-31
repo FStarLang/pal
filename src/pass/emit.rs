@@ -5491,11 +5491,7 @@ impl<'a> Emitter<'a> {
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
     }
 
-    fn emit_uniondefn(
-        &mut self,
-        env: &Env,
-        decl @ UnionDefn { name, fields, .. }: &UnionDefn,
-    ) -> Doc {
+    fn emit_uniondefn(&mut self, env: &Env, decl @ UnionDefn { name, fields }: &UnionDefn) -> Doc {
         let env = &mut env.clone();
         env.push_union(decl.clone());
 
