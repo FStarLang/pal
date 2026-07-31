@@ -147,7 +147,6 @@ impl<'a> Ctx<'a> {
                 name: builder.name,
                 fields: builder.fields,
                 eager_unfold_pred: builder.eager_unfold_pred,
-                occupies_space: builder.occupies_space,
             }),
         })
     }
@@ -165,7 +164,6 @@ impl<'a> Ctx<'a> {
             val: DeclT::UnionDefn(UnionDefn {
                 name: builder.name,
                 fields: builder.fields,
-                occupies_space: builder.occupies_space,
             }),
         })
     }
@@ -435,7 +433,6 @@ struct DeclBuilder {
     is_total: bool,
     decreases: Option<Rc<Expr>>,
     eager_unfold_pred: bool,
-    occupies_space: bool,
 }
 
 impl DeclBuilder {
@@ -454,7 +451,6 @@ impl DeclBuilder {
             is_total: false,
             decreases: None,
             eager_unfold_pred: false,
-            occupies_space: false,
         }
     }
 
@@ -517,9 +513,6 @@ impl DeclBuilder {
     }
     fn set_eager_unfold_pred(&mut self) {
         self.eager_unfold_pred = true;
-    }
-    fn set_occupies_space(&mut self) {
-        self.occupies_space = true;
     }
     fn decreases(&mut self, p: Rc<Expr>) {
         self.decreases = Some(p);

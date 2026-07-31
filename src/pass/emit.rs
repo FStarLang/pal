@@ -4529,7 +4529,7 @@ impl<'a> Emitter<'a> {
                 .append("}")
                 .group(),
         );
-        if decl.occupies_space {
+        if env.occupies_space(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()).into()) {
             ses.push(mk_sizeof_pos_axiom(
                 self.emit_name(Name::TypeRefSizeofPos(k.into())),
                 struct_type_name.clone(),
@@ -5534,7 +5534,7 @@ impl<'a> Emitter<'a> {
                 })))
                 .group(),
         );
-        if decl.occupies_space {
+        if env.occupies_space(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()).into()) {
             ses.push(mk_sizeof_pos_axiom(
                 self.emit_name(Name::TypeRefSizeofPos(k.into())),
                 union_type_name.clone(),

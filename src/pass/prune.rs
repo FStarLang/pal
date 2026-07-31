@@ -397,7 +397,6 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 name: _,
                 fields,
                 eager_unfold_pred: _,
-                occupies_space: _,
             }) => {
                 let ds = deps.deps_for(n);
                 for f in fields {
@@ -407,11 +406,7 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
             DeclT::StructDecl(_) => {
                 deps.deps_for(n);
             }
-            DeclT::UnionDefn(UnionDefn {
-                name: _,
-                fields,
-                occupies_space: _,
-            }) => {
+            DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
                 let ds = deps.deps_for(n);
                 for f in fields {
                     scan_field(ds, f);

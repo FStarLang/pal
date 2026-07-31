@@ -442,7 +442,6 @@ pub struct StructDefn {
     pub name: Rc<Ident>,
     pub fields: Vec<Field>,
     pub eager_unfold_pred: bool,
-    pub occupies_space: bool,
 }
 
 impl StructDefn {
@@ -467,7 +466,6 @@ impl StructDefn {
 pub struct UnionDefn {
     pub name: Rc<Ident>,
     pub fields: Vec<Field>,
-    pub occupies_space: bool,
 }
 
 impl UnionDefn {
