@@ -125,7 +125,7 @@ void f(uds_array a) { ... }
 
 `_refine_always` on a typedef is the form to use when the type also appears in `_out` position, since the refinement then has to hold in the uninit precondition too.
 
-**On a struct declaration** — `this` is the whole record; reach into fields with `this.<field>`. Just like a typedef refinement, the refinement is carried by the struct type and so fires at every use of `struct S`; `struct_S__pred` itself is unchanged. The annotation must be written *after* the `struct` keyword, otherwise clang ignores it.
+**On a struct declaration** — `this` is the whole record; reach into fields with `this.<field>`. PAL parses the declaration's type attributes once, stores the attributed self type on the struct definition, and reuses it whenever `struct S` is referenced. Thus the refinement fires at every use while `struct_S__pred` itself remains unchanged; repeated mentions do not reparse the annotation. The annotation must be written *after* the `struct` keyword, otherwise clang ignores it.
 
 ```c
 struct _refine(0 < this.x) simpler { int x; };

@@ -1127,8 +1127,12 @@ impl<'a> Elaborator<'a> {
                 self.in_view_body = false;
             }
             DeclT::StructDefn(StructDefn {
-                name: _, fields, ..
+                name: _,
+                refines,
+                fields,
+                ..
             }) => {
+                self.elab_type(env, Rc::make_mut(refines));
                 let siblings = fields.clone();
                 for f in fields {
                     self.elab_field(env, f, &siblings);
@@ -1294,7 +1298,10 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 elab.elab_type(&env, Rc::make_mut(&mut td.body));
                 elab.in_view_body = false;
             }
-            DeclT::StructDefn(StructDefn { fields, .. }) => {
+            DeclT::StructDefn(StructDefn {
+                refines, fields, ..
+            }) => {
+                elab.elab_type(&env, Rc::make_mut(refines));
                 let siblings = fields.clone();
                 for f in fields {
                     elab.elab_field(&env, f, &siblings);

@@ -49,7 +49,7 @@ The same annotations may also be written directly on a tag-only struct declarati
 struct _refine(this.x._length == 32) b32_struct { _array unsigned char *x; };
 ```
 
-PAL applies the record declaration's attributes to the struct type, so — exactly as for a typedef — the refinement fires at every use of `struct b32_struct` rather than being folded into `struct_b32_struct__pred`. The annotation has to come *after* the `struct` keyword or clang drops it. This form is not supported on `union` declarations yet. See [`test/refine_struct/refine_struct.c`](../test/refine_struct/refine_struct.c).
+PAL parses the record declaration's attributes once and stores the attributed self type on the struct definition. Every `struct b32_struct` reference reuses that parsed tree, so — exactly as for a typedef — the refinement fires at every use rather than being folded into `struct_b32_struct__pred`, without reparsing the annotation at each mention. The annotation has to come *after* the `struct` keyword or clang drops it. This form is not supported on `union` declarations yet. See [`test/refine_struct/refine_struct.c`](../test/refine_struct/refine_struct.c).
 
 ## Examples
 

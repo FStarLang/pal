@@ -322,6 +322,8 @@ public:
     auto loc = getRange(decl->getSourceRange());
     auto builder = DeclBuilder::new_(loc.clone(), ident.clone());
     if (decl->getTagKind() == TagTypeKind::Struct) {
+      builder.refines(trTypeAttrs(decl->getAttrs(),
+                                  mk_type_struct(loc.clone(), ident.clone())));
       // Check for struct-level attributes
       if (decl->hasAttrs()) {
         for (auto *attr : decl->getAttrs()) {
@@ -424,11 +426,7 @@ public:
       }
       switch (decl->getTagKind()) {
       case TagTypeKind::Struct: {
-        auto ty = mk_type_struct(std::move(loc), std::move(name));
-        // Apply the record declaration's own PAL attributes (e.g. `_refine`)
-        // to the struct type, exactly as is done for typedefs.
-        return decl->hasAttrs() ? trTypeAttrs(decl->getAttrs(), std::move(ty))
-                                : std::move(ty);
+        return mk_type_struct(std::move(loc), std::move(name));
       }
       case TagTypeKind::Union: {
         return mk_type_union(std::move(loc), std::move(name));

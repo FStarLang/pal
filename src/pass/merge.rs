@@ -701,6 +701,7 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
         match &d.val {
             DeclT::Typedef(t) => collect_type_refs(&t.body, &mut refs),
             DeclT::StructDefn(s) => {
+                collect_type_refs(&s.refines, &mut refs);
                 for f in &s.fields {
                     collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
                 }
