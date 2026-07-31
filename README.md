@@ -62,7 +62,7 @@ it passes, the implementation satisfies the spec. More availabe at [`examples/`]
 | LLVM dev headers | 20.x | `llvm-config`, `libclang-cpp20-dev`, `libclang-20-dev` |
 | g++ | recent | builds the C++ FFI ([`cpp/impl.cpp`](cpp/impl.cpp)) |
 | Rust | 2024 edition | compiles the PAL binary |
-| F\*/Pulse | nightly 2026-07-29 | verifies generated `.fst` output |
+| F\*/Pulse | nightly 2026-07-30 | verifies generated `.fst` output |
 
 ### Setup (Ubuntu / Debian)
 
