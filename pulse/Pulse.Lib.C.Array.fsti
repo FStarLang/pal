@@ -114,69 +114,6 @@ val array_spec_uninit (a: Type) (n: nat) : array_spec a
 val array_spec_uninit_len a n : Lemma (array_spec_len (array_spec_uninit a n) == n) [SMTPat (array_spec_len (array_spec_uninit a n))]
 val array_spec_uninit_mask a n (i:nat) : Lemma (i < n ==> array_spec_mask (array_spec_uninit a n) i) [SMTPat (array_spec_mask (array_spec_uninit a n) i)]
 
-fn alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SizeT.t)
-  returns r : array a
-  ensures freeable_array r
-  ensures array_pts_to_uninit' r
-  ensures pure (reveal (array_spec_of r) == array_spec_uninit a (SZ.v sz))
-
-fn free_array u#a (#a:Type u#a) (r:array a)
-  requires array_pts_to_uninit' r
-  requires freeable_array r
-
-fn stack_alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SizeT.t)
-  returns r : array a
-  ensures array_pts_to_uninit' r
-  ensures pure (reveal (array_spec_of r) == array_spec_uninit a (SZ.v sz))
-
-fn stack_free_array u#a (#a:Type u#a) (r:array a)
-  requires array_pts_to_uninit' r
-
-fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |} (s: full_array_spec a)
-  returns r : array a
-  ensures array_pts_to_full r 1.0R s
-
-fn stack_free_array_full u#a (#a: Type u#a) (r: array a) (#s: erased (full_array_spec a))
-  requires array_pts_to_full r 1.0R s
-
-fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} (sz:SizeT.t)
-  returns r : array a
-  ensures freeable_array r
-  ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SizeT.v sz) zero_default)
-
-// Fill every cell of a fully-initialized array with `v` (C `memset`).
-// Only byte-sized element types are translated to this (the transpiler rejects
-// multi-byte element types), so an element-wise fill matches C's byte-wise
-// semantics. The array must already be fully masked and initialized: array
-// function parameters satisfy this (`array_pts_to_full`).
-fn memset (#t: Type0) (a: array t) (v: t) (n: SizeT.t)
-  (#s: erased (array_spec t) { array_spec_full s /\ array_spec_len s == SizeT.v n })
-  requires array_pts_to a 1.0R s
-  ensures array_pts_to_full a 1.0R (array_spec_zeroed t (SizeT.v n) v)
-
-
-ghost fn length_of u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
-  preserves array_pts_to x p y
-  returns n: nat
-  ensures rewrites_to n (array_spec_len y)
-{ array_spec_len y }
-
-ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: array_spec a)
-  preserves array_pts_to r p v
-  ensures pure (not (array_is_null r))
-
-// live_array: array resource preserved across loop iterations
-[@@pulse_eager_unfold]
-let live_array (#t: Type u#a) (a: array t) : slprop =
-  exists* (s: full_array_spec t). array_pts_to a 1.0R s
-
-fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
-  (#p: perm)
-  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
-  preserves array_pts_to a p s
-  returns res: t
-  ensures rewrites_to res (array_spec_idx s (SZ.v i))
-
 val array_spec_upd (#a: Type) (s: array_spec a) (n: nat) (x: a) : array_spec a
 val array_spec_upd_len #a s n x : Lemma (array_spec_len (array_spec_upd #a s n x) == array_spec_len s) [SMTPat (array_spec_len (array_spec_upd #a s n x))]
 val array_spec_upd_initd #a s n x (i:nat) : Lemma (array_spec_initd (array_spec_upd #a s n x) i <==> (i == n /\ i < array_spec_len s) \/ array_spec_initd s i) [SMTPat (array_spec_initd (array_spec_upd #a s n x) i)]
@@ -245,6 +182,68 @@ val array_spec_to_list_idx #a (s: full_array_spec a) (i: nat) :
 val array_spec_to_list_of_list #a (xs: list a) :
   Lemma (array_spec_to_list (array_spec_of_list xs) == xs)
     [SMTPat (array_spec_to_list (array_spec_of_list xs))]
+
+fn alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SZ.t)
+  returns r : array a
+  ensures freeable_array r
+  ensures array_pts_to_uninit' r
+  ensures pure (reveal (array_spec_of r) == array_spec_uninit a (SZ.v sz))
+
+fn free_array u#a (#a:Type u#a) (r:array a)
+  requires array_pts_to_uninit' r
+  requires freeable_array r
+
+fn stack_alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SZ.t)
+  returns r : array a
+  ensures array_pts_to_uninit' r
+  ensures pure (reveal (array_spec_of r) == array_spec_uninit a (SZ.v sz))
+
+fn stack_free_array u#a (#a:Type u#a) (r:array a)
+  requires array_pts_to_uninit' r
+
+fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |} (s: full_array_spec a)
+  returns r : array a
+  ensures array_pts_to_full r 1.0R s
+
+fn stack_free_array_full u#a (#a: Type u#a) (r: array a) (#s: erased (full_array_spec a))
+  requires array_pts_to_full r 1.0R s
+
+fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} (sz:SZ.t)
+  returns r : array a
+  ensures freeable_array r
+  ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SZ.v sz) zero_default)
+
+// Fill every cell of a fully-initialized array with `v` (C `memset`).
+// Only byte-sized element types are translated to this (the transpiler rejects
+// multi-byte element types), so an element-wise fill matches C's byte-wise
+// semantics. The array must already be fully masked and initialized: array
+// function parameters satisfy this (`array_pts_to_full`).
+fn memset (#t: Type0) (a: array t) (v: t) (n: SZ.t)
+  (#s: erased (array_spec t) { array_spec_full s /\ array_spec_len s == SZ.v n })
+  requires array_pts_to a 1.0R s
+  ensures array_pts_to_full a 1.0R (array_spec_zeroed t (SZ.v n) v)
+
+ghost fn length_of u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
+  preserves array_pts_to x p y
+  returns n: nat
+  ensures rewrites_to n (array_spec_len y)
+{ array_spec_len y }
+
+ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: array_spec a)
+  preserves array_pts_to r p v
+  ensures pure (not (array_is_null r))
+
+// live_array: array resource preserved across loop iterations
+[@@pulse_eager_unfold]
+let live_array (#t: Type u#a) (a: array t) : slprop =
+  exists* (s: full_array_spec t). array_pts_to a 1.0R s
+
+fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
+  (#p: perm)
+  (#s: erased (array_spec t) { array_spec_initd s (SZ.v i) /\ array_spec_mask s (SZ.v i) })
+  preserves array_pts_to a p s
+  returns res: t
+  ensures rewrites_to res (array_spec_idx s (SZ.v i))
 
 fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
