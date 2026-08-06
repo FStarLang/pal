@@ -160,6 +160,12 @@ Rc<rust::num_bigint::BigInt> toBigInt(llvm::APInt const &n) {
   return mk_bigint(toStr(out));
 }
 
+Rc<rust::num_bigint::BigInt> toBigInt(llvm::APSInt const &n) {
+  llvm::SmallString<16> out;
+  n.toString(out);
+  return mk_bigint(toStr(out));
+}
+
 struct AnonNameGen {
   llvm::StringRef base;
   unsigned i = 0;
@@ -1845,38 +1851,13 @@ public:
       auto scrutTy =
           trQualType(sw->getCond()->getType(), sw->getCond()->getSourceRange());
 
-      // Create scrutinee temp variable
+      // Bind the scrutinee once as an immutable value.
       static int switchCounter = 0;
-      auto scrutName = "__switch_scrut_" + std::to_string(switchCounter);
+      auto switchIndex = switchCounter++;
+      auto scrutName = "__switch_scrut_" + std::to_string(switchIndex);
       auto scrutId = ctx.mk_ident(toStr(scrutName), loc.clone());
-      stmts.push(mk_var_decl(loc.clone(), scrutId.clone(), std::move(scrutTy)));
-      stmts.push(mk_assign(loc.clone(),
-                           mk_lvalue_var(loc.clone(), scrutId.clone()),
-                           std::move(scrutRval)));
-
-      // Create hit and brk flag variables
-      auto hitName = "__switch_hit_" + std::to_string(switchCounter);
-      auto brkName = "__switch_brk_" + std::to_string(switchCounter);
-      switchCounter++;
-      auto hitId = ctx.mk_ident(toStr(hitName), loc.clone());
-      auto brkId = ctx.mk_ident(toStr(brkName), loc.clone());
-      auto boolTy = mk_bool_type(loc.clone());
-
-      stmts.push(
-          mk_var_decl(loc.clone(), hitId.clone(), mk_bool_type(loc.clone())));
-      stmts.push(mk_assign(loc.clone(),
-                           mk_lvalue_var(loc.clone(), hitId.clone()),
-                           mk_bool_lit(loc.clone(), false)));
-      stmts.push(
-          mk_var_decl(loc.clone(), brkId.clone(), mk_bool_type(loc.clone())));
-      stmts.push(mk_assign(loc.clone(),
-                           mk_lvalue_var(loc.clone(), brkId.clone()),
-                           mk_bool_lit(loc.clone(), false)));
-
-      // Set switchBreakId so BreakStmt sets flag
-      auto savedSwitchBreak = switchBreakId;
-      auto brkIdHeap = new Rc<ir::Ident>(brkId.clone());
-      switchBreakId = brkIdHeap;
+      stmts.push(mk_let_stmt(loc.clone(), scrutId.clone(), scrutTy.clone(),
+                             std::move(scrutRval)));
 
       // Collect cases from the switch body. A switch postcondition is used as
       // the join invariant for every desugared case test.
@@ -1894,33 +1875,8 @@ public:
       if (!comp) {
         reportUnsupported(body->getSourceRange(), loc,
                           "switch body must be a compound statement", "");
-        delete switchBreakId;
-        switchBreakId = savedSwitchBreak;
         return {};
       }
-      auto caseEnss = [&]() {
-        auto enss = Vec<Rc<ir::Expr>>::new_();
-        if (!switchEnss.empty()) {
-          auto combined = switchEnss.front().clone();
-          for (size_t i = 1; i < switchEnss.size(); i++) {
-            combined =
-                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
-                                std::move(combined), switchEnss[i].clone());
-          }
-          combined = mk_rvalue_binop(
-              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
-              mk_live(loc.clone(),
-                      mk_lvalue_var(loc.clone(), scrutId.clone())));
-          combined = mk_rvalue_binop(
-              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
-              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), hitId.clone())));
-          combined = mk_rvalue_binop(
-              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
-              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), brkId.clone())));
-          enss.push(std::move(combined));
-        }
-        return enss;
-      };
 
       auto containsSwitchBreak = [&](auto &self, Stmt *s) -> bool {
         if (dyn_cast<BreakStmt>(s))
@@ -1984,15 +1940,140 @@ public:
         }
       }
 
+      // A switch whose cases all end in a direct break has no fall-through.
+      // Emit it as one match and omit the terminal breaks.
+      bool hasOnlyTerminalBreaks = !groups.empty();
+      std::vector<SwitchGroup *> cases;
+      SwitchGroup *defaultGroup = nullptr;
+      for (auto &group : groups) {
+        bool hasTerminalBreak =
+            !group.body.empty() && isa<BreakStmt>(group.body.back());
+        if (!hasTerminalBreak) {
+          hasOnlyTerminalBreaks = false;
+          break;
+        }
+
+        size_t bodySize = group.body.size() - 1;
+        if (group.isDefault) {
+          defaultGroup = &group;
+        } else {
+          cases.push_back(&group);
+        }
+        for (size_t i = 0; i < bodySize; i++) {
+          if (containsSwitchBreak(containsSwitchBreak, group.body[i])) {
+            hasOnlyTerminalBreaks = false;
+            break;
+          }
+        }
+        if (!hasOnlyTerminalBreaks)
+          break;
+      }
+
+      if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
+        auto makeBody = [&](SwitchGroup &group) {
+          auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+          size_t bodySize = group.body.size() - 1;
+          for (size_t i = 0; i < bodySize; i++)
+            trStmt(bodyStmts, group.body[i]);
+          return bodyStmts;
+        };
+
+        bool canUseMatch = true;
+        for (auto *group : cases) {
+          for (auto *caseValue : group->caseValues) {
+            Expr::EvalResult result;
+            if (!caseValue->EvaluateAsInt(result, *astCtx) ||
+                !result.Val.isInt()) {
+              canUseMatch = false;
+              break;
+            }
+          }
+          if (!canUseMatch)
+            break;
+        }
+
+        if (canUseMatch) {
+          auto matchBranches = Vec<Rc<ir::MatchBranch>>::new_();
+          for (auto *group : cases) {
+            auto patterns = Vec<Rc<ir::Expr>>::new_();
+            for (auto *caseValue : group->caseValues) {
+              Expr::EvalResult result;
+              bool evaluated = caseValue->EvaluateAsInt(result, *astCtx);
+              assert(evaluated && result.Val.isInt());
+              patterns.push(mk_int_lit(getRange(caseValue->getSourceRange()),
+                                       toBigInt(result.Val.getInt()),
+                                       scrutTy.clone()));
+            }
+            matchBranches.push(
+                mk_match_branch(std::move(patterns), makeBody(*group)));
+          }
+
+          auto defaultBody = defaultGroup ? makeBody(*defaultGroup)
+                                          : Vec<Rc<ir::Stmt>>::new_();
+          auto matchEnss = Vec<Rc<ir::Expr>>::new_();
+          auto combined = switchEnss.front().clone();
+          for (size_t i = 1; i < switchEnss.size(); i++) {
+            combined =
+                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
+                                std::move(combined), switchEnss[i].clone());
+          }
+          matchEnss.push(std::move(combined));
+          stmts.push(mk_match(loc.clone(),
+                              mk_lvalue_var(loc.clone(), scrutId.clone()),
+                              std::move(matchBranches), std::move(defaultBody),
+                              std::move(matchEnss)));
+          return {};
+        }
+      }
+
+      // General switches retain explicit hit and break state to model
+      // fall-through.
+      auto hitName = "__switch_hit_" + std::to_string(switchIndex);
+      auto brkName = "__switch_brk_" + std::to_string(switchIndex);
+      auto hitId = ctx.mk_ident(toStr(hitName), loc.clone());
+      auto brkId = ctx.mk_ident(toStr(brkName), loc.clone());
+
+      stmts.push(
+          mk_var_decl(loc.clone(), hitId.clone(), mk_bool_type(loc.clone())));
+      stmts.push(mk_assign(loc.clone(),
+                           mk_lvalue_var(loc.clone(), hitId.clone()),
+                           mk_bool_lit(loc.clone(), false)));
+      stmts.push(
+          mk_var_decl(loc.clone(), brkId.clone(), mk_bool_type(loc.clone())));
+      stmts.push(mk_assign(loc.clone(),
+                           mk_lvalue_var(loc.clone(), brkId.clone()),
+                           mk_bool_lit(loc.clone(), false)));
+
+      auto savedSwitchBreak = switchBreakId;
+      switchBreakId = new Rc<ir::Ident>(brkId.clone());
+
+      auto caseEnss = [&]() {
+        auto enss = Vec<Rc<ir::Expr>>::new_();
+        if (!switchEnss.empty()) {
+          auto combined = switchEnss.front().clone();
+          for (size_t i = 1; i < switchEnss.size(); i++) {
+            combined =
+                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
+                                std::move(combined), switchEnss[i].clone());
+          }
+          combined = mk_rvalue_binop(
+              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
+              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), hitId.clone())));
+          combined = mk_rvalue_binop(
+              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
+              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), brkId.clone())));
+          enss.push(std::move(combined));
+        }
+        return enss;
+      };
+
       for (auto &group : groups) {
         auto childLoc = getRange(group.label->getSourceRange());
         if (!group.isDefault) {
           // Build match condition: scrut == v1 || scrut == v2 || ...
           Rc<ir::Expr> matchCond = mk_bool_lit(childLoc.clone(), false);
           for (auto *cv : group.caseValues) {
-            auto scrutRead = mk_rvalue_lvalue(
-                childLoc.clone(),
-                mk_lvalue_var(childLoc.clone(), scrutId.clone()));
+            auto scrutRead = mk_lvalue_var(childLoc.clone(), scrutId.clone());
             auto caseVal = trRValue(cv->IgnoreParenImpCasts());
             auto eq = mk_rvalue_binop(childLoc.clone(), ir::BinOp::Eq(),
                                       std::move(scrutRead), std::move(caseVal));

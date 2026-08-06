@@ -274,6 +274,9 @@ impl Env {
     pub fn push_stmt(&mut self, stmt: &Stmt) {
         match &stmt.val {
             StmtT::Decl(ident, ty) => self.push_var_decl(ident, ty.clone(), LocalDeclKind::LValue),
+            StmtT::Let(ident, ty, _) => {
+                self.push_var_decl(ident, ty.clone(), LocalDeclKind::RValue)
+            }
             StmtT::DeclStackArray {
                 name, elem_type, ..
             } => {

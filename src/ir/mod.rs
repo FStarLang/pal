@@ -396,10 +396,18 @@ pub type Ident = Ast<Rc<IdentT>>;
 
 pub type Stmt = Ast<StmtT>;
 pub type Stmts = Vec<Rc<Stmt>>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct MatchBranch {
+    pub patterns: Rc<Exprs>,
+    pub body: Rc<Stmts>,
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum StmtT {
     Call(Rc<Expr>),
     Decl(Rc<Ident>, Rc<Type>),
+    Let(Rc<Ident>, Rc<Type>, Rc<Expr>),
     DeclStackArray {
         name: Rc<Ident>,
         elem_type: Rc<Type>,
@@ -410,6 +418,12 @@ pub enum StmtT {
         cond: Rc<Expr>,
         then_branch: Rc<Stmts>,
         else_branch: Rc<Stmts>,
+        ensures: Rc<Exprs>,
+    },
+    Match {
+        scrutinee: Rc<Expr>,
+        branches: Rc<Vec<Rc<MatchBranch>>>,
+        default_branch: Rc<Stmts>,
         ensures: Rc<Exprs>,
     },
     While {

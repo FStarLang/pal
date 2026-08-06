@@ -25,6 +25,7 @@ use crate::ir::SourceInfo as SourceInfo;
 use crate::ir::Type as Type;
 use crate::ir::Stmt as Stmt;
 use crate::ir::Expr as Expr;
+use crate::ir::MatchBranch as MatchBranch;
 use crate::ir::UnOp as UnOp;
 use crate::ir::BinOp as BinOp;
 use crate::ir::ParamMode as ParamMode;
@@ -46,6 +47,7 @@ mod crate::ir {
     type Type { #only_by_ref; }
     type Expr { #only_by_ref; }
     type Stmt { #only_by_ref; }
+    type MatchBranch { #only_by_ref; }
 
     type Rc<SourceInfo> {
         #layout(size=8, align=8);
@@ -88,9 +90,20 @@ mod crate::ir {
         fn push(&mut self, Rc<Stmt>);
     }
 
+    type Rc<MatchBranch> {
+        #layout(size=8, align=8);
+    }
+
+    type Vec<Rc<MatchBranch>> {
+        #heap_allocated;
+        fn new() -> Vec<Rc<MatchBranch>>;
+        fn push(&mut self, Rc<MatchBranch>);
+    }
+
     type Rc<Type> {
         #layout(size=8, align=8);
         fn deref(&self) -> &Type;
+        fn clone(&self) -> Rc<Type>;
     }
 
     type Rc<Ident> {
@@ -308,12 +321,15 @@ mod crate::clang {
     fn mk_lvalue_err(Rc<SourceInfo>, Rc<Type>) -> Rc<Expr>;
 
     fn mk_var_decl(Rc<SourceInfo>, Rc<Ident>, Rc<Type>) -> Rc<Stmt>;
+    fn mk_let_stmt(Rc<SourceInfo>, Rc<Ident>, Rc<Type>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_decl_stack_array(Rc<SourceInfo>, Rc<Ident>, Rc<Type>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_assign(Rc<SourceInfo>, Rc<Expr>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_return(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_return_void(Rc<SourceInfo>) -> Rc<Stmt>;
     fn mk_call(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_if(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Stmt>>, Vec<Rc<Stmt>>, Vec<Rc<Expr>>) -> Rc<Stmt>;
+    fn mk_match_branch(Vec<Rc<Expr>>, Vec<Rc<Stmt>>) -> Rc<MatchBranch>;
+    fn mk_match(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<MatchBranch>>, Vec<Rc<Stmt>>, Vec<Rc<Expr>>) -> Rc<Stmt>;
     fn mk_while(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Expr>>, Vec<Rc<Expr>>, Vec<Rc<Expr>>, Vec<Rc<Stmt>>) -> Rc<Stmt>;
     fn mk_break(Rc<SourceInfo>) -> Rc<Stmt>;
     fn mk_continue(Rc<SourceInfo>) -> Rc<Stmt>;
