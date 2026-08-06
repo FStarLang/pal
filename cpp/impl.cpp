@@ -301,10 +301,11 @@ public:
       reportUnsupported(f->getSourceRange(), floc,
                         "unsupported non-constant-length array field", "");
     } else {
-      builder.field(ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
-                    trTypeAttrs(f->getAttrs(),
-                                trQualType(f->getType(), f->getSourceRange(),
-                                           liftStructs)));
+      builder.field(
+          ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
+          trTypeAttrs(f->getAttrs(),
+                      trQualType(f->getType(), f->getSourceRange(), liftStructs,
+                                 findFnProtoTypeLoc(f->getTypeSourceInfo()))));
     }
   }
 
@@ -375,17 +376,42 @@ public:
 
   Rc<ir::Type> trFnPtrType(const FunctionProtoType *proto, SourceRange range,
                            Rc<ir::SourceInfo> loc,
-                           AnonNameGen *liftStructs = nullptr) {
+                           AnonNameGen *liftStructs = nullptr,
+                           FunctionProtoTypeLoc protoLoc = {}) {
     auto args = Vec<Rc<ir::Type>>::new_();
-    for (auto param : proto->getParamTypes()) {
-      args.push(trQualType(param, range, liftStructs));
+    for (unsigned i = 0; i < proto->getNumParams(); ++i) {
+      ParmVarDecl *paramDecl = protoLoc && i < protoLoc.getNumParams()
+                                   ? protoLoc.getParam(i)
+                                   : nullptr;
+      SourceRange paramRange = paramDecl ? paramDecl->getSourceRange() : range;
+      auto param = trQualType(
+          proto->getParamType(i), paramRange, liftStructs,
+          paramDecl ? findFnProtoTypeLoc(paramDecl->getTypeSourceInfo())
+                    : FunctionProtoTypeLoc{});
+      if (paramDecl) {
+        param = trTypeAttrs(paramDecl->getAttrs(), std::move(param),
+                            paramDecl->getType(), paramRange);
+      }
+      args.push(std::move(param));
     }
     auto ret = trQualType(proto->getReturnType(), range, liftStructs);
     return mk_type_fnptr(std::move(loc), std::move(args), std::move(ret));
   }
 
+  FunctionProtoTypeLoc findFnProtoTypeLoc(TypeSourceInfo *typeInfo) {
+    if (!typeInfo)
+      return {};
+    for (TypeLoc typeLoc = typeInfo->getTypeLoc(); typeLoc;
+         typeLoc = typeLoc.getNextTypeLoc()) {
+      if (auto protoLoc = typeLoc.getAs<FunctionProtoTypeLoc>())
+        return protoLoc;
+    }
+    return {};
+  }
+
   Rc<ir::Type> trQualType(QualType t, SourceRange range,
-                          AnonNameGen *liftStructs = nullptr) {
+                          AnonNameGen *liftStructs = nullptr,
+                          FunctionProtoTypeLoc protoLoc = {}) {
     t = t.IgnoreParens();
     auto loc = getRange(range);
 
@@ -403,7 +429,7 @@ public:
       // dedicated function-pointer IR type with the argument types collected in
       // order and tupled on emission.
       if (auto proto = ptr->getPointeeType()->getAs<FunctionProtoType>()) {
-        return trFnPtrType(proto, range, loc.clone(), liftStructs);
+        return trFnPtrType(proto, range, loc.clone(), liftStructs, protoLoc);
       }
       return mk_pointer_unknown(
           std::move(loc),
@@ -411,9 +437,9 @@ public:
     } else if (auto proto = t->getAs<FunctionProtoType>()) {
       // A bare (undecayed) function type reached as a value type — treat the
       // function-to-pointer decay result the same as a function pointer.
-      return trFnPtrType(proto, range, std::move(loc), liftStructs);
+      return trFnPtrType(proto, range, std::move(loc), liftStructs, protoLoc);
     } else if (auto adj = dyn_cast<AdjustedType>(t)) {
-      return trQualType(adj->getOriginalType(), range, liftStructs);
+      return trQualType(adj->getOriginalType(), range, liftStructs, protoLoc);
     } else if (auto cat = dyn_cast<ConstantArrayType>(t)) {
       return mk_fixed_array_type(
           std::move(loc),
@@ -2169,9 +2195,10 @@ public:
                                            std::move(elemTy),
                                            std::move(sizeExpr)));
           } else {
-            auto ty =
-                trTypeAttrs(vd->getAttrs(),
-                            trQualType(vd->getType(), vd->getSourceRange()));
+            auto ty = trTypeAttrs(
+                vd->getAttrs(),
+                trQualType(vd->getType(), vd->getSourceRange(), nullptr,
+                           findFnProtoTypeLoc(vd->getTypeSourceInfo())));
             stmts.push(mk_var_decl(dloc.clone(), id.clone(), std::move(ty)));
             if (vd->hasInit()) {
               stmts.push(mk_assign(dloc.clone(),
@@ -2402,7 +2429,8 @@ public:
       auto builder =
           DeclBuilder::new_(getRange(FD->getSourceRange()), ident.clone());
       for (auto param : FD->parameters()) {
-        auto ty = trQualType(param->getType(), param->getSourceRange());
+        auto ty = trQualType(param->getType(), param->getSourceRange(), nullptr,
+                             findFnProtoTypeLoc(param->getTypeSourceInfo()));
         ty = trTypeAttrs(param->getAttrs(), std::move(ty), param->getType(),
                          param->getSourceRange());
         auto mode = hasConsumesAttr(param->getAttrs())
@@ -2472,7 +2500,8 @@ public:
       auto id = ctx.mk_ident(toStr(TD->getName()), loc.clone());
       auto anon = AnonNameGen(TD->getName());
       auto type =
-          trQualType(TD->getUnderlyingType(), TD->getSourceRange(), &anon);
+          trQualType(TD->getUnderlyingType(), TD->getSourceRange(), &anon,
+                     findFnProtoTypeLoc(TD->getTypeSourceInfo()));
       type = trTypeAttrs(TD->getAttrs(), std::move(type));
       bool isPointerView = false;
       if (TD->hasAttrs()) {
@@ -2500,7 +2529,8 @@ public:
     } else if (auto *VD = dyn_cast<VarDecl>(D)) {
       auto loc = getRange(VD->getSourceRange());
       auto id = ctx.mk_ident(toStr(VD->getName()), loc.clone());
-      auto ty = trQualType(VD->getType(), VD->getSourceRange());
+      auto ty = trQualType(VD->getType(), VD->getSourceRange(), nullptr,
+                           findFnProtoTypeLoc(VD->getTypeSourceInfo()));
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
                                    : OptExpr::None();
       bool is_pure = VD->getType().isConstQualified() && VD->hasInit();
