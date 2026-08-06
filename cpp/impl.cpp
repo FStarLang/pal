@@ -677,6 +677,17 @@ public:
       // the emitter fills it with its default (a length-0 array).
       if (field->getType()->isIncompleteArrayType())
         continue;
+      // A field omitted from a designated initializer (e.g. `{ .initialized =
+      // 42 }` leaving other fields unset) is represented by Clang's semantic
+      // InitListExpr as an ImplicitValueInitExpr placeholder. Per C11
+      // 6.7.9p21, such fields are implicitly zero-initialized, the same as an
+      // object of static storage duration. Skip translating the placeholder
+      // itself (trRValue has no case for it, so it would otherwise become an
+      // error/admit()) and let the emitter fill it with its type's zero/null
+      // default, exactly as it does for a field absent entirely from the
+      // initializer list.
+      if (isa<ImplicitValueInitExpr>(fieldInit))
+        continue;
       auto floc = getRange(fieldInit->getSourceRange());
       auto fieldName =
           ctx.mk_ident(toStr(fieldNameStr(field)), std::move(floc));
