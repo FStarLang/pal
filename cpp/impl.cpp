@@ -391,6 +391,10 @@ public:
 
     if (t.getAsString() == "size_t") {
       return mk_sizet(std::move(loc));
+    } else if (auto typeOf = dyn_cast<TypeOfType>(t)) {
+      return trQualType(typeOf->desugar(), range, liftStructs);
+    } else if (auto typeOfExpr = dyn_cast<TypeOfExprType>(t)) {
+      return trQualType(typeOfExpr->desugar(), range, liftStructs);
     } else if (auto tydef = dyn_cast<TypedefType>(t)) {
       auto id = ctx.mk_ident(toStr(tydef->getDecl()->getName()), loc.clone());
       return mk_type_typedef(std::move(loc), std::move(id));
