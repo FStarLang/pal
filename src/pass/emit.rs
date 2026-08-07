@@ -2193,6 +2193,52 @@ impl<'a> Emitter<'a> {
         self.emit_expr(env, v).to_rvalue_decayed()
     }
 
+    fn emit_pattern(&mut self, env: &Env, pattern: &Expr) -> Doc {
+        if let ExprT::IntLit(val, ty) = &pattern.val {
+            let resolved = env.vtype_whnf(ty.clone().into());
+            let literal = match resolved.val {
+                TypeT::Int {
+                    signed: true,
+                    width: 8,
+                } => Some(format!("{}y", val)),
+                TypeT::Int {
+                    signed: false,
+                    width: 8,
+                } => Some(format!("{}uy", normalize_unsigned(val, 8))),
+                TypeT::Int {
+                    signed: true,
+                    width: 16,
+                } => Some(format!("{}s", val)),
+                TypeT::Int {
+                    signed: false,
+                    width: 16,
+                } => Some(format!("{}us", normalize_unsigned(val, 16))),
+                TypeT::Int {
+                    signed: true,
+                    width: 32,
+                } => Some(format!("{}l", val)),
+                TypeT::Int {
+                    signed: false,
+                    width: 32,
+                } => Some(format!("{}ul", normalize_unsigned(val, 32))),
+                TypeT::Int {
+                    signed: true,
+                    width: 64,
+                } => Some(format!("{}L", val)),
+                TypeT::Int {
+                    signed: false,
+                    width: 64,
+                } => Some(format!("{}uL", normalize_unsigned(val, 64))),
+                TypeT::SizeT => Some(format!("{}sz", val)),
+                _ => None,
+            };
+            if let Some(literal) = literal {
+                return Doc::text(literal);
+            }
+        }
+        self.emit_rvalue(env, pattern)
+    }
+
     fn emit_rvalue_inner(&mut self, env: &Env, v: &Expr) -> Doc {
         annotated(v, || {
             match &v.val {
@@ -3614,6 +3660,18 @@ impl<'a> Emitter<'a> {
                             .group()
                     }
                 }
+                StmtT::Let(x, ty, value) => Doc::text("let ")
+                    .append(self.emit_name(Name::Var(x.val.clone())))
+                    .append(" :")
+                    .append(Doc::line())
+                    .append(self.emit_type(env, ty))
+                    .append(Doc::line())
+                    .append("=")
+                    .group()
+                    .append(Doc::line().append(self.emit_rvalue(env, value)).nest(2))
+                    .append(";")
+                    .nest(2)
+                    .group(),
                 StmtT::DeclStackArray {
                     name,
                     elem_type,
@@ -3963,6 +4021,53 @@ impl<'a> Emitter<'a> {
                         .append(else_doc)
                         .append(";")
                         .group()
+                }
+                StmtT::Match {
+                    scrutinee,
+                    branches,
+                    default_branch,
+                    ensures,
+                } => {
+                    let mut branch_docs = Vec::new();
+                    for branch in &**branches {
+                        for pattern in &*branch.patterns {
+                            branch_docs.push(
+                                Doc::line()
+                                    .append(self.emit_pattern(env, pattern))
+                                    .append(" -> ")
+                                    .append(self.emit_block(env, &branch.body))
+                                    .nest(2),
+                            );
+                        }
+                    }
+                    let match_doc = Doc::text("match ")
+                        .append(parens(self.emit_rvalue(env, scrutinee)))
+                        .append(" {")
+                        .append(Doc::concat(branch_docs))
+                        .append(Doc::line())
+                        .append("_ -> ")
+                        .append(self.emit_block(env, default_branch))
+                        .nest(2)
+                        .append(Doc::line())
+                        .append("};")
+                        .group();
+                    if ensures.is_empty() {
+                        match_doc
+                    } else {
+                        // A forward label fixes the join postcondition while
+                        // preserving the ambient stt/stt_div effect.
+                        let mut doc = block(Doc::hardline().append(match_doc));
+                        for e in ensures.iter() {
+                            doc = doc
+                                .append(Doc::hardline())
+                                .append("ensures ")
+                                .append(self.emit_rvalue(env, e));
+                        }
+                        doc.append(Doc::hardline())
+                            .append("label ")
+                            .append(self.fresh_tmp("match_join"))
+                            .append(":;")
+                    }
                 }
                 StmtT::While {
                     cond,
@@ -6747,6 +6852,74 @@ impl<'a> Emitter<'a> {
                         .group()
                         .nest(2)
                         .append(Doc::line().append(ghost_doc).nest(2))
+                        .append(Doc::line())
+                        .append("in")
+                        .append(Doc::line().append(rest).nest(2)),
+                )
+            }
+
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ..
+            } => {
+                let rest = &stmts[1..];
+                let mut branch_docs = Vec::new();
+                for branch in &**branches {
+                    for pattern in &*branch.patterns {
+                        let branch_stmts = append_rest(&branch.body, rest);
+                        branch_docs.push(
+                            Doc::line()
+                                .append("| ")
+                                .append(self.emit_pattern(env, pattern))
+                                .append(" ->")
+                                .append(
+                                    Doc::line()
+                                        .append(self.emit_pure_body(env, &branch_stmts))
+                                        .nest(2),
+                                ),
+                        );
+                    }
+                }
+                parens(
+                    Doc::text("match")
+                        .append(Doc::line())
+                        .append(self.emit_rvalue(env, scrutinee))
+                        .append(Doc::line())
+                        .append("with")
+                        .append(Doc::concat(branch_docs))
+                        .append(Doc::line())
+                        .append("| _ ->")
+                        .append(
+                            Doc::line()
+                                .append(
+                                    self.emit_pure_body(env, &append_rest(default_branch, rest)),
+                                )
+                                .nest(2),
+                        ),
+                )
+            }
+
+            StmtT::Let(x, ty, value) => {
+                let value_doc = self.emit_rvalue(env, value);
+                let ty_doc = self.emit_type(env, ty);
+                let mut rest_env = env.clone();
+                rest_env.push_var_decl(x, ty.clone(), LocalDeclKind::RValue);
+                let rest = self.emit_pure_body(&rest_env, &stmts[1..]);
+                parens(
+                    Doc::text("let")
+                        .append(Doc::line())
+                        .append(self.emit_name(Name::Var(x.val.clone())))
+                        .append(Doc::line())
+                        .append(":")
+                        .append(Doc::line())
+                        .append(ty_doc)
+                        .append(Doc::line())
+                        .append("=")
+                        .group()
+                        .nest(2)
+                        .append(Doc::line().append(value_doc).nest(2))
                         .append(Doc::line())
                         .append("in")
                         .append(Doc::line().append(rest).nest(2)),

@@ -619,6 +619,15 @@ impl<'a> Checker<'a> {
         match &stmt.val {
             StmtT::Call(rval) => self.check_rvalue(env, rval),
             StmtT::Decl(_, ty) => self.check_type(env, ty),
+            StmtT::Let(_, ty, value) => {
+                self.check_type(env, ty);
+                self.check_rvalue(env, value);
+                if self.check_types
+                    && let Some(value_ty) = self.infer_expr(env, value)
+                {
+                    self.check_type_eq(env, value_ty.into(), ty.clone().into());
+                }
+            }
             StmtT::DeclStackArray {
                 elem_type, size, ..
             } => {
@@ -647,6 +656,31 @@ impl<'a> Checker<'a> {
                 }
                 self.check_stmts(env, then_branch);
                 self.check_stmts(env, else_branch);
+            }
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => {
+                self.check_rvalue(env, scrutinee);
+                let scrutinee_ty = self.infer_expr(env, scrutinee);
+                for branch in &**branches {
+                    for pattern in &*branch.patterns {
+                        self.check_rvalue(env, pattern);
+                        if self.check_types
+                            && let (Some(scrutinee_ty), Some(pattern_ty)) =
+                                (scrutinee_ty.clone(), self.infer_expr(env, pattern))
+                        {
+                            self.check_type_eq(env, pattern_ty.into(), scrutinee_ty.into());
+                        }
+                    }
+                    self.check_stmts(env, &branch.body);
+                }
+                self.check_stmts(env, default_branch);
+                for e in &**ensures {
+                    self.check_slprop(env, e);
+                }
             }
             StmtT::While {
                 cond,

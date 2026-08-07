@@ -883,6 +883,9 @@ fn mk_lvalue_err(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
 fn mk_var_decl(loc: Rc<SourceInfo>, id: Rc<Ident>, ty: Rc<Type>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::Decl(id, ty))
 }
+fn mk_let_stmt(loc: Rc<SourceInfo>, id: Rc<Ident>, ty: Rc<Type>, value: Rc<Expr>) -> Rc<Stmt> {
+    mk_ast(loc, StmtT::Let(id, ty, value))
+}
 fn mk_decl_stack_array(
     loc: Rc<SourceInfo>,
     name: Rc<Ident>,
@@ -915,6 +918,27 @@ fn mk_if(loc: Rc<SourceInfo>, cond: Rc<Expr>, a: Stmts, b: Stmts, ensures: Exprs
         cond,
         then_branch: Rc::new(a),
         else_branch: Rc::new(b),
+        ensures: Rc::new(ensures),
+    }
+    .with_loc(loc)
+}
+fn mk_match_branch(patterns: Exprs, body: Stmts) -> Rc<MatchBranch> {
+    Rc::new(MatchBranch {
+        patterns: Rc::new(patterns),
+        body: Rc::new(body),
+    })
+}
+fn mk_match(
+    loc: Rc<SourceInfo>,
+    scrutinee: Rc<Expr>,
+    branches: Vec<Rc<MatchBranch>>,
+    default_branch: Stmts,
+    ensures: Exprs,
+) -> Rc<Stmt> {
+    StmtT::Match {
+        scrutinee,
+        branches: Rc::new(branches),
+        default_branch: Rc::new(default_branch),
         ensures: Rc::new(ensures),
     }
     .with_loc(loc)

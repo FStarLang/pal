@@ -232,6 +232,7 @@ fn rewrite_stmt(env: &Env, stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion
     match &mut stmt.val {
         StmtT::Call(e) | StmtT::Assert(e) => rewrite_expr(env, Rc::make_mut(e), elim),
         StmtT::DeclStackArray { size, .. } => rewrite_expr(env, Rc::make_mut(size), elim),
+        StmtT::Let(_, _, value) => rewrite_expr(env, Rc::make_mut(value), elim),
         StmtT::Assign(lhs, rhs) => {
             rewrite_expr(env, Rc::make_mut(lhs), elim);
             rewrite_expr(env, Rc::make_mut(rhs), elim);
@@ -245,6 +246,25 @@ fn rewrite_stmt(env: &Env, stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion
             rewrite_expr(env, Rc::make_mut(cond), elim);
             rewrite_stmts(env, Rc::make_mut(then_branch), elim);
             rewrite_stmts(env, Rc::make_mut(else_branch), elim);
+            for e in Rc::make_mut(ensures).iter_mut() {
+                rewrite_expr(env, Rc::make_mut(e), elim);
+            }
+        }
+        StmtT::Match {
+            scrutinee,
+            branches,
+            default_branch,
+            ensures,
+        } => {
+            rewrite_expr(env, Rc::make_mut(scrutinee), elim);
+            for branch in Rc::make_mut(branches) {
+                let branch = Rc::make_mut(branch);
+                for pattern in Rc::make_mut(&mut branch.patterns) {
+                    rewrite_expr(env, Rc::make_mut(pattern), elim);
+                }
+                rewrite_stmts(env, Rc::make_mut(&mut branch.body), elim);
+            }
+            rewrite_stmts(env, Rc::make_mut(default_branch), elim);
             for e in Rc::make_mut(ensures).iter_mut() {
                 rewrite_expr(env, Rc::make_mut(e), elim);
             }
@@ -513,6 +533,10 @@ fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
             rewrite_types_expr(Rc::make_mut(e), elim)
         }
         StmtT::Decl(_, ty) => rewrite_type(ty, elim),
+        StmtT::Let(_, ty, value) => {
+            rewrite_type(ty, elim);
+            rewrite_types_expr(Rc::make_mut(value), elim);
+        }
         StmtT::DeclStackArray {
             elem_type, size, ..
         } => {
@@ -532,6 +556,25 @@ fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
             rewrite_types_expr(Rc::make_mut(cond), elim);
             rewrite_types_stmts(Rc::make_mut(then_branch), elim);
             rewrite_types_stmts(Rc::make_mut(else_branch), elim);
+            for e in Rc::make_mut(ensures).iter_mut() {
+                rewrite_types_expr(Rc::make_mut(e), elim);
+            }
+        }
+        StmtT::Match {
+            scrutinee,
+            branches,
+            default_branch,
+            ensures,
+        } => {
+            rewrite_types_expr(Rc::make_mut(scrutinee), elim);
+            for branch in Rc::make_mut(branches) {
+                let branch = Rc::make_mut(branch);
+                for pattern in Rc::make_mut(&mut branch.patterns) {
+                    rewrite_types_expr(Rc::make_mut(pattern), elim);
+                }
+                rewrite_types_stmts(Rc::make_mut(&mut branch.body), elim);
+            }
+            rewrite_types_stmts(Rc::make_mut(default_branch), elim);
             for e in Rc::make_mut(ensures).iter_mut() {
                 rewrite_types_expr(Rc::make_mut(e), elim);
             }
