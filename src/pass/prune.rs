@@ -133,6 +133,27 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
     }
 }
 
+// A generated module referenced from verbatim inline-Pulse text is a real dependency, but the
+// text is opaque to the scanner. Recover the referenced declaration from the module name, which
+// `emit::module_name_for_decl` builds by prefixing the C name.
+fn scan_verbatim_module_ref(deps: &mut HashSet<DeclName>, text: &str) {
+    for segment in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        for (prefix, wrap) in [
+            ("Func_", (|n| DeclName::Fn(n)) as fn(Rc<str>) -> DeclName),
+            ("Global_", |n| DeclName::GlobalVar(n)),
+            ("Typedef_", |n| DeclName::Typedef(n)),
+            ("Struct_", |n| DeclName::Struct(n)),
+            ("Union_", |n| DeclName::Union(n)),
+        ] {
+            if let Some(name) = segment.strip_prefix(prefix) {
+                if !name.is_empty() {
+                    deps.insert(wrap(Rc::from(name)));
+                }
+            }
+        }
+    }
+}
+
 fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) {
     for tok in &code.tokens {
         match tok {
@@ -141,7 +162,7 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
             InlinePulseToken::TypeAntiquot { ty, .. } | InlinePulseToken::Declare { ty, .. } => {
                 scan_type(deps, ty)
             }
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(ct) => scan_verbatim_module_ref(deps, &ct.text.val),
             InlinePulseToken::FieldAntiquot { ty, .. } => {
                 scan_type(deps, ty);
             }
