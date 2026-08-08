@@ -668,6 +668,10 @@ struct Emitter<'a> {
     /// Read when a branch tests a `_nullable` parameter, to decide what the
     /// branch has to hand back.
     current_fn_param_modes: HashMap<Rc<str>, ParamMode>,
+    /// What the function currently being emitted must say about the storage it
+    /// only borrows, one assertion per borrowed parameter. A branch that reads
+    /// through one of these restates it on the way out; see `borrow_bindings`.
+    current_fn_borrow_asserts: Vec<Doc>,
     tmp_counter: usize,
 }
 
@@ -4452,11 +4456,16 @@ impl<'a> Emitter<'a> {
                             // handing it back would take it away.
                             let joins = falls_through(then_branch) && falls_through(else_branch);
                             let close = payload.as_ref().filter(|_| joins).map(|p| {
-                                Doc::text("assert (Pulse.Lib.C.Nullable.unless_null ")
-                                    .append(name_doc.clone())
-                                    .append(Doc::text(" "))
-                                    .append(p.clone())
-                                    .append(Doc::text(");"))
+                                let mut doc =
+                                    Doc::text("assert (Pulse.Lib.C.Nullable.unless_null ")
+                                        .append(name_doc.clone())
+                                        .append(Doc::text(" "))
+                                        .append(p.clone())
+                                        .append(Doc::text(");"));
+                                for a in self.current_fn_borrow_asserts.iter() {
+                                    doc = doc.append(Doc::line()).append(a.clone());
+                                }
+                                doc
                             });
                             let (elim_nonnull, elim_null) = if guard.array {
                                 (
@@ -4738,6 +4747,102 @@ impl<'a> Emitter<'a> {
     /// conditional on the null test that neither branch can then discharge.
     /// Closing both sides at the same `unless_null` sidesteps the join
     /// entirely.
+    /// Name what the function only borrows, so that a branch can restate it.
+    ///
+    /// A branch that reads through a borrowed structure pointer splits that
+    /// structure into its fields, and the other branch, which did not read it,
+    /// still holds it whole. Pulse has to join the two, cannot see they are the
+    /// same resource, and gives up on a `match` over the branch condition.
+    /// Restating each borrowed parameter at the end of both branches settles
+    /// them on one shape, so there is nothing left to join.
+    ///
+    /// Restating it requires naming the value, and the value of a parameter
+    /// taken at full permission is bound existentially in the signature, where
+    /// the body cannot reach it. Bind it once here instead, at the top of the
+    /// body, and the branches have a name to use. A parameter borrowed at a
+    /// fractional permission already has signature-level names for both its
+    /// permission and its value, so it needs no binding of its own.
+    ///
+    /// Only functions with an optional parameter get this treatment, because
+    /// only their branches have a guard to close.
+    fn borrow_bindings(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        self.current_fn_borrow_asserts = vec![];
+        let has_nullable = decl
+            .args
+            .iter()
+            .any(|a| matches!(a.ty.val, TypeT::Nullable(_)));
+        if !has_nullable {
+            return Doc::nil();
+        }
+        let mut doc = Doc::nil();
+        for arg in decl.args.iter() {
+            let Some(name) = arg.name.as_ref() else {
+                continue;
+            };
+            if matches!(arg.ty.val, TypeT::Nullable(_)) {
+                continue;
+            }
+            let (perm, quote) = match arg.mode {
+                ParamMode::Consumed | ParamMode::Out => continue,
+                ParamMode::Const => {
+                    let perm_name =
+                        self.emit_name(Name::Perm(extract_base_ident(&mk_rvar(name)), 0));
+                    (Doc::text("'").append(perm_name), true)
+                }
+                ParamMode::Regular => (Doc::text("1.0R"), false),
+            };
+            let mut bindings = vec![];
+            let mut props = vec![];
+            let mut naming = ValNaming::Standard {
+                quote,
+                bindings: &mut bindings,
+            };
+            let this = mk_rvar(name);
+            self.emit_type_slprop(
+                env,
+                &arg.ty,
+                SLPropVariant::Init { perm: &perm },
+                &mut naming,
+                &mut props,
+                &this,
+            );
+            drop(naming);
+            if props.is_empty() {
+                continue;
+            }
+            // One assertion per conjunct. A conjunct that spells the value at
+            // a pointer as `!p` resolves that against the surrounding context,
+            // and it cannot do so from under a binder introduced by the same
+            // statement, so the binding goes on its own.
+            let assertions: Vec<Doc> = props
+                .into_iter()
+                .map(|prop| {
+                    Doc::text("assert ")
+                        .append(parens(prop))
+                        .append(Doc::text(";"))
+                })
+                .collect();
+            if !quote && !bindings.is_empty() {
+                let names = Doc::concat(
+                    bindings
+                        .iter()
+                        .map(|b| b.name.clone().append(Doc::text(" "))),
+                );
+                doc = doc.append(Doc::line()).append(
+                    Doc::text("with ")
+                        .append(names)
+                        .append(Doc::text(". "))
+                        .append(assertions[0].clone()),
+                );
+                for a in assertions.iter().skip(1) {
+                    doc = doc.append(Doc::line()).append(a.clone());
+                }
+            }
+            self.current_fn_borrow_asserts.extend(assertions);
+        }
+        doc
+    }
+
     fn nullable_payload(
         &mut self,
         env: &Env,
@@ -7405,7 +7510,15 @@ impl<'a> Emitter<'a> {
         }));
         let env = &mut env.clone();
         env.push_fn_decl_args_for_body(decl);
-        decl_doc.append(block(arg_redecl_as_mut.append(self.emit_stmts(env, body))).group())
+        let borrow_bindings = self.borrow_bindings(env, decl);
+        decl_doc.append(
+            block(
+                arg_redecl_as_mut
+                    .append(borrow_bindings)
+                    .append(self.emit_stmts(env, body)),
+            )
+            .group(),
+        )
     }
 } // impl Emitter (group E)
 
@@ -8234,6 +8347,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         typedef_override_map,
         current_fn_total: false,
         current_fn_param_modes: HashMap::new(),
+        current_fn_borrow_asserts: Vec::new(),
         tmp_counter: 0,
     };
 
