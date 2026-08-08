@@ -65,3 +65,35 @@ int zero_local(void)
     memset(&t, 0, sizeof(t));
     return t.a;
 }
+
+// A platform wrapper around memset. Declaring it `_memset_zero` says that a
+// call `f(ptr, size)` is the zero fill, so calls translate to the same
+// whole-object write as a direct memset rather than to an uninterpreted stub.
+_memset_zero
+void plat_zero(void *buffer, size_t size);
+
+void zero_triple_via_wrapper(struct triple *s)
+    _ensures(s->a == 0)
+    _ensures(s->c == 0)
+{
+    plat_zero(s, sizeof(*s));
+}
+
+// The wrapper composes with a later field write, exactly as memset does: the
+// field written afterwards holds its new value and the untouched ones are 0.
+void zero_then_set(struct triple *s)
+    _ensures(s->a == 7)
+    _ensures(s->b == 0)
+{
+    plat_zero(s, sizeof(struct triple));
+    s->a = 7;
+}
+
+// Zeroing a local through the wrapper, matching `zero_local` above.
+int zero_local_via_wrapper(void)
+    _ensures(return == 0)
+{
+    struct triple t;
+    plat_zero(&t, sizeof(t));
+    return t.a;
+}

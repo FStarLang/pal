@@ -1362,7 +1362,31 @@ public:
         //   * memset(ptr, 0, sizeof(T) * n)  — zero an array of byte-sized
         //     element type (e.g. uint8_t, char).
         // Non-zero fill values are rejected with a clear diagnostic.
-        if (fd->getName() == "memset" && c->getNumArgs() == 3) {
+        // A platform's zeroing wrapper is the memset intrinsic under another
+        // name and a shorter argument list: `zero_memory(ptr, size)`,
+        // `RtlZeroMemory(ptr, size)`, `bzero(ptr, size)`. Declaring it
+        // `_memset_zero` routes it through the same recognizer, with the fill
+        // value supplied rather than read from the call. Without this the
+        // wrapper translates to an uninterpreted stub, which silently makes
+        // every postcondition about the zeroed object vacuous.
+        bool isMemsetAlias = false;
+        for (auto *attr : fd->attrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+              ann && ann->getAnnotation() == "pal-memset-zero" &&
+              ann->args_size() == 0) {
+            isMemsetAlias = true;
+          }
+        }
+        if (isMemsetAlias && c->getNumArgs() != 2) {
+          reportUnsupported(e->getSourceRange(), loc,
+                            "a _memset_zero function must take exactly two "
+                            "arguments (destination, size); ",
+                            fd->getName().str());
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(c->getType(), c->getSourceRange()));
+        }
+        if ((fd->getName() == "memset" && c->getNumArgs() == 3) ||
+            isMemsetAlias) {
           auto *ptrArg = c->getArg(0);
           // Strip implicit void* cast
           if (auto *ic = dyn_cast<ImplicitCastExpr>(ptrArg)) {
@@ -1370,11 +1394,13 @@ public:
               ptrArg = ic->getSubExpr();
             }
           }
-          auto *valArg = c->getArg(1);
-          auto *sizeArg = c->getArg(2)->IgnoreParenImpCasts();
+          auto *valArg = isMemsetAlias ? nullptr : c->getArg(1);
+          auto *sizeArg =
+              c->getArg(isMemsetAlias ? 1 : 2)->IgnoreParenImpCasts();
           Expr::EvalResult valRes;
-          bool valIsZero = valArg->EvaluateAsInt(valRes, *astCtx) &&
-                           valRes.Val.isInt() && valRes.Val.getInt() == 0;
+          bool valIsZero =
+              isMemsetAlias || (valArg->EvaluateAsInt(valRes, *astCtx) &&
+                                valRes.Val.isInt() && valRes.Val.getInt() == 0);
           if (!valIsZero) {
             reportUnsupported(e->getSourceRange(), loc,
                               "memset is only supported with a zero fill value",
@@ -1398,6 +1424,20 @@ public:
                                       trRValue(ptrArg));
               }
             }
+          }
+          // The array shape below reads the fill value out of the call, which
+          // an alias does not carry, and a wrapper taking `void *` cannot name
+          // a byte-sized element type anyway. Rejecting it here keeps an
+          // unrecognized alias call from falling through to an uninterpreted
+          // stub.
+          if (isMemsetAlias) {
+            reportUnsupported(
+                e->getSourceRange(), loc,
+                "a _memset_zero call is only supported in the form "
+                "f(ptr, sizeof(*ptr)); ",
+                fd->getName().str());
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
           }
           if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
             if (binOp->getOpcode() == BO_Mul) {
@@ -2534,6 +2574,26 @@ public:
                           "internal error: invalid _type encoding"_rs);
         }
         return {};
+      }
+
+      // A `_memset_zero` wrapper is an intrinsic, not a function: every call
+      // to it is rewritten to a whole-object zeroing, so emitting a module for
+      // it would only add an uninterpreted stub that nothing calls. A
+      // definition still translates normally -- the marker only claims what
+      // calls mean, and a body present in this translation unit is code to be
+      // verified like any other.
+      {
+        bool memsetZero = false;
+        for (auto *attr : FD->getAttrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+              ann && ann->getAnnotation() == "pal-memset-zero" &&
+              ann->args_size() == 0) {
+            memsetZero = true;
+          }
+        }
+        if (memsetZero && !FD->hasBody()) {
+          return {};
+        }
       }
 
       // Regular function decl
