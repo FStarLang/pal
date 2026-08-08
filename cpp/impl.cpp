@@ -1891,8 +1891,20 @@ public:
 
       // Evaluate scrutinee
       auto scrutRval = trRValue(sw->getCond());
-      auto scrutTy =
-          trQualType(sw->getCond()->getType(), sw->getCond()->getSourceRange());
+      // Clang applies the integral promotions to the switch condition. An
+      // enumeration is modeled by its underlying integer type, so that
+      // promotion translates to the identity and is elided from the rvalue.
+      // Annotating the binding with the promoted type would then leave the
+      // declared type and the translated value syntactically distinct, which
+      // the Pulse dereference tactic rejects. Use the enumeration's own type
+      // so the two agree; other promotions are genuine casts that trRValue
+      // preserves, so their promoted type remains correct.
+      auto *scrutExpr = sw->getCond();
+      auto scrutQualTy = scrutExpr->getType();
+      if (scrutExpr->IgnoreImpCasts()->getType()->isEnumeralType()) {
+        scrutQualTy = scrutExpr->IgnoreImpCasts()->getType();
+      }
+      auto scrutTy = trQualType(scrutQualTy, scrutExpr->getSourceRange());
 
       // Bind the scrutinee once as an immutable value.
       static int switchCounter = 0;
