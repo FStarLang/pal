@@ -565,6 +565,24 @@ struct ExBinding {
     ty: Doc,
 }
 
+/// A branch condition that tests a `_nullable` pointer against null.
+struct NullableGuard {
+    /// The pointer being tested.
+    pointer: Rc<Expr>,
+    /// The type under the `_nullable`, whose slprop is what the `unless_null`
+    /// guards. Kept unreduced so its refinements survive.
+    inner: Rc<Type>,
+    /// Whether it is array-like (`_array`/`_arrayptr`) rather than a reference,
+    /// which decides the `has_is_null` instance the elimination needs.
+    array: bool,
+    /// Whether the `then` branch is the one in which the pointer is non-null.
+    then_is_nonnull: bool,
+    /// How the enclosing function takes the pointer, which fixes the shape of
+    /// the resource it is expected to be carrying when the branch is over.
+    /// `None` when the tested pointer is not one of the parameters.
+    mode: Option<ParamMode>,
+}
+
 /// Info about a single spec record field for a struct.
 struct SpecFieldBinding {
     /// The spec record field name (e.g., "struct_simple__spec__y_0")
@@ -626,6 +644,10 @@ struct Emitter<'a> {
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
+    /// How the function currently being emitted takes each of its parameters.
+    /// Read when a branch tests a `_nullable` parameter, to decide what the
+    /// branch has to hand back.
+    current_fn_param_modes: HashMap<Rc<str>, ParamMode>,
     tmp_counter: usize,
 }
 
@@ -1570,13 +1592,47 @@ impl<'a> Emitter<'a> {
             TypeT::Nullable(inner) => {
                 // Collect the inner type's props separately, then wrap the whole
                 // conjunction in `unless_null this (…)` so the resource is `emp`
-                // when the pointer is null. Val bindings (existentials) are still
-                // registered via the shared `naming`.
+                // when the pointer is null.
+                //
+                // An existential the inner type registers has to be bound
+                // *inside* the `unless_null`. Hoisted, it would have to be
+                // witnessed even on the path where the pointer is null and the
+                // resource that would name a witness is `emp`, and the prover
+                // has nothing to offer -- the postcondition of a routine that
+                // writes through an optional output would be unprovable in its
+                // own null branch. Bound inside, the null case discharges as
+                // `emp` and asks for no witness at all.
+                //
+                // Implicit (`'`-quoted) bindings are left where they are: those
+                // are universally quantified at the enclosing signature, so
+                // they need no witness, and hoisting is what lets a caller
+                // relate the value across a `preserves`.
                 let this_doc = self.emit_rvalue(env, this);
                 let mut inner_props: Vec<Doc> = vec![];
-                self.emit_type_slprop(env, inner, variant, naming, &mut inner_props, this);
+                let mut local_bindings: Vec<ExBinding> = vec![];
+                let existential = matches!(naming, ValNaming::Standard { quote: false, .. });
+                if existential {
+                    let mut local_naming = ValNaming::Standard {
+                        quote: false,
+                        bindings: &mut local_bindings,
+                    };
+                    self.emit_type_slprop(
+                        env,
+                        inner,
+                        variant,
+                        &mut local_naming,
+                        &mut inner_props,
+                        this,
+                    );
+                } else {
+                    self.emit_type_slprop(env, inner, variant, naming, &mut inner_props, this);
+                }
                 props.push(annotated(ty, || {
-                    naryfn([Doc::text("unless_null"), this_doc, mk_star(inner_props)])
+                    naryfn([
+                        Doc::text("unless_null"),
+                        this_doc,
+                        parens(wrap_exists(&local_bindings, inner_props)),
+                    ])
                 }));
             }
             TypeT::Error => {}
@@ -4027,8 +4083,109 @@ impl<'a> Emitter<'a> {
                             .group()
                             .nest(2)
                     }));
-                    let then_doc = self.emit_block(env, then_branch);
-                    let else_doc = self.emit_block(env, else_branch);
+                    // A branch on the nullness of a `_nullable` pointer decides
+                    // whether that pointer's `unless_null` is carrying anything,
+                    // so open it here rather than leaving every branch body to
+                    // do it by hand. The guarded resource is left implicit: an
+                    // optional output starts uninitialized and becomes
+                    // initialized part way through, and the translation has no
+                    // reason to know which of those it is looking at.
+                    let (then_open, else_open, guard_env) = match self.nullable_guard(env, cond) {
+                        None => (None, None, None),
+                        Some(guard) => {
+                            // Name the pointer. Inside the body the parameter
+                            // is a mutable cell, so the expression that reads
+                            // it is a dereference; a slprop that mentioned
+                            // that dereference would not be the slprop the
+                            // context is holding, which names the value the
+                            // cell had. Binding it once gives both the ghost
+                            // steps and the resource they mention the same
+                            // name for the pointer.
+                            let name: Rc<Ident> =
+                                Rc::<str>::from(format!("__pal_guarded_{}", self.tmp_counter))
+                                    .with_loc(cond.loc.clone());
+                            self.tmp_counter += 1;
+                            let mut genv = env.clone();
+                            genv.push_var_decl(&name, guard.inner.clone(), LocalDeclKind::RValue);
+                            let bound = mk_rvar(&name);
+                            let name_doc = self.emit_name(Name::Var(name.val.clone()));
+                            let bind = Doc::text("let ")
+                                .append(name_doc.clone())
+                                .append(" = ")
+                                .append(parens(self.emit_rvalue(env, &guard.pointer)))
+                                .append(";");
+                            let payload = self.nullable_payload(&genv, &guard, &bound);
+                            let elim = |name: &str| {
+                                Doc::text(name.to_string())
+                                    .append(Doc::text(" "))
+                                    .append(name_doc.clone())
+                                    .append(Doc::text(";"))
+                            };
+                            // Close the branch by asserting the guarded form
+                            // back. An `assert` is what makes this work rather
+                            // than a call to the introduction: PAL writes the
+                            // value at a pointer as `!p`, and that spelling is
+                            // resolved against the surrounding conjunction
+                            // only in a slprop position -- a signature clause
+                            // or an `assert` -- not in a term passed as an
+                            // argument. The assertion is discharged by the
+                            // introduction rules, which fire off the
+                            // nullness the branch hypothesis already carries,
+                            // so the same text serves both branches.
+                            // Only worth closing when both branches fall
+                            // through: that is the shape in which Pulse has to
+                            // join them and cannot. When one branch returns,
+                            // the code after the test is entitled to the
+                            // opened resource -- an early return on null is how
+                            // C says a pointer is non-null from here on -- and
+                            // handing it back would take it away.
+                            let joins = falls_through(then_branch) && falls_through(else_branch);
+                            let close = payload.as_ref().filter(|_| joins).map(|p| {
+                                Doc::text("assert (Pulse.Lib.C.Nullable.unless_null ")
+                                    .append(name_doc.clone())
+                                    .append(Doc::text(" "))
+                                    .append(p.clone())
+                                    .append(Doc::text(");"))
+                            });
+                            let (elim_nonnull, elim_null) = if guard.array {
+                                (
+                                    "Pulse.Lib.C.Nullable.elim_unless_null_arr",
+                                    "Pulse.Lib.C.Nullable.elim_null_arr",
+                                )
+                            } else {
+                                (
+                                    "Pulse.Lib.C.Nullable.elim_unless_null_ref",
+                                    "Pulse.Lib.C.Nullable.elim_null_ref",
+                                )
+                            };
+                            let open = |name: &str| {
+                                (
+                                    bind.clone().append(Doc::line()).append(elim(name)),
+                                    close.clone(),
+                                )
+                            };
+                            let nonnull = open(elim_nonnull);
+                            let null = open(elim_null);
+                            if guard.then_is_nonnull {
+                                (Some(nonnull), Some(null), Some(genv))
+                            } else {
+                                (Some(null), Some(nonnull), Some(genv))
+                            }
+                        }
+                    };
+                    let benv = guard_env.as_ref().unwrap_or(env);
+                    let then_doc = match then_open {
+                        None => self.emit_block(env, then_branch),
+                        Some((open, close)) => {
+                            self.emit_block_wrapping_with(benv, then_branch, open, close)
+                        }
+                    };
+                    let else_doc = match else_open {
+                        None => self.emit_block(env, else_branch),
+                        Some((open, close)) => {
+                            self.emit_block_wrapping_with(benv, else_branch, open, close)
+                        }
+                    };
                     Doc::text("if ")
                         .append(cond_doc)
                         .nest(2)
@@ -4236,6 +4393,129 @@ impl<'a> Emitter<'a> {
         }
         block(self.emit_stmts(env, stmts))
     }
+
+    /// Emit a block bracketed by ghost steps the translation supplies rather
+    /// than the source.
+    fn emit_block_wrapping_with(
+        &mut self,
+        env: &Env,
+        stmts: &Vec<Rc<Stmt>>,
+        opening: Doc,
+        closing: Option<Doc>,
+    ) -> Doc {
+        let rest = if stmts.is_empty() {
+            Doc::nil()
+        } else {
+            self.emit_stmts(env, stmts)
+        };
+        let mut inner = Doc::line().append(opening).append(rest);
+        if let Some(closing) = closing {
+            inner = inner.append(Doc::line().append(closing));
+        }
+        block(inner)
+    }
+
+    /// The resource a `_nullable` parameter is expected to be carrying once a
+    /// branch that tested it is over: the same slprop the function's own
+    /// postcondition names for that parameter, but written in the naming of
+    /// the body rather than of the signature.
+    ///
+    /// Both branches of the test close by putting this back under
+    /// `unless_null`, which is what keeps them joinable. Left open, the two
+    /// branches would end at different slprops -- the guarded resource on one
+    /// side and `emp` on the other -- and Pulse would join them into a
+    /// conditional on the null test that neither branch can then discharge.
+    /// Closing both sides at the same `unless_null` sidesteps the join
+    /// entirely.
+    fn nullable_payload(
+        &mut self,
+        env: &Env,
+        guard: &NullableGuard,
+        this: &Rc<Expr>,
+    ) -> Option<Doc> {
+        // `Consumed` hands the resource to the callee and has nothing to give
+        // back; anything not a parameter has no postcondition to match.
+        let mode = guard.mode?;
+        let perm = match mode {
+            ParamMode::Consumed => return None,
+            ParamMode::Const => {
+                let base = extract_base_ident(&guard.pointer);
+                let name = self.emit_name(Name::Perm(base, 0));
+                Doc::text("'").append(name)
+            }
+            ParamMode::Regular | ParamMode::Out => Doc::text("1.0R"),
+        };
+        // A `preserves` names the value with a signature-level implicit, which
+        // is in scope in the body; the other modes bind it existentially.
+        let quote = matches!(mode, ParamMode::Const);
+        let mut bindings = vec![];
+        let mut props = vec![];
+        let mut naming = ValNaming::Standard {
+            quote,
+            bindings: &mut bindings,
+        };
+        self.emit_type_slprop(
+            env,
+            &guard.inner,
+            SLPropVariant::Init { perm: &perm },
+            &mut naming,
+            &mut props,
+            this,
+        );
+        drop(naming);
+        if props.is_empty() {
+            return None;
+        }
+        Some(parens(wrap_exists(&bindings, props)))
+    }
+
+    /// Recognize a condition that tests a `_nullable` pointer against null, so
+    /// that each branch can open the pointer's `unless_null` the right way.
+    /// Returns `None` for anything else, including a nullness test on a
+    /// pointer that is not `_nullable` -- that pointer owns its pointee
+    /// outright and has no `unless_null` to open.
+    fn nullable_guard(&self, env: &Env, cond: &Expr) -> Option<NullableGuard> {
+        match &cond.val {
+            ExprT::UnOp(UnOp::Not, inner) => {
+                let guard = self.nullable_guard(env, inner)?;
+                Some(NullableGuard {
+                    then_is_nonnull: !guard.then_is_nonnull,
+                    ..guard
+                })
+            }
+            ExprT::BinOp(BinOp::Eq, lhs, rhs) => {
+                match &rhs.val {
+                    ExprT::IntLit(n, _) if **n == BigInt::ZERO => {}
+                    _ => return None,
+                }
+                let ty = env.infer_expr(lhs).ok()?;
+                let TypeT::Nullable(inner) = &ty.val else {
+                    return None;
+                };
+                let inner: Rc<Type> = inner.clone().into();
+                let whnf = env.vtype_whnf(inner.clone().into());
+                let array = match &whnf.val {
+                    TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown) => false,
+                    TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => true,
+                    // A `core_ref` carries no ownership and a function pointer
+                    // keeps ordinary `pts_to`, so neither has an `unless_null`.
+                    _ => return None,
+                };
+                let mode = match &lhs.val {
+                    ExprT::Var(n) => self.current_fn_param_modes.get(&n.val).copied(),
+                    _ => None,
+                };
+                Some(NullableGuard {
+                    pointer: lhs.clone(),
+                    inner,
+                    array,
+                    then_is_nonnull: false,
+                    mode,
+                })
+            }
+            _ => None,
+        }
+    }
 } // impl Emitter (group C)
 
 fn mk_let(n: Doc, args: &[Doc], ty: Doc, body: Doc) -> Doc {
@@ -4314,6 +4594,18 @@ fn mk_star<I: IntoIterator<Item = Doc>>(ps: I) -> Doc {
     }) {
         Some(star) => parens(star),
         None => Doc::text("emp"),
+    }
+}
+
+/// Whether control can reach the end of a block, i.e. whether the block joins
+/// with whatever follows it.
+fn falls_through(stmts: &[Rc<Stmt>]) -> bool {
+    match stmts.last() {
+        None => true,
+        Some(s) => !matches!(
+            s.val,
+            StmtT::Return(_) | StmtT::Break | StmtT::Continue | StmtT::Goto(_)
+        ),
     }
 }
 
@@ -6714,6 +7006,11 @@ impl<'a> Emitter<'a> {
             return self.emit_pure_fn(env, decl, body);
         }
         self.current_fn_total = decl.is_total;
+        self.current_fn_param_modes = decl
+            .args
+            .iter()
+            .filter_map(|a| a.name.as_ref().map(|n| (n.val.clone(), a.mode)))
+            .collect();
         let decl_doc = self.emit_fn_sig(env, decl).nest(2).append(Doc::hardline());
         let arg_redecl_as_mut = Doc::concat(decl.args.iter().filter_map(|arg| {
             arg.name.as_ref().map(|n| {
@@ -7502,6 +7799,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         fn_module_map,
         typedef_override_map,
         current_fn_total: false,
+        current_fn_param_modes: HashMap::new(),
         tmp_counter: 0,
     };
 
