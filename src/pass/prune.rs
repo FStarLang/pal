@@ -154,7 +154,12 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
 
 fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
     match &rv.val {
-        ExprT::Var(_) => {}
+        // A bare name may refer to a global (an enum constant, say). Locals share the namespace,
+        // so this over-approximates -- which is the safe direction for a pruner: it can keep a
+        // declaration that is not needed, but must never drop one that is.
+        ExprT::Var(n) => {
+            deps.insert(DeclName::GlobalVar(n.val.clone()));
+        }
         ExprT::Deref(v) => scan_expr(deps, v),
         ExprT::Member(x, _a) => scan_expr(deps, x),
         ExprT::VAttr(_, x) => scan_expr(deps, x),
