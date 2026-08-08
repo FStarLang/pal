@@ -304,6 +304,17 @@ fn paren_if_negative(val: &BigInt) -> String {
     }
 }
 
+/// Render a suffixed literal such as `-1l`. A leading `-` also has to be
+/// parenthesized: F* lexes `=-` and `:=-` as single operators, so a negative
+/// literal in a record field or an assignment would otherwise not parse.
+fn suffixed_literal(val: &BigInt, suffix: &str) -> String {
+    if val.sign() == num_bigint::Sign::Minus {
+        format!("({}{})", val, suffix)
+    } else {
+        format!("{}{}", val, suffix)
+    }
+}
+
 fn parens(doc: Doc) -> Doc {
     Doc::text("(")
         .append(doc)
@@ -2249,7 +2260,7 @@ impl<'a> Emitter<'a> {
                         TypeT::Int {
                             signed: true,
                             width: 32,
-                        } => Doc::text(format!("{}l", val)),
+                        } => Doc::text(suffixed_literal(val, "l")),
                         TypeT::Int {
                             signed: false,
                             width: 32,
@@ -2279,8 +2290,8 @@ impl<'a> Emitter<'a> {
                             width,
                             normalize_unsigned(val, width)
                         )),
-                        TypeT::SizeT => Doc::text(format!("{}sz", val)),
-                        TypeT::SpecInt | TypeT::SpecNat => Doc::text(format!("{}", val)),
+                        TypeT::SizeT => Doc::text(suffixed_literal(val, "sz")),
+                        TypeT::SpecInt | TypeT::SpecNat => Doc::text(suffixed_literal(val, "")),
                         TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
                             if **val == BigInt::ZERO =>
                         {
