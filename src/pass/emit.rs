@@ -26,8 +26,6 @@ fn funcptr_module_name(g: &str) -> String {
     format!("Funcptr_{}", g)
 }
 
-
-
 /// Determines the output module name for a given top-level declaration.
 pub fn module_name_for_decl(decl: &Decl) -> String {
     match &decl.val {
@@ -305,6 +303,17 @@ impl<'a> RenderAnnotated<'a, Annotation> for StrWriter {
 
 fn annotated<T>(ast: &Ast<T>, doc: impl FnOnce() -> Doc) -> Doc {
     doc().annotate(ast.loc.clone())
+}
+
+/// Render an integer literal for use as a function argument. F* lexes a leading
+/// `-` as the infix subtraction operator, so `Int16.int_to_t -1` parses as
+/// `Int16.int_to_t - 1`; negative values must be parenthesized.
+fn paren_if_negative(val: &BigInt) -> String {
+    if val.sign() == num_bigint::Sign::Minus {
+        format!("({})", val)
+    } else {
+        format!("{}", val)
+    }
 }
 
 fn parens(doc: Doc) -> Doc {
@@ -2435,7 +2444,13 @@ impl<'a> Emitter<'a> {
                         TypeT::Int {
                             signed: true,
                             width,
-                        } => Doc::text(format!("(Int{}.int_to_t {})", width, val)),
+                        } => Doc::text(format!(
+                            // A bare negative argument would be parsed as
+                            // subtraction (`int_to_t - 1`), so parenthesize it.
+                            "(Int{}.int_to_t {})",
+                            width,
+                            paren_if_negative(val)
+                        )),
                         TypeT::Int {
                             signed: false,
                             width,
