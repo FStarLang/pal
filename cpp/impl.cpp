@@ -1966,29 +1966,40 @@ public:
       bool seenDefault = false;
       SwitchGroup *currentGroup = nullptr;
       for (auto *child : comp->body()) {
-        if (auto *cs = dyn_cast<CaseStmt>(child)) {
+        if (isa<CaseStmt>(child) || isa<DefaultStmt>(child)) {
           auto childLoc = getRange(child->getSourceRange());
           if (seenDefault) {
-            reportUnsupported(cs->getSourceRange(), childLoc,
+            reportUnsupported(child->getSourceRange(), childLoc,
                               "default must be the last case in switch", "");
             break;
           }
 
           groups.push_back({child, false, {}, {}});
           currentGroup = &groups.back();
-          Stmt *caseBody = child;
-          while (auto *innerCs = dyn_cast<CaseStmt>(caseBody)) {
-            currentGroup->caseValues.push_back(innerCs->getLHS());
-            caseBody = innerCs->getSubStmt();
+          // Consecutive labels nest: clang makes the second the sub-statement
+          // of the first, so `case A: case B: default:` arrives as a chain
+          // rather than as three siblings. Peel the whole chain, in either
+          // order, so a default sharing an arm with explicit cases is that
+          // arm's default rather than a statement in its body.
+          Stmt *labelBody = child;
+          for (;;) {
+            if (auto *innerCs = dyn_cast<CaseStmt>(labelBody)) {
+              currentGroup->caseValues.push_back(innerCs->getLHS());
+              labelBody = innerCs->getSubStmt();
+            } else if (auto *innerDs = dyn_cast<DefaultStmt>(labelBody)) {
+              currentGroup->isDefault = true;
+              seenDefault = true;
+              labelBody = innerDs->getSubStmt();
+            } else {
+              break;
+            }
           }
-          if (caseBody)
-            currentGroup->body.push_back(caseBody);
-        } else if (auto *ds = dyn_cast<DefaultStmt>(child)) {
-          seenDefault = true;
-          groups.push_back({child, true, {}, {}});
-          currentGroup = &groups.back();
-          if (ds->getSubStmt())
-            currentGroup->body.push_back(ds->getSubStmt());
+          // The arm is reached by anything, so its explicit case values add
+          // nothing and would otherwise be emitted as a redundant test.
+          if (currentGroup->isDefault)
+            currentGroup->caseValues.clear();
+          if (labelBody)
+            currentGroup->body.push_back(labelBody);
         } else if (currentGroup) {
           currentGroup->body.push_back(child);
         } else {
