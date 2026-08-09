@@ -6858,6 +6858,77 @@ impl<'a> Emitter<'a> {
         (fst, fsti)
     }
 
+    /// Conservatively decide whether `e` could mention the `return` keyword.
+    ///
+    /// Only the expression forms a contract is written in are traversed; any
+    /// other form answers `true`, so an unrecognised shape costs the caller the
+    /// `rewrites_to` form rather than soundness.
+    fn mentions_return(e: &Expr) -> bool {
+        match &e.val {
+            ExprT::Var(id) => &*id.val == "return",
+            ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => false,
+            ExprT::UnOp(_, a)
+            | ExprT::Cast(a, _)
+            | ExprT::Deref(a)
+            | ExprT::Ref(a)
+            | ExprT::Live(a)
+            | ExprT::Old(a)
+            | ExprT::Member(a, _)
+            | ExprT::VAttr(_, a) => Self::mentions_return(a),
+            ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => {
+                Self::mentions_return(a) || Self::mentions_return(b)
+            }
+            ExprT::Cond(a, b, c) => {
+                Self::mentions_return(a) || Self::mentions_return(b) || Self::mentions_return(c)
+            }
+            ExprT::FnCall(_, args) => args.iter().any(|a| Self::mentions_return(a)),
+            _ => true,
+        }
+    }
+
+    /// Emit one postcondition of a stateful function.
+    ///
+    /// A clause that fixes the result outright -- `_ensures(return == E)`, with
+    /// `E` not mentioning the result -- is emitted as Pulse's `rewrites_to`
+    /// rather than an ordinary equality. The two assert the same thing, but
+    /// `rewrites_to` is the form Pulse's prover reads as a *substitution*: it
+    /// replaces the bound result by `E` throughout the context and the goal.
+    ///
+    /// That matters at a conditional join. A call in a branch binds its result
+    /// to a branch-local name, so the branch's postcondition closes over it
+    /// existentially; Pulse's join gives up on an `exists*` and leaves an
+    /// unusable `match` on the guard, which nothing after the conditional can
+    /// take a resource out of. With `rewrites_to`, the local never survives
+    /// into the postcondition at all -- it has already been rewritten to a term
+    /// the caller can see -- and the two branches join normally.
+    fn emit_ensures_prop(&mut self, env: &Env, e: &Expr) -> Doc {
+        // Elaboration wraps a boolean clause in the coercion that renders it as
+        // an slprop; look through that to see the equality underneath.
+        let mut inner = e;
+        loop {
+            match &inner.val {
+                ExprT::Cast(a, _) | ExprT::VAttr(_, a) => inner = a,
+                _ => break,
+            }
+        }
+        if let ExprT::BinOp(BinOp::Eq, l, r) = &inner.val {
+            let is_ret = |x: &Rc<Expr>| matches!(&x.val, ExprT::Var(id) if &*id.val == "return");
+            let determined = if is_ret(l) && !Self::mentions_return(r) {
+                Some(r)
+            } else if is_ret(r) && !Self::mentions_return(l) {
+                Some(l)
+            } else {
+                None
+            };
+            if let Some(rhs) = determined {
+                let rhs_doc = self.emit_rvalue(env, rhs);
+                let ret_doc = self.emit_name(Name::Var(Rc::from("return")));
+                return naryfn([Doc::text("rewrites_to"), ret_doc, parens(rhs_doc)]);
+            }
+        }
+        self.emit_rvalue(env, e)
+    }
+
     fn emit_fn_sig_for_interface(&mut self, env: &Env, decl: &FnDecl) -> Doc {
         self.emit_fn_sig_inner(env, decl, true)
     }
@@ -7050,7 +7121,10 @@ impl<'a> Emitter<'a> {
         }
         let ret_type_doc = self.emit_type(env, ret_type);
 
-        ensures_props.extend(ensures.iter().map(|r| self.emit_rvalue(env, r)));
+        for r in ensures.iter() {
+            let d = self.emit_ensures_prop(env, r);
+            ensures_props.push(d);
+        }
 
         // C functions are not guaranteed to terminate, and PAL emits `while`
         // loops without a `decreases` measure. Since Pulse split `stt` into a
