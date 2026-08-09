@@ -3110,6 +3110,16 @@ static void parse_file(RefMut<Ctx> ctx) {
 
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-DC2PULSE", "-fno-builtin"}, ArgumentInsertPosition::BEGIN));
+  // Under `-DC2PULSE` the annotation macros expand away, so a variable that a
+  // production build reads from inside an assertion or a logging macro can
+  // look written-but-never-read here. That is an artifact of how PAL
+  // configures the preprocessor, not a property of the source, and with a
+  // compilation database that carries `-Werror` it would otherwise stop the
+  // translation. These go at the end because a `-Wall` from the database
+  // would re-enable them.
+  Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+      {"-Wno-unused-but-set-variable", "-Wno-unused-variable"},
+      ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
