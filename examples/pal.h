@@ -32,6 +32,15 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _plain __attribute__((annotate("pal-plain")))
 #define _core_ref __attribute__((annotate("pal-core-ref")))
 #define _nullable __attribute((annotate("pal-nullable")))
+/* Translate a `const`-qualified parameter in the default mode rather than
+   as a const one, so that its permission and pointee are quantified per
+   call instead of becoming implicits of the signature. The reason to want
+   that is `_nullable`: a const parameter's hold sits behind a null guard,
+   and a call site that passes a literal null has nothing for those
+   implicits to be solved against, so the call does not elaborate. Marking
+   the parameter `_mutable` costs precision -- a caller no longer learns
+   that the pointee came back unchanged -- and buys the null call site. */
+#define _mutable __attribute((annotate("pal-mutable")))
 #define _consumes __attribute__((annotate("pal-consumes")))
 #define _out __attribute__((annotate("pal-out")))
 #define _array __attribute((annotate("pal-array")))
@@ -76,6 +85,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _plain
 #define _core_ref
 #define _nullable
+#define _mutable
 #define _consumes
 #define _out
 #define _array
