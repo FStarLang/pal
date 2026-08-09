@@ -83,3 +83,56 @@ void opt_fill_pair(_nullable _out _refine(this->lo == 0 && this->hi == 0) struct
         fill_pair(Dst);
     }
 }
+
+/* Supplying and declining an optional parameter, from the caller's side.
+   `opt_write_many` states its two outputs under a guard, which is right for
+   it and wrong for a caller that knows which side of each test its own
+   arguments are on. Handing over a pointer PAL owns and taking it back again
+   is the ordinary shape of a conversion built out of smaller conversions. */
+void forward_one(const uint64_t* Src, _out uint64_t* Dst)
+    _ensures(*Dst == *Src)
+{
+    opt_write_many(Src, Dst, NULL);
+}
+
+/* The other way round, so that neither position is special. */
+void forward_other(const uint64_t* Src, _out uint64_t* Dst)
+    _ensures(*Dst == *Src)
+{
+    opt_write_many(Src, NULL, Dst);
+}
+
+/* Both supplied, and both recovered. */
+void forward_both(const uint64_t* Src, _out uint64_t* First, _out uint64_t* Second)
+    _ensures(*First == *Src)
+    _ensures(*Second == *Src)
+{
+    opt_write_many(Src, First, Second);
+}
+
+/* Neither supplied: the guard has to be discarded twice even though nothing
+   was ever behind it. */
+void forward_neither(const uint64_t* Src)
+{
+    opt_write_many(Src, NULL, NULL);
+}
+
+/* Forwarding an optional parameter onward as an optional parameter. The
+   caller cannot say which way the test goes -- that is what makes it a
+   forward -- so the guard must be passed along untouched rather than opened
+   and closed. */
+void forward_optional(const uint64_t* Src, _nullable _out _refine(*this == *Src) uint64_t* Dst)
+{
+    opt_write_many(Src, Dst, NULL);
+}
+
+/* Supplying the address of a local, which is where a value read back out of
+   a conversion usually lands. */
+void via_local(const uint64_t* Src, _out uint64_t* Dst)
+    _ensures(*Dst == *Src)
+{
+    uint64_t tmp;
+
+    opt_write_many(Src, &tmp, NULL);
+    *Dst = tmp;
+}
