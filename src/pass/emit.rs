@@ -617,6 +617,13 @@ enum ValNaming<'a> {
     /// Used for function signatures and old-style preds.
     Standard {
         quote: bool,
+        /// Base identifier for generated val names. `None` derives it from the
+        /// expression being described, which is what a signature clause wants:
+        /// the value is named after the parameter it belongs to. A caller that
+        /// describes a parameter's resource through some *other* expression --
+        /// the local the null test binds, say -- has to say which parameter the
+        /// names belong to, or it invents names no signature ever bound.
+        base: Option<Rc<IdentT>>,
         bindings: &'a mut Vec<ExBinding>,
     },
     /// Spec record: val references become `spec_param.field_name`.
@@ -1484,13 +1491,14 @@ impl<'a> Emitter<'a> {
     /// Returns the Doc to use as the val reference in the slprop.
     fn push_val_binding(&mut self, naming: &mut ValNaming, this: &Rc<Expr>, ty: Doc) -> Doc {
         match naming {
-            ValNaming::Standard { quote, bindings } => {
+            ValNaming::Standard {
+                quote,
+                base,
+                bindings,
+            } => {
                 let idx = bindings.len() as u32;
-                let raw = Doc::text(
-                    self.nm
-                        .mangle(&Name::Val(extract_base_ident(this), idx))
-                        .to_string(),
-                );
+                let base_ident = base.clone().unwrap_or_else(|| extract_base_ident(this));
+                let raw = Doc::text(self.nm.mangle(&Name::Val(base_ident, idx)).to_string());
                 let val_name = if *quote {
                     Doc::text("'").append(raw)
                 } else {
@@ -1535,7 +1543,9 @@ impl<'a> Emitter<'a> {
     /// Returns the Doc to use as the val reference in the slprop.
     fn push_val_binding_explicit(&mut self, naming: &mut ValNaming, raw_name: Doc, ty: Doc) -> Doc {
         match naming {
-            ValNaming::Standard { quote, bindings } => {
+            ValNaming::Standard {
+                quote, bindings, ..
+            } => {
                 let val_name = if *quote {
                     Doc::text("'").append(raw_name)
                 } else {
@@ -1846,6 +1856,7 @@ impl<'a> Emitter<'a> {
                 if existential {
                     let mut local_naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut local_bindings,
                     };
                     self.emit_type_slprop_inner(
@@ -1901,6 +1912,7 @@ impl<'a> Emitter<'a> {
         let mut props = vec![];
         let mut naming = ValNaming::Standard {
             quote: false,
+            base: None,
             bindings: &mut bindings,
         };
         emit_slprops(self, variant, &mut naming, &mut props);
@@ -4795,6 +4807,7 @@ impl<'a> Emitter<'a> {
             let mut props = vec![];
             let mut naming = ValNaming::Standard {
                 quote,
+                base: None,
                 bindings: &mut bindings,
             };
             let this = mk_rvar(name);
@@ -4863,11 +4876,24 @@ impl<'a> Emitter<'a> {
         };
         // A `preserves` names the value with a signature-level implicit, which
         // is in scope in the body; the other modes bind it existentially.
+        //
+        // For a preserved (const) pointer that implicit is the *only* value the
+        // signature will accept back: `preserves unless_null p (.. 'val_p_0)`
+        // asks for the value the caller handed in, not for some value. So the
+        // payload has to name it exactly as the signature does -- off the
+        // parameter, not off the local the null test binds -- and must not
+        // re-quantify it, or the branch gives back an `exists*` where the
+        // signature wanted `'val_p_0` and the join fails.
         let quote = matches!(mode, ParamMode::Const);
+        let base = match mode {
+            ParamMode::Const => Some(extract_base_ident(&guard.pointer)),
+            _ => None,
+        };
         let mut bindings = vec![];
         let mut props = vec![];
         let mut naming = ValNaming::Standard {
             quote,
+            base,
             bindings: &mut bindings,
         };
         self.emit_type_slprop(
@@ -4881,6 +4907,9 @@ impl<'a> Emitter<'a> {
         drop(naming);
         if props.is_empty() {
             return None;
+        }
+        if quote {
+            return Some(parens(mk_star(props)));
         }
         Some(parens(wrap_exists(&bindings, props)))
     }
@@ -5683,6 +5712,7 @@ impl<'a> Emitter<'a> {
                 let mut field_bindings = vec![];
                 let mut naming = ValNaming::Standard {
                     quote: false,
+                    base: None,
                     bindings: &mut field_bindings,
                 };
                 self.emit_type_slprop(
@@ -6917,6 +6947,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6944,6 +6975,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6962,6 +6994,7 @@ impl<'a> Emitter<'a> {
                     let mut uninit_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut uninit_bindings,
                     };
                     self.emit_type_slprop(
@@ -6980,6 +7013,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7070,6 +7104,7 @@ impl<'a> Emitter<'a> {
             let mut ret_props = vec![];
             let mut naming = ValNaming::Standard {
                 quote: false,
+                base: None,
                 bindings: &mut ret_bindings,
             };
             self.emit_type_slprop(
@@ -7266,6 +7301,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7300,6 +7336,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7319,6 +7356,7 @@ impl<'a> Emitter<'a> {
                     let mut uninit_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut uninit_bindings,
                     };
                     self.emit_type_slprop(
@@ -7339,6 +7377,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7372,6 +7411,7 @@ impl<'a> Emitter<'a> {
         let mut ret_props = vec![];
         let mut naming = ValNaming::Standard {
             quote: false,
+            base: None,
             bindings: &mut ret_bindings,
         };
         self.emit_type_slprop(
@@ -8026,6 +8066,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -8044,6 +8085,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
