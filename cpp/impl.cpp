@@ -2710,11 +2710,33 @@ public:
                     : hasOutAttr(param->getAttrs())
                         ? ir::ParamMode::Out()
                         : [&]() {
+                            // `_mutable` opts a const-qualified parameter out
+                            // of const mode. A const parameter's permission
+                            // and pointee become signature-level implicits so
+                            // that `preserves` can hand the caller's own hold
+                            // back unchanged; but under `unless_null` a call
+                            // site that passes a literal null offers nothing
+                            // to solve those implicits against, and the call
+                            // does not elaborate. A declaration whose optional
+                            // input is ever passed a null says so with
+                            // `_mutable` and gets the quantified treatment.
+                            for (auto *attr : param->getAttrs()) {
+                              if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+                                  ann &&
+                                  ann->getAnnotation() == "pal-mutable")
+                                return ir::ParamMode::Regular();
+                            }
                             auto qt = param->getType().IgnoreParens();
-                            if (qt.isConstQualified())
+                            if (qt.getCanonicalType().isConstQualified())
                               return ir::ParamMode::Const();
-                            if (auto ptr = dyn_cast<PointerType>(qt)) {
-                              if (ptr->getPointeeType().isConstQualified())
+                            // `getAs` desugars through typedefs, so a
+                            // parameter declared with a pointer-to-const
+                            // typedef (`PCFOO`) is recognized just
+                            // like one that writes `const T *` through.
+                            if (auto ptr = qt->getAs<PointerType>()) {
+                              if (ptr->getPointeeType()
+                                      .getCanonicalType()
+                                      .isConstQualified())
                                 return ir::ParamMode::Const();
                             }
                             return ir::ParamMode::Regular();
