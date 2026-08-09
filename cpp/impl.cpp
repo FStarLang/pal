@@ -1490,6 +1490,23 @@ public:
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
       return mk_rvalue_lvalue(std::move(loc), trLValue(e));
+    } else if (auto *m = dyn_cast<MemberExpr>(e)) {
+      // A member of a structure *value* -- `f(x).field`, or a field of a
+      // compound literal -- is itself an rvalue in C, so there is no lvalue to
+      // project from and trLValue cannot be used. Translate the base as a value
+      // and project the field out of it; ExprT::Member is neutral, and emit
+      // already renders a value base as a record field selection rather than a
+      // reference projection.
+      auto *md = m->getMemberDecl();
+      std::string nameStr;
+      if (auto *fd = dyn_cast<FieldDecl>(md))
+        nameStr = fieldNameStr(fd);
+      else
+        nameStr = md->getName().str();
+      auto id = ctx.mk_ident(toStr(nameStr), loc.clone());
+      auto base = m->isArrow() ? mk_deref(loc.clone(), trRValue(m->getBase()))
+                               : trRValue(m->getBase());
+      return mk_lvalue_member(std::move(loc), std::move(base), std::move(id));
     } else if (auto *u = dyn_cast<UnaryExprOrTypeTraitExpr>(e)) {
       auto kind = u->getKind();
       if (kind == UETT_SizeOf || kind == UETT_AlignOf ||
