@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
 
 use chumsky::{
     Parser,
@@ -141,8 +141,8 @@ enum Token<'src> {
     Whitespace,
 
     String(&'src str),
-    Integer(&'src str, IntegerSuffix),
-    Char(u32),
+    Integer(&'src str, u32, IntegerSuffix),
+    Char(i64),
     Ident(&'src str),
 
     Punct(Punct),
@@ -155,7 +155,14 @@ impl<'src> Display for Token<'src> {
         match self {
             Token::Whitespace => write!(f, " "),
             Token::String(tok) => write!(f, "{}", tok),
-            Token::Integer(i, suffix) => write!(f, "{}{}", i, suffix),
+            Token::Integer(i, radix, suffix) => {
+                let prefix = match radix {
+                    16 => "0x",
+                    8 => "0",
+                    _ => "",
+                };
+                write!(f, "{}{}{}", prefix, i, suffix)
+            }
             Token::Char(n) => write!(f, "'\\x{:x}'", n),
             Token::Ident(id) => write!(f, "{}", id),
             Token::Punct(punct) => write!(f, "{}", punct.to_str()),
@@ -186,11 +193,24 @@ fn lex_core_token<'src>() -> impl Parser<'src, &'src str, Token<'src>> {
         empty().to(IntegerSuffix::None),
     ));
 
-    let decimal_literal = text::int(10); // also happens to accept 0, which should be an octal literal in C
+    // C's three radices.  Hexadecimal is what a contract about an on-media
+    // structure is almost always written in -- a field mask, a signature, a
+    // version -- so a spec that could only be written in decimal would have
+    // to be written in a base the structure it describes is not documented
+    // in.  The prefix is dropped here and the radix carried alongside the
+    // digits, so the constant is parsed once, at the point where its value is
+    // needed.
+    let hex_literal = Parser::or(just("0x"), just("0X"))
+        .ignore_then(text::digits(16).at_least(1).to_slice())
+        .map(|i| (i, 16u32));
+    let octal_literal = just('0')
+        .ignore_then(text::digits(8).at_least(1).to_slice())
+        .map(|i| (i, 8u32));
+    let decimal_literal = text::int(10).map(|i| (i, 10u32)); // also happens to accept 0, which C reads as an octal literal, to the same value
 
-    let integer_literal = decimal_literal
+    let integer_literal = choice((hex_literal, octal_literal, decimal_literal))
         .then(integer_suffix)
-        .map(|(i, s)| Token::Integer(i, s));
+        .map(|((i, radix), s)| Token::Integer(i, radix, s));
 
     let op = Punct::lexer().map(Token::Punct);
 
@@ -206,8 +226,19 @@ fn lex_core_token<'src>() -> impl Parser<'src, &'src str, Token<'src>> {
 
     // C-style character literal: 'X' or '\E' for a small set of common
     // escapes. The value is the codepoint of the character (for plain
-    // chars) or the escape-mapped byte value. Wide-char prefixes (L'…',
-    // u'…', U'…'), multi-character constants, octal escapes, and
+    // chars) or the escape-mapped byte value.
+    //
+    // A multi-character constant such as 'hdIR' is also accepted: C leaves
+    // its value implementation-defined, and every implementation this
+    // targets -- clang and MSVC alike -- packs the characters into an `int`
+    // most significant first, which is what makes the constant readable as
+    // the four bytes it will occupy on media. That is the whole reason the
+    // form is used: an on-media signature is written so that a hex dump
+    // spells it. The result has type `int`, so it is sign-extended, not
+    // zero-extended, once four characters are present and the first has its
+    // high bit set.
+    //
+    // Wide-char prefixes (L'…', u'…', U'…'), octal escapes, and
     // \xHH+ / \uHHHH numeric escapes are unsupported
     let char_escape = just('\\').ignore_then(choice((
         just('n').to(b'\n' as u32),
@@ -226,8 +257,18 @@ fn lex_core_token<'src>() -> impl Parser<'src, &'src str, Token<'src>> {
     let plain_char = none_of("'\\\n").map(|c: char| c as u32);
     let char_literal = char_escape
         .or(plain_char)
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<u32>>()
         .delimited_by(just('\''), just('\''))
-        .map(Token::Char);
+        .map(|cs: Vec<u32>| {
+            if cs.len() == 1 {
+                Token::Char(cs[0] as i64)
+            } else {
+                let packed = cs.iter().fold(0u32, |acc, c| (acc << 8) | (c & 0xFF));
+                Token::Char(packed as i32 as i64)
+            }
+        });
 
     let fallback = text::whitespace()
         .not()
@@ -603,7 +644,7 @@ fn expr_parser<
 
         let inline_pulse = select! { Token::Ident("_inline_pulse") => () }
             .ignore_then(
-                select! { Token::Integer(i, _) => i }
+                select! { Token::Integer(i, _, _) => i }
                     .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
             )
             .try_map(|i, span| {
@@ -633,8 +674,10 @@ fn expr_parser<
         });
 
         let integer_constant =
-            select! { Token::Integer(i, suf) => (i,suf) }.try_map(move |(i, suf), span| {
-                match BigInt::from_str(i) {
+            select! { Token::Integer(i, radix, suf) => (i,radix,suf) }.try_map(move |(i, radix, suf), span| {
+                match BigInt::parse_bytes(i.as_bytes(), radix)
+                    .ok_or_else(|| format!("invalid base-{} integer constant '{}'", radix, i))
+                {
                     Ok(i) => {
                         let loc = sift.resolve_source_info(&span);
                         let ty_val = match suf {
@@ -664,7 +707,7 @@ fn expr_parser<
                         let ty = ty_val.with_loc(loc.clone());
                         Ok(ExprT::IntLit(Rc::new(i), ty).with_loc(loc).into())
                     }
-                    Err(err) => Err(Rich::custom(span, err.to_string())),
+                    Err(err) => Err(Rich::custom(span, err)),
                 }
             });
 
@@ -733,7 +776,7 @@ fn expr_parser<
                 type_name
                     .clone()
                     .then(
-                        select! { Token::Integer(i, _) => i }
+                        select! { Token::Integer(i, _, _) => i }
                             .delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))
                             .or_not(),
                     )
