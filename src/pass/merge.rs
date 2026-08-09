@@ -305,6 +305,16 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // reintroduce into a definition that declared none (see below).
     let mut spec_copies: Vec<(usize, Exprs, Exprs, Vec<GhostArg>)> = Vec::new();
 
+    // A parameter refinement written on a declaration (`_refine` inside the
+    // parameter's type) names the declaration's parameters. Under
+    // `_Use_decl_annotations_` the definition inherits those types verbatim
+    // while keeping its own parameter names, which C permits to differ. The
+    // requires/ensures are already mapped across by `param_renames`; the
+    // refinements carried in the argument types need the same treatment, or the
+    // definition is checked against a predicate mentioning names it does not
+    // bind.
+    let mut arg_type_renames: Vec<(usize, HashMap<Rc<str>, Rc<Ident>>)> = Vec::new();
+
     // Build an Env for type comparison (need typedef resolution)
     let mut env = Env::new();
     for decl in tu.decls.iter() {
@@ -332,6 +342,11 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                             &fn_decl.name.loc,
                         );
                         continue;
+                    }
+
+                    let renames = param_renames(fn_decl, &defn.decl);
+                    if !renames.is_empty() {
+                        arg_type_renames.push((defn_idx, renames));
                     }
 
                     let decl_has_specs =
@@ -436,6 +451,17 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 }
             }
             _ => {}
+        }
+    }
+
+    // Map declaration parameter names onto definition parameter names inside the
+    // argument types, so a `_refine` on one parameter that mentions another is
+    // checked against the names the definition actually binds.
+    for (defn_idx, renames) in arg_type_renames {
+        if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
+            for arg in defn.decl.args.iter_mut() {
+                rename_type_in_place(Rc::make_mut(&mut arg.ty), &renames);
+            }
         }
     }
 
