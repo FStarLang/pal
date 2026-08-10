@@ -61,7 +61,7 @@ enum DeclName {
     Union(Rc<str>),
     Typedef(Rc<str>),
     GlobalVar(Rc<str>),
-    Include(Rc<SourceInfo>),
+    Include(Rc<str>),
 }
 
 fn in_main_file(main_files: &[Rc<str>], loc: &SourceInfo) -> bool {
@@ -150,6 +150,12 @@ fn scan_verbatim_module_ref(deps: &mut HashSet<DeclName>, text: &str) {
                     deps.insert(wrap(Rc::from(name)));
                 }
             }
+        }
+        // An INCLUDES module is referred to by its bare name, with no prefix to
+        // recognize it by, so every segment has to be offered as a candidate. A
+        // segment that names no module simply matches no declaration.
+        if !segment.is_empty() {
+            deps.insert(DeclName::Include(Rc::from(segment)));
         }
     }
 }
@@ -382,7 +388,7 @@ fn decl_name(decl: &Decl) -> DeclName {
         DeclT::StructDefn(struct_defn) => DeclName::Struct(struct_defn.name.val.clone()),
         DeclT::StructDecl(name) => DeclName::Struct(name.val.clone()),
         DeclT::UnionDefn(union_defn) => DeclName::Union(union_defn.name.val.clone()),
-        DeclT::IncludeDecl(_) => DeclName::Include(decl.loc.clone()),
+        DeclT::IncludeDecl(include_decl) => DeclName::Include(include_decl.module_name.clone()),
         DeclT::LetDecl(let_decl) => DeclName::Fn(let_decl.name.val.clone()),
         DeclT::OpaqueTypeDecl(decl) => DeclName::Typedef(decl.name.val.clone()),
         DeclT::GlobalVar(gv) => DeclName::GlobalVar(gv.name.val.clone()),
