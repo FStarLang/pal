@@ -763,6 +763,16 @@ pub struct GlobalVar {
     pub opaque_to_smt: bool,
 }
 
+/// Whether a global is an array. Array globals are emitted as a *spec*
+/// (`full_array_lspec`) rather than storage, so they are excluded from
+/// address-of support; see `Env::addressable_global`.
+pub fn global_var_is_array(gv: &GlobalVar) -> bool {
+    matches!(
+        &gv.ty.val,
+        TypeT::FixedArray(_, _) | TypeT::FlexArray(_) | TypeT::Pointer(_, PointerKind::Array)
+    )
+}
+
 pub type Decl = Ast<DeclT>;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum DeclT {

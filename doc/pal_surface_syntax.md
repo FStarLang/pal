@@ -185,6 +185,102 @@ Notes:
 - `_rec` — recursive (must be paired with `_decreases`).
 - `_pulse_eager_unfold_predicate` — on a struct/union, emit `[@@pulse_eager_unfold]` on the generated `__pred`.
 
+## Global variables
+
+A global must be **pure**; non-pure globals are rejected with "non-pure global
+variables are not yet supported". A global is pure when *either*:
+
+- it is annotated `_pure`, or
+- it is `const`-qualified **and has an initializer** — this is implicit, no
+  annotation needed (`cpp/impl.cpp`: `isConstQualified() && hasInit()`).
+
+A `const` global *without* an initializer is **not** pure and is rejected, since
+there is no value for the emitted definition to take.
+
+```c
+_pure uint32_t g_a = 42;      /* explicit  */
+const uint32_t g_b = 7;       /* implicit — same treatment as g_a */
+const uint32_t g_c;           /* rejected: const but no initializer */
+uint32_t       g_d = 1;       /* rejected: not const, not _pure */
+```
+
+Either way the global lowers to a plain top-level F* value, and every read of it
+is **ownership-free** — the read just evaluates to `var_g`, with nothing in the
+`requires`:
+
+```fstar
+let var_g_b : ty_uint32_t = 7ul
+```
+
+**Address-of (`&g`)** is supported for scalar and struct globals (both spellings
+of purity). Because reads are ownership-free, any pointer to a global must be
+read-only forever — a writable alias would let a callee store a value that
+PAL-emitted reads do not observe, which is unsound. So alongside `var_g`, PAL
+emits
+
+```fstar
+assume val addr_var_g : ref ty                          // keyed on the global's identity
+assume val addr_var_g_not_null : squash (~(is_null addr_var_g))
+ghost fn acquire_var_g () requires emp
+  ensures Pulse.Lib.C.RefRo.pts_to_ro addr_var_g var_g // exists* p. pts_to addr_var_g #p var_g
+```
+
+The fraction stays existentially quantified, so reads typecheck, writes (which
+need `1.0R`) do not, and `&g` may be taken any number of times. `&g` itself is
+just the address, so it works in any expression position.
+
+Acquiring and releasing that ownership is **explicit**, via `_ghost_stmt`:
+
+```c
+uint32_t read_via_addr_of_global(void)
+    _ensures(return == 42)
+{
+    _ghost_stmt(Global_g_const.acquire_var_g_const ());
+    const uint32_t *p = &g_const;
+    return *p;
+    _ghost_stmt(drop_ro Global_g_const.addr_var_g_const);
+}
+```
+
+The release goes *after* the `return`. A ghost statement in that position is
+lowered to `let return_1 = <expr>; <ghosts>; return return_1;`, so the returned
+expression is evaluated — still holding the ownership it needs — before the
+drop. Releasing earlier would fail if the returned expression reads through the
+pointer. This is the same discipline the function-pointer cases use with
+`of_fn_div_valid` / `drop_is_valid`.
+
+Omitting either annotation is a verification error (`Leftover resources`, or a
+missing-ownership failure at the read), never unsoundness.
+
+`drop_ro` resolves unqualified (generated modules `open Pulse.Lib.C`, which
+reaches `Pulse.Lib.C.RefRo` via `Pulse.Lib.C.Ref`), but its ref argument must be
+written out: `drop_ro _` fails to infer whenever more than one `pts_to` is in
+scope — and the local holding the address is itself one — with
+`Cannot prove: pts_to (*?u*)_ (*?u*)_`.
+
+Reads through the pointer yield the same pure value that specs already use, so
+`_ensures(return == 42)` follows from `var_g = 42` with no extra reasoning.
+
+`addr_var_g_not_null` gives non-nullness, which does *not* follow from the
+points-to alone; use it by comparing the pointer against `NULL` as usual:
+
+```c
+bool addr_of_global_is_not_null(void)
+    _ensures(return == true)
+{
+    _ghost_stmt(Global_g_const.acquire_var_g_const ());
+    const uint32_t *p = &g_const;
+    return p != NULL;
+    _ghost_stmt(drop_ro Global_g_const.addr_var_g_const);
+}
+```
+
+Array globals are out of scope for `&g` (they have no pointer path at all —
+`const int *p = g_arr;` is rejected), which keeps the ownership-free
+`array_spec_idx` model of `test/global_array_tactic` unaffected.
+
+See `test/addr_global/addr_global.c` and `pulse/Pulse.Lib.C.RefRo.fst`.
+
 ## See also
 
 - `structs.md` / `unions.md` — what gets generated per struct / union.

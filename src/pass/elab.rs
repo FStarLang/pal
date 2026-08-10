@@ -475,7 +475,7 @@ impl<'a> Elaborator<'a> {
                         return;
                     }
                 }
-                if !env.is_lvalue(v) {
+                if !env.is_addressable(v) {
                     self.report(format!("expected lvalue for &, got {}", v), &rval.loc);
                 }
             }
