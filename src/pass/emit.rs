@@ -2463,6 +2463,21 @@ impl<'a> Emitter<'a> {
                                 .append(Doc::line())
                                 .append("0"),
                         ),
+                        // C truthiness: a spec integer standing where a
+                        // separation-logic proposition is expected holds exactly
+                        // when it is non-zero. This is how a `false` written in
+                        // an assertion arrives, since the preprocessor has
+                        // already turned it into the literal 0.
+                        (TypeT::SpecInt | TypeT::SpecNat, TypeT::SLProp) => unaryfn(
+                            Doc::text("with_pure"),
+                            parens(
+                                val_doc
+                                    .append(Doc::line())
+                                    .append("<>")
+                                    .append(Doc::line())
+                                    .append("0"),
+                            ),
+                        ),
                         (TypeT::SpecNat, TypeT::SpecInt) => with_type(val_doc, Doc::text("int")),
                         (TypeT::SpecInt, TypeT::SpecNat) => with_type(val_doc, Doc::text("nat")),
                         (TypeT::Bool, TypeT::SizeT) => parens(
@@ -2593,15 +2608,32 @@ impl<'a> Emitter<'a> {
                         (TypeT::SizeT, TypeT::SpecInt | TypeT::SpecNat) => {
                             unaryfn(Doc::text("SizeT.v"), val_doc)
                         }
+                        // C converts an integer to an unsigned type by
+                        // reducing it modulo the target width, which is what
+                        // `sizet_to_uint32`/`sizet_to_uint64` and the
+                        // `Int.Cast` family already mean. Going through them
+                        // keeps a `size_t` conversion total, matching how PAL
+                        // already translates every other narrowing cast; the
+                        // alternative, `UIntN.uint_to_t (SizeT.v x)`, silently
+                        // demands a proof that no truncation happens, which is
+                        // not what the C says and is not even statable for a
+                        // `sizeof`, whose value PAL keeps opaque.
+                        (TypeT::SizeT, TypeT::Int { signed: false, width: 64 }) => {
+                            unaryfn(Doc::text("SizeT.sizet_to_uint64"), val_doc)
+                        }
+                        (TypeT::SizeT, TypeT::Int { signed: false, width: 32 }) => {
+                            unaryfn(Doc::text("SizeT.sizet_to_uint32"), val_doc)
+                        }
                         (TypeT::SizeT, TypeT::Int { signed, width }) => {
-                            if let Some(m) = get_int_mod(signed, width) {
-                                unaryfn(
+                            if get_int_mod(signed, width).is_some() {
+                                unaryfn_with_type(
                                     Doc::text(format!(
-                                        "{}.{} (SizeT.v",
-                                        m,
-                                        if *signed { "int_to_t" } else { "uint_to_t" }
+                                        "Int.Cast.uint64_to_{}int{}",
+                                        if *signed { "" } else { "u" },
+                                        width
                                     )),
-                                    val_doc.append(Doc::text(")")),
+                                    unaryfn(Doc::text("SizeT.sizet_to_uint64"), val_doc),
+                                    self.emit_type(env, &*to_ty),
                                 )
                             } else {
                                 self.report(default_msg.clone(), &v.loc);
