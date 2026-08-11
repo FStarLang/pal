@@ -3460,6 +3460,12 @@ public:
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
       return {};
+    } else if (dyn_cast<FileScopeAsmDecl>(D)) {
+      // File-scope assembly has no C-level meaning to translate. Skipping it
+      // is unsound in principle, so say so rather than pass silently.
+      reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
+                        "file-scope assembly is not translated", "");
+      return {};
     }
 
     reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
