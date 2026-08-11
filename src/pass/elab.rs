@@ -819,9 +819,36 @@ impl<'a> Elaborator<'a> {
             ExprT::UnionInit(_, _, fld_val) => {
                 self.elab_rvalue(env, Rc::make_mut(fld_val), None);
             }
-            ExprT::ArrayInit { elems, .. } => {
-                for elem in elems {
+            ExprT::ArrayInit {
+                elem_ty,
+                elems,
+                is_static,
+            } => {
+                for elem in elems.iter_mut() {
                     self.elab_rvalue(env, Rc::make_mut(elem), None);
+                }
+                // Per C11 6.7.9p14/p21, a narrow string literal shorter than
+                // its destination fixed-size array implicitly zero-pads the
+                // trailing elements. `is_static` marks array literals derived
+                // from string literals (see `ArrayInit`'s doc comment); pad
+                // them out to the destination's declared length here, using
+                // the `expected` type threaded down from the enclosing
+                // declaration, assignment, or struct field.
+                if *is_static {
+                    if let Some(exp) = expected {
+                        if let TypeT::FixedArray(_, target_len) =
+                            env.vtype_whnf(exp.clone().into()).val
+                        {
+                            let target_len = target_len as usize;
+                            let pad_loc = rval.loc.clone();
+                            while elems.len() < target_len {
+                                elems.push(
+                                    ExprT::IntLit(Rc::new(BigInt::ZERO), elem_ty.clone())
+                                        .with_loc(pad_loc.clone()),
+                                );
+                            }
+                        }
+                    }
                 }
             }
             ExprT::Cond(cond, then_expr, else_expr) => {
