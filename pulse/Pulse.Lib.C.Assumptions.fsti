@@ -22,6 +22,15 @@ let sizet_fits_u32_of_size_pat (x:int)
     [SMTPat (SizeT.fits x)]
   = fits_u32_implies_fits x
 
+// Consequence of SizeTFitsU64: every non-negative value below 2^64 fits in
+// size_t, which is what makes converting a uint64_t back to size_t total.
+let sizet_fits_u64_pat (x:int)
+  : Lemma
+    (requires 0 <= x /\ x < pow2 64)
+    (ensures fits x)
+    [SMTPat (fits x)]
+  = FStar.SizeT.fits_u64_implies_fits x
+
 // Whether C assert() is enabled (i.e., NDEBUG is not defined).
 // Opaque so the verifier must handle both cases, exposing any
 // side effects in assert arguments that would change behavior
