@@ -361,9 +361,8 @@ impl From<&TypeRefKind> for TypeRef {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Name {
     Var(Rc<IdentT>),
-    /// The address of a `_pure` global: an assumed `ref` naming its storage.
-    /// One per global, so distinct globals get distinct (non-equatable)
-    /// addresses.
+    /// The address of a `_pure` global: an assumed `ref` naming its storage,
+    /// one per global, so distinct globals get distinct addresses.
     GlobalAddr(Rc<IdentT>),
     /// Proof that a global's address is non-NULL.
     GlobalAddrNotNull(Rc<IdentT>),
@@ -855,8 +854,7 @@ fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
         match &decl.val {
             DeclT::FnDefn(fd) => fd.body.iter().for_each(|s| walk_stmt_tree(s, &mut note)),
             // A global initializer can mention a function too, e.g.
-            // `_pure ops g_ops = { .op = add };`. Its emitted form references
-            // `Funcptr_add.func_add__fp`, so that wrapper module must exist.
+            // `_pure ops g_ops = { .op = add };`.
             DeclT::GlobalVar(gv) => {
                 if let Some(init) = &gv.init {
                     walk_expr_tree(init, &mut note)
@@ -2418,10 +2416,9 @@ impl<'a> Emitter<'a> {
                 }
                 ExprT::Ref(v) => {
                     // `&g` for a `_pure` global: the global is a plain F* value
-                    // with no lvalue, so use its assumed address. Read-only
-                    // ownership of that address is acquired by the caller with
-                    // `_ghost_stmt(<Global_g>.acquire_var_g ())`, and released
-                    // with Pulse's generic `drop_`.
+                    // with no lvalue, so use its assumed address. Ownership is
+                    // acquired by the caller with `acquire_var_g` and released
+                    // with `drop_`.
                     if let ExprT::Var(x) = &v.val
                         && env.addressable_global(x).is_some()
                     {
@@ -7507,42 +7504,28 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Emit the address of a `_pure` global, plus the `&g` operation that hands
-    /// it out with *read-only* ownership.
+    /// Emit a `_pure` global's address: an assumed `ref` (one per global, so
+    /// distinct globals get distinct addresses), a non-null axiom, and the
+    /// acquire that hands out *read-only* ownership of its storage.
     ///
-    /// PAL reads a `_pure` global with no ownership at all -- a read of `g`
-    /// emits the pure value `var_g` directly -- which is only sound because the
-    /// storage backing `g` is assumed to hold `var_g` forever. So the pointer
-    /// handed out here must never be writable: the acquired slprop hides the
-    /// permission under an existential, so `Pulse.Lib.Reference.read` (which
-    /// needs only some `p`) still works while `write` / `( := )` (which need
-    /// full ownership) can never be derived. No `freeable` is granted either.
+    /// Reads of a `_pure` global are ownership-free, which is only sound if the
+    /// storage holds `var_g` forever -- so the pointer must never be writable.
+    /// Hiding the permission under an existential achieves that, and it must
+    /// stay existential rather than some fixed fraction `k`: `k` acquired `n`
+    /// times gathers to `n * k`, and `pts_to_perm_bound` (`p <=. 1.0R`) would
+    /// then prove `False` for `n > 1/k`.
     ///
-    /// The permission must stay existential rather than being fixed to some
-    /// concrete fraction: a fixed `k` could be acquired `n` times and gathered
-    /// to `n * k`, and `Pulse.Lib.Reference.pts_to_perm_bound` (which gives
-    /// `p <=. 1.0R`) would then prove `False` for `n > 1/k`. With an
-    /// existential, `n` acquires only constrain `p_1 + .. + p_n <=. 1.0R`,
-    /// which is satisfiable for every `n` -- that is what makes `&g` usable any
-    /// number of times, independently, by any number of callers.
+    /// The `pts_to` is emitted literally, not behind an abbreviation: Pulse's
+    /// `[@@pulse_intro] __aux_raw_unfold` only fires on a literal `pts_to`,
+    /// which the struct-global case depends on.
     ///
-    /// The `pts_to` is emitted literally rather than behind an abbreviation:
-    /// Pulse's `[@@pulse_intro] __aux_raw_unfold` only fires on a literal
-    /// `pts_to`, which the struct-global case depends on.
+    /// The acquire is an `assume val` rather than an admitted `ghost fn`: the
+    /// ownership is *assumed* to exist, being a fraction of the one reserved
+    /// for the global at program start. Callers release it with `drop_`.
     ///
-    /// The acquire is an `assume val` axiom, not a `ghost fn` with an admitted
-    /// body: the read-only ownership is *assumed* to exist (it is a fraction of
-    /// the one reserved for the global at program start), so it should be
-    /// stated as an axiom rather than smuggled in through a fake proof. Callers
-    /// release it with Pulse's generic `drop_`.
-    ///
-    /// The address is a distinct `val` per global rather than a function of the
-    /// global's *value*, so two distinct globals that happen to hold the same
-    /// value do not get provably equal addresses.
-    ///
-    /// Emitted for every eligible global, whether or not its address is
-    /// actually taken (the `&g` may live in another module), matching how the
-    /// `__fp` function-pointer wrappers are emitted.
+    /// Emitted for every eligible global, whether or not its address is taken
+    /// (the `&g` may live in another module), as for the `__fp` wrappers.
+    /// See `doc/pal_surface_syntax.md`.
     fn emit_global_addr(&mut self, env: &Env, gv: &GlobalVar) -> Option<Doc> {
         if global_var_is_array(gv) {
             return None;
