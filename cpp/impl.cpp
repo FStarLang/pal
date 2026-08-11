@@ -2080,6 +2080,53 @@ public:
         }
       }
 
+      // A switch with no fall-through is an if/else chain, and saying so is
+      // better than encoding it: the hit and break flags turn every case test
+      // into a compound condition over mutable state, which leaves the prover
+      // unable to reduce a state-dependent join at the *next* test. Nested
+      // if/else tests the scrutinee directly, so each branch condition is the
+      // one the join is phrased in. Reserved for the unannotated case; an
+      // explicit switch postcondition still takes the match form above.
+      if (hasOnlyTerminalBreaks && !cases.empty() && switchEnss.empty() &&
+          defaultGroup) {
+        auto makeChainBody = [&](SwitchGroup &group) {
+          auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+          size_t bodySize = group.body.size() - 1;
+          for (size_t i = 0; i < bodySize; i++)
+            trStmt(bodyStmts, group.body[i]);
+          return bodyStmts;
+        };
+
+        auto chain = makeChainBody(*defaultGroup);
+        size_t remaining = cases.size();
+        for (auto it = cases.rbegin(); it != cases.rend(); ++it) {
+          auto *group = *it;
+          auto childLoc = getRange(group->label->getSourceRange());
+          Rc<ir::Expr> cond = mk_rvalue_binop(
+              childLoc.clone(), ir::BinOp::Eq(),
+              mk_lvalue_var(childLoc.clone(), scrutId.clone()),
+              trRValue(group->caseValues.front()->IgnoreParenImpCasts()));
+          for (size_t i = 1; i < group->caseValues.size(); i++) {
+            auto eq = mk_rvalue_binop(
+                childLoc.clone(), ir::BinOp::Eq(),
+                mk_lvalue_var(childLoc.clone(), scrutId.clone()),
+                trRValue(group->caseValues[i]->IgnoreParenImpCasts()));
+            cond = mk_rvalue_binop(childLoc.clone(), ir::BinOp::LogOr(),
+                                   std::move(cond), std::move(eq));
+          }
+          auto ifStmt =
+              mk_if(childLoc.clone(), std::move(cond), makeChainBody(*group),
+                    std::move(chain), Vec<Rc<ir::Expr>>::new_());
+          if (--remaining == 0) {
+            stmts.push(std::move(ifStmt));
+          } else {
+            chain = Vec<Rc<ir::Stmt>>::new_();
+            chain.push(std::move(ifStmt));
+          }
+        }
+        return {};
+      }
+
       // General switches retain explicit hit and break state to model
       // fall-through.
       auto hitName = "__switch_hit_" + std::to_string(switchIndex);
