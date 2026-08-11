@@ -779,8 +779,9 @@ impl Env {
     /// This is `is_lvalue` plus the address-taking-only cases. A `_pure` global
     /// is *not* an lvalue -- PAL emits it as a plain top-level F* value and
     /// reads it with no ownership at all -- but its address can still be taken,
-    /// because the emitter hands out a read-only (`pts_to_ro`) pointer that can
-    /// never be written through. See `addressable_global`.
+    /// because the emitter hands out a read-only pointer (the permission is
+    /// hidden under an existential) that can never be written through. See
+    /// `addressable_global`.
     pub fn is_addressable(&self, expr: &Expr) -> bool {
         if self.is_lvalue(expr) {
             return true;

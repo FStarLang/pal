@@ -221,13 +221,21 @@ emits
 ```fstar
 assume val addr_var_g : ref ty                          // keyed on the global's identity
 assume val addr_var_g_not_null : squash (~(is_null addr_var_g))
-ghost fn acquire_var_g () requires emp
-  ensures Pulse.Lib.C.RefRo.pts_to_ro addr_var_g var_g // exists* p. pts_to addr_var_g #p var_g
+assume val acquire_var_g
+  : unit -> stt_ghost unit emp_inames emp
+      (fun _ -> exists* (p: perm). pts_to addr_var_g #p var_g)
 ```
 
 The fraction stays existentially quantified, so reads typecheck, writes (which
-need `1.0R`) do not, and `&g` may be taken any number of times. `&g` itself is
-just the address, so it works in any expression position.
+need `1.0R`) do not, and `&g` may be taken any number of times. A *fixed*
+fraction would be unsound to hand out repeatedly: acquiring `k` some `n` times
+and gathering yields `n * k`, and `pts_to_perm_bound` (`p <=. 1.0R`) then proves
+`False` for `n > 1/k`. `&g` itself is just the address, so it works in any
+expression position.
+
+The acquire is an axiom (`assume val`) rather than a proven ghost function: the
+ownership is *assumed* to exist, being a fraction of the one reserved for the
+global at program start.
 
 Acquiring and releasing that ownership is **explicit**, via `_ghost_stmt`:
 
@@ -238,7 +246,7 @@ uint32_t read_via_addr_of_global(void)
     _ghost_stmt(Global_g_const.acquire_var_g_const ());
     const uint32_t *p = &g_const;
     return *p;
-    _ghost_stmt(drop_ro Global_g_const.addr_var_g_const);
+    _ghost_stmt(drop_ (exists* q. pts_to Global_g_const.addr_var_g_const #q _));
 }
 ```
 
@@ -252,11 +260,21 @@ pointer. This is the same discipline the function-pointer cases use with
 Omitting either annotation is a verification error (`Leftover resources`, or a
 missing-ownership failure at the read), never unsoundness.
 
-`drop_ro` resolves unqualified (generated modules `open Pulse.Lib.C`, which
-reaches `Pulse.Lib.C.RefRo` via `Pulse.Lib.C.Ref`), but its ref argument must be
-written out: `drop_ro _` fails to infer whenever more than one `pts_to` is in
-scope — and the local holding the address is itself one — with
-`Cannot prove: pts_to (*?u*)_ (*?u*)_`.
+Release uses Pulse's generic `drop_`, which resolves unqualified (generated
+modules `open Pulse`). Its argument mirrors the acquire's postcondition, but
+the stored value and the binder's `perm` type are both inferable, leaving
+`drop_ (exists* q. pts_to addr_var_g #q _)`. The two parts that must be written
+out are:
+
+- **the ref.** A bare `drop_ _` fails with `Cannot prove: (*?u*)_`, because the
+  local holding the address contributes a second `pts_to` and nothing picks
+  between them.
+- **the existential.** Collapsing it to `drop_ (pts_to addr_var_g #_ _)` fails
+  in the SMT solver: the acquire hands out an existentially quantified
+  fraction, and a bare `#_` does not stand for one.
+
+Name the bound permission something other than a local in scope (`q` above,
+since `p` is the C pointer).
 
 Reads through the pointer yield the same pure value that specs already use, so
 `_ensures(return == 42)` follows from `var_g = 42` with no extra reasoning.
@@ -271,7 +289,7 @@ bool addr_of_global_is_not_null(void)
     _ghost_stmt(Global_g_const.acquire_var_g_const ());
     const uint32_t *p = &g_const;
     return p != NULL;
-    _ghost_stmt(drop_ro Global_g_const.addr_var_g_const);
+    _ghost_stmt(drop_ (exists* q. pts_to Global_g_const.addr_var_g_const #q _));
 }
 ```
 
@@ -279,7 +297,7 @@ Array globals are out of scope for `&g` (they have no pointer path at all —
 `const int *p = g_arr;` is rejected), which keeps the ownership-free
 `array_spec_idx` model of `test/global_array_tactic` unaffected.
 
-See `test/addr_global/addr_global.c` and `pulse/Pulse.Lib.C.RefRo.fst`.
+See `test/addr_global/addr_global.c`.
 
 ## See also
 

@@ -3,7 +3,6 @@ module Pulse.Lib.C.Ref
 open Pulse
 open Pulse.Lib.C.Inhabited
 include Pulse.Lib.Reference
-include Pulse.Lib.C.RefRo
 open FStar.Tactics.Typeclasses { noinst }
 
 instance inhabited_ref (a:Type) : Pulse.Lib.C.Inhabited.inhabited (ref a) = {

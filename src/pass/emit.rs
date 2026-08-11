@@ -2421,7 +2421,7 @@ impl<'a> Emitter<'a> {
                     // with no lvalue, so use its assumed address. Read-only
                     // ownership of that address is acquired by the caller with
                     // `_ghost_stmt(<Global_g>.acquire_var_g ())`, and released
-                    // with `Pulse.Lib.C.RefRo.drop_ro`.
+                    // with Pulse's generic `drop_`.
                     if let ExprT::Var(x) = &v.val
                         && env.addressable_global(x).is_some()
                     {
@@ -7513,9 +7513,28 @@ impl<'a> Emitter<'a> {
     /// PAL reads a `_pure` global with no ownership at all -- a read of `g`
     /// emits the pure value `var_g` directly -- which is only sound because the
     /// storage backing `g` is assumed to hold `var_g` forever. So the pointer
-    /// handed out here must never be writable: `pts_to_ro` hides the permission
-    /// under an existential, so full ownership (which `:=` requires) can never
-    /// be derived, and no `freeable` is granted either.
+    /// handed out here must never be writable: the acquired slprop hides the
+    /// permission under an existential, so `Pulse.Lib.Reference.read` (which
+    /// needs only some `p`) still works while `write` / `( := )` (which need
+    /// full ownership) can never be derived. No `freeable` is granted either.
+    ///
+    /// The permission must stay existential rather than being fixed to some
+    /// concrete fraction: a fixed `k` could be acquired `n` times and gathered
+    /// to `n * k`, and `Pulse.Lib.Reference.pts_to_perm_bound` (which gives
+    /// `p <=. 1.0R`) would then prove `False` for `n > 1/k`. With an
+    /// existential, `n` acquires only constrain `p_1 + .. + p_n <=. 1.0R`,
+    /// which is satisfiable for every `n` -- that is what makes `&g` usable any
+    /// number of times, independently, by any number of callers.
+    ///
+    /// The `pts_to` is emitted literally rather than behind an abbreviation:
+    /// Pulse's `[@@pulse_intro] __aux_raw_unfold` only fires on a literal
+    /// `pts_to`, which the struct-global case depends on.
+    ///
+    /// The acquire is an `assume val` axiom, not a `ghost fn` with an admitted
+    /// body: the read-only ownership is *assumed* to exist (it is a fraction of
+    /// the one reserved for the global at program start), so it should be
+    /// stated as an axiom rather than smuggled in through a fake proof. Callers
+    /// release it with Pulse's generic `drop_`.
     ///
     /// The address is a distinct `val` per global rather than a function of the
     /// global's *value*, so two distinct globals that happen to hold the same
@@ -7542,21 +7561,33 @@ impl<'a> Emitter<'a> {
             .append(Doc::text(" : squash (~(Pulse.Lib.Reference.is_null "))
             .append(addr.clone())
             .append(Doc::text("))"));
-        let addr_of = Doc::text("ghost fn ")
-            .append(self.emit_name(Name::GlobalAcquire(gv.name.val.clone())))
-            .append(Doc::text(" ()"))
-            .append(Doc::hardline())
-            .append(Doc::text("  requires emp"))
-            .append(Doc::hardline())
-            .append(
-                Doc::text("  ensures (Pulse.Lib.C.RefRo.pts_to_ro ")
-                    .append(addr)
-                    .append(Doc::text(" "))
-                    .append(var)
-                    .append(Doc::text(")"))
-                    .append(Doc::hardline()),
-            )
-            .append(Doc::text("{ admit() }"));
+        let perm = Doc::text("p");
+        let pts_to = naryfn([
+            Doc::text("Pulse.Lib.Reference.pts_to"),
+            addr,
+            Doc::text("#").append(perm.clone()),
+            var,
+        ]);
+        let addr_of = mk_assume_val(
+            vec![],
+            self.emit_name(Name::GlobalAcquire(gv.name.val.clone())),
+            &[],
+            naryfn([
+                Doc::text("unit"),
+                Doc::text("->"),
+                Doc::text("stt_ghost"),
+                Doc::text("unit"),
+                Doc::text("emp_inames"),
+                Doc::text("emp"),
+                mk_thunk(wrap_exists(
+                    &[ExBinding {
+                        name: perm,
+                        ty: Doc::text("perm"),
+                    }],
+                    vec![pts_to],
+                )),
+            ]),
+        );
 
         Some(
             addr_val
