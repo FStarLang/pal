@@ -2869,6 +2869,13 @@ public:
       return {};
     } else if (auto *VD = dyn_cast<VarDecl>(D)) {
       auto loc = getRange(VD->getSourceRange());
+      if (VD->isThisDeclarationADefinition() == VarDecl::DeclarationOnly) {
+        // A bare `extern T x;`. It supplies no value, so there is nothing to
+        // translate; the definition lives in another translation unit that PAL
+        // is not looking at. Dropping it is safe because any *use* of the name
+        // then fails to resolve rather than silently reading a made-up value.
+        return {};
+      }
       auto id = ctx.mk_ident(toStr(VD->getName()), loc.clone());
       auto ty = trQualType(VD->getType(), VD->getSourceRange());
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
@@ -2921,6 +2928,18 @@ public:
     } else if (dyn_cast<StaticAssertDecl>(D)) {
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
+      return {};
+    } else if (dyn_cast<EmptyDecl>(D)) {
+      // A stray `;` at file scope. It is what a macro that already ends in a
+      // semicolon leaves behind when it is invoked with one, which is how
+      // every assertion macro in a header is written, so this is common in
+      // real code and declares nothing.
+      return {};
+    } else if (dyn_cast<FileScopeAsmDecl>(D)) {
+      // File-scope assembly has no C-level meaning to translate. Skipping it
+      // is unsound in principle, so say so rather than pass silently.
+      reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
+                        "file-scope assembly is not translated", "");
       return {};
     }
 
