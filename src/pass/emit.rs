@@ -713,51 +713,93 @@ fn fnptr_domain_doc(arg_docs: Vec<Doc>) -> Doc {
     }
 }
 
-/// Collect the set of C functions whose address is taken anywhere in the
-/// translation unit (`&f` or bare `f` decaying to a function pointer, both
-/// modeled as `ExprT::FnRef`). Each such function needs its fnptr wrapper
-/// (`func_<f>__fp`) emitted in its module.
+/// The set of functions whose address is taken anywhere in the translation
+/// unit (`&f` or a bare `f` decaying to a pointer, both `ExprT::FnRef`), and
+/// which therefore need a `Funcptr_<f>` module emitted.
+///
+/// The walks are exhaustive with no `_` catch-all on purpose: a missed variant
+/// silently emits a reference to a `Funcptr_<f>` that never gets written,
+/// surfacing only as F* `Error 72` and never as a PAL diagnostic.
 fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
     fn walk_expr(e: &Expr, set: &mut HashSet<Rc<str>>) {
         match &e.val {
             ExprT::FnRef(f) => {
                 set.insert(f.val.clone());
             }
-            ExprT::UnOp(_, a)
-            | ExprT::Cast(a, _)
-            | ExprT::Deref(a)
+            // Leaves.
+            ExprT::Var(_)
+            | ExprT::BoolLit(_)
+            | ExprT::IntLit(_, _)
+            | ExprT::FloatLit(_, _)
+            | ExprT::InlinePulse(_, _)
+            | ExprT::Malloc(_)
+            | ExprT::Calloc(_)
+            | ExprT::SizeOf(_)
+            | ExprT::AlignOf(_)
+            | ExprT::Error(_) => {}
+            // One sub-expression.
+            ExprT::Deref(a)
+            | ExprT::Member(a, _)
+            | ExprT::VAttr(_, a)
             | ExprT::Ref(a)
+            | ExprT::UnOp(_, a)
+            | ExprT::Cast(a, _)
+            | ExprT::ContainerOf(a, _, _)
             | ExprT::Live(a)
-            | ExprT::Old(a) => walk_expr(a, set),
-            ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+            | ExprT::Old(a)
+            | ExprT::Forall(_, _, a)
+            | ExprT::Exists(_, _, a)
+            | ExprT::UnionInit(_, _, a)
+            | ExprT::MallocArray(_, a)
+            | ExprT::CallocArray(_, a)
+            | ExprT::MallocFlex(_, a)
+            | ExprT::CallocFlex(_, a)
+            | ExprT::MemsetZero(_, a)
+            | ExprT::Free(a)
+            | ExprT::PreIncr(a)
+            | ExprT::PostIncr(a)
+            | ExprT::PreDecr(a)
+            | ExprT::PostDecr(a) => walk_expr(a, set),
+            // Two sub-expressions.
+            ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
                 walk_expr(a, set);
                 walk_expr(b, set);
             }
-            ExprT::Cond(a, b, c) => {
+            // Three sub-expressions.
+            ExprT::Cond(a, b, c) | ExprT::Memset(_, a, b, c) => {
                 walk_expr(a, set);
                 walk_expr(b, set);
                 walk_expr(c, set);
             }
+            // Sequences.
             ExprT::FnCall(_, args) => args.iter().for_each(|a| walk_expr(a, set)),
-            ExprT::FnPtrCall(f, args) => {
-                walk_expr(f, set);
+            ExprT::FnPtrCall(callee, args) => {
+                walk_expr(callee, set);
                 args.iter().for_each(|a| walk_expr(a, set));
             }
-            ExprT::Index(a, b) => {
-                walk_expr(a, set);
-                walk_expr(b, set);
-            }
-            ExprT::Member(a, _) => walk_expr(a, set),
-            _ => {}
+            ExprT::StructInit(_, fields) => fields.iter().for_each(|(_, a)| walk_expr(a, set)),
+            ExprT::ArrayInit { elems, .. } => elems.iter().for_each(|a| walk_expr(a, set)),
         }
     }
     fn walk_stmt(s: &Stmt, set: &mut HashSet<Rc<str>>) {
         match &s.val {
+            StmtT::Decl(_, _)
+            | StmtT::Break
+            | StmtT::Continue
+            | StmtT::Return(None)
+            | StmtT::GhostStmt(_)
+            | StmtT::Goto(_)
+            | StmtT::Label { .. }
+            | StmtT::Error => {}
+            StmtT::Call(e)
+            | StmtT::Assert(e)
+            | StmtT::Return(Some(e))
+            | StmtT::Let(_, _, e)
+            | StmtT::DeclStackArray { size: e, .. } => walk_expr(e, set),
             StmtT::Assign(l, r) => {
                 walk_expr(l, set);
                 walk_expr(r, set);
             }
-            StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => walk_expr(e, set),
             StmtT::If {
                 cond,
                 then_branch,
@@ -768,6 +810,18 @@ fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
                 then_branch.iter().for_each(|s| walk_stmt(s, set));
                 else_branch.iter().for_each(|s| walk_stmt(s, set));
             }
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ..
+            } => {
+                walk_expr(scrutinee, set);
+                branches
+                    .iter()
+                    .for_each(|b| b.body.iter().for_each(|s| walk_stmt(s, set)));
+                default_branch.iter().for_each(|s| walk_stmt(s, set));
+            }
             StmtT::While { cond, body, .. } => {
                 walk_expr(cond, set);
                 body.iter().for_each(|s| walk_stmt(s, set));
@@ -775,13 +829,25 @@ fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
             StmtT::GotoBlock { body, .. } => {
                 body.iter().for_each(|s| walk_stmt(s, set));
             }
-            _ => {}
         }
     }
     let mut set = HashSet::new();
     for decl in decls {
-        if let DeclT::FnDefn(fd) = &decl.val {
-            fd.body.iter().for_each(|s| walk_stmt(s, &mut set));
+        match &decl.val {
+            DeclT::FnDefn(fd) => fd.body.iter().for_each(|s| walk_stmt(s, &mut set)),
+            DeclT::GlobalVar(gv) => {
+                if let Some(init) = &gv.init {
+                    walk_expr(init, &mut set)
+                }
+            }
+            DeclT::LetDecl(ld) => walk_expr(&ld.body, &mut set),
+            DeclT::FnDecl(_)
+            | DeclT::Typedef(_)
+            | DeclT::StructDefn(_)
+            | DeclT::StructDecl(_)
+            | DeclT::UnionDefn(_)
+            | DeclT::IncludeDecl(_)
+            | DeclT::OpaqueTypeDecl(_) => {}
         }
     }
     set
