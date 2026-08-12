@@ -641,6 +641,31 @@ impl<'a> Elaborator<'a> {
                             return;
                         }
                     }
+                    // A function pointer compared against null. `func_ptr` is
+                    // abstract and has no equality, so both spellings (`f == 0`
+                    // and `f == NULL`, a cast of 0) are normalized to a zero
+                    // literal at the function-pointer type; emit lowers that to
+                    // `FuncPtr.is_null`. Without this the zero keeps its
+                    // `_specint`/`void*` type and `meet_type` rejects the
+                    // comparison.
+                    if let TypeT::FnPtr { .. } = &lhs_ty.val {
+                        let rhs = Rc::make_mut(rhs);
+                        let is_null_lit = match &rhs.val {
+                            ExprT::IntLit(n, _) => **n == BigInt::ZERO,
+                            ExprT::Cast(inner, cast_ty) => {
+                                matches!(&inner.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
+                                    && matches!(
+                                        &env.vtype_whnf(cast_ty.clone().into()).val,
+                                        TypeT::Pointer(_, _) | TypeT::FnPtr { .. }
+                                    )
+                            }
+                            _ => false,
+                        };
+                        if is_null_lit {
+                            rhs.val = ExprT::IntLit(Rc::new(BigInt::ZERO), lhs_ty.to_rc());
+                            return;
+                        }
+                    }
                     // Mixed pointer-kind equality (e.g. arrayptr == ref): the two
                     // abstract pointer types are not directly comparable, so
                     // erase both operands to raw `core_ref` addresses and compare
