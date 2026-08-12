@@ -229,6 +229,12 @@ impl<'a> Elaborator<'a> {
             TypeT::FlexArray(elem_ty) => {
                 self.elab_type(env, Rc::make_mut(elem_ty));
             }
+            TypeT::FnPtr { args, ret } => {
+                for a in args.iter_mut() {
+                    self.elab_type(env, Rc::make_mut(a));
+                }
+                self.elab_type(env, Rc::make_mut(ret));
+            }
             TypeT::Unknown => {}
             TypeT::Error => {}
             TypeT::Void => {}
@@ -478,6 +484,37 @@ impl<'a> Elaborator<'a> {
                 let param_types: Option<Vec<_>> = env
                     .lookup_fn(f)
                     .map(|fn_decl| fn_decl.args.iter().map(|arg| arg.ty.clone()).collect());
+                for (i, arg) in args.iter_mut().enumerate() {
+                    let expected_param = param_types
+                        .as_ref()
+                        .and_then(|pts| pts.get(i))
+                        .map(|t| t.as_ref());
+                    self.elab_rvalue(env, Rc::make_mut(arg), expected_param);
+                }
+                if let Some(param_types) = param_types {
+                    for (arg, param_ty) in args.iter_mut().zip(param_types.iter()) {
+                        let expected_ty = env.vtype_whnf(param_ty.clone().into());
+                        if let Ok(actual_ty) = env.infer_expr(arg) {
+                            if !env.vtype_eq(actual_ty, expected_ty.clone()) {
+                                cast_to(arg, (*expected_ty).clone().into());
+                            }
+                        }
+                    }
+                }
+            }
+            ExprT::FnRef(_) => {}
+            ExprT::FnPtrCall(f, args) => {
+                self.elab_rvalue(env, Rc::make_mut(f), None);
+                // Collect the callee's parameter types (tupled arg types of the
+                // FnPtr) to pass expected types into the arguments.
+                let param_types: Option<Vec<Rc<Type>>> = env
+                    .infer_expr(f)
+                    .ok()
+                    .map(|t| env.vtype_whnf(t))
+                    .and_then(|t| match &t.val {
+                        TypeT::FnPtr { args, .. } => Some(args.clone()),
+                        _ => None,
+                    });
                 for (i, arg) in args.iter_mut().enumerate() {
                     let expected_param = param_types
                         .as_ref()
@@ -782,9 +819,36 @@ impl<'a> Elaborator<'a> {
             ExprT::UnionInit(_, _, fld_val) => {
                 self.elab_rvalue(env, Rc::make_mut(fld_val), None);
             }
-            ExprT::ArrayInit { elems, .. } => {
-                for elem in elems {
+            ExprT::ArrayInit {
+                elem_ty,
+                elems,
+                is_static,
+            } => {
+                for elem in elems.iter_mut() {
                     self.elab_rvalue(env, Rc::make_mut(elem), None);
+                }
+                // Per C11 6.7.9p14/p21, a narrow string literal shorter than
+                // its destination fixed-size array implicitly zero-pads the
+                // trailing elements. `is_static` marks array literals derived
+                // from string literals (see `ArrayInit`'s doc comment); pad
+                // them out to the destination's declared length here, using
+                // the `expected` type threaded down from the enclosing
+                // declaration, assignment, or struct field.
+                if *is_static {
+                    if let Some(exp) = expected {
+                        if let TypeT::FixedArray(_, target_len) =
+                            env.vtype_whnf(exp.clone().into()).val
+                        {
+                            let target_len = target_len as usize;
+                            let pad_loc = rval.loc.clone();
+                            while elems.len() < target_len {
+                                elems.push(
+                                    ExprT::IntLit(Rc::new(BigInt::ZERO), elem_ty.clone())
+                                        .with_loc(pad_loc.clone()),
+                                );
+                            }
+                        }
+                    }
                 }
             }
             ExprT::Cond(cond, then_expr, else_expr) => {
@@ -826,6 +890,15 @@ impl<'a> Elaborator<'a> {
         match &mut stmt.val {
             StmtT::Call(rval) => self.elab_rvalue(env, Rc::make_mut(rval), None),
             StmtT::Decl(_, ty) => self.elab_type(env, Rc::make_mut(ty)),
+            StmtT::Let(_, ty, value) => {
+                self.elab_type(env, Rc::make_mut(ty));
+                self.elab_rvalue(env, Rc::make_mut(value), Some(ty));
+                if let Ok(value_ty) = env.infer_expr(value)
+                    && !env.vtype_eq(value_ty, ty.clone().into())
+                {
+                    cast_to(value, ty.clone());
+                }
+            }
             StmtT::DeclStackArray {
                 elem_type, size, ..
             } => {
@@ -880,6 +953,24 @@ impl<'a> Elaborator<'a> {
                 self.elab_slprops(env, Rc::make_mut(ensures));
                 self.elab_stmts(env, Rc::make_mut(then_branch));
                 self.elab_stmts(env, Rc::make_mut(else_branch));
+            }
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => {
+                self.elab_rvalue(env, Rc::make_mut(scrutinee), None);
+                let scrutinee_ty = env.infer_expr(scrutinee).ok();
+                for branch in Rc::make_mut(branches) {
+                    let branch = Rc::make_mut(branch);
+                    for pattern in Rc::make_mut(&mut branch.patterns) {
+                        self.elab_rvalue(env, Rc::make_mut(pattern), scrutinee_ty.as_deref());
+                    }
+                    self.elab_stmts(env, Rc::make_mut(&mut branch.body));
+                }
+                self.elab_stmts(env, Rc::make_mut(default_branch));
+                self.elab_slprops(env, Rc::make_mut(ensures));
             }
             StmtT::While {
                 cond,

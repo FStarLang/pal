@@ -109,6 +109,13 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
                 rename_expr_in_place(Rc::make_mut(arg), renames);
             }
         }
+        ExprT::FnRef(_) => {}
+        ExprT::FnPtrCall(f, args) => {
+            rename_expr_in_place(Rc::make_mut(f), renames);
+            for arg in args {
+                rename_expr_in_place(Rc::make_mut(arg), renames);
+            }
+        }
         ExprT::Cast(a, ty) => {
             rename_expr_in_place(Rc::make_mut(a), renames);
             rename_type_in_place(Rc::make_mut(ty), renames);
@@ -199,6 +206,12 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
             rename_type_in_place(Rc::make_mut(inner), renames);
             rename_type_in_place(Rc::make_mut(binder_ty), renames);
             rename_shadowed_expr(binder, pred, renames);
+        }
+        TypeT::FnPtr { args, ret } => {
+            for a in args {
+                rename_type_in_place(Rc::make_mut(a), renames);
+            }
+            rename_type_in_place(Rc::make_mut(ret), renames);
         }
         TypeT::Void
         | TypeT::Bool
@@ -539,6 +552,13 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
                 collect_refs_expr(a, out);
             }
         }
+        ExprT::FnRef(_) => {}
+        ExprT::FnPtrCall(f, args) => {
+            collect_refs_expr(f, out);
+            for a in args {
+                collect_refs_expr(a, out);
+            }
+        }
         ExprT::Cast(a, ty) => {
             collect_refs_expr(a, out);
             collect_type_refs(ty, out);
@@ -614,6 +634,10 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
     match &s.val {
         StmtT::Call(e) | StmtT::Assert(e) => collect_refs_expr(e, out),
         StmtT::Decl(_, ty) => collect_type_refs(ty, out),
+        StmtT::Let(_, ty, value) => {
+            collect_type_refs(ty, out);
+            collect_refs_expr(value, out);
+        }
         StmtT::DeclStackArray {
             elem_type, size, ..
         } => {
@@ -636,6 +660,24 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
             }
             for st in else_branch.iter() {
                 collect_refs_stmt(st, out);
+            }
+            exprs(ensures, out);
+        }
+        StmtT::Match {
+            scrutinee,
+            branches,
+            default_branch,
+            ensures,
+        } => {
+            collect_refs_expr(scrutinee, out);
+            for branch in branches.iter() {
+                exprs(&branch.patterns, out);
+                for stmt in branch.body.iter() {
+                    collect_refs_stmt(stmt, out);
+                }
+            }
+            for stmt in default_branch.iter() {
+                collect_refs_stmt(stmt, out);
             }
             exprs(ensures, out);
         }

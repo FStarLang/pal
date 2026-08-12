@@ -151,6 +151,16 @@ pub enum TypeT {
     SizeT,
     PtrdiffT,
     Pointer(Rc<Type>, PointerKind),
+    /// C pointer-to-function type. `int (*)(int, int)` becomes
+    /// `FnPtr { args: [int, int], ret: int }`.
+    ///
+    /// In the deep (physical) model a function-pointer value is stored as a real
+    /// `Pulse.Lib.C.FuncPtr.func_ptr ARG RET` value, where `ARG` is the tupled
+    /// argument type and `RET` the return type.
+    FnPtr {
+        args: Vec<Rc<Type>>,
+        ret: Rc<Type>,
+    },
     /// Fixed-size C array type `T[N]`. Decays to `Pointer(T, Array)` in
     /// function parameters (handled by the decay pass).
     FixedArray(Rc<Type>, u64),
@@ -307,6 +317,16 @@ pub enum ExprT {
     UnOp(UnOp, Rc<Expr>),
     BinOp(BinOp, Rc<Expr>, Rc<Expr>),
     FnCall(Rc<Ident>, Exprs),
+    /// Reference to a named top-level C function used as a value (function-to-
+    /// pointer decay `add` or address-of `&add`). In the deep model this becomes
+    /// the concrete `Pulse.Lib.C.FuncPtr.of_fn (pre_of func_<name>__fp)
+    /// (post_of func_<name>__fp) func_<name>__fp` value.
+    FnRef(Rc<Ident>),
+    /// Indirect call through a function-pointer value: `fptr(a, b)`. Holds the
+    /// callee expression and the argument list. Emitted as a
+    /// `Pulse.Lib.C.FuncPtr.call` through the read physical value, at the spec of
+    /// the function the pointer currently holds.
+    FnPtrCall(Rc<Expr>, Exprs),
     Cast(Rc<Expr>, Rc<Type>),
     /// `_container_of(ptr, struct T, field)` — recover a `ref` to the enclosing
     /// struct `T` from a `ref` to its `field` (the CONTAINING_RECORD / offsetof
@@ -362,7 +382,9 @@ pub enum ExprT {
     /// Lowered to Assign statement + value in elab pass.
     AssignExpr(Rc<Expr>, Rc<Expr>),
     /// `sizeof(T)` — translated to an opaque `c_sizeof T` call where `T`
-    /// is the F* type PAL uses to represent the C type being measured.
+    /// is the F* type PAL uses to represent the C type being measured. A
+    /// fixed-size array `T[N]` is measured as `c_sizeof (full_array_lspec T N)`,
+    /// whose size is related to the element size by the `c_sizeof_array` axiom.
     SizeOf(Rc<Type>),
     /// `_Alignof(T)` / `__alignof__(T)` — translated to `c_alignof T`.
     AlignOf(Rc<Type>),
@@ -374,10 +396,18 @@ pub type Ident = Ast<Rc<IdentT>>;
 
 pub type Stmt = Ast<StmtT>;
 pub type Stmts = Vec<Rc<Stmt>>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct MatchBranch {
+    pub patterns: Rc<Exprs>,
+    pub body: Rc<Stmts>,
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum StmtT {
     Call(Rc<Expr>),
     Decl(Rc<Ident>, Rc<Type>),
+    Let(Rc<Ident>, Rc<Type>, Rc<Expr>),
     DeclStackArray {
         name: Rc<Ident>,
         elem_type: Rc<Type>,
@@ -388,6 +418,12 @@ pub enum StmtT {
         cond: Rc<Expr>,
         then_branch: Rc<Stmts>,
         else_branch: Rc<Stmts>,
+        ensures: Rc<Exprs>,
+    },
+    Match {
+        scrutinee: Rc<Expr>,
+        branches: Rc<Vec<Rc<MatchBranch>>>,
+        default_branch: Rc<Stmts>,
         ensures: Rc<Exprs>,
     },
     While {

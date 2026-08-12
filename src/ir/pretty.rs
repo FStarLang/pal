@@ -138,6 +138,15 @@ impl PrettyIR for TypeT {
             TypeT::Pointer(ty, PointerKind::Unknown) => ty.to_doc().append(RcDoc::text("[?]")),
             TypeT::FixedArray(ty, len) => ty.to_doc().append(RcDoc::text(format!("[{}]", len))),
             TypeT::FlexArray(ty) => ty.to_doc().append(RcDoc::text("[]")),
+            TypeT::FnPtr { args, ret } => ret
+                .to_doc()
+                .append(RcDoc::text(" (*)("))
+                .append(RcDoc::intersperse(
+                    args.iter().map(|a| a.to_doc()),
+                    RcDoc::text(", "),
+                ))
+                .append(RcDoc::text(")"))
+                .group(),
             TypeT::SpecInt => RcDoc::text("_specint"),
             TypeT::SpecNat => RcDoc::text("_specnat"),
             TypeT::SLProp => RcDoc::text("_slprop"),
@@ -226,6 +235,16 @@ impl PrettyIR for ExprT {
                 .nest(2)
                 .group(),
             ExprT::FnCall(f, args) => f
+                .to_doc()
+                .append("(")
+                .append(RcDoc::intersperse(
+                    args.iter().map(|arg| arg.to_doc()),
+                    RcDoc::text(",").append(RcDoc::line()),
+                ))
+                .append(")")
+                .group(),
+            ExprT::FnRef(f) => RcDoc::text("&").append(f.to_doc()),
+            ExprT::FnPtrCall(f, args) => f
                 .to_doc()
                 .append("(")
                 .append(RcDoc::intersperse(
@@ -436,6 +455,16 @@ impl PrettyIR for StmtT {
                 .append(";")
                 .nest(2)
                 .group(),
+            StmtT::Let(x, ty, value) => RcDoc::text("let ")
+                .append(x.to_doc())
+                .append(": ")
+                .append(ty.to_doc())
+                .append(" =")
+                .append(RcDoc::line())
+                .append(value.to_doc())
+                .append(";")
+                .nest(2)
+                .group(),
             StmtT::DeclStackArray {
                 name,
                 elem_type,
@@ -480,6 +509,42 @@ impl PrettyIR for StmtT {
                 .append(pretty_block(then_branch))
                 .append(" else ")
                 .append(pretty_block(else_branch))
+                .group(),
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => RcDoc::text("match (")
+                .append(scrutinee.to_doc())
+                .append(")")
+                .append(RcDoc::concat(ensures.iter().map(|e| {
+                    RcDoc::line().append(
+                        RcDoc::text("_ensures(")
+                            .append(e.to_doc())
+                            .append(")")
+                            .group(),
+                    )
+                })))
+                .append(" {")
+                .append(RcDoc::concat(branches.iter().map(|branch| {
+                    RcDoc::line()
+                        .append(RcDoc::intersperse(
+                            branch.patterns.iter().map(|pattern| pattern.to_doc()),
+                            RcDoc::text(", "),
+                        ))
+                        .append(":")
+                        .append(RcDoc::line())
+                        .append(branch.body.to_doc())
+                        .nest(2)
+                })))
+                .append(RcDoc::line())
+                .append("default:")
+                .append(RcDoc::line())
+                .append(default_branch.to_doc())
+                .nest(2)
+                .append(RcDoc::line())
+                .append("}")
                 .group(),
             StmtT::While {
                 cond,

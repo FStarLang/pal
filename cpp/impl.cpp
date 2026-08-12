@@ -8,6 +8,7 @@
 #include <optional>
 #include <sstream>
 #include <unordered_set>
+#include <vector>
 
 using namespace clang;
 using namespace clang::tooling;
@@ -156,6 +157,12 @@ public:
 Rc<rust::num_bigint::BigInt> toBigInt(llvm::APInt const &n) {
   llvm::SmallString<16> out;
   n.toStringSigned(out);
+  return mk_bigint(toStr(out));
+}
+
+Rc<rust::num_bigint::BigInt> toBigInt(llvm::APSInt const &n) {
+  llvm::SmallString<16> out;
+  n.toString(out);
   return mk_bigint(toStr(out));
 }
 
@@ -374,6 +381,17 @@ public:
     }
   }
 
+  Rc<ir::Type> trFnPtrType(const FunctionProtoType *proto, SourceRange range,
+                           Rc<ir::SourceInfo> loc,
+                           AnonNameGen *liftStructs = nullptr) {
+    auto args = Vec<Rc<ir::Type>>::new_();
+    for (auto param : proto->getParamTypes()) {
+      args.push(trQualType(param, range, liftStructs));
+    }
+    auto ret = trQualType(proto->getReturnType(), range, liftStructs);
+    return mk_type_fnptr(std::move(loc), std::move(args), std::move(ret));
+  }
+
   Rc<ir::Type> trQualType(QualType t, SourceRange range,
                           AnonNameGen *liftStructs = nullptr) {
     t = t.IgnoreParens();
@@ -381,6 +399,10 @@ public:
 
     if (t.getAsString() == "size_t") {
       return mk_sizet(std::move(loc));
+    } else if (auto typeOf = dyn_cast<TypeOfType>(t)) {
+      return trQualType(typeOf->desugar(), range, liftStructs);
+    } else if (auto typeOfExpr = dyn_cast<TypeOfExprType>(t)) {
+      return trQualType(typeOfExpr->desugar(), range, liftStructs);
     } else if (auto tydef = dyn_cast<TypedefType>(t)) {
       auto id = ctx.mk_ident(toStr(tydef->getDecl()->getName()), loc.clone());
       return mk_type_typedef(std::move(loc), std::move(id));
@@ -389,9 +411,19 @@ public:
       return trQualType(elab->desugar(), range, liftStructs);
 #endif
     } else if (auto ptr = dyn_cast<PointerType>(t)) {
+      // Pointer to a (prototyped) function: `R (*)(A0, A1, ...)`. Modeled as a
+      // dedicated function-pointer IR type with the argument types collected in
+      // order and tupled on emission.
+      if (auto proto = ptr->getPointeeType()->getAs<FunctionProtoType>()) {
+        return trFnPtrType(proto, range, loc.clone(), liftStructs);
+      }
       return mk_pointer_unknown(
           std::move(loc),
           trQualType(ptr->getPointeeType(), /*TODO*/ range, liftStructs));
+    } else if (auto proto = t->getAs<FunctionProtoType>()) {
+      // A bare (undecayed) function type reached as a value type — treat the
+      // function-to-pointer decay result the same as a function pointer.
+      return trFnPtrType(proto, range, std::move(loc), liftStructs);
     } else if (auto adj = dyn_cast<AdjustedType>(t)) {
       return trQualType(adj->getOriginalType(), range, liftStructs);
     } else if (auto cat = dyn_cast<ConstantArrayType>(t)) {
@@ -464,7 +496,13 @@ public:
     return mk_type_err(std::move(loc));
   }
 
-  Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty) {
+  Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty,
+                           QualType declQt = QualType(),
+                           SourceRange declRange = SourceRange()) {
+    (void)declQt;
+    (void)declRange;
+    bool sawNullable = false;
+    std::optional<Rc<ir::SourceInfo>> nullableLoc;
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
       if (auto ann = dyn_cast<AnnotateAttr>(*it)) {
         auto loc = getRange(ann->getRange());
@@ -502,6 +540,9 @@ public:
           ty = mk_type_plain(std::move(loc), std::move(ty));
         } else if (ann->getAnnotation() == "pal-nullable" &&
                    ann->args_size() == 0) {
+          sawNullable = true;
+          if (!nullableLoc)
+            nullableLoc = getRange(ann->getRange());
           ty = mk_type_nullable(std::move(loc), std::move(ty));
         } else if (ann->getAnnotation() == "pal-array" &&
                    ann->args_size() == 0) {
@@ -515,6 +556,8 @@ public:
         }
       }
     }
+    (void)sawNullable;
+    (void)nullableLoc;
     return ty;
   }
 
@@ -646,6 +689,17 @@ public:
       // the emitter fills it with its default (a length-0 array).
       if (field->getType()->isIncompleteArrayType())
         continue;
+      // A field omitted from a designated initializer (e.g. `{ .initialized =
+      // 42 }` leaving other fields unset) is represented by Clang's semantic
+      // InitListExpr as an ImplicitValueInitExpr placeholder. Per C11
+      // 6.7.9p21, such fields are implicitly zero-initialized, the same as an
+      // object of static storage duration. Skip translating the placeholder
+      // itself (trRValue has no case for it, so it would otherwise become an
+      // error/admit()) and let the emitter fill it with its type's zero/null
+      // default, exactly as it does for a field absent entirely from the
+      // initializer list.
+      if (isa<ImplicitValueInitExpr>(fieldInit))
+        continue;
       auto floc = getRange(fieldInit->getSourceRange());
       auto fieldName =
           ctx.mk_ident(toStr(fieldNameStr(field)), std::move(floc));
@@ -690,6 +744,11 @@ public:
         return mk_rvalue_lvalue(std::move(loc), trLValue(ic->getSubExpr()));
 
       case CK_NoOp:
+        return trRValue(ic->getSubExpr());
+      case CK_FunctionToPointerDecay:
+        // `add` used as a value decays to a function pointer; translate the
+        // underlying function reference directly (the DeclRefExpr arm below
+        // produces a FnRef for a FunctionDecl).
         return trRValue(ic->getSubExpr());
       case CK_ArrayToPointerDecay: {
         auto *subExpr = ic->getSubExpr()->IgnoreParenImpCasts();
@@ -950,15 +1009,21 @@ public:
           }
         }
 
-        // Detect a cast between a struct pointer and a pointer to its FIRST
-        // field, in either direction. C guarantees this round-trips only for
-        // the initial member (C17 6.7.2.1p17): "A pointer to a structure
-        // object, suitably converted, points to its initial member ... and
-        // vice versa. There may be unnamed padding within a structure object,
-        // but not at its beginning." A `field -> struct` cast lowers to the
-        // per-field container projection (the node `_container_of` produces); a
-        // `struct -> field` cast lowers to `&base->firstfield`. Both reuse
-        // machinery PAL already emits, so nothing downstream changes.
+        // Detect a cast between a struct pointer and a pointer to one of its
+        // transitively-initial members, in either direction. C guarantees a
+        // struct pointer round-trips with a pointer to its initial member
+        // (C17 6.7.2.1p17): "A pointer to a structure object, suitably
+        // converted, points to its initial member ... and vice versa. There
+        // may be unnamed padding within a structure object, but not at its
+        // beginning." Applying this recursively, a struct pointer is
+        // interconvertible with a pointer to the first field of the first
+        // field of ... its first field, arbitrarily deep. We recover this
+        // chain of initial members and lower a `field -> struct` cast to a
+        // nest of per-field container projections (the node `_container_of`
+        // produces) and a `struct -> field` cast to a nest of member accesses
+        // `&base->f0.f1...`. Both reuse machinery PAL already emits, so
+        // nothing downstream changes. A chain of length one reproduces the
+        // single-hop first-field cast exactly.
         if (ic->getCastKind() == CK_BitCast) {
           QualType dstTy = ic->getType();
           QualType srcTy = ic->getSubExpr()->getType();
@@ -966,6 +1031,9 @@ public:
             QualType dstPointee = dstTy->getPointeeType();
             QualType srcPointee = srcTy->getPointeeType();
 
+            auto sameType = [&](QualType a, QualType b) {
+              return astCtx->hasSameUnqualifiedType(a, b);
+            };
             // The non-bitfield first field of a struct pointee, or null.
             auto firstField = [&](QualType pointee) -> FieldDecl * {
               auto *rt = pointee->getAs<RecordType>();
@@ -979,36 +1047,66 @@ public:
                 return nullptr;
               return *it;
             };
-            auto sameType = [&](QualType a, QualType b) {
-              return astCtx->hasSameUnqualifiedType(a, b);
+            // The chain of initial members descending from `from` until one
+            // has type `target`, e.g. [outer::in, inner::x] for `outer` down
+            // to `int`. Empty if `target` is not a transitively-initial member
+            // of `from` (a non-struct/bitfield is reached first, or `from`
+            // already equals `target`). Depth-capped as a safety net against
+            // pathological (e.g. recursive) type graphs.
+            auto firstFieldChain =
+                [&](QualType from,
+                    QualType target) -> std::vector<FieldDecl *> {
+              std::vector<FieldDecl *> chain;
+              QualType cur = from;
+              for (int depth = 0; depth < 32; ++depth) {
+                if (sameType(cur, target))
+                  return chain;
+                FieldDecl *f = firstField(cur);
+                if (!f)
+                  return {};
+                chain.push_back(f);
+                if (sameType(f->getType(), target))
+                  return chain;
+                cur = f->getType();
+              }
+              return {};
             };
 
-            FieldDecl *toStructField = firstField(dstPointee);
-            bool fieldToStruct =
-                toStructField && sameType(srcPointee, toStructField->getType());
-            FieldDecl *toFieldField = firstField(srcPointee);
-            bool structToField =
-                toFieldField && sameType(dstPointee, toFieldField->getType());
+            // (struct S *)p  where p : F *, F transitively-initial member of S.
+            auto revChain = firstFieldChain(dstPointee, srcPointee);
+            // (F *)s  where s : struct S *, F transitively-initial member of S.
+            auto fwdChain = firstFieldChain(srcPointee, dstPointee);
 
-            // (struct S *)p  where p : F *, F = first field of S.
-            if (fieldToStruct && !structToField) {
-              auto structTy =
-                  trQualType(astCtx->getRecordType(toStructField->getParent()),
-                             ic->getSourceRange());
-              auto fieldId = ctx.mk_ident(toStr(fieldNameStr(toStructField)),
-                                          getRange(ic->getSourceRange()));
-              return mk_container_of(std::move(loc), trRValue(ic->getSubExpr()),
-                                     std::move(structTy), std::move(fieldId));
+            // At most one direction can match: both would require a cycle in
+            // the by-value initial-member graph, impossible as sizes strictly
+            // decrease. The `.empty()` guards are defensive.
+            if (!revChain.empty() && fwdChain.empty()) {
+              // Nest container projections innermost-first: the deepest field
+              // (whose parent owns `p`) is applied first.
+              auto expr = trRValue(ic->getSubExpr());
+              for (auto it = revChain.rbegin(); it != revChain.rend(); ++it) {
+                FieldDecl *f = *it;
+                auto structTy =
+                    trQualType(astCtx->getRecordType(f->getParent()),
+                               ic->getSourceRange());
+                auto fieldId = ctx.mk_ident(toStr(fieldNameStr(f)),
+                                            getRange(ic->getSourceRange()));
+                expr = mk_container_of(loc.clone(), std::move(expr),
+                                       std::move(structTy), std::move(fieldId));
+              }
+              return expr;
             }
 
-            // (F *)s  where s : struct S *, F = first field of S.
-            if (structToField && !fieldToStruct) {
-              auto fieldId = ctx.mk_ident(toStr(fieldNameStr(toFieldField)),
-                                          getRange(ic->getSourceRange()));
+            if (!fwdChain.empty() && revChain.empty()) {
+              // Nest member accesses outermost-first: &(*s).f0.f1...
               auto base = mk_deref(loc.clone(), trRValue(ic->getSubExpr()));
-              auto member = mk_lvalue_member(loc.clone(), std::move(base),
-                                             std::move(fieldId));
-              return mk_rvalue_ref(std::move(loc), std::move(member));
+              for (FieldDecl *f : fwdChain) {
+                auto fieldId = ctx.mk_ident(toStr(fieldNameStr(f)),
+                                            getRange(ic->getSourceRange()));
+                base = mk_lvalue_member(loc.clone(), std::move(base),
+                                        std::move(fieldId));
+              }
+              return mk_rvalue_ref(std::move(loc), std::move(base));
             }
           }
         }
@@ -1076,6 +1174,16 @@ public:
     } else if (auto uo = dyn_cast<UnaryOperator>(e)) {
       switch (uo->getOpcode()) {
       case UO_AddrOf:
+        // `&func` where `func` is a function: produce a function reference
+        // rather than address-of an lvalue. `&func` and bare `func` (decay)
+        // both denote the same function-pointer value.
+        if (auto *dre = dyn_cast<DeclRefExpr>(
+                uo->getSubExpr()->IgnoreParenImpCasts())) {
+          if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
+            auto id = ctx.mk_ident(toStr(fd->getName()), loc.clone());
+            return mk_rvalue_fnref(std::move(loc), std::move(id));
+          }
+        }
         return mk_rvalue_ref(std::move(loc), trLValue(uo->getSubExpr()));
 
       case UO_LNot:
@@ -1314,6 +1422,17 @@ public:
           args.push(trRValue(arg));
         }
         return mk_rvalue_fncall(std::move(loc), std::move(fn), std::move(args));
+      } else {
+        // Indirect call through a function-pointer value: `fptr(a, b, ...)`.
+        // Clang gives no direct callee; the callee is an rvalue of
+        // function-pointer type.
+        auto callee = trRValue(c->getCallee());
+        auto args = Vec<Rc<ir::Expr>>::new_();
+        for (auto arg : c->arguments()) {
+          args.push(trRValue(arg));
+        }
+        return mk_rvalue_fnptr_call(std::move(loc), std::move(callee),
+                                    std::move(args));
       }
     } else if (auto *cl = dyn_cast<CompoundLiteralExpr>(e)) {
       auto *init = dyn_cast<InitListExpr>(cl->getInitializer());
@@ -1336,6 +1455,12 @@ public:
         val.toString(valStr, 10, val.isSigned());
         return mk_int_lit(std::move(loc), mk_bigint(toStr(StringRef(valStr))),
                           trQualType(e->getType(), e->getSourceRange()));
+      }
+      // A bare reference to a function (function-to-pointer decay): produce a
+      // function reference, identical to `&func`.
+      if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
+        auto id = ctx.mk_ident(toStr(fd->getName()), loc.clone());
+        return mk_rvalue_fnref(std::move(loc), std::move(id));
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
       return mk_rvalue_lvalue(std::move(loc), trLValue(e));
@@ -1743,38 +1868,13 @@ public:
       auto scrutTy =
           trQualType(sw->getCond()->getType(), sw->getCond()->getSourceRange());
 
-      // Create scrutinee temp variable
+      // Bind the scrutinee once as an immutable value.
       static int switchCounter = 0;
-      auto scrutName = "__switch_scrut_" + std::to_string(switchCounter);
+      auto switchIndex = switchCounter++;
+      auto scrutName = "__switch_scrut_" + std::to_string(switchIndex);
       auto scrutId = ctx.mk_ident(toStr(scrutName), loc.clone());
-      stmts.push(mk_var_decl(loc.clone(), scrutId.clone(), std::move(scrutTy)));
-      stmts.push(mk_assign(loc.clone(),
-                           mk_lvalue_var(loc.clone(), scrutId.clone()),
-                           std::move(scrutRval)));
-
-      // Create hit and brk flag variables
-      auto hitName = "__switch_hit_" + std::to_string(switchCounter);
-      auto brkName = "__switch_brk_" + std::to_string(switchCounter);
-      switchCounter++;
-      auto hitId = ctx.mk_ident(toStr(hitName), loc.clone());
-      auto brkId = ctx.mk_ident(toStr(brkName), loc.clone());
-      auto boolTy = mk_bool_type(loc.clone());
-
-      stmts.push(
-          mk_var_decl(loc.clone(), hitId.clone(), mk_bool_type(loc.clone())));
-      stmts.push(mk_assign(loc.clone(),
-                           mk_lvalue_var(loc.clone(), hitId.clone()),
-                           mk_bool_lit(loc.clone(), false)));
-      stmts.push(
-          mk_var_decl(loc.clone(), brkId.clone(), mk_bool_type(loc.clone())));
-      stmts.push(mk_assign(loc.clone(),
-                           mk_lvalue_var(loc.clone(), brkId.clone()),
-                           mk_bool_lit(loc.clone(), false)));
-
-      // Set switchBreakId so BreakStmt sets flag
-      auto savedSwitchBreak = switchBreakId;
-      auto brkIdHeap = new Rc<ir::Ident>(brkId.clone());
-      switchBreakId = brkIdHeap;
+      stmts.push(mk_let_stmt(loc.clone(), scrutId.clone(), scrutTy.clone(),
+                             std::move(scrutRval)));
 
       // Collect cases from the switch body. A switch postcondition is used as
       // the join invariant for every desugared case test.
@@ -1792,33 +1892,8 @@ public:
       if (!comp) {
         reportUnsupported(body->getSourceRange(), loc,
                           "switch body must be a compound statement", "");
-        delete switchBreakId;
-        switchBreakId = savedSwitchBreak;
         return {};
       }
-      auto caseEnss = [&]() {
-        auto enss = Vec<Rc<ir::Expr>>::new_();
-        if (!switchEnss.empty()) {
-          auto combined = switchEnss.front().clone();
-          for (size_t i = 1; i < switchEnss.size(); i++) {
-            combined =
-                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
-                                std::move(combined), switchEnss[i].clone());
-          }
-          combined = mk_rvalue_binop(
-              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
-              mk_live(loc.clone(),
-                      mk_lvalue_var(loc.clone(), scrutId.clone())));
-          combined = mk_rvalue_binop(
-              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
-              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), hitId.clone())));
-          combined = mk_rvalue_binop(
-              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
-              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), brkId.clone())));
-          enss.push(std::move(combined));
-        }
-        return enss;
-      };
 
       auto containsSwitchBreak = [&](auto &self, Stmt *s) -> bool {
         if (dyn_cast<BreakStmt>(s))
@@ -1882,15 +1957,140 @@ public:
         }
       }
 
+      // A switch whose cases all end in a direct break has no fall-through.
+      // Emit it as one match and omit the terminal breaks.
+      bool hasOnlyTerminalBreaks = !groups.empty();
+      std::vector<SwitchGroup *> cases;
+      SwitchGroup *defaultGroup = nullptr;
+      for (auto &group : groups) {
+        bool hasTerminalBreak =
+            !group.body.empty() && isa<BreakStmt>(group.body.back());
+        if (!hasTerminalBreak) {
+          hasOnlyTerminalBreaks = false;
+          break;
+        }
+
+        size_t bodySize = group.body.size() - 1;
+        if (group.isDefault) {
+          defaultGroup = &group;
+        } else {
+          cases.push_back(&group);
+        }
+        for (size_t i = 0; i < bodySize; i++) {
+          if (containsSwitchBreak(containsSwitchBreak, group.body[i])) {
+            hasOnlyTerminalBreaks = false;
+            break;
+          }
+        }
+        if (!hasOnlyTerminalBreaks)
+          break;
+      }
+
+      if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
+        auto makeBody = [&](SwitchGroup &group) {
+          auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+          size_t bodySize = group.body.size() - 1;
+          for (size_t i = 0; i < bodySize; i++)
+            trStmt(bodyStmts, group.body[i]);
+          return bodyStmts;
+        };
+
+        bool canUseMatch = true;
+        for (auto *group : cases) {
+          for (auto *caseValue : group->caseValues) {
+            Expr::EvalResult result;
+            if (!caseValue->EvaluateAsInt(result, *astCtx) ||
+                !result.Val.isInt()) {
+              canUseMatch = false;
+              break;
+            }
+          }
+          if (!canUseMatch)
+            break;
+        }
+
+        if (canUseMatch) {
+          auto matchBranches = Vec<Rc<ir::MatchBranch>>::new_();
+          for (auto *group : cases) {
+            auto patterns = Vec<Rc<ir::Expr>>::new_();
+            for (auto *caseValue : group->caseValues) {
+              Expr::EvalResult result;
+              bool evaluated = caseValue->EvaluateAsInt(result, *astCtx);
+              assert(evaluated && result.Val.isInt());
+              patterns.push(mk_int_lit(getRange(caseValue->getSourceRange()),
+                                       toBigInt(result.Val.getInt()),
+                                       scrutTy.clone()));
+            }
+            matchBranches.push(
+                mk_match_branch(std::move(patterns), makeBody(*group)));
+          }
+
+          auto defaultBody = defaultGroup ? makeBody(*defaultGroup)
+                                          : Vec<Rc<ir::Stmt>>::new_();
+          auto matchEnss = Vec<Rc<ir::Expr>>::new_();
+          auto combined = switchEnss.front().clone();
+          for (size_t i = 1; i < switchEnss.size(); i++) {
+            combined =
+                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
+                                std::move(combined), switchEnss[i].clone());
+          }
+          matchEnss.push(std::move(combined));
+          stmts.push(mk_match(loc.clone(),
+                              mk_lvalue_var(loc.clone(), scrutId.clone()),
+                              std::move(matchBranches), std::move(defaultBody),
+                              std::move(matchEnss)));
+          return {};
+        }
+      }
+
+      // General switches retain explicit hit and break state to model
+      // fall-through.
+      auto hitName = "__switch_hit_" + std::to_string(switchIndex);
+      auto brkName = "__switch_brk_" + std::to_string(switchIndex);
+      auto hitId = ctx.mk_ident(toStr(hitName), loc.clone());
+      auto brkId = ctx.mk_ident(toStr(brkName), loc.clone());
+
+      stmts.push(
+          mk_var_decl(loc.clone(), hitId.clone(), mk_bool_type(loc.clone())));
+      stmts.push(mk_assign(loc.clone(),
+                           mk_lvalue_var(loc.clone(), hitId.clone()),
+                           mk_bool_lit(loc.clone(), false)));
+      stmts.push(
+          mk_var_decl(loc.clone(), brkId.clone(), mk_bool_type(loc.clone())));
+      stmts.push(mk_assign(loc.clone(),
+                           mk_lvalue_var(loc.clone(), brkId.clone()),
+                           mk_bool_lit(loc.clone(), false)));
+
+      auto savedSwitchBreak = switchBreakId;
+      switchBreakId = new Rc<ir::Ident>(brkId.clone());
+
+      auto caseEnss = [&]() {
+        auto enss = Vec<Rc<ir::Expr>>::new_();
+        if (!switchEnss.empty()) {
+          auto combined = switchEnss.front().clone();
+          for (size_t i = 1; i < switchEnss.size(); i++) {
+            combined =
+                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
+                                std::move(combined), switchEnss[i].clone());
+          }
+          combined = mk_rvalue_binop(
+              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
+              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), hitId.clone())));
+          combined = mk_rvalue_binop(
+              loc.clone(), ir::BinOp::LogAnd(), std::move(combined),
+              mk_live(loc.clone(), mk_lvalue_var(loc.clone(), brkId.clone())));
+          enss.push(std::move(combined));
+        }
+        return enss;
+      };
+
       for (auto &group : groups) {
         auto childLoc = getRange(group.label->getSourceRange());
         if (!group.isDefault) {
           // Build match condition: scrut == v1 || scrut == v2 || ...
           Rc<ir::Expr> matchCond = mk_bool_lit(childLoc.clone(), false);
           for (auto *cv : group.caseValues) {
-            auto scrutRead = mk_rvalue_lvalue(
-                childLoc.clone(),
-                mk_lvalue_var(childLoc.clone(), scrutId.clone()));
+            auto scrutRead = mk_lvalue_var(childLoc.clone(), scrutId.clone());
             auto caseVal = trRValue(cv->IgnoreParenImpCasts());
             auto eq = mk_rvalue_binop(childLoc.clone(), ir::BinOp::Eq(),
                                       std::move(scrutRead), std::move(caseVal));
@@ -2290,7 +2490,8 @@ public:
           DeclBuilder::new_(getRange(FD->getSourceRange()), ident.clone());
       for (auto param : FD->parameters()) {
         auto ty = trQualType(param->getType(), param->getSourceRange());
-        ty = trTypeAttrs(param->getAttrs(), std::move(ty));
+        ty = trTypeAttrs(param->getAttrs(), std::move(ty), param->getType(),
+                         param->getSourceRange());
         auto mode = hasConsumesAttr(param->getAttrs())
                         ? ir::ParamMode::Consumed()
                     : hasOutAttr(param->getAttrs())

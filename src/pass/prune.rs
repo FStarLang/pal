@@ -100,6 +100,12 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
         TypeT::FlexArray(elem_ty) => {
             scan_type(deps, elem_ty);
         }
+        TypeT::FnPtr { args, ret } => {
+            for a in args {
+                scan_type(deps, a);
+            }
+            scan_type(deps, ret);
+        }
         TypeT::Unknown => {}
         TypeT::Error => {}
         TypeT::Void => {}
@@ -204,6 +210,13 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             deps.insert(DeclName::Fn(f.val.clone()));
             scan_exprs(deps, args);
         }
+        ExprT::FnRef(f) => {
+            deps.insert(DeclName::Fn(f.val.clone()));
+        }
+        ExprT::FnPtrCall(f, args) => {
+            scan_expr(deps, f);
+            scan_exprs(deps, args);
+        }
         ExprT::BoolLit(_) => {}
         ExprT::Live(v) => scan_expr(deps, v),
         ExprT::Old(v) => scan_expr(deps, v),
@@ -249,6 +262,10 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
     match &stmt.val {
         StmtT::Call(v) => scan_expr(deps, v),
         StmtT::Decl(_name, ty) => scan_type(deps, ty),
+        StmtT::Let(_name, ty, value) => {
+            scan_type(deps, ty);
+            scan_expr(deps, value);
+        }
         StmtT::DeclStackArray {
             elem_type, size, ..
         } => {
@@ -269,6 +286,20 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
             scan_exprs(deps, ensures);
             scan_stmts(deps, then_branch);
             scan_stmts(deps, else_branch)
+        }
+        StmtT::Match {
+            scrutinee,
+            branches,
+            default_branch,
+            ensures,
+        } => {
+            scan_expr(deps, scrutinee);
+            for branch in &**branches {
+                scan_exprs(deps, &branch.patterns);
+                scan_stmts(deps, &branch.body);
+            }
+            scan_stmts(deps, default_branch);
+            scan_exprs(deps, ensures);
         }
         StmtT::While {
             cond,

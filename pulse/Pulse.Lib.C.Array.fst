@@ -80,6 +80,22 @@ fn array_read_all u#a (#a: Type u#a) (x: array a)
   admit ()
 }
 
+ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
+      (a: array t) (#y: erased (array_spec t))
+  requires array_pts_to a 1.0R y ** pure (array_spec_full_mask (reveal y))
+  ensures array_pts_to_uninit' a
+{
+  ()
+}
+
+ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
+  requires array_pts_to_uninit' a
+  returns  y : erased (array_spec t)
+  ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
+{
+  observe (array_pts_to_uninit a)
+}
+
 let freeable_array #a (r: array a) : slprop =
   pure (A.is_full_array r)
 
@@ -237,7 +253,7 @@ fn stack_free_array_full u#a (#a: Type u#a) (r: array a) (#s: erased (full_array
 fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} (sz:SZ.t)
   returns r : array a
   ensures freeable_array r
-  ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SizeT.v sz) zero_default)
+  ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SZ.v sz) zero_default)
 {
   let r = A.alloc (zero_default #a) sz;
   A.to_mask r;
@@ -289,22 +305,6 @@ ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: a
   unfold array_pts_to r p v;
   A.pts_to_mask_not_null r;
   fold array_pts_to r p v;
-}
-
-ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
-      (a: array t) (#y: erased (array_spec t))
-  requires array_pts_to a 1.0R y ** pure (array_spec_full_mask (reveal y))
-  ensures array_pts_to_uninit' a
-{
-  ()
-}
-
-ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
-  requires array_pts_to_uninit' a
-  returns  y : erased (array_spec t)
-  ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
-{
-  observe (array_pts_to_uninit a)
 }
 
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)

@@ -259,6 +259,70 @@ impl Env {
         self.globals.unions.get(&ident.val)
     }
 
+    /// Whether a value of `ty` occupies storage, i.e. `sizeof(ty) > 0`.
+    ///
+    /// Almost everything in C does; the exceptions are all GNU zero-size
+    /// extensions, and all of them are structural, so this is derivable from
+    /// the IR rather than something the frontend has to tell us:
+    ///   - a zero-length array `T[0]`, or an array of a zero-size element type;
+    ///   - a flexible array member `T[]`, which contributes no storage;
+    ///   - a struct or union whose fields are all themselves zero-size (in
+    ///     particular one with no fields at all);
+    ///   - the anonymous `int :0;` bit-field, which is alignment-only.
+    ///
+    /// Termination: the only recursive cases are arrays and by-value struct or
+    /// union fields, and C forbids a type from containing itself by value, so
+    /// the recursion is well-founded. Pointers stop it immediately.
+    pub fn occupies_space(&self, ty: MaybeRc<Type>) -> bool {
+        match &self.vtype_whnf(ty).val {
+            TypeT::Bool
+            | TypeT::Int { .. }
+            | TypeT::Float { .. }
+            | TypeT::SizeT
+            | TypeT::PtrdiffT
+            | TypeT::Pointer(..)
+            | TypeT::FnPtr { .. } => true,
+
+            TypeT::FixedArray(elem, len) => *len > 0 && self.occupies_space(elem.clone().into()),
+            TypeT::FlexArray(_) | TypeT::Void => false,
+
+            TypeT::TypeRef(TypeRefKind::Struct(name)) => self
+                .lookup_struct(name)
+                .is_some_and(|s| s.fields.iter().any(|f| self.field_occupies_space(f))),
+            TypeT::TypeRef(TypeRefKind::Union(name)) => self
+                .lookup_union(name)
+                .is_some_and(|u| u.fields.iter().any(|f| self.field_occupies_space(f))),
+
+            // Spec-only types have no runtime representation, and a typedef
+            // that `vtype_whnf` could not resolve is not one we should claim a
+            // size for.
+            TypeT::SpecInt
+            | TypeT::SpecNat
+            | TypeT::SLProp
+            | TypeT::TypeRef(TypeRefKind::Typedef(_))
+            | TypeT::Unknown
+            | TypeT::Error => false,
+
+            // Already peeled by `vtype_whnf`.
+            TypeT::Refine(..)
+            | TypeT::RefineAlways(..)
+            | TypeT::RefineUninit(..)
+            | TypeT::RefineValue(..)
+            | TypeT::Plain(_)
+            | TypeT::Nullable(_) => false,
+        }
+    }
+
+    /// Whether `field` contributes storage to its enclosing struct or union.
+    fn field_occupies_space(&self, field: &Field) -> bool {
+        match &field.val {
+            FieldT::Plain { ty, .. } => self.occupies_space(ty.clone().into()),
+            // A named bit-field must have positive width; only the anonymous
+            // `int :0;` alignment marker contributes no storage.
+            FieldT::BitField { width, .. } => *width > 0,
+        }
+    }
+
     pub fn lookup_var(&self, ident: &Ident) -> Option<&LocalDecl> {
         self.locals.get(&ident.val)
     }
@@ -276,6 +340,9 @@ impl Env {
     pub fn push_stmt(&mut self, stmt: &Stmt) {
         match &stmt.val {
             StmtT::Decl(ident, ty) => self.push_var_decl(ident, ty.clone(), LocalDeclKind::LValue),
+            StmtT::Let(ident, ty, _) => {
+                self.push_var_decl(ident, ty.clone(), LocalDeclKind::RValue)
+            }
             StmtT::DeclStackArray {
                 name, elem_type, ..
             } => {
@@ -379,6 +446,28 @@ impl Env {
                 Some(f_decl) => Ok(f_decl.ret_type.clone().into()),
                 None => Err(InferError::NotAFunction(f.clone())),
             },
+            ExprT::FnRef(f) => match self.globals.fns.get(&f.val) {
+                Some(f_decl) => {
+                    let args = f_decl.args.iter().map(|a| a.ty.clone()).collect();
+                    Ok(expr
+                        .reuse_loc(TypeT::FnPtr {
+                            args,
+                            ret: f_decl.ret_type.clone(),
+                        })
+                        .into())
+                }
+                None => Err(InferError::NotAFunction(f.clone())),
+            },
+            ExprT::FnPtrCall(f, _args) => {
+                let f_ty = self.vtype_whnf(self.infer_expr(f)?);
+                match &f_ty.val {
+                    TypeT::FnPtr { ret, .. } => Ok(ret.clone().into()),
+                    _ => Err(InferError::NotAFunction(match &f.val {
+                        ExprT::Var(id) | ExprT::FnRef(id) => id.clone(),
+                        _ => Rc::new(f.reuse_loc(Rc::from("<indirect callee>"))),
+                    })),
+                }
+            }
             ExprT::Cast(_, ty) => Ok(ty.clone().into()),
             ExprT::ContainerOf(_, struct_ty, _) => Ok(expr
                 .reuse_loc(TypeT::Pointer(struct_ty.clone(), PointerKind::Ref))
@@ -577,6 +666,7 @@ impl Env {
             either_side!(TypeT::Pointer(_, _)) => None,
             either_side!(TypeT::FixedArray(_, _)) => None,
             either_side!(TypeT::FlexArray(_)) => None,
+            either_side!(TypeT::FnPtr { .. }) => None,
 
             either_side!(TypeT::TypeRef(_)) => None,
 
@@ -610,6 +700,7 @@ impl Env {
             | TypeT::Pointer(_, _)
             | TypeT::FixedArray(_, _)
             | TypeT::FlexArray(_)
+            | TypeT::FnPtr { .. }
             | TypeT::SpecInt
             | TypeT::SpecNat
             | TypeT::SLProp
@@ -653,6 +744,21 @@ impl Env {
             }
             (TypeT::FixedArray(t1, n1), TypeT::FixedArray(t2, n2)) => {
                 n1 == n2 && self.vtype_eq(t1.clone().into(), t2.clone().into())
+            }
+            (
+                TypeT::FnPtr {
+                    args: a1, ret: r1, ..
+                },
+                TypeT::FnPtr {
+                    args: a2, ret: r2, ..
+                },
+            ) => {
+                a1.len() == a2.len()
+                    && self.vtype_eq(r1.clone().into(), r2.clone().into())
+                    && a1
+                        .iter()
+                        .zip(a2.iter())
+                        .all(|(x, y)| self.vtype_eq(x.clone().into(), y.clone().into()))
             }
             (TypeT::SpecInt, TypeT::SpecInt) => true,
             (TypeT::SpecNat, TypeT::SpecNat) => true,
