@@ -3769,7 +3769,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-
     /// Move a caller's pointer slot across the typed/raw view for the duration
     /// of a call.
     ///
