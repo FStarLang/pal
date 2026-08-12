@@ -2829,6 +2829,29 @@ impl<'a> Emitter<'a> {
                             self.emit_type(env, to_pointee),
                             val_doc,
                         ])),
+                        // A *cell* holding a typed pointer, viewed as a cell
+                        // holding a raw one: `(void const **)&typedLocal`, which
+                        // is how a caller hands a callee its own pointer slot to
+                        // write into. Unlike `ref_to_core` this does not erase a
+                        // pointer's type, it retypes the slot that holds it, so
+                        // the ownership is moved across by the ghost shift that
+                        // `core_cell_arg_ghosts` emits around the call. Must be
+                        // matched before the plain `ref T -> core_ref` rule
+                        // below, which would otherwise erase the outer pointer
+                        // and quietly hand the callee an unwritable address.
+                        (
+                            TypeT::Pointer(from_pointee, PointerKind::Ref | PointerKind::Unknown),
+                            TypeT::Pointer(to_pointee, PointerKind::Ref | PointerKind::Unknown),
+                        ) if matches!(
+                            env.vtype_whnf(from_pointee.clone().into()).val,
+                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+                        ) && matches!(
+                            env.vtype_whnf(to_pointee.clone().into()).val,
+                            TypeT::Pointer(_, PointerKind::Core)
+                        ) =>
+                        {
+                            unaryfn(Doc::text("Pulse.Lib.C.CoreRef.core_cell"), val_doc)
+                        }
                         // typed `ref T` → `core_ref`: erase the pointee type.
                         (
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
@@ -3600,6 +3623,101 @@ impl<'a> Emitter<'a> {
         }
     }
 
+
+    /// Move a caller's pointer slot across the typed/raw view for the duration
+    /// of a call.
+    ///
+    /// `f((void const ** )&typedLocal)` hands the callee the caller's own slot
+    /// at an erased type so it can write a pointer into it without knowing the
+    /// pointee. `core_cell` retypes the slot as a term, but the ownership does
+    /// not follow on its own: `pts_to (core_cell r)` and `pts_to r` are
+    /// different slprops over what is nonetheless one location, so the prover
+    /// has to be walked across and back. Emit `to_core_cell` before the call
+    /// and `of_core_cell` after, which leaves the caller holding its slot at
+    /// the type it declared it with, now containing whatever the callee wrote.
+    ///
+    /// An `_out` parameter takes the uninitialized pair, since a slot the
+    /// callee is about to fill has no value to carry across.
+    fn core_cell_arg_ghosts(
+        &mut self,
+        env: &Env,
+        args: &[Rc<Expr>],
+        fn_decl: &FnDecl,
+        out: &mut NullableGhosts,
+    ) {
+        for (i, arg) in args.iter().enumerate() {
+            let Some(param) = fn_decl.args.get(i) else {
+                continue;
+            };
+            let TypeT::Pointer(param_pointee, PointerKind::Ref | PointerKind::Unknown) =
+                &env.vtype_whnf(param.ty.clone().into()).val
+            else {
+                continue;
+            };
+            if !matches!(
+                env.vtype_whnf(param_pointee.clone().into()).val,
+                TypeT::Pointer(_, PointerKind::Core)
+            ) {
+                continue;
+            }
+            // Only the cell view needs the shift. An argument that is already a
+            // raw cell, or that is not a pointer to a typed pointer, is passed
+            // as it stands.
+            let inner = Self::strip_pointer_casts(arg);
+            let Ok(arg_ty) = env.infer_expr(inner) else {
+                continue;
+            };
+            let TypeT::Pointer(arg_pointee, PointerKind::Ref | PointerKind::Unknown) =
+                &env.vtype_whnf(arg_ty.clone().into()).val
+            else {
+                continue;
+            };
+            if !matches!(
+                env.vtype_whnf(arg_pointee.clone().into()).val,
+                TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+            ) {
+                continue;
+            }
+            let arg_doc = parens(self.emit_rvalue(env, inner));
+            // An out-parameter is uninitialized going in and written by the
+            // time it comes back, so the two halves of the shift are not
+            // symmetric: hand over an empty slot, take back a full one. C
+            // locals passed this way are usually initialized to NULL first, so
+            // the empty slot is reached by forgetting that value rather than by
+            // never having had one; `to_core_cell_out` takes either.
+            let (to_shift, of_shift) = match param.mode {
+                ParamMode::Out => (
+                    "Pulse.Lib.C.CoreRef.to_core_cell_out ",
+                    "Pulse.Lib.C.CoreRef.of_core_cell ",
+                ),
+                _ => (
+                    "Pulse.Lib.C.CoreRef.to_core_cell ",
+                    "Pulse.Lib.C.CoreRef.of_core_cell ",
+                ),
+            };
+            out.before.push(
+                Doc::text(to_shift.to_string())
+                    .append(arg_doc.clone())
+                    .append(Doc::text(";")),
+            );
+            out.after.push(
+                Doc::text(of_shift.to_string())
+                    .append(arg_doc)
+                    .append(Doc::text(";")),
+            );
+        }
+    }
+
+    /// The argument as written, with the pointer casts that got it to the
+    /// callee's type peeled off, so the shift names the caller's own slot.
+    fn strip_pointer_casts(e: &Rc<Expr>) -> &Rc<Expr> {
+        let mut cur = e;
+        while let ExprT::Cast(inner, _) = &cur.val {
+            cur = inner;
+        }
+        cur
+    }
+
     fn nullable_arg_ghosts_expr(&mut self, env: &Env, e: &Expr, out: &mut NullableGhosts) {
         match &e.val {
             ExprT::UnOp(_, a) | ExprT::Cast(a, _) | ExprT::Deref(a) | ExprT::Ref(a) => {
@@ -3616,6 +3734,7 @@ impl<'a> Emitter<'a> {
                 let Some(fn_decl) = env.lookup_fn(f) else {
                     return;
                 };
+                self.core_cell_arg_ghosts(env, args, &fn_decl, out);
                 for (i, arg) in args.iter().enumerate() {
                     let Some(param) = fn_decl.args.get(i) else {
                         continue;
