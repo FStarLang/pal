@@ -35,9 +35,12 @@ val core_to_ref_to_core (#a: Type u#a) (r: ref a)
   : Lemma (core_to_ref a (ref_to_core r) == r)
           [SMTPat (ref_to_core r)]
 
-(* And the other way round: a raw pointer viewed at a type and erased again is
-   the pointer it started as. Both directions together say that the two views
-   name the same machine address, which is exactly what the C cast means. *)
+(* And the other way round: an address viewed at a type and erased again is the
+   address it started as. The two lemmas together say that the two views name
+   the same machine word, which is exactly what the C cast means -- and the
+   second direction is what a caller needs after it has recovered a typed
+   pointer from a slot and has to name the raw address again to talk about the
+   loan the callee gave it. *)
 val ref_to_core_to_ref (a: Type u#a) (r: core_ref)
   : Lemma (ref_to_core (core_to_ref a r) == r)
           [SMTPat (core_to_ref a r)]
