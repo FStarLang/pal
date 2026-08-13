@@ -330,6 +330,8 @@ public:
     auto loc = getRange(decl->getSourceRange());
     auto builder = DeclBuilder::new_(loc.clone(), ident.clone());
     if (decl->getTagKind() == TagTypeKind::Struct) {
+      builder.refines(trTypeAttrs(decl->getAttrs(),
+                                  mk_type_struct(loc.clone(), ident.clone())));
       // Check for struct-level attributes
       if (decl->hasAttrs()) {
         for (auto *attr : decl->getAttrs()) {

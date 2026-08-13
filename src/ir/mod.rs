@@ -454,6 +454,9 @@ pub enum StmtT {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct StructDefn {
     pub name: Rc<Ident>,
+    /// The struct's self type wrapped in declaration-level PAL attributes.
+    /// Keeping this tree on the definition lets every named use share one parse.
+    pub refines: Rc<Type>,
     pub fields: Vec<Field>,
     pub eager_unfold_pred: bool,
 }

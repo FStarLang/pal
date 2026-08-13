@@ -170,6 +170,8 @@ impl Env {
                 if !self.globals.structs.contains_key(&name.val) {
                     self.push_struct(StructDefn {
                         name: name.clone(),
+                        refines: TypeT::TypeRef(TypeRefKind::Struct(name.clone()))
+                            .with_loc(name.loc.clone()),
                         fields: vec![],
                         eager_unfold_pred: false,
                     });
