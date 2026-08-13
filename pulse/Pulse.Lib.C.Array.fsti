@@ -44,6 +44,14 @@ let full_array_lspec a (l: nat) = s:full_array_spec a { array_spec_len s == l }
 // returned through an ownership-free (`_plain`) pointer.
 val array_literal_to_ref #a #n (s: full_array_lspec a n) : Tot (R.ref a)
 
+// An initialized cell is necessarily in range and in the mask: initialization
+// is a strictly stronger state than mere ownership. Both projections are
+// abstract, so a client that knows only `array_spec_initd` cannot recover
+// either fact without this.
+val array_spec_initd_mask #a (s: array_spec a) (i: nat) :
+  Lemma (array_spec_initd s i ==> i < array_spec_len s /\ array_spec_mask s i)
+    [SMTPat (array_spec_initd s i)]
+
 val array_spec_ext #a (s1 s2: array_spec a) :
   Lemma (requires
     array_spec_len s1 == array_spec_len s2
