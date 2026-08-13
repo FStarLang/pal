@@ -1,0 +1,1 @@
+goto_label_ensures.c:19: label 'fail' is a goto target with code after it, so it needs an `_ensures`
