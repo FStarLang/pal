@@ -3591,11 +3591,15 @@ impl<'a> Emitter<'a> {
                     // `full_array_lspec T N`, so `sizeof(T[N])` becomes
                     // `c_sizeof (full_array_lspec T N)` and its length
                     // participates in the size (see the `c_sizeof_array` axiom).
-                    // Other types size opaquely.
-                    unaryfn(
-                        Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"),
-                        self.emit_type(env, ty),
-                    )
+                    // A record whose ABI size clang reported sizes to that
+                    // constant; every other type sizes opaquely.
+                    match self.record_sizeof_constant(env, ty) {
+                        Some(c) => c,
+                        None => unaryfn(
+                            Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"),
+                            self.emit_type(env, ty),
+                        ),
+                    }
                 }
                 ExprT::AlignOf(ty) => {
                     let ty_doc = match &ty.val {
@@ -4771,10 +4775,74 @@ impl<'a> Emitter<'a> {
         )
     }
 
+    /// A constant pinning `c_sizeof` for a translated record type to the size
+    /// clang computed for it under the target ABI.
+    ///
+    /// This is emitted into the record's own generated module, so the size of
+    /// a given type is introduced exactly once, for that one type. Stating it
+    /// at each `sizeof` site instead would be unsound: nothing would stop two
+    /// sites from claiming different sizes for the same type.
+    ///
+    /// It is a refinement-typed constant rather than a lemma with an `SMTPat`
+    /// because the size of a specific type is a ground fact: a trigger for it
+    /// would contain no variable, which Z3 warns about and F* then rejects.
+    fn emit_abi_size_constant(&mut self, type_name: &Doc, abi_size: Option<u64>) -> Option<Doc> {
+        let size = abi_size?;
+        let sizeof = parens(
+            Doc::text("Pulse.Lib.C.Sizeof.c_sizeof")
+                .append(Doc::line())
+                .append(type_name.clone())
+                .group(),
+        );
+        Some(
+            Doc::text("assume")
+                .append(Doc::hardline())
+                .append("val ")
+                .append(type_name.clone())
+                .append("__c_sizeof")
+                .append(Doc::hardline())
+                .append(
+                    Doc::text(": (n: FStar.SizeT.t{")
+                        .append(Doc::text("FStar.SizeT.v n == "))
+                        .append(Doc::text(size.to_string()))
+                        .append(Doc::text(" /\\ n == "))
+                        .append(sizeof)
+                        .append("})")
+                        .nest(2),
+                ),
+        )
+    }
+
+    /// The name of the ABI-size constant for `ty`, when `ty` resolves to a
+    /// record whose size clang reported.
+    fn record_sizeof_constant(&mut self, env: &Env, ty: &Rc<Type>) -> Option<Doc> {
+        let whnf = env.vtype_whnf(ty.clone().into());
+        let k = match &whnf.val {
+            TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                env.lookup_struct(n).filter(|d| d.abi_size.is_some())?;
+                TypeRefKind::Struct(n.clone())
+            }
+            TypeT::TypeRef(TypeRefKind::Union(n)) => {
+                env.lookup_union(n).filter(|d| d.abi_size.is_some())?;
+                TypeRefKind::Union(n.clone())
+            }
+            _ => return None,
+        };
+        Some(
+            self.emit_name(Name::TypeRef((&k).into()))
+                .append("__c_sizeof"),
+        )
+    }
+
     fn emit_structdefn(
         &mut self,
         env: &Env,
-        decl @ StructDefn { name, fields, .. }: &StructDefn,
+        decl @ StructDefn {
+            name,
+            fields,
+            abi_size,
+            ..
+        }: &StructDefn,
     ) -> Doc {
         let env = &mut env.clone();
         env.push_struct(decl.clone());
@@ -4823,6 +4891,10 @@ impl<'a> Emitter<'a> {
                 self.emit_name(Name::TypeRefSizeofPos(k.into())),
                 struct_type_name.clone(),
             ));
+        }
+
+        if let Some(c) = self.emit_abi_size_constant(&struct_type_name, *abi_size) {
+            ses.push(c);
         }
 
         // Generate struct spec type and pred by gathering slprops from fields
@@ -5780,7 +5852,15 @@ impl<'a> Emitter<'a> {
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
     }
 
-    fn emit_uniondefn(&mut self, env: &Env, decl @ UnionDefn { name, fields }: &UnionDefn) -> Doc {
+    fn emit_uniondefn(
+        &mut self,
+        env: &Env,
+        decl @ UnionDefn {
+            name,
+            fields,
+            abi_size,
+        }: &UnionDefn,
+    ) -> Doc {
         let env = &mut env.clone();
         env.push_union(decl.clone());
 
@@ -5824,6 +5904,10 @@ impl<'a> Emitter<'a> {
                 self.emit_name(Name::TypeRefSizeofPos(k.into())),
                 union_type_name.clone(),
             ));
+        }
+
+        if let Some(c) = self.emit_abi_size_constant(&union_type_name, *abi_size) {
+            ses.push(c);
         }
 
         // Emit predicate (emp for MVP)
