@@ -223,20 +223,22 @@ int32_t use_null_truthiness(void)
 
 /* Null comparison in a *spec* (not just a body). `f != 0` and `f != NULL` both
    lower to `FuncPtr.is_null`, so the postcondition follows from the
-   precondition even though the two spellings differ. */
+   precondition even though the two spellings differ. The body returns the
+   comparison itself, which exercises the same lowering in value position; here
+   `f == NULL` is false, so the result is 0. */
 int32_t fp_spec_nonnull(binop f)
     _requires(f != 0)
     _ensures(f != NULL && return == 0)
 {
-    return 0;
+    return f == NULL;
 }
 
-/* Same, for the `==` direction. */
+/* Same, for the `==` direction; `f != 0` is false, so the result is again 0. */
 int32_t fp_spec_null(binop f)
     _requires(f == NULL)
     _ensures(f == 0 && return == 0)
 {
-    return 0;
+    return f != 0;
 }
 
 /* ---- calling: arities / void ---- */
