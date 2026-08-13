@@ -172,6 +172,7 @@ impl Env {
                         name: name.clone(),
                         fields: vec![],
                         eager_unfold_pred: false,
+                        abi_size: None,
                     });
                 }
             }

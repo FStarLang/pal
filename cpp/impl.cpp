@@ -330,6 +330,16 @@ public:
       return;
     auto loc = getRange(decl->getSourceRange());
     auto builder = DeclBuilder::new_(loc.clone(), ident.clone());
+    // Record the ABI size clang computed for this record, so that the
+    // generated module can pin down `c_sizeof` for it. Dependent or
+    // incomplete types have no constant size; leave those unpinned.
+    {
+      auto recTy = decl->getASTContext().getRecordType(decl);
+      if (!recTy->isDependentType() &&
+          !decl->getASTContext().getAsIncompleteArrayType(recTy))
+        builder.set_abi_size(
+            (uint64_t)decl->getASTContext().getTypeSizeInChars(recTy).getQuantity());
+    }
     if (decl->getTagKind() == TagTypeKind::Struct) {
       // Check for struct-level attributes
       if (decl->hasAttrs()) {
