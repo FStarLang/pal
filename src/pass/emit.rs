@@ -2618,12 +2618,20 @@ impl<'a> Emitter<'a> {
                         // demands a proof that no truncation happens, which is
                         // not what the C says and is not even statable for a
                         // `sizeof`, whose value PAL keeps opaque.
-                        (TypeT::SizeT, TypeT::Int { signed: false, width: 64 }) => {
-                            unaryfn(Doc::text("SizeT.sizet_to_uint64"), val_doc)
-                        }
-                        (TypeT::SizeT, TypeT::Int { signed: false, width: 32 }) => {
-                            unaryfn(Doc::text("SizeT.sizet_to_uint32"), val_doc)
-                        }
+                        (
+                            TypeT::SizeT,
+                            TypeT::Int {
+                                signed: false,
+                                width: 64,
+                            },
+                        ) => unaryfn(Doc::text("SizeT.sizet_to_uint64"), val_doc),
+                        (
+                            TypeT::SizeT,
+                            TypeT::Int {
+                                signed: false,
+                                width: 32,
+                            },
+                        ) => unaryfn(Doc::text("SizeT.sizet_to_uint32"), val_doc),
                         (TypeT::SizeT, TypeT::Int { signed, width }) => {
                             if get_int_mod(signed, width).is_some() {
                                 unaryfn_with_type(
@@ -3623,7 +3631,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-
     /// Move a caller's pointer slot across the typed/raw view for the duration
     /// of a call.
     ///
@@ -4617,9 +4624,7 @@ impl<'a> Emitter<'a> {
                 // agree with its siblings' resources. Asserting `with_pure
                 // False` would instead leave the branch's own footprint in the
                 // join and make an unreachable arm the reason a proof fails.
-                StmtT::Assert(v) if is_statically_false(v) => {
-                    Doc::text("unreachable ();")
-                }
+                StmtT::Assert(v) if is_statically_false(v) => Doc::text("unreachable ();"),
                 StmtT::Assert(v) => Doc::text("assert")
                     .append(Doc::line())
                     .append(self.emit_rvalue(env, v))
@@ -4672,6 +4677,27 @@ impl<'a> Emitter<'a> {
         let mut idx = 0;
         while idx < stmts.len() {
             let stmt = &stmts[idx];
+            // Pulse spells a forward jump as a block carrying a postcondition
+            // followed by a label; it has no syntax for a label that is
+            // followed by more code but carries no postcondition. A `goto`
+            // target therefore needs an explicit `_ensures` describing the
+            // state at the join point, unless nothing follows it. Report that
+            // here: emitting the label regardless produces a file that does
+            // not parse, and the resulting syntax error points at the
+            // enclosing function rather than at the label.
+            if let StmtT::GotoBlock { label, ensures, .. } = &stmt.val
+                && ensures.is_empty()
+                && idx + 1 < stmts.len()
+            {
+                self.report(
+                    format!(
+                        "label '{}' is a goto target with code after it, so it needs an \
+                         `_ensures` describing the state that holds when it is reached",
+                        label.val
+                    ),
+                    &label.loc,
+                );
+            }
             // `return e;` immediately followed by ghost statement(s) needs a
             // rewrite: the ghosts must run live, with access to the returned
             // value. Emit `let <ret> = e; <ghosts>; return <ret>;`. Statements
