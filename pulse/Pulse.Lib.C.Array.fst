@@ -38,6 +38,8 @@ let to_seq #t (s: array_spec t) : GTot (Seq.seq (option t)) =
     | Val x -> Some x
     | _ -> None
 
+let array_spec_initd_mask #a (s: array_spec a) (i: nat) = ()
+
 let array_spec_ext #a (s1 s2: array_spec a) :
   Lemma (requires
     array_spec_len s1 == array_spec_len s2
