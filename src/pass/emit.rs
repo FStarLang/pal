@@ -713,6 +713,18 @@ fn fnptr_domain_doc(arg_docs: Vec<Doc>) -> Doc {
     }
 }
 
+/// `erased t`, the type of a witness component in a fnptr domain.
+fn erased_doc(ty: Doc) -> Doc {
+    parens(Doc::text("FStar.Ghost.erased ").append(ty))
+}
+
+/// The placeholder name the type-level witness scan binds each argument to.
+/// Only the resulting binding *types* are used, so the name is arbitrary; it is
+/// merely kept out of the way of real C identifiers.
+fn fnptr_witness_ident(idx: usize, ty: &Rc<Type>) -> Rc<Ident> {
+    Rc::<str>::from(format!("__fpw{idx}")).with_loc(ty.loc.clone())
+}
+
 /// The set of functions whose address is taken anywhere in the translation
 /// unit (`&f` or a bare `f` decaying to a pointer, both `ExprT::FnRef`), and
 /// which therefore need a `Funcptr_<f>` module emitted.
@@ -3118,7 +3130,7 @@ impl<'a> Emitter<'a> {
                     // in scope (seeded by `of_fn_valid`/`of_fn_div_valid`, or
                     // carried in a callback parameter's precondition), the holes
                     // unify against it.
-                    let arg_tuple = self.emit_fnptr_arg_tuple(env, args);
+                    let arg_tuple = self.emit_fnptr_arg_tuple(env, f, args);
                     let callee_val = self.emit_rvalue(env, f);
                     let call_prim = if self.current_fn_total {
                         "Pulse.Lib.C.FuncPtr.call"
@@ -6227,15 +6239,68 @@ impl<'a> Emitter<'a> {
         parens(naryfn([Doc::text(of_fn), pre, post, wrap]))
     }
 
+    /// The `erased` witness components a fnptr's argument tuple carries beyond
+    /// the C arguments: one per existential the precondition would otherwise
+    /// bind (i.e. one per value binding the ownership lowering introduces).
+    ///
+    /// Pulse does not keep an `exists*` in a precondition inside the function's
+    /// exported arrow type: it opens it and turns the witness into an implicit
+    /// `erased` binder after the explicit parameters. `of_fn{,_div}` demands
+    /// exactly `x:a -> stt{,_div} b (pre x) (post x)`, which admits no such
+    /// binder, so the witnesses must instead travel inside `a`.
+    ///
+    /// Computed from the argument *types* alone, with every parameter lowered
+    /// as if `ParamMode::Regular`, because `TypeT::FnPtr` carries no parameter
+    /// modes: a fnptr type and the wrapper synthesized for a target function
+    /// must agree on `ARG` regardless of how that target annotates its
+    /// parameters. A mode whose precondition binds no value (`_out`) simply
+    /// leaves its component unused.
+    ///
+    /// `emit_fnptr_spec_core` re-runs the same lowering over the real parameter
+    /// names to recover the binding *names*; only the types need to line up
+    /// here, and they do because both derive from the same argument types.
+    fn fnptr_witness_types(&mut self, env: &Env, args: &[Rc<Type>]) -> Vec<Doc> {
+        let env = &mut env.clone();
+        let mut out = vec![];
+        for (i, ty) in args.iter().enumerate() {
+            let n: Rc<Ident> = fnptr_witness_ident(i, ty);
+            env.push_var_decl(&n, ty.clone(), LocalDeclKind::RValue);
+            let mut bindings = vec![];
+            let mut props = vec![];
+            let mut naming = ValNaming::Standard {
+                quote: false,
+                bindings: &mut bindings,
+            };
+            self.emit_type_slprop(
+                env,
+                ty,
+                SLPropVariant::Init {
+                    perm: &Doc::text("1.0R"),
+                },
+                &mut naming,
+                &mut props,
+                &mk_rvar(&n),
+            );
+            drop(naming);
+            out.extend(bindings.into_iter().map(|b| b.ty));
+        }
+        out
+    }
+
     /// The fnptr domain for the given argument types. This MUST agree with
     /// `emit_fnptr_spec_core`'s domain so that a fnptr *type* (`emit_type`
     /// FnPtr) and the synthesized triple's specs share the same `ARG`.
     fn fnptr_domain(&mut self, env: &Env, args: &[Rc<Type>]) -> Doc {
-        let docs: Vec<Doc> = args.iter().map(|a| self.emit_type(env, a)).collect();
+        let mut docs: Vec<Doc> = args.iter().map(|a| self.emit_type(env, a)).collect();
+        docs.extend(
+            self.fnptr_witness_types(env, args)
+                .into_iter()
+                .map(erased_doc),
+        );
         fnptr_domain_doc(docs)
     }
 
-    fn emit_fnptr_arg_tuple(&mut self, env: &Env, args: &[Rc<Expr>]) -> Doc {
+    fn emit_fnptr_arg_tuple(&mut self, env: &Env, callee: &Rc<Expr>, args: &[Rc<Expr>]) -> Doc {
         // One tuple component per C argument (its plain value). Pointer
         // arguments pass their pointer value; the callee's spec carries the
         // pointee ownership (`pts_to`) via the general type-slprop path. `_old`
@@ -6244,6 +6309,19 @@ impl<'a> Emitter<'a> {
         let mut comps: Vec<Doc> = vec![];
         for a in args {
             comps.push(self.emit_rvalue(env, a));
+        }
+        // Then the erased witness components the domain carries (see
+        // `fnptr_witness_types`). Each is fixed by the caller's own ownership of
+        // the argument, so it is left to inference.
+        let arg_tys = match env.infer_expr(callee).map(|t| env.vtype_whnf(t)) {
+            Ok(t) => match &t.val {
+                TypeT::FnPtr { args, .. } => args.clone(),
+                _ => vec![],
+            },
+            Err(_) => vec![],
+        };
+        for _ in 0..self.fnptr_witness_types(env, &arg_tys).len() {
+            comps.push(Doc::text("_"));
         }
         match comps.len() {
             0 => Doc::text("()"),
@@ -6274,10 +6352,25 @@ impl<'a> Emitter<'a> {
             arg_names.push(n.clone());
             env.push_arg(arg, LocalDeclKind::RValue);
         }
-        // Domain: one component per C argument, in argument order. Pointer
-        // arguments contribute their pointer type; the pointee ownership
-        // (`pts_to`) is carried by the general type-slprop lowering below.
-        let domain = fnptr_domain_doc(arg_ty_docs.clone());
+        // Domain: one component per C argument, in argument order, followed by
+        // one `erased` witness component per value the precondition's ownership
+        // lowering binds (see `fnptr_witness_types`). Pointer arguments
+        // contribute their pointer type; the pointee ownership (`pts_to`) is
+        // carried by the general type-slprop lowering below, over the witness.
+        //
+        // The witness list is computed mode-lessly, exactly as `fnptr_domain`
+        // does, so that this wrapper's type matches the fnptr *type* it must
+        // inhabit — `TypeT::FnPtr` records no parameter modes.
+        let arg_tys: Vec<Rc<Type>> = decl.args.iter().map(|a| a.ty.clone()).collect();
+        let witness_ty_docs = self.fnptr_witness_types(env, &arg_tys);
+        let arity = arg_ty_docs.len() + witness_ty_docs.len();
+        let domain = fnptr_domain_doc(
+            arg_ty_docs
+                .iter()
+                .cloned()
+                .chain(witness_ty_docs.into_iter().map(erased_doc))
+                .collect(),
+        );
 
         let name_docs: Vec<Doc> = arg_names
             .iter()
@@ -6295,28 +6388,26 @@ impl<'a> Emitter<'a> {
         // is the bare type, arity 2 is `a & b` (`tuple2`, projected with
         // `fst`/`snd`), and arity >= 3 is `a & b & c ...` (`tupleN`, which is
         // NOT nested `tuple2`s, so `fst`/`snd` do not apply — use the `tupleN`
-        // field projectors `MktupleN?._i`).
-        let projs: Vec<Doc> = {
-            let n = name_docs.len();
-            (0..n)
-                .map(|i| {
-                    if n == 1 {
-                        return Doc::text("x_fp");
-                    }
-                    if n == 2 {
-                        let mut e = Doc::text("x_fp");
-                        for _ in 0..i {
-                            e = parens(Doc::text("snd ").append(e));
-                        }
-                        if i < n - 1 {
-                            e = parens(Doc::text("fst ").append(e));
-                        }
-                        return e;
-                    }
-                    parens(Doc::text(format!("Mktuple{n}?._{} x_fp", i + 1)))
-                })
-                .collect()
+        // field projectors `MktupleN?._i`). The indices run over the *whole*
+        // domain, C arguments first and then the witnesses.
+        let proj = |i: usize| -> Doc {
+            if arity == 1 {
+                return Doc::text("x_fp");
+            }
+            if arity == 2 {
+                let mut e = Doc::text("x_fp");
+                for _ in 0..i {
+                    e = parens(Doc::text("snd ").append(e));
+                }
+                if i < arity - 1 {
+                    e = parens(Doc::text("fst ").append(e));
+                }
+                return e;
+            }
+            parens(Doc::text(format!("Mktuple{arity}?._{} x_fp", i + 1)))
         };
+        let projs: Vec<Doc> = (0..name_docs.len()).map(proj).collect();
+        let witness_projs: Vec<Doc> = (name_docs.len()..arity).map(proj).collect();
 
         // `let a = <proj0> in let b = <proj1> in ` prefix (empty for arity 0).
         let bind_prefix = |names: &[Doc]| -> Doc {
@@ -6339,7 +6430,15 @@ impl<'a> Emitter<'a> {
         let mut requires_props: Vec<Doc> = vec![];
         let mut ensures_props: Vec<Doc> = vec![];
         let mut preserves_props: Vec<Doc> = vec![];
+        // The name each domain witness component is bound to in the
+        // precondition, in domain order. `None` where a parameter's
+        // precondition lowering binds no value of its own (an `_out` parameter
+        // is `pts_to_uninit` on entry) — the component is then simply unused.
+        let mut witness_names: Vec<Option<Doc>> = vec![];
         for (n, arg) in arg_names.iter().zip(decl.args.iter()) {
+            let arg_witness_count = self
+                .fnptr_witness_types(env, std::slice::from_ref(&arg.ty))
+                .len();
             match arg.mode {
                 ParamMode::Regular | ParamMode::Consumed => {
                     let mut type_bindings = vec![];
@@ -6359,19 +6458,38 @@ impl<'a> Emitter<'a> {
                         &mk_rvar(n),
                     );
                     drop(naming);
+                    witness_names.extend(type_bindings.iter().map(|b| Some(b.name.clone())));
                     if !type_props.is_empty() {
-                        let wrapped = wrap_exists(&type_bindings, type_props);
+                        // The precondition uses the witnesses bound by the
+                        // domain, so it needs no `exists*`; the postcondition
+                        // binds its own fresh ones, since the callee may have
+                        // written new values.
+                        let opened = mk_star(type_props.clone());
                         match arg.mode {
                             ParamMode::Regular => {
-                                requires_props.push(wrapped.clone());
-                                ensures_props.push(wrapped);
+                                requires_props.push(opened);
+                                ensures_props.push(wrap_exists(&type_bindings, type_props));
                             }
-                            ParamMode::Consumed => requires_props.push(wrapped),
+                            ParamMode::Consumed => requires_props.push(opened),
                             _ => unreachable!(),
                         }
                     }
                 }
                 ParamMode::Const => {
+                    if arg_witness_count > 0 {
+                        // A `const` pointer parameter's ownership is lowered
+                        // with Pulse's `'x` spec syntax, which introduces an
+                        // implicit binder of its own — the very thing the
+                        // domain witnesses exist to avoid — and would also need
+                        // a permission component in the domain. Rather than
+                        // emit Pulse that cannot typecheck, report it.
+                        self.report(
+                            "const pointer parameters are not supported on address-taken functions"
+                                .to_string(),
+                            &arg.ty.loc,
+                        );
+                    }
+                    witness_names.extend((0..arg_witness_count).map(|_| None));
                     let perm_name = self.emit_name(Name::Perm(extract_base_ident(&mk_rvar(n)), 0));
                     let perm_doc = Doc::text("'").append(perm_name);
                     let mut type_bindings = vec![];
@@ -6392,6 +6510,7 @@ impl<'a> Emitter<'a> {
                     preserves_props.extend(type_props);
                 }
                 ParamMode::Out => {
+                    witness_names.extend((0..arg_witness_count).map(|_| None));
                     let mut uninit_bindings = vec![];
                     let mut uninit_props = vec![];
                     let mut naming = ValNaming::Standard {
@@ -6517,7 +6636,30 @@ impl<'a> Emitter<'a> {
         // Inline pre/post slprops (bound over the tuple domain `x_fp` via the
         // same projection prefix), to be spliced directly into the `__fp`
         // wrapper's `requires`/`ensures` instead of being named `unfold let`s.
-        let pre_expr = parens(bind_prefix(&name_docs).append(pre_body));
+        //
+        // Only the precondition binds the witness components: it is stated over
+        // them instead of under an `exists*`, which is what keeps the wrapper's
+        // type free of the implicit binder Pulse would otherwise introduce (and
+        // which `of_fn{,_div}` does not admit).
+        let witness_prefix = Doc::concat(
+            witness_names
+                .iter()
+                .zip(witness_projs.iter())
+                .filter_map(|(name, proj)| name.as_ref().map(|n| (n, proj)))
+                .map(|(name, proj)| {
+                    Doc::text("let ")
+                        .append(name.clone())
+                        .append(" = FStar.Ghost.reveal ")
+                        .append(proj.clone())
+                        .append(" in")
+                        .append(Doc::hardline())
+                }),
+        );
+        let pre_expr = parens(
+            bind_prefix(&name_docs)
+                .append(witness_prefix)
+                .append(pre_body),
+        );
         let post_expr = parens(bind_prefix(&name_docs).append(post_body));
 
         FnPtrSpecCore {

@@ -1013,6 +1013,92 @@ int32_t weaken_total_to_div(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
+/* ==========================================================================
+ * Stateful callbacks: function pointers whose target takes a POINTER argument.
+ *
+ * The pointee value is unknown to the caller. Left under an `exists*` in the
+ * wrapper's PRECONDITION it would become an implicit binder, so the arrow would
+ * no longer match the `x:a -> stt_div b (pre x) (post x)` that `of_fn_div`
+ * requires. PAL passes each witness in the argument tuple as an `erased`
+ * component instead: `void (*)(struct item *)` has domain
+ * `(ref struct_item & erased struct_item)`. The postcondition keeps its own
+ * `exists*` (the callback may have written a new value); at an indirect call
+ * the erased component is passed as `_`. */
+struct item {
+    int32_t value;
+};
+
+void clear_item(struct item *item)
+{
+    item->value = 0;
+}
+
+/* Taking the address is what forces the `__fp` wrapper to be emitted. */
+void reproduce(void)
+{
+    void (*callback)(struct item *) = clear_item;
+}
+
+/* The other half: calling *through* the callback, where the erased component
+   has to be supplied at the call site. */
+void call_stateful(struct item *it)
+{
+    void (*callback)(struct item *) = clear_item;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_clear_item.func_clear_item__fp);
+    callback(it);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Two pointer arguments, the first a struct that itself holds a reference.
+   Witnesses are per ownership binding, not per argument: `struct boxed *`
+   contributes both its value and the `__spec` its `__pred` takes, so the domain
+   is a 5-tuple and the `MktupleN?._i` projections are used instead of
+   `fst`/`snd`. `zero_cell`/`call_zero` also check that a callback's
+   postcondition survives the indirect call. */
+struct cell {
+    int32_t v;
+};
+
+struct boxed {
+    struct cell *inner;
+    int32_t tag;
+};
+
+void update_both(struct boxed *b, struct cell *c)
+{
+    b->tag = 1;
+    b->inner->v = 2;
+    c->v = 3;
+}
+
+void take_two(void)
+{
+    void (*cb)(struct boxed *, struct cell *) = update_both;
+}
+
+void call_two(struct boxed *b, struct cell *c)
+{
+    void (*cb)(struct boxed *, struct cell *) = update_both;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_update_both.func_update_both__fp);
+    cb(b, c);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+void zero_cell(struct boxed *b, struct cell *c)
+    _ensures(c->v == 0)
+{
+    c->v = 0;
+}
+
+void call_zero(struct boxed *b, struct cell *c)
+    _ensures(c->v == 0)
+{
+    void (*cb)(struct boxed *, struct cell *) = zero_cell;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_zero_cell.func_zero_cell__fp);
+    cb(b, c);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
 #if 0
 
 /* [not yet verified -- DEFERRED, emitter mutual-recursion gap] Indirect
