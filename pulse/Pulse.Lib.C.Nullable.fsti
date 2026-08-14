@@ -105,3 +105,23 @@ ghost fn elim_unless_null_arr (#a:Type0) (x:array a) (#p:slprop)
 ghost fn elim_null_arr (#a:Type0) (x:array a) (#p:slprop)
   requires unless_null #(array a) x p
   requires pure (test_null #(array a) x)
+
+(* A null pointer, bound to a name.
+
+   A call that declines several optional outputs at once passes the same
+   `null` for each of them, and gets back one `unless_null null _` per
+   declined output. Those guards are identical except for the resource they
+   carry, and the resource is exactly what the elimination has to recover by
+   matching. With more than one of them in scope the match is ambiguous, the
+   prover falls back to the introduction rules, and the failure surfaces as an
+   unresolved `has_is_null` on a type nobody wrote.
+
+   Handing each declined output its own name splits the guards apart at the
+   pointer instead of at the resource, which is a position the matcher can
+   discriminate on. The value is still null and the post-condition says so, so
+   nothing is hidden from the caller -- only from the term matcher, which is
+   the point. *)
+fn null_ref (a:Type0)
+  requires emp
+  returns r : ref a
+  ensures pure (r == null #a)

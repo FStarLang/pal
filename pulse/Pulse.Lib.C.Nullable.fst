@@ -124,3 +124,11 @@ ghost fn elim_null_arr (#a:Type0) (x:array a) (#p:slprop)
 {
   elim_unless_null_null #(array a) x p;
 }
+
+fn null_ref (a:Type0)
+  requires emp
+  returns r : ref a
+  ensures pure (r == null #a)
+{
+  null #a
+}
