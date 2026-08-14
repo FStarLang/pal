@@ -72,6 +72,62 @@ static bool hasTopLevelBreak(const Stmt *s) {
   return false;
 }
 
+// Returns true if the constant expression `e` folds to zero with no side
+// effects -- the condition of a `do { } while (0)` macro wrapper.
+static bool isSideEffectFreeZero(ASTContext &ctx, const Expr *e) {
+  if (!e || e->HasSideEffects(ctx))
+    return false;
+  Expr::EvalResult result;
+  return e->EvaluateAsInt(result, ctx) && result.Val.isInt() &&
+         result.Val.getInt() == 0;
+}
+
+// Returns true if control cannot leave `s` by falling off its end, because `s`
+// claims it is never reached past that point. `__builtin_unreachable()` is how
+// C spells that claim, and it is what a `noreturn` abort macro expands to.
+//
+// The claim propagates the way control flow does: a block aborts if any of its
+// statements does (whatever follows an abort is dead), a `do { } while (0)`
+// wrapper aborts if its body does, and an `if` aborts if both arms do, or if
+// its condition folds to a constant selecting an arm that does -- which is the
+// shape `if (!(cond)) __builtin_unreachable();` takes once `cond` is literally
+// false.
+//
+// PAL discharges the claim rather than assuming it (see src/pass/builtins.rs),
+// so recognizing an abort here weakens nothing: it only lets a switch arm that
+// ends in one be treated as an arm that cannot fall through, which it is.
+static bool abortsControlFlow(ASTContext &ctx, const Stmt *s) {
+  if (!s)
+    return false;
+  if (const auto *call = dyn_cast<CallExpr>(s))
+    return call->getBuiltinCallee() == Builtin::BI__builtin_unreachable;
+  if (const auto *attributed = dyn_cast<AttributedStmt>(s))
+    return abortsControlFlow(ctx, attributed->getSubStmt());
+  if (const auto *label = dyn_cast<LabelStmt>(s))
+    return abortsControlFlow(ctx, label->getSubStmt());
+  if (const auto *compound = dyn_cast<CompoundStmt>(s)) {
+    for (const Stmt *child : compound->body())
+      if (abortsControlFlow(ctx, child))
+        return true;
+    return false;
+  }
+  if (const auto *d = dyn_cast<DoStmt>(s))
+    return isSideEffectFreeZero(ctx, d->getCond()) &&
+           abortsControlFlow(ctx, d->getBody());
+  if (const auto *i = dyn_cast<IfStmt>(s)) {
+    bool thenAborts = abortsControlFlow(ctx, i->getThen());
+    bool elseAborts = abortsControlFlow(ctx, i->getElse());
+    if (thenAborts && elseAborts)
+      return true;
+    Expr::EvalResult result;
+    if (i->getCond() && !i->getCond()->HasSideEffects(ctx) &&
+        i->getCond()->EvaluateAsInt(result, ctx) && result.Val.isInt())
+      return result.Val.getInt() != 0 ? thenAborts : elseAborts;
+    return false;
+  }
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -1691,11 +1747,7 @@ public:
       // Only when nothing in the body jumps out of it: a `break` or `continue`
       // that binds to the do-while has no meaning once the loop is gone.
       {
-        Expr::EvalResult condResult;
-        auto *doCond = d->getCond();
-        if (doCond && !doCond->HasSideEffects(*astCtx) &&
-            doCond->EvaluateAsInt(condResult, *astCtx) &&
-            condResult.Val.isInt() && condResult.Val.getInt() == 0 &&
+        if (isSideEffectFreeZero(*astCtx, d->getCond()) &&
             !hasTopLevelContinue(d->getBody()) &&
             !hasTopLevelBreak(d->getBody())) {
           auto *doBody = d->getBody();
@@ -2049,6 +2101,10 @@ public:
       // the switch -- in which case there is equally nothing to fall through
       // to, and the statement stays. A dispatcher whose default arm aborts and
       // jumps to a shared exit is the common shape of the second kind.
+      //
+      // An arm can also end in a `noreturn` abort with no jump after it, which
+      // is what the C compiler's own reachability analysis relies on. That arm
+      // does not fall through either, so recognize it the same way.
       auto dropsTerminalBreak = [](SwitchGroup &group) {
         return !group.body.empty() && isa<BreakStmt>(group.body.back());
       };
@@ -2064,7 +2120,8 @@ public:
             !group.body.empty() &&
             (isa<BreakStmt>(group.body.back()) ||
              isa<ReturnStmt>(group.body.back()) ||
-             isa<GotoStmt>(group.body.back()));
+             isa<GotoStmt>(group.body.back()) ||
+             abortsControlFlow(*astCtx, group.body.back()));
         if (!cannotFallThrough) {
           hasOnlyTerminalBreaks = false;
           break;

@@ -4310,9 +4310,7 @@ impl<'a> Emitter<'a> {
                 // agree with its siblings' resources. Asserting `with_pure
                 // False` would instead leave the branch's own footprint in the
                 // join and make an unreachable arm the reason a proof fails.
-                StmtT::Assert(v) if is_statically_false(v) => {
-                    Doc::text("unreachable ();")
-                }
+                StmtT::Assert(v) if is_statically_false(v) => Doc::text("unreachable ();"),
                 StmtT::Assert(v) => Doc::text("assert")
                     .append(Doc::line())
                     .append(self.emit_rvalue(env, v))
