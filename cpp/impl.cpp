@@ -2784,20 +2784,35 @@ public:
         }
       }
 
-      // A switch whose cases all end in a direct break has no fall-through.
-      // Emit it as one match and omit the terminal breaks.
+      // A switch whose cases cannot fall through is an if/else chain or a
+      // match, and saying so is what lets the prover reason about it. A case
+      // ends in a direct `break`, which the encoding drops; or it leaves the
+      // function or the switch some other way -- `return`, or a `goto` out of
+      // the switch -- in which case there is equally nothing to fall through
+      // to, and the statement stays. A dispatcher whose default arm aborts and
+      // jumps to a shared exit is the common shape of the second kind.
+      auto dropsTerminalBreak = [](SwitchGroup &group) {
+        return !group.body.empty() && isa<BreakStmt>(group.body.back());
+      };
+      auto groupBodySize = [&](SwitchGroup &group) {
+        return dropsTerminalBreak(group) ? group.body.size() - 1
+                                         : group.body.size();
+      };
       bool hasOnlyTerminalBreaks = !groups.empty();
       std::vector<SwitchGroup *> cases;
       SwitchGroup *defaultGroup = nullptr;
       for (auto &group : groups) {
-        bool hasTerminalBreak =
-            !group.body.empty() && isa<BreakStmt>(group.body.back());
-        if (!hasTerminalBreak) {
+        bool cannotFallThrough =
+            !group.body.empty() &&
+            (isa<BreakStmt>(group.body.back()) ||
+             isa<ReturnStmt>(group.body.back()) ||
+             isa<GotoStmt>(group.body.back()));
+        if (!cannotFallThrough) {
           hasOnlyTerminalBreaks = false;
           break;
         }
 
-        size_t bodySize = group.body.size() - 1;
+        size_t bodySize = groupBodySize(group);
         if (group.isDefault) {
           defaultGroup = &group;
         } else {
@@ -2816,7 +2831,7 @@ public:
       if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
         auto makeBody = [&](SwitchGroup &group) {
           auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
+          size_t bodySize = groupBodySize(group);
           for (size_t i = 0; i < bodySize; i++)
             trStmt(bodyStmts, group.body[i]);
           return bodyStmts;
@@ -2881,7 +2896,7 @@ public:
           defaultGroup) {
         auto makeChainBody = [&](SwitchGroup &group) {
           auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
+          size_t bodySize = groupBodySize(group);
           for (size_t i = 0; i < bodySize; i++)
             trStmt(bodyStmts, group.body[i]);
           return bodyStmts;
