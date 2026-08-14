@@ -601,6 +601,43 @@ public:
     return ty;
   }
 
+  // A `_core_ref` parameter carries no ownership: `core_ref` is an
+  // axiomatized address with no `pts_to`, and the predicate generated for it
+  // is `emp`. Reading its const qualifier as a borrow would still give it a
+  // permission implicit, and an implicit that appears only in `emp` is one no
+  // call site can ever solve, so the call does not elaborate. The attribute
+  // is nearly always written on a typedef -- it has to be, to land on the
+  // pointee of a `void const**` -- so the typedef chain is walked.
+  static bool isCoreRefQualType(QualType qt) {
+    while (!qt.isNull()) {
+      qt = qt.IgnoreParens();
+      auto *td = qt->getAs<TypedefType>();
+      if (!td)
+        return false;
+      for (auto *attr : td->getDecl()->getAttrs()) {
+        if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
+          if (ann->getAnnotation() == "pal-core-ref" && ann->args_size() == 0)
+            return true;
+        }
+      }
+      QualType next = td->getDecl()->getUnderlyingType();
+      if (next.getAsOpaquePtr() == qt.getAsOpaquePtr())
+        return false;
+      qt = next;
+    }
+    return false;
+  }
+
+  bool hasCoreRefAttr(AttrVec const &attrs) {
+    for (auto attr : attrs) {
+      if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
+        if (ann->getAnnotation() == "pal-core-ref" && ann->args_size() == 0)
+          return true;
+      }
+    }
+    return false;
+  }
+
   bool hasConsumesAttr(AttrVec const &attrs) {
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
       if (auto ann = dyn_cast<AnnotateAttr>(*it)) {
@@ -2878,7 +2915,20 @@ public:
                                 return ir::ParamMode::Regular();
                             }
                             auto qt = param->getType().IgnoreParens();
-                            if (qt.getCanonicalType().isConstQualified())
+                            if (hasCoreRefAttr(param->getAttrs()) ||
+                                isCoreRefQualType(param->getType()))
+                              return ir::ParamMode::Regular();
+                            // A top-level `const` on a parameter passed by
+                            // value says nothing about ownership: the callee
+                            // gets its own copy, and the qualifier only
+                            // forbids reassigning the local. Reading it as a
+                            // borrow gives the parameter a permission
+                            // implicit, and for a scalar -- whose ownership
+                            // predicate is `emp` -- nothing at the call site
+                            // can ever solve it, so the call does not
+                            // elaborate. Only an indirection can be borrowed.
+                            if (qt.getCanonicalType()->isPointerType() &&
+                                qt.getCanonicalType().isConstQualified())
                               return ir::ParamMode::Const();
                             // `getAs` desugars through typedefs, so a
                             // parameter declared with a pointer-to-const
