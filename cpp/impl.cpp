@@ -743,6 +743,24 @@ public:
       return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
                            false);
     }
+    // A braced initializer for a scalar object: C permits `int x = {0}` and
+    // `T x = {}`, and BOSS reaches it through typedefs whose definition on one
+    // platform is a struct and on another a plain integer -- `SNAP_LE_UINT32`
+    // and `SNAP_CRC64` are both. The list holds at most one element, and it
+    // initializes the object directly.
+    if (qt->isScalarType()) {
+      if (init->getNumInits() == 0) {
+        return trZeroInit(init->getType(), range, std::move(loc));
+      }
+      if (init->getNumInits() == 1) {
+        return trRValue(init->getInit(0));
+      }
+      reportUnsupported(range, loc,
+                        "initializer list for a scalar type has more than one "
+                        "element",
+                        "");
+      return mk_rvalue_err(std::move(loc), trQualType(init->getType(), range));
+    }
     auto *rec = dyn_cast<RecordType>(qt.getTypePtr());
     if (!rec) {
       reportUnsupported(range, loc,
