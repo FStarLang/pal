@@ -774,6 +774,14 @@ public:
       if (ic->getCastKind() == CK_NoOp) {
         return trLValue(ic->getSubExpr());
       }
+    } else if (isa<CompoundLiteralExpr>(e)) {
+      // C11 6.5.2.5p4 makes a compound literal an lvalue, so `(T){...}.f` and
+      // `&(T){...}` are both legal. The object it names is unnamed and fresh,
+      // though, so nothing stored through it can be observed by any later
+      // expression -- which means translating it as its own value loses
+      // nothing. That is what lets a read like `((T){.f = 0}).f`, the shape a
+      // named-constant macro expands to, go through.
+      return trRValue(e);
     }
 
     reportUnsupported(e->getSourceRange(), loc,
