@@ -198,10 +198,16 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
                 TypeT::Int { signed: true, .. } => value.as_ref().clone(),
                 _ => return,
             };
-            if integer_fits(&source_value, target_signed, target_width) {
-                return;
-            }
-            let target_value = if target_signed {
+            // Fold the cast away even when the value is representable. The
+            // result is the same constant at the target type, and dropping the
+            // conversion matters for more than readability: `Int.Cast` applied
+            // to a literal reduces to a machine-integer constructor whose
+            // argument carries a refinement only the SMT solver discharges, so
+            // such a term is ill-typed wherever the checker runs without SMT --
+            // notably while Pulse searches for a witness to an existential.
+            let target_value = if integer_fits(&source_value, target_signed, target_width) {
+                source_value
+            } else if target_signed {
                 normalize_signed(&source_value, target_width)
             } else {
                 normalize_unsigned(&source_value, target_width)
