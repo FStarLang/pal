@@ -55,6 +55,24 @@ static bool hasTopLevelContinue(const Stmt *s) {
   return false;
 }
 
+// Returns true if `s` contains a `break` that binds to the enclosing loop or
+// switch, i.e. one that is not nested inside another loop or switch. Nested
+// `for`, `while`, `do-while` and `switch` all capture `break`, so we do not
+// descend into them.
+static bool hasTopLevelBreak(const Stmt *s) {
+  if (!s)
+    return false;
+  if (isa<BreakStmt>(s))
+    return true;
+  if (isa<ForStmt>(s) || isa<WhileStmt>(s) || isa<DoStmt>(s) ||
+      isa<SwitchStmt>(s))
+    return false;
+  for (const Stmt *child : s->children())
+    if (hasTopLevelBreak(child))
+      return true;
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -1948,6 +1966,36 @@ public:
                                  std::move(invs), std::move(reqs),
                                  std::move(enss), std::move(bodyStmts)));
     } else if (auto *d = dyn_cast<DoStmt>(stmt)) {
+      // `do { body } while (0)` is not a loop, it is the C idiom for giving a
+      // macro a single-statement body, and encoding it as one costs more than
+      // the two flags it introduces: a loop's postcondition is its invariant,
+      // so every fact the body established -- including that it cannot be
+      // reached at all, which is exactly what an aborting macro says -- is lost
+      // at the loop's exit. The body runs once and falls out, so emit it.
+      //
+      // Only when nothing in the body jumps out of it: a `break` or `continue`
+      // that binds to the do-while has no meaning once the loop is gone.
+      {
+        Expr::EvalResult condResult;
+        auto *doCond = d->getCond();
+        if (doCond && !doCond->HasSideEffects(*astCtx) &&
+            doCond->EvaluateAsInt(condResult, *astCtx) &&
+            condResult.Val.isInt() && condResult.Val.getInt() == 0 &&
+            !hasTopLevelContinue(d->getBody()) &&
+            !hasTopLevelBreak(d->getBody())) {
+          auto *doBody = d->getBody();
+          if (auto attrBody = dyn_cast<AttributedStmt>(doBody))
+            doBody = attrBody->getSubStmt();
+          if (auto *compound = dyn_cast<CompoundStmt>(doBody)) {
+            for (auto *child : compound->body())
+              trStmt(stmts, child);
+          } else {
+            trStmt(stmts, doBody);
+          }
+          return {};
+        }
+      }
+
       // Desugar `do { body } while (cond)` into a `while` loop. There are two
       // desugarings, and the presence of a *top-level* `continue` in the body
       // selects between them:
@@ -2291,20 +2339,35 @@ public:
         }
       }
 
-      // A switch whose cases all end in a direct break has no fall-through.
-      // Emit it as one match and omit the terminal breaks.
+      // A switch whose cases cannot fall through is an if/else chain or a
+      // match, and saying so is what lets the prover reason about it. A case
+      // ends in a direct `break`, which the encoding drops; or it leaves the
+      // function or the switch some other way -- `return`, or a `goto` out of
+      // the switch -- in which case there is equally nothing to fall through
+      // to, and the statement stays. A dispatcher whose default arm aborts and
+      // jumps to a shared exit is the common shape of the second kind.
+      auto dropsTerminalBreak = [](SwitchGroup &group) {
+        return !group.body.empty() && isa<BreakStmt>(group.body.back());
+      };
+      auto groupBodySize = [&](SwitchGroup &group) {
+        return dropsTerminalBreak(group) ? group.body.size() - 1
+                                         : group.body.size();
+      };
       bool hasOnlyTerminalBreaks = !groups.empty();
       std::vector<SwitchGroup *> cases;
       SwitchGroup *defaultGroup = nullptr;
       for (auto &group : groups) {
-        bool hasTerminalBreak =
-            !group.body.empty() && isa<BreakStmt>(group.body.back());
-        if (!hasTerminalBreak) {
+        bool cannotFallThrough =
+            !group.body.empty() &&
+            (isa<BreakStmt>(group.body.back()) ||
+             isa<ReturnStmt>(group.body.back()) ||
+             isa<GotoStmt>(group.body.back()));
+        if (!cannotFallThrough) {
           hasOnlyTerminalBreaks = false;
           break;
         }
 
-        size_t bodySize = group.body.size() - 1;
+        size_t bodySize = groupBodySize(group);
         if (group.isDefault) {
           defaultGroup = &group;
         } else {
@@ -2323,7 +2386,7 @@ public:
       if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
         auto makeBody = [&](SwitchGroup &group) {
           auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
+          size_t bodySize = groupBodySize(group);
           for (size_t i = 0; i < bodySize; i++)
             trStmt(bodyStmts, group.body[i]);
           return bodyStmts;
@@ -2388,7 +2451,7 @@ public:
           defaultGroup) {
         auto makeChainBody = [&](SwitchGroup &group) {
           auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
+          size_t bodySize = groupBodySize(group);
           for (size_t i = 0; i < bodySize; i++)
             trStmt(bodyStmts, group.body[i]);
           return bodyStmts;

@@ -10,6 +10,14 @@ fn stmt_contains_goto(stmt: &Stmt, label: &str) -> bool {
             else_branch,
             ..
         } => stmts_contain_goto(then_branch, label) || stmts_contain_goto(else_branch, label),
+        StmtT::Match {
+            branches,
+            default_branch,
+            ..
+        } => {
+            branches.iter().any(|b| stmts_contain_goto(&b.body, label))
+                || stmts_contain_goto(default_branch, label)
+        }
         StmtT::While { body, .. } => stmts_contain_goto(body, label),
         StmtT::GotoBlock { body, .. } => stmts_contain_goto(body, label),
         _ => false,
@@ -81,6 +89,16 @@ fn restructure_stmt(stmt: &mut Stmt) {
         } => {
             restructure_stmts(Rc::make_mut(then_branch));
             restructure_stmts(Rc::make_mut(else_branch));
+        }
+        StmtT::Match {
+            branches,
+            default_branch,
+            ..
+        } => {
+            for branch in Rc::make_mut(branches).iter_mut() {
+                restructure_stmts(Rc::make_mut(&mut Rc::make_mut(branch).body));
+            }
+            restructure_stmts(Rc::make_mut(default_branch));
         }
         StmtT::While { body, .. } => {
             restructure_stmts(Rc::make_mut(body));
