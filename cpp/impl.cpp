@@ -1422,6 +1422,43 @@ public:
               }
             }
           }
+          // Zeroing a whole array: `f(arr, N)` where `arr` is an array-typed
+          // lvalue that decays to the pointer argument and `N` is its size in
+          // bytes. The extent lives in the array's own type, so nothing has to
+          // be inferred from the way the count was spelled: `sizeof(s->field)`
+          // and a literal are both accepted, and both are checked against the
+          // type rather than trusted. This is the shape a platform zeroing
+          // wrapper takes on a fixed-size trailing `Reserved` member, which
+          // `memset(ptr, 0, sizeof(T) * n)` below cannot express because a
+          // wrapper taking `void *` has no element type to name.
+          {
+            auto *destObj = c->getArg(0)->IgnoreParenImpCasts();
+            auto destQt = destObj->getType();
+            if (const auto *arrTy = astCtx->getAsConstantArrayType(destQt)) {
+              auto elemQt = arrTy->getElementType();
+              Expr::EvalResult szRes;
+              const bool byteSized =
+                  !elemQt->isIncompleteType() && !elemQt->isDependentType() &&
+                  astCtx->getTypeSizeInChars(elemQt).getQuantity() == 1;
+              const auto arrBytes =
+                  astCtx->getTypeSizeInChars(destQt).getQuantity();
+              if (byteSized && sizeArg->EvaluateAsInt(szRes, *astCtx) &&
+                  szRes.Val.isInt() && szRes.Val.getInt() == arrBytes) {
+                auto elemTy = trQualType(elemQt, destObj->getSourceRange());
+                llvm::SmallString<20> countStr;
+                llvm::APInt(64, arrBytes, true).toStringSigned(countStr);
+                auto countExpr = mk_int_lit(
+                    loc.clone(), mk_bigint(toStr(StringRef(countStr))),
+                    trQualType(astCtx->getSizeType(), e->getSourceRange()));
+                auto zeroExpr =
+                    mk_int_lit(loc.clone(), mk_bigint("0"_rs),
+                               trQualType(elemQt, destObj->getSourceRange()));
+                return mk_memset(std::move(loc), std::move(elemTy),
+                                 trRValue(ptrArg), std::move(zeroExpr),
+                                 std::move(countExpr));
+              }
+            }
+          }
           // The array shape below reads the fill value out of the call, which
           // an alias does not carry, and a wrapper taking `void *` cannot name
           // a byte-sized element type anyway. Rejecting it here keeps an
@@ -1431,7 +1468,8 @@ public:
             reportUnsupported(
                 e->getSourceRange(), loc,
                 "a _memset_zero call is only supported in the form "
-                "f(ptr, sizeof(*ptr)); ",
+                "f(ptr, sizeof(*ptr)) or f(arr, sizeof(arr)) for a "
+                "fixed-size array of a byte-sized element type; ",
                 fd->getName().str());
             return mk_rvalue_err(std::move(loc),
                                  trQualType(c->getType(), c->getSourceRange()));
