@@ -284,19 +284,53 @@ let full_to_mask_seq #t (s: array_spec t) (i: nat)
     assert (array_spec_mask s i)
   end
 
+
+// The private cell write the fill below is built on. It is `array_write`'s
+// body, repeated here because `array_write` is declared after `memset` in the
+// interface and a module must define its interface's members in order.
+fn fill_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
+  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
+  requires array_pts_to a 1.0R s
+  ensures exists* sn. array_pts_to a 1.0R sn ** pure (sn == array_spec_upd s (SZ.v i) v)
+{
+  unfold array_pts_to a 1.0R s;
+  A.mask_write a i v;
+  let sn = hide (array_spec_upd s (SZ.v i) v);
+  A.mask_mext a (to_mask sn);
+  A.mask_vext a (to_seq sn);
+  fold (array_pts_to a 1.0R sn);
+  ()
+}
+
+// The cells are written one at a time rather than through
+// `Pulse.Lib.Array.fill`, because `fill` goes through `from_mask`, which wants
+// every cell to already hold a value. `array_write` needs only that the cell is
+// in the mask, so the loop covers storage that has not been written yet -- see
+// the note on `memset` in the interface.
 fn memset (#t: Type0) (a: array t) (v: t) (n: SZ.t)
-  (#s: erased (array_spec t) { array_spec_full s /\ array_spec_len s == SZ.v n })
+  (#s: erased (array_spec t) { array_spec_full_mask s /\ array_spec_len s == SZ.v n })
   requires array_pts_to a 1.0R s
   ensures array_pts_to_full a 1.0R (array_spec_zeroed t (SZ.v n) v)
 {
-  unfold array_pts_to a 1.0R s;
-  Classical.forall_intro (Classical.move_requires (full_to_mask_seq s));
-  A.from_mask a;
-  A.pts_to_len a;
-  fill n a v;
-  A.to_mask a;
-  mask_mext a (to_mask (array_spec_zeroed t (SZ.v n) v));
-  mask_vext a (to_seq (array_spec_zeroed t (SZ.v n) v));
+  let mut i = 0sz;
+  while (SZ.lt (!i) n)
+  invariant exists* vi sp.
+    R.pts_to i vi **
+    array_pts_to a 1.0R sp **
+    pure (SZ.v vi <= SZ.v n /\
+          array_spec_len sp == SZ.v n /\
+          array_spec_full_mask sp /\
+          (forall (j:nat). j < SZ.v vi ==> array_spec_initd sp j /\ array_spec_idx sp j == v))
+  decreases (SZ.v n - SZ.v !i)
+  {
+    let vi = !i;
+    fill_cell a vi v;
+    i := SZ.add vi 1sz;
+  };
+  with sf. assert array_pts_to a 1.0R sf;
+  unfold array_pts_to a 1.0R sf;
+  A.mask_mext a (to_mask (array_spec_zeroed t (SZ.v n) v));
+  A.mask_vext a (to_seq (array_spec_zeroed t (SZ.v n) v));
   fold array_pts_to a 1.0R (array_spec_zeroed t (SZ.v n) v);
 }
 
@@ -340,6 +374,7 @@ fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   fold (array_pts_to a 1.0R s');
   ()
 }
+
 
 fn array_assign_ret u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
