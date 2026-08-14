@@ -617,11 +617,19 @@ paired with `defer` to ensure they don't escape:
 ```fstar
 fn uint32_t_stack_alloc ()
   returns  a : ptr
-  ensures  uint32_t_pts_to_uninit a
+  ensures  uint32_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn uint32_t_stack_free (a: ptr)
   requires uint32_t_pts_to_uninit a
 ```
+
+A local's address is never null in C, and the allocation says so as a pure
+fact. It follows from the ownership the allocation hands back
+(`mem_pts_to_not_null`), but stating it once there keeps it in scope for the
+rest of the body, so `&local` passed to a callee whose contract requires a
+non-null pointer needs no proof step (`test/local_not_null`). The generated
+struct and union `_stack_alloc` wrappers and `array_stack_alloc` export it too,
+from `mem_stack_alloc`.
 
 There is deliberately no token pairing an allocation with its deallocator, the
 same design Pulse's own `let mut` uses. Passing a `malloc`ed pointer to

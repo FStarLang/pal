@@ -124,11 +124,16 @@ fn memset_zero (dst: ptr) (n: SZ.t) (#bd: erased bytes)
    `uint32_t_stack_free` would indeed be wrong, but PAL controls the
    translation and never emits it, so paying for a token everywhere to rule out
    a program we do not generate is not worth it.
+
+   An allocation also says that its address is not null. That much follows
+   from the ownership it hands back (`mem_pts_to_not_null`), but saying it here
+   puts a pure fact in scope for the rest of the body, so a later `&local`
+   passed to a callee that requires a non-null pointer needs no proof step.
    --------------------------------------------------------------------------- *)
 
 fn uint32_t_stack_alloc ()
   returns  a : ptr
-  ensures  uint32_t_pts_to_uninit a
+  ensures  uint32_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn uint32_t_stack_free (a: ptr)
   requires uint32_t_pts_to_uninit a
@@ -139,7 +144,7 @@ fn ptr_write_uninit (a: ptr) (y: ptr)
 
 fn ptr_stack_alloc ()
   returns  a : ptr
-  ensures  ptr_pts_to_uninit a
+  ensures  ptr_pts_to_uninit a ** pure (not (is_null a))
 
 fn ptr_stack_free (a: ptr)
   requires ptr_pts_to_uninit a
@@ -153,7 +158,7 @@ fn ptr_stack_free (a: ptr)
 fn mem_stack_alloc (n: SZ.t) (al: SZ.t { SZ.v al > 0 /\ pow2 32 % SZ.v al == 0 })
   returns  a : ptr
   ensures  exists* b. mem_pts_to a 1.0R b
-                      ** pure (len b == SZ.v n /\ aligned a al)
+                      ** pure (len b == SZ.v n /\ aligned a al /\ not (is_null a))
 
 fn mem_stack_free (a: ptr) (#b: erased bytes)
   requires mem_pts_to a 1.0R b
@@ -186,7 +191,7 @@ fn bool_t_write_uninit (a: ptr) (y: bool)
 
 fn bool_t_stack_alloc ()
   returns  a : ptr
-  ensures  bool_t_pts_to_uninit a
+  ensures  bool_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn bool_t_stack_free (a: ptr)
   requires bool_t_pts_to_uninit a
@@ -206,7 +211,7 @@ fn int8_t_write_uninit (a: ptr) (y: I8.t)
 
 fn int8_t_stack_alloc ()
   returns  a : ptr
-  ensures  int8_t_pts_to_uninit a
+  ensures  int8_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn int8_t_stack_free (a: ptr)
   requires int8_t_pts_to_uninit a
@@ -226,7 +231,7 @@ fn int16_t_write_uninit (a: ptr) (y: I16.t)
 
 fn int16_t_stack_alloc ()
   returns  a : ptr
-  ensures  int16_t_pts_to_uninit a
+  ensures  int16_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn int16_t_stack_free (a: ptr)
   requires int16_t_pts_to_uninit a
@@ -246,7 +251,7 @@ fn int32_t_write_uninit (a: ptr) (y: I32.t)
 
 fn int32_t_stack_alloc ()
   returns  a : ptr
-  ensures  int32_t_pts_to_uninit a
+  ensures  int32_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn int32_t_stack_free (a: ptr)
   requires int32_t_pts_to_uninit a
@@ -266,7 +271,7 @@ fn int64_t_write_uninit (a: ptr) (y: I64.t)
 
 fn int64_t_stack_alloc ()
   returns  a : ptr
-  ensures  int64_t_pts_to_uninit a
+  ensures  int64_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn int64_t_stack_free (a: ptr)
   requires int64_t_pts_to_uninit a
@@ -277,7 +282,7 @@ fn uint8_t_write_uninit (a: ptr) (y: U8.t)
 
 fn uint8_t_stack_alloc ()
   returns  a : ptr
-  ensures  uint8_t_pts_to_uninit a
+  ensures  uint8_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn uint8_t_stack_free (a: ptr)
   requires uint8_t_pts_to_uninit a
@@ -297,7 +302,7 @@ fn uint16_t_write_uninit (a: ptr) (y: U16.t)
 
 fn uint16_t_stack_alloc ()
   returns  a : ptr
-  ensures  uint16_t_pts_to_uninit a
+  ensures  uint16_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn uint16_t_stack_free (a: ptr)
   requires uint16_t_pts_to_uninit a
@@ -317,7 +322,7 @@ fn uint64_t_write_uninit (a: ptr) (y: U64.t)
 
 fn uint64_t_stack_alloc ()
   returns  a : ptr
-  ensures  uint64_t_pts_to_uninit a
+  ensures  uint64_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn uint64_t_stack_free (a: ptr)
   requires uint64_t_pts_to_uninit a
@@ -337,7 +342,7 @@ fn size_t_write_uninit (a: ptr) (y: SZ.t)
 
 fn size_t_stack_alloc ()
   returns  a : ptr
-  ensures  size_t_pts_to_uninit a
+  ensures  size_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn size_t_stack_free (a: ptr)
   requires size_t_pts_to_uninit a
@@ -357,7 +362,7 @@ fn float32_t_write_uninit (a: ptr) (y: float32)
 
 fn float32_t_stack_alloc ()
   returns  a : ptr
-  ensures  float32_t_pts_to_uninit a
+  ensures  float32_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn float32_t_stack_free (a: ptr)
   requires float32_t_pts_to_uninit a
@@ -377,7 +382,7 @@ fn float64_t_write_uninit (a: ptr) (y: float64)
 
 fn float64_t_stack_alloc ()
   returns  a : ptr
-  ensures  float64_t_pts_to_uninit a
+  ensures  float64_t_pts_to_uninit a ** pure (not (is_null a))
 
 fn float64_t_stack_free (a: ptr)
   requires float64_t_pts_to_uninit a
