@@ -1912,8 +1912,12 @@ impl<'a> Emitter<'a> {
                                         }))
                                     }
                                 }
+                                // A record literal is one of the shapes that
+                                // can turn up here -- `(T){...}.f`, which C11
+                                // 6.5.2.5p4 allows -- and F* will not parse a
+                                // projection off an unparenthesized one.
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
-                                    x_doc.append(Doc::text(".")).append(self.emit_name(
+                                    parens(x_doc).append(Doc::text(".")).append(self.emit_name(
                                         Name::StructDirectFieldName(
                                             struct_name.val.clone(),
                                             a.val.clone(),
