@@ -1667,6 +1667,23 @@ public:
           return mk_alignof(std::move(loc), std::move(ty));
         }
       }
+    } else if (auto *off = dyn_cast<OffsetOfExpr>(e)) {
+      // `offsetof(S, m)` is a ground fact about the ABI, in the same way the
+      // size of a complete record is, and clang has already computed it. Fold
+      // it to its value rather than leaving the whole enclosing function
+      // untranslatable. This shares the layout assumption `c_sizeof` makes:
+      // the layout being proved against is the one this compiler chooses.
+      Expr::EvalResult evalResult;
+      if (off->EvaluateAsInt(evalResult, *astCtx)) {
+        SmallString<32> digits;
+        evalResult.Val.getInt().toString(digits, 10, /*Signed=*/false);
+        return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                          trQualType(e->getType(), e->getSourceRange()));
+      }
+      reportUnsupported(e->getSourceRange(), loc,
+                        "offsetof whose value is not a constant", "");
+      return mk_rvalue_err(std::move(loc),
+                           trQualType(e->getType(), e->getSourceRange()));
     }
 
     reportUnsupported(e->getSourceRange(), loc,
