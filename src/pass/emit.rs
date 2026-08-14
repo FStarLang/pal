@@ -3843,12 +3843,29 @@ impl<'a> Emitter<'a> {
                             .append(redecl)
                     } else {
                         let x = self.emit_name(Name::Var(x.val.clone()));
+                        // A local has an address, and in C that address is
+                        // never NULL. Pulse does not get that for free: the
+                        // cell is just a `ref`, and `ref` includes `null`. So
+                        // say it once, here, where the cell is created. The
+                        // conclusion is pure, so it stays in scope for the rest
+                        // of the body and every later `&local` argument to a
+                        // routine with a non-null precondition is discharged
+                        // without the caller having to say anything.
+                        let not_null = unaryfn(
+                            Doc::text("Pulse.Lib.Reference.pts_to_uninit_not_null"),
+                            x.clone(),
+                        )
+                        .append(";")
+                        .nest(2)
+                        .group();
                         (Doc::text("let mut ").append(x).append(" :"))
                             .append(Doc::line())
                             .append(self.emit_type(env, ty))
                             .append(";")
                             .nest(2)
                             .group()
+                            .append(Doc::hardline())
+                            .append(not_null)
                     }
                 }
                 StmtT::Let(x, ty, value) => Doc::text("let ")
