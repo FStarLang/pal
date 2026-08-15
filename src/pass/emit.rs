@@ -7413,6 +7413,18 @@ impl<'a> Emitter<'a> {
                 Self::mentions_return(a) || Self::mentions_return(b) || Self::mentions_return(c)
             }
             ExprT::FnCall(_, args) => args.iter().any(|a| Self::mentions_return(a)),
+            // A spec written in Pulse can only reach `return` through an
+            // antiquotation, so the verbatim tokens around them cannot
+            // reintroduce it. Looking inside is what lets a clause that fixes
+            // the result to a Pulse-level function of the arguments --
+            // `_ensures(return == (_Bool)_inline_pulse(f $(A) $(B)))`, which is
+            // the only way to say "this predicate decides that" -- still be
+            // emitted as `rewrites_to` rather than a plain equality.
+            ExprT::InlinePulse(code, _) => code.tokens.iter().any(|tok| match tok {
+                InlinePulseToken::RValueAntiquot { expr, .. }
+                | InlinePulseToken::LValueAntiquot { expr, .. } => Self::mentions_return(expr),
+                _ => false,
+            }),
             _ => true,
         }
     }
