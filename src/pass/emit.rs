@@ -4891,6 +4891,18 @@ impl<'a> Emitter<'a> {
             doc = doc.append(Doc::line().append(self.emit_stmt(&env, stmt)));
             env.push_stmt(stmt);
             idx += 1;
+            // A conditional that names its own join state cannot be the last
+            // thing in a block: Pulse would then have two postconditions for
+            // it -- the annotated one and the one the enclosing signature
+            // already fixed -- and rejects the pair rather than reconciling
+            // them. Sequencing a unit after it keeps the annotation local to
+            // the join, which is the only place it says anything.
+            if idx == stmts.len()
+                && let StmtT::If { ensures, .. } = &stmt.val
+                && !ensures.is_empty()
+            {
+                doc = doc.append(Doc::line().append("()"));
+            }
         }
         doc
     }
