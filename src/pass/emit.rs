@@ -114,6 +114,10 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::TypeRefSizeofPos(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
         Name::TypeRefSizeofPos(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefSizeofPos(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        // Global address names live in the global's own module.
+        Name::GlobalAddr(v) | Name::GlobalAddrNotNull(v) | Name::GlobalAcquire(v) => {
+            Some(format!("Global_{}", v))
+        }
         // Local names (Var, Val, Perm) are not cross-module references
         Name::Var(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
     }
@@ -357,6 +361,14 @@ impl From<&TypeRefKind> for TypeRef {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Name {
     Var(Rc<IdentT>),
+    /// The address of a `_pure` global: an assumed `ref` naming its storage,
+    /// one per global, so distinct globals get distinct addresses.
+    GlobalAddr(Rc<IdentT>),
+    /// Proof that a global's address is non-NULL.
+    GlobalAddrNotNull(Rc<IdentT>),
+    /// Acquires *read-only* ownership of a global's storage. Called in the
+    /// prologue of every function that takes the global's address.
+    GlobalAcquire(Rc<IdentT>),
     Val(Rc<IdentT>, u32),
     Perm(Rc<IdentT>, u32),
     Fn(Rc<IdentT>),
@@ -420,6 +432,9 @@ impl Name {
                     _ => format!("var_{}", v),
                 }
             }
+            Name::GlobalAddr(v) => format!("addr_var_{}", v),
+            Name::GlobalAddrNotNull(v) => format!("addr_var_{}_not_null", v),
+            Name::GlobalAcquire(v) => format!("acquire_var_{}", v),
             Name::Val(v, idx) => {
                 let v: &str = v;
                 format!("val_{}_{}", v, idx)
@@ -713,134 +728,144 @@ fn fnptr_domain_doc(arg_docs: Vec<Doc>) -> Doc {
     }
 }
 
-/// The set of functions whose address is taken anywhere in the translation
-/// unit (`&f` or a bare `f` decaying to a pointer, both `ExprT::FnRef`), and
-/// which therefore need a `Funcptr_<f>` module emitted.
+/// Visit every sub-expression of `e`, outermost first.
+fn walk_expr_tree(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    f(e);
+    match &e.val {
+        // Leaves.
+        ExprT::Var(_)
+        | ExprT::BoolLit(_)
+        | ExprT::IntLit(_, _)
+        | ExprT::FloatLit(_, _)
+        | ExprT::FnRef(_)
+        | ExprT::InlinePulse(_, _)
+        | ExprT::Malloc(_)
+        | ExprT::Calloc(_)
+        | ExprT::SizeOf(_)
+        | ExprT::AlignOf(_)
+        | ExprT::Error(_) => {}
+        // One sub-expression.
+        ExprT::Deref(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a)
+        | ExprT::Ref(a)
+        | ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _)
+        | ExprT::ContainerOf(a, _, _)
+        | ExprT::Live(a)
+        | ExprT::Old(a)
+        | ExprT::Forall(_, _, a)
+        | ExprT::Exists(_, _, a)
+        | ExprT::UnionInit(_, _, a)
+        | ExprT::MallocArray(_, a)
+        | ExprT::CallocArray(_, a)
+        | ExprT::MallocFlex(_, a)
+        | ExprT::CallocFlex(_, a)
+        | ExprT::MemsetZero(_, a)
+        | ExprT::Free(a)
+        | ExprT::PreIncr(a)
+        | ExprT::PostIncr(a)
+        | ExprT::PreDecr(a)
+        | ExprT::PostDecr(a) => walk_expr_tree(a, f),
+        // Two sub-expressions.
+        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+            walk_expr_tree(a, f);
+            walk_expr_tree(b, f);
+        }
+        // Three sub-expressions.
+        ExprT::Cond(a, b, c) | ExprT::Memset(_, a, b, c) => {
+            walk_expr_tree(a, f);
+            walk_expr_tree(b, f);
+            walk_expr_tree(c, f);
+        }
+        // Sequences.
+        ExprT::FnCall(_, args) => args.iter().for_each(|a| walk_expr_tree(a, f)),
+        ExprT::FnPtrCall(callee, args) => {
+            walk_expr_tree(callee, f);
+            args.iter().for_each(|a| walk_expr_tree(a, f));
+        }
+        ExprT::StructInit(_, fields) => fields.iter().for_each(|(_, a)| walk_expr_tree(a, f)),
+        ExprT::ArrayInit { elems, .. } => elems.iter().for_each(|a| walk_expr_tree(a, f)),
+    }
+}
+
+/// Visit every sub-expression appearing in `s`, including nested statements.
+fn walk_stmt_tree(s: &Stmt, f: &mut impl FnMut(&Expr)) {
+    match &s.val {
+        StmtT::Decl(_, _)
+        | StmtT::Break
+        | StmtT::Continue
+        | StmtT::Return(None)
+        | StmtT::GhostStmt(_)
+        | StmtT::Goto(_)
+        | StmtT::Label { .. }
+        | StmtT::Error => {}
+        StmtT::Call(e)
+        | StmtT::Assert(e)
+        | StmtT::Return(Some(e))
+        | StmtT::Let(_, _, e)
+        | StmtT::DeclStackArray { size: e, .. } => walk_expr_tree(e, f),
+        StmtT::Assign(l, r) => {
+            walk_expr_tree(l, f);
+            walk_expr_tree(r, f);
+        }
+        StmtT::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            walk_expr_tree(cond, f);
+            then_branch.iter().for_each(|s| walk_stmt_tree(s, f));
+            else_branch.iter().for_each(|s| walk_stmt_tree(s, f));
+        }
+        StmtT::Match {
+            scrutinee,
+            branches,
+            default_branch,
+            ..
+        } => {
+            walk_expr_tree(scrutinee, f);
+            branches
+                .iter()
+                .for_each(|b| b.body.iter().for_each(|s| walk_stmt_tree(s, f)));
+            default_branch.iter().for_each(|s| walk_stmt_tree(s, f));
+        }
+        StmtT::While { cond, body, .. } => {
+            walk_expr_tree(cond, f);
+            body.iter().for_each(|s| walk_stmt_tree(s, f));
+        }
+        StmtT::GotoBlock { body, .. } => body.iter().for_each(|s| walk_stmt_tree(s, f)),
+    }
+}
+
+/// Collect the set of C functions whose address is taken anywhere in the
+/// translation unit (`&f` or bare `f` decaying to a function pointer, both
+/// modeled as `ExprT::FnRef`). Each such function needs its fnptr wrapper
+/// (`func_<f>__fp`) emitted in its module.
 ///
-/// The walks are exhaustive with no `_` catch-all on purpose: a missed variant
-/// silently emits a reference to a `Funcptr_<f>` that never gets written,
-/// surfacing only as F* `Error 72` and never as a PAL diagnostic.
+/// The `Decl`-level match below is exhaustive with no `_` catch-all on
+/// purpose: a missed variant silently emits a reference to a `Funcptr_<f>`
+/// that never gets written, surfacing only as F* `Error 72` and never as a
+/// PAL diagnostic.
 fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
-    fn walk_expr(e: &Expr, set: &mut HashSet<Rc<str>>) {
-        match &e.val {
-            ExprT::FnRef(f) => {
-                set.insert(f.val.clone());
-            }
-            // Leaves.
-            ExprT::Var(_)
-            | ExprT::BoolLit(_)
-            | ExprT::IntLit(_, _)
-            | ExprT::FloatLit(_, _)
-            | ExprT::InlinePulse(_, _)
-            | ExprT::Malloc(_)
-            | ExprT::Calloc(_)
-            | ExprT::SizeOf(_)
-            | ExprT::AlignOf(_)
-            | ExprT::Error(_) => {}
-            // One sub-expression.
-            ExprT::Deref(a)
-            | ExprT::Member(a, _)
-            | ExprT::VAttr(_, a)
-            | ExprT::Ref(a)
-            | ExprT::UnOp(_, a)
-            | ExprT::Cast(a, _)
-            | ExprT::ContainerOf(a, _, _)
-            | ExprT::Live(a)
-            | ExprT::Old(a)
-            | ExprT::Forall(_, _, a)
-            | ExprT::Exists(_, _, a)
-            | ExprT::UnionInit(_, _, a)
-            | ExprT::MallocArray(_, a)
-            | ExprT::CallocArray(_, a)
-            | ExprT::MallocFlex(_, a)
-            | ExprT::CallocFlex(_, a)
-            | ExprT::MemsetZero(_, a)
-            | ExprT::Free(a)
-            | ExprT::PreIncr(a)
-            | ExprT::PostIncr(a)
-            | ExprT::PreDecr(a)
-            | ExprT::PostDecr(a) => walk_expr(a, set),
-            // Two sub-expressions.
-            ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
-                walk_expr(a, set);
-                walk_expr(b, set);
-            }
-            // Three sub-expressions.
-            ExprT::Cond(a, b, c) | ExprT::Memset(_, a, b, c) => {
-                walk_expr(a, set);
-                walk_expr(b, set);
-                walk_expr(c, set);
-            }
-            // Sequences.
-            ExprT::FnCall(_, args) => args.iter().for_each(|a| walk_expr(a, set)),
-            ExprT::FnPtrCall(callee, args) => {
-                walk_expr(callee, set);
-                args.iter().for_each(|a| walk_expr(a, set));
-            }
-            ExprT::StructInit(_, fields) => fields.iter().for_each(|(_, a)| walk_expr(a, set)),
-            ExprT::ArrayInit { elems, .. } => elems.iter().for_each(|a| walk_expr(a, set)),
-        }
-    }
-    fn walk_stmt(s: &Stmt, set: &mut HashSet<Rc<str>>) {
-        match &s.val {
-            StmtT::Decl(_, _)
-            | StmtT::Break
-            | StmtT::Continue
-            | StmtT::Return(None)
-            | StmtT::GhostStmt(_)
-            | StmtT::Goto(_)
-            | StmtT::Label { .. }
-            | StmtT::Error => {}
-            StmtT::Call(e)
-            | StmtT::Assert(e)
-            | StmtT::Return(Some(e))
-            | StmtT::Let(_, _, e)
-            | StmtT::DeclStackArray { size: e, .. } => walk_expr(e, set),
-            StmtT::Assign(l, r) => {
-                walk_expr(l, set);
-                walk_expr(r, set);
-            }
-            StmtT::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                walk_expr(cond, set);
-                then_branch.iter().for_each(|s| walk_stmt(s, set));
-                else_branch.iter().for_each(|s| walk_stmt(s, set));
-            }
-            StmtT::Match {
-                scrutinee,
-                branches,
-                default_branch,
-                ..
-            } => {
-                walk_expr(scrutinee, set);
-                branches
-                    .iter()
-                    .for_each(|b| b.body.iter().for_each(|s| walk_stmt(s, set)));
-                default_branch.iter().for_each(|s| walk_stmt(s, set));
-            }
-            StmtT::While { cond, body, .. } => {
-                walk_expr(cond, set);
-                body.iter().for_each(|s| walk_stmt(s, set));
-            }
-            StmtT::GotoBlock { body, .. } => {
-                body.iter().for_each(|s| walk_stmt(s, set));
-            }
-        }
-    }
     let mut set = HashSet::new();
+    let mut note = |e: &Expr| {
+        if let ExprT::FnRef(f) = &e.val {
+            set.insert(f.val.clone());
+        }
+    };
     for decl in decls {
         match &decl.val {
-            DeclT::FnDefn(fd) => fd.body.iter().for_each(|s| walk_stmt(s, &mut set)),
+            DeclT::FnDefn(fd) => fd.body.iter().for_each(|s| walk_stmt_tree(s, &mut note)),
+            // A global initializer can mention a function too, e.g.
+            // `_pure ops g_ops = { .op = add };`.
             DeclT::GlobalVar(gv) => {
                 if let Some(init) = &gv.init {
-                    walk_expr(init, &mut set)
+                    walk_expr_tree(init, &mut note)
                 }
             }
-            DeclT::LetDecl(ld) => walk_expr(&ld.body, &mut set),
+            DeclT::LetDecl(ld) => walk_expr_tree(&ld.body, &mut note),
             DeclT::FnDecl(_)
             | DeclT::Typedef(_)
             | DeclT::StructDefn(_)
@@ -2478,7 +2503,18 @@ impl<'a> Emitter<'a> {
                     // These are lvalue/vattr variants; handled by emit_expr
                     unreachable!("lvalue/vattr variants should be handled by emit_expr")
                 }
-                ExprT::Ref(v) => self.emit_lvalue(env, v),
+                ExprT::Ref(v) => {
+                    // `&g` for a `_pure` global: the global is a plain F* value
+                    // with no lvalue, so use its assumed address. Ownership is
+                    // acquired by the caller with `acquire_var_g` and released
+                    // with `drop_`.
+                    if let ExprT::Var(x) = &v.val
+                        && env.addressable_global(x).is_some()
+                    {
+                        return self.emit_name(Name::GlobalAddr(x.val.clone()));
+                    }
+                    self.emit_lvalue(env, v)
+                }
                 ExprT::Cast(val, to_ty) => {
                     let val_doc = self.emit_rvalue(env, val);
                     let Ok(from_ty) = env.infer_expr(val).map(|t| env.vtype_whnf(t)) else {
@@ -7544,13 +7580,94 @@ impl<'a> Emitter<'a> {
             None => self.emit_type_default(env, &gv.ty),
         };
         let def = mk_let(name.clone(), &[], ty, body);
-        if gv.opaque_to_smt {
+        let def = if gv.opaque_to_smt {
             Doc::text("[@@\"opaque_to_smt\"]")
                 .append(Doc::hardline())
                 .append(def)
         } else {
             def
+        };
+        match self.emit_global_addr(env, gv) {
+            Some(addr) => def.append(Doc::hardline()).append(addr),
+            None => def,
         }
+    }
+
+    /// Emit a `_pure` global's address: an assumed `ref` (one per global, so
+    /// distinct globals get distinct addresses), a non-null axiom, and the
+    /// acquire that hands out *read-only* ownership of its storage.
+    ///
+    /// Reads of a `_pure` global are ownership-free, which is only sound if the
+    /// storage holds `var_g` forever -- so the pointer must never be writable.
+    /// Hiding the permission under an existential achieves that, and it must
+    /// stay existential rather than some fixed fraction `k`: `k` acquired `n`
+    /// times gathers to `n * k`, and `pts_to_perm_bound` (`p <=. 1.0R`) would
+    /// then prove `False` for `n > 1/k`.
+    ///
+    /// The `pts_to` is emitted literally, not behind an abbreviation: Pulse's
+    /// `[@@pulse_intro] __aux_raw_unfold` only fires on a literal `pts_to`,
+    /// which the struct-global case depends on.
+    ///
+    /// The acquire is an `assume val` rather than an admitted `ghost fn`: the
+    /// ownership is *assumed* to exist, being a fraction of the one reserved
+    /// for the global at program start. Callers release it with `drop_`.
+    ///
+    /// Emitted for every eligible global, whether or not its address is taken
+    /// (the `&g` may live in another module), as for the `__fp` wrappers.
+    /// See `doc/pal_surface_syntax.md`.
+    fn emit_global_addr(&mut self, env: &Env, gv: &GlobalVar) -> Option<Doc> {
+        if global_var_is_array(gv) {
+            return None;
+        }
+        let var = self.emit_name(Name::Var(gv.name.val.clone()));
+        let addr = self.emit_name(Name::GlobalAddr(gv.name.val.clone()));
+        let ty = self.emit_type(env, &gv.ty);
+        let ref_ty = parens(Doc::text("ref").append(Doc::line()).append(ty).nest(2));
+
+        let addr_val = Doc::text("assume val ")
+            .append(addr.clone())
+            .append(Doc::text(" : "))
+            .append(ref_ty.clone());
+        let not_null = Doc::text("assume val ")
+            .append(self.emit_name(Name::GlobalAddrNotNull(gv.name.val.clone())))
+            .append(Doc::text(" : squash (~(Pulse.Lib.Reference.is_null "))
+            .append(addr.clone())
+            .append(Doc::text("))"));
+        let perm = Doc::text("p");
+        let pts_to = naryfn([
+            Doc::text("Pulse.Lib.Reference.pts_to"),
+            addr,
+            Doc::text("#").append(perm.clone()),
+            var,
+        ]);
+        let addr_of = mk_assume_val(
+            vec![],
+            self.emit_name(Name::GlobalAcquire(gv.name.val.clone())),
+            &[],
+            naryfn([
+                Doc::text("unit"),
+                Doc::text("->"),
+                Doc::text("stt_ghost"),
+                Doc::text("unit"),
+                Doc::text("emp_inames"),
+                Doc::text("emp"),
+                mk_thunk(wrap_exists(
+                    &[ExBinding {
+                        name: perm,
+                        ty: Doc::text("perm"),
+                    }],
+                    vec![pts_to],
+                )),
+            ]),
+        );
+
+        Some(
+            addr_val
+                .append(Doc::hardline())
+                .append(not_null)
+                .append(Doc::hardline())
+                .append(addr_of),
+        )
     }
 
     fn emit_decl(&mut self, env: &Env, decl: &Decl) -> Doc {

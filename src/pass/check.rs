@@ -304,7 +304,7 @@ impl<'a> Checker<'a> {
             }
             ExprT::Ref(lval) => {
                 self.check_rvalue(env, lval);
-                if !env.is_lvalue(lval) {
+                if !env.is_addressable(lval) {
                     self.report(format!("expected lvalue for &, got {}", lval), &rval.loc);
                 }
             }

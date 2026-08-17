@@ -776,6 +776,41 @@ impl Env {
         matches!(&self.vtype_whnf(a).val, TypeT::SLProp)
     }
 
+    /// Whether `&expr` is allowed, i.e. `expr` denotes storage.
+    ///
+    /// This is `is_lvalue` plus the address-taking-only cases. A `_pure` global
+    /// is *not* an lvalue -- PAL emits it as a plain top-level F* value and
+    /// reads it with no ownership at all -- but its address can still be taken,
+    /// because the emitter hands out a read-only pointer (the permission is
+    /// hidden under an existential) that can never be written through. See
+    /// `addressable_global`.
+    pub fn is_addressable(&self, expr: &Expr) -> bool {
+        if self.is_lvalue(expr) {
+            return true;
+        }
+        matches!(&expr.val, ExprT::Var(x) if self.addressable_global(x).is_some())
+    }
+
+    /// The global named by `ident`, if `&ident` is supported.
+    ///
+    /// Restricted to `_pure` non-array globals:
+    ///
+    /// * A non-pure (mutable) global emits nothing at all, so there is no spec
+    ///   value for the address to point at -- and it is writable by definition,
+    ///   which is exactly what the read-only discipline must rule out.
+    /// * An array global is exposed as a *spec* (`full_array_lspec`) and read
+    ///   ownership-free via `array_spec_idx`. Handing out a pointer to it would
+    ///   let a caller observe storage that the spec value no longer describes.
+    ///   (Arrays have no pointer path at all today, so this rejects nothing that
+    ///   used to work.)
+    pub fn addressable_global(&self, ident: &Ident) -> Option<&GlobalVar> {
+        let gv = self.lookup_global_var(ident)?;
+        if !gv.is_pure || global_var_is_array(gv) {
+            return None;
+        }
+        Some(gv)
+    }
+
     pub fn is_lvalue(&self, expr: &Expr) -> bool {
         match &expr.val {
             ExprT::Var(x) => match self.lookup_var(x) {
