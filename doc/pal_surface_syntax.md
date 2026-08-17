@@ -112,7 +112,7 @@ As explained in `structs.md`, PAL auto-generates predicates for compound types. 
 | `_refine_uninit(p)`         | only when uninitialised                   |
 | `_refine_value(bind, pred)` | as `_refine`, but binding name is `bind`  |
 
-A refinement does *not* change the runtime representation. It is attached to the **type** at every site where the type appears (parameter, struct field, return value, …) and is materialised as an extra pure conjunct in any slprop emitted for a value of that type — i.e. in the implicit `pts_to` of a function parameter, in a struct's `__pred`, etc.
+A refinement does *not* change the runtime representation. It is attached to the **type** at every site where the type appears (parameter, struct field, return value, …) and is materialised as an extra pure conjunct in any slprop emitted for a value of that type — e.g. in the implicit `pts_to` of a function parameter. Whether that conjunct ends up *inside* the type's auto-generated `__pred` or *alongside* it at each use site depends on where the refinement is written: a field-level refinement is folded into the struct's `__pred` (see below), whereas a refinement on a struct or typedef declaration itself is kept separate and re-attached at every use site, leaving `struct_S__pred` unchanged (see below). Folding a record/typedef-level refinement directly into `struct_S__pred` instead is potential future work, not current behavior.
 
 **On a typedef** — the refinement fires for every use of the typedef.
 
