@@ -6573,8 +6573,20 @@ impl<'a> Emitter<'a> {
                 ))
             }
         };
-        let req_props: Vec<Doc> = decl
+        //
+        // A clause is only a plain boolean fact (and thus belongs under the
+        // `pure(...)` conjunction above) when the elaborator had to insert a
+        // `Cast(_, SLProp)` to lift it (see `Elaborator::cast_to_slprop`); a
+        // clause written via `_inline_pulse(...)` already infers as `slprop`
+        // and is left as-is by the elaborator, so it must be spliced directly
+        // into `requires_props`/`ensures_props` instead — wrapping it in
+        // `pure(...)` a second time is ill-typed (`pure` expects `Prims.prop`,
+        // not `slprop`).
+        let (req_bool, req_slprop): (Vec<_>, Vec<_>) = decl
             .requires
+            .iter()
+            .partition(|r| is_bool_cast_to_slprop(r));
+        let req_props: Vec<Doc> = req_bool
             .iter()
             .map(|r| self.emit_pure_prop(env, r))
             .collect();
@@ -6583,6 +6595,7 @@ impl<'a> Emitter<'a> {
         if has_req {
             requires_props.push(unaryfn(Doc::text("pure"), req_conj.clone()));
         }
+        requires_props.extend(req_slprop.iter().map(|r| self.emit_rvalue(env, r)));
 
         let return_id = env
             .push_return(decl.ret_type.clone())
@@ -6612,8 +6625,13 @@ impl<'a> Emitter<'a> {
             }
         }
         // Pure ensures reference the pointee value via the normal lowering.
-        let ens_props_pure: Vec<Doc> = decl
-            .ensures
+        // As with `requires` above, only plain boolean clauses (elaborator-
+        // inserted `Cast(_, SLProp)`) go under the `req ==> ens` implication
+        // and `pure(...)`; clauses already `slprop`-typed (`_inline_pulse`)
+        // are spliced directly.
+        let (ens_bool, ens_slprop): (Vec<_>, Vec<_>) =
+            decl.ensures.iter().partition(|r| is_bool_cast_to_slprop(r));
+        let ens_props_pure: Vec<Doc> = ens_bool
             .iter()
             .map(|r| self.emit_pure_prop(env, r))
             .collect();
@@ -6626,6 +6644,7 @@ impl<'a> Emitter<'a> {
             };
             ensures_props.push(unaryfn(Doc::text("pure"), implied));
         }
+        ensures_props.extend(ens_slprop.iter().map(|r| self.emit_rvalue(env, r)));
 
         let pre_body = mk_star(requires_props);
         let post_body = mk_star(ensures_props);
@@ -7048,6 +7067,15 @@ impl<'a> Emitter<'a> {
 /// Append remaining statements to a block (for if/else continuation in pure functions).
 fn append_rest(block_stmts: &[Rc<Stmt>], rest: &[Rc<Stmt>]) -> Vec<Rc<Stmt>> {
     block_stmts.iter().chain(rest.iter()).cloned().collect()
+}
+
+/// Whether a `_requires`/`_ensures` clause is a plain boolean fact that the
+/// elaborator lifted into `slprop` by inserting a `Cast(_, SLProp)` wrapper
+/// (see `Elaborator::cast_to_slprop`), as opposed to a clause that already
+/// infers as `slprop` on its own (e.g. one written via `_inline_pulse(...)`),
+/// which the elaborator leaves unwrapped.
+fn is_bool_cast_to_slprop(expr: &Expr) -> bool {
+    matches!(&expr.val, ExprT::Cast(_, ty) if matches!(ty.val, TypeT::SLProp))
 }
 
 impl<'a> Emitter<'a> {

@@ -1119,6 +1119,77 @@ void call_zero(struct boxed *b, struct cell *c)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
+/* `_plain` suppresses PAL's automatic pts_to, so this hand-written slprop
+   clause is `touch`'s only ownership of `*p`. It requires `*p == 0` rather
+   than `exists* v. pts_to p v`: taking `touch`'s address needs Pulse's
+   `pre_of`/`post_of` reflection to recover the `__fp` wrapper's contract,
+   which can't invert a top-level `exists*` -- only a fixed witness can. */
+void touch(_plain int *p)
+  _requires(_inline_pulse(pts_to $(p) 0l))
+  _ensures(_inline_pulse(pts_to $(p) 0l))
+{
+}
+
+void use_touch_fp(void)
+{
+    void (*cb)(_plain int *) = touch;
+}
+
+/* `destroy` points back to `struct itemx` itself: an intrusive vtable.
+   Without `_core_ref`, PAL's field type embeds `struct_itemx` inside its own
+   function-pointer field -- a non-strictly-positive occurrence F* rejects
+   (Error 3). `_core_ref` reflects `destroy`'s domain as the opaque `core_ref`
+   handle instead, breaking the cycle (PAL auto-casts with `ref_to_core` at
+   call sites; an implementation would cast back with `core_to_ref`, as
+   `core_ref_use.c` does).
+
+   Like `_plain`, `_core_ref` drops PAL's automatic ownership plumbing for
+   that argument, so `destroy_impl` below is a no-op: a real destroy body
+   would need an `exists*` precondition over `*self`'s unknown contents,
+   which hits the same `pre_of`/`post_of` reflection limit as `touch` above. */
+
+struct itemx {
+    void (*destroy)(_core_ref struct itemx *self);
+    unsigned int n;
+};
+
+/* The concrete vtable target. Left as a no-op (see above). */
+void destroy_impl(_core_ref struct itemx *self)
+{
+}
+
+/* Ownership predicate for a `struct itemx *` carrying `is_valid` on its
+   `destroy` field, so `destroy_via_field` can call through it -- mirrors
+   `Dispatch_spec.ops_c_valid`/`ops_c_ptr` above exactly. */
+_include_pulse(Itemx_spec,
+  unfold let itemx_valid ([@@@mkey] this: ref Struct_itemx.struct_itemx) (vo: Struct_itemx.struct_itemx) : slprop =
+    Pulse.Lib.Reference.pts_to this vo **
+    Pulse.Lib.C.FuncPtr.is_valid vo.Struct_itemx.struct_itemx__destroy true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_destroy_impl.func_destroy_impl__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_destroy_impl.func_destroy_impl__fp)
+)
+
+_type(itemx_val, Struct_itemx.struct_itemx)
+_refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
+_plain
+typedef struct itemx *itemx_ptr;
+
+/* Cross-function call through the self-referential vtable field. */
+void destroy_via_field(itemx_ptr p) {
+    p->destroy(p);
+}
+
+/* Caller: builds the struct, assigns `destroy_impl` into the vtable, seeds
+   validity, and calls through the field. */
+void use_destroy_via_field(void)
+{
+    struct itemx it;
+    _ghost_stmt($unfold-uninit(struct itemx) $&(it));
+    it.destroy = destroy_impl;
+    it.n = 0;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);
+    destroy_via_field(&it);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
 #if 0
 
 /* [not yet verified -- DEFERRED, emitter mutual-recursion gap] Indirect
