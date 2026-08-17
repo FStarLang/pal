@@ -843,6 +843,11 @@ fn walk_stmt_tree(s: &Stmt, f: &mut impl FnMut(&Expr)) {
 /// translation unit (`&f` or bare `f` decaying to a function pointer, both
 /// modeled as `ExprT::FnRef`). Each such function needs its fnptr wrapper
 /// (`func_<f>__fp`) emitted in its module.
+///
+/// The `Decl`-level match below is exhaustive with no `_` catch-all on
+/// purpose: a missed variant silently emits a reference to a `Funcptr_<f>`
+/// that never gets written, surfacing only as F* `Error 72` and never as a
+/// PAL diagnostic.
 fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
     let mut set = HashSet::new();
     let mut note = |e: &Expr| {
@@ -860,7 +865,14 @@ fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
                     walk_expr_tree(init, &mut note)
                 }
             }
-            _ => {}
+            DeclT::LetDecl(ld) => walk_expr_tree(&ld.body, &mut note),
+            DeclT::FnDecl(_)
+            | DeclT::Typedef(_)
+            | DeclT::StructDefn(_)
+            | DeclT::StructDecl(_)
+            | DeclT::UnionDefn(_)
+            | DeclT::IncludeDecl(_)
+            | DeclT::OpaqueTypeDecl(_) => {}
         }
     }
     set
@@ -1474,6 +1486,19 @@ impl<'a> Emitter<'a> {
         props: &mut Vec<Doc>,
         this: &Rc<Expr>,
     ) {
+        self.emit_type_slprop_inner(env, ty, variant, naming, props, this, None);
+    }
+
+    fn emit_type_slprop_inner(
+        &mut self,
+        env: &Env,
+        ty: &Type,
+        variant: SLPropVariant,
+        naming: &mut ValNaming,
+        props: &mut Vec<Doc>,
+        this: &Rc<Expr>,
+        resolving_struct: Option<&str>,
+    ) {
         match &ty.val {
             TypeT::Void
             | TypeT::Bool
@@ -1513,8 +1538,14 @@ impl<'a> Emitter<'a> {
                             };
                             if !is_self_ref {
                                 let derefed = ExprT::Deref(this.clone()).with_loc(this.loc.clone());
-                                self.emit_type_slprop(
-                                    env, pointee_ty, variant, naming, props, &derefed,
+                                self.emit_type_slprop_inner(
+                                    env,
+                                    pointee_ty,
+                                    variant,
+                                    naming,
+                                    props,
+                                    &derefed,
+                                    resolving_struct,
                                 );
                             }
                         }
@@ -1566,6 +1597,24 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::TypeRef(n) => {
+                if let TypeRefKind::Struct(name) = n {
+                    if resolving_struct != Some(&name.val) {
+                        if let Some(decl) = env.lookup_struct(name) {
+                            // Record attributes are parsed once on StructDefn.
+                            // Bypass lookup for the cached tree's inner self
+                            // reference so it emits the raw named predicate.
+                            return self.emit_type_slprop_inner(
+                                env,
+                                &decl.refines,
+                                variant,
+                                naming,
+                                props,
+                                this,
+                                Some(&name.val),
+                            );
+                        }
+                    }
+                }
                 let this_doc = self.emit_rvalue(env, this);
                 let (val_param_types, pred_name) = match variant {
                     SLPropVariant::Init { .. } => (
@@ -1596,7 +1645,15 @@ impl<'a> Emitter<'a> {
                 props.push(naryfn(args));
             }
             TypeT::Refine(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, naming, props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    ty,
+                    variant,
+                    naming,
+                    props,
+                    this,
+                    resolving_struct,
+                );
                 if let SLPropVariant::Init { .. } = variant {
                     let p = &mut p.clone();
                     self.subst_this_rvalue(env, Rc::make_mut(p), this);
@@ -1604,13 +1661,29 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::RefineAlways(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, naming, props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    ty,
+                    variant,
+                    naming,
+                    props,
+                    this,
+                    resolving_struct,
+                );
                 let p = &mut p.clone();
                 self.subst_this_rvalue(env, Rc::make_mut(p), this);
                 props.push(self.emit_rvalue(env, p));
             }
             TypeT::RefineUninit(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, naming, props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    ty,
+                    variant,
+                    naming,
+                    props,
+                    this,
+                    resolving_struct,
+                );
                 if let SLPropVariant::Uninit = variant {
                     let p = &mut p.clone();
                     self.subst_this_rvalue(env, Rc::make_mut(p), this);
@@ -1618,7 +1691,15 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::RefineValue(ty, binding_name, binding_ty, p) => {
-                self.emit_type_slprop(env, ty, variant, naming, props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    ty,
+                    variant,
+                    naming,
+                    props,
+                    this,
+                    resolving_struct,
+                );
                 if let SLPropVariant::Init { .. } = variant {
                     let binding_type_doc = self.emit_type(env, binding_ty);
                     // RefineValue uses an explicit binding name from the user annotation
@@ -1649,7 +1730,15 @@ impl<'a> Emitter<'a> {
                 // registered via the shared `naming`.
                 let this_doc = self.emit_rvalue(env, this);
                 let mut inner_props: Vec<Doc> = vec![];
-                self.emit_type_slprop(env, inner, variant, naming, &mut inner_props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    inner,
+                    variant,
+                    naming,
+                    &mut inner_props,
+                    this,
+                    resolving_struct,
+                );
                 props.push(annotated(ty, || {
                     naryfn([Doc::text("unless_null"), this_doc, mk_star(inner_props)])
                 }));

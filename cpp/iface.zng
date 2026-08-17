@@ -223,6 +223,7 @@ mod crate::clang {
         fn arg_anon(&mut self, Rc<Type>, ParamMode);
         fn field(&mut self, Rc<Ident>, Rc<Type>);
         fn field_bitfield(&mut self, Rc<Ident>, Rc<Type>, u32);
+        fn refines(&mut self, Rc<Type>);
         fn ghost_arg(&mut self, Rc<Ident>, Rc<Type>);
         fn requires(&mut self, Rc<Expr>);
         fn ensures(&mut self, Rc<Expr>);

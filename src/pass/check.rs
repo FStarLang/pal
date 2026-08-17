@@ -814,8 +814,12 @@ impl<'a> Checker<'a> {
                 is_pointer_view: _,
             }) => self.check_type(env, body),
             DeclT::StructDefn(StructDefn {
-                name: _, fields, ..
+                name: _,
+                refines,
+                fields,
+                ..
             }) => {
+                self.check_type(env, refines);
                 for f in fields {
                     self.check_field(env, f, fields);
                 }
