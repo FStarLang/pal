@@ -34,19 +34,16 @@ open Pulse.Lib.C.Inhabited
 
    Every combinator above is additionally parametrized by a witness type `c`,
    with `pre`/`post` taking a `c`-typed argument and the wrapped function
-   itself taking a matching, EXPLICIT `erased c` parameter after `x:a`. This
-   lets a plain (unannotated) pointer parameter's ownership -- normally an
-   `exists* v. pts_to p v` in `requires` -- be expressed via `pre x v` for an
-   explicit `v`, instead of `exists* v. pre x v`. The distinction matters
-   because Pulse elaborates a top-level `exists*` in `requires` by opening it
-   and threading the witness as a HIDDEN implicit binder placed after `x` in
-   the function's real type, which defeats `pre_of`/`post_of`'s higher-order
-   unification (it no longer sees the flat `x:a -> stt_div b (pre x) (post x)`
-   shape it needs -- F* Error 189). Making the witness an ordinary explicit
-   parameter sidesteps this: HOU only has to solve for `pre`/`post` applied to
-   two plain bound variables (`x` and `y`), exactly as it already does for `x`
-   alone today. Ordinary function pointers with no such existential parameter
-   simply instantiate `c = unit` and pass `hide ()`.
+   taking a matching, EXPLICIT `erased c` parameter after `x:a`. This lets a
+   plain pointer parameter's ownership (normally `exists* v. pts_to p v` in
+   `requires`) be expressed as `pre x v` for an explicit `v`, instead of
+   `exists* v. pre x v`. This matters because Pulse elaborates a top-level
+   `exists*` in `requires` by opening it into a HIDDEN implicit binder after
+   `x`, which defeats `pre_of`/`post_of`'s higher-order unification (F* Error
+   189: the wrapper's type no longer has the flat `x:a -> stt_div b (pre x)
+   (post x)` shape they need). An explicit witness parameter sidesteps this.
+   Ordinary function pointers with no such parameter instantiate `c = unit`
+   and pass `hide ()`.
    ============================================================================ *)
 
 (* Abstract C function pointer: `a` is the (tupled) argument type, `b` the return
@@ -57,21 +54,15 @@ val func_ptr (a: Type0) (b: Type0) : Type0
    records whether `f` may diverge. A pure prop, so `is_valid` is a persistent
    fact threadable without touching the heap.
 
-   `pre`/`post` additionally take a caller-supplied `erased c` witness. This
-   makes any existential ownership `f`'s parameters carry (e.g. `exists* v.
-   pts_to p v` for a plain, unannotated pointer parameter) an EXPLICIT curried
-   argument of the wrapped function, rather than a witness Pulse would
-   otherwise hide as an implicit binder when it opens that `exists*` while
-   elaborating the function's own `requires` -- which is exactly what defeats
-   `pre_of`/`post_of`'s higher-order unification below (the wrapper's real
-   type no longer has the flat `x:a -> stt_div b (pre x) (post x)` shape they
-   need). `pre`/`post` themselves are free to `reveal` this witness (e.g. to
-   supply a concrete `pts_to` value); it stays un-revealed at the outer
-   `pre x y`/`post x y` application so `y` remains a bare bound variable --
-   HOU needs a genuine Miller pattern (`?pre` applied to two plain variables
-   `x`/`y`), not `?pre` applied to `reveal y` (a non-pattern application).
-   Ordinary function pointers with no such existential parameter witness
-   simply instantiate `c = unit`. *)
+   `pre`/`post` additionally take a caller-supplied `erased c` witness (see
+   the witness-type note above): this keeps any existential ownership `f`'s
+   parameters carry as an EXPLICIT curried argument, rather than a hidden
+   implicit binder Pulse would otherwise introduce -- which is what defeats
+   `pre_of`/`post_of`'s higher-order unification below. `pre`/`post` may
+   `reveal` the witness internally; it stays un-revealed at the outer
+   `pre x y`/`post x y` application so HOU sees a genuine Miller pattern
+   (`?pre` applied to plain variables `x`/`y`). Ordinary function pointers
+   with no such parameter simply instantiate `c = unit`. *)
 val valid (#a #b #c: Type0) (f: func_ptr a b) (div: bool) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop) : prop
 let is_valid (#a #b #c: Type0) ([@@@mkey] f: func_ptr a b) (div: bool) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop) : slprop = pure (valid f div pre post)
 

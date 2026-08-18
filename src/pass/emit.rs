@@ -3236,13 +3236,12 @@ impl<'a> Emitter<'a> {
                     // uses to build the callee wrapper's own witness tuple.
                     // Ordinary (non-witnessing) call sites pass `hide ()`.
                     //
-                    // NOTE: when the callee itself is read through the SAME
-                    // pointer (`self->field(self, ..)`), the struct
-                    // field-getter's own implicit unfold currently opens an
-                    // existential independent of this witness read, which
-                    // Pulse cannot unify automatically -- a known limitation
-                    // for self-dispatch call sites, tracked separately from
-                    // the plain-pointer-*parameter* fix this change targets.
+                    // NOTE: self-dispatch (`self->field(self, ..)`) verifies
+                    // when `self` is `_consumes` -- see `destroy_via_field` in
+                    // test/func_pointer/func_pointer.c. With a borrowed
+                    // `self`, the field getter's own unfold and this witness
+                    // read open two independent existentials for the same
+                    // value that Pulse can't unify.
                     let param_tys: Option<Vec<Rc<Type>>> = env
                         .infer_expr(f)
                         .ok()
@@ -6472,18 +6471,15 @@ impl<'a> Emitter<'a> {
         let mut requires_props: Vec<Doc> = vec![];
         let mut ensures_props: Vec<Doc> = vec![];
         let mut preserves_props: Vec<Doc> = vec![];
-        // Requires-side existential ownership groups, one per Regular/
-        // Consumed/Out arg contributing bindings (e.g. a plain pointer
-        // parameter's pointee value). Deferred until after this loop: their
-        // combined bindings become components of ONE explicit `y_fp: erased c`
-        // wrapper parameter (via `wrap_witness`) instead of independent
-        // `exists*`s, each of which Pulse would otherwise open into a hidden
-        // implicit binder placed after the wrapper's `x_fp` parameter --
-        // defeating `pre_of`/`post_of`'s higher-order unification (F* Error
-        // 189; see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc). An
-        // `ensures`-side `exists*` is not part of the wrapper's own arrow
-        // *type* (it lives inside the `stt_div` RESULT slprop), so it is not a
-        // HOU obstacle and keeps using the ordinary `wrap_exists` unchanged.
+        // Requires-side existential ownership groups (e.g. a plain pointer
+        // parameter's pointee value), one per Regular/Consumed/Out arg.
+        // Deferred until after this loop: their bindings are combined into
+        // ONE explicit `y_fp: erased c` wrapper parameter (via
+        // `wrap_witness`) instead of independent `exists*`s, which Pulse
+        // would otherwise open as hidden implicit binders and break
+        // `pre_of`/`post_of`'s higher-order unification (F* Error 189; see
+        // `Pulse.Lib.C.FuncPtr.fsti`). Ensures-side `exists*`s aren't part of
+        // the wrapper's arrow type, so they keep using `wrap_exists`.
         let mut req_witness_groups: Vec<(Vec<ExBinding>, Vec<Doc>)> = vec![];
         for (n, arg) in arg_names.iter().zip(decl.args.iter()) {
             match arg.mode {

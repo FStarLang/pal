@@ -1044,16 +1044,12 @@ int32_t weaken_total_to_div(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-/* Plain pointer parameter, no workaround annotations: PAL's auto-generated
-   ownership for `int *p` is `exists* v. pts_to p v`. Taking `touch`'s
-   address forces a `__fp` wrapper whose contract must be recovered via
-   `pre_of`/`post_of` type-reflection. This now VERIFIES: `pre`/`post`
-   (`Pulse.Lib.C.FuncPtr.fsti`) take an extra explicit `erased c` witness
-   parameter after the wrapper's own argument, so the wrapper's real type is
-   the flat `x:a -> y:erased c -> stt_div b (pre x y) (post x y)`
-   `pre_of`/`post_of` need -- the pointee's ownership is threaded through `y`
-   instead of a hidden implicit binder Pulse would otherwise introduce by
-   opening a top-level `exists*` (which is what broke HOU with Error 189). */
+/* Plain pointer parameter, no workaround annotations. Taking `touch`'s
+   address forces a `__fp` wrapper recovered via `pre_of`/`post_of`
+   type-reflection. Now VERIFIES: `pre_of`/`post_of` take an explicit
+   `erased c` witness parameter, so the wrapper's ownership is threaded
+   through it instead of a hidden implicit binder (which broke HOU with
+   Error 189). */
 void touch(int *p)
 {
 }
@@ -1063,18 +1059,16 @@ void use_touch_fp(void)
     void (*cb)(int *) = touch;
 }
 
-/* `struct itemx` itself verifies fine here -- `destroy`'s field type stays a
-   plain, non-recursive `func_ptr (ref struct_itemx) unit`, no self-
-   reference, no strict-positivity Error 3. */
+/* `struct itemx` verifies fine: `destroy`'s field type is a plain,
+   non-recursive `func_ptr`, no self-reference, no strict-positivity error. */
 struct itemx {
     void (*destroy)(struct itemx *self);
     unsigned int n;
 };
 
-/* Now VERIFIES. `destroy_impl`'s `self` is `_consumes _allocated`: a real
-   destructor that takes ownership of its receiver and frees it, rather than
-   merely borrowing it (same annotation combo as `test/dpe/DPE.c`'s
-   `destroy_uds_context`). */
+/* `destroy_impl`'s `self` is `_consumes _allocated`: a real destructor that
+   takes ownership of its receiver and frees it (same combo as
+   `test/dpe/DPE.c`'s `destroy_uds_context`). */
 void destroy_impl(_consumes _allocated struct itemx *self)
 {
     free(self);
@@ -1097,46 +1091,40 @@ _refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
 _plain
 typedef struct itemx *itemx_ptr;
 
-/* Self-dispatch through a field now VERIFIES too, once `self` is
-   `_consumes`, resolving the earlier "two independent existentials for the
-   same value" mismatch (Error 228: `is_valid val_p_0... ` vs
-   `is_valid _val_self_0XX...`) documented as a known limitation before this
-   change. With a plain (borrowed, non-consuming) `self`, the call site's
-   witness computation (`hide (!(!p))`, needed to instantiate `destroy_impl`'s
-   `erased c` parameter) and the field-getter's own unfold of `p->destroy`
-   each independently opened the struct's `pts_to` existential, producing
-   two different bound names for what is semantically the same value, which
-   Pulse could not unify. With `_consumes itemx_ptr p`, `p`'s OWN top-level
-   existential (`val_p_0`, bound once by `destroy_via_field`'s `requires`)
-   is the SAME name both the field-getter and the witness computation read
-   from -- there is no second, independently-opened existential to clash
-   with, since consuming `p` up front (rather than borrowing through a
-   pointer indirection) means both projections happen against one and the
-   same already-opened value. The `itemx_valid` predicate now also asserts
-   `freeable this`, so consuming `p` yields both the `is_valid` fact needed
-   to dispatch through the field and the `freeable` fact `destroy_impl`
-   needs to physically `free` the struct. An explicit `drop_is_valid` is
-   needed at the end since `is_valid` is a non-affine fact left over after
-   the call. */
+/* Self-dispatch through a field VERIFIES once `self` is `_consumes`. With a
+   borrowed `self`, the call-site witness read (`!(!p)`) and the field
+   getter's own unfold of `p->destroy` each opened a separate existential
+   for the same value, which Pulse couldn't unify (Error 228). Consuming `p`
+   binds ONE top-level existential that both projections read from, so
+   there's no second name to clash with. `itemx_valid` also asserts
+   `freeable this`, giving `destroy_impl` the fact it needs to `free`.
+   `drop_is_valid` clears the leftover non-affine `is_valid` fact. */
 void destroy_via_field(_consumes itemx_ptr p) {
     p->destroy(p);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-/* `it` must be heap-allocated (`malloc`, not the stack) so `free` inside
-   `destroy_impl` is valid. Like the earlier stack-allocated version, a
-   freshly-`malloc`'d struct pointer still needs an explicit
-   `$unfold-uninit` to expose its per-field uninitialized cells before the
-   individual field writes below -- `malloc` gives genuinely uninitialized
-   memory (unlike `test/vec_fam/vec_fam.c`'s `calloc`-based `vec_new`, whose
-   zeroed memory can be treated as already-initialized field values). */
-void use_destroy_via_field(void)
+/* Constructs a valid `struct itemx` and RETURNS it (as `itemx_ptr`), instead
+   of consuming it immediately in the same function -- see `destroy_via_field`
+   above for the destructor side. Mirrors `test/malloc/malloc.c`'s
+   `mk_point`/`test/dpe/DPE.c`'s `init_engine_context`. `it` is heap-allocated
+   (`malloc`) so `free` (inside `destroy_impl`) is valid; `malloc` gives
+   genuinely uninitialized memory, so an explicit `$unfold-uninit` is needed
+   before the field writes (unlike `vec_fam.c`'s `calloc`-based `vec_new`,
+   whose zeroed memory needs no such unfold). */
+itemx_ptr mk_itemx(void)
 {
     struct itemx *it = (struct itemx *) malloc(sizeof(struct itemx));
     _ghost_stmt($unfold-uninit(struct itemx) $(it));
     it->destroy = destroy_impl;
     it->n = 0;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);
+    return it;
+}
+
+void use_mk_itemx(void)
+{
+    itemx_ptr it = mk_itemx();
     destroy_via_field(it);
 }
 
