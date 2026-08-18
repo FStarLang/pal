@@ -208,6 +208,8 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             if let Some(info) = elim.get(&u.name.val) {
                 decl.val = DeclT::StructDefn(StructDefn {
                     name: u.name.clone(),
+                    refines: TypeT::TypeRef(TypeRefKind::Struct(u.name.clone()))
+                        .with_loc(u.name.loc.clone()),
                     fields: vec![info.named_field.clone()],
                     eager_unfold_pred: false,
                     abi_size: u.abi_size,

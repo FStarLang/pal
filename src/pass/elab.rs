@@ -475,7 +475,7 @@ impl<'a> Elaborator<'a> {
                         return;
                     }
                 }
-                if !env.is_lvalue(v) {
+                if !env.is_addressable(v) {
                     self.report(format!("expected lvalue for &, got {}", v), &rval.loc);
                 }
             }
@@ -638,6 +638,31 @@ impl<'a> Elaborator<'a> {
                             )
                         {
                             *rhs_ty = lhs_ty.to_rc();
+                            return;
+                        }
+                    }
+                    // A function pointer compared against null. `func_ptr` is
+                    // abstract and has no equality, so both spellings (`f == 0`
+                    // and `f == NULL`, a cast of 0) are normalized to a zero
+                    // literal at the function-pointer type; emit lowers that to
+                    // `FuncPtr.is_null`. Without this the zero keeps its
+                    // `_specint`/`void*` type and `meet_type` rejects the
+                    // comparison.
+                    if let TypeT::FnPtr { .. } = &lhs_ty.val {
+                        let rhs = Rc::make_mut(rhs);
+                        let is_null_lit = match &rhs.val {
+                            ExprT::IntLit(n, _) => **n == BigInt::ZERO,
+                            ExprT::Cast(inner, cast_ty) => {
+                                matches!(&inner.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
+                                    && matches!(
+                                        &env.vtype_whnf(cast_ty.clone().into()).val,
+                                        TypeT::Pointer(_, _) | TypeT::FnPtr { .. }
+                                    )
+                            }
+                            _ => false,
+                        };
+                        if is_null_lit {
+                            rhs.val = ExprT::IntLit(Rc::new(BigInt::ZERO), lhs_ty.to_rc());
                             return;
                         }
                     }
@@ -819,9 +844,36 @@ impl<'a> Elaborator<'a> {
             ExprT::UnionInit(_, _, fld_val) => {
                 self.elab_rvalue(env, Rc::make_mut(fld_val), None);
             }
-            ExprT::ArrayInit { elems, .. } => {
-                for elem in elems {
+            ExprT::ArrayInit {
+                elem_ty,
+                elems,
+                is_static,
+            } => {
+                for elem in elems.iter_mut() {
                     self.elab_rvalue(env, Rc::make_mut(elem), None);
+                }
+                // Per C11 6.7.9p14/p21, a narrow string literal shorter than
+                // its destination fixed-size array implicitly zero-pads the
+                // trailing elements. `is_static` marks array literals derived
+                // from string literals (see `ArrayInit`'s doc comment); pad
+                // them out to the destination's declared length here, using
+                // the `expected` type threaded down from the enclosing
+                // declaration, assignment, or struct field.
+                if *is_static {
+                    if let Some(exp) = expected {
+                        if let TypeT::FixedArray(_, target_len) =
+                            env.vtype_whnf(exp.clone().into()).val
+                        {
+                            let target_len = target_len as usize;
+                            let pad_loc = rval.loc.clone();
+                            while elems.len() < target_len {
+                                elems.push(
+                                    ExprT::IntLit(Rc::new(BigInt::ZERO), elem_ty.clone())
+                                        .with_loc(pad_loc.clone()),
+                                );
+                            }
+                        }
+                    }
                 }
             }
             ExprT::Cond(cond, then_expr, else_expr) => {
@@ -1191,8 +1243,12 @@ impl<'a> Elaborator<'a> {
                 self.in_view_body = false;
             }
             DeclT::StructDefn(StructDefn {
-                name: _, fields, ..
+                name: _,
+                refines,
+                fields,
+                ..
             }) => {
+                self.elab_type(env, Rc::make_mut(refines));
                 let siblings = fields.clone();
                 for f in fields {
                     self.elab_field(env, f, &siblings);
@@ -1368,7 +1424,10 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 elab.elab_type(&env, Rc::make_mut(&mut td.body));
                 elab.in_view_body = false;
             }
-            DeclT::StructDefn(StructDefn { fields, .. }) => {
+            DeclT::StructDefn(StructDefn {
+                refines, fields, ..
+            }) => {
+                elab.elab_type(&env, Rc::make_mut(refines));
                 let siblings = fields.clone();
                 for f in fields {
                     elab.elab_field(&env, f, &siblings);

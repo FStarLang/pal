@@ -454,6 +454,9 @@ pub enum StmtT {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct StructDefn {
     pub name: Rc<Ident>,
+    /// The struct's self type wrapped in declaration-level PAL attributes.
+    /// Keeping this tree on the definition lets every named use share one parse.
+    pub refines: Rc<Type>,
     pub fields: Vec<Field>,
     pub eager_unfold_pred: bool,
     /// The size, in bytes, that the target ABI gives this type, as reported by
@@ -766,6 +769,16 @@ pub struct GlobalVar {
     pub init: Option<Rc<Expr>>,
     pub is_pure: bool,
     pub opaque_to_smt: bool,
+}
+
+/// Whether a global is an array. Array globals are emitted as a *spec*
+/// (`full_array_lspec`) rather than storage, so they are excluded from
+/// address-of support; see `Env::addressable_global`.
+pub fn global_var_is_array(gv: &GlobalVar) -> bool {
+    matches!(
+        &gv.ty.val,
+        TypeT::FixedArray(_, _) | TypeT::FlexArray(_) | TypeT::Pointer(_, PointerKind::Array)
+    )
 }
 
 pub type Decl = Ast<DeclT>;

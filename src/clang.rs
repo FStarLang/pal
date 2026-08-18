@@ -145,6 +145,7 @@ impl<'a> Ctx<'a> {
             loc: builder.loc,
             val: DeclT::StructDefn(StructDefn {
                 name: builder.name,
+                refines: builder.refines.unwrap(),
                 fields: builder.fields,
                 eager_unfold_pred: builder.eager_unfold_pred,
                 abi_size: builder.abi_size,
@@ -428,6 +429,7 @@ struct DeclBuilder {
     args: Vec<FnArg>,
     ghost_args: Vec<GhostArg>,
     fields: Vec<Field>,
+    refines: Option<Rc<Type>>,
     requires: Vec<Rc<Expr>>,
     ensures: Vec<Rc<Expr>>,
     is_pure: bool,
@@ -447,6 +449,7 @@ impl DeclBuilder {
             args: vec![],
             ghost_args: vec![],
             fields: vec![],
+            refines: None,
             requires: vec![],
             ensures: vec![],
             is_pure: false,
@@ -498,6 +501,10 @@ impl DeclBuilder {
                 width,
             },
         })
+    }
+
+    fn refines(&mut self, ty: Rc<Type>) {
+        self.refines = Some(ty);
     }
 
     fn requires(&mut self, p: Rc<Expr>) {
