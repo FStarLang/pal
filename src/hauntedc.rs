@@ -673,43 +673,42 @@ fn expr_parser<
             ExprT::Var(i).with_loc(loc).into()
         });
 
-        let integer_constant =
-            select! { Token::Integer(i, radix, suf) => (i,radix,suf) }.try_map(move |(i, radix, suf), span| {
-                match BigInt::parse_bytes(i.as_bytes(), radix)
-                    .ok_or_else(|| format!("invalid base-{} integer constant '{}'", radix, i))
-                {
-                    Ok(i) => {
-                        let loc = sift.resolve_source_info(&span);
-                        let ty_val = match suf {
-                            IntegerSuffix::None => TypeT::SpecInt,
-                            IntegerSuffix::U => TypeT::Int {
-                                signed: false,
-                                width: tw.int_width,
-                            },
-                            IntegerSuffix::L => TypeT::Int {
-                                signed: true,
-                                width: tw.long_width,
-                            },
-                            IntegerSuffix::UL => TypeT::Int {
-                                signed: false,
-                                width: tw.long_width,
-                            },
-                            IntegerSuffix::LL => TypeT::Int {
-                                signed: true,
-                                width: tw.long_long_width,
-                            },
-                            IntegerSuffix::ULL => TypeT::Int {
-                                signed: false,
-                                width: tw.long_long_width,
-                            },
-                            IntegerSuffix::Z | IntegerSuffix::UZ => TypeT::SizeT,
-                        };
-                        let ty = ty_val.with_loc(loc.clone());
-                        Ok(ExprT::IntLit(Rc::new(i), ty).with_loc(loc).into())
-                    }
-                    Err(err) => Err(Rich::custom(span, err)),
+        let integer_constant = select! { Token::Integer(i, radix, suf) => (i,radix,suf) }.try_map(
+            move |(i, radix, suf), span| match BigInt::parse_bytes(i.as_bytes(), radix)
+                .ok_or_else(|| format!("invalid base-{} integer constant '{}'", radix, i))
+            {
+                Ok(i) => {
+                    let loc = sift.resolve_source_info(&span);
+                    let ty_val = match suf {
+                        IntegerSuffix::None => TypeT::SpecInt,
+                        IntegerSuffix::U => TypeT::Int {
+                            signed: false,
+                            width: tw.int_width,
+                        },
+                        IntegerSuffix::L => TypeT::Int {
+                            signed: true,
+                            width: tw.long_width,
+                        },
+                        IntegerSuffix::UL => TypeT::Int {
+                            signed: false,
+                            width: tw.long_width,
+                        },
+                        IntegerSuffix::LL => TypeT::Int {
+                            signed: true,
+                            width: tw.long_long_width,
+                        },
+                        IntegerSuffix::ULL => TypeT::Int {
+                            signed: false,
+                            width: tw.long_long_width,
+                        },
+                        IntegerSuffix::Z | IntegerSuffix::UZ => TypeT::SizeT,
+                    };
+                    let ty = ty_val.with_loc(loc.clone());
+                    Ok(ExprT::IntLit(Rc::new(i), ty).with_loc(loc).into())
                 }
-            });
+                Err(err) => Err(Rich::custom(span, err)),
+            },
+        );
 
         // Character constants are emitted as SpecInt-typed integer
         // literals — matches how an unsuffixed `65` is treated in a

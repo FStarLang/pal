@@ -412,8 +412,9 @@ public:
       auto recTy = decl->getASTContext().getRecordType(decl);
       if (!recTy->isDependentType() &&
           !decl->getASTContext().getAsIncompleteArrayType(recTy))
-        builder.set_abi_size(
-            (uint64_t)decl->getASTContext().getTypeSizeInChars(recTy).getQuantity());
+        builder.set_abi_size((uint64_t)decl->getASTContext()
+                                 .getTypeSizeInChars(recTy)
+                                 .getQuantity());
     }
     if (decl->getTagKind() == TagTypeKind::Struct) {
       builder.refines(trTypeAttrs(decl->getAttrs(),
@@ -884,8 +885,7 @@ public:
         if (filler && !isa<ImplicitValueInitExpr>(filler))
           elems.push(trRValue(filler));
         else
-          elems.push(
-              trZeroInit(cat->getElementType(), range, getRange(range)));
+          elems.push(trZeroInit(cat->getElementType(), range, getRange(range)));
       }
       return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
                            false);
@@ -1688,8 +1688,9 @@ public:
                 auto countExpr = mk_int_lit(
                     loc.clone(), mk_bigint(toStr(StringRef(countStr))),
                     trQualType(astCtx->getSizeType(), e->getSourceRange()));
-                auto zeroExpr = mk_int_lit(loc.clone(), mk_bigint("0"_rs),
-                                           trQualType(elemQt, destObj->getSourceRange()));
+                auto zeroExpr =
+                    mk_int_lit(loc.clone(), mk_bigint("0"_rs),
+                               trQualType(elemQt, destObj->getSourceRange()));
                 return mk_memset(std::move(loc), std::move(elemTy),
                                  trRValue(ptrArg), std::move(zeroExpr),
                                  std::move(countExpr));
@@ -3106,8 +3107,7 @@ public:
                             // `_mutable` and gets the quantified treatment.
                             for (auto *attr : param->getAttrs()) {
                               if (auto *ann = dyn_cast<AnnotateAttr>(attr);
-                                  ann &&
-                                  ann->getAnnotation() == "pal-mutable")
+                                  ann && ann->getAnnotation() == "pal-mutable")
                                 return ir::ParamMode::Regular();
                             }
                             auto qt = param->getType().IgnoreParens();
