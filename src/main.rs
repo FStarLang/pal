@@ -189,7 +189,7 @@ fn main() {
     }
 
     let t = Instant::now();
-    pass::restructure_goto::restructure_goto(&mut combined_tu);
+    pass::restructure_goto::restructure_goto(&mut diags, &mut combined_tu);
     if cli.time_passes {
         eprintln!("  restructure_goto: {:.3}s", t.elapsed().as_secs_f64());
     }
