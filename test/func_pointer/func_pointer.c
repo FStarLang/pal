@@ -1063,21 +1063,21 @@ void use_touch_fp(void)
     void (*cb)(int *) = touch;
 }
 
-/* Also now verifies, for the same reason as `touch` above (not a strict-
-   positivity error): `struct itemx` itself is fine here -- `destroy`'s field
-   type stays a plain, non-recursive `func_ptr (ref struct_itemx) unit`, no
-   self-reference, no Error 3. `destroy_impl`'s plain pointer parameter gets
-   PAL's usual auto-derived `exists* v. pts_to self v` ownership, and
-   `Itemx_spec.itemx_valid` recovers `pre_of`/`post_of
-   Funcptr_destroy_impl.func_destroy_impl__fp` via the same explicit-witness
-   mechanism. */
+/* `struct itemx` itself verifies fine here -- `destroy`'s field type stays a
+   plain, non-recursive `func_ptr (ref struct_itemx) unit`, no self-
+   reference, no strict-positivity Error 3. */
 struct itemx {
     void (*destroy)(struct itemx *self);
     unsigned int n;
 };
 
-void destroy_impl(struct itemx *self)
+/* Now VERIFIES. `destroy_impl`'s `self` is `_consumes _allocated`: a real
+   destructor that takes ownership of its receiver and frees it, rather than
+   merely borrowing it (same annotation combo as `test/dpe/DPE.c`'s
+   `destroy_uds_context`). */
+void destroy_impl(_consumes _allocated struct itemx *self)
 {
+    free(self);
 }
 
 void use_destroy_impl_fp(void)
@@ -1088,6 +1088,7 @@ void use_destroy_impl_fp(void)
 _include_pulse(Itemx_spec,
   unfold let itemx_valid ([@@@mkey] this: ref Struct_itemx.struct_itemx) (vo: Struct_itemx.struct_itemx) : slprop =
     Pulse.Lib.Reference.pts_to this vo **
+    Pulse.Lib.C.Ref.freeable this **
     Pulse.Lib.C.FuncPtr.is_valid vo.Struct_itemx.struct_itemx__destroy true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_destroy_impl.func_destroy_impl__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_destroy_impl.func_destroy_impl__fp)
 )
 
@@ -1096,35 +1097,48 @@ _refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
 _plain
 typedef struct itemx *itemx_ptr;
 
-/* [not yet verified -- separate, harder limitation from the one above]
-   Self-dispatch through a field: `p->destroy(p)` both (a) reads the callee
-   off `p` via the struct's usual field-getter (`struct_itemx__get_destroy`,
-   which implicitly unfolds `p`'s `pts_to` to split out the field) and (b)
-   needs `p`'s pointee as the explicit witness value for `destroy_impl`'s
-   `self` parameter. Each of these opens its OWN existential name for "the
-   struct value at `p`" independently, and Pulse cannot automatically prove
-   the two are the same value -- even when read back-to-back with no
-   intervening mutation (confirmed by direct experimentation: naming one
-   shared read explicitly still produces two distinct bound names). Fixing
-   this needs either a `with`-based Pulse idiom threaded through PAL's
-   fnptr-call emission, or a change to the struct field-getter to reuse an
-   already-open existential -- left as follow-up work. */
-#if 0
-void destroy_via_field(itemx_ptr p) {
+/* Self-dispatch through a field now VERIFIES too, once `self` is
+   `_consumes`, resolving the earlier "two independent existentials for the
+   same value" mismatch (Error 228: `is_valid val_p_0... ` vs
+   `is_valid _val_self_0XX...`) documented as a known limitation before this
+   change. With a plain (borrowed, non-consuming) `self`, the call site's
+   witness computation (`hide (!(!p))`, needed to instantiate `destroy_impl`'s
+   `erased c` parameter) and the field-getter's own unfold of `p->destroy`
+   each independently opened the struct's `pts_to` existential, producing
+   two different bound names for what is semantically the same value, which
+   Pulse could not unify. With `_consumes itemx_ptr p`, `p`'s OWN top-level
+   existential (`val_p_0`, bound once by `destroy_via_field`'s `requires`)
+   is the SAME name both the field-getter and the witness computation read
+   from -- there is no second, independently-opened existential to clash
+   with, since consuming `p` up front (rather than borrowing through a
+   pointer indirection) means both projections happen against one and the
+   same already-opened value. The `itemx_valid` predicate now also asserts
+   `freeable this`, so consuming `p` yields both the `is_valid` fact needed
+   to dispatch through the field and the `freeable` fact `destroy_impl`
+   needs to physically `free` the struct. An explicit `drop_is_valid` is
+   needed at the end since `is_valid` is a non-affine fact left over after
+   the call. */
+void destroy_via_field(_consumes itemx_ptr p) {
     p->destroy(p);
-}
-
-void use_destroy_via_field(void)
-{
-    struct itemx it;
-    _ghost_stmt($unfold-uninit(struct itemx) $&(it));
-    it.destroy = destroy_impl;
-    it.n = 0;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);
-    destroy_via_field(&it);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
-#endif
+
+/* `it` must be heap-allocated (`malloc`, not the stack) so `free` inside
+   `destroy_impl` is valid. Like the earlier stack-allocated version, a
+   freshly-`malloc`'d struct pointer still needs an explicit
+   `$unfold-uninit` to expose its per-field uninitialized cells before the
+   individual field writes below -- `malloc` gives genuinely uninitialized
+   memory (unlike `test/vec_fam/vec_fam.c`'s `calloc`-based `vec_new`, whose
+   zeroed memory can be treated as already-initialized field values). */
+void use_destroy_via_field(void)
+{
+    struct itemx *it = (struct itemx *) malloc(sizeof(struct itemx));
+    _ghost_stmt($unfold-uninit(struct itemx) $(it));
+    it->destroy = destroy_impl;
+    it->n = 0;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);
+    destroy_via_field(it);
+}
 
 #if 0
 
