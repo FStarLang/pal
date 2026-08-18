@@ -145,6 +145,11 @@ fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
             }
             DeclT::FnDecl(fn_decl) => {
                 let m = format!("Func_{}", fn_decl.name.val);
+                let n = &fn_decl.name.val;
+                // A declaration can be address-taken too, and its wrapper lives
+                // in `Funcptr_<g>` just as above.
+                let fp = funcptr_module_name(n);
+                map.insert(Rc::from(format!("{}__fp", n)), fp);
                 map.insert(fn_decl.name.val.clone(), m);
             }
             DeclT::LetDecl(let_decl) => {
@@ -7813,11 +7818,19 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         // `pre`/`post` definitions and wrapper signature go in the `.fsti`. The
         // wrapper body's `func_<g>` reference qualifies to `Func_<g>.func_<g>`
         // because `current_module` is the fnptr module while emitting.
-        if let DeclT::FnDefn(fn_defn) = &decl.val {
-            if !fn_defn.decl.is_pure && addr_taken.contains(&fn_defn.decl.name.val) {
-                let fp_mod = funcptr_module_name(&fn_defn.decl.name.val);
+        // A declaration gets one too: its `Func_<g>` stub carries the declared
+        // contract for the wrapper body to delegate to. `merge` drops a `FnDecl`
+        // that has a matching `FnDefn`, so only one arm fires per function.
+        let wrapper_decl: Option<&FnDecl> = match &decl.val {
+            DeclT::FnDefn(fn_defn) => Some(&fn_defn.decl),
+            DeclT::FnDecl(fn_decl) => Some(fn_decl),
+            _ => None,
+        };
+        if let Some(fn_decl) = wrapper_decl {
+            if !fn_decl.is_pure && addr_taken.contains(&fn_decl.name.val) {
+                let fp_mod = funcptr_module_name(&fn_decl.name.val);
                 emitter.current_module = fp_mod.clone();
-                let (fst_extra, fsti_extra) = emitter.emit_fnptr_triple(&env, &fn_defn.decl);
+                let (fst_extra, fsti_extra) = emitter.emit_fnptr_triple(&env, fn_decl);
 
                 let mut fp_writer = StrWriter::new();
                 fst_extra.render_raw(100, &mut fp_writer).unwrap();
