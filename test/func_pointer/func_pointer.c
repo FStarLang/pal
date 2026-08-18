@@ -474,6 +474,7 @@ int32_t use_hof(void)
 _include_pulse(Apply_weaker_spec,
   unfold
   let aw_post (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
+              (y_fp: erased unit)
               (return_1: Typedef_int32_t.ty_int32_t) : slprop =
     let var_a = fst x_fp in
     let var_b = snd x_fp in
@@ -488,15 +489,17 @@ _include_pulse(Apply_weaker_spec,
 
   ghost
   fn wpost_weak (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-                (y: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y
-    ensures aw_post x y
+                (y: erased unit)
+                (r: Typedef_int32_t.ty_int32_t)
+    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y r
+    ensures aw_post x y r
   { () }
 
   ghost
   fn wpre_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-    requires (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x
+             (y: erased unit)
+    requires (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
+    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
 
   ghost
@@ -582,7 +585,8 @@ int32_t is_set(int32_t (*fp)(int32_t, int32_t) _nullable)
 _include_pulse(Reassign_join_spec,
   unfold
   let rj_pre (g: bool)
-             (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t)) : slprop =
+             (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
+             (y_fp: erased unit) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
     ((Typedef_int32_t.ty_int32_t__pred var_a 1.0R)) **
@@ -602,6 +606,7 @@ _include_pulse(Reassign_join_spec,
   unfold
   let rj_post (g: bool)
               (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
+              (y_fp: erased unit)
               (return_1: Typedef_int32_t.ty_int32_t) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
@@ -622,28 +627,32 @@ _include_pulse(Reassign_join_spec,
 
   ghost
   fn wpre_sub (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-    requires rj_pre true x
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x
+              (y: erased unit)
+    requires rj_pre true x y
+    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
 
   ghost
   fn wpost_sub (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y
-    ensures rj_post true x y
+               (y: erased unit)
+               (r: Typedef_int32_t.ty_int32_t)
+    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y r
+    ensures rj_post true x y r
   { () }
 
   ghost
   fn wpre_add (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-    requires rj_pre false x
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) x
+              (y: erased unit)
+    requires rj_pre false x y
+    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) x y
   { () }
 
   ghost
   fn wpost_add (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) x y
-    ensures rj_post false x y
+               (y: erased unit)
+               (r: Typedef_int32_t.ty_int32_t)
+    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) x y r
+    ensures rj_post false x y r
   { () }
 
 )
@@ -994,15 +1003,17 @@ int32_t apply_t(int32_t (*op)(int32_t, int32_t)
 _include_pulse(Total_to_div_spec,
   ghost
   fn wpre_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-    requires (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x
-    ensures (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x
+             (y: erased unit)
+    requires (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
+    ensures (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
   { () }
 
   ghost
   fn wpost_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y
-    ensures (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y
+               (y: erased unit)
+               (r: Typedef_int32_t.ty_int32_t)
+    requires (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
+    ensures (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
   { () }
 
   ghost
@@ -1032,6 +1043,88 @@ int32_t weaken_total_to_div(void)
     return apply_t(add_t, 2, 3);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
+
+/* Plain pointer parameter, no workaround annotations: PAL's auto-generated
+   ownership for `int *p` is `exists* v. pts_to p v`. Taking `touch`'s
+   address forces a `__fp` wrapper whose contract must be recovered via
+   `pre_of`/`post_of` type-reflection. This now VERIFIES: `pre`/`post`
+   (`Pulse.Lib.C.FuncPtr.fsti`) take an extra explicit `erased c` witness
+   parameter after the wrapper's own argument, so the wrapper's real type is
+   the flat `x:a -> y:erased c -> stt_div b (pre x y) (post x y)`
+   `pre_of`/`post_of` need -- the pointee's ownership is threaded through `y`
+   instead of a hidden implicit binder Pulse would otherwise introduce by
+   opening a top-level `exists*` (which is what broke HOU with Error 189). */
+void touch(int *p)
+{
+}
+
+void use_touch_fp(void)
+{
+    void (*cb)(int *) = touch;
+}
+
+/* Also now verifies, for the same reason as `touch` above (not a strict-
+   positivity error): `struct itemx` itself is fine here -- `destroy`'s field
+   type stays a plain, non-recursive `func_ptr (ref struct_itemx) unit`, no
+   self-reference, no Error 3. `destroy_impl`'s plain pointer parameter gets
+   PAL's usual auto-derived `exists* v. pts_to self v` ownership, and
+   `Itemx_spec.itemx_valid` recovers `pre_of`/`post_of
+   Funcptr_destroy_impl.func_destroy_impl__fp` via the same explicit-witness
+   mechanism. */
+struct itemx {
+    void (*destroy)(struct itemx *self);
+    unsigned int n;
+};
+
+void destroy_impl(struct itemx *self)
+{
+}
+
+void use_destroy_impl_fp(void)
+{
+    void (*cb)(struct itemx *) = destroy_impl;
+}
+
+_include_pulse(Itemx_spec,
+  unfold let itemx_valid ([@@@mkey] this: ref Struct_itemx.struct_itemx) (vo: Struct_itemx.struct_itemx) : slprop =
+    Pulse.Lib.Reference.pts_to this vo **
+    Pulse.Lib.C.FuncPtr.is_valid vo.Struct_itemx.struct_itemx__destroy true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_destroy_impl.func_destroy_impl__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_destroy_impl.func_destroy_impl__fp)
+)
+
+_type(itemx_val, Struct_itemx.struct_itemx)
+_refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
+_plain
+typedef struct itemx *itemx_ptr;
+
+/* [not yet verified -- separate, harder limitation from the one above]
+   Self-dispatch through a field: `p->destroy(p)` both (a) reads the callee
+   off `p` via the struct's usual field-getter (`struct_itemx__get_destroy`,
+   which implicitly unfolds `p`'s `pts_to` to split out the field) and (b)
+   needs `p`'s pointee as the explicit witness value for `destroy_impl`'s
+   `self` parameter. Each of these opens its OWN existential name for "the
+   struct value at `p`" independently, and Pulse cannot automatically prove
+   the two are the same value -- even when read back-to-back with no
+   intervening mutation (confirmed by direct experimentation: naming one
+   shared read explicitly still produces two distinct bound names). Fixing
+   this needs either a `with`-based Pulse idiom threaded through PAL's
+   fnptr-call emission, or a change to the struct field-getter to reuse an
+   already-open existential -- left as follow-up work. */
+#if 0
+void destroy_via_field(itemx_ptr p) {
+    p->destroy(p);
+}
+
+void use_destroy_via_field(void)
+{
+    struct itemx it;
+    _ghost_stmt($unfold-uninit(struct itemx) $&(it));
+    it.destroy = destroy_impl;
+    it.n = 0;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);
+    destroy_via_field(&it);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+#endif
 
 #if 0
 
