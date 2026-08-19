@@ -2614,24 +2614,44 @@ public:
       }
       return {};
     } else if (auto *VD = dyn_cast<VarDecl>(D)) {
-      auto loc = getRange(VD->getSourceRange());
-      auto id = ctx.mk_ident(toStr(VD->getName()), loc.clone());
-      auto ty = trQualType(VD->getType(), VD->getSourceRange(), nullptr,
-                           findFnProtoTypeLoc(VD->getTypeSourceInfo()));
-      OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
-                                   : OptExpr::None();
-      bool is_pure = VD->getType().isConstQualified() && VD->hasInit();
+      // A C object may be declared more than once, and its value and
+      // constness belong to the object rather than to any one declaration.
+      // Emit it once, at the declaration that defines it, reading both from
+      // the whole redeclaration chain.
+      VarDecl *primary = VD->getDefinition(*astCtx);
+      if (!primary)
+        primary = VD->getActingDefinition();
+      if (!primary)
+        primary = VD->getCanonicalDecl();
+      if (VD != primary)
+        return {};
+      auto loc = getRange(primary->getSourceRange());
+      auto id = ctx.mk_ident(toStr(primary->getName()), loc.clone());
+      auto ty = trQualType(primary->getType(), primary->getSourceRange(),
+                           nullptr,
+                           findFnProtoTypeLoc(primary->getTypeSourceInfo()));
+      const Expr *anyInit = primary->getAnyInitializer();
+      OptExpr init = anyInit
+                         ? OptExpr::Some(trRValue(const_cast<Expr *>(anyInit)))
+                         : OptExpr::None();
+      // A tentative definition is initialized as if by 0 (C17 6.9.2p2), so
+      // it counts as defined; only a chain that is purely extern does not.
+      bool is_defined =
+          primary->hasDefinition(*astCtx) != VarDecl::DeclarationOnly;
+      bool is_pure = primary->getType().isConstQualified() && is_defined;
       bool opaque_to_smt = false;
-      for (auto attr : VD->getAttrs()) {
-        if (auto ann = dyn_cast<AnnotateAttr>(attr);
-            ann && ann->getAnnotation() == "pal-pure" &&
-            ann->args_size() == 0) {
-          is_pure = true;
-        }
-        if (auto ann = dyn_cast<AnnotateAttr>(attr);
-            ann && ann->getAnnotation() == "pal-opaque-to-smt" &&
-            ann->args_size() == 0) {
-          opaque_to_smt = true;
+      for (auto *redecl : primary->redecls()) {
+        for (auto attr : redecl->getAttrs()) {
+          if (auto ann = dyn_cast<AnnotateAttr>(attr);
+              ann && ann->getAnnotation() == "pal-pure" &&
+              ann->args_size() == 0) {
+            is_pure = true;
+          }
+          if (auto ann = dyn_cast<AnnotateAttr>(attr);
+              ann && ann->getAnnotation() == "pal-opaque-to-smt" &&
+              ann->args_size() == 0) {
+            opaque_to_smt = true;
+          }
         }
       }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
