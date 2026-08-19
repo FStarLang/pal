@@ -764,6 +764,11 @@ pub struct GlobalVar {
     pub init: Option<Rc<Expr>>,
     pub is_pure: bool,
     pub opaque_to_smt: bool,
+    /// A bare `extern T x;`: the definition is in another translation unit, so
+    /// there is no value here to translate. Distinguishes it from a tentative
+    /// definition (`T x;`), which C zero-initializes and which therefore *does*
+    /// have a known value even though it carries no initializer.
+    pub is_external: bool,
 }
 
 /// Whether a global is an array. Array globals are emitted as a *spec*

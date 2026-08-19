@@ -41,6 +41,17 @@ Ref<rust::Str> toStr(std::string const &str) {
 // `while`, and `do-while` loops act as boundaries (their `continue` belongs to
 // them), so we do not descend into them. A `switch` does NOT capture `continue`
 // in C, so we descend into it (and into `if`, blocks, labels, etc.).
+// Whether a declaration carries `_pure`, which marks it a pure value even when
+// its C type does not say so.
+static bool hasPalPureAttr(const Decl *D) {
+  for (auto attr : D->attrs()) {
+    if (auto ann = dyn_cast<AnnotateAttr>(attr);
+        ann && ann->getAnnotation() == "pal-pure" && ann->args_size() == 0)
+      return true;
+  }
+  return false;
+}
+
 static bool hasTopLevelContinue(const Stmt *s) {
   if (!s)
     return false;
@@ -2615,11 +2626,15 @@ public:
       return {};
     } else if (auto *VD = dyn_cast<VarDecl>(D)) {
       auto loc = getRange(VD->getSourceRange());
-      if (VD->isThisDeclarationADefinition() == VarDecl::DeclarationOnly) {
-        // A bare `extern T x;`. It supplies no value, so there is nothing to
-        // translate; the definition lives in another translation unit that PAL
-        // is not looking at. Dropping it is safe because any *use* of the name
-        // then fails to resolve rather than silently reading a made-up value.
+      const bool declarationOnly =
+          VD->isThisDeclarationADefinition() == VarDecl::DeclarationOnly;
+      if (declarationOnly && !VD->getType().isConstQualified() &&
+          !hasPalPureAttr(VD)) {
+        // A bare `extern T x;` over mutable storage. Its value is written by
+        // another translation unit, so it is not a value PAL can name at all;
+        // modelling it would need global mutable state, which PAL does not
+        // have. Drop it, so that merely *declaring* one -- as a macro-generated
+        // handler table does -- no longer stops the translation.
         return {};
       }
       auto id = ctx.mk_ident(toStr(VD->getName()), loc.clone());
@@ -2627,7 +2642,12 @@ public:
                            findFnProtoTypeLoc(VD->getTypeSourceInfo()));
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
                                    : OptExpr::None();
-      bool is_pure = VD->getType().isConstQualified() && VD->hasInit();
+      // A `const` object is a pure value. It normally has to carry its
+      // initializer for PAL to know *which* value it is, but an `extern const`
+      // is exactly the case where the value is real and simply not visible
+      // here, so it is pure too -- and is assumed rather than computed.
+      bool is_pure = VD->getType().isConstQualified() &&
+                     (VD->hasInit() || declarationOnly);
       bool opaque_to_smt = false;
       for (auto attr : VD->getAttrs()) {
         if (auto ann = dyn_cast<AnnotateAttr>(attr);
@@ -2642,7 +2662,8 @@ public:
         }
       }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
-                                std::move(init), is_pure, opaque_to_smt);
+                                std::move(init), is_pure, opaque_to_smt,
+                                declarationOnly);
     } else if (dyn_cast<EnumDecl>(D)) {
       // Enum declarations need no IR representation;
       // constants are inlined as integer literals at use sites.
