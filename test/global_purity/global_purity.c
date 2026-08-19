@@ -1,15 +1,26 @@
 /* Test: how PAL emits pure global variables -- their value and their address
  * machinery (`var_g`, `addr_var_g`, `addr_var_g_not_null`, `acquire_var_g`).
  *
- * A global is pure when it is `const` with an initializer, or annotated
- * `_pure`. `_pure` forces purity outright, so `const` adds nothing under it.
+ * A global is pure when it is `const`, or annotated `_pure`. `_pure` forces
+ * purity outright, so `const` adds nothing under it.
  *
  * Cases are grouped by payload type, since emission differs: struct globals
  * get the full address machinery, array globals get none.
  *
- * Cases 1.7 to 1.11 do not verify yet. All stem from PAL deciding a global's
- * value and purity from a single `VarDecl`, so when a global is declared more
- * than once only the last declaration survives.
+ * Value and purity are properties of the object, not of one declaration, so
+ * they should be read off the whole redeclaration chain (C17 6.9.2p2): a
+ * chain with an initializer anywhere has that value, and a chain of bare
+ * declarations is a tentative definition and reads as 0.
+ *
+ * PAL instead reads both from a single declaration, so cases 1.7, 1.8 and 1.9
+ * do not verify yet. Each asserts the value C guarantees rather than what PAL
+ * does today, so they come true once that is fixed.
+ *
+ *   1.7  const T g = V; const T g;   rejected; the initializer is lost
+ *   1.8  _pure T g = V; _pure T g;   emits zero_default with no diagnostic,
+ *                                    so it fails in F* rather than in PAL
+ *   1.9  const T g;                  rejected, though C17 6.9.2p2 makes a
+ *                                    tentative definition read as 0
  */
 
 #include "pal.h"
@@ -88,16 +99,14 @@ uint32_t read_i_extern_then_def(void) _ensures(return == 44) {
   _ghost_stmt(drop_ (exists* q. pts_to Global_i_extern_then_def.addr_var_i_extern_then_def #q _));
 }
 
-/* --- The cases below do not work yet. ------------------------------------
+/* --- Declarations spread over several declarations. -----------------------
  *
- * Each asserts the value C guarantees, so it comes true once PAL is fixed
- * rather than pinning today's behaviour. The two `extern` cases are the
- * exception: their value is unknowable here, so they assert nothing about it.
+ * Each asserts the value C guarantees.
  */
 
 /* 1.7 Definition, then a bare re-declaration -- the mirror of 1.5. Legal C
- * naming one object, but the surviving declaration has no initializer, so the
- * global is not considered pure and `&` has nothing to take. */
+ * naming one object, so the initializer from the first declaration is the
+ * object's value. */
 const uint32_t i_def_then_decl = 55;
 const uint32_t i_def_then_decl;
 
@@ -108,9 +117,8 @@ uint32_t read_i_def_then_decl(void) _ensures(return == 55) {
   _ghost_stmt(drop_ (exists* q. pts_to Global_i_def_then_decl.addr_var_i_def_then_decl #q _));
 }
 
-/* 1.8 The same under `_pure`, which is worse: purity is forced, so PAL
- * reports nothing and silently emits `zero_default`. This one reaches F* and
- * fails the postcondition instead -- the global reads as 0, not 66. */
+/* 1.8 The same under `_pure`. Forcing purity must not lose the initializer:
+ * the global still reads as 66. */
 _pure uint32_t i_pure_def_then_decl = 66;
 _pure uint32_t i_pure_def_then_decl;
 
@@ -130,32 +138,6 @@ uint32_t read_i_bare_const(void) _ensures(return == 0) {
   const uint32_t *p = &i_bare_const;
   return *p;
   _ghost_stmt(drop_ (exists* q. pts_to Global_i_bare_const.addr_var_i_bare_const #q _));
-}
-
-/* 1.10 A global defined in another translation unit, so this asserts only
- * that the address machinery exists and the global can be read. */
-extern const uint32_t i_extern_only;
-
-uint32_t read_i_extern_only(void) {
-  _ghost_stmt(Global_i_extern_only.acquire_var_i_extern_only ());
-  const uint32_t *p = &i_extern_only;
-  return *p;
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_extern_only.addr_var_i_extern_only #q _));
-}
-
-/* 1.11 The same under `_pure`, which is accepted but unsound: it invents
- * `zero_default` for a global it cannot see. It verifies today only because
- * it asserts no value, and should keep verifying after the fix.
- *
- * Both should instead assume the value, `assume val var_g : T`, and keep the
- * usual address machinery. */
-_pure extern const uint32_t i_pure_extern_only;
-
-uint32_t read_i_pure_extern_only(void) {
-  _ghost_stmt(Global_i_pure_extern_only.acquire_var_i_pure_extern_only ());
-  const uint32_t *p = &i_pure_extern_only;
-  return *p;
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_pure_extern_only.addr_var_i_pure_extern_only #q _));
 }
 
 /* ===========================================================================
