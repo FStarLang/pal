@@ -4303,6 +4303,14 @@ impl<'a> Emitter<'a> {
                     .group()
                     .nest(2),
                 StmtT::Return(None) => Doc::text("return;"),
+                // `_assert(false)` is a claim that control never reaches this
+                // point, not a proposition to carry forward. Pulse spells that
+                // `unreachable ()`, whose postcondition is `pure False`, so the
+                // branch absorbs whatever the join needs instead of having to
+                // agree with its siblings' resources. Asserting `with_pure
+                // False` would instead leave the branch's own footprint in the
+                // join and make an unreachable arm the reason a proof fails.
+                StmtT::Assert(v) if is_statically_false(v) => Doc::text("unreachable ();"),
                 StmtT::Assert(v) => Doc::text("assert")
                     .append(Doc::line())
                     .append(self.emit_rvalue(env, v))
@@ -4634,6 +4642,21 @@ fn mk_attrs(attrs: Vec<Doc>) -> Doc {
         .group()
         .nest(2)
         .append(Doc::line())
+}
+
+/// Recognize an assertion condition that is syntactically the constant false.
+///
+/// `_assert` bodies are C-preprocessed, so a source-level `false` reaches us as
+/// the integer literal `0` once `<stdbool.h>` has had its way, and it may be
+/// wrapped in whatever casts the surrounding macro applied. Look through casts
+/// and accept either spelling.
+fn is_statically_false(e: &Rc<Expr>) -> bool {
+    match &e.val {
+        ExprT::BoolLit(b) => !b,
+        ExprT::IntLit(n, _) => **n == BigInt::from(0),
+        ExprT::Cast(inner, _) => is_statically_false(inner),
+        _ => false,
+    }
 }
 
 fn mk_assume_val(attrs: Vec<Doc>, n: Doc, args: &[Doc], ty: Doc) -> Doc {

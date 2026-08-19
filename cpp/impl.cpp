@@ -54,6 +54,80 @@ static bool hasTopLevelContinue(const Stmt *s) {
   return false;
 }
 
+// Returns true if `s` contains a `break` that binds to the enclosing loop or
+// switch, i.e. one that is not nested inside another loop or switch. Nested
+// `for`, `while`, `do-while` and `switch` all capture `break`, so we do not
+// descend into them.
+static bool hasTopLevelBreak(const Stmt *s) {
+  if (!s)
+    return false;
+  if (isa<BreakStmt>(s))
+    return true;
+  if (isa<ForStmt>(s) || isa<WhileStmt>(s) || isa<DoStmt>(s) ||
+      isa<SwitchStmt>(s))
+    return false;
+  for (const Stmt *child : s->children())
+    if (hasTopLevelBreak(child))
+      return true;
+  return false;
+}
+
+// Returns true if the constant expression `e` folds to zero with no side
+// effects -- the condition of a `do { } while (0)` macro wrapper.
+static bool isSideEffectFreeZero(ASTContext &ctx, const Expr *e) {
+  if (!e || e->HasSideEffects(ctx))
+    return false;
+  Expr::EvalResult result;
+  return e->EvaluateAsInt(result, ctx) && result.Val.isInt() &&
+         result.Val.getInt() == 0;
+}
+
+// Returns true if control cannot leave `s` by falling off its end, because `s`
+// claims it is never reached past that point. `__builtin_unreachable()` is how
+// C spells that claim, and it is what a `noreturn` abort macro expands to.
+//
+// The claim propagates the way control flow does: a block aborts if any of its
+// statements does (whatever follows an abort is dead), a `do { } while (0)`
+// wrapper aborts if its body does, and an `if` aborts if both arms do, or if
+// its condition folds to a constant selecting an arm that does -- which is the
+// shape `if (!(cond)) __builtin_unreachable();` takes once `cond` is literally
+// false.
+//
+// PAL discharges the claim rather than assuming it (see src/pass/builtins.rs),
+// so recognizing an abort here weakens nothing: it only lets a switch arm that
+// ends in one be treated as an arm that cannot fall through, which it is.
+static bool abortsControlFlow(ASTContext &ctx, const Stmt *s) {
+  if (!s)
+    return false;
+  if (const auto *call = dyn_cast<CallExpr>(s))
+    return call->getBuiltinCallee() == Builtin::BI__builtin_unreachable;
+  if (const auto *attributed = dyn_cast<AttributedStmt>(s))
+    return abortsControlFlow(ctx, attributed->getSubStmt());
+  if (const auto *label = dyn_cast<LabelStmt>(s))
+    return abortsControlFlow(ctx, label->getSubStmt());
+  if (const auto *compound = dyn_cast<CompoundStmt>(s)) {
+    for (const Stmt *child : compound->body())
+      if (abortsControlFlow(ctx, child))
+        return true;
+    return false;
+  }
+  if (const auto *d = dyn_cast<DoStmt>(s))
+    return isSideEffectFreeZero(ctx, d->getCond()) &&
+           abortsControlFlow(ctx, d->getBody());
+  if (const auto *i = dyn_cast<IfStmt>(s)) {
+    bool thenAborts = abortsControlFlow(ctx, i->getThen());
+    bool elseAborts = abortsControlFlow(ctx, i->getElse());
+    if (thenAborts && elseAborts)
+      return true;
+    Expr::EvalResult result;
+    if (i->getCond() && !i->getCond()->HasSideEffects(ctx) &&
+        i->getCond()->EvaluateAsInt(result, ctx) && result.Val.isInt())
+      return result.Val.getInt() != 0 ? thenAborts : elseAborts;
+    return false;
+  }
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -1663,6 +1737,32 @@ public:
                                  std::move(invs), std::move(reqs),
                                  std::move(enss), std::move(bodyStmts)));
     } else if (auto *d = dyn_cast<DoStmt>(stmt)) {
+      // `do { body } while (0)` is not a loop, it is the C idiom for giving a
+      // macro a single-statement body, and encoding it as one costs more than
+      // the two flags it introduces: a loop's postcondition is its invariant,
+      // so every fact the body established -- including that it cannot be
+      // reached at all, which is exactly what an aborting macro says -- is lost
+      // at the loop's exit. The body runs once and falls out, so emit it.
+      //
+      // Only when nothing in the body jumps out of it: a `break` or `continue`
+      // that binds to the do-while has no meaning once the loop is gone.
+      {
+        if (isSideEffectFreeZero(*astCtx, d->getCond()) &&
+            !hasTopLevelContinue(d->getBody()) &&
+            !hasTopLevelBreak(d->getBody())) {
+          auto *doBody = d->getBody();
+          if (auto attrBody = dyn_cast<AttributedStmt>(doBody))
+            doBody = attrBody->getSubStmt();
+          if (auto *compound = dyn_cast<CompoundStmt>(doBody)) {
+            for (auto *child : compound->body())
+              trStmt(stmts, child);
+          } else {
+            trStmt(stmts, doBody);
+          }
+          return {};
+        }
+      }
+
       // Desugar `do { body } while (cond)` into a `while` loop. There are two
       // desugarings, and the presence of a *top-level* `continue` in the body
       // selects between them:
@@ -1994,20 +2094,40 @@ public:
         }
       }
 
-      // A switch whose cases all end in a direct break has no fall-through.
-      // Emit it as one match and omit the terminal breaks.
+      // A switch whose cases cannot fall through is an if/else chain or a
+      // match, and saying so is what lets the prover reason about it. A case
+      // ends in a direct `break`, which the encoding drops; or it leaves the
+      // function or the switch some other way -- `return`, or a `goto` out of
+      // the switch -- in which case there is equally nothing to fall through
+      // to, and the statement stays. A dispatcher whose default arm aborts and
+      // jumps to a shared exit is the common shape of the second kind.
+      //
+      // An arm can also end in a `noreturn` abort with no jump after it, which
+      // is what the C compiler's own reachability analysis relies on. That arm
+      // does not fall through either, so recognize it the same way.
+      auto dropsTerminalBreak = [](SwitchGroup &group) {
+        return !group.body.empty() && isa<BreakStmt>(group.body.back());
+      };
+      auto groupBodySize = [&](SwitchGroup &group) {
+        return dropsTerminalBreak(group) ? group.body.size() - 1
+                                         : group.body.size();
+      };
       bool hasOnlyTerminalBreaks = !groups.empty();
       std::vector<SwitchGroup *> cases;
       SwitchGroup *defaultGroup = nullptr;
       for (auto &group : groups) {
-        bool hasTerminalBreak =
-            !group.body.empty() && isa<BreakStmt>(group.body.back());
-        if (!hasTerminalBreak) {
+        bool cannotFallThrough =
+            !group.body.empty() &&
+            (isa<BreakStmt>(group.body.back()) ||
+             isa<ReturnStmt>(group.body.back()) ||
+             isa<GotoStmt>(group.body.back()) ||
+             abortsControlFlow(*astCtx, group.body.back()));
+        if (!cannotFallThrough) {
           hasOnlyTerminalBreaks = false;
           break;
         }
 
-        size_t bodySize = group.body.size() - 1;
+        size_t bodySize = groupBodySize(group);
         if (group.isDefault) {
           defaultGroup = &group;
         } else {
@@ -2026,7 +2146,7 @@ public:
       if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
         auto makeBody = [&](SwitchGroup &group) {
           auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
+          size_t bodySize = groupBodySize(group);
           for (size_t i = 0; i < bodySize; i++)
             trStmt(bodyStmts, group.body[i]);
           return bodyStmts;
@@ -2091,7 +2211,7 @@ public:
           defaultGroup) {
         auto makeChainBody = [&](SwitchGroup &group) {
           auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
+          size_t bodySize = groupBodySize(group);
           for (size_t i = 0; i < bodySize; i++)
             trStmt(bodyStmts, group.body[i]);
           return bodyStmts;
