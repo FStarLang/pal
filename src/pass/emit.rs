@@ -628,6 +628,14 @@ enum ValNaming<'a> {
         base: Option<Rc<IdentT>>,
         bindings: &'a mut Vec<ExBinding>,
     },
+    /// Every value is the type's canonical zero rather than a name.
+    ///
+    /// Used where a slprop has to be written down with no metavariables left
+    /// in it -- introducing an optional argument's guard at a call site that
+    /// declines the argument, where the resource is `emp` and any value at all
+    /// will do, but the *shape* has to be concrete enough to solve the
+    /// callee's implicits against.
+    Zeroed,
     /// Spec record: val references become `spec_param.field_name`.
     /// Used for struct pred body with spec record parameter.
     SpecRecord {
@@ -682,6 +690,10 @@ struct Emitter<'a> {
     /// through one of these restates it on the way out; see `borrow_bindings`.
     current_fn_borrow_asserts: Vec<Doc>,
     tmp_counter: usize,
+    /// Literal `NULL` arguments that have been given a name for the duration
+    /// of a call, keyed by the address of the argument expression. See
+    /// `nullable_arg_ghosts_expr`.
+    null_arg_names: HashMap<usize, Doc>,
 }
 
 impl<'a> Emitter<'a> {
@@ -1430,6 +1442,7 @@ impl<'a> Emitter<'a> {
     /// Returns the Doc to use as the val reference in the slprop.
     fn push_val_binding(&mut self, naming: &mut ValNaming, this: &Rc<Expr>, ty: Doc) -> Doc {
         match naming {
+            ValNaming::Zeroed => Doc::text("zero_default"),
             ValNaming::Standard {
                 quote,
                 base,
@@ -1482,6 +1495,7 @@ impl<'a> Emitter<'a> {
     /// Returns the Doc to use as the val reference in the slprop.
     fn push_val_binding_explicit(&mut self, naming: &mut ValNaming, raw_name: Doc, ty: Doc) -> Doc {
         match naming {
+            ValNaming::Zeroed => Doc::text("zero_default"),
             ValNaming::Standard {
                 quote, bindings, ..
             } => {
@@ -2449,6 +2463,9 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
 
 impl<'a> Emitter<'a> {
     fn emit_rvalue(&mut self, env: &Env, v: &Expr) -> Doc {
+        if let Some(name) = self.null_arg_names.get(&(v as *const Expr as usize)) {
+            return name.clone();
+        }
         self.emit_expr(env, v).to_rvalue_decayed()
     }
 
@@ -3725,6 +3742,7 @@ impl<'a> Emitter<'a> {
     /// the callee's parameter mode says: an `_out` parameter is handed
     /// uninitialized storage, anything else an initialized cell.
     fn nullable_arg_ghosts(&mut self, env: &Env, stmt: &Stmt) -> (Vec<Doc>, Vec<Doc>) {
+        self.null_arg_names.clear();
         let mut ghosts = NullableGhosts::default();
         self.nullable_arg_ghosts_stmt(env, stmt, &mut ghosts);
         (ghosts.before, ghosts.after)
@@ -3768,15 +3786,113 @@ impl<'a> Emitter<'a> {
                     let inner: Rc<Type> = inner.clone().into();
                     // Only a plain pointer round-trips today. An optional
                     // array argument still has to be opened by hand.
-                    if !matches!(
-                        &env.vtype_whnf(inner.into()).val,
-                        TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
-                    ) {
+                    let inner_whnf = env.vtype_whnf(inner.clone().into());
+                    let TypeT::Pointer(pointee, PointerKind::Ref | PointerKind::Unknown) =
+                        &inner_whnf.val
+                    else {
                         continue;
-                    }
+                    };
                     if Self::is_null_constant(arg) {
-                        out.after
-                            .push(Doc::text("Pulse.Lib.C.Nullable.elim_null_ref null;"));
+                        // Declining an optional output leaves the caller
+                        // holding `unless_null null _`, which has to be
+                        // eliminated before the resource inside it can be
+                        // forgotten. Two things get in the way of writing that
+                        // elimination against a bare `null`.
+                        //
+                        // The pointee type is an implicit that a bare `null`
+                        // determines nothing about, so it has to be written
+                        // down or typeclass resolution fails on `has_is_null
+                        // ?t` -- a failure that reads as a defect in the
+                        // annotation rather than in the argument it is about.
+                        //
+                        // Worse, a call that declines *several* optional
+                        // outputs hands back one guard per output, all at the
+                        // same `null` and differing only in the resource they
+                        // carry -- which is precisely the implicit the
+                        // elimination has to recover by matching. The match is
+                        // then ambiguous and fails the same unhelpful way. So
+                        // bind each declined output to its own name first:
+                        // `Pulse.Lib.C.Nullable.null_ref` yields a null
+                        // pointer the matcher can tell apart from the next
+                        // one, and says in its post-condition that it is null,
+                        // which is all the elimination needs.
+                        let pointee = pointee.clone();
+                        let raw: Rc<str> = Rc::from(format!("__pal_null_{}", self.tmp_counter));
+                        self.tmp_counter += 1;
+                        let name = Doc::text(raw.to_string());
+                        // Bind the generated name in the mangler as itself, so
+                        // the guard below names the same pointer the `let`
+                        // introduces rather than a `var_`-prefixed one.
+                        let name_key = Name::Var(raw.clone());
+                        if !self.nm.map.contains_key(&name_key) {
+                            self.nm.used.insert(raw.clone());
+                            self.nm.map.insert(name_key, raw.clone());
+                        }
+                        out.before.push(
+                            Doc::text("let ".to_string())
+                                .append(name.clone())
+                                .append(Doc::text(" = Pulse.Lib.C.Nullable.null_ref "))
+                                .append(parens(self.emit_type(env, &pointee)))
+                                .append(Doc::text(";")),
+                        );
+                        // An optional *const* parameter states its guarded
+                        // resource with the permission and pointee value the
+                        // caller handed in, both signature-level implicits, so
+                        // that `preserves` can give the caller's own hold back
+                        // unchanged. A call site that declines the parameter
+                        // holds nothing to solve those implicits against and
+                        // the call does not elaborate -- the failure reads as
+                        // unresolved unification variables in the application,
+                        // naming neither the parameter nor the implicit.
+                        //
+                        // Since the pointer is null the guard is `emp`, so any
+                        // resource whatever may be introduced under it. Write
+                        // one down with the canonical zero for the pointee
+                        // type: it has no metavariables left in it, the
+                        // callee's clause matches it structurally, and both
+                        // implicits are pinned. It says nothing about memory,
+                        // because there is no memory to say anything about.
+                        // Only a `_const` parameter needs this. Every other
+                        // mode already binds its guarded value existentially,
+                        // which a null call site discharges with no witness at
+                        // all, and writing the guard down there would only ask
+                        // the prover for a resource it does not have.
+                        if matches!(param.mode, ParamMode::Const) {
+                            let this_id: Rc<Ident> =
+                                Rc::<str>::from(&*raw).with_loc(arg.loc.clone());
+                            let this = mk_rvar(&this_id);
+                            let mut guard_env = env.clone();
+                            guard_env.push_var_decl(&this_id, inner.clone(), LocalDeclKind::RValue);
+                            let mut guard_props = vec![];
+                            self.emit_type_slprop(
+                                &guard_env,
+                                &inner,
+                                SLPropVariant::Init {
+                                    perm: &Doc::text("1.0R"),
+                                },
+                                &mut ValNaming::Zeroed,
+                                &mut guard_props,
+                                &this,
+                            );
+                            if !guard_props.is_empty() {
+                                out.before.push(
+                                    Doc::text(
+                                        "Pulse.Lib.C.Nullable.intro_unless_null_null_ref "
+                                            .to_string(),
+                                    )
+                                    .append(name.clone())
+                                    .append(Doc::text(" "))
+                                    .append(parens(mk_star(guard_props)))
+                                    .append(Doc::text(";")),
+                                );
+                            }
+                        }
+                        out.after.push(
+                            Doc::text("Pulse.Lib.C.Nullable.elim_null_ref ".to_string())
+                                .append(name.clone())
+                                .append(Doc::text(";")),
+                        );
+                        self.null_arg_names.insert(Rc::as_ptr(arg) as usize, name);
                         continue;
                     }
                     // Only when PAL is the one holding the resource. Two
@@ -8372,6 +8488,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_fn_param_modes: HashMap::new(),
         current_fn_borrow_asserts: Vec::new(),
         tmp_counter: 0,
+        null_arg_names: HashMap::new(),
     };
 
     let addr_taken = collect_addr_taken(&tu.decls);
