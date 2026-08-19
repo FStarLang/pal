@@ -7250,6 +7250,18 @@ impl<'a> Emitter<'a> {
                 Self::mentions_return(a) || Self::mentions_return(b) || Self::mentions_return(c)
             }
             ExprT::FnCall(_, args) => args.iter().any(|a| Self::mentions_return(a)),
+            // A spec written in Pulse can only reach `return` through an
+            // antiquotation, so the verbatim tokens around them cannot
+            // reintroduce it. Looking inside is what lets a clause that fixes
+            // the result to a Pulse-level function of the arguments --
+            // `_ensures(return == (_Bool)_inline_pulse(f $(A) $(B)))`, which is
+            // the only way to say "this predicate decides that" -- still be
+            // emitted as `rewrites_to` rather than a plain equality.
+            ExprT::InlinePulse(code, _) => code.tokens.iter().any(|tok| match tok {
+                InlinePulseToken::RValueAntiquot { expr, .. }
+                | InlinePulseToken::LValueAntiquot { expr, .. } => Self::mentions_return(expr),
+                _ => false,
+            }),
             _ => true,
         }
     }
@@ -7578,6 +7590,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_fn_decl(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        if decl.is_pure {
+            return self.emit_pure_fn_decl(env, decl);
+        }
         self.emit_fn_sig(env, decl)
             .nest(2)
             .append(Doc::hardline())
@@ -7887,7 +7902,43 @@ impl<'a> Emitter<'a> {
 
     fn emit_pure_fn(&mut self, env: &Env, decl: &FnDecl, body: &Stmts) -> Doc {
         let env = &mut env.clone();
+        let (params, ty_doc) = self.emit_pure_fn_sig(env, decl);
+        let body_doc = self.emit_pure_body(env, body);
+        mk_let_rec(
+            decl.is_rec,
+            self.emit_name(Name::Fn(decl.name.val.clone())),
+            &params,
+            ty_doc,
+            body_doc,
+        )
+    }
 
+    /// A `_pure` function without a body is an external pure operation. It is
+    /// assumed rather than stubbed out as a state-passing `fn`, so that it can
+    /// be applied inside the pre- and postconditions of the functions that call
+    /// it. A stubbed `fn` cannot: Pulse rejects a stateful application in a
+    /// specification.
+    fn emit_pure_fn_decl(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        let env = &mut env.clone();
+        let (params, ty_doc) = self.emit_pure_fn_sig(env, decl);
+        (Doc::text("assume val")
+            .append(Doc::line())
+            .append(self.emit_name(Name::Fn(decl.name.val.clone()))))
+        .append(
+            Doc::concat(params.iter().map(|arg| Doc::line().append(arg.clone())))
+                .append(Doc::line().append(":"))
+                .nest(2),
+        )
+        .group()
+        .append(Doc::line().append(ty_doc))
+        .nest(2)
+        .group()
+    }
+
+    /// Shared signature elaboration for the two pure forms: the parameter list
+    /// and the result type, including the `Pure` effect wrapper when the
+    /// declaration carries a contract.
+    fn emit_pure_fn_sig(&mut self, env: &mut Env, decl: &FnDecl) -> (Vec<Doc>, Doc) {
         let mut params = vec![];
 
         // Emit ghost arguments as implicit erased parameters
@@ -7946,8 +7997,6 @@ impl<'a> Emitter<'a> {
             .map(|e| self.emit_pure_prop(env, e))
             .collect();
 
-        let body_doc = self.emit_pure_body(env, body);
-
         let has_specs = !requires_props.is_empty() || !ensures_props.is_empty();
 
         let ty_doc = if has_specs || (decl.is_rec && decl.decreases.is_some()) {
@@ -7991,14 +8040,7 @@ impl<'a> Emitter<'a> {
             ret_type_doc
         };
 
-        let body = mk_let_rec(
-            decl.is_rec,
-            self.emit_name(Name::Fn(decl.name.val.clone())),
-            &params,
-            ty_doc,
-            body_doc,
-        );
-        body
+        (params, ty_doc)
     }
 
     fn emit_let_decl(&mut self, env: &Env, let_decl: &LetDecl) -> Doc {
