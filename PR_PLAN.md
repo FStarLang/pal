@@ -14,8 +14,8 @@ since moved to 2026-08-17, which is strictly newer, so the pin is already satisf
 `32264e3 Restore the shared template symlinks in two test directories` is not a PR of
 its own; it is folded into PR14 and PR15, which introduce the directories it repairs.
 
-Eight PRs carry no test directory of their own — PR01, PR05, PR08, PR09, PR10, PR19,
-PR31, PR32. Six of those are enablers whose observable behaviour is what makes some
+Seven PRs carry no test directory of their own — PR05, PR08, PR09, PR10, PR19,
+PR31, PR32. Five of those are enablers whose observable behaviour is what makes some
 *other* PR's test verify (the dependency edges below say which), one is a
 `pulse/` library lemma, and one is a `tests-todo` reproducer. Each was checked with a
 full `make test -j8` rather than a targeted run.
@@ -99,7 +99,7 @@ Suggested wave order, to keep the review queue shallow:
 | | |
 |---|---|
 | **PR01** | `nswamy/pal-pr01-header-robustness` |
-| Commits | `8a8502e`, `1d53a75` |
+| Commits | `8a8502e`, `1d53a75`, `e835866` |
 | Depends on | — |
 
 PAL compiles with `-DC2PULSE`, under which a project's annotation macros expand away
@@ -109,6 +109,14 @@ warning PAL caused itself; the suppressions go at the end of the argument list s
 `-Wall` from the database cannot re-enable them. Also skips two declaration kinds that
 stopped translation outright: a stray `;` after a macro (clang `EmptyDecl`) and a
 definition-less `extern struct attrs name;`, and names `FileScopeAsmDecl` explicitly.
+
+A third commit, added during review, narrows that last one: an `extern const` object
+has a real value fixed by another translation unit, so it is emitted as `assume val`
+rather than dropped — the same treatment PR06 gives a `_pure` external function. It has
+to be *assumed* rather than defined, because the global path fills a missing initializer
+with the type's default; that is correct for a tentative definition (`T x;`, which C
+zero-initializes) but would invent a value for an `extern const`. The new `is_external`
+flag distinguishes the two. A non-const `extern T x;` is still dropped.
 
 ---
 
