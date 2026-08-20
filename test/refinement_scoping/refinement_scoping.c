@@ -89,3 +89,63 @@ void use_copy(const uint32_t* src, _out uint32_t* dst)
 {
     copy_one(src, dst);
 }
+
+// (3) The same refinements, but on a *regular* (non-`_out`) parameter. An
+// `_out` pointee is uninitialized on entry and initialized on return, so its
+// refinement is a guarantee only -- it lands in `ensures` alone. A plain
+// pointer's pointee is initialized on both sides, so the very same annotation
+// is an *obligation on the caller* as well as a guarantee on return, and has to
+// be emitted into `requires` and `ensures` both.
+//
+// Nothing in this body re-establishes the relation, so it verifies only if the
+// refinement is assumed on entry -- which is the `requires` half.
+void keep_equal(
+    const uint32_t* Src,
+    _refine(*this == *Src) uint32_t* Both)
+{
+}
+
+// Both halves at once, and neither is redundant: the body perturbs `Src` and
+// `Both`, so the entry refinement is what says they started equal, and the exit
+// refinement is a real obligation about the values they end at.
+void bump_together(
+    uint32_t* Src,
+    _refine(*this == *Src) uint32_t* Both)
+  _requires(*Src < 1000)
+{
+    *Src = *Src + 1;
+    *Both = *Both + 1;
+}
+
+// The declaration/definition rename of (2), on a regular parameter: the
+// refinement naming `Source` has to be resolved against `from` after `merge`,
+// and then appear on both sides of the spec.
+void keep_equal_renamed(
+    const uint32_t* Source,
+    _refine(*this == *Source) uint32_t* Target);
+
+void keep_equal_renamed(const uint32_t* from, uint32_t* to)
+{
+    *to = *from;
+}
+
+// The caller's side of the same coin, and the reason both halves have to be
+// emitted: the `_requires` here is what *discharges* the refinement at the call
+// (an `_out` refinement never asks this), and the `_ensures` is provable only
+// from the refinement coming back out, since the call havocs `*both`.
+void use_keep_equal(const uint32_t* src, uint32_t* both)
+  _requires(*both == *src)
+  _ensures(*both == *src)
+{
+    keep_equal(src, both);
+}
+
+// The same, where the values genuinely change across the call: the caller keeps
+// no handle on what `bump_together` wrote, so the relation it learns about the
+// new values can only have come from the refinement's `ensures` half.
+void use_bump_together(uint32_t* a, uint32_t* b)
+  _requires(*b == *a && *a < 1000)
+  _ensures(*b == *a)
+{
+    bump_together(a, b);
+}
