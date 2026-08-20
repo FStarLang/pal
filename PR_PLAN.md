@@ -14,11 +14,14 @@ since moved to 2026-08-17, which is strictly newer, so the pin is already satisf
 `32264e3 Restore the shared template symlinks in two test directories` is not a PR of
 its own; it is folded into PR14 and PR15, which introduce the directories it repairs.
 
-Seven PRs carry no test directory of their own — PR05, PR08, PR09, PR10, PR19,
-PR31, PR32. Five of those are enablers whose observable behaviour is what makes some
-*other* PR's test verify (the dependency edges below say which), one is a
-`pulse/` library lemma, and one is a `tests-todo` reproducer. Each was checked with a
-full `make test -j8` rather than a targeted run.
+Six PRs carry no test directory of their own — PR08, PR09, PR10, PR19, PR31, PR32.
+Four of those are enablers whose observable behaviour is what makes some *other* PR's
+test verify (the dependency edges below say which), one is a `pulse/` library lemma,
+and one is a `tests-todo` reproducer. Each was checked with a full `make test -j8`
+rather than a targeted run.
+
+Where review has found that an enabler could carry its own test after all, one has been
+added: PR01 gained `test/extern_const` and PR05 gained `test/refinement_scoping`.
 
 ## Merge order
 
@@ -196,7 +199,7 @@ offered as a candidate.
 | | |
 |---|---|
 | **PR05** | `nswamy/pal-pr05-refinement-scoping` |
-| Commits | `60e9210`, `f1ded6e` |
+| Commits | `60e9210`, `f1ded6e`, `0f60a13` |
 | Depends on | — |
 
 A `_refine` on one parameter could not mention another, because the type pre-pass
