@@ -9,6 +9,12 @@
 // PAL now publishes each enumerator as a pure global constant, so a contract
 // can name it instead of repeating its value. Unreferenced globals are pruned,
 // so this costs nothing when an enumerator is only used from a body.
+//
+// "Constant" is meant in C's sense: an enumerator names a value and has no
+// storage, so `&Color_Red` is not something that can be written. Each one is
+// emitted as a bare `let`, without the address, non-null axiom and acquire that
+// a real global carries -- assuming a cell for it would assume storage that
+// nothing can ever produce.
 
 typedef enum _COLOR
 {

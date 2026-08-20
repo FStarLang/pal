@@ -2635,7 +2635,8 @@ public:
         }
       }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
-                                std::move(init), is_pure, opaque_to_smt);
+                                std::move(init), is_pure, opaque_to_smt,
+                                /*is_enum_constant=*/false);
     } else if (auto *ED = dyn_cast<EnumDecl>(D)) {
       // Enum declarations need no IR representation of their own; Clang inlines
       // enumerators as integer literals wherever they appear in a *body*.
@@ -2662,7 +2663,8 @@ public:
         ctx.add_global_var(std::move(ecdLoc), std::move(ecdId),
                            std::move(ecdTy), OptExpr::Some(std::move(lit)),
                            /*is_pure=*/true,
-                           /*opaque_to_smt=*/false);
+                           /*opaque_to_smt=*/false,
+                           /*is_enum_constant=*/true);
       }
       return {};
     } else if (dyn_cast<StaticAssertDecl>(D)) {

@@ -764,6 +764,11 @@ pub struct GlobalVar {
     pub init: Option<Rc<Expr>>,
     pub is_pure: bool,
     pub opaque_to_smt: bool,
+    /// An enumerator published so a contract can name it. C calls these
+    /// *constants*, not objects: an enumerator has no storage and `&Color_Red`
+    /// is not something that can be written, so unlike a real global it gets no
+    /// address.
+    pub is_enum_constant: bool,
 }
 
 /// Whether a global is an array. Array globals are emitted as a *spec*
