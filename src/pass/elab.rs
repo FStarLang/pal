@@ -1403,9 +1403,15 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 let env = &mut env.clone();
                 for ga in &mut fn_decl.ghost_args {
                     elab.elab_type(env, Rc::make_mut(&mut ga.ty));
+                    env.push_var_decl(&ga.name, ga.ty.clone(), LocalDeclKind::RValue);
                 }
+                // Bring each parameter into scope as it is elaborated: a
+                // refinement on one parameter may name an earlier one, which is
+                // how an output's contract says what it was computed from.
                 for arg in &mut fn_decl.args {
                     elab.elab_type(env, Rc::make_mut(&mut arg.ty));
+                    let arg = arg.clone();
+                    env.push_arg(&arg, LocalDeclKind::RValue);
                 }
                 elab.elab_type(env, Rc::make_mut(&mut fn_decl.ret_type));
             }
