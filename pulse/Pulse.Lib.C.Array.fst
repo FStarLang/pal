@@ -412,6 +412,80 @@ let arrayptr_shift #t x n #y =
   admit ()
   // Stuck: need a concrete operation to shift the pointer.
 
+let arrayptr_shift_back #t x n #y =
+  admit ()
+  // Stuck: need a concrete operation to shift the pointer.
+
+fn arrayptr_post_incr u#a (#t: Type u#a) (x: R.ref (array t))
+  (#v: erased (array t)) (#y: erased (array t))
+  requires R.pts_to x v
+  requires arrayptr_pts_to v y
+  returns r: array t
+  ensures exists* v'.
+    R.pts_to x v' **
+    arrayptr_pts_to v' y **
+    arrayptr_pts_to r y **
+    pure (r == reveal v /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) + 1)
+{
+  let old = !x;
+  let shifted = arrayptr_shift old 1sz;
+  x := shifted;
+  old
+}
+
+fn arrayptr_pre_incr u#a (#t: Type u#a) (x: R.ref (array t))
+  (#v: erased (array t)) (#y: erased (array t))
+  requires R.pts_to x v
+  requires arrayptr_pts_to v y
+  returns r: array t
+  ensures exists* v'.
+    R.pts_to x v' **
+    arrayptr_pts_to v' y **
+    arrayptr_pts_to r y **
+    pure (r == v' /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) + 1)
+{
+  let old = !x;
+  let shifted = arrayptr_shift old 1sz;
+  x := shifted;
+  shifted
+}
+
+fn arrayptr_post_decr u#a (#t: Type u#a) (x: R.ref (array t))
+  (#v: erased (array t)) (#y: erased (array t))
+  requires R.pts_to x v
+  requires arrayptr_pts_to v y
+  requires pure (offset_of (reveal v) >= 1)
+  returns r: array t
+  ensures exists* v'.
+    R.pts_to x v' **
+    arrayptr_pts_to v' y **
+    arrayptr_pts_to r y **
+    pure (r == reveal v /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) - 1)
+{
+  let old = !x;
+  let shifted = arrayptr_shift_back old 1sz;
+  x := shifted;
+  old
+}
+
+fn arrayptr_pre_decr u#a (#t: Type u#a) (x: R.ref (array t))
+  (#v: erased (array t)) (#y: erased (array t))
+  requires R.pts_to x v
+  requires arrayptr_pts_to v y
+  requires pure (offset_of (reveal v) >= 1)
+  returns r: array t
+  ensures exists* v'.
+    R.pts_to x v' **
+    arrayptr_pts_to v' y **
+    arrayptr_pts_to r y **
+    pure (r == v' /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) - 1)
+{
+  let old = !x;
+  let shifted = arrayptr_shift_back old 1sz;
+  x := shifted;
+  shifted
+}
+
 fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
   (#y: erased (array t))
   (#p: perm) (#s: erased (array_spec t) { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_initd s (arrayptr_off x y + SZ.v i) })
