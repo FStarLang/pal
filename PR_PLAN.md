@@ -141,7 +141,7 @@ could otherwise only be written in a base its subject is not described in.
 | | |
 |---|---|
 | **PR03** | `nswamy/pal-pr03-enum-constants-in-contracts` |
-| Commits | `ea81be6` |
+| Commits | `ea81be6`, `abca233` |
 | Depends on | — |
 
 Clang inlines an enumerator as an integer literal in a *body*, but contracts are raw
@@ -149,6 +149,14 @@ source snippets PAL parses itself, so an enumerator in a `_requires` was an unre
 name and contracts had to repeat its value as a magic number. Publishes each enumerator
 as a pure global constant; existing name resolution, emission and pruning do the rest,
 so an enum reached through a header costs nothing.
+
+`abca233` (added in review) stops an enumerator from being given an address. Routing it
+through the ordinary global path also emitted the storage a global has — an assumed
+address, a non-null axiom and an acquire — but an enumerator is a C *constant*, not an
+object: it has no storage and `&Color_Red` cannot be written, so nothing translated
+could ever mention that pointer. Gating the address on a new `is_enum_constant` flag, in
+`emit` and in `Env::addressable_global` alike, takes an enumerator from eighteen emitted
+lines to six.
 
 ---
 
