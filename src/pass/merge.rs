@@ -268,7 +268,35 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         // Apply moves in order so the final value at each first position is the
         // last (most complete) occurrence.
         for &(src, dst) in &moves {
-            tu.decls[dst] = tu.decls[src].clone();
+            let later = tu.decls[src].clone();
+            // A global's value and purity belong to the object, not to any one
+            // of its declarations, so "last wins" would discard information the
+            // earlier declaration carried: in `const T g = 1; const T g;` the
+            // later declaration has no initializer. Merge field-wise instead,
+            // which also makes the two declaration orderings agree.
+            if let DeclT::GlobalVar(later_gv) = &later.val
+                && let DeclT::GlobalVar(earlier_gv) = &tu.decls[dst].val
+            {
+                let merged = GlobalVar {
+                    name: later_gv.name.clone(),
+                    ty: later_gv.ty.clone(),
+                    init: later_gv.init.clone().or_else(|| earlier_gv.init.clone()),
+                    is_pure: earlier_gv.is_pure || later_gv.is_pure,
+                    opaque_to_smt: earlier_gv.opaque_to_smt || later_gv.opaque_to_smt,
+                };
+                // Point at whichever declaration defines the object.
+                let loc = if later_gv.init.is_none() && earlier_gv.init.is_some() {
+                    tu.decls[dst].loc.clone()
+                } else {
+                    later.loc.clone()
+                };
+                tu.decls[dst] = Ast {
+                    loc,
+                    val: DeclT::GlobalVar(merged),
+                };
+            } else {
+                tu.decls[dst] = later;
+            }
         }
 
         to_remove.sort_unstable();
