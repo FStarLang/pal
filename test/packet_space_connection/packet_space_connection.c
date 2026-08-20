@@ -1,15 +1,3 @@
-/*
- * Isolated packet_space <-> connection bidirectional-link ownership test.
- * This file is translated for proof but is not part of a production build.
- *
- * The selected packet-space pointer is only an address and the packet-space
- * connection back-pointer is a proof-only core reference; neither grants
- * ownership of the separately allocated peer. A root owner creates one
- * quantified Pulse.Lib.Trade capability while it owns both allocations. The
- * trade is instantiated with the packet-space value after its scalar fields
- * have changed, provided its immutable core-reference back-pointer is stable.
- */
-
 #include "pal.h"
 #include <stdint.h>
 

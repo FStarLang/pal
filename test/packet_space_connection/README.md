@@ -135,14 +135,3 @@ The precise postcondition states the two packet-space scalar values and the two
 connection scalar values, while `connection_owner` re-establishes ownership of
 the connection and all array slots.
 
-## Validation
-
-Run from this directory:
-
-```sh
-make clean && make verify
-```
-
-The local Makefile invokes only the repository-local PAL translator and F*
-verification harness. See [`RESULT.md`](RESULT.md) for the recorded result and
-additional focused checks.
