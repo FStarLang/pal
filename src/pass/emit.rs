@@ -7580,11 +7580,21 @@ impl<'a> Emitter<'a> {
         }
         let name = self.emit_name(Name::Var(gv.name.val.clone()));
         let ty = self.emit_type(env, &gv.ty);
-        let body = match &gv.init {
-            Some(init) => self.emit_rvalue(env, init),
-            None => self.emit_type_default(env, &gv.ty),
+        // A bare `extern const T x;` has a value, but it is fixed by another
+        // translation unit, so it is *assumed* rather than defined. Emitting a
+        // definition here would have to invent one, and inventing the type's
+        // default would let a proof conclude `x == 0`, which nothing
+        // establishes. A tentative definition (`T x;`) is the opposite case: C
+        // zero-initializes it, so the default really is its value.
+        let def = if gv.is_external && gv.init.is_none() {
+            mk_assume_val(vec![], name.clone(), &[], ty)
+        } else {
+            let body = match &gv.init {
+                Some(init) => self.emit_rvalue(env, init),
+                None => self.emit_type_default(env, &gv.ty),
+            };
+            mk_let(name.clone(), &[], ty, body)
         };
-        let def = mk_let(name.clone(), &[], ty, body);
         let def = if gv.opaque_to_smt {
             Doc::text("[@@\"opaque_to_smt\"]")
                 .append(Doc::hardline())

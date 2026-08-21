@@ -177,6 +177,7 @@ impl<'a> Ctx<'a> {
         init: Option<Rc<Expr>>,
         is_pure: bool,
         opaque_to_smt: bool,
+        is_external: bool,
     ) {
         self.translation_unit.decls.push(Ast {
             loc,
@@ -186,6 +187,7 @@ impl<'a> Ctx<'a> {
                 init,
                 is_pure,
                 opaque_to_smt,
+                is_external,
             }),
         })
     }

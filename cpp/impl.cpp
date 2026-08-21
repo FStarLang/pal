@@ -41,6 +41,17 @@ Ref<rust::Str> toStr(std::string const &str) {
 // `while`, and `do-while` loops act as boundaries (their `continue` belongs to
 // them), so we do not descend into them. A `switch` does NOT capture `continue`
 // in C, so we descend into it (and into `if`, blocks, labels, etc.).
+// Whether a declaration carries `_pure`, which marks it a pure value even when
+// its C type does not say so.
+static bool hasPalPureAttr(const Decl *D) {
+  for (auto attr : D->attrs()) {
+    if (auto ann = dyn_cast<AnnotateAttr>(attr);
+        ann && ann->getAnnotation() == "pal-pure" && ann->args_size() == 0)
+      return true;
+  }
+  return false;
+}
+
 static bool hasTopLevelContinue(const Stmt *s) {
   if (!s)
     return false;
@@ -2615,12 +2626,28 @@ public:
       return {};
     } else if (auto *VD = dyn_cast<VarDecl>(D)) {
       auto loc = getRange(VD->getSourceRange());
+      const bool declarationOnly =
+          VD->isThisDeclarationADefinition() == VarDecl::DeclarationOnly;
+      if (declarationOnly && !VD->getType().isConstQualified() &&
+          !hasPalPureAttr(VD)) {
+        // A bare `extern T x;` over mutable storage. Its value is written by
+        // another translation unit, so it is not a value PAL can name at all;
+        // modelling it would need global mutable state, which PAL does not
+        // have. Drop it, so that merely *declaring* one -- as a macro-generated
+        // handler table does -- no longer stops the translation.
+        return {};
+      }
       auto id = ctx.mk_ident(toStr(VD->getName()), loc.clone());
       auto ty = trQualType(VD->getType(), VD->getSourceRange(), nullptr,
                            findFnProtoTypeLoc(VD->getTypeSourceInfo()));
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
                                    : OptExpr::None();
-      bool is_pure = VD->getType().isConstQualified() && VD->hasInit();
+      // A `const` object is a pure value. It normally has to carry its
+      // initializer for PAL to know *which* value it is, but an `extern const`
+      // is exactly the case where the value is real and simply not visible
+      // here, so it is pure too -- and is assumed rather than computed.
+      bool is_pure = VD->getType().isConstQualified() &&
+                     (VD->hasInit() || declarationOnly);
       bool opaque_to_smt = false;
       for (auto attr : VD->getAttrs()) {
         if (auto ann = dyn_cast<AnnotateAttr>(attr);
@@ -2635,7 +2662,8 @@ public:
         }
       }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
-                                std::move(init), is_pure, opaque_to_smt);
+                                std::move(init), is_pure, opaque_to_smt,
+                                declarationOnly);
     } else if (dyn_cast<EnumDecl>(D)) {
       // Enum declarations need no IR representation;
       // constants are inlined as integer literals at use sites.
@@ -2643,6 +2671,18 @@ public:
     } else if (dyn_cast<StaticAssertDecl>(D)) {
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
+      return {};
+    } else if (dyn_cast<EmptyDecl>(D)) {
+      // A stray `;` at file scope. It is what a macro that already ends in a
+      // semicolon leaves behind when it is invoked with one, which is how
+      // every assertion macro in a header is written, so this is common in
+      // real code and declares nothing.
+      return {};
+    } else if (dyn_cast<FileScopeAsmDecl>(D)) {
+      // File-scope assembly has no C-level meaning to translate. Skipping it
+      // is unsound in principle, so say so rather than pass silently.
+      reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
+                        "file-scope assembly is not translated", "");
       return {};
     }
 
@@ -2879,6 +2919,16 @@ static void parse_file(RefMut<Ctx> ctx) {
 
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-DC2PULSE", "-fno-builtin"}, ArgumentInsertPosition::BEGIN));
+  // Under `-DC2PULSE` the annotation macros expand away, so a variable that a
+  // production build reads from inside an assertion or a logging macro can
+  // look written-but-never-read here. That is an artifact of how PAL
+  // configures the preprocessor, not a property of the source, and with a
+  // compilation database that carries `-Werror` it would otherwise stop the
+  // translation. These go at the end because a `-Wall` from the database
+  // would re-enable them.
+  Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+      {"-Wno-unused-but-set-variable", "-Wno-unused-variable"},
+      ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 

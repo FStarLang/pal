@@ -867,6 +867,7 @@ impl<'a> Checker<'a> {
                 init,
                 is_pure: _,
                 opaque_to_smt: _,
+                is_external: _,
             }) => {
                 self.check_type(env, ty);
                 if let Some(init) = init {
