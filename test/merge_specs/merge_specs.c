@@ -49,6 +49,12 @@
 //           redeclaration chain: by the time PAL's frontend walks the
 //           AST, both FunctionDecl nodes it sees already carry the same
 //           (merged) specs.
+//
+//   7. decl_decl_same_specs           — two forward decls only (no defn),
+//                                        IDENTICAL specs
+//        => SUCCEEDS: no diagnostic (see below, compiled). Same semantic
+//           spec comparison as scenario 5, but since the two occurrences
+//           agree, Phase 1's dedup just keeps one with nothing to report.
 
 // --- 1. decl + defn, identical specs => SUCCEEDS ---
 int32_t decl_defn_same_specs(int32_t x)
@@ -79,3 +85,12 @@ int32_t decl_decl_one_sided_specs(int32_t x)
   _ensures(return == x + 1);
 
 int32_t decl_decl_one_sided_specs(int32_t x);
+
+// --- 7. two forward decls only (no defn), identical specs => SUCCEEDS ---
+int32_t decl_decl_same_specs(int32_t x)
+  _requires(x < 100)
+  _ensures(return == x + 1);
+
+int32_t decl_decl_same_specs(int32_t x)
+  _requires(x < 100)
+  _ensures(return == x + 1);
