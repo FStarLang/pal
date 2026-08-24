@@ -758,30 +758,6 @@ fn nary_tuple_proj(base: Doc, i: usize, n: usize) -> Doc {
     parens(Doc::text(format!("Mktuple{n}?._{} ", i + 1)).append(base))
 }
 
-/// Like `wrap_exists`, but instead of introducing a fresh `exists* v1 v2. ..`
-/// binder for `bindings`, binds each name via `let vi = <proj_i> in ..` to a
-/// caller-supplied projection expression (one projection per binding, in
-/// order). Used for a wrapper's `requires`-side existential parameter
-/// ownership: turning it into `let`s (rather than an `exists*`) keeps it out
-/// of the wrapper's own elaborated *type*, so `pre_of`/`post_of`'s
-/// higher-order unification isn't defeated by a Pulse-inserted hidden
-/// implicit binder (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc).
-fn wrap_witness(bindings: &[ExBinding], props: Vec<Doc>, projs: &[Doc]) -> Doc {
-    let star = mk_star(props);
-    if bindings.is_empty() {
-        return star;
-    }
-    let let_prefix = Doc::concat(bindings.iter().zip(projs.iter()).map(|(b, proj)| {
-        Doc::text("let ")
-            .append(b.name.clone())
-            .append(" = ")
-            .append(proj.clone())
-            .append(" in")
-            .append(Doc::hardline())
-    }));
-    let_prefix.append(star)
-}
-
 /// If `ty` is a bare (non-`_plain`, non-`_core_ref`, non-`_nullable`) pointer
 /// type, return its pointee type -- this is exactly the pointer shape whose
 /// ownership `emit_fnptr_spec_core` witnesses via an explicit `erased c`
@@ -6501,10 +6477,11 @@ impl<'a> Emitter<'a> {
         // Requires-side existential ownership groups (e.g. a plain pointer
         // parameter's pointee value), one per Regular/Consumed/Out arg.
         // Deferred until after this loop: their bindings are combined into
-        // ONE explicit `y_fp: erased c` wrapper parameter (via
-        // `wrap_witness`) instead of independent `exists*`s, which Pulse
-        // would otherwise open as hidden implicit binders and break
-        // `pre_of`/`post_of`'s higher-order unification (F* Error 189; see
+        // ONE explicit `y_fp: erased c` wrapper parameter, bound by `let`s
+        // rather than independent `exists*`s. `let`s keep the bindings out of
+        // the wrapper's own elaborated *type*; `exists*`s would be opened by
+        // Pulse as hidden implicit binders and break `pre_of`/`post_of`'s
+        // higher-order unification (F* Error 189; see
         // `Pulse.Lib.C.FuncPtr.fsti`). Ensures-side `exists*`s aren't part of
         // the wrapper's arrow type, so they keep using `wrap_exists`.
         let mut req_witness_groups: Vec<(Vec<ExBinding>, Vec<Doc>)> = vec![];
@@ -6598,34 +6575,43 @@ impl<'a> Emitter<'a> {
             }
         }
         // Combine every requires-side existential group's bindings (in arg
-        // order) into a single flat witness type tuple `c`, and re-express
-        // each group's props via `let`s projecting out of ONE explicit
-        // `y_fp: erased c` wrapper parameter (see comment above).
+        // order) into a single flat witness type tuple `c`, and bind them all
+        // with `let`s projecting out of ONE explicit `y_fp: erased c` wrapper
+        // parameter (see comment above).
         let witness_count: usize = req_witness_groups.iter().map(|(b, _)| b.len()).sum();
         let witness_ty_docs: Vec<Doc> = req_witness_groups
             .iter()
             .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
             .collect();
         let witness_domain = fnptr_domain_doc(witness_ty_docs);
-        {
+        // Every group's `let`s are hoisted into ONE prefix placed in front of
+        // the whole `requires` conjunction, rather than each group carrying
+        // its own. A `let` is a term-level binder, so it cannot appear as the
+        // right operand of `**`: emitting it per group parses only while
+        // there is a single group, and is a syntax error from two groups on.
+        // Hoisting also keeps every witness binding in scope for the trailing
+        // `pure` conjunct below.
+        let witness_let_prefix = {
             let witness_base = parens(Doc::text("reveal y_fp"));
             let mut widx = 0usize;
+            let mut lets: Vec<Doc> = vec![];
             for (bindings, props) in req_witness_groups {
-                if bindings.is_empty() {
-                    requires_props.push(mk_star(props));
-                    continue;
+                for b in &bindings {
+                    let proj = nary_tuple_proj(witness_base.clone(), widx, witness_count);
+                    widx += 1;
+                    lets.push(
+                        Doc::text("let ")
+                            .append(b.name.clone())
+                            .append(" = ")
+                            .append(proj)
+                            .append(" in")
+                            .append(Doc::hardline()),
+                    );
                 }
-                let group_projs: Vec<Doc> = bindings
-                    .iter()
-                    .map(|_| {
-                        let p = nary_tuple_proj(witness_base.clone(), widx, witness_count);
-                        widx += 1;
-                        p
-                    })
-                    .collect();
-                requires_props.push(wrap_witness(&bindings, props, &group_projs));
+                requires_props.push(mk_star(props));
             }
-        }
+            Doc::concat(lets)
+        };
         // `preserves` (const params) hold across the call, so they belong in
         // both the pre and the post.
         requires_props.extend(preserves_props.iter().cloned());
@@ -6710,7 +6696,11 @@ impl<'a> Emitter<'a> {
         // Inline pre/post slprops (bound over the tuple domain `x_fp` via the
         // same projection prefix), to be spliced directly into the `__fp`
         // wrapper's `requires`/`ensures` instead of being named `unfold let`s.
-        let pre_expr = parens(bind_prefix(&name_docs).append(pre_body));
+        let pre_expr = parens(
+            bind_prefix(&name_docs)
+                .append(witness_let_prefix)
+                .append(pre_body),
+        );
         let post_expr = parens(bind_prefix(&name_docs).append(post_body));
 
         FnPtrSpecCore {
