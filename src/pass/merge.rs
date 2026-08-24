@@ -45,23 +45,6 @@ fn param_renames(decl: &FnDecl, defn: &FnDecl) -> HashMap<Rc<str>, Rc<Ident>> {
     renames
 }
 
-/// Compare two spec expression lists (`_requires`/`_ensures`) for semantic
-/// equality. `Ast<T>`'s derived `PartialEq` includes source-location
-/// metadata at every node, so two textually-identical specs written at
-/// different source locations (e.g. one on a declaration, one on a
-/// definition, or one on each of two separate declarations) would otherwise
-/// never compare equal with plain `==`. Comparing their pretty-printed
-/// (`Display`) form instead ignores location entirely and compares content
-/// only. Used consistently for both declaration-vs-definition and
-/// declaration-vs-declaration spec comparisons below, since both are
-/// affected by the same location-leak issue.
-fn exprs_semantically_eq(a: &Exprs, b: &Exprs) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b.iter())
-            .all(|(x, y)| x.to_string() == y.to_string())
-}
-
 fn rename_specs(exprs: &Exprs, renames: &HashMap<Rc<str>, Rc<Ident>>) -> Exprs {
     if renames.is_empty() {
         return exprs.clone();
@@ -275,9 +258,9 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     // If this is a second (or later) bare `FnDecl` for a function
                     // that was already seen (no `FnDefn` involved — that case is
                     // handled separately in Phase 2), and both occurrences carry
-                    // specs, make sure the specs agree (up to parameter renaming
-                    // and ignoring source location) instead of silently keeping
-                    // whichever occurrence happens to be processed last.
+                    // specs, make sure the specs agree (up to parameter
+                    // renaming) instead of silently keeping whichever
+                    // occurrence happens to be processed last.
                     if key.0 == 5 {
                         if let (DeclT::FnDecl(first_decl), DeclT::FnDecl(this_decl)) =
                             (&tu.decls[first].val, &decl.val)
@@ -290,8 +273,8 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                                 let renames = param_renames(first_decl, this_decl);
                                 let renamed_requires = rename_specs(&first_decl.requires, &renames);
                                 let renamed_ensures = rename_specs(&first_decl.ensures, &renames);
-                                if !exprs_semantically_eq(&renamed_requires, &this_decl.requires)
-                                    || !exprs_semantically_eq(&renamed_ensures, &this_decl.ensures)
+                                if renamed_requires != this_decl.requires
+                                    || renamed_ensures != this_decl.ensures
                                 {
                                     report(
                                         diags,
@@ -419,14 +402,12 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && defn_has_specs {
-                        // Both have specs — they must match semantically (up to
-                        // declaration/definition parameter renaming), not by raw
-                        // `==` (which is location-sensitive; see
-                        // `exprs_semantically_eq`).
+                        // Both have specs — they must match, up to
+                        // declaration/definition parameter renaming.
                         let renamed_requires = rename_specs(&fn_decl.requires, &renames);
                         let renamed_ensures = rename_specs(&fn_decl.ensures, &renames);
-                        if !exprs_semantically_eq(&renamed_requires, &defn.decl.requires)
-                            || !exprs_semantically_eq(&renamed_ensures, &defn.decl.ensures)
+                        if renamed_requires != defn.decl.requires
+                            || renamed_ensures != defn.decl.ensures
                         {
                             report(
                                 diags,
@@ -441,7 +422,6 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && !defn_has_specs {
-                        let renames = param_renames(fn_decl, &defn.decl);
                         // The specs we copy below (and the definition's own body)
                         // reference the declaration's ghost-argument variables. If
                         // the definition declared no ghost args of its own, the

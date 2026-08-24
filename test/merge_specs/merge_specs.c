@@ -6,14 +6,13 @@
 // declaration and its definition, or duplicated across two forward
 // declarations with no definition at all.
 //
-// merge.rs compares specs *semantically* (via their pretty-printed form,
-// ignoring source-location metadata) rather than with raw `==` on the
-// underlying Ast<T> nodes, since two textually-identical specs written at
-// different source locations would otherwise never compare equal. This
-// comparison is applied consistently both for declaration-vs-definition
-// specs and for declaration-vs-declaration specs (there's no reason for
-// one of those two cases to be checked syntactically and the other
-// semantically — the same location-leak issue affects both).
+// merge.rs compares specs structurally, up to parameter renaming. `Ast<T>`
+// equality ignores the source-location metadata each node carries, so two
+// textually-identical specs written at different source locations still
+// compare equal. This comparison is applied consistently both for
+// declaration-vs-definition specs and for declaration-vs-declaration specs
+// (there's no reason for one of those two cases to be checked differently
+// from the other).
 //
 // Summary of results:
 //
@@ -52,8 +51,8 @@
 //
 //   7. decl_decl_same_specs           — two forward decls only (no defn),
 //                                        IDENTICAL specs
-//        => SUCCEEDS: no diagnostic (see below, compiled). Same semantic
-//           spec comparison as scenario 5, but since the two occurrences
+//        => SUCCEEDS: no diagnostic (see below, compiled). Same spec
+//           comparison as scenario 5, but since the two occurrences
 //           agree, Phase 1's dedup just keeps one with nothing to report.
 
 // --- 1. decl + defn, identical specs => SUCCEEDS ---
