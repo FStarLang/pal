@@ -277,12 +277,18 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             if let DeclT::GlobalVar(later_gv) = &later.val
                 && let DeclT::GlobalVar(earlier_gv) = &tu.decls[dst].val
             {
+                // Being an enumerator is fixed for the entity, so the two
+                // declarations cannot disagree: C forbids redeclaring an
+                // enumerator, and one sharing a name with a global is a
+                // redeclaration clang rejects before we see it.
+                debug_assert_eq!(earlier_gv.is_enum_constant, later_gv.is_enum_constant);
                 let merged = GlobalVar {
                     name: later_gv.name.clone(),
                     ty: later_gv.ty.clone(),
                     init: later_gv.init.clone().or_else(|| earlier_gv.init.clone()),
                     is_pure: earlier_gv.is_pure || later_gv.is_pure,
                     opaque_to_smt: earlier_gv.opaque_to_smt || later_gv.opaque_to_smt,
+                    is_enum_constant: later_gv.is_enum_constant,
                 };
                 // Point at whichever declaration defines the object.
                 let loc = if later_gv.init.is_none() && earlier_gv.init.is_some() {
