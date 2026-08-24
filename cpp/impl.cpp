@@ -2620,7 +2620,12 @@ public:
                            findFnProtoTypeLoc(VD->getTypeSourceInfo()));
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
                                    : OptExpr::None();
-      bool is_pure = VD->getType().isConstQualified() && VD->hasInit();
+      // A tentative definition (no initializer, no storage-class specifier)
+      // defines the object and is initialized as if by 0 (C17 6.9.2p2), so it
+      // is pure; only a `DeclarationOnly` (e.g. `extern`) is not.
+      bool is_pure =
+          VD->getType().isConstQualified() &&
+          VD->isThisDeclarationADefinition(*astCtx) != VarDecl::DeclarationOnly;
       bool opaque_to_smt = false;
       for (auto attr : VD->getAttrs()) {
         if (auto ann = dyn_cast<AnnotateAttr>(attr);
