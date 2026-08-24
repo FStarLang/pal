@@ -1080,6 +1080,65 @@ void use_mk_itemx(void)
     destroy_via_field(it);
 }
 
+/* ---- Multiple ownership groups across a function pointer ----
+   Each callback below varies ONE thing: how many parameters contribute an
+   ownership group (a requires-side existential). Parameter count is held
+   separate from group count on purpose, so a failure can be attributed to
+   one or the other.
+
+     mo_one    1 owned param              -> 1 group
+     mo_scalar 2 params, 1 pointer        -> 1 group (a by-value scalar
+                                             emits no existential binder)
+     mo_two    2 owned params             -> 2 groups
+     mo_three  3 owned params             -> 3 groups
+
+   Every address-taken function gets a `Funcptr_<g>` wrapper whose
+   requires-side ownership is carried by ONE explicit `y_fp: erased c`
+   witness parameter, with each group's props recovered by projecting out of
+   it (see emit.rs `emit_fnptr_spec_core`). `mo_one`/`mo_scalar` are the
+   controls for that machinery at one group; `mo_two`/`mo_three` exercise it
+   at two and three. */
+
+struct mo_a { int32_t x; };
+struct mo_b { int32_t y; };
+
+int32_t mo_one(struct mo_a *p)
+    _ensures(return == p->x)
+{
+    return p->x;
+}
+
+int32_t mo_scalar(struct mo_a *p, int32_t k)
+    _requires(p->x > 0 && p->x < 100 && k > 0 && k < 100)
+{
+    return p->x + k;
+}
+
+int32_t mo_two(struct mo_a *p, struct mo_b *q)
+    _requires(p->x > 0 && p->x < 100 && q->y > 0 && q->y < 100)
+{
+    return p->x + q->y;
+}
+
+int32_t mo_three(struct mo_a *p, struct mo_b *q, struct mo_a *r)
+    _requires(p->x > 0 && p->x < 100 && q->y > 0 && q->y < 100
+              && r->x > 0 && r->x < 100)
+{
+    return p->x + q->y + r->x;
+}
+
+/* Address-taken through a const ops table — the shape real drivers use. */
+struct mo_ops {
+    int32_t (*f1)(struct mo_a *);
+    int32_t (*fs)(struct mo_a *, int32_t);
+    int32_t (*f2)(struct mo_a *, struct mo_b *);
+    int32_t (*f3)(struct mo_a *, struct mo_b *, struct mo_a *);
+};
+
+const struct mo_ops the_mo_ops = {
+    .f1 = mo_one, .fs = mo_scalar, .f2 = mo_two, .f3 = mo_three
+};
+
 #if 0
 
 /* [DEFERRED] Indirect recursion through a function pointer. Taking the
