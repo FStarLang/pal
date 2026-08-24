@@ -1868,6 +1868,28 @@ impl<'a> Emitter<'a> {
                     ExprKind::RValue(annotated(v, || {
                         parens(naryfn([Doc::text(read_fn), inner_doc, Doc::text("0sz")]))
                     }))
+                } else if matches!(inner_kind, Ok(Some(PointerKind::Core))) {
+                    // *core_ref: the field stores an untyped `core_ref`, not a
+                    // `ref <pointee>`, so recover the typed reference with
+                    // `core_to_ref` before it's used further (e.g. chained
+                    // field access, as in `o->pb->y`). Mirrors the coercion
+                    // the `Cast` handler inserts for assignments.
+                    match env.infer_expr(v) {
+                        Ok(pointee_ty) => {
+                            let inner_doc = self.emit_expr(env, inner).to_rvalue();
+                            ExprKind::LValue(annotated(v, || {
+                                parens(naryfn([
+                                    Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
+                                    self.emit_type(env, &pointee_ty),
+                                    inner_doc,
+                                ]))
+                            }))
+                        }
+                        Err(_) => {
+                            self.report(format!("cannot infer pointee type of {}", v), &v.loc);
+                            ExprKind::LValue(Doc::text("(admit())"))
+                        }
+                    }
                 } else {
                     ExprKind::LValue(annotated(v, || self.emit_expr(env, inner).to_rvalue()))
                 }
