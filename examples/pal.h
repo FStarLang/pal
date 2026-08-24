@@ -69,8 +69,8 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _do_while_first(name)
 #define _do_while_cond(name)
 
-#define _assert(p)
-#define _ghost_stmt(args)
+#define _assert(p) ((void)0)
+#define _ghost_stmt(args) ((void)0)
 #define _ghost_arg(p)
 
 #define _plain
