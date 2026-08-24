@@ -332,6 +332,72 @@ val arrayptr_shift (#t: Type u#a) (x: array t) (n: SZ.t) (#y: erased (array t))
     (fun r -> arrayptr_pts_to x y ** arrayptr_pts_to r y **
       pure (base_of r == base_of x /\ offset_of r == offset_of x + SZ.v n))
 
+/// Shift an arrayptr backward by `n` positions. Unlike `arrayptr_shift`
+/// (offsets are unbounded nats, so forward movement is always in range),
+/// backward movement needs an explicit lower-bound precondition to keep the
+/// resulting offset a valid nat (out-of-bounds pointer decrement is
+/// undefined behavior in C anyway, C11 6.5.6p8).
+val arrayptr_shift_back (#t: Type u#a) (x: array t) (n: SZ.t) (#y: erased (array t))
+  : stt (array t)
+    (arrayptr_pts_to x y ** pure (SZ.v n <= offset_of x))
+    (fun r -> arrayptr_pts_to x y ** arrayptr_pts_to r y **
+      pure (base_of r == base_of x /\ offset_of r == offset_of x - SZ.v n))
+
+/// Post-increment an arrayptr held in `x`: advance `x`'s stored offset by
+/// one, returning the OLD value (C semantics for `p++`, mirroring
+/// `Pulse.Lib.C.UnaryOps.pluspluspost_*` for the scalar case).
+fn arrayptr_post_incr u#a (#t: Type u#a) (x: R.ref (array t))
+  (#v: erased (array t)) (#y: erased (array t))
+  requires R.pts_to x v
+  requires arrayptr_pts_to v y
+  returns r: array t
+  ensures exists* v'.
+    R.pts_to x v' **
+    arrayptr_pts_to v' y **
+    arrayptr_pts_to r y **
+    pure (r == reveal v /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) + 1)
+
+/// Pre-increment an arrayptr held in `x`: advance `x`'s stored offset by
+/// one, returning the NEW value (C semantics for `++p`).
+fn arrayptr_pre_incr u#a (#t: Type u#a) (x: R.ref (array t))
+  (#v: erased (array t)) (#y: erased (array t))
+  requires R.pts_to x v
+  requires arrayptr_pts_to v y
+  returns r: array t
+  ensures exists* v'.
+    R.pts_to x v' **
+    arrayptr_pts_to v' y **
+    arrayptr_pts_to r y **
+    pure (r == v' /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) + 1)
+
+/// Post-decrement an arrayptr held in `x`: move `x`'s stored offset back by
+/// one, returning the OLD value (C semantics for `p--`).
+fn arrayptr_post_decr u#a (#t: Type u#a) (x: R.ref (array t))
+  (#v: erased (array t)) (#y: erased (array t))
+  requires R.pts_to x v
+  requires arrayptr_pts_to v y
+  requires pure (offset_of (reveal v) >= 1)
+  returns r: array t
+  ensures exists* v'.
+    R.pts_to x v' **
+    arrayptr_pts_to v' y **
+    arrayptr_pts_to r y **
+    pure (r == reveal v /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) - 1)
+
+/// Pre-decrement an arrayptr held in `x`: move `x`'s stored offset back by
+/// one, returning the NEW value (C semantics for `--p`).
+fn arrayptr_pre_decr u#a (#t: Type u#a) (x: R.ref (array t))
+  (#v: erased (array t)) (#y: erased (array t))
+  requires R.pts_to x v
+  requires arrayptr_pts_to v y
+  requires pure (offset_of (reveal v) >= 1)
+  returns r: array t
+  ensures exists* v'.
+    R.pts_to x v' **
+    arrayptr_pts_to v' y **
+    arrayptr_pts_to r y **
+    pure (r == v' /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) - 1)
+
 /// Read through an arrayptr at index `i`, borrowing permissions from parent `y`.
 fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
   (#y: erased (array t))
