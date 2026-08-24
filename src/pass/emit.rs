@@ -7784,7 +7784,10 @@ impl<'a> Emitter<'a> {
     /// (the `&g` may live in another module), as for the `__fp` wrappers.
     /// See `doc/pal_surface_syntax.md`.
     fn emit_global_addr(&mut self, env: &Env, gv: &GlobalVar) -> Option<Doc> {
-        if global_var_is_array(gv) {
+        // An enumerator is a constant, not an object: it has no storage, and
+        // `&Color_Red` cannot be written in C. Giving it an address would assume
+        // a cell that nothing can ever produce.
+        if global_var_is_array(gv) || gv.is_enum_constant {
             return None;
         }
         let var = self.emit_name(Name::Var(gv.name.val.clone()));

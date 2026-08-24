@@ -805,7 +805,7 @@ impl Env {
     ///   used to work.)
     pub fn addressable_global(&self, ident: &Ident) -> Option<&GlobalVar> {
         let gv = self.lookup_global_var(ident)?;
-        if !gv.is_pure || global_var_is_array(gv) {
+        if !gv.is_pure || global_var_is_array(gv) || gv.is_enum_constant {
             return None;
         }
         Some(gv)
