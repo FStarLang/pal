@@ -2,31 +2,18 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* ==========================================================================
- * Function-pointer tests against the axiomatized Pulse.Lib.C.FuncPtr library.
- * Every example here verifies (`make -C test/func_pointer`); the single deferred
- * case (`rec_via_ptr`) is kept under `#if 0` at the end.
+/* Function-pointer tests against the axiomatized Pulse.Lib.C.FuncPtr library.
+ * All examples verify except `rec_via_ptr` (`#if 0` at the end).
  *
- * Divergence: PAL emits every function as `divergent fn` (`stt_div`) unless it
- * carries `_total`. FuncPtr validity therefore tracks a `div: bool` bit. A
- * pointer to a divergent target (the common case) is reflected with `of_fn_div`
- * and seeded with `of_fn_div_valid` (baking `div = true`); a `_total` target
- * (e.g. `add_t`) uses `of_fn`/`of_fn_valid` (`div = false`). An indirect call
- * emits `call` from a `_total` body and `call_div` from a divergent one, so the
- * required validity bit matches the enclosing body. A total pointer can be used
- * where a divergent one is expected by `weaken`-ing `false` up to `true`
- * (`weaken_total_to_div`); the reverse is unsound and forbidden.
+ * Divergence: every function is `divergent fn` unless `_total`. A pointer to
+ * a divergent target uses `of_fn_div`/`of_fn_div_valid`; a `_total` target
+ * uses `of_fn`/`of_fn_valid`. Calls use `call_div`/`call` to match. A total
+ * pointer can `weaken` up to divergent, never the reverse.
  *
- * Indirect-call recipe: a call `fp(x)` emits `call{,_div} _ _ (!fp) args` with
- * the spec left as inference holes. For a pointer holding a concrete `of_fn{,_div}
- * ..` (a decayed named function), seed the validity fact just before the call
- * with `_ghost_stmt(.. of_fn_div_valid ..)` (or `of_fn_valid` for a `_total`
- * target). `call{,_div}` returns `is_valid` in its postcondition (validity is a
- * persistent pure fact), so a caller that does not itself export validity drops
- * the surplus afterwards with `_ghost_stmt(.. drop_is_valid _ _ _)`. Callback
- * parameters instead export `is_valid` via a `_refine` refinement (with the
- * matching `div` bit) and keep the returned fact.
- * ========================================================================== */
+ * Indirect-call recipe: seed validity with `_ghost_stmt(.. of_fn_div_valid ..)`
+ * before calling `fp(x)`; drop the returned `is_valid` fact afterwards with
+ * `_ghost_stmt(.. drop_is_valid _ _ _)` unless it needs to be kept. Callback
+ * parameters instead get `is_valid` via a `_refine` on the parameter. */
 
 /* ---- shared helper callees ---- */
 
@@ -37,10 +24,8 @@ int32_t add(int32_t a, int32_t b)
     return a + b;
 }
 
-/* A `_total` (non-divergent) twin of `add`. Its `__fp` wrapper is emitted as a
-   plain `fn` and reflected with `of_fn`, so `of_fn_valid` seeds validity at the
-   total bit `false`. Used to test total function pointers and total->divergent
-   weakening. */
+/* A `_total` (non-divergent) twin of `add`, for testing total function
+   pointers and total->divergent weakening. */
 _total
 int32_t add_t(int32_t a, int32_t b)
     _requires(a > 0 && a < 100 && b > 0 && b < 100)
@@ -221,11 +206,8 @@ int32_t use_null_truthiness(void)
     return 0;
 }
 
-/* Null comparison in a *spec* (not just a body). `f != 0` and `f != NULL` both
-   lower to `FuncPtr.is_null`, so the postcondition follows from the
-   precondition even though the two spellings differ. The body returns the
-   comparison itself, which exercises the same lowering in value position; here
-   `f == NULL` is false, so the result is 0. */
+/* Null comparison in a spec: `f != 0` and `f != NULL` both lower to
+   `is_null`, so the ensures holds regardless of spelling. */
 int32_t fp_spec_nonnull(binop f)
     _requires(f != 0)
     _ensures(f != NULL && return == 0)
@@ -352,9 +334,7 @@ int32_t loop_call(void)
 }
 
 /* ---- callback parameters (abstract func_ptr params) ----
-   The pointer is a func_ptr PARAMETER, so the caller supplies the `is_valid`
-   fact via a `_refine((_slprop) is_valid $(this) ..)` refinement on the
-   parameter, landing it in both the generated `requires` and `ensures`. */
+   A `_refine` on the parameter supplies the `is_valid` fact for the call. */
 
 /* Function pointer as a callback parameter. */
 int32_t apply(int32_t (*op)(int32_t, int32_t)
@@ -440,10 +420,9 @@ int32_t use_forward(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-/* Higher-order: the callback `g` is itself a function that takes a function
-   pointer (like `apply`). After `g(add, ..)` returns, two `is_valid` facts are
-   live -- `g`'s own (exported here) and `add`'s (returned by `apply`'s ensures)
-   -- so the surplus `add` fact is dropped by pinning its `f`. */
+/* Higher-order: `g` itself takes a function pointer (like `apply`). Two
+   `is_valid` facts are live after `g(add, ..)` -- `g`'s own and `add`'s --
+   so the surplus `add` fact is dropped. */
 int32_t hof(int32_t (*g)(int32_t (*)(int32_t, int32_t), int32_t, int32_t)
                 _refine((_slprop) _inline_pulse(
                     Pulse.Lib.C.FuncPtr.is_valid $(this) true
@@ -467,13 +446,13 @@ int32_t use_hof(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-/* `apply_weaker` takes a callback whose declared post (`aw_post`) is WEAKER than
-   `subtract` provides. `weaken_sub_to_aw` moves subtract's validity onto the
-   weaker spec (identity pre-coercion; post-coercion proving
-   `return == a - b ==> return < a` under the shared precondition). */
+/* `apply_weaker` takes a callback whose declared post (`aw_post`) is weaker
+   than `subtract` provides; `weaken_sub_to_aw` moves subtract's validity
+   onto that weaker spec. */
 _include_pulse(Apply_weaker_spec,
   unfold
   let aw_post (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
+              (y_fp: erased unit)
               (return_1: Typedef_int32_t.ty_int32_t) : slprop =
     let var_a = fst x_fp in
     let var_b = snd x_fp in
@@ -488,15 +467,17 @@ _include_pulse(Apply_weaker_spec,
 
   ghost
   fn wpost_weak (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-                (y: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y
-    ensures aw_post x y
+                (y: erased unit)
+                (r: Typedef_int32_t.ty_int32_t)
+    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y r
+    ensures aw_post x y r
   { () }
 
   ghost
   fn wpre_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-    requires (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x
+             (y: erased unit)
+    requires (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
+    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
 
   ghost
@@ -555,12 +536,9 @@ int32_t guarded_call(int32_t (*fp)(int32_t, int32_t) _nullable
     return 0;
 }
 
-/* Bare `_nullable` callback, i.e. no `_refine`. Without a refinement there is no
-   `is_valid` to carry, so the parameter's slprop is the empty `unless_null fp emp`
-   -- the same shape a `_nullable` data pointer with a prop-less pointee gets. The
-   pointer can still be null-tested; it just cannot be called, since nothing
-   establishes its validity. This exercises the plain `unless_null` path for
-   function pointers, which relies on the `has_is_null_func_ptr` instance. */
+/* Bare `_nullable` callback, no `_refine`: no `is_valid` to carry, so the
+   parameter's slprop is just `unless_null fp emp`. Can be null-tested but
+   not called. Exercises `has_is_null_func_ptr`. */
 int32_t is_set(int32_t (*fp)(int32_t, int32_t) _nullable)
     _ensures(return == 0 || return == 1)
 {
@@ -571,18 +549,18 @@ int32_t is_set(int32_t (*fp)(int32_t, int32_t) _nullable)
 }
 
 /* ---- join family ----
-   The pointer is bound to different functions across a control-flow join and
-   called after the merge, so no single static target exists at the call site.
-   Each branch weakens its per-branch validity onto a common guard-keyed spec
-   `(rj_pre g)(rj_post g)`; an `_ensures` on the `if` carries the join existential
-   `exists* v. pts_to fp v ** is_valid v (rj_pre g)(rj_post g)`. */
+   The pointer is bound to different functions across a control-flow join,
+   so no single static target exists at the call site. Each branch weakens
+   its validity onto a common guard-keyed spec `(rj_pre g)(rj_post g)`,
+   carried across the join by an `_ensures` on the `if`. */
 
 /* Guard-keyed pre/post (`rj_pre`/`rj_post`) and the per-branch weakenings used
    by the join-family examples below. */
 _include_pulse(Reassign_join_spec,
   unfold
   let rj_pre (g: bool)
-             (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t)) : slprop =
+             (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
+             (y_fp: erased unit) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
     ((Typedef_int32_t.ty_int32_t__pred var_a 1.0R)) **
@@ -602,6 +580,7 @@ _include_pulse(Reassign_join_spec,
   unfold
   let rj_post (g: bool)
               (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
+              (y_fp: erased unit)
               (return_1: Typedef_int32_t.ty_int32_t) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
@@ -622,28 +601,32 @@ _include_pulse(Reassign_join_spec,
 
   ghost
   fn wpre_sub (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-    requires rj_pre true x
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x
+              (y: erased unit)
+    requires rj_pre true x y
+    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
 
   ghost
   fn wpost_sub (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y
-    ensures rj_post true x y
+               (y: erased unit)
+               (r: Typedef_int32_t.ty_int32_t)
+    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y r
+    ensures rj_post true x y r
   { () }
 
   ghost
   fn wpre_add (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-    requires rj_pre false x
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) x
+              (y: erased unit)
+    requires rj_pre false x y
+    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) x y
   { () }
 
   ghost
   fn wpost_add (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) x y
-    ensures rj_post false x y
+               (y: erased unit)
+               (r: Typedef_int32_t.ty_int32_t)
+    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) x y r
+    ensures rj_post false x y r
   { () }
 
 )
@@ -787,15 +770,9 @@ void inc(int32_t *p)
 
 /* ---- DISABLED: relational `_old` on an ownership pointer through an
    indirect (function-pointer) call ----
-   `ptr_arg_cb` passes an ownership pointer through a FuncPtr to a callee
-   (`inc`) whose contract is relational (`*p == _old(*p) + 1`). The pointer
-   still gets its default `pts_to` permission across the FuncPtr, but the
-   FuncPtr contract (`pre: a -> slprop`, `post: a -> b -> slprop`) is
-   non-relational: expressing `_old(*p)` would need the pointer's initial
-   pointee value threaded through the FuncPtr domain, which has been removed
-   (fnptr arguments are now always plain values). So `_old(*p)` across an
-   indirect call is unsupported. Disabled until first-class `_old` support in
-   FuncPtr contracts is reinstated.
+   `_old(*p)` needs the pointer's initial value threaded through the FuncPtr
+   domain, which no longer exists (fnptr arguments are plain values only).
+   Disabled until FuncPtr contracts support `_old` again.
 
 void ptr_arg_cb(int32_t *p)
     _requires(*p < 100)
@@ -809,25 +786,13 @@ void ptr_arg_cb(int32_t *p)
 ---- end DISABLED ptr_arg_cb ---- */
 
 /* ---- DISABLED: storing a function pointer into an array element ----
-   The four functions below (assign_from_agg, use_array_slot, array_runtime_idx,
-   multilayer) each write a function pointer into an array slot (`tbl[i] = add;`).
-
-   PAL used to work around a verification failure here with an ad-hoc trick: it
-   let-bound the stored value to a temporary before `array_write`, so the array
-   spec update stayed over a small variable. That trick has been removed, so the
-   value (a large `of_fn_div (pre_of __fp) (post_of __fp) __fp` term) is now
-   inlined directly into `array_write`. This makes
-   `array_spec_upd s i (of_fn ...)` too large for the `array_spec_upd_*` SMTPats
-   to fire, so the subsequent read-back cannot prove `array_spec_mask` /
-   `array_spec_initd` nor recover the stored pointer.
-
-   Increasing `z3rlimit` does NOT help: this was verified empirically (the proof
-   fails identically at `--z3rlimit 50` and `--z3rlimit 300`, with the same
-   `VC = array_spec_mask _s' 1`). The problem is SMTPat trigger/congruence
-   matching against an over-large term, not a Z3 resource-budget problem.
-
-   These are disabled until a proper library-level fix (making `array_write`'s
-   spec robust to large stored values) is implemented.
+   These four functions each write a function pointer into an array slot
+   (`tbl[i] = add;`). Storing the large `of_fn_div ...` term directly makes
+   `array_spec_upd s i (of_fn ...)` too large for the `array_spec_upd_*`
+   SMTPats to fire, so the read-back can't recover `array_spec_mask`/
+   `array_spec_initd`. This is an SMTPat matching issue, not a Z3 resource
+   problem (confirmed: raising `z3rlimit` doesn't help). Disabled until
+   `array_write`'s spec is made robust to large stored values.
 
 int32_t assign_from_agg(void)
     _ensures(return == 5)
@@ -961,11 +926,9 @@ int32_t use_two_field_vtable(void)
 
 /* ---- total function pointers & total->divergent weakening ---- */
 
-/* A `_total` caller holding a pointer to the `_total` `add_t`. Because `add_t`
-   is total, its wrapper is reflected with `of_fn` and `of_fn_valid` seeds
-   `is_valid .. false ..`; because the caller body is itself `_total`, the
-   indirect call emits `call` (the total primitive returning `stt`). Shows that
-   total function pointers verify end-to-end. */
+/* A `_total` caller holding a pointer to the `_total` `add_t`: `of_fn_valid`
+   seeds `is_valid .. false ..`, and the indirect call emits `call` (the
+   total primitive). Total function pointers verify end-to-end. */
 _total
 int32_t use_total_fp(void)
     _ensures(return == 5)
@@ -994,15 +957,17 @@ int32_t apply_t(int32_t (*op)(int32_t, int32_t)
 _include_pulse(Total_to_div_spec,
   ghost
   fn wpre_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-    requires (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x
-    ensures (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x
+             (y: erased unit)
+    requires (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
+    ensures (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
   { () }
 
   ghost
   fn wpost_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y
-    ensures (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y
+               (y: erased unit)
+               (r: Typedef_int32_t.ty_int32_t)
+    requires (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
+    ensures (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
   { () }
 
   ghost
@@ -1033,15 +998,96 @@ int32_t weaken_total_to_div(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
+/* Plain pointer parameter, no workaround annotations. Taking `touch`'s
+   address forces a `__fp` wrapper via `pre_of`/`post_of` type-reflection;
+   verifies because those take an explicit `erased c` witness parameter
+   instead of a hidden implicit binder (which broke HOU with Error 189). */
+void touch(int *p)
+{
+}
+
+void use_touch_fp(void)
+{
+    void (*cb)(int *) = touch;
+}
+
+/* `struct itemx` verifies fine: `destroy`'s field type is a plain,
+   non-recursive `func_ptr`, no self-reference, no strict-positivity error. */
+struct itemx {
+    void (*destroy)(struct itemx *self);
+    unsigned int n;
+};
+
+/* `destroy_impl`'s `self` is `_consumes _allocated`: a real destructor that
+   takes ownership of its receiver and frees it (same combo as
+   `test/dpe/DPE.c`'s `destroy_uds_context`). */
+void destroy_impl(_consumes _allocated struct itemx *self)
+{
+    free(self);
+}
+
+void use_destroy_impl_fp(void)
+{
+    void (*cb)(struct itemx *) = destroy_impl;
+}
+
+/* `Itemx_spec` is a separate module (not a field-level `_refine` on
+   `destroy`) because `destroy_impl`'s spec module already depends on
+   `struct itemx`; folding `is_valid` into the struct's own predicate would
+   make `Struct_itemx` depend back on it, a circular module dependency
+   (Error 308). */
+_include_pulse(Itemx_spec,
+  unfold let itemx_valid ([@@@mkey] this: ref Struct_itemx.struct_itemx) (vo: Struct_itemx.struct_itemx) : slprop =
+    Pulse.Lib.Reference.pts_to this vo **
+    Pulse.Lib.C.Ref.freeable this **
+    Pulse.Lib.C.FuncPtr.is_valid vo.Struct_itemx.struct_itemx__destroy true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_destroy_impl.func_destroy_impl__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_destroy_impl.func_destroy_impl__fp)
+)
+
+_type(itemx_val, Struct_itemx.struct_itemx)
+_refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
+_plain
+typedef struct itemx *itemx_ptr;
+
+/* Self-dispatch through a field verifies once `self` is `_consumes`: a
+   borrowed `self` opens two separate existentials for the same value
+   (call-site witness vs. field-getter unfold), which Pulse can't unify
+   (Error 228). Consuming `p` binds ONE existential both read from.
+   `itemx_valid` also asserts `freeable`, for `destroy_impl`'s `free`.
+   `drop_is_valid` clears the leftover non-affine `is_valid` fact. */
+void destroy_via_field(_consumes itemx_ptr p) {
+    p->destroy(p);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Constructs a valid `struct itemx` and RETURNS it, instead of consuming it
+   immediately (see `destroy_via_field`). Mirrors `test/malloc/malloc.c`'s
+   `mk_point`. `malloc`'s memory is genuinely uninitialized, so an explicit
+   `$unfold-uninit` is needed before the field writes (unlike `vec_fam.c`'s
+   `calloc`-based `vec_new`). */
+itemx_ptr mk_itemx(void)
+{
+    struct itemx *it = (struct itemx *) malloc(sizeof(struct itemx));
+    _ghost_stmt($unfold-uninit(struct itemx) $(it));
+    it->destroy = destroy_impl;
+    it->n = 0;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);
+    return it;
+}
+
+void use_mk_itemx(void)
+{
+    itemx_ptr it = mk_itemx();
+    destroy_via_field(it);
+}
+
 #if 0
 
-/* [not yet verified -- DEFERRED, emitter mutual-recursion gap] Indirect
-   recursion through a function pointer. Taking the address of the function under
-   definition decays to `of_fn .. func_rec_via_ptr__fp`, but PAL emits the
-   function and its lifted triple as two SEPARATE top-level `fn`s (not a
-   `fn rec .. and ..` group), so the reference is forward (F* Error 72). The fix
-   is an emitter change to emit the recursive function and its address-taken
-   `__fp` triple as a single mutually-recursive group. */
+/* [DEFERRED] Indirect recursion through a function pointer. Taking the
+   address of the function under definition decays to `of_fn ..
+   func_rec_via_ptr__fp`, but PAL emits the function and its lifted triple
+   as two separate top-level `fn`s (not a `fn rec .. and ..` group), so the
+   reference is forward (F* Error 72). Needs an emitter change to emit both
+   as one mutually-recursive group. */
 _rec int32_t rec_via_ptr(int32_t n)
     _requires(n >= 0 && n < 100)
     _ensures(return == 0)

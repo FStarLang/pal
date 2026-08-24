@@ -195,6 +195,10 @@ struct FnPtrSpecCore {
     wrap_name: Doc,
     callee: Doc,
     domain: Doc,
+    /// The type `c` of the wrapper's explicit `y_fp: erased c` witness
+    /// parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc);
+    /// `unit` when no parameter needs one.
+    witness_domain: Doc,
     ret_name: Doc,
     ret_ty_doc: Doc,
     projs: Vec<Doc>,
@@ -730,6 +734,69 @@ fn fnptr_domain_doc(arg_docs: Vec<Doc>) -> Doc {
         0 => Doc::text("unit"),
         1 => arg_docs.into_iter().next().unwrap(),
         _ => parens(Doc::intersperse(arg_docs, Doc::text(" & "))),
+    }
+}
+
+/// The projection expression for extracting component `i` (0-indexed) out of
+/// an `n`-ary flat tuple value `base`, matching `fnptr_domain_doc`'s tupling
+/// convention (bare value at arity 1, `fst`/`snd` at arity 2, `MktupleN?._i`
+/// field projectors at arity >= 3 -- NOT nested `tuple2`s).
+fn nary_tuple_proj(base: Doc, i: usize, n: usize) -> Doc {
+    if n <= 1 {
+        return base;
+    }
+    if n == 2 {
+        let mut e = base;
+        for _ in 0..i {
+            e = parens(Doc::text("snd ").append(e));
+        }
+        if i < n - 1 {
+            e = parens(Doc::text("fst ").append(e));
+        }
+        return e;
+    }
+    parens(Doc::text(format!("Mktuple{n}?._{} ", i + 1)).append(base))
+}
+
+/// Like `wrap_exists`, but instead of introducing a fresh `exists* v1 v2. ..`
+/// binder for `bindings`, binds each name via `let vi = <proj_i> in ..` to a
+/// caller-supplied projection expression (one projection per binding, in
+/// order). Used for a wrapper's `requires`-side existential parameter
+/// ownership: turning it into `let`s (rather than an `exists*`) keeps it out
+/// of the wrapper's own elaborated *type*, so `pre_of`/`post_of`'s
+/// higher-order unification isn't defeated by a Pulse-inserted hidden
+/// implicit binder (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc).
+fn wrap_witness(bindings: &[ExBinding], props: Vec<Doc>, projs: &[Doc]) -> Doc {
+    let star = mk_star(props);
+    if bindings.is_empty() {
+        return star;
+    }
+    let let_prefix = Doc::concat(bindings.iter().zip(projs.iter()).map(|(b, proj)| {
+        Doc::text("let ")
+            .append(b.name.clone())
+            .append(" = ")
+            .append(proj.clone())
+            .append(" in")
+            .append(Doc::hardline())
+    }));
+    let_prefix.append(star)
+}
+
+/// If `ty` is a bare (non-`_plain`, non-`_core_ref`, non-`_nullable`) pointer
+/// type, return its pointee type -- this is exactly the pointer shape whose
+/// ownership `emit_fnptr_spec_core` witnesses via an explicit `erased c`
+/// wrapper parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter
+/// doc). Used at `FnPtrCall` call sites (from the callee's static `FnPtr`
+/// argument types alone) to determine, in argument order, which call
+/// arguments contribute a witness component.
+fn fnptr_witness_pointee(ty: &Rc<Type>) -> Option<Rc<Type>> {
+    match &ty.val {
+        TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, ..) => fnptr_witness_pointee(inner),
+        TypeT::Pointer(pointee, PointerKind::Ref | PointerKind::Unknown) => Some(pointee.clone()),
+        _ => None,
     }
 }
 
@@ -3188,12 +3255,56 @@ impl<'a> Emitter<'a> {
                     } else {
                         "Pulse.Lib.C.FuncPtr.call_div"
                     };
+                    // The explicit `w: erased c` witness argument (see
+                    // `Pulse.Lib.C.FuncPtr.fsti`): one component per bare
+                    // (non-`_plain`/non-`_core_ref`) pointer argument, holding
+                    // that pointee's CURRENT value (`hide !arg`), matching the
+                    // same argument-order convention `emit_fnptr_spec_core`
+                    // uses to build the callee wrapper's own witness tuple.
+                    // Ordinary (non-witnessing) call sites pass `hide ()`.
+                    //
+                    // NOTE: self-dispatch (`self->field(self, ..)`) verifies
+                    // when `self` is `_consumes` -- see `destroy_via_field` in
+                    // test/func_pointer/func_pointer.c. With a borrowed
+                    // `self`, the field getter's own unfold and this witness
+                    // read open two independent existentials for the same
+                    // value that Pulse can't unify.
+                    let param_tys: Option<Vec<Rc<Type>>> = env
+                        .infer_expr(f)
+                        .ok()
+                        .map(|t| env.vtype_whnf(t))
+                        .and_then(|t| match &t.val {
+                            TypeT::FnPtr { args, .. } => Some(args.clone()),
+                            _ => None,
+                        });
+                    let witness_vals: Vec<Doc> = param_tys
+                        .iter()
+                        .flatten()
+                        .zip(args.iter())
+                        .filter(|(ty, _)| fnptr_witness_pointee(ty).is_some())
+                        .map(|(_, a)| {
+                            let derefed = ExprT::Deref(a.clone()).with_loc(a.loc.clone());
+                            self.emit_rvalue(env, &derefed)
+                        })
+                        .collect();
+                    let witness_arg = match witness_vals.len() {
+                        0 => Doc::text("(hide ())"),
+                        1 => parens(
+                            Doc::text("hide ")
+                                .append(parens(witness_vals.into_iter().next().unwrap())),
+                        ),
+                        _ => parens(
+                            Doc::text("hide ")
+                                .append(parens(Doc::intersperse(witness_vals, Doc::text(", ")))),
+                        ),
+                    };
                     parens(naryfn([
                         Doc::text(call_prim),
                         Doc::text("_"),
                         Doc::text("_"),
                         callee_val,
                         arg_tuple,
+                        witness_arg,
                     ]))
                 }
                 ExprT::Live(v) => {
@@ -6362,22 +6473,7 @@ impl<'a> Emitter<'a> {
         let projs: Vec<Doc> = {
             let n = name_docs.len();
             (0..n)
-                .map(|i| {
-                    if n == 1 {
-                        return Doc::text("x_fp");
-                    }
-                    if n == 2 {
-                        let mut e = Doc::text("x_fp");
-                        for _ in 0..i {
-                            e = parens(Doc::text("snd ").append(e));
-                        }
-                        if i < n - 1 {
-                            e = parens(Doc::text("fst ").append(e));
-                        }
-                        return e;
-                    }
-                    parens(Doc::text(format!("Mktuple{n}?._{} x_fp", i + 1)))
-                })
+                .map(|i| nary_tuple_proj(Doc::text("x_fp"), i, n))
                 .collect()
         };
 
@@ -6402,6 +6498,16 @@ impl<'a> Emitter<'a> {
         let mut requires_props: Vec<Doc> = vec![];
         let mut ensures_props: Vec<Doc> = vec![];
         let mut preserves_props: Vec<Doc> = vec![];
+        // Requires-side existential ownership groups (e.g. a plain pointer
+        // parameter's pointee value), one per Regular/Consumed/Out arg.
+        // Deferred until after this loop: their bindings are combined into
+        // ONE explicit `y_fp: erased c` wrapper parameter (via
+        // `wrap_witness`) instead of independent `exists*`s, which Pulse
+        // would otherwise open as hidden implicit binders and break
+        // `pre_of`/`post_of`'s higher-order unification (F* Error 189; see
+        // `Pulse.Lib.C.FuncPtr.fsti`). Ensures-side `exists*`s aren't part of
+        // the wrapper's arrow type, so they keep using `wrap_exists`.
+        let mut req_witness_groups: Vec<(Vec<ExBinding>, Vec<Doc>)> = vec![];
         for (n, arg) in arg_names.iter().zip(decl.args.iter()) {
             match arg.mode {
                 ParamMode::Regular | ParamMode::Consumed => {
@@ -6423,15 +6529,10 @@ impl<'a> Emitter<'a> {
                     );
                     drop(naming);
                     if !type_props.is_empty() {
-                        let wrapped = wrap_exists(&type_bindings, type_props);
-                        match arg.mode {
-                            ParamMode::Regular => {
-                                requires_props.push(wrapped.clone());
-                                ensures_props.push(wrapped);
-                            }
-                            ParamMode::Consumed => requires_props.push(wrapped),
-                            _ => unreachable!(),
+                        if let ParamMode::Regular = arg.mode {
+                            ensures_props.push(wrap_exists(&type_bindings, type_props.clone()));
                         }
+                        req_witness_groups.push((type_bindings, type_props));
                     }
                 }
                 ParamMode::Const => {
@@ -6471,7 +6572,7 @@ impl<'a> Emitter<'a> {
                     );
                     drop(naming);
                     if !uninit_props.is_empty() {
-                        requires_props.push(wrap_exists(&uninit_bindings, uninit_props));
+                        req_witness_groups.push((uninit_bindings, uninit_props));
                     }
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
@@ -6494,6 +6595,35 @@ impl<'a> Emitter<'a> {
                         ensures_props.push(wrap_exists(&type_bindings, type_props));
                     }
                 }
+            }
+        }
+        // Combine every requires-side existential group's bindings (in arg
+        // order) into a single flat witness type tuple `c`, and re-express
+        // each group's props via `let`s projecting out of ONE explicit
+        // `y_fp: erased c` wrapper parameter (see comment above).
+        let witness_count: usize = req_witness_groups.iter().map(|(b, _)| b.len()).sum();
+        let witness_ty_docs: Vec<Doc> = req_witness_groups
+            .iter()
+            .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
+            .collect();
+        let witness_domain = fnptr_domain_doc(witness_ty_docs);
+        {
+            let witness_base = parens(Doc::text("reveal y_fp"));
+            let mut widx = 0usize;
+            for (bindings, props) in req_witness_groups {
+                if bindings.is_empty() {
+                    requires_props.push(mk_star(props));
+                    continue;
+                }
+                let group_projs: Vec<Doc> = bindings
+                    .iter()
+                    .map(|_| {
+                        let p = nary_tuple_proj(witness_base.clone(), widx, witness_count);
+                        widx += 1;
+                        p
+                    })
+                    .collect();
+                requires_props.push(wrap_witness(&bindings, props, &group_projs));
             }
         }
         // `preserves` (const params) hold across the call, so they belong in
@@ -6589,6 +6719,7 @@ impl<'a> Emitter<'a> {
             wrap_name,
             callee,
             domain,
+            witness_domain,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6605,6 +6736,7 @@ impl<'a> Emitter<'a> {
             wrap_name,
             callee,
             domain,
+            witness_domain,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6615,10 +6747,19 @@ impl<'a> Emitter<'a> {
         } else {
             "divergent fn "
         };
+        // `y_fp: erased c`: an explicit (not merely implicit) witness
+        // parameter for any bare pointer parameter's ownership, so
+        // `pre_of`/`post_of` see the wrapper's real type as a flat
+        // `x:a -> y:erased c -> stt_div b (pre x y) (post x y)` -- see
+        // `Pulse.Lib.C.FuncPtr.fsti`. Unconditionally present (even as a
+        // trivial `erased unit` when no witness is needed) so `of_fn`/
+        // `of_fn_div`/`call`/`call_div` share one uniform shape.
         let wrap_sig = Doc::text(wrap_kw)
             .append(wrap_name.clone())
             .append(" (x_fp: ")
             .append(domain.clone())
+            .append(") (y_fp: erased ")
+            .append(witness_domain)
             .append(")")
             .append(Doc::hardline())
             .append("  requires ")
