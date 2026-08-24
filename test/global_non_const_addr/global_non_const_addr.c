@@ -1,13 +1,9 @@
 /* Test: taking the address of a global that is neither `const` nor `_pure`.
  *
- * NOT SUPPORTED YET -- this directory is expected to fail, and records the gap
- * rather than working around it. PAL rejects the global ("non-pure global
- * variables are not yet supported"), each `&g` then fails with "cannot produce
- * lvalue for g", and emission replaces the reads with `admit()`.
- *
- * The intent is that a mutable global should still get an address -- a single
- * fixed value, so pointer identity works -- but no `pts_to`, so its value
- * cannot be read or written. Taking an address does not confer purity.
+ * Such a global emits only an assumed address, no `pts_to`. The address is a
+ * single fixed value, so pointer identity works; with no permission obtainable,
+ * the storage can be neither read nor written. Taking an address does not
+ * confer purity.
  */
 
 #include "pal.h"

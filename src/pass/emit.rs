@@ -1887,7 +1887,22 @@ impl<'a> Emitter<'a> {
     fn emit_expr(&mut self, env: &Env, v: &Expr) -> ExprKind {
         match &v.val {
             ExprT::Var(x) => {
-                if env.lookup_global_var(x).is_some() {
+                if let Some(gv) = env.lookup_global_var(x) {
+                    // A mutable global emits no `var_g`, so there is no name to
+                    // refer to here. Reject the read rather than emit a dangling
+                    // reference that F* would report as an unbound identifier.
+                    // Arrays are exempt: they are still emitted as a spec value.
+                    if !gv.is_pure && !global_var_is_array(gv) {
+                        self.report(
+                            format!(
+                                "cannot read the mutable global {}; its address may be taken, \
+                                 but its value is not available",
+                                x
+                            ),
+                            &x.loc,
+                        );
+                        return ExprKind::RValue(Doc::text("(admit())"));
+                    }
                     // Global variables need module-qualified names
                     let x2 = annotated(v, || {
                         let mangled = self.nm.mangle(&Name::Var(x.val.clone())).to_string();
@@ -7735,11 +7750,20 @@ impl<'a> Emitter<'a> {
 
     fn emit_global_var(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
         if !gv.is_pure {
-            self.report(
-                "non-pure global variables are not yet supported".to_string(),
-                &gv.name.loc,
-            );
-            return Doc::nil();
+            // A mutable global gets an address but no value: its storage cannot
+            // be read or written, so there is nothing for an initializer to
+            // mean and nothing for a spec value to describe.
+            return match self.emit_global_addr(env, gv) {
+                Some(addr) => addr,
+                None => {
+                    // Only an array reaches here: an enumerator is always pure.
+                    self.report(
+                        "non-pure array globals are not yet supported".to_string(),
+                        &gv.name.loc,
+                    );
+                    Doc::nil()
+                }
+            };
         }
         let name = self.emit_name(Name::Var(gv.name.val.clone()));
         let ty = self.emit_type(env, &gv.ty);
@@ -7761,9 +7785,16 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Emit a `_pure` global's address: an assumed `ref` (one per global, so
-    /// distinct globals get distinct addresses), a non-null axiom, and the
-    /// acquire that hands out *read-only* ownership of its storage.
+    /// Emit a global's address: an assumed `ref` (one per global, so distinct
+    /// globals get distinct addresses) and a non-null axiom. A `_pure` global
+    /// additionally gets the acquire that hands out *read-only* ownership of
+    /// its storage; a mutable one gets no acquire at all.
+    ///
+    /// A mutable global has no `var_g` for a `pts_to` to mention, and giving
+    /// out ownership of something writable would be unsound anyway. Emitting
+    /// the bare address is still safe: with no `pts_to` in existence there is
+    /// no permission to obtain, so the pointer can be compared but never read
+    /// or written through.
     ///
     /// Reads of a `_pure` global are ownership-free, which is only sound if the
     /// storage holds `var_g` forever -- so the pointer must never be writable.
@@ -7790,7 +7821,6 @@ impl<'a> Emitter<'a> {
         if global_var_is_array(gv) || gv.is_enum_constant {
             return None;
         }
-        let var = self.emit_name(Name::Var(gv.name.val.clone()));
         let addr = self.emit_name(Name::GlobalAddr(gv.name.val.clone()));
         let ty = self.emit_type(env, &gv.ty);
         let ref_ty = parens(Doc::text("ref").append(Doc::line()).append(ty).nest(2));
@@ -7804,6 +7834,15 @@ impl<'a> Emitter<'a> {
             .append(Doc::text(" : squash (~(Pulse.Lib.Reference.is_null "))
             .append(addr.clone())
             .append(Doc::text("))"));
+
+        // A mutable global gets the address and nothing else: the acquire below
+        // mentions `var_g`, which is not emitted for it, and handing out
+        // ownership of a mutable object is exactly what must not happen.
+        if !gv.is_pure {
+            return Some(addr_val.append(Doc::hardline()).append(not_null));
+        }
+
+        let var = self.emit_name(Name::Var(gv.name.val.clone()));
         let perm = Doc::text("p");
         let pts_to = naryfn([
             Doc::text("Pulse.Lib.Reference.pts_to"),

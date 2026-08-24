@@ -778,12 +778,10 @@ impl Env {
 
     /// Whether `&expr` is allowed, i.e. `expr` denotes storage.
     ///
-    /// This is `is_lvalue` plus the address-taking-only cases. A `_pure` global
-    /// is *not* an lvalue -- PAL emits it as a plain top-level F* value and
-    /// reads it with no ownership at all -- but its address can still be taken,
-    /// because the emitter hands out a read-only pointer (the permission is
-    /// hidden under an existential) that can never be written through. See
-    /// `addressable_global`.
+    /// This is `is_lvalue` plus the address-taking-only cases. Neither a
+    /// `_pure` global nor a mutable one is an lvalue -- PAL emits the former as
+    /// a plain top-level F* value and the latter as nothing but an address --
+    /// yet both can have their address taken. See `addressable_global`.
     pub fn is_addressable(&self, expr: &Expr) -> bool {
         if self.is_lvalue(expr) {
             return true;
@@ -793,19 +791,32 @@ impl Env {
 
     /// The global named by `ident`, if `&ident` is supported.
     ///
-    /// Restricted to `_pure` non-array globals:
+    /// Every non-array global that denotes an object qualifies, whether or not
+    /// it is `_pure`, because an address is not ownership. The two shapes reach
+    /// it differently:
     ///
-    /// * A non-pure (mutable) global emits nothing at all, so there is no spec
-    ///   value for the address to point at -- and it is writable by definition,
-    ///   which is exactly what the read-only discipline must rule out.
+    /// * A `_pure` global additionally gets an acquire handing out *read-only*
+    ///   ownership (the permission is hidden under an existential, so the
+    ///   pointer can never be written through), which is what keeps its
+    ///   ownership-free reads sound.
+    /// * A mutable global gets the address and nothing else -- no `var_g` and
+    ///   no acquire. Since no `pts_to` is ever produced for it, no permission to
+    ///   read or write through the pointer can be obtained, so handing out the
+    ///   address is inert. Reads of the global itself are rejected in the
+    ///   emitter.
+    ///
+    /// Excluded:
+    ///
     /// * An array global is exposed as a *spec* (`full_array_lspec`) and read
     ///   ownership-free via `array_spec_idx`. Handing out a pointer to it would
     ///   let a caller observe storage that the spec value no longer describes.
     ///   (Arrays have no pointer path at all today, so this rejects nothing that
     ///   used to work.)
+    /// * An enumerator is a constant, not an object: it has no storage, and
+    ///   `&Color_Red` cannot be written in C.
     pub fn addressable_global(&self, ident: &Ident) -> Option<&GlobalVar> {
         let gv = self.lookup_global_var(ident)?;
-        if !gv.is_pure || global_var_is_array(gv) || gv.is_enum_constant {
+        if global_var_is_array(gv) || gv.is_enum_constant {
             return None;
         }
         Some(gv)
