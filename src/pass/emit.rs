@@ -2255,7 +2255,7 @@ fn emit_unop(env: &Env, op: UnOp, ty: MaybeRc<Type>) -> Option<Doc> {
                 Doc::text(format!("{}.minus", modu))
             }
         }
-        (UnOp::Neg, TypeT::SpecInt | TypeT::SpecNat) => Doc::text("op_Minus"),
+        (UnOp::Neg, TypeT::SpecInt | TypeT::SpecNat) => Doc::text("op_Tilde_Minus"),
         (UnOp::Neg, TypeT::Float { width }) => Doc::text(format!("{}_neg", get_float_mod(width)?)),
         (UnOp::Neg, _) => return None,
         (UnOp::BitNot, TypeT::Int { signed, width }) => {
