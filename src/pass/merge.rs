@@ -255,6 +255,39 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             };
             if let Some(key) = key {
                 if let Some(&first) = first_idx.get(&key) {
+                    // If this is a second (or later) bare `FnDecl` for a function
+                    // that was already seen (no `FnDefn` involved — that case is
+                    // handled separately in Phase 2), and both occurrences carry
+                    // specs, make sure the specs agree (up to parameter
+                    // renaming) instead of silently keeping whichever
+                    // occurrence happens to be processed last.
+                    if key.0 == 5 {
+                        if let (DeclT::FnDecl(first_decl), DeclT::FnDecl(this_decl)) =
+                            (&tu.decls[first].val, &decl.val)
+                        {
+                            let first_has_specs =
+                                !first_decl.requires.is_empty() || !first_decl.ensures.is_empty();
+                            let this_has_specs =
+                                !this_decl.requires.is_empty() || !this_decl.ensures.is_empty();
+                            if first_has_specs && this_has_specs {
+                                let renames = param_renames(first_decl, this_decl);
+                                let renamed_requires = rename_specs(&first_decl.requires, &renames);
+                                let renamed_ensures = rename_specs(&first_decl.ensures, &renames);
+                                if renamed_requires != this_decl.requires
+                                    || renamed_ensures != this_decl.ensures
+                                {
+                                    report(
+                                        diags,
+                                        format!(
+                                            "multiple declarations of {} have differing specifications",
+                                            this_decl.name.val
+                                        ),
+                                        &this_decl.name.loc,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // Copy this (later, more complete) decl back to the first position
                     // and mark this duplicate for removal.
                     moves.push((i, first));
@@ -380,7 +413,7 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
 
                     let renames = param_renames(fn_decl, &defn.decl);
                     if !renames.is_empty() {
-                        arg_type_renames.push((defn_idx, renames));
+                        arg_type_renames.push((defn_idx, renames.clone()));
                     }
 
                     let decl_has_specs =
@@ -403,9 +436,12 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && defn_has_specs {
-                        // Both have specs — they must match
-                        if fn_decl.requires != defn.decl.requires
-                            || fn_decl.ensures != defn.decl.ensures
+                        // Both have specs — they must match, up to
+                        // declaration/definition parameter renaming.
+                        let renamed_requires = rename_specs(&fn_decl.requires, &renames);
+                        let renamed_ensures = rename_specs(&fn_decl.ensures, &renames);
+                        if renamed_requires != defn.decl.requires
+                            || renamed_ensures != defn.decl.ensures
                         {
                             report(
                                 diags,
@@ -420,7 +456,6 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && !defn_has_specs {
-                        let renames = param_renames(fn_decl, &defn.decl);
                         // The specs we copy below (and the definition's own body)
                         // reference the declaration's ghost-argument variables. If
                         // the definition declared no ghost args of its own, the

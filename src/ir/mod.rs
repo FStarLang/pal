@@ -1,5 +1,6 @@
 use num_bigint::BigInt;
 use std::fmt::{Debug, Display};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 pub mod pretty;
 
@@ -82,10 +83,28 @@ impl Debug for SourceInfo {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(Clone)]
 pub struct Ast<T> {
     pub val: T,
     pub loc: Rc<SourceInfo>,
+}
+
+// `loc` is provenance, not identity: two nodes with the same `val` denote the
+// same thing however they were written. Deriving these would compare `loc` at
+// every level of the tree, so two specs that are identical apart from where
+// they were written would never compare equal. `Hash` must agree with `Eq`.
+impl<T: PartialEq> PartialEq for Ast<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.val == other.val
+    }
+}
+
+impl<T: Eq> Eq for Ast<T> {}
+
+impl<T: Hash> Hash for Ast<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.val.hash(state);
+    }
 }
 
 impl<T> Ast<T> {
