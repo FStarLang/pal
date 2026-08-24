@@ -36,9 +36,8 @@ slot_owner br o = match o with
               else exists* pv. pts_to p pv ** pure (pv.connection == br)
 
 other_slots br pk k =           (* every slot except k *)
-  (if k=0 then emp else slot_owner br pk[0])
-  ** (if k=1 then emp else slot_owner br pk[1])
-  ** (if k=2 then emp else slot_owner br pk[2])
+  slot_owner_at br pk k 0 ** slot_owner_at br pk k 1 ** slot_owner_at br pk k 2
+  where slot_owner_at br pk k j = if k = j then emp else slot_owner br pk[j]
 
 connection_owner ps ps_v back_ref lvl pk conn_v =
   pts_to ps ps_v
@@ -126,10 +125,13 @@ The direct C update is ordered as follows:
 2. instantiate and eliminate the quantified trade
    (`consume_packet_space_trade`) using the current, post-mutation packet-space
    ownership and the `pure` coordinate equalities;
-3. reify the already-written packet scalar snapshot in PAL's returned owner root
-   (the C values are unchanged);
-4. follow `PacketSpace->connection`, then write `last_acknowledged` and
+3. follow `PacketSpace->connection`, then write `last_acknowledged` and
    `send_flags`.
+
+Each C field is written exactly once. `consume_packet_space_trade` takes the
+packet-space value as an **implicit parameter** rather than re-quantifying it in
+its postcondition, so the caller keeps knowing that the returned owner holds
+precisely the values it wrote in step 1; no reifying re-write is needed.
 
 The precise postcondition states the two packet-space scalar values and the two
 connection scalar values, while `connection_owner` re-establishes ownership of

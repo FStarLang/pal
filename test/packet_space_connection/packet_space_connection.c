@@ -44,12 +44,12 @@ PalPacketSpaceConnectionUpdate(
             Helpers_PACKET_SPACE_CONNECTION.connection_owner
                 $(PacketSpace) ps_v back_ref lvl pk conn_v
             ** pure (
-                 ps_v.Struct_packet_space.struct_packet_space__largest_acknowledged
+                 ps_v.$field(struct packet_space::largest_acknowledged)
                      == $(PacketNumber)
-              /\ UInt32.v ps_v.Struct_packet_space.struct_packet_space__ack_needed == 0
-              /\ conn_v.Struct_connection.struct_connection__last_acknowledged
+              /\ UInt32.v ps_v.$field(struct packet_space::ack_needed) == 0
+              /\ conn_v.$field(struct connection::last_acknowledged)
                      == $(PacketNumber)
-              /\ UInt32.v conn_v.Struct_connection.struct_connection__send_flags == 3)))
+              /\ UInt32.v conn_v.$field(struct connection::send_flags) == 3)))
 {
     PacketSpace->largest_acknowledged = PacketNumber;
     PacketSpace->ack_needed = PACKET_SPACE_ACK_NOT_NEEDED;
@@ -57,9 +57,6 @@ PalPacketSpaceConnectionUpdate(
     _ghost_stmt(
         Helpers_PACKET_SPACE_CONNECTION.consume_packet_space_trade $(PacketSpace));
 
-    /* Reify the already-written scalar snapshot in the returned owner root. */
-    PacketSpace->largest_acknowledged = PacketNumber;
-    PacketSpace->ack_needed = PACKET_SPACE_ACK_NOT_NEEDED;
     connection* Connection = PacketSpace->connection;
 
     Connection->last_acknowledged = PacketNumber;
@@ -83,12 +80,12 @@ PalPacketSpaceConnectionOwnerUpdate(
             Helpers_PACKET_SPACE_CONNECTION.connection_owner
                 $(PacketSpace) ps_v back_ref lvl pk conn_v
             ** pure (
-                 ps_v.Struct_packet_space.struct_packet_space__largest_acknowledged
+                 ps_v.$field(struct packet_space::largest_acknowledged)
                      == $(PacketNumber)
-              /\ UInt32.v ps_v.Struct_packet_space.struct_packet_space__ack_needed == 0
-              /\ conn_v.Struct_connection.struct_connection__last_acknowledged
+              /\ UInt32.v ps_v.$field(struct packet_space::ack_needed) == 0
+              /\ conn_v.$field(struct connection::last_acknowledged)
                      == $(PacketNumber)
-              /\ UInt32.v conn_v.Struct_connection.struct_connection__send_flags == 3)))
+              /\ UInt32.v conn_v.$field(struct connection::send_flags) == 3)))
 {
     _ghost_stmt(
         Helpers_PACKET_SPACE_CONNECTION.create_packet_space_trade $(PacketSpace));
@@ -96,30 +93,19 @@ PalPacketSpaceConnectionOwnerUpdate(
 }
 
 /*
- * Models QuicPacketSpaceInitialize's create + install lifecycle FAITHFULLY, in
- * one step, producing the full owner.
+ * Models QuicPacketSpaceInitialize's create + install lifecycle in one step,
+ * producing the full owner.
  *
- * Faithfulness point (why `PacketSpace` comes in UNINITIALIZED): in real MsQuic
- * the packet space is FRESHLY ALLOCATED (`CxPlatPoolAlloc`), so its memory is
- * uninitialized when initialization begins -- the packet-space invariant does
- * NOT hold yet, and it would be nonsensical to require it. A `_consumes
- * packet_space*` would instead demand a fully-formed packet space (`__pred`
- * already holding) BEFORE the call, i.e. require the very invariant that
- * initialization is supposed to establish. So the storage comes in as
- * `pts_to_uninit` (raw memory, exactly the `_pal_pool_alloc_*` wrapper shape),
- * and the body ESTABLISHES the representation by writing every field, installs
- * it into the connection's NULL slot, and deposits into the full owner.
+ * `PacketSpace` arrives UNINITIALIZED (`pts_to_uninit`) because in real MsQuic
+ * it is freshly allocated, so the packet-space invariant does not hold yet; a
+ * `_consumes` parameter would demand the very invariant this function
+ * establishes. Both pointers are therefore `_plain`, with the preconditions
+ * written by hand, and `PacketSpace` is consumed into the resulting owner.
  *
- * Postcondition: `connection_owner_exists` -- the connection now owns the
- * connection allocation, every previously-owned slot, AND the freshly created
- * packet space in slot `EncryptLevel` (None/NULL -> Some ps). This is the exact
- * shape the mutate-existing owner functions consume, so the full lifecycle
- * chains: Initialize => connection_owner_exists => (borrow / mutate / restore).
- *
- * `PacketSpace` is `_plain` so PAL emits no automatic `_out`/`_consumes`
- * ownership: the uninitialized precondition is stated by hand, and the
- * packet-space pointer is CONSUMED into the owner (no residual standalone
- * ownership to return).
+ * The postcondition `connection_owner_exists` is exactly what the mutate
+ * functions above consume, so the lifecycle chains:
+ * Initialize => connection_owner_exists => borrow / mutate / restore.
+ * See README.md for the full rationale.
  */
 void
 PalPacketSpaceInitialize(

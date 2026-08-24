@@ -26,9 +26,24 @@ module U32 = FStar.UInt32
 // back to `conn_v.packets`, so the framed atom still matches.
 let packets_t = CA.full_array_lspec (ref PS.struct_packet_space) 3
 
+// Field accessors. `unfold` makes them transparent to the SMT solver and to
+// Pulse's slprop matcher, so they are purely cosmetic — every proof below sees
+// exactly the projection it would have seen written out longhand.
+unfold let conn_of (v: PS.struct_packet_space) = v.PS.struct_packet_space__connection
+unfold let lvl_of (v: PS.struct_packet_space) = v.PS.struct_packet_space__encrypt_level
+unfold let packets_of (v: C.struct_connection) = v.C.struct_connection__packets
+
 let slot_at (pk: packets_t) (i: nat)
   : GTot (option (ref PS.struct_packet_space)) =
   CA.array_spec_get pk i
+
+// Writing slot `i` leaves every other slot alone. Exposed as an SMT rewrite so
+// that folding `other_slots` after a slot write matches the unfocused slots
+// automatically, instead of needing an explicit `rewrite` per slot.
+let slot_at_set_ne (pk: packets_t) (i j: nat) (x: ref PS.struct_packet_space)
+  : Lemma (requires j <> i /\ i < 3 /\ j < 3)
+          (ensures slot_at (CA.array_spec_set pk i (Some x)) j == slot_at pk j)
+          [SMTPat (slot_at (CA.array_spec_set pk i (Some x)) j)] = ()
 
 // Ownership of the packet space a slot pointer refers to. A NULL (or absent)
 // slot owns nothing; a live slot owns its whole packet space and pins the
@@ -41,35 +56,26 @@ let slot_owner (br: CR.core_ref)
     if R.is_null p then emp
     else exists* (pv: PS.struct_packet_space).
            R.pts_to p pv
-           ** pure (pv.PS.struct_packet_space__connection == br)
+           ** pure ((conn_of pv) == br)
 
-// Ownership of every slot EXCEPT the focused index `k`. With only three
-// encryption levels this is a fixed three-way bundle; the focused slot's `if`
-// collapses to `emp` because its ownership travels separately as `pts_to ps`.
+// Ownership of every slot EXCEPT the focused index `k`, whose contribution is
+// `emp` because its packet space travels separately as `pts_to ps`. With only
+// three encryption levels this is a fixed three-way bundle.
+let slot_owner_at (br: CR.core_ref) (pk: packets_t) (k j: nat) : slprop =
+  if k = j then emp else slot_owner br (slot_at pk j)
+
 let other_slots (br: CR.core_ref) (pk: packets_t) (k: nat) : slprop =
-  (if k = 0 then emp else slot_owner br (slot_at pk 0))
-  ** (if k = 1 then emp else slot_owner br (slot_at pk 1))
-  ** (if k = 2 then emp else slot_owner br (slot_at pk 2))
+  slot_owner_at br pk k 0 ** slot_owner_at br pk k 1 ** slot_owner_at br pk k 2
 
 // A connection owner focused on packet space `ps` (which lives in slot `lvl`).
 // It retains: the focused packet space, the connection allocation (reached
 // through the core reference `back_ref`), and every other slot.
 //
 // KEY DESIGN POINT (witness selection): the two *stable* coordinates of the
-// focus — the connection back-pointer `back_ref` and the encryption level `lvl`
-// — are EXPLICIT parameters, NOT projections of `ps_v`. This is what makes the
-// owner robust under mutation of the focused packet space. If instead the
-// connection address / `other_slots` were written as `core_to_ref
-// ps_v.connection` / `other_slots ps_v.connection ... (v ps_v.encrypt_level)`,
-// then when a caller re-establishes `exists* ps_v .... connection_owner ...`
-// after writing scalar fields of `ps`, Pulse's higher-order unifier could bind
-// `ps_v` from those argument positions to the STALE pre-write value (the one the
-// trade was opened with) rather than from `pts_to ps ps_v`. The scalar
-// postcondition (stated over `ps_v`) would then be checked against the wrong
-// value and fail. Threading `back_ref`/`lvl` separately leaves `ps_v` appearing
-// only in `pts_to ps ps_v`, so it is pinned uniquely to the current value; the
-// `pure` clause still ties the coordinates back to `ps_v` for callers that need
-// it.
+// focus — `back_ref` and `lvl` — are EXPLICIT parameters, NOT projections of
+// `ps_v`, so that `ps_v` appears only in `pts_to ps ps_v` and Pulse's unifier
+// cannot bind it to a stale pre-write value. See README.md, "Why the
+// coordinates must be *explicit*".
 [@@pulse_unfold]
 let connection_owner
   (ps: ref PS.struct_packet_space)
@@ -81,11 +87,11 @@ let connection_owner
   : slprop =
   R.pts_to ps ps_v
   ** R.pts_to (CR.core_to_ref C.struct_connection
-                ps_v.PS.struct_packet_space__connection) conn_v
+                (conn_of ps_v)) conn_v
   ** other_slots back_ref pk (U32.v lvl)
-  ** pure (ps_v.PS.struct_packet_space__connection == back_ref
-           /\ ps_v.PS.struct_packet_space__encrypt_level == lvl
-           /\ conn_v.C.struct_connection__packets == pk
+  ** pure ((conn_of ps_v) == back_ref
+           /\ (lvl_of ps_v) == lvl
+           /\ (packets_of conn_v) == pk
            /\ slot_at pk (U32.v lvl) == Some ps
            /\ not (R.is_null ps))
 
@@ -96,9 +102,9 @@ let connection_owner
 let connection_owner_exists (ps: ref PS.struct_packet_space) : slprop =
   exists* (ps_v: PS.struct_packet_space) (conn_v: C.struct_connection).
     connection_owner ps ps_v
-      ps_v.PS.struct_packet_space__connection
-      ps_v.PS.struct_packet_space__encrypt_level
-      conn_v.C.struct_connection__packets
+      (conn_of ps_v)
+      (lvl_of ps_v)
+      (packets_of conn_v)
       conn_v
 
 // The whiteboard capability, generalized to the array layout:
@@ -106,14 +112,11 @@ let connection_owner_exists (ps: ref PS.struct_packet_space) : slprop =
 //   forall* ps_v. trade (pts_to ps ps_v) (connection_owner ps ps_v (back ps_v))
 //
 // `back` maps the *current* packet-space value to the connection value the
-// owner still holds. Two immutable coordinates are pinned in the trade
-// antecedent, forced by the layout:
-//   * `back_ref`  fixes the _core_ref reverse slot (as in the single-slot
-//     model), so an arbitrary quantified ps_v cannot redirect the core
-//     reference to an unowned connection.
-//   * `lvl` fixes the encryption level, i.e. WHICH array slot the packet space
-//     occupies. Without it a mutated ps_v could name a different slot and the
-//     forward link `slot_at conn_v.packets (v lvl) == Some ps` would break.
+// owner still holds. Quantifying over `ps_v` is what keeps the packet space
+// mutable. The antecedent pins the two immutable coordinates `back_ref` (the
+// _core_ref reverse slot) and `lvl` (which array slot `ps` occupies), so that an
+// arbitrary quantified `ps_v` cannot redirect the core reference or name a
+// different slot. See README.md, "Three immutable coordinates".
 let packet_space_to_connection
   (ps: ref PS.struct_packet_space)
   (back: PS.struct_packet_space -> GTot C.struct_connection)
@@ -124,13 +127,16 @@ let packet_space_to_connection
   forall* (ps_v: PS.struct_packet_space).
     T.trade
       (R.pts_to ps ps_v
-       ** pure (ps_v.PS.struct_packet_space__connection == back_ref
-                /\ ps_v.PS.struct_packet_space__encrypt_level == lvl))
+       ** pure ((conn_of ps_v) == back_ref
+                /\ (lvl_of ps_v) == lvl))
       (connection_owner ps ps_v back_ref lvl pk (back ps_v))
 
 // Recombine the fixed connection allocation and the residual slots with a
-// current focused packet-space value. With the coordinates threaded explicitly
-// the fold is a direct match — no rewriting of projections is required.
+// current focused packet-space value. The one rewrite re-keys the connection
+// allocation from `back_ref` onto `conn_of ps_v` (equal by the `pure` clause,
+// but Pulse's matcher does not consult SMT for slprop arguments).
+// `connection_owner` must name the connection by the packet space's OWN
+// projection so that C-level `PacketSpace->connection` dereferences match it.
 ghost fn restore_connection_owner
   (ps: ref PS.struct_packet_space)
   (ps_v: PS.struct_packet_space)
@@ -139,9 +145,9 @@ ghost fn restore_connection_owner
   (pk: packets_t)
   (conn_v: C.struct_connection)
   requires R.pts_to ps ps_v
-  requires pure (ps_v.PS.struct_packet_space__connection == back_ref
-                 /\ ps_v.PS.struct_packet_space__encrypt_level == lvl
-                 /\ conn_v.C.struct_connection__packets == pk)
+  requires pure ((conn_of ps_v) == back_ref
+                 /\ (lvl_of ps_v) == lvl
+                 /\ (packets_of conn_v) == pk)
   requires R.pts_to (CR.core_to_ref C.struct_connection back_ref) conn_v
   requires other_slots back_ref pk (U32.v lvl)
   requires pure (slot_at pk (U32.v lvl) == Some ps
@@ -150,7 +156,7 @@ ghost fn restore_connection_owner
 {
   rewrite (R.pts_to (CR.core_to_ref C.struct_connection back_ref) conn_v)
        as (R.pts_to (CR.core_to_ref C.struct_connection
-                       ps_v.PS.struct_packet_space__connection) conn_v);
+                       (conn_of ps_v)) conn_v);
   fold (connection_owner ps ps_v back_ref lvl pk conn_v)
 }
 
@@ -166,113 +172,101 @@ ghost fn create_packet_space_trade (ps: ref PS.struct_packet_space)
     (back: PS.struct_packet_space -> GTot C.struct_connection).
     R.pts_to ps ps_v
     ** packet_space_to_connection ps back back_ref lvl pk
-    ** pure (ps_v.PS.struct_packet_space__connection == back_ref
-             /\ ps_v.PS.struct_packet_space__encrypt_level == lvl)
+    ** pure ((conn_of ps_v) == back_ref
+             /\ (lvl_of ps_v) == lvl)
 {
   unfold (connection_owner_exists ps);
   with ps_v conn_v. assert (
     connection_owner ps (reveal ps_v)
-      (reveal ps_v).PS.struct_packet_space__connection
-      (reveal ps_v).PS.struct_packet_space__encrypt_level
-      (reveal conn_v).C.struct_connection__packets
+      (conn_of (reveal ps_v))
+      (lvl_of (reveal ps_v))
+      (packets_of (reveal conn_v))
       (reveal conn_v));
   unfold (connection_owner ps (reveal ps_v)
-      (reveal ps_v).PS.struct_packet_space__connection
-      (reveal ps_v).PS.struct_packet_space__encrypt_level
-      (reveal conn_v).C.struct_connection__packets
+      (conn_of (reveal ps_v))
+      (lvl_of (reveal ps_v))
+      (packets_of (reveal conn_v))
       (reveal conn_v));
   intro (forall* (ps_v_out: PS.struct_packet_space).
     T.trade
       (R.pts_to ps ps_v_out
-       ** pure (ps_v_out.PS.struct_packet_space__connection
-                  == (reveal ps_v).PS.struct_packet_space__connection
-                /\ ps_v_out.PS.struct_packet_space__encrypt_level
-                  == (reveal ps_v).PS.struct_packet_space__encrypt_level))
+       ** pure ((conn_of ps_v_out)
+                  == (conn_of (reveal ps_v))
+                /\ (lvl_of ps_v_out)
+                  == (lvl_of (reveal ps_v))))
       (connection_owner ps ps_v_out
-        (reveal ps_v).PS.struct_packet_space__connection
-        (reveal ps_v).PS.struct_packet_space__encrypt_level
-        (reveal conn_v).C.struct_connection__packets
+        (conn_of (reveal ps_v))
+        (lvl_of (reveal ps_v))
+        (packets_of (reveal conn_v))
         ((fun _ -> reveal conn_v) ps_v_out)))
     #(
       R.pts_to
         (CR.core_to_ref C.struct_connection
-           (reveal ps_v).PS.struct_packet_space__connection)
+           (conn_of (reveal ps_v)))
         (reveal conn_v)
-      ** other_slots (reveal ps_v).PS.struct_packet_space__connection
-           (reveal conn_v).C.struct_connection__packets
-           (U32.v (reveal ps_v).PS.struct_packet_space__encrypt_level)
+      ** other_slots (conn_of (reveal ps_v))
+           (packets_of (reveal conn_v))
+           (U32.v (lvl_of (reveal ps_v)))
       ** pure (
-           slot_at (reveal conn_v).C.struct_connection__packets
-             (U32.v (reveal ps_v).PS.struct_packet_space__encrypt_level)
+           slot_at (packets_of (reveal conn_v))
+             (U32.v (lvl_of (reveal ps_v)))
              == Some ps
            /\ not (R.is_null ps)))
     fn _ ps_v_out {
       restore_connection_owner
         ps
         ps_v_out
-        ((reveal ps_v).PS.struct_packet_space__connection)
-        ((reveal ps_v).PS.struct_packet_space__encrypt_level)
-        ((reveal conn_v).C.struct_connection__packets)
+        ((conn_of (reveal ps_v)))
+        ((lvl_of (reveal ps_v)))
+        ((packets_of (reveal conn_v)))
         (reveal conn_v)
     };
   fold (packet_space_to_connection ps
     (fun _ -> reveal conn_v)
-    (reveal ps_v).PS.struct_packet_space__connection
-    (reveal ps_v).PS.struct_packet_space__encrypt_level
-    (reveal conn_v).C.struct_connection__packets);
-  introduce exists* (ps_v_out: PS.struct_packet_space)
-    (back_ref_out: CR.core_ref)
-    (lvl_out: U32.t) (pk_out: packets_t)
-    (back_out: PS.struct_packet_space -> GTot C.struct_connection).
-      R.pts_to ps ps_v_out
-      ** packet_space_to_connection ps back_out back_ref_out lvl_out pk_out
-      ** pure (ps_v_out.PS.struct_packet_space__connection == back_ref_out
-               /\ ps_v_out.PS.struct_packet_space__encrypt_level == lvl_out)
-    with (reveal ps_v)
-         ((reveal ps_v).PS.struct_packet_space__connection)
-         ((reveal ps_v).PS.struct_packet_space__encrypt_level)
-         ((reveal conn_v).C.struct_connection__packets)
-         (fun _ -> reveal conn_v)
+    (conn_of (reveal ps_v))
+    (lvl_of (reveal ps_v))
+    (packets_of (reveal conn_v)));
 }
 
 // Spend the quantified capability: after the callee has mutated the focused
 // packet space (keeping its core_ref and level stable) recover full ownership.
-// The ensures binds `back_ref`/`lvl` as SEPARATE existentials (not projections
-// of `ps_v`) so the returned owner stays decoupled — see `connection_owner`.
-ghost fn consume_packet_space_trade (ps: ref PS.struct_packet_space)
-  requires exists* (ps_v: PS.struct_packet_space)
-    (back_ref: CR.core_ref)
+//
+// `ps_v` is an IMPLICIT PARAMETER, not an existential of the ensures, so the
+// caller keeps knowing exactly which packet-space value it gets back — in
+// particular any scalar fields it wrote just before calling. (When `ps_v` was
+// re-quantified in the ensures the caller lost that link and had to re-write
+// the fields to recover it, emitting redundant C stores.) `back_ref`/`lvl` stay
+// separate existentials so the returned owner stays decoupled — see
+// `connection_owner`.
+ghost fn consume_packet_space_trade
+  (#ps_v: PS.struct_packet_space)
+  (ps: ref PS.struct_packet_space)
+  requires exists* (back_ref: CR.core_ref)
     (lvl: U32.t) (pk: packets_t)
     (back: PS.struct_packet_space -> GTot C.struct_connection).
     packet_space_to_connection ps back back_ref lvl pk
     ** R.pts_to ps ps_v
-    ** pure (ps_v.PS.struct_packet_space__connection == back_ref
-             /\ ps_v.PS.struct_packet_space__encrypt_level == lvl)
-  ensures exists* (ps_v: PS.struct_packet_space) (back_ref: CR.core_ref)
+    ** pure ((conn_of ps_v) == back_ref
+             /\ (lvl_of ps_v) == lvl)
+  ensures exists* (back_ref: CR.core_ref)
     (lvl: U32.t) (pk: packets_t) (conn_v: C.struct_connection).
     connection_owner ps ps_v back_ref lvl pk conn_v
 {
-  with ps_v back_ref lvl pk back. assert (
+  with back_ref lvl pk back. assert (
     packet_space_to_connection ps (reveal back) (reveal back_ref) (reveal lvl)
       (reveal pk)
-    ** R.pts_to ps (reveal ps_v)
-    ** pure ((reveal ps_v).PS.struct_packet_space__connection == (reveal back_ref)
-             /\ (reveal ps_v).PS.struct_packet_space__encrypt_level == (reveal lvl)));
+    ** R.pts_to ps ps_v
+    ** pure ((conn_of ps_v) == (reveal back_ref)
+             /\ (lvl_of ps_v) == (reveal lvl)));
   unfold (packet_space_to_connection ps (reveal back) (reveal back_ref) (reveal lvl)
     (reveal pk));
-  Pulse.Lib.Forall.elim_forall (reveal ps_v);
+  Pulse.Lib.Forall.elim_forall ps_v;
   T.elim_trade
-    (R.pts_to ps (reveal ps_v)
-     ** pure ((reveal ps_v).PS.struct_packet_space__connection == (reveal back_ref)
-              /\ (reveal ps_v).PS.struct_packet_space__encrypt_level == (reveal lvl)))
-    (connection_owner ps (reveal ps_v) (reveal back_ref) (reveal lvl) (reveal pk)
-       ((reveal back) (reveal ps_v)));
-  introduce exists* (ps_v_out: PS.struct_packet_space)
-    (back_ref_out: CR.core_ref) (lvl_out: U32.t) (pk_out: packets_t)
-    (conn_v_out: C.struct_connection).
-      connection_owner ps ps_v_out back_ref_out lvl_out pk_out conn_v_out
-    with (reveal ps_v) (reveal back_ref) (reveal lvl) (reveal pk)
-         ((reveal back) (reveal ps_v))
+    (R.pts_to ps ps_v
+     ** pure ((conn_of ps_v) == (reveal back_ref)
+              /\ (lvl_of ps_v) == (reveal lvl)))
+    (connection_owner ps ps_v (reveal back_ref) (reveal lvl) (reveal pk)
+       ((reveal back) ps_v));
 }
 // ============================================================================
 //  Create + install lifecycle (models QuicPacketSpaceInitialize).
@@ -295,49 +289,33 @@ let connection_slot_empty (conn: ref C.struct_connection) (lvl: U32.t) : slprop 
   exists* (conn_v: C.struct_connection) (pk: packets_t).
     R.pts_to conn conn_v
     ** other_slots (CR.ref_to_core conn) pk (U32.v lvl)
-    ** pure (conn_v.C.struct_connection__packets == pk
+    ** pure ((packets_of conn_v) == pk
              /\ U32.v lvl < 3
              /\ slot_at pk (U32.v lvl) == Some (R.null #PS.struct_packet_space))
 
-// Writing slot `i` leaves every OTHER slot's ownership untouched: `other_slots`
-// only reads slots =/= i, and `array_spec_set ... i ...` agrees with the
-// original spec off `i` (array_spec_set_idx1 / _get_spec fire as SMT patterns).
+// Writing slot `k` leaves slot `j`'s ownership untouched: for j =/= k the two
+// sides are the same `slot_owner` because `array_spec_set` agrees with the
+// original spec off `k` (`slot_at_set_ne`); for j == k both sides are `emp`.
+ghost fn slot_owner_at_set_stable
+  (br: CR.core_ref) (pk: packets_t) (k j: nat) (newptr: ref PS.struct_packet_space)
+  requires slot_owner_at br pk k j ** pure (k < 3 /\ j < 3)
+  ensures slot_owner_at br (CA.array_spec_set pk k (Some newptr)) k j
+{
+  rewrite (slot_owner_at br pk k j)
+       as (slot_owner_at br (CA.array_spec_set pk k (Some newptr)) k j)
+}
+
+// Writing slot `i` leaves every OTHER slot's ownership untouched.
 ghost fn other_slots_set_stable
   (br: CR.core_ref) (pk: packets_t) (i: nat) (newptr: ref PS.struct_packet_space)
   requires other_slots br pk i ** pure (i < 3)
   ensures other_slots br (CA.array_spec_set pk i (Some newptr)) i
 {
-  if (i = 0) {
-    rewrite (other_slots br pk i) as (other_slots br pk 0);
-    unfold (other_slots br pk 0);
-    rewrite (slot_owner br (slot_at pk 1))
-         as (slot_owner br (slot_at (CA.array_spec_set pk 0 (Some newptr)) 1));
-    rewrite (slot_owner br (slot_at pk 2))
-         as (slot_owner br (slot_at (CA.array_spec_set pk 0 (Some newptr)) 2));
-    fold (other_slots br (CA.array_spec_set pk 0 (Some newptr)) 0);
-    rewrite (other_slots br (CA.array_spec_set pk 0 (Some newptr)) 0)
-         as (other_slots br (CA.array_spec_set pk i (Some newptr)) i)
-  } else if (i = 1) {
-    rewrite (other_slots br pk i) as (other_slots br pk 1);
-    unfold (other_slots br pk 1);
-    rewrite (slot_owner br (slot_at pk 0))
-         as (slot_owner br (slot_at (CA.array_spec_set pk 1 (Some newptr)) 0));
-    rewrite (slot_owner br (slot_at pk 2))
-         as (slot_owner br (slot_at (CA.array_spec_set pk 1 (Some newptr)) 2));
-    fold (other_slots br (CA.array_spec_set pk 1 (Some newptr)) 1);
-    rewrite (other_slots br (CA.array_spec_set pk 1 (Some newptr)) 1)
-         as (other_slots br (CA.array_spec_set pk i (Some newptr)) i)
-  } else {
-    rewrite (other_slots br pk i) as (other_slots br pk 2);
-    unfold (other_slots br pk 2);
-    rewrite (slot_owner br (slot_at pk 0))
-         as (slot_owner br (slot_at (CA.array_spec_set pk 2 (Some newptr)) 0));
-    rewrite (slot_owner br (slot_at pk 1))
-         as (slot_owner br (slot_at (CA.array_spec_set pk 2 (Some newptr)) 1));
-    fold (other_slots br (CA.array_spec_set pk 2 (Some newptr)) 2);
-    rewrite (other_slots br (CA.array_spec_set pk 2 (Some newptr)) 2)
-         as (other_slots br (CA.array_spec_set pk i (Some newptr)) i)
-  }
+  unfold (other_slots br pk i);
+  slot_owner_at_set_stable br pk i 0 newptr;
+  slot_owner_at_set_stable br pk i 1 newptr;
+  slot_owner_at_set_stable br pk i 2 newptr;
+  fold (other_slots br (CA.array_spec_set pk i (Some newptr)) i)
 }
 
 // PAL's `array_write` emits `array_spec_upd s i v` (a RAW value write); the
@@ -369,9 +347,9 @@ ghost fn deposit
   requires R.pts_to conn conn_v
   requires other_slots (CR.ref_to_core conn) old_pk (U32.v lvl)
   requires pure (
-     ps_v.PS.struct_packet_space__connection == CR.ref_to_core conn
-     /\ ps_v.PS.struct_packet_space__encrypt_level == lvl
-     /\ conn_v.C.struct_connection__packets
+     (conn_of ps_v) == CR.ref_to_core conn
+     /\ (lvl_of ps_v) == lvl
+     /\ (packets_of conn_v)
           == CA.array_spec_set old_pk (U32.v lvl) (Some ps)
      /\ U32.v lvl < 3
      /\ not (R.is_null ps))
@@ -386,14 +364,14 @@ ghost fn deposit
   // array_spec_set old_pk (v lvl) (Some ps) == conn_v.packets, lvl == ps_v level.
   rewrite (other_slots (CR.ref_to_core conn)
              (CA.array_spec_set old_pk (U32.v lvl) (Some ps)) (U32.v lvl))
-       as (other_slots ps_v.PS.struct_packet_space__connection
-             conn_v.C.struct_connection__packets
-             (U32.v ps_v.PS.struct_packet_space__encrypt_level));
+       as (other_slots (conn_of ps_v)
+             (packets_of conn_v)
+             (U32.v (lvl_of ps_v)));
   rewrite (R.pts_to conn conn_v)
        as (R.pts_to (CR.core_to_ref C.struct_connection
-                       ps_v.PS.struct_packet_space__connection) conn_v);
+                       (conn_of ps_v)) conn_v);
   restore_connection_owner ps ps_v
-    ps_v.PS.struct_packet_space__connection
-    ps_v.PS.struct_packet_space__encrypt_level
-    conn_v.C.struct_connection__packets conn_v
+    (conn_of ps_v)
+    (lvl_of ps_v)
+    (packets_of conn_v) conn_v
 }
