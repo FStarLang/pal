@@ -216,6 +216,16 @@ impl<'a> Elaborator<'a> {
             TypeT::Pointer(to, kind) => {
                 self.elab_type(env, Rc::make_mut(to));
                 match kind {
+                    // A `void *` has no pointee type to be parametric in, so it
+                    // becomes a raw `core_ref` rather than a `ref unit`: `unit`
+                    // is a real inhabited type, and `ref unit` would be
+                    // incompatible with every typed pointer. Defaulting here
+                    // rather than in the frontend keeps the explicit `_array`,
+                    // `_arrayptr` and `_core_ref` annotations winning, since
+                    // they set a non-`Unknown` kind earlier.
+                    PointerKind::Unknown if matches!(to.val, TypeT::Void) => {
+                        *kind = PointerKind::Core
+                    }
                     PointerKind::Unknown => *kind = PointerKind::Ref,
                     PointerKind::Ref => {}
                     PointerKind::Array => {}
@@ -1060,9 +1070,18 @@ impl<'a> Elaborator<'a> {
     /// pointer kind (e.g. `int *a = malloc(sizeof(int) * 10)` → Array), and
     /// update the Decl's type before it is pushed to the environment.
     fn refine_decl_pointer_kind(env: &Env, stmts: &mut Vec<Rc<Stmt>>, decl_idx: usize) {
-        let StmtT::Decl(decl_name, _) = &stmts[decl_idx].val else {
+        let StmtT::Decl(decl_name, decl_ty) = &stmts[decl_idx].val else {
             return;
         };
+        // A `void *` local is always a raw `core_ref`, whatever it is assigned
+        // from: it has no pointee type to be refined to. Without this guard the
+        // initializer's kind wins here, before `elab_type` runs, and the local
+        // is pinned to `Ref` — i.e. `ref unit`.
+        if let TypeT::Pointer(to, _) = &decl_ty.val
+            && matches!(to.val, TypeT::Void)
+        {
+            return;
+        }
         let var_name = &decl_name.val;
         for j in (decl_idx + 1)..stmts.len() {
             let StmtT::Assign(x, v) = &stmts[j].val else {
