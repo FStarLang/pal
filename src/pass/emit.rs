@@ -6717,11 +6717,18 @@ impl<'a> Emitter<'a> {
         // Inline pre/post slprops (bound over the tuple domain `x_fp` via the
         // same projection prefix), to be spliced directly into the `__fp`
         // wrapper's `requires`/`ensures` instead of being named `unfold let`s.
-        let pre_expr = parens(
-            bind_prefix(&name_docs)
-                .append(witness_let_prefix)
-                .append(pre_body),
-        );
+        // `prevent_lifting` is an `unfold` identity on slprops. It keeps Pulse's
+        // frontend from lifting a top-level `with_pure` in the precondition into
+        // a hidden implicit binder, which would give the wrapper one binder more
+        // than `pre_of`/`post_of` can unify against. See `Pulse.Lib.C.FuncPtr`.
+        let pre_expr = parens(unaryfn(
+            Doc::text("Pulse.Lib.C.FuncPtr.prevent_lifting"),
+            parens(
+                bind_prefix(&name_docs)
+                    .append(witness_let_prefix)
+                    .append(pre_body),
+            ),
+        ));
         let post_expr = parens(bind_prefix(&name_docs).append(post_body));
 
         FnPtrSpecCore {
