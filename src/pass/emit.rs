@@ -585,6 +585,30 @@ struct ExBinding {
     ty: Doc,
 }
 
+/// A branch condition that tests a `_nullable` pointer against null.
+#[derive(Default)]
+struct NullableGhosts {
+    before: Vec<Doc>,
+    after: Vec<Doc>,
+}
+
+struct NullableGuard {
+    /// The pointer being tested.
+    pointer: Rc<Expr>,
+    /// The type under the `_nullable`, whose slprop is what the `unless_null`
+    /// guards. Kept unreduced so its refinements survive.
+    inner: Rc<Type>,
+    /// Whether it is array-like (`_array`/`_arrayptr`) rather than a reference,
+    /// which decides the `has_is_null` instance the elimination needs.
+    array: bool,
+    /// Whether the `then` branch is the one in which the pointer is non-null.
+    then_is_nonnull: bool,
+    /// How the enclosing function takes the pointer, which fixes the shape of
+    /// the resource it is expected to be carrying when the branch is over.
+    /// `None` when the tested pointer is not one of the parameters.
+    mode: Option<ParamMode>,
+}
+
 /// Info about a single spec record field for a struct.
 struct SpecFieldBinding {
     /// The spec record field name (e.g., "struct_simple__spec__y_0")
@@ -599,6 +623,13 @@ enum ValNaming<'a> {
     /// Used for function signatures and old-style preds.
     Standard {
         quote: bool,
+        /// Base identifier for generated val names. `None` derives it from the
+        /// expression being described, which is what a signature clause wants:
+        /// the value is named after the parameter it belongs to. A caller that
+        /// describes a parameter's resource through some *other* expression --
+        /// the local the null test binds, say -- has to say which parameter the
+        /// names belong to, or it invents names no signature ever bound.
+        base: Option<Rc<IdentT>>,
         bindings: &'a mut Vec<ExBinding>,
     },
     /// Spec record: val references become `spec_param.field_name`.
@@ -646,6 +677,14 @@ struct Emitter<'a> {
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
+    /// How the function currently being emitted takes each of its parameters.
+    /// Read when a branch tests a `_nullable` parameter, to decide what the
+    /// branch has to hand back.
+    current_fn_param_modes: HashMap<Rc<str>, ParamMode>,
+    /// What the function currently being emitted must say about the storage it
+    /// only borrows, one assertion per borrowed parameter. A branch that reads
+    /// through one of these restates it on the way out; see `borrow_bindings`.
+    current_fn_borrow_asserts: Vec<Doc>,
     tmp_counter: usize,
 }
 
@@ -1434,13 +1473,14 @@ impl<'a> Emitter<'a> {
     /// Returns the Doc to use as the val reference in the slprop.
     fn push_val_binding(&mut self, naming: &mut ValNaming, this: &Rc<Expr>, ty: Doc) -> Doc {
         match naming {
-            ValNaming::Standard { quote, bindings } => {
+            ValNaming::Standard {
+                quote,
+                base,
+                bindings,
+            } => {
                 let idx = bindings.len() as u32;
-                let raw = Doc::text(
-                    self.nm
-                        .mangle(&Name::Val(extract_base_ident(this), idx))
-                        .to_string(),
-                );
+                let base_ident = base.clone().unwrap_or_else(|| extract_base_ident(this));
+                let raw = Doc::text(self.nm.mangle(&Name::Val(base_ident, idx)).to_string());
                 let val_name = if *quote {
                     Doc::text("'").append(raw)
                 } else {
@@ -1485,7 +1525,9 @@ impl<'a> Emitter<'a> {
     /// Returns the Doc to use as the val reference in the slprop.
     fn push_val_binding_explicit(&mut self, naming: &mut ValNaming, raw_name: Doc, ty: Doc) -> Doc {
         match naming {
-            ValNaming::Standard { quote, bindings } => {
+            ValNaming::Standard {
+                quote, bindings, ..
+            } => {
                 let val_name = if *quote {
                     Doc::text("'").append(raw_name)
                 } else {
@@ -1774,21 +1816,57 @@ impl<'a> Emitter<'a> {
             TypeT::Nullable(inner) => {
                 // Collect the inner type's props separately, then wrap the whole
                 // conjunction in `unless_null this (…)` so the resource is `emp`
-                // when the pointer is null. Val bindings (existentials) are still
-                // registered via the shared `naming`.
+                // when the pointer is null.
+                //
+                // An existential the inner type registers has to be bound
+                // *inside* the `unless_null`. Hoisted, it would have to be
+                // witnessed even on the path where the pointer is null and the
+                // resource that would name a witness is `emp`, and the prover
+                // has nothing to offer -- the postcondition of a routine that
+                // writes through an optional output would be unprovable in its
+                // own null branch. Bound inside, the null case discharges as
+                // `emp` and asks for no witness at all.
+                //
+                // Implicit (`'`-quoted) bindings are left where they are: those
+                // are universally quantified at the enclosing signature, so
+                // they need no witness, and hoisting is what lets a caller
+                // relate the value across a `preserves`.
                 let this_doc = self.emit_rvalue(env, this);
                 let mut inner_props: Vec<Doc> = vec![];
-                self.emit_type_slprop_inner(
-                    env,
-                    inner,
-                    variant,
-                    naming,
-                    &mut inner_props,
-                    this,
-                    resolving_struct,
-                );
+                let mut local_bindings: Vec<ExBinding> = vec![];
+                let existential = matches!(naming, ValNaming::Standard { quote: false, .. });
+                if existential {
+                    let mut local_naming = ValNaming::Standard {
+                        quote: false,
+                        base: None,
+                        bindings: &mut local_bindings,
+                    };
+                    self.emit_type_slprop_inner(
+                        env,
+                        inner,
+                        variant,
+                        &mut local_naming,
+                        &mut inner_props,
+                        this,
+                        resolving_struct,
+                    );
+                } else {
+                    self.emit_type_slprop_inner(
+                        env,
+                        inner,
+                        variant,
+                        naming,
+                        &mut inner_props,
+                        this,
+                        resolving_struct,
+                    );
+                }
                 props.push(annotated(ty, || {
-                    naryfn([Doc::text("unless_null"), this_doc, mk_star(inner_props)])
+                    naryfn([
+                        Doc::text("unless_null"),
+                        this_doc,
+                        parens(wrap_exists(&local_bindings, inner_props)),
+                    ])
                 }));
             }
             TypeT::Error => {}
@@ -1816,6 +1894,7 @@ impl<'a> Emitter<'a> {
         let mut props = vec![];
         let mut naming = ValNaming::Standard {
             quote: false,
+            base: None,
             bindings: &mut bindings,
         };
         emit_slprops(self, variant, &mut naming, &mut props);
@@ -1992,8 +2071,12 @@ impl<'a> Emitter<'a> {
                                         }))
                                     }
                                 }
+                                // A record literal is one of the shapes that
+                                // can turn up here -- `(T){...}.f`, which C11
+                                // 6.5.2.5p4 allows -- and F* will not parse a
+                                // projection off an unparenthesized one.
                                 ExprKind::RValue(x_doc) => ExprKind::RValue(annotated(v, || {
-                                    x_doc.append(Doc::text(".")).append(self.emit_name(
+                                    parens(x_doc).append(Doc::text(".")).append(self.emit_name(
                                         Name::StructDirectFieldName(
                                             struct_name.val.clone(),
                                             a.val.clone(),
@@ -3734,7 +3817,152 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// Strip casts and parentheses down to the null pointer constant, if that
+    /// is what an argument is.
+    fn is_null_constant(e: &Expr) -> bool {
+        match &e.val {
+            ExprT::Cast(inner, _) => Self::is_null_constant(inner),
+            ExprT::IntLit(n, _) => **n == BigInt::ZERO,
+            _ => false,
+        }
+    }
+
+    /// The ghost steps a statement owes around a call that supplies an
+    /// argument for a `_nullable` parameter, before the call and after it.
+    ///
+    /// A callee that takes an optional pointer states its half of the bargain
+    /// under a guard: it asks for `unless_null p (..)` and gives back
+    /// `unless_null p (..)`. That is right for the callee and wrong for the
+    /// caller, which knows which side of the test its own argument is on and
+    /// wants the resource, or nothing, rather than a guarded maybe. The guard
+    /// is deliberately opaque -- see `Pulse.Lib.C.Nullable` -- so neither end
+    /// of it opens by itself, and the resource the caller handed over stays
+    /// out of reach afterwards. Nothing about that is conditional: it happens
+    /// on every call that supplies or declines an optional parameter, which in
+    /// such code is most calls between conversions.
+    ///
+    /// Declining is the easy half: `p` is `null`, the resource is nothing, and
+    /// the elimination just discards the guard.
+    ///
+    /// Supplying takes a fact rather than a resource. `elim_unless_null_ref`
+    /// needs to know the pointer is not null, and the only way to learn that
+    /// is from the resource itself -- which is exactly what is inside the
+    /// guard. So the fact is established *before* the call, while the resource
+    /// is still unguarded, and carried across the call as a pure proposition.
+    /// Which lemma establishes it depends on what the caller is holding, and
+    /// the callee's parameter mode says: an `_out` parameter is handed
+    /// uninitialized storage, anything else an initialized cell.
+    fn nullable_arg_ghosts(&mut self, env: &Env, stmt: &Stmt) -> (Vec<Doc>, Vec<Doc>) {
+        let mut ghosts = NullableGhosts::default();
+        self.nullable_arg_ghosts_stmt(env, stmt, &mut ghosts);
+        (ghosts.before, ghosts.after)
+    }
+
+    fn nullable_arg_ghosts_stmt(&mut self, env: &Env, stmt: &Stmt, out: &mut NullableGhosts) {
+        match &stmt.val {
+            StmtT::Assign(l, r) => {
+                self.nullable_arg_ghosts_expr(env, l, out);
+                self.nullable_arg_ghosts_expr(env, r, out);
+            }
+            StmtT::Call(e) | StmtT::Return(Some(e)) => self.nullable_arg_ghosts_expr(env, e, out),
+            StmtT::Let(_, _, e) => self.nullable_arg_ghosts_expr(env, e, out),
+            _ => {}
+        }
+    }
+
+    fn nullable_arg_ghosts_expr(&mut self, env: &Env, e: &Expr, out: &mut NullableGhosts) {
+        match &e.val {
+            ExprT::UnOp(_, a) | ExprT::Cast(a, _) | ExprT::Deref(a) | ExprT::Ref(a) => {
+                self.nullable_arg_ghosts_expr(env, a, out)
+            }
+            ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+                self.nullable_arg_ghosts_expr(env, a, out);
+                self.nullable_arg_ghosts_expr(env, b, out);
+            }
+            ExprT::FnCall(f, args) => {
+                for a in args.iter() {
+                    self.nullable_arg_ghosts_expr(env, a, out);
+                }
+                let Some(fn_decl) = env.lookup_fn(f) else {
+                    return;
+                };
+                for (i, arg) in args.iter().enumerate() {
+                    let Some(param) = fn_decl.args.get(i) else {
+                        continue;
+                    };
+                    let TypeT::Nullable(inner) = &param.ty.val else {
+                        continue;
+                    };
+                    let inner: Rc<Type> = inner.clone().into();
+                    // Only a plain pointer round-trips today. An optional
+                    // array argument still has to be opened by hand.
+                    if !matches!(
+                        &env.vtype_whnf(inner.into()).val,
+                        TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+                    ) {
+                        continue;
+                    }
+                    if Self::is_null_constant(arg) {
+                        out.after
+                            .push(Doc::text("Pulse.Lib.C.Nullable.elim_null_ref null;"));
+                        continue;
+                    }
+                    // Only when PAL is the one holding the resource. Two
+                    // arguments look identical here and are not: a pointer
+                    // whose ownership PAL emitted, which it can take back
+                    // afterwards, and one whose ownership was written by hand
+                    // in the enclosing contract, which it cannot.
+                    //
+                    // `_nullable` is the forwarding case -- an optional
+                    // argument passed straight through from an optional
+                    // parameter, where the caller is in no position to say
+                    // which way the test goes, that being the whole point of
+                    // forwarding it. `_plain` is the hand-written case: PAL
+                    // emits no ownership at all for it, so there is nothing
+                    // here to take back and the enclosing contract's own
+                    // `unless_null` would be eliminated out from under it.
+                    let Ok(arg_ty) = env.infer_expr(arg) else {
+                        continue;
+                    };
+                    if matches!(arg_ty.val, TypeT::Nullable(_) | TypeT::Plain(_)) {
+                        continue;
+                    }
+                    let arg_doc = parens(self.emit_rvalue(env, arg));
+                    let not_null = match param.mode {
+                        ParamMode::Out => "Pulse.Lib.Reference.pts_to_uninit_not_null",
+                        _ => "Pulse.Lib.Reference.pts_to_not_null",
+                    };
+                    out.before.push(
+                        Doc::text(not_null.to_string())
+                            .append(Doc::text(" "))
+                            .append(arg_doc.clone())
+                            .append(Doc::text(";")),
+                    );
+                    out.after.push(
+                        Doc::text("Pulse.Lib.C.Nullable.elim_unless_null_ref ".to_string())
+                            .append(arg_doc)
+                            .append(Doc::text(";")),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
+        let (before, after) = self.nullable_arg_ghosts(env, stmt);
+        let mut doc = Doc::nil();
+        for g in before {
+            doc = doc.append(g).append(Doc::hardline());
+        }
+        doc = doc.append(self.emit_stmt_core(env, stmt));
+        for g in after {
+            doc = doc.append(Doc::hardline()).append(g);
+        }
+        doc
+    }
+
+    fn emit_stmt_core(&mut self, env: &Env, stmt: &Stmt) -> Doc {
         annotated(stmt, || {
             match &stmt.val {
                 StmtT::Call(v) => {
@@ -4324,8 +4552,114 @@ impl<'a> Emitter<'a> {
                             .group()
                             .nest(2)
                     }));
-                    let then_doc = self.emit_block(env, then_branch);
-                    let else_doc = self.emit_block(env, else_branch);
+                    // A branch on the nullness of a `_nullable` pointer decides
+                    // whether that pointer's `unless_null` is carrying anything,
+                    // so open it here rather than leaving every branch body to
+                    // do it by hand. The guarded resource is left implicit: an
+                    // optional output starts uninitialized and becomes
+                    // initialized part way through, and the translation has no
+                    // reason to know which of those it is looking at.
+                    let (then_open, else_open, guard_env) = match self.nullable_guard(env, cond) {
+                        None => (None, None, None),
+                        Some(guard) => {
+                            // Name the pointer. Inside the body the parameter
+                            // is a mutable cell, so the expression that reads
+                            // it is a dereference; a slprop that mentioned
+                            // that dereference would not be the slprop the
+                            // context is holding, which names the value the
+                            // cell had. Binding it once gives both the ghost
+                            // steps and the resource they mention the same
+                            // name for the pointer.
+                            let name: Rc<Ident> =
+                                Rc::<str>::from(format!("__pal_guarded_{}", self.tmp_counter))
+                                    .with_loc(cond.loc.clone());
+                            self.tmp_counter += 1;
+                            let mut genv = env.clone();
+                            genv.push_var_decl(&name, guard.inner.clone(), LocalDeclKind::RValue);
+                            let bound = mk_rvar(&name);
+                            let name_doc = self.emit_name(Name::Var(name.val.clone()));
+                            let bind = Doc::text("let ")
+                                .append(name_doc.clone())
+                                .append(" = ")
+                                .append(parens(self.emit_rvalue(env, &guard.pointer)))
+                                .append(";");
+                            let payload = self.nullable_payload(&genv, &guard, &bound);
+                            let elim = |name: &str| {
+                                Doc::text(name.to_string())
+                                    .append(Doc::text(" "))
+                                    .append(name_doc.clone())
+                                    .append(Doc::text(";"))
+                            };
+                            // Close the branch by asserting the guarded form
+                            // back. An `assert` is what makes this work rather
+                            // than a call to the introduction: PAL writes the
+                            // value at a pointer as `!p`, and that spelling is
+                            // resolved against the surrounding conjunction
+                            // only in a slprop position -- a signature clause
+                            // or an `assert` -- not in a term passed as an
+                            // argument. The assertion is discharged by the
+                            // introduction rules, which fire off the
+                            // nullness the branch hypothesis already carries,
+                            // so the same text serves both branches.
+                            // Only worth closing when both branches fall
+                            // through: that is the shape in which Pulse has to
+                            // join them and cannot. When one branch returns,
+                            // the code after the test is entitled to the
+                            // opened resource -- an early return on null is how
+                            // C says a pointer is non-null from here on -- and
+                            // handing it back would take it away.
+                            let joins = falls_through(then_branch) && falls_through(else_branch);
+                            let close = payload.as_ref().filter(|_| joins).map(|p| {
+                                let mut doc =
+                                    Doc::text("assert (Pulse.Lib.C.Nullable.unless_null ")
+                                        .append(name_doc.clone())
+                                        .append(Doc::text(" "))
+                                        .append(p.clone())
+                                        .append(Doc::text(");"));
+                                for a in self.current_fn_borrow_asserts.iter() {
+                                    doc = doc.append(Doc::line()).append(a.clone());
+                                }
+                                doc
+                            });
+                            let (elim_nonnull, elim_null) = if guard.array {
+                                (
+                                    "Pulse.Lib.C.Nullable.elim_unless_null_arr",
+                                    "Pulse.Lib.C.Nullable.elim_null_arr",
+                                )
+                            } else {
+                                (
+                                    "Pulse.Lib.C.Nullable.elim_unless_null_ref",
+                                    "Pulse.Lib.C.Nullable.elim_null_ref",
+                                )
+                            };
+                            let open = |name: &str| {
+                                (
+                                    bind.clone().append(Doc::line()).append(elim(name)),
+                                    close.clone(),
+                                )
+                            };
+                            let nonnull = open(elim_nonnull);
+                            let null = open(elim_null);
+                            if guard.then_is_nonnull {
+                                (Some(nonnull), Some(null), Some(genv))
+                            } else {
+                                (Some(null), Some(nonnull), Some(genv))
+                            }
+                        }
+                    };
+                    let benv = guard_env.as_ref().unwrap_or(env);
+                    let then_doc = match then_open {
+                        None => self.emit_block(env, then_branch),
+                        Some((open, close)) => {
+                            self.emit_block_wrapping_with(benv, then_branch, open, close)
+                        }
+                    };
+                    let else_doc = match else_open {
+                        None => self.emit_block(env, else_branch),
+                        Some((open, close)) => {
+                            self.emit_block_wrapping_with(benv, else_branch, open, close)
+                        }
+                    };
                     Doc::text("if ")
                         .append(cond_doc)
                         .nest(2)
@@ -4533,6 +4867,242 @@ impl<'a> Emitter<'a> {
         }
         block(self.emit_stmts(env, stmts))
     }
+
+    /// Emit a block bracketed by ghost steps the translation supplies rather
+    /// than the source.
+    fn emit_block_wrapping_with(
+        &mut self,
+        env: &Env,
+        stmts: &Vec<Rc<Stmt>>,
+        opening: Doc,
+        closing: Option<Doc>,
+    ) -> Doc {
+        let rest = if stmts.is_empty() {
+            Doc::nil()
+        } else {
+            self.emit_stmts(env, stmts)
+        };
+        let mut inner = Doc::line().append(opening).append(rest);
+        if let Some(closing) = closing {
+            inner = inner.append(Doc::line().append(closing));
+        }
+        block(inner)
+    }
+
+    /// The resource a `_nullable` parameter is expected to be carrying once a
+    /// branch that tested it is over: the same slprop the function's own
+    /// postcondition names for that parameter, but written in the naming of
+    /// the body rather than of the signature.
+    ///
+    /// Both branches of the test close by putting this back under
+    /// `unless_null`, which is what keeps them joinable. Left open, the two
+    /// branches would end at different slprops -- the guarded resource on one
+    /// side and `emp` on the other -- and Pulse would join them into a
+    /// conditional on the null test that neither branch can then discharge.
+    /// Closing both sides at the same `unless_null` sidesteps the join
+    /// entirely.
+    /// Name what the function only borrows, so that a branch can restate it.
+    ///
+    /// A branch that reads through a borrowed structure pointer splits that
+    /// structure into its fields, and the other branch, which did not read it,
+    /// still holds it whole. Pulse has to join the two, cannot see they are the
+    /// same resource, and gives up on a `match` over the branch condition.
+    /// Restating each borrowed parameter at the end of both branches settles
+    /// them on one shape, so there is nothing left to join.
+    ///
+    /// Restating it requires naming the value, and the value of a parameter
+    /// taken at full permission is bound existentially in the signature, where
+    /// the body cannot reach it. Bind it once here instead, at the top of the
+    /// body, and the branches have a name to use. A parameter borrowed at a
+    /// fractional permission already has signature-level names for both its
+    /// permission and its value, so it needs no binding of its own.
+    ///
+    /// Only functions with an optional parameter get this treatment, because
+    /// only their branches have a guard to close.
+    fn borrow_bindings(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        self.current_fn_borrow_asserts = vec![];
+        let has_nullable = decl
+            .args
+            .iter()
+            .any(|a| matches!(a.ty.val, TypeT::Nullable(_)));
+        if !has_nullable {
+            return Doc::nil();
+        }
+        let mut doc = Doc::nil();
+        for arg in decl.args.iter() {
+            let Some(name) = arg.name.as_ref() else {
+                continue;
+            };
+            if matches!(arg.ty.val, TypeT::Nullable(_)) {
+                continue;
+            }
+            let (perm, quote) = match arg.mode {
+                ParamMode::Consumed | ParamMode::Out => continue,
+                ParamMode::Const => {
+                    let perm_name =
+                        self.emit_name(Name::Perm(extract_base_ident(&mk_rvar(name)), 0));
+                    (Doc::text("'").append(perm_name), true)
+                }
+                ParamMode::Regular => (Doc::text("1.0R"), false),
+            };
+            let mut bindings = vec![];
+            let mut props = vec![];
+            let mut naming = ValNaming::Standard {
+                quote,
+                base: None,
+                bindings: &mut bindings,
+            };
+            let this = mk_rvar(name);
+            self.emit_type_slprop(
+                env,
+                &arg.ty,
+                SLPropVariant::Init { perm: &perm },
+                &mut naming,
+                &mut props,
+                &this,
+            );
+            drop(naming);
+            if props.is_empty() {
+                continue;
+            }
+            // One assertion per conjunct. A conjunct that spells the value at
+            // a pointer as `!p` resolves that against the surrounding context,
+            // and it cannot do so from under a binder introduced by the same
+            // statement, so the binding goes on its own.
+            let assertions: Vec<Doc> = props
+                .into_iter()
+                .map(|prop| {
+                    Doc::text("assert ")
+                        .append(parens(prop))
+                        .append(Doc::text(";"))
+                })
+                .collect();
+            if !quote && !bindings.is_empty() {
+                let names = Doc::concat(
+                    bindings
+                        .iter()
+                        .map(|b| b.name.clone().append(Doc::text(" "))),
+                );
+                doc = doc.append(Doc::line()).append(
+                    Doc::text("with ")
+                        .append(names)
+                        .append(Doc::text(". "))
+                        .append(assertions[0].clone()),
+                );
+                for a in assertions.iter().skip(1) {
+                    doc = doc.append(Doc::line()).append(a.clone());
+                }
+            }
+            self.current_fn_borrow_asserts.extend(assertions);
+        }
+        doc
+    }
+
+    fn nullable_payload(
+        &mut self,
+        env: &Env,
+        guard: &NullableGuard,
+        this: &Rc<Expr>,
+    ) -> Option<Doc> {
+        // `Consumed` hands the resource to the callee and has nothing to give
+        // back; anything not a parameter has no postcondition to match.
+        let mode = guard.mode?;
+        let perm = match mode {
+            ParamMode::Consumed => return None,
+            ParamMode::Const => {
+                let base = extract_base_ident(&guard.pointer);
+                let name = self.emit_name(Name::Perm(base, 0));
+                Doc::text("'").append(name)
+            }
+            ParamMode::Regular | ParamMode::Out => Doc::text("1.0R"),
+        };
+        // A `preserves` names the value with a signature-level implicit, which
+        // is in scope in the body; the other modes bind it existentially.
+        //
+        // For a preserved (const) pointer that implicit is the *only* value the
+        // signature will accept back: `preserves unless_null p (.. 'val_p_0)`
+        // asks for the value the caller handed in, not for some value. So the
+        // payload has to name it exactly as the signature does -- off the
+        // parameter, not off the local the null test binds -- and must not
+        // re-quantify it, or the branch gives back an `exists*` where the
+        // signature wanted `'val_p_0` and the join fails.
+        let quote = matches!(mode, ParamMode::Const);
+        let base = match mode {
+            ParamMode::Const => Some(extract_base_ident(&guard.pointer)),
+            _ => None,
+        };
+        let mut bindings = vec![];
+        let mut props = vec![];
+        let mut naming = ValNaming::Standard {
+            quote,
+            base,
+            bindings: &mut bindings,
+        };
+        self.emit_type_slprop(
+            env,
+            &guard.inner,
+            SLPropVariant::Init { perm: &perm },
+            &mut naming,
+            &mut props,
+            this,
+        );
+        drop(naming);
+        if props.is_empty() {
+            return None;
+        }
+        if quote {
+            return Some(parens(mk_star(props)));
+        }
+        Some(parens(wrap_exists(&bindings, props)))
+    }
+
+    /// Recognize a condition that tests a `_nullable` pointer against null, so
+    /// that each branch can open the pointer's `unless_null` the right way.
+    /// Returns `None` for anything else, including a nullness test on a
+    /// pointer that is not `_nullable` -- that pointer owns its pointee
+    /// outright and has no `unless_null` to open.
+    fn nullable_guard(&self, env: &Env, cond: &Expr) -> Option<NullableGuard> {
+        match &cond.val {
+            ExprT::UnOp(UnOp::Not, inner) => {
+                let guard = self.nullable_guard(env, inner)?;
+                Some(NullableGuard {
+                    then_is_nonnull: !guard.then_is_nonnull,
+                    ..guard
+                })
+            }
+            ExprT::BinOp(BinOp::Eq, lhs, rhs) => {
+                match &rhs.val {
+                    ExprT::IntLit(n, _) if **n == BigInt::ZERO => {}
+                    _ => return None,
+                }
+                let ty = env.infer_expr(lhs).ok()?;
+                let TypeT::Nullable(inner) = &ty.val else {
+                    return None;
+                };
+                let inner: Rc<Type> = inner.clone().into();
+                let whnf = env.vtype_whnf(inner.clone().into());
+                let array = match &whnf.val {
+                    TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown) => false,
+                    TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => true,
+                    // A `core_ref` carries no ownership and a function pointer
+                    // keeps ordinary `pts_to`, so neither has an `unless_null`.
+                    _ => return None,
+                };
+                let mode = match &lhs.val {
+                    ExprT::Var(n) => self.current_fn_param_modes.get(&n.val).copied(),
+                    _ => None,
+                };
+                Some(NullableGuard {
+                    pointer: lhs.clone(),
+                    inner,
+                    array,
+                    then_is_nonnull: false,
+                    mode,
+                })
+            }
+            _ => None,
+        }
+    }
 } // impl Emitter (group C)
 
 fn mk_let(n: Doc, args: &[Doc], ty: Doc, body: Doc) -> Doc {
@@ -4611,6 +5181,18 @@ fn mk_star<I: IntoIterator<Item = Doc>>(ps: I) -> Doc {
     }) {
         Some(star) => parens(star),
         None => Doc::text("emp"),
+    }
+}
+
+/// Whether control can reach the end of a block, i.e. whether the block joins
+/// with whatever follows it.
+fn falls_through(stmts: &[Rc<Stmt>]) -> bool {
+    match stmts.last() {
+        None => true,
+        Some(s) => !matches!(
+            s.val,
+            StmtT::Return(_) | StmtT::Break | StmtT::Continue | StmtT::Goto(_)
+        ),
     }
 }
 
@@ -5272,6 +5854,7 @@ impl<'a> Emitter<'a> {
                 let mut field_bindings = vec![];
                 let mut naming = ValNaming::Standard {
                     quote: false,
+                    base: None,
                     bindings: &mut field_bindings,
                 };
                 self.emit_type_slprop(
@@ -6507,6 +7090,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6534,6 +7118,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6552,6 +7137,7 @@ impl<'a> Emitter<'a> {
                     let mut uninit_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut uninit_bindings,
                     };
                     self.emit_type_slprop(
@@ -6570,6 +7156,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6669,6 +7256,7 @@ impl<'a> Emitter<'a> {
             let mut ret_props = vec![];
             let mut naming = ValNaming::Standard {
                 quote: false,
+                base: None,
                 bindings: &mut ret_bindings,
             };
             self.emit_type_slprop(
@@ -6806,6 +7394,89 @@ impl<'a> Emitter<'a> {
         (fst, fsti)
     }
 
+    /// Conservatively decide whether `e` could mention the `return` keyword.
+    ///
+    /// Only the expression forms a contract is written in are traversed; any
+    /// other form answers `true`, so an unrecognised shape costs the caller the
+    /// `rewrites_to` form rather than soundness.
+    fn mentions_return(e: &Expr) -> bool {
+        match &e.val {
+            ExprT::Var(id) => &*id.val == "return",
+            ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => false,
+            ExprT::UnOp(_, a)
+            | ExprT::Cast(a, _)
+            | ExprT::Deref(a)
+            | ExprT::Ref(a)
+            | ExprT::Live(a)
+            | ExprT::Old(a)
+            | ExprT::Member(a, _)
+            | ExprT::VAttr(_, a) => Self::mentions_return(a),
+            ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => {
+                Self::mentions_return(a) || Self::mentions_return(b)
+            }
+            ExprT::Cond(a, b, c) => {
+                Self::mentions_return(a) || Self::mentions_return(b) || Self::mentions_return(c)
+            }
+            ExprT::FnCall(_, args) => args.iter().any(|a| Self::mentions_return(a)),
+            // A spec written in Pulse can only reach `return` through an
+            // antiquotation, so the verbatim tokens around them cannot
+            // reintroduce it. Looking inside is what lets a clause that fixes
+            // the result to a Pulse-level function of the arguments --
+            // `_ensures(return == (_Bool)_inline_pulse(f $(A) $(B)))`, which is
+            // the only way to say "this predicate decides that" -- still be
+            // emitted as `rewrites_to` rather than a plain equality.
+            ExprT::InlinePulse(code, _) => code.tokens.iter().any(|tok| match tok {
+                InlinePulseToken::RValueAntiquot { expr, .. }
+                | InlinePulseToken::LValueAntiquot { expr, .. } => Self::mentions_return(expr),
+                _ => false,
+            }),
+            _ => true,
+        }
+    }
+
+    /// Emit one postcondition of a stateful function.
+    ///
+    /// A clause that fixes the result outright -- `_ensures(return == E)`, with
+    /// `E` not mentioning the result -- is emitted as Pulse's `rewrites_to`
+    /// rather than an ordinary equality. The two assert the same thing, but
+    /// `rewrites_to` is the form Pulse's prover reads as a *substitution*: it
+    /// replaces the bound result by `E` throughout the context and the goal.
+    ///
+    /// That matters at a conditional join. A call in a branch binds its result
+    /// to a branch-local name, so the branch's postcondition closes over it
+    /// existentially; Pulse's join gives up on an `exists*` and leaves an
+    /// unusable `match` on the guard, which nothing after the conditional can
+    /// take a resource out of. With `rewrites_to`, the local never survives
+    /// into the postcondition at all -- it has already been rewritten to a term
+    /// the caller can see -- and the two branches join normally.
+    fn emit_ensures_prop(&mut self, env: &Env, e: &Expr) -> Doc {
+        // Elaboration wraps a boolean clause in the coercion that renders it as
+        // an slprop; look through that to see the equality underneath.
+        let mut inner = e;
+        loop {
+            match &inner.val {
+                ExprT::Cast(a, _) | ExprT::VAttr(_, a) => inner = a,
+                _ => break,
+            }
+        }
+        if let ExprT::BinOp(BinOp::Eq, l, r) = &inner.val {
+            let is_ret = |x: &Rc<Expr>| matches!(&x.val, ExprT::Var(id) if &*id.val == "return");
+            let determined = if is_ret(l) && !Self::mentions_return(r) {
+                Some(r)
+            } else if is_ret(r) && !Self::mentions_return(l) {
+                Some(l)
+            } else {
+                None
+            };
+            if let Some(rhs) = determined {
+                let rhs_doc = self.emit_rvalue(env, rhs);
+                let ret_doc = self.emit_name(Name::Var(Rc::from("return")));
+                return naryfn([Doc::text("rewrites_to"), ret_doc, parens(rhs_doc)]);
+            }
+        }
+        self.emit_rvalue(env, e)
+    }
+
     fn emit_fn_sig_for_interface(&mut self, env: &Env, decl: &FnDecl) -> Doc {
         self.emit_fn_sig_inner(env, decl, true)
     }
@@ -6869,6 +7540,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6903,6 +7575,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6922,6 +7595,7 @@ impl<'a> Emitter<'a> {
                     let mut uninit_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut uninit_bindings,
                     };
                     self.emit_type_slprop(
@@ -6942,6 +7616,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6975,6 +7650,7 @@ impl<'a> Emitter<'a> {
         let mut ret_props = vec![];
         let mut naming = ValNaming::Standard {
             quote: false,
+            base: None,
             bindings: &mut ret_bindings,
         };
         self.emit_type_slprop(
@@ -6993,7 +7669,10 @@ impl<'a> Emitter<'a> {
         }
         let ret_type_doc = self.emit_type(env, ret_type);
 
-        ensures_props.extend(ensures.iter().map(|r| self.emit_rvalue(env, r)));
+        for r in ensures.iter() {
+            let d = self.emit_ensures_prop(env, r);
+            ensures_props.push(d);
+        }
 
         // C functions are not guaranteed to terminate, and PAL emits `while`
         // loops without a `decreases` measure. Since Pulse split `stt` into a
@@ -7079,6 +7758,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_fn_decl(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        if decl.is_pure {
+            return self.emit_pure_fn_decl(env, decl);
+        }
         self.emit_fn_sig(env, decl)
             .nest(2)
             .append(Doc::hardline())
@@ -7091,6 +7773,11 @@ impl<'a> Emitter<'a> {
             return self.emit_pure_fn(env, decl, body);
         }
         self.current_fn_total = decl.is_total;
+        self.current_fn_param_modes = decl
+            .args
+            .iter()
+            .filter_map(|a| a.name.as_ref().map(|n| (n.val.clone(), a.mode)))
+            .collect();
         let decl_doc = self.emit_fn_sig(env, decl).nest(2).append(Doc::hardline());
         let arg_redecl_as_mut = Doc::concat(decl.args.iter().filter_map(|arg| {
             arg.name.as_ref().map(|n| {
@@ -7108,7 +7795,15 @@ impl<'a> Emitter<'a> {
         }));
         let env = &mut env.clone();
         env.push_fn_decl_args_for_body(decl);
-        decl_doc.append(block(arg_redecl_as_mut.append(self.emit_stmts(env, body))).group())
+        let borrow_bindings = self.borrow_bindings(env, decl);
+        decl_doc.append(
+            block(
+                arg_redecl_as_mut
+                    .append(borrow_bindings)
+                    .append(self.emit_stmts(env, body)),
+            )
+            .group(),
+        )
     }
 } // impl Emitter (group E)
 
@@ -7375,7 +8070,43 @@ impl<'a> Emitter<'a> {
 
     fn emit_pure_fn(&mut self, env: &Env, decl: &FnDecl, body: &Stmts) -> Doc {
         let env = &mut env.clone();
+        let (params, ty_doc) = self.emit_pure_fn_sig(env, decl);
+        let body_doc = self.emit_pure_body(env, body);
+        mk_let_rec(
+            decl.is_rec,
+            self.emit_name(Name::Fn(decl.name.val.clone())),
+            &params,
+            ty_doc,
+            body_doc,
+        )
+    }
 
+    /// A `_pure` function without a body is an external pure operation. It is
+    /// assumed rather than stubbed out as a state-passing `fn`, so that it can
+    /// be applied inside the pre- and postconditions of the functions that call
+    /// it. A stubbed `fn` cannot: Pulse rejects a stateful application in a
+    /// specification.
+    fn emit_pure_fn_decl(&mut self, env: &Env, decl: &FnDecl) -> Doc {
+        let env = &mut env.clone();
+        let (params, ty_doc) = self.emit_pure_fn_sig(env, decl);
+        (Doc::text("assume val")
+            .append(Doc::line())
+            .append(self.emit_name(Name::Fn(decl.name.val.clone()))))
+        .append(
+            Doc::concat(params.iter().map(|arg| Doc::line().append(arg.clone())))
+                .append(Doc::line().append(":"))
+                .nest(2),
+        )
+        .group()
+        .append(Doc::line().append(ty_doc))
+        .nest(2)
+        .group()
+    }
+
+    /// Shared signature elaboration for the two pure forms: the parameter list
+    /// and the result type, including the `Pure` effect wrapper when the
+    /// declaration carries a contract.
+    fn emit_pure_fn_sig(&mut self, env: &mut Env, decl: &FnDecl) -> (Vec<Doc>, Doc) {
         let mut params = vec![];
 
         // Emit ghost arguments as implicit erased parameters
@@ -7434,8 +8165,6 @@ impl<'a> Emitter<'a> {
             .map(|e| self.emit_pure_prop(env, e))
             .collect();
 
-        let body_doc = self.emit_pure_body(env, body);
-
         let has_specs = !requires_props.is_empty() || !ensures_props.is_empty();
 
         let ty_doc = if has_specs || (decl.is_rec && decl.decreases.is_some()) {
@@ -7479,14 +8208,7 @@ impl<'a> Emitter<'a> {
             ret_type_doc
         };
 
-        let body = mk_let_rec(
-            decl.is_rec,
-            self.emit_name(Name::Fn(decl.name.val.clone())),
-            &params,
-            ty_doc,
-            body_doc,
-        );
-        body
+        (params, ty_doc)
     }
 
     fn emit_let_decl(&mut self, env: &Env, let_decl: &LetDecl) -> Doc {
@@ -7616,6 +8338,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7634,6 +8357,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7960,6 +8684,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         fn_module_map,
         typedef_override_map,
         current_fn_total: false,
+        current_fn_param_modes: HashMap::new(),
+        current_fn_borrow_asserts: Vec::new(),
         tmp_counter: 0,
     };
 

@@ -5,6 +5,7 @@
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
 #include <dlfcn.h>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <unordered_set>
@@ -649,6 +650,14 @@ public:
       if (ic->getCastKind() == CK_NoOp) {
         return trLValue(ic->getSubExpr());
       }
+    } else if (isa<CompoundLiteralExpr>(e)) {
+      // C11 6.5.2.5p4 makes a compound literal an lvalue, so `(T){...}.f` and
+      // `&(T){...}` are both legal. The object it names is unnamed and fresh,
+      // though, so nothing stored through it can be observed by any later
+      // expression -- which means translating it as its own value loses
+      // nothing. That is what lets a read like `((T){.f = 0}).f`, the shape a
+      // named-constant macro expands to, go through.
+      return trRValue(e);
     }
 
     reportUnsupported(e->getSourceRange(), loc,
@@ -1490,6 +1499,32 @@ public:
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
       return mk_rvalue_lvalue(std::move(loc), trLValue(e));
+    } else if (auto *m = dyn_cast<MemberExpr>(e)) {
+      // A member of a structure *value* -- `f(x).field`, or a field of a
+      // compound literal -- is itself an rvalue in C, so there is no lvalue to
+      // project from and trLValue cannot be used. Translate the base as a value
+      // and project the field out of it; ExprT::Member is neutral, and emit
+      // already renders a value base as a record field selection rather than a
+      // reference projection.
+      auto *md = m->getMemberDecl();
+      std::string nameStr;
+      if (auto *fd = dyn_cast<FieldDecl>(md))
+        nameStr = fieldNameStr(fd);
+      else
+        nameStr = md->getName().str();
+      auto id = ctx.mk_ident(toStr(nameStr), loc.clone());
+      // When the base was hoisted out of the enclosing statement, project from
+      // the temporary rather than re-translating the call.
+      auto hoisted = hoistedRValues.find(m->getBase()->IgnoreParenImpCasts());
+      if (hoisted != hoistedRValues.end()) {
+        auto tmp = ctx.mk_ident(toStr(StringRef(hoisted->second)), loc.clone());
+        auto tmpRef = mk_lvalue_var(loc.clone(), std::move(tmp));
+        return mk_lvalue_member(std::move(loc), std::move(tmpRef),
+                                std::move(id));
+      }
+      auto base = m->isArrow() ? mk_deref(loc.clone(), trRValue(m->getBase()))
+                               : trRValue(m->getBase());
+      return mk_lvalue_member(std::move(loc), std::move(base), std::move(id));
     } else if (auto *u = dyn_cast<UnaryExprOrTypeTraitExpr>(e)) {
       auto kind = u->getKind();
       if (kind == UETT_SizeOf || kind == UETT_AlignOf ||
@@ -1537,8 +1572,82 @@ public:
     return stmts;
   }
 
+  /// Structure-valued call results bound ahead of the statement that projects
+  /// from them, keyed by the call expression.
+  std::map<const Expr *, std::string> hoistedRValues;
+  int rvalueHoistCounter = 0;
+
+  /// Bind a structure-valued call that a member projection reads from to a
+  /// uniquely named local, ahead of the statement that contains it.
+  ///
+  /// `f(x).field` has no lvalue to project from, so the call's result has to
+  /// live somewhere before the field can be read. Pulse will hoist it on its
+  /// own, but its hoisted binders are named from a counter that does not
+  /// survive leaving a statement, so two of them can end up sharing a name; a
+  /// branch-local one then captures a same-named binder introduced before the
+  /// branch, and the branch postcondition becomes ill-typed. Naming the
+  /// temporary here keeps the names unique by construction and makes the
+  /// emitted Pulse say what the C says.
+  ///
+  /// Only unconditionally evaluated positions are hoisted: moving a call out
+  /// of a `?:` arm or the right operand of `&&`/`||` would evaluate it when C
+  /// would not.
+  void hoistRValueMembers(Vec<Rc<ir::Stmt>> &stmts, Expr *e) {
+    if (!e)
+      return;
+    e = e->IgnoreParens();
+    if (auto *co = dyn_cast<ConditionalOperator>(e)) {
+      hoistRValueMembers(stmts, co->getCond());
+      return;
+    }
+    if (auto *bo = dyn_cast<BinaryOperator>(e)) {
+      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr) {
+        hoistRValueMembers(stmts, bo->getLHS());
+        return;
+      }
+    }
+    for (auto *child : e->children()) {
+      if (auto *ce = dyn_cast_or_null<Expr>(child)) {
+        hoistRValueMembers(stmts, ce);
+      }
+    }
+    auto *m = dyn_cast<MemberExpr>(e);
+    if (!m || m->isArrow()) {
+      return;
+    }
+    auto *base = m->getBase()->IgnoreParenImpCasts();
+    if (!base->isPRValue() || !isa<CallExpr>(base)) {
+      return;
+    }
+    if (hoistedRValues.count(base)) {
+      return;
+    }
+    auto baseLoc = getRange(base->getSourceRange());
+    auto ty = trQualType(base->getType(), base->getSourceRange());
+    auto name = "__pal_rvalue_" + std::to_string(rvalueHoistCounter++);
+    auto id = ctx.mk_ident(toStr(StringRef(name)), baseLoc.clone());
+    auto rval = trRValue(base);
+    stmts.push(mk_let_stmt(baseLoc.clone(), std::move(id), std::move(ty),
+                           std::move(rval)));
+    hoistedRValues[base] = name;
+  }
+
   rust::Unit trStmt(Vec<Rc<ir::Stmt>> &stmts, Stmt *stmt) {
     auto loc = getRange(stmt->getSourceRange());
+
+    if (auto *e = dyn_cast<Expr>(stmt)) {
+      hoistRValueMembers(stmts, e);
+    } else if (auto *ret = dyn_cast<ReturnStmt>(stmt)) {
+      hoistRValueMembers(stmts, ret->getRetValue());
+    } else if (auto *ifs = dyn_cast<IfStmt>(stmt)) {
+      hoistRValueMembers(stmts, ifs->getCond());
+    } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
+      for (auto *d : ds->decls()) {
+        if (auto *vd = dyn_cast<VarDecl>(d)) {
+          hoistRValueMembers(stmts, vd->getInit());
+        }
+      }
+    }
 
     if (auto *bo = dyn_cast<BinaryOperator>(stmt)) {
       switch (bo->getOpcode()) {
