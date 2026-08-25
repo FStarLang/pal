@@ -223,6 +223,47 @@ int32_t fp_spec_null(binop f)
     return f != 0;
 }
 
+/* ---- null in argument position ----
+   `null` takes two explicit type arguments, so the emitted term is an
+   application and must be parenthesized to survive juxtaposition at a call
+   site. `take_cb` deliberately does not call its callback, so no `is_valid`
+   witness is needed and the proof stays trivial. */
+
+int32_t take_cb(int32_t x, int32_t (*f)(int32_t))
+    _ensures(return == x)
+{
+    return x;
+}
+
+/* NULL as an argument. */
+int32_t pass_null_cb(int32_t x)
+    _ensures(return == x)
+{
+    return take_cb(x, NULL);
+}
+
+/* Bare `0` as an argument. */
+int32_t pass_zero_cb(int32_t x)
+    _ensures(return == x)
+{
+    return take_cb(x, 0);
+}
+
+/* Explicit cast to the function-pointer type as an argument. */
+int32_t pass_cast_cb(int32_t x)
+    _ensures(return == x)
+{
+    return take_cb(x, (int32_t (*)(int32_t))0);
+}
+
+/* Via a local; this path already worked, keep it covered. */
+int32_t pass_local_cb(int32_t x)
+    _ensures(return == x)
+{
+    int32_t (*f)(int32_t) = NULL;
+    return take_cb(x, f);
+}
+
 /* ---- calling: arities / void ---- */
 
 /* Zero-arg / `void`-return callback. */
