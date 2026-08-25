@@ -94,8 +94,9 @@ bool infile_addr_via_global(void) _ensures(return == true) {
 /* ===========================================================================
  * 4 -- reading a header `const` global
  *
- * The same bug on the value path: a pruned `const` global left the read with
- * nothing to refer to and the body was emitted as `admit()`.
+ * The same bug on the value path: a pruned `const` global left the read
+ * referring to a name that does not exist, which surfaces downstream as F*
+ * Error 72.
  * ======================================================================== */
 
 /* 4.1 */
@@ -114,10 +115,66 @@ uint32_t read_infile_const(void) _ensures(return == m_const) {
   _ghost_stmt(drop_ (exists* q. pts_to Global_m_const.addr_var_m_const #q _));
 }
 
-/* 4.3 A global named in a *specification* is a variable reference too. */
+/* 4.3 A global named in a *specification* is a variable reference too. Losing
+ * it degraded the whole body to `admit()` rather than to a dangling name. */
 uint32_t header_const_in_spec(void) _requires(h_const < 100) _ensures(return == h_const) {
   _ghost_stmt(Global_h_const.acquire_var_h_const());
   const uint32_t *p = &h_const;
   return *p;
   _ghost_stmt(drop_ (exists* q. pts_to Global_h_const.addr_var_h_const #q _));
+}
+
+/* ===========================================================================
+ * 5 -- the same, without `extern`
+ *
+ * Prune splits on which file a declaration is in and never looks at storage
+ * class, linkage or initialisers, so every kind of header global was lost
+ * equally. The globals above are all `extern`, which would let a fix that only
+ * covered `extern` pass; these pin the rest.
+ *
+ * Unlike section 4 these are defined, so their value is reachable directly
+ * rather than only through an acquire.
+ * ======================================================================== */
+
+static const uint32_t m_static_const = 5;
+const uint32_t m_plain_const = 7;
+uint32_t m_tentative;
+struct ms m_tentative_struct;
+
+/* 5.1 `static const` in a header: internal linkage, value known. */
+uint32_t read_header_static_const(void) _ensures(return == 5) { return h_static_const; }
+
+/* 5.2 Control. */
+uint32_t read_infile_static_const(void) _ensures(return == 5) { return m_static_const; }
+
+/* 5.3 Plain `const` in a header: external linkage. */
+uint32_t read_header_plain_const(void) _ensures(return == 7) { return h_plain_const; }
+
+/* 5.4 Control. */
+uint32_t read_infile_plain_const(void) _ensures(return == 7) { return m_plain_const; }
+
+/* 5.5 A tentative definition is mutable, so it gets an address and no value. */
+bool header_tentative_addr(void) _ensures(return == true) {
+  uint32_t *p = &h_tentative;
+  uint32_t *q = &h_tentative;
+  return p == q;
+}
+
+/* 5.6 Control. */
+bool infile_tentative_addr(void) _ensures(return == true) {
+  uint32_t *p = &m_tentative;
+  uint32_t *q = &m_tentative;
+  return p == q;
+}
+
+/* 5.7 The same at struct type. */
+bool header_tentative_struct_addr(void) _ensures(return == true) {
+  struct hs *p = &h_tentative_struct;
+  return p == &h_tentative_struct;
+}
+
+/* 5.8 Control. */
+bool infile_tentative_struct_addr(void) _ensures(return == true) {
+  struct ms *p = &m_tentative_struct;
+  return p == &m_tentative_struct;
 }
