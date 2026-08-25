@@ -2548,9 +2548,11 @@ impl<'a> Emitter<'a> {
                         TypeT::Pointer(_, PointerKind::Core) if **val == BigInt::ZERO => {
                             Doc::text("core_null")
                         }
-                        TypeT::FnPtr { .. } if **val == BigInt::ZERO => {
-                            Doc::text("Pulse.Lib.C.FuncPtr.null _ _")
-                        }
+                        TypeT::FnPtr { .. } if **val == BigInt::ZERO => naryfn([
+                            Doc::text("Pulse.Lib.C.FuncPtr.null"),
+                            Doc::text("_"),
+                            Doc::text("_"),
+                        ]),
                         _ => {
                             self.report(
                                 format!("unsupported integer literal type for {}", val),
@@ -2853,7 +2855,11 @@ impl<'a> Emitter<'a> {
                             }
                         }
                         (_, TypeT::FnPtr { .. }) if matches!(&val.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) => {
-                            Doc::text("Pulse.Lib.C.FuncPtr.null _ _")
+                            naryfn([
+                                Doc::text("Pulse.Lib.C.FuncPtr.null"),
+                                Doc::text("_"),
+                                Doc::text("_"),
+                            ])
                         }
                         // (TypeT::Pointer { to:t1, kind:k1 }, TypeT::Pointer { to:t2, kind:k2 }) if t1 == t2 => todo!(),
                         // (TypeT::Pointer { to, kind }, TypeT::SLProp) => todo!(),
