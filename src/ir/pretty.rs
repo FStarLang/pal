@@ -863,6 +863,11 @@ impl PrettyIR for GlobalVar {
         } else {
             RcDoc::nil()
         };
+        let prefix = if self.is_extern {
+            prefix.append(RcDoc::text("extern "))
+        } else {
+            prefix
+        };
         let init = match &self.init {
             Some(e) => RcDoc::text(" = ").append(e.to_doc()),
             None => RcDoc::nil(),

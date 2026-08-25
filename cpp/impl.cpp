@@ -2620,12 +2620,19 @@ public:
                            findFnProtoTypeLoc(VD->getTypeSourceInfo()));
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
                                    : OptExpr::None();
-      // A tentative definition (no initializer, no storage-class specifier)
-      // defines the object and is initialized as if by 0 (C17 6.9.2p2), so it
-      // is pure; only a `DeclarationOnly` (e.g. `extern`) is not.
-      bool is_pure =
-          VD->getType().isConstQualified() &&
-          VD->isThisDeclarationADefinition(*astCtx) != VarDecl::DeclarationOnly;
+      // Purity is immutability, which is a property of the type alone. Whether
+      // the value is *known here* is a separate question, answered by `init`
+      // and `is_extern` below.
+      bool is_pure = VD->getType().isConstQualified();
+      // Whether the object is defined in another translation unit. Asked of
+      // the whole redeclaration chain in this one, so an `extern` declaration
+      // that this file also defines is not external. This is what separates
+      // `extern const T g;`, whose value is unknown, from the tentative
+      // definition `const T g;`, which is initialized as if by 0 (C17
+      // 6.9.2p2); neither carries an initializer. Files that only declare the
+      // object report it as external, and `merge` combines that with the file
+      // that defines it, if the build has one.
+      bool is_extern = VD->hasDefinition(*astCtx) == VarDecl::DeclarationOnly;
       bool opaque_to_smt = false;
       for (auto attr : VD->getAttrs()) {
         if (auto ann = dyn_cast<AnnotateAttr>(attr);
@@ -2640,7 +2647,8 @@ public:
         }
       }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
-                                std::move(init), is_pure, opaque_to_smt,
+                                std::move(init), is_pure, is_extern,
+                                opaque_to_smt,
                                 /*is_enum_constant=*/false);
     } else if (auto *ED = dyn_cast<EnumDecl>(D)) {
       // Enum declarations need no IR representation of their own; Clang inlines
@@ -2668,6 +2676,9 @@ public:
         ctx.add_global_var(std::move(ecdLoc), std::move(ecdId),
                            std::move(ecdTy), OptExpr::Some(std::move(lit)),
                            /*is_pure=*/true,
+                           // An enumerator is defined right here, never in
+                           // another translation unit.
+                           /*is_extern=*/false,
                            /*opaque_to_smt=*/false,
                            /*is_enum_constant=*/true);
       }

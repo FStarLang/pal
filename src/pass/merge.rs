@@ -302,11 +302,13 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         // last (most complete) occurrence.
         for &(src, dst) in &moves {
             let later = tu.decls[src].clone();
-            // A global's value and purity belong to the object, not to any one
-            // of its declarations, so "last wins" would discard information the
-            // earlier declaration carried: in `const T g = 1; const T g;` the
-            // later declaration has no initializer. Merge field-wise instead,
-            // which also makes the two declaration orderings agree.
+            // A global's value, purity and externness belong to the object, not
+            // to any one of its declarations, so "last wins" would discard
+            // information an earlier declaration carried: in
+            // `const T g = 1; const T g;` the later declaration has no
+            // initializer, and a file that only sees `extern T g;` says nothing
+            // about the value another file defines. Merge field-wise instead,
+            // which also makes the declaration orderings agree.
             if let DeclT::GlobalVar(later_gv) = &later.val
                 && let DeclT::GlobalVar(earlier_gv) = &tu.decls[dst].val
             {
@@ -320,11 +322,19 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     ty: later_gv.ty.clone(),
                     init: later_gv.init.clone().or_else(|| earlier_gv.init.clone()),
                     is_pure: earlier_gv.is_pure || later_gv.is_pure,
+                    // The object is external only if *no* file in this build
+                    // defines it: one file seeing only an `extern` declaration
+                    // does not make it external when another defines it.
+                    is_extern: earlier_gv.is_extern && later_gv.is_extern,
                     opaque_to_smt: earlier_gv.opaque_to_smt || later_gv.opaque_to_smt,
                     is_enum_constant: later_gv.is_enum_constant,
                 };
-                // Point at whichever declaration defines the object.
-                let loc = if later_gv.init.is_none() && earlier_gv.init.is_some() {
+                // Point at whichever declaration says most about the object:
+                // the one carrying the initializer, else one that defines it.
+                let loc = if later_gv.init.is_some() {
+                    later.loc.clone()
+                } else if earlier_gv.init.is_some() || (later_gv.is_extern && !earlier_gv.is_extern)
+                {
                     tu.decls[dst].loc.clone()
                 } else {
                     later.loc.clone()

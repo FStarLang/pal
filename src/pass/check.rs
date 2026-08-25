@@ -866,6 +866,7 @@ impl<'a> Checker<'a> {
                 ty,
                 init,
                 is_pure: _,
+                is_extern: _,
                 opaque_to_smt: _,
                 is_enum_constant: _,
             }) => {

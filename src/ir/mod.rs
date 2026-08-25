@@ -781,7 +781,15 @@ pub struct GlobalVar {
     pub name: Rc<Ident>,
     pub ty: Rc<Type>,
     pub init: Option<Rc<Expr>>,
+    /// Whether the object is immutable: `const`, or annotated `_pure`. This is
+    /// about mutability alone; whether its value is *known here* is `init` and
+    /// `is_extern`.
     pub is_pure: bool,
+    /// Whether the object is defined in another translation unit, so that no
+    /// file in this build supplies its value. Distinguishes `extern const T g;`
+    /// from the tentative definition `const T g;`, which are otherwise alike in
+    /// having no initializer but differ in value: unknown versus 0.
+    pub is_extern: bool,
     pub opaque_to_smt: bool,
     /// An enumerator published so a contract can name it. C calls these
     /// *constants*, not objects: an enumerator has no storage and `&Color_Red`

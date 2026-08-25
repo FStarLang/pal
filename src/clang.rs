@@ -176,6 +176,7 @@ impl<'a> Ctx<'a> {
         ty: Rc<Type>,
         init: Option<Rc<Expr>>,
         is_pure: bool,
+        is_extern: bool,
         opaque_to_smt: bool,
         is_enum_constant: bool,
     ) {
@@ -186,6 +187,7 @@ impl<'a> Ctx<'a> {
                 ty,
                 init,
                 is_pure,
+                is_extern,
                 opaque_to_smt,
                 is_enum_constant,
             }),
