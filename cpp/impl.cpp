@@ -697,6 +697,50 @@ public:
                          trQualType(e->getType(), e->getSourceRange()));
   }
 
+  // C11 6.7.9p21: elements of an aggregate that the initializer list does not
+  // reach are initialized as objects with static storage duration, i.e. to
+  // zero. Build that zero value for `qt`, so a partial array initializer can be
+  // padded out to the array's declared length.
+  Rc<ir::Expr> trZeroInit(QualType qt, SourceRange range,
+                          Rc<ir::SourceInfo> loc) {
+    auto desugared = qt.getDesugaredType(*astCtx);
+    if (auto *cat = dyn_cast<ConstantArrayType>(desugared.getTypePtr())) {
+      auto elemTy = trQualType(cat->getElementType(), range);
+      auto elems = Vec<Rc<ir::Expr>>::new_();
+      uint64_t n = cat->getSize().getLimitedValue();
+      for (uint64_t i = 0; i < n; ++i)
+        elems.push(trZeroInit(cat->getElementType(), range, loc.clone()));
+      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
+                           false);
+    }
+    if (auto *rec = dyn_cast<RecordType>(desugared.getTypePtr())) {
+      auto *decl = rec->getDecl();
+      auto it = structNames.find(recordKey(decl));
+      if (it != structNames.end() &&
+          decl->getTagKind() == TagTypeKind::Struct) {
+        // An empty field list means "every field takes its type's default",
+        // which is what emission already does for fields omitted from a
+        // designated initializer.
+        auto structName = ctx.mk_ident(toStr(it->second), loc.clone());
+        return StructInitBuilder::new_(loc.clone(), std::move(structName))
+            .build();
+      }
+      reportUnsupported(range, loc, "unsupported zero initializer for type ",
+                        qt.getAsString().c_str());
+      return mk_rvalue_err(std::move(loc), trQualType(qt, range));
+    }
+    if (desugared->isScalarType()) {
+      // Covers integers, enums, floating point, booleans and pointers; a null
+      // pointer constant is a zero literal of the pointer's type, which is how
+      // `isNull` casts are already translated.
+      return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
+                        trQualType(qt, range));
+    }
+    reportUnsupported(range, loc, "unsupported zero initializer for type ",
+                      qt.getAsString().c_str());
+    return mk_rvalue_err(std::move(loc), trQualType(qt, range));
+  }
+
   Rc<ir::Expr> trInitList(InitListExpr *init, SourceRange range,
                           Rc<ir::SourceInfo> loc) {
     auto qt = init->getType().getDesugaredType(*astCtx);
@@ -704,11 +748,43 @@ public:
     if (auto *cat = dyn_cast<ConstantArrayType>(qt.getTypePtr())) {
       auto elemTy = trQualType(cat->getElementType(), range);
       auto elems = Vec<Rc<ir::Expr>>::new_();
-      for (unsigned i = 0; i < init->getNumInits(); ++i) {
+      unsigned given = init->getNumInits();
+      for (unsigned i = 0; i < given; ++i) {
         elems.push(trRValue(init->getInit(i)));
+      }
+      // An initializer list may be shorter than the array; the array's length
+      // comes from its type, not from the list. Pad the tail with the filler
+      // Clang recorded, or with zeroes when that filler is the implicit one.
+      // Without this the array literal takes the length of the list and the
+      // result no longer has the array's type.
+      uint64_t declared = cat->getSize().getLimitedValue();
+      Expr *filler = init->getArrayFiller();
+      for (uint64_t i = given; i < declared; ++i) {
+        if (filler && !isa<ImplicitValueInitExpr>(filler))
+          elems.push(trRValue(filler));
+        else
+          elems.push(trZeroInit(cat->getElementType(), range, getRange(range)));
       }
       return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
                            false);
+    }
+    // A braced initializer for a scalar object: C permits `int x = {0}` and
+    // `T x = {}`, and BOSS reaches it through typedefs whose definition on one
+    // platform is a struct and on another a plain integer -- `SNAP_LE_UINT32`
+    // and `SNAP_CRC64` are both. The list holds at most one element, and it
+    // initializes the object directly.
+    if (qt->isScalarType()) {
+      if (init->getNumInits() == 0) {
+        return trZeroInit(init->getType(), range, std::move(loc));
+      }
+      if (init->getNumInits() == 1) {
+        return trRValue(init->getInit(0));
+      }
+      reportUnsupported(range, loc,
+                        "initializer list for a scalar type has more than one "
+                        "element",
+                        "");
+      return mk_rvalue_err(std::move(loc), trQualType(init->getType(), range));
     }
     auto *rec = dyn_cast<RecordType>(qt.getTypePtr());
     if (!rec) {
