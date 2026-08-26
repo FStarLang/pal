@@ -132,7 +132,8 @@ artifact.
 
 Comment `!diff` on a pull request to regenerate the report on demand; the
 "PR Output Diff" workflow can also be started manually from the Actions tab
-for any pull request number.
+for any pull request number. On-demand reports take a few minutes, since the
+command waits for the run it started before posting.
 
 The workflows live in [`.github/workflows/`](.github/workflows):
 `pr-output-diff.yml` builds both revisions and computes the diff (via

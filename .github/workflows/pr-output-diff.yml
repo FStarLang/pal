@@ -18,6 +18,9 @@ on:
         required: true
         type: string
 
+# Also used by the `!diff` command to find the run it just dispatched.
+run-name: "Output diff for pull request #${{ github.event.pull_request.number || inputs.pr }}"
+
 permissions:
   contents: read
   pull-requests: read

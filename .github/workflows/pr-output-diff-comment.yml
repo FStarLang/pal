@@ -3,11 +3,22 @@ name: PR Output Diff Comment
 # Posts the report produced by the "PR Output Diff" workflow as a comment on
 # the pull request. This runs from the default branch (never from pull request
 # code), which is what allows it to hold write permissions safely.
+#
+# GitHub suppresses `workflow_run` events for runs that were started with the
+# GITHUB_TOKEN, so reports requested through the `!diff` command never reach
+# the trigger below. The "PR Output Diff Command" workflow therefore calls this
+# workflow directly instead.
 
 on:
   workflow_run:
     workflows: ["PR Output Diff"]
     types: [completed]
+  workflow_call:
+    inputs:
+      run_id:
+        description: "The PR Output Diff run holding the report to post"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -16,19 +27,20 @@ permissions:
 
 jobs:
   comment:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: inputs.run_id != '' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     env:
       # Publishing to a gist requires a token with the `gist` scope, which the
       # built-in GITHUB_TOKEN does not have. If the secret is not configured we
       # simply link to the workflow artifact instead.
       HAS_GIST_TOKEN: ${{ secrets.PAL_GIST_TOKEN != '' }}
+      RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
     steps:
       - name: Download report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh run download '${{ github.event.workflow_run.id }}' \
+          gh run download "$RUN_ID" \
             -R '${{ github.repository }}' \
             -n pal-output-diff -D report
 
@@ -43,14 +55,13 @@ jobs:
             exit 0
           fi
           url=$(gh gist create report/output.diff \
-            --desc "pal generated output diff (run ${{ github.event.workflow_run.id }})")
+            --desc "pal generated output diff (run $RUN_ID)")
           echo "url=$url" >>"$GITHUB_OUTPUT"
 
       - name: Post comment
         uses: actions/github-script@v7
         env:
           GIST_URL: ${{ steps.gist.outputs.url }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
         with:
           script: |
             const fs = require('fs');
