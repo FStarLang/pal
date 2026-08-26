@@ -221,13 +221,18 @@ fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} 
   ensures freeable_array r
   ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SZ.v sz) zero_default)
 
-// Fill every cell of a fully-initialized array with `v` (C `memset`).
+// Fill every cell of an array with `v` (C `memset`).
 // Only byte-sized element types are translated to this (the transpiler rejects
 // multi-byte element types), so an element-wise fill matches C's byte-wise
-// semantics. The array must already be fully masked and initialized: array
-// function parameters satisfy this (`array_pts_to_full`).
+// semantics.
+//
+// The array must be owned over its whole extent -- `array_spec_full_mask` --
+// but need not already hold values. Zeroing storage that has not been written
+// yet is what a `Reserved` member of a structure under construction needs, and
+// requiring initialization there would be requiring the caller to write the
+// bytes twice. Every cell is overwritten, so nothing uninitialized is read.
 fn memset (#t: Type0) (a: array t) (v: t) (n: SZ.t)
-  (#s: erased (array_spec t) { array_spec_full s /\ array_spec_len s == SZ.v n })
+  (#s: erased (array_spec t) { array_spec_full_mask s /\ array_spec_len s == SZ.v n })
   requires array_pts_to a 1.0R s
   ensures array_pts_to_full a 1.0R (array_spec_zeroed t (SZ.v n) v)
 

@@ -1399,7 +1399,31 @@ public:
         //   * memset(ptr, 0, sizeof(T) * n)  — zero an array of byte-sized
         //     element type (e.g. uint8_t, char).
         // Non-zero fill values are rejected with a clear diagnostic.
-        if (fd->getName() == "memset" && c->getNumArgs() == 3) {
+        // A platform's zeroing wrapper is the memset intrinsic under another
+        // name and a shorter argument list: `zero_memory(ptr, size)`,
+        // `RtlZeroMemory(ptr, size)`, `bzero(ptr, size)`. Declaring it
+        // `_memset_zero` routes it through the same recognizer, with the fill
+        // value supplied rather than read from the call. Without this the
+        // wrapper translates to an uninterpreted stub, which silently makes
+        // every postcondition about the zeroed object vacuous.
+        bool isMemsetAlias = false;
+        for (auto *attr : fd->attrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+              ann && ann->getAnnotation() == "pal-memset-zero" &&
+              ann->args_size() == 0) {
+            isMemsetAlias = true;
+          }
+        }
+        if (isMemsetAlias && c->getNumArgs() != 2) {
+          reportUnsupported(e->getSourceRange(), loc,
+                            "a _memset_zero function must take exactly two "
+                            "arguments (destination, size); ",
+                            fd->getName().str());
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(c->getType(), c->getSourceRange()));
+        }
+        if ((fd->getName() == "memset" && c->getNumArgs() == 3) ||
+            isMemsetAlias) {
           auto *ptrArg = c->getArg(0);
           // Strip implicit void* cast
           if (auto *ic = dyn_cast<ImplicitCastExpr>(ptrArg)) {
@@ -1407,11 +1431,13 @@ public:
               ptrArg = ic->getSubExpr();
             }
           }
-          auto *valArg = c->getArg(1);
-          auto *sizeArg = c->getArg(2)->IgnoreParenImpCasts();
+          auto *valArg = isMemsetAlias ? nullptr : c->getArg(1);
+          auto *sizeArg =
+              c->getArg(isMemsetAlias ? 1 : 2)->IgnoreParenImpCasts();
           Expr::EvalResult valRes;
-          bool valIsZero = valArg->EvaluateAsInt(valRes, *astCtx) &&
-                           valRes.Val.isInt() && valRes.Val.getInt() == 0;
+          bool valIsZero =
+              isMemsetAlias || (valArg->EvaluateAsInt(valRes, *astCtx) &&
+                                valRes.Val.isInt() && valRes.Val.getInt() == 0);
           if (!valIsZero) {
             reportUnsupported(e->getSourceRange(), loc,
                               "memset is only supported with a zero fill value",
@@ -1435,6 +1461,58 @@ public:
                                       trRValue(ptrArg));
               }
             }
+          }
+          // Zeroing a whole array: `f(arr, N)` where `arr` is an array-typed
+          // lvalue that decays to the pointer argument and `N` is its size in
+          // bytes. The extent lives in the array's own type, so nothing has to
+          // be inferred from the way the count was spelled: `sizeof(s->field)`
+          // and a literal are both accepted, and both are checked against the
+          // type rather than trusted. This is the shape a platform zeroing
+          // wrapper takes on a fixed-size trailing `Reserved` member, which
+          // `memset(ptr, 0, sizeof(T) * n)` below cannot express because a
+          // wrapper taking `void *` has no element type to name.
+          {
+            auto *destObj = c->getArg(0)->IgnoreParenImpCasts();
+            auto destQt = destObj->getType();
+            if (const auto *arrTy = astCtx->getAsConstantArrayType(destQt)) {
+              auto elemQt = arrTy->getElementType();
+              Expr::EvalResult szRes;
+              const bool byteSized =
+                  !elemQt->isIncompleteType() && !elemQt->isDependentType() &&
+                  astCtx->getTypeSizeInChars(elemQt).getQuantity() == 1;
+              const auto arrBytes =
+                  astCtx->getTypeSizeInChars(destQt).getQuantity();
+              if (byteSized && sizeArg->EvaluateAsInt(szRes, *astCtx) &&
+                  szRes.Val.isInt() && szRes.Val.getInt() == arrBytes) {
+                auto elemTy = trQualType(elemQt, destObj->getSourceRange());
+                llvm::SmallString<20> countStr;
+                llvm::APInt(64, arrBytes, true).toStringSigned(countStr);
+                auto countExpr = mk_int_lit(
+                    loc.clone(), mk_bigint(toStr(StringRef(countStr))),
+                    trQualType(astCtx->getSizeType(), e->getSourceRange()));
+                auto zeroExpr =
+                    mk_int_lit(loc.clone(), mk_bigint("0"_rs),
+                               trQualType(elemQt, destObj->getSourceRange()));
+                return mk_memset(std::move(loc), std::move(elemTy),
+                                 trRValue(ptrArg), std::move(zeroExpr),
+                                 std::move(countExpr));
+              }
+            }
+          }
+          // The array shape below reads the fill value out of the call, which
+          // an alias does not carry, and a wrapper taking `void *` cannot name
+          // a byte-sized element type anyway. Rejecting it here keeps an
+          // unrecognized alias call from falling through to an uninterpreted
+          // stub.
+          if (isMemsetAlias) {
+            reportUnsupported(
+                e->getSourceRange(), loc,
+                "a _memset_zero call is only supported in the form "
+                "f(ptr, sizeof(*ptr)) or f(arr, sizeof(arr)) for a "
+                "fixed-size array of a byte-sized element type; ",
+                fd->getName().str());
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
           }
           if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
             if (binOp->getOpcode() == BO_Mul) {
@@ -2650,6 +2728,26 @@ public:
                           "internal error: invalid _type encoding"_rs);
         }
         return {};
+      }
+
+      // A `_memset_zero` wrapper is an intrinsic, not a function: every call
+      // to it is rewritten to a whole-object zeroing, so emitting a module for
+      // it would only add an uninterpreted stub that nothing calls. A
+      // definition still translates normally -- the marker only claims what
+      // calls mean, and a body present in this translation unit is code to be
+      // verified like any other.
+      {
+        bool memsetZero = false;
+        for (auto *attr : FD->getAttrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+              ann && ann->getAnnotation() == "pal-memset-zero" &&
+              ann->args_size() == 0) {
+            memsetZero = true;
+          }
+        }
+        if (memsetZero && !FD->hasBody()) {
+          return {};
+        }
       }
 
       // Regular function decl
