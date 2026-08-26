@@ -41,6 +41,8 @@ void init_from_braces(void) {
    the declared length, so every cell is written and the length is 8, not 3. */
 void init_shorter_string(void) {
     char buf[8] = "lo";
+    _assert(buf[0] == 'l');
+    _assert(buf[5] == '\0');
     write(buf, 8);
 }
 
