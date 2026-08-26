@@ -130,7 +130,9 @@ of the output `pal` generates for the whole test suite, base versus head. The
 full diff is also attached to the workflow run as the `pal-output-diff`
 artifact.
 
-Comment `!diff` on a pull request to regenerate the report on demand.
+Comment `!diff` on a pull request to regenerate the report on demand; the
+"PR Output Diff" workflow can also be started manually from the Actions tab
+for any pull request number.
 
 The workflows live in [`.github/workflows/`](.github/workflows):
 `pr-output-diff.yml` builds both revisions and computes the diff (via
