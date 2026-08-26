@@ -1,0 +1,92 @@
+name: PR Output Diff
+
+# Generates a diff of the F* code that `pal` produces for the test suite, as
+# of the base of the pull request versus as of its head. The diff is uploaded
+# as an artifact; the "PR Output Diff Comment" workflow picks it up and posts
+# it to the pull request.
+#
+# This workflow runs with untrusted pull request code and therefore has no
+# write permissions and no access to secrets.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-output-diff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Share a target directory between the base and head builds so that the
+  # dependencies are only compiled once.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out head
+        uses: actions/checkout@v4
+        with:
+          path: head
+          fetch-depth: 0
+
+      - name: Check out base
+        run: |
+          cd head
+          git fetch --no-tags origin '${{ github.event.pull_request.base.sha }}' || true
+          git worktree add --detach ../base '${{ github.event.pull_request.base.sha }}'
+
+      - name: Install clang
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          sudo apt update
+          sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.CARGO_TARGET_DIR }}
+          key: pr-output-diff-${{ runner.os }}-${{ hashFiles('head/Cargo.lock') }}
+          restore-keys: pr-output-diff-${{ runner.os }}-
+
+      - name: Snapshot base output
+        run: head/.github/scripts/pal-snapshot.sh base snapshots/base
+
+      - name: Snapshot head output
+        run: head/.github/scripts/pal-snapshot.sh head snapshots/head
+
+      - name: Compute diff
+        run: |
+          mkdir -p report
+          cd snapshots
+          git -c core.pager=cat diff --no-index --no-color --no-prefix \
+            -- base head >../report/output.diff || true
+          git -c core.pager=cat diff --no-index --no-color --no-prefix --stat=200,180 \
+            -- base head >../report/output.stat || true
+
+      - name: Record pull request metadata
+        run: |
+          cat >report/metadata.json <<EOF
+          {
+            "pr": ${{ github.event.pull_request.number }},
+            "base_sha": "${{ github.event.pull_request.base.sha }}",
+            "head_sha": "${{ github.event.pull_request.head.sha }}"
+          }
+          EOF
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pal-output-diff
+          path: report/
+          retention-days: 14
