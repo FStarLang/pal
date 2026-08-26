@@ -262,6 +262,25 @@ fn array_update u#a (#t #s: Type u#a) (a: array t) (i: SZ.t) (upd: (t -> s -> t)
   ensures exists* sp'. array_pts_to a 1.0R sp' **
     pure (sp' == array_spec_upd sp (SZ.v i) (upd (array_spec_idx sp (SZ.v i)) y))
 
+// Write every cell of `s` into `a`, one `array_write` per element. Used to
+// initialize a local array from an initializer list or string literal.
+//
+// The array must already be fully masked -- wholly owned, which is what
+// `stack_alloc_array` hands back -- but its cells need not be initialized:
+// `array_write` requires only `array_spec_mask`, not `array_spec_initd`.
+// Writing every cell is precisely what promotes the result to
+// `array_pts_to_full`.
+//
+// Unlike the rest of this interface this is `Type0` rather than `u#a`: it is
+// implemented by recursion over the element list, and `fn rec` does not support
+// universe polymorphism. Every element type PAL can produce is a C type, hence
+// `Type0`, so this costs nothing in practice.
+fn array_multiple_writes (#t: Type0) (a: array t) (n: SZ.t)
+  (s: full_array_lspec t (SZ.v n))
+  (#s0: erased (array_spec t) { array_spec_full_mask s0 /\ array_spec_len s0 == SZ.v n })
+  requires array_pts_to a 1.0R s0
+  ensures array_pts_to_full a 1.0R s
+
 // ---------------------------------------------------------------------------
 // ArrayPtr: pointers into arrays (zero-length sub-arrays sharing a base)
 //

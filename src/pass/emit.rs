@@ -340,6 +340,15 @@ fn nary_no_parens<T: IntoIterator<Item = Doc>>(args: T) -> Doc {
     Doc::intersperse(args.into_iter(), Doc::space())
 }
 
+/// The array literal inside `e`, looking through a cast if there is one.
+fn array_literal_init(e: &Rc<Expr>) -> Option<&Rc<Expr>> {
+    match &e.val {
+        ExprT::ArrayInit { .. } => Some(e),
+        ExprT::Cast(inner, _) if matches!(inner.val, ExprT::ArrayInit { .. }) => Some(inner),
+        _ => None,
+    }
+}
+
 // Many F* functions encode their specifications as refinements in the return type.
 // This breaks type inference in interesting ways, so we wrap it in `id #desired_type ...`.
 // Note: `(... <: desired_type)` doesn't work as well since it is normalized somewhere.
@@ -4040,6 +4049,41 @@ impl<'a> Emitter<'a> {
                         .append(redecl)
                 }
                 StmtT::Assign(x, t) => {
+                    // Assigning an array literal to an array must write the
+                    // literal's elements into the array. Falling through to the
+                    // generic store would instead put the literal's `array_spec`
+                    // — a description of contents — into the slot holding the
+                    // `array` handle. C arrays are not assignable, so this only
+                    // ever arises from a declaration's initializer, which is
+                    // lowered to a separate `Assign`.
+                    if let Some(init) = array_literal_init(t)
+                        && let ExprT::ArrayInit { elems, .. } = &init.val
+                        && let Some(length) = env
+                            .infer_expr(x)
+                            .ok()
+                            .map(|ty| env.vtype_whnf(ty))
+                            .and_then(|ty| match ty.val {
+                                TypeT::FixedArray(_, length) => Some(length),
+                                _ => None,
+                            })
+                        // A partial initializer would leave cells the spec does
+                        // not describe, so leave it to the generic path.
+                        && elems.len() as u64 == length
+                    {
+                        let arr_doc = match self.emit_expr(env, x) {
+                            ExprKind::ArrayLValue(arr_doc) => arr_doc,
+                            arr_doc => arr_doc.to_rvalue(),
+                        };
+                        return naryfn([
+                            Doc::text("array_multiple_writes"),
+                            arr_doc,
+                            Doc::text(format!("{}sz", length)),
+                            self.emit_rvalue(env, init),
+                        ])
+                        .append(";")
+                        .nest(2)
+                        .group();
+                    }
                     // Function-pointer store (`fp = add`, `fp = other`, `fp = 0`,
                     // ...) needs no special handling: the ref keeps ordinary
                     // `pts_to` ownership. A concrete `fp = add` stores the

@@ -359,6 +359,49 @@ fn array_update u#a (#t #s: Type u#a) (a: array t) (i: SZ.t) (upd: (t -> s -> t)
   array_write a i (upd v y);
 }
 
+// Fill `a` from index `i` onward with the elements of `l`, one `array_write`
+// per element; cells below `i` are left alone.
+//
+// The recursion is on the list rather than on an index because an indexed loop
+// would have to write `List.Tot.index l (SZ.v i)`, and `SZ.v` is `GTot` -- that
+// element would be ghost, leaving no runtime value to store.
+fn rec array_write_list (#t: Type0) (a: array t) (i: SZ.t) (l: list t)
+  (#s: erased (array_spec t))
+  requires array_pts_to a 1.0R s **
+    pure (array_spec_full_mask s /\ SZ.fits (array_spec_len s) /\
+          SZ.v i + List.Tot.length l == array_spec_len s)
+  ensures exists* s'. array_pts_to a 1.0R s' **
+    pure (array_spec_len s' == array_spec_len s /\
+          array_spec_full_mask s' /\
+          (forall (k:nat). k < SZ.v i ==>
+            (array_spec_initd s' k <==> array_spec_initd s k) /\
+            (array_spec_initd s k ==> array_spec_idx s' k == array_spec_idx s k)) /\
+          (forall (k:nat). SZ.v i <= k /\ k < SZ.v i + List.Tot.length l ==>
+            array_spec_initd s' k /\
+            array_spec_idx s' k == List.Tot.index l (k - SZ.v i)))
+  decreases l
+{
+  match l {
+    Nil -> { () }
+    Cons hd tl -> {
+      array_write a i hd;
+      array_write_list a (SZ.add i 1sz) tl;
+    }
+  }
+}
+
+fn array_multiple_writes (#t: Type0) (a: array t) (n: SZ.t)
+  (s: full_array_lspec t (SZ.v n))
+  (#s0: erased (array_spec t) { array_spec_full_mask s0 /\ array_spec_len s0 == SZ.v n })
+  requires array_pts_to a 1.0R s0
+  ensures array_pts_to_full a 1.0R s
+{
+  array_write_list a 0sz (array_spec_to_list s);
+  with s'. assert (array_pts_to a 1.0R s');
+  array_spec_ext s' s;
+  rewrite (array_pts_to a 1.0R s') as (array_pts_to a 1.0R s);
+}
+
 let length #t (a: array t) : GTot nat = A.length a
 let base_of #t (a: array t) : base_t = A.base_of a
 let offset_of #t (a: array t) : GTot nat = A.offset_of a
