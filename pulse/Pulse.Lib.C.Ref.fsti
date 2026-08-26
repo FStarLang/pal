@@ -102,9 +102,7 @@ ensures r |->? Frac p (Some x)
   introduce exists* v. (r |-> Frac p v) ** pure (Some x == Some v)
   with x;
   rewrite (exists* (v:a). (r |-> Frac p v) ** pure (Some x == Some v)) as (maybe_pts_to r #p (Some x));
-  rewrite (maybe_pts_to r #p (Some x)) as (maybe_pts_to r #(1.0R *. p) (Some x));
-  fold (pts_to_nullable_pts_to a).pts_to_nullable r #(1.0R *. p) (Some x);
-  rewrite ((pts_to_nullable_pts_to a).pts_to_nullable r #(1.0R *. p) (Some x)) as (r |->? Frac p (Some x));
+  rewrite (maybe_pts_to r #p (Some x)) as (r |->? Frac p (Some x));
 }
 
 ghost
@@ -113,9 +111,7 @@ requires pure (is_null r)
 ensures r |->? Frac p None
 {
   rewrite (pure (None #a == None #a)) as (maybe_pts_to r #p None);
-  rewrite (maybe_pts_to r #p None) as (maybe_pts_to r #(1.0R *. p) None);
-  fold (pts_to_nullable_pts_to a).pts_to_nullable r #(1.0R *. p) None;
-  rewrite ((pts_to_nullable_pts_to a).pts_to_nullable r #(1.0R *. p) None) as (r |->? Frac p None);
+  rewrite (maybe_pts_to r #p None) as (r |->? Frac p None);
 }
 
 
