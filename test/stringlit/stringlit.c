@@ -33,6 +33,7 @@ void init_from_string(void) {
    through an int32->int8 cast rather than directly, so it is covered too. */
 void init_from_braces(void) {
     char buf[3] = {'o', 'k', '\0'};
+    _assert(buf[0] == 'o');
     write(buf, 3);
 }
 
