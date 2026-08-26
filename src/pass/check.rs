@@ -304,7 +304,7 @@ impl<'a> Checker<'a> {
             }
             ExprT::Ref(lval) => {
                 self.check_rvalue(env, lval);
-                if !env.is_lvalue(lval) {
+                if !env.is_addressable(lval) {
                     self.report(format!("expected lvalue for &, got {}", lval), &rval.loc);
                 }
             }
@@ -814,8 +814,12 @@ impl<'a> Checker<'a> {
                 is_pointer_view: _,
             }) => self.check_type(env, body),
             DeclT::StructDefn(StructDefn {
-                name: _, fields, ..
+                name: _,
+                refines,
+                fields,
+                ..
             }) => {
+                self.check_type(env, refines);
                 for f in fields {
                     self.check_field(env, f, fields);
                 }
@@ -862,7 +866,9 @@ impl<'a> Checker<'a> {
                 ty,
                 init,
                 is_pure: _,
+                is_extern: _,
                 opaque_to_smt: _,
+                is_enum_constant: _,
             }) => {
                 self.check_type(env, ty);
                 if let Some(init) = init {

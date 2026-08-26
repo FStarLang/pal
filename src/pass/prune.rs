@@ -154,7 +154,16 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
 
 fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
     match &rv.val {
-        ExprT::Var(_) => {}
+        // Keeps a global of this name alive: without this edge a global
+        // declared in a header is unreachable from the main-file roots and
+        // gets pruned, leaving `&g` with no addressable global to emit.
+        //
+        // Prune runs before elab, so a `Var` carries no scope information and
+        // a local cannot be told apart from a global. The edge is therefore
+        // unconditional; it can only over-retain, never under-retain.
+        ExprT::Var(n) => {
+            deps.insert(DeclName::GlobalVar(n.val.clone()));
+        }
         ExprT::Deref(v) => scan_expr(deps, v),
         ExprT::Member(x, _a) => scan_expr(deps, x),
         ExprT::VAttr(_, x) => scan_expr(deps, x),
@@ -413,10 +422,12 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
             }) => scan_type(deps.deps_for(n), body),
             DeclT::StructDefn(StructDefn {
                 name: _,
+                refines,
                 fields,
                 eager_unfold_pred: _,
             }) => {
                 let ds = deps.deps_for(n);
+                scan_type(ds, refines);
                 for f in fields {
                     scan_field(ds, f);
                 }
@@ -453,7 +464,9 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 ty,
                 init,
                 is_pure: _,
+                is_extern: _,
                 opaque_to_smt: _,
+                is_enum_constant: _,
             }) => {
                 let ds = deps.deps_for(n);
                 scan_type(ds, ty);

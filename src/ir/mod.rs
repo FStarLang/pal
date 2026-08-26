@@ -1,5 +1,6 @@
 use num_bigint::BigInt;
 use std::fmt::{Debug, Display};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 pub mod pretty;
 
@@ -82,10 +83,28 @@ impl Debug for SourceInfo {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(Clone)]
 pub struct Ast<T> {
     pub val: T,
     pub loc: Rc<SourceInfo>,
+}
+
+// `loc` is provenance, not identity: two nodes with the same `val` denote the
+// same thing however they were written. Deriving these would compare `loc` at
+// every level of the tree, so two specs that are identical apart from where
+// they were written would never compare equal. `Hash` must agree with `Eq`.
+impl<T: PartialEq> PartialEq for Ast<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.val == other.val
+    }
+}
+
+impl<T: Eq> Eq for Ast<T> {}
+
+impl<T: Hash> Hash for Ast<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.val.hash(state);
+    }
 }
 
 impl<T> Ast<T> {
@@ -454,6 +473,9 @@ pub enum StmtT {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct StructDefn {
     pub name: Rc<Ident>,
+    /// The struct's self type wrapped in declaration-level PAL attributes.
+    /// Keeping this tree on the definition lets every named use share one parse.
+    pub refines: Rc<Type>,
     pub fields: Vec<Field>,
     pub eager_unfold_pred: bool,
 }
@@ -759,8 +781,31 @@ pub struct GlobalVar {
     pub name: Rc<Ident>,
     pub ty: Rc<Type>,
     pub init: Option<Rc<Expr>>,
+    /// Whether the object is immutable: `const`, or annotated `_pure`. This is
+    /// about mutability alone; whether its value is *known here* is `init` and
+    /// `is_extern`.
     pub is_pure: bool,
+    /// Whether the object is defined in another translation unit, so that no
+    /// file in this build supplies its value. Distinguishes `extern const T g;`
+    /// from the tentative definition `const T g;`, which are otherwise alike in
+    /// having no initializer but differ in value: unknown versus 0.
+    pub is_extern: bool,
     pub opaque_to_smt: bool,
+    /// An enumerator published so a contract can name it. C calls these
+    /// *constants*, not objects: an enumerator has no storage and `&Color_Red`
+    /// is not something that can be written, so unlike a real global it gets no
+    /// address.
+    pub is_enum_constant: bool,
+}
+
+/// Whether a global is an array. Array globals are emitted as a *spec*
+/// (`full_array_lspec`) rather than storage, so they are excluded from
+/// address-of support; see `Env::addressable_global`.
+pub fn global_var_is_array(gv: &GlobalVar) -> bool {
+    matches!(
+        &gv.ty.val,
+        TypeT::FixedArray(_, _) | TypeT::FlexArray(_) | TypeT::Pointer(_, PointerKind::Array)
+    )
 }
 
 pub type Decl = Ast<DeclT>;

@@ -173,12 +173,6 @@ fn main() {
     }
 
     let t = Instant::now();
-    pass::check::check(&mut diags, &mut combined_tu, "prune", false);
-    if cli.time_passes {
-        eprintln!("  check (post-prune): {:.3}s", t.elapsed().as_secs_f64());
-    }
-
-    let t = Instant::now();
     pass::merge::merge(&mut diags, &mut combined_tu);
     if cli.time_passes {
         eprintln!(
@@ -188,8 +182,20 @@ fn main() {
         );
     }
 
+    // Scope checking waits until after `merge`, because a definition and its
+    // declaration are separate declarations until then. C lets the two name
+    // their parameters differently, and `_Use_decl_annotations_` gives the
+    // definition the declaration's annotations, so between parsing and merging
+    // a parameter refinement can legitimately mention a name the enclosing
+    // declaration does not bind. `merge` is what reconciles the two.
     let t = Instant::now();
-    pass::restructure_goto::restructure_goto(&mut combined_tu);
+    pass::check::check(&mut diags, &mut combined_tu, "merge", false);
+    if cli.time_passes {
+        eprintln!("  check (post-merge): {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
+    pass::restructure_goto::restructure_goto(&mut diags, &mut combined_tu);
     if cli.time_passes {
         eprintln!("  restructure_goto: {:.3}s", t.elapsed().as_secs_f64());
     }

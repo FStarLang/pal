@@ -62,7 +62,7 @@ it passes, the implementation satisfies the spec. More availabe at [`examples/`]
 | LLVM dev headers | 20.x | `llvm-config`, `libclang-cpp20-dev`, `libclang-20-dev` |
 | g++ | recent | builds the C++ FFI ([`cpp/impl.cpp`](cpp/impl.cpp)) |
 | Rust | 2024 edition | compiles the PAL binary |
-| F\*/Pulse | nightly 2026-07-30 | verifies generated `.fst` output |
+| F\*/Pulse | nightly 2026-08-24 | verifies generated `.fst` output |
 
 ### Setup (Ubuntu / Debian)
 
@@ -119,6 +119,29 @@ pal [OPTIONS] <FILES>...
   -q, --quiet            suppress diagnostics on stderr
       --tmpdir <DIR>     directory for intermediates
 ```
+
+---
+
+## Reviewing pull requests
+
+Changes to the translator are easiest to judge by looking at the F\* code they
+produce. Every pull request therefore gets an automatic comment showing a diff
+of the output `pal` generates for the whole test suite, base versus head. The
+full diff is also attached to the workflow run as the `pal-output-diff`
+artifact.
+
+Comment `!diff` on a pull request to regenerate the report on demand; the
+"PR Output Diff" workflow can also be started manually from the Actions tab
+for any pull request number. On-demand reports take a few minutes, since the
+command waits for the run it started before posting.
+
+The workflows live in [`.github/workflows/`](.github/workflows):
+`pr-output-diff.yml` builds both revisions and computes the diff (via
+[`.github/scripts/pal-snapshot.sh`](.github/scripts/pal-snapshot.sh)),
+`pr-output-diff-comment.yml` posts it, and `pr-output-diff-command.yml`
+handles the `!diff` command. Configure a `PAL_GIST_TOKEN` repository secret
+(a token with the `gist` scope) to additionally publish each full diff as a
+gist; without it the comment links to the artifact instead.
 
 ---
 

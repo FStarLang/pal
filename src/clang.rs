@@ -145,6 +145,7 @@ impl<'a> Ctx<'a> {
             loc: builder.loc,
             val: DeclT::StructDefn(StructDefn {
                 name: builder.name,
+                refines: builder.refines.unwrap(),
                 fields: builder.fields,
                 eager_unfold_pred: builder.eager_unfold_pred,
             }),
@@ -175,7 +176,9 @@ impl<'a> Ctx<'a> {
         ty: Rc<Type>,
         init: Option<Rc<Expr>>,
         is_pure: bool,
+        is_extern: bool,
         opaque_to_smt: bool,
+        is_enum_constant: bool,
     ) {
         self.translation_unit.decls.push(Ast {
             loc,
@@ -184,7 +187,9 @@ impl<'a> Ctx<'a> {
                 ty,
                 init,
                 is_pure,
+                is_extern,
                 opaque_to_smt,
+                is_enum_constant,
             }),
         })
     }
@@ -426,6 +431,7 @@ struct DeclBuilder {
     args: Vec<FnArg>,
     ghost_args: Vec<GhostArg>,
     fields: Vec<Field>,
+    refines: Option<Rc<Type>>,
     requires: Vec<Rc<Expr>>,
     ensures: Vec<Rc<Expr>>,
     is_pure: bool,
@@ -444,6 +450,7 @@ impl DeclBuilder {
             args: vec![],
             ghost_args: vec![],
             fields: vec![],
+            refines: None,
             requires: vec![],
             ensures: vec![],
             is_pure: false,
@@ -494,6 +501,10 @@ impl DeclBuilder {
                 width,
             },
         })
+    }
+
+    fn refines(&mut self, ty: Rc<Type>) {
+        self.refines = Some(ty);
     }
 
     fn requires(&mut self, p: Rc<Expr>) {

@@ -135,6 +135,13 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::TypeRefPredFold(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
         Name::TypeRefPredFold(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefPredFold(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefSizeofPos(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefSizeofPos(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefSizeofPos(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        // Global address names live in the global's own module.
+        Name::GlobalAddr(v) | Name::GlobalAddrNotNull(v) | Name::GlobalAcquire(v) => {
+            Some(format!("Global_{}", v))
+        }
         // Local names (Var, Val, Perm) are not cross-module references
         Name::Var(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
     }
@@ -162,6 +169,11 @@ fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
             }
             DeclT::FnDecl(fn_decl) => {
                 let m = format!("Func_{}", fn_decl.name.val);
+                let n = &fn_decl.name.val;
+                // A declaration can be address-taken too, and its wrapper lives
+                // in `Funcptr_<g>` just as above.
+                let fp = funcptr_module_name(n);
+                map.insert(Rc::from(format!("{}__fp", n)), fp);
                 map.insert(fn_decl.name.val.clone(), m);
             }
             DeclT::LetDecl(let_decl) => {
@@ -207,6 +219,10 @@ struct FnPtrSpecCore {
     wrap_name: Doc,
     callee: Doc,
     domain: Doc,
+    /// The type `c` of the wrapper's explicit `y_fp: erased c` witness
+    /// parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc);
+    /// `unit` when no parameter needs one.
+    witness_domain: Doc,
     ret_name: Doc,
     ret_ty_doc: Doc,
     projs: Vec<Doc>,
@@ -378,6 +394,14 @@ impl From<&TypeRefKind> for TypeRef {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Name {
     Var(Rc<IdentT>),
+    /// The address of a `_pure` global: an assumed `ref` naming its storage,
+    /// one per global, so distinct globals get distinct addresses.
+    GlobalAddr(Rc<IdentT>),
+    /// Proof that a global's address is non-NULL.
+    GlobalAddrNotNull(Rc<IdentT>),
+    /// Acquires *read-only* ownership of a global's storage. Called in the
+    /// prologue of every function that takes the global's address.
+    GlobalAcquire(Rc<IdentT>),
     Val(Rc<IdentT>, u32),
     Perm(Rc<IdentT>, u32),
     Fn(Rc<IdentT>),
@@ -389,6 +413,7 @@ enum Name {
     TypeRefSpecField(TypeRef, String),
     TypeRefPredUnfold(TypeRef),
     TypeRefPredFold(TypeRef),
+    TypeRefSizeofPos(TypeRef),
 
     StructFieldProj(Rc<IdentT>, Rc<IdentT>),
     StructDirectFieldName(Rc<IdentT>, Rc<IdentT>),
@@ -440,6 +465,9 @@ impl Name {
                     _ => format!("var_{}", v),
                 }
             }
+            Name::GlobalAddr(v) => format!("addr_var_{}", v),
+            Name::GlobalAddrNotNull(v) => format!("addr_var_{}_not_null", v),
+            Name::GlobalAcquire(v) => format!("acquire_var_{}", v),
             Name::Val(v, idx) => {
                 let v: &str = v;
                 format!("val_{}_{}", v, idx)
@@ -458,6 +486,9 @@ impl Name {
             }
             Name::TypeRefPredFold(type_ref) => {
                 format!("{}__pred_fold", typeref_to_string(type_ref))
+            }
+            Name::TypeRefSizeofPos(type_ref) => {
+                format!("{}__sizeof_pos", typeref_to_string(type_ref))
             }
             Name::TypeRefSpec(type_ref) => format!("{}__spec", typeref_to_string(type_ref)),
             Name::TypeRefSpecField(type_ref, fld) => {
@@ -730,75 +761,190 @@ fn fnptr_domain_doc(arg_docs: Vec<Doc>) -> Doc {
     }
 }
 
+/// The projection expression for extracting component `i` (0-indexed) out of
+/// an `n`-ary flat tuple value `base`, matching `fnptr_domain_doc`'s tupling
+/// convention (bare value at arity 1, `fst`/`snd` at arity 2, `MktupleN?._i`
+/// field projectors at arity >= 3 -- NOT nested `tuple2`s).
+fn nary_tuple_proj(base: Doc, i: usize, n: usize) -> Doc {
+    if n <= 1 {
+        return base;
+    }
+    if n == 2 {
+        let mut e = base;
+        for _ in 0..i {
+            e = parens(Doc::text("snd ").append(e));
+        }
+        if i < n - 1 {
+            e = parens(Doc::text("fst ").append(e));
+        }
+        return e;
+    }
+    parens(Doc::text(format!("Mktuple{n}?._{} ", i + 1)).append(base))
+}
+
+/// If `ty` is a bare (non-`_plain`, non-`_core_ref`, non-`_nullable`) pointer
+/// type, return its pointee type -- this is exactly the pointer shape whose
+/// ownership `emit_fnptr_spec_core` witnesses via an explicit `erased c`
+/// wrapper parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter
+/// doc). Used at `FnPtrCall` call sites (from the callee's static `FnPtr`
+/// argument types alone) to determine, in argument order, which call
+/// arguments contribute a witness component.
+fn fnptr_witness_pointee(ty: &Rc<Type>) -> Option<Rc<Type>> {
+    match &ty.val {
+        TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, ..) => fnptr_witness_pointee(inner),
+        TypeT::Pointer(pointee, PointerKind::Ref | PointerKind::Unknown) => Some(pointee.clone()),
+        _ => None,
+    }
+}
+
+/// Visit every sub-expression of `e`, outermost first.
+fn walk_expr_tree(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    f(e);
+    match &e.val {
+        // Leaves.
+        ExprT::Var(_)
+        | ExprT::BoolLit(_)
+        | ExprT::IntLit(_, _)
+        | ExprT::FloatLit(_, _)
+        | ExprT::FnRef(_)
+        | ExprT::InlinePulse(_, _)
+        | ExprT::Malloc(_)
+        | ExprT::Calloc(_)
+        | ExprT::SizeOf(_)
+        | ExprT::AlignOf(_)
+        | ExprT::Error(_) => {}
+        // One sub-expression.
+        ExprT::Deref(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a)
+        | ExprT::Ref(a)
+        | ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _)
+        | ExprT::ContainerOf(a, _, _)
+        | ExprT::Live(a)
+        | ExprT::Old(a)
+        | ExprT::Forall(_, _, a)
+        | ExprT::Exists(_, _, a)
+        | ExprT::UnionInit(_, _, a)
+        | ExprT::MallocArray(_, a)
+        | ExprT::CallocArray(_, a)
+        | ExprT::MallocFlex(_, a)
+        | ExprT::CallocFlex(_, a)
+        | ExprT::MemsetZero(_, a)
+        | ExprT::Free(a)
+        | ExprT::PreIncr(a)
+        | ExprT::PostIncr(a)
+        | ExprT::PreDecr(a)
+        | ExprT::PostDecr(a) => walk_expr_tree(a, f),
+        // Two sub-expressions.
+        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+            walk_expr_tree(a, f);
+            walk_expr_tree(b, f);
+        }
+        // Three sub-expressions.
+        ExprT::Cond(a, b, c) | ExprT::Memset(_, a, b, c) => {
+            walk_expr_tree(a, f);
+            walk_expr_tree(b, f);
+            walk_expr_tree(c, f);
+        }
+        // Sequences.
+        ExprT::FnCall(_, args) => args.iter().for_each(|a| walk_expr_tree(a, f)),
+        ExprT::FnPtrCall(callee, args) => {
+            walk_expr_tree(callee, f);
+            args.iter().for_each(|a| walk_expr_tree(a, f));
+        }
+        ExprT::StructInit(_, fields) => fields.iter().for_each(|(_, a)| walk_expr_tree(a, f)),
+        ExprT::ArrayInit { elems, .. } => elems.iter().for_each(|a| walk_expr_tree(a, f)),
+    }
+}
+
+/// Visit every sub-expression appearing in `s`, including nested statements.
+fn walk_stmt_tree(s: &Stmt, f: &mut impl FnMut(&Expr)) {
+    match &s.val {
+        StmtT::Decl(_, _)
+        | StmtT::Break
+        | StmtT::Continue
+        | StmtT::Return(None)
+        | StmtT::GhostStmt(_)
+        | StmtT::Goto(_)
+        | StmtT::Label { .. }
+        | StmtT::Error => {}
+        StmtT::Call(e)
+        | StmtT::Assert(e)
+        | StmtT::Return(Some(e))
+        | StmtT::Let(_, _, e)
+        | StmtT::DeclStackArray { size: e, .. } => walk_expr_tree(e, f),
+        StmtT::Assign(l, r) => {
+            walk_expr_tree(l, f);
+            walk_expr_tree(r, f);
+        }
+        StmtT::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            walk_expr_tree(cond, f);
+            then_branch.iter().for_each(|s| walk_stmt_tree(s, f));
+            else_branch.iter().for_each(|s| walk_stmt_tree(s, f));
+        }
+        StmtT::Match {
+            scrutinee,
+            branches,
+            default_branch,
+            ..
+        } => {
+            walk_expr_tree(scrutinee, f);
+            branches
+                .iter()
+                .for_each(|b| b.body.iter().for_each(|s| walk_stmt_tree(s, f)));
+            default_branch.iter().for_each(|s| walk_stmt_tree(s, f));
+        }
+        StmtT::While { cond, body, .. } => {
+            walk_expr_tree(cond, f);
+            body.iter().for_each(|s| walk_stmt_tree(s, f));
+        }
+        StmtT::GotoBlock { body, .. } => body.iter().for_each(|s| walk_stmt_tree(s, f)),
+    }
+}
+
 /// Collect the set of C functions whose address is taken anywhere in the
 /// translation unit (`&f` or bare `f` decaying to a function pointer, both
 /// modeled as `ExprT::FnRef`). Each such function needs its fnptr wrapper
 /// (`func_<f>__fp`) emitted in its module.
+///
+/// The `Decl`-level match below is exhaustive with no `_` catch-all on
+/// purpose: a missed variant silently emits a reference to a `Funcptr_<f>`
+/// that never gets written, surfacing only as F* `Error 72` and never as a
+/// PAL diagnostic.
 fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
-    fn walk_expr(e: &Expr, set: &mut HashSet<Rc<str>>) {
-        match &e.val {
-            ExprT::FnRef(f) => {
-                set.insert(f.val.clone());
-            }
-            ExprT::UnOp(_, a)
-            | ExprT::Cast(a, _)
-            | ExprT::Deref(a)
-            | ExprT::Ref(a)
-            | ExprT::Live(a)
-            | ExprT::Old(a) => walk_expr(a, set),
-            ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
-                walk_expr(a, set);
-                walk_expr(b, set);
-            }
-            ExprT::Cond(a, b, c) => {
-                walk_expr(a, set);
-                walk_expr(b, set);
-                walk_expr(c, set);
-            }
-            ExprT::FnCall(_, args) => args.iter().for_each(|a| walk_expr(a, set)),
-            ExprT::FnPtrCall(f, args) => {
-                walk_expr(f, set);
-                args.iter().for_each(|a| walk_expr(a, set));
-            }
-            ExprT::Index(a, b) => {
-                walk_expr(a, set);
-                walk_expr(b, set);
-            }
-            ExprT::Member(a, _) => walk_expr(a, set),
-            _ => {}
-        }
-    }
-    fn walk_stmt(s: &Stmt, set: &mut HashSet<Rc<str>>) {
-        match &s.val {
-            StmtT::Assign(l, r) => {
-                walk_expr(l, set);
-                walk_expr(r, set);
-            }
-            StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => walk_expr(e, set),
-            StmtT::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                walk_expr(cond, set);
-                then_branch.iter().for_each(|s| walk_stmt(s, set));
-                else_branch.iter().for_each(|s| walk_stmt(s, set));
-            }
-            StmtT::While { cond, body, .. } => {
-                walk_expr(cond, set);
-                body.iter().for_each(|s| walk_stmt(s, set));
-            }
-            StmtT::GotoBlock { body, .. } => {
-                body.iter().for_each(|s| walk_stmt(s, set));
-            }
-            _ => {}
-        }
-    }
     let mut set = HashSet::new();
+    let mut note = |e: &Expr| {
+        if let ExprT::FnRef(f) = &e.val {
+            set.insert(f.val.clone());
+        }
+    };
     for decl in decls {
-        if let DeclT::FnDefn(fd) = &decl.val {
-            fd.body.iter().for_each(|s| walk_stmt(s, &mut set));
+        match &decl.val {
+            DeclT::FnDefn(fd) => fd.body.iter().for_each(|s| walk_stmt_tree(s, &mut note)),
+            // A global initializer can mention a function too, e.g.
+            // `_pure ops g_ops = { .op = add };`.
+            DeclT::GlobalVar(gv) => {
+                if let Some(init) = &gv.init {
+                    walk_expr_tree(init, &mut note)
+                }
+            }
+            DeclT::LetDecl(ld) => walk_expr_tree(&ld.body, &mut note),
+            DeclT::FnDecl(_)
+            | DeclT::Typedef(_)
+            | DeclT::StructDefn(_)
+            | DeclT::StructDecl(_)
+            | DeclT::UnionDefn(_)
+            | DeclT::IncludeDecl(_)
+            | DeclT::OpaqueTypeDecl(_) => {}
         }
     }
     set
@@ -1412,6 +1558,19 @@ impl<'a> Emitter<'a> {
         props: &mut Vec<Doc>,
         this: &Rc<Expr>,
     ) {
+        self.emit_type_slprop_inner(env, ty, variant, naming, props, this, None);
+    }
+
+    fn emit_type_slprop_inner(
+        &mut self,
+        env: &Env,
+        ty: &Type,
+        variant: SLPropVariant,
+        naming: &mut ValNaming,
+        props: &mut Vec<Doc>,
+        this: &Rc<Expr>,
+        resolving_struct: Option<&str>,
+    ) {
         match &ty.val {
             TypeT::Void
             | TypeT::Bool
@@ -1451,8 +1610,14 @@ impl<'a> Emitter<'a> {
                             };
                             if !is_self_ref {
                                 let derefed = ExprT::Deref(this.clone()).with_loc(this.loc.clone());
-                                self.emit_type_slprop(
-                                    env, pointee_ty, variant, naming, props, &derefed,
+                                self.emit_type_slprop_inner(
+                                    env,
+                                    pointee_ty,
+                                    variant,
+                                    naming,
+                                    props,
+                                    &derefed,
+                                    resolving_struct,
                                 );
                             }
                         }
@@ -1504,6 +1669,24 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::TypeRef(n) => {
+                if let TypeRefKind::Struct(name) = n {
+                    if resolving_struct != Some(&name.val) {
+                        if let Some(decl) = env.lookup_struct(name) {
+                            // Record attributes are parsed once on StructDefn.
+                            // Bypass lookup for the cached tree's inner self
+                            // reference so it emits the raw named predicate.
+                            return self.emit_type_slprop_inner(
+                                env,
+                                &decl.refines,
+                                variant,
+                                naming,
+                                props,
+                                this,
+                                Some(&name.val),
+                            );
+                        }
+                    }
+                }
                 let this_doc = self.emit_rvalue(env, this);
                 let (val_param_types, pred_name) = match variant {
                     SLPropVariant::Init { .. } => (
@@ -1534,7 +1717,15 @@ impl<'a> Emitter<'a> {
                 props.push(naryfn(args));
             }
             TypeT::Refine(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, naming, props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    ty,
+                    variant,
+                    naming,
+                    props,
+                    this,
+                    resolving_struct,
+                );
                 if let SLPropVariant::Init { .. } = variant {
                     let p = &mut p.clone();
                     self.subst_this_rvalue(env, Rc::make_mut(p), this);
@@ -1542,13 +1733,29 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::RefineAlways(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, naming, props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    ty,
+                    variant,
+                    naming,
+                    props,
+                    this,
+                    resolving_struct,
+                );
                 let p = &mut p.clone();
                 self.subst_this_rvalue(env, Rc::make_mut(p), this);
                 props.push(self.emit_rvalue(env, p));
             }
             TypeT::RefineUninit(ty, p) => {
-                self.emit_type_slprop(env, ty, variant, naming, props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    ty,
+                    variant,
+                    naming,
+                    props,
+                    this,
+                    resolving_struct,
+                );
                 if let SLPropVariant::Uninit = variant {
                     let p = &mut p.clone();
                     self.subst_this_rvalue(env, Rc::make_mut(p), this);
@@ -1556,7 +1763,15 @@ impl<'a> Emitter<'a> {
                 }
             }
             TypeT::RefineValue(ty, binding_name, binding_ty, p) => {
-                self.emit_type_slprop(env, ty, variant, naming, props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    ty,
+                    variant,
+                    naming,
+                    props,
+                    this,
+                    resolving_struct,
+                );
                 if let SLPropVariant::Init { .. } = variant {
                     let binding_type_doc = self.emit_type(env, binding_ty);
                     // RefineValue uses an explicit binding name from the user annotation
@@ -1587,7 +1802,15 @@ impl<'a> Emitter<'a> {
                 // registered via the shared `naming`.
                 let this_doc = self.emit_rvalue(env, this);
                 let mut inner_props: Vec<Doc> = vec![];
-                self.emit_type_slprop(env, inner, variant, naming, &mut inner_props, this);
+                self.emit_type_slprop_inner(
+                    env,
+                    inner,
+                    variant,
+                    naming,
+                    &mut inner_props,
+                    this,
+                    resolving_struct,
+                );
                 props.push(annotated(ty, || {
                     naryfn([Doc::text("unless_null"), this_doc, mk_star(inner_props)])
                 }));
@@ -1664,7 +1887,22 @@ impl<'a> Emitter<'a> {
     fn emit_expr(&mut self, env: &Env, v: &Expr) -> ExprKind {
         match &v.val {
             ExprT::Var(x) => {
-                if env.lookup_global_var(x).is_some() {
+                if let Some(gv) = env.lookup_global_var(x) {
+                    // A mutable global emits no `var_g`, so there is no name to
+                    // refer to here. Reject the read rather than emit a dangling
+                    // reference that F* would report as an unbound identifier.
+                    // Arrays are exempt: they are still emitted as a spec value.
+                    if !gv.is_pure && !global_var_is_array(gv) {
+                        self.report(
+                            format!(
+                                "cannot read the mutable global {}; its address may be taken, \
+                                 but its value is not available",
+                                x
+                            ),
+                            &x.loc,
+                        );
+                        return ExprKind::RValue(Doc::text("(admit())"));
+                    }
                     // Global variables need module-qualified names
                     let x2 = annotated(v, || {
                         let mangled = self.nm.mangle(&Name::Var(x.val.clone())).to_string();
@@ -1712,6 +1950,28 @@ impl<'a> Emitter<'a> {
                     ExprKind::RValue(annotated(v, || {
                         parens(naryfn([Doc::text(read_fn), inner_doc, Doc::text("0sz")]))
                     }))
+                } else if matches!(inner_kind, Ok(Some(PointerKind::Core))) {
+                    // *core_ref: the field stores an untyped `core_ref`, not a
+                    // `ref <pointee>`, so recover the typed reference with
+                    // `core_to_ref` before it's used further (e.g. chained
+                    // field access, as in `o->pb->y`). Mirrors the coercion
+                    // the `Cast` handler inserts for assignments.
+                    match env.infer_expr(v) {
+                        Ok(pointee_ty) => {
+                            let inner_doc = self.emit_expr(env, inner).to_rvalue();
+                            ExprKind::LValue(annotated(v, || {
+                                parens(naryfn([
+                                    Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
+                                    self.emit_type(env, &pointee_ty),
+                                    inner_doc,
+                                ]))
+                            }))
+                        }
+                        Err(_) => {
+                            self.report(format!("cannot infer pointee type of {}", v), &v.loc);
+                            ExprKind::LValue(Doc::text("(admit())"))
+                        }
+                    }
                 } else {
                     ExprKind::LValue(annotated(v, || self.emit_expr(env, inner).to_rvalue()))
                 }
@@ -1995,7 +2255,7 @@ fn emit_unop(env: &Env, op: UnOp, ty: MaybeRc<Type>) -> Option<Doc> {
                 Doc::text(format!("{}.minus", modu))
             }
         }
-        (UnOp::Neg, TypeT::SpecInt | TypeT::SpecNat) => Doc::text("op_Minus"),
+        (UnOp::Neg, TypeT::SpecInt | TypeT::SpecNat) => Doc::text("op_Tilde_Minus"),
         (UnOp::Neg, TypeT::Float { width }) => Doc::text(format!("{}_neg", get_float_mod(width)?)),
         (UnOp::Neg, _) => return None,
         (UnOp::BitNot, TypeT::Int { signed, width }) => {
@@ -2256,9 +2516,11 @@ impl<'a> Emitter<'a> {
                         TypeT::Pointer(_, PointerKind::Core) if **val == BigInt::ZERO => {
                             Doc::text("core_null")
                         }
-                        TypeT::FnPtr { .. } if **val == BigInt::ZERO => {
-                            Doc::text("Pulse.Lib.C.FuncPtr.null _ _")
-                        }
+                        TypeT::FnPtr { .. } if **val == BigInt::ZERO => naryfn([
+                            Doc::text("Pulse.Lib.C.FuncPtr.null"),
+                            Doc::text("_"),
+                            Doc::text("_"),
+                        ]),
                         _ => {
                             self.report(
                                 format!("unsupported integer literal type for {}", val),
@@ -2296,7 +2558,18 @@ impl<'a> Emitter<'a> {
                     // These are lvalue/vattr variants; handled by emit_expr
                     unreachable!("lvalue/vattr variants should be handled by emit_expr")
                 }
-                ExprT::Ref(v) => self.emit_lvalue(env, v),
+                ExprT::Ref(v) => {
+                    // `&g` for a `_pure` global: the global is a plain F* value
+                    // with no lvalue, so use its assumed address. Ownership is
+                    // acquired by the caller with `acquire_var_g` and released
+                    // with `drop_`.
+                    if let ExprT::Var(x) = &v.val
+                        && env.addressable_global(x).is_some()
+                    {
+                        return self.emit_name(Name::GlobalAddr(x.val.clone()));
+                    }
+                    self.emit_lvalue(env, v)
+                }
                 ExprT::Cast(val, to_ty) => {
                     let val_doc = self.emit_rvalue(env, val);
                     let Ok(from_ty) = env.infer_expr(val).map(|t| env.vtype_whnf(t)) else {
@@ -2551,7 +2824,11 @@ impl<'a> Emitter<'a> {
                             }
                         }
                         (_, TypeT::FnPtr { .. }) if matches!(&val.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) => {
-                            Doc::text("Pulse.Lib.C.FuncPtr.null _ _")
+                            naryfn([
+                                Doc::text("Pulse.Lib.C.FuncPtr.null"),
+                                Doc::text("_"),
+                                Doc::text("_"),
+                            ])
                         }
                         // (TypeT::Pointer { to:t1, kind:k1 }, TypeT::Pointer { to:t2, kind:k2 }) if t1 == t2 => todo!(),
                         // (TypeT::Pointer { to, kind }, TypeT::SLProp) => todo!(),
@@ -2944,12 +3221,56 @@ impl<'a> Emitter<'a> {
                     } else {
                         "Pulse.Lib.C.FuncPtr.call_div"
                     };
+                    // The explicit `w: erased c` witness argument (see
+                    // `Pulse.Lib.C.FuncPtr.fsti`): one component per bare
+                    // (non-`_plain`/non-`_core_ref`) pointer argument, holding
+                    // that pointee's CURRENT value (`hide !arg`), matching the
+                    // same argument-order convention `emit_fnptr_spec_core`
+                    // uses to build the callee wrapper's own witness tuple.
+                    // Ordinary (non-witnessing) call sites pass `hide ()`.
+                    //
+                    // NOTE: self-dispatch (`self->field(self, ..)`) verifies
+                    // when `self` is `_consumes` -- see `destroy_via_field` in
+                    // test/func_pointer/func_pointer.c. With a borrowed
+                    // `self`, the field getter's own unfold and this witness
+                    // read open two independent existentials for the same
+                    // value that Pulse can't unify.
+                    let param_tys: Option<Vec<Rc<Type>>> = env
+                        .infer_expr(f)
+                        .ok()
+                        .map(|t| env.vtype_whnf(t))
+                        .and_then(|t| match &t.val {
+                            TypeT::FnPtr { args, .. } => Some(args.clone()),
+                            _ => None,
+                        });
+                    let witness_vals: Vec<Doc> = param_tys
+                        .iter()
+                        .flatten()
+                        .zip(args.iter())
+                        .filter(|(ty, _)| fnptr_witness_pointee(ty).is_some())
+                        .map(|(_, a)| {
+                            let derefed = ExprT::Deref(a.clone()).with_loc(a.loc.clone());
+                            self.emit_rvalue(env, &derefed)
+                        })
+                        .collect();
+                    let witness_arg = match witness_vals.len() {
+                        0 => Doc::text("(hide ())"),
+                        1 => parens(
+                            Doc::text("hide ")
+                                .append(parens(witness_vals.into_iter().next().unwrap())),
+                        ),
+                        _ => parens(
+                            Doc::text("hide ")
+                                .append(parens(Doc::intersperse(witness_vals, Doc::text(", ")))),
+                        ),
+                    };
                     parens(naryfn([
                         Doc::text(call_prim),
                         Doc::text("_"),
                         Doc::text("_"),
                         callee_val,
                         arg_tuple,
+                        witness_arg,
                     ]))
                 }
                 ExprT::Live(v) => {
@@ -4434,6 +4755,33 @@ fn mk_assume_val(attrs: Vec<Doc>, n: Doc, args: &[Doc], ty: Doc) -> Doc {
         .group()
 }
 
+fn mk_sizeof_pos_axiom(name: Doc, ty: Doc) -> Doc {
+    let ty_arg = parens(
+        Doc::text("a: Type0 { a ==")
+            .append(Doc::line())
+            .append(ty)
+            .append(Doc::line())
+            .append("}")
+            .group(),
+    );
+    let sizeof = unaryfn(Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"), Doc::text("a"));
+    let sizeof_value = unaryfn(Doc::text("FStar.SizeT.v"), sizeof);
+    mk_assume_val(
+        vec![],
+        name,
+        &[ty_arg],
+        Doc::text("Lemma")
+            .append(Doc::line())
+            .append(parens(sizeof_value.clone().append(Doc::text(" > 0"))))
+            .append(Doc::line())
+            .append(
+                Doc::text("[SMTPat ")
+                    .append(sizeof_value)
+                    .append(Doc::text("]")),
+            ),
+    )
+}
+
 fn mk_fun(arg: Doc, body: Doc) -> Doc {
     parens(
         Doc::text("fun")
@@ -4569,6 +4917,12 @@ impl<'a> Emitter<'a> {
                 .append("}")
                 .group(),
         );
+        if env.occupies_space(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()).into()) {
+            ses.push(mk_sizeof_pos_axiom(
+                self.emit_name(Name::TypeRefSizeofPos(k.into())),
+                struct_type_name.clone(),
+            ));
+        }
 
         // Generate struct spec type and pred by gathering slprops from fields
         let env = &mut env.clone();
@@ -5564,6 +5918,12 @@ impl<'a> Emitter<'a> {
                 })))
                 .group(),
         );
+        if env.occupies_space(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()).into()) {
+            ses.push(mk_sizeof_pos_axiom(
+                self.emit_name(Name::TypeRefSizeofPos(k.into())),
+                union_type_name.clone(),
+            ));
+        }
 
         // Emit predicate (emp for MVP)
         let env = &mut env.clone();
@@ -6079,22 +6439,7 @@ impl<'a> Emitter<'a> {
         let projs: Vec<Doc> = {
             let n = name_docs.len();
             (0..n)
-                .map(|i| {
-                    if n == 1 {
-                        return Doc::text("x_fp");
-                    }
-                    if n == 2 {
-                        let mut e = Doc::text("x_fp");
-                        for _ in 0..i {
-                            e = parens(Doc::text("snd ").append(e));
-                        }
-                        if i < n - 1 {
-                            e = parens(Doc::text("fst ").append(e));
-                        }
-                        return e;
-                    }
-                    parens(Doc::text(format!("Mktuple{n}?._{} x_fp", i + 1)))
-                })
+                .map(|i| nary_tuple_proj(Doc::text("x_fp"), i, n))
                 .collect()
         };
 
@@ -6119,6 +6464,17 @@ impl<'a> Emitter<'a> {
         let mut requires_props: Vec<Doc> = vec![];
         let mut ensures_props: Vec<Doc> = vec![];
         let mut preserves_props: Vec<Doc> = vec![];
+        // Requires-side existential ownership groups (e.g. a plain pointer
+        // parameter's pointee value), one per Regular/Consumed/Out arg.
+        // Deferred until after this loop: their bindings are combined into
+        // ONE explicit `y_fp: erased c` wrapper parameter, bound by `let`s
+        // rather than independent `exists*`s. `let`s keep the bindings out of
+        // the wrapper's own elaborated *type*; `exists*`s would be opened by
+        // Pulse as hidden implicit binders and break `pre_of`/`post_of`'s
+        // higher-order unification (F* Error 189; see
+        // `Pulse.Lib.C.FuncPtr.fsti`). Ensures-side `exists*`s aren't part of
+        // the wrapper's arrow type, so they keep using `wrap_exists`.
+        let mut req_witness_groups: Vec<(Vec<ExBinding>, Vec<Doc>)> = vec![];
         for (n, arg) in arg_names.iter().zip(decl.args.iter()) {
             match arg.mode {
                 ParamMode::Regular | ParamMode::Consumed => {
@@ -6140,15 +6496,10 @@ impl<'a> Emitter<'a> {
                     );
                     drop(naming);
                     if !type_props.is_empty() {
-                        let wrapped = wrap_exists(&type_bindings, type_props);
-                        match arg.mode {
-                            ParamMode::Regular => {
-                                requires_props.push(wrapped.clone());
-                                ensures_props.push(wrapped);
-                            }
-                            ParamMode::Consumed => requires_props.push(wrapped),
-                            _ => unreachable!(),
+                        if let ParamMode::Regular = arg.mode {
+                            ensures_props.push(wrap_exists(&type_bindings, type_props.clone()));
                         }
+                        req_witness_groups.push((type_bindings, type_props));
                     }
                 }
                 ParamMode::Const => {
@@ -6188,7 +6539,7 @@ impl<'a> Emitter<'a> {
                     );
                     drop(naming);
                     if !uninit_props.is_empty() {
-                        requires_props.push(wrap_exists(&uninit_bindings, uninit_props));
+                        req_witness_groups.push((uninit_bindings, uninit_props));
                     }
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
@@ -6213,6 +6564,44 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
+        // Combine every requires-side existential group's bindings (in arg
+        // order) into a single flat witness type tuple `c`, and bind them all
+        // with `let`s projecting out of ONE explicit `y_fp: erased c` wrapper
+        // parameter (see comment above).
+        let witness_count: usize = req_witness_groups.iter().map(|(b, _)| b.len()).sum();
+        let witness_ty_docs: Vec<Doc> = req_witness_groups
+            .iter()
+            .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
+            .collect();
+        let witness_domain = fnptr_domain_doc(witness_ty_docs);
+        // Every group's `let`s are hoisted into ONE prefix placed in front of
+        // the whole `requires` conjunction, rather than each group carrying
+        // its own. A `let` is a term-level binder, so it cannot appear as the
+        // right operand of `**`: emitting it per group parses only while
+        // there is a single group, and is a syntax error from two groups on.
+        // Hoisting also keeps every witness binding in scope for the trailing
+        // `pure` conjunct below.
+        let witness_let_prefix = {
+            let witness_base = parens(Doc::text("reveal y_fp"));
+            let mut widx = 0usize;
+            let mut lets: Vec<Doc> = vec![];
+            for (bindings, props) in req_witness_groups {
+                for b in &bindings {
+                    let proj = nary_tuple_proj(witness_base.clone(), widx, witness_count);
+                    widx += 1;
+                    lets.push(
+                        Doc::text("let ")
+                            .append(b.name.clone())
+                            .append(" = ")
+                            .append(proj)
+                            .append(" in")
+                            .append(Doc::hardline()),
+                    );
+                }
+                requires_props.push(mk_star(props));
+            }
+            Doc::concat(lets)
+        };
         // `preserves` (const params) hold across the call, so they belong in
         // both the pre and the post.
         requires_props.extend(preserves_props.iter().cloned());
@@ -6297,7 +6686,11 @@ impl<'a> Emitter<'a> {
         // Inline pre/post slprops (bound over the tuple domain `x_fp` via the
         // same projection prefix), to be spliced directly into the `__fp`
         // wrapper's `requires`/`ensures` instead of being named `unfold let`s.
-        let pre_expr = parens(bind_prefix(&name_docs).append(pre_body));
+        let pre_expr = parens(
+            bind_prefix(&name_docs)
+                .append(witness_let_prefix)
+                .append(pre_body),
+        );
         let post_expr = parens(bind_prefix(&name_docs).append(post_body));
 
         FnPtrSpecCore {
@@ -6306,6 +6699,7 @@ impl<'a> Emitter<'a> {
             wrap_name,
             callee,
             domain,
+            witness_domain,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6322,6 +6716,7 @@ impl<'a> Emitter<'a> {
             wrap_name,
             callee,
             domain,
+            witness_domain,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6332,10 +6727,19 @@ impl<'a> Emitter<'a> {
         } else {
             "divergent fn "
         };
+        // `y_fp: erased c`: an explicit (not merely implicit) witness
+        // parameter for any bare pointer parameter's ownership, so
+        // `pre_of`/`post_of` see the wrapper's real type as a flat
+        // `x:a -> y:erased c -> stt_div b (pre x y) (post x y)` -- see
+        // `Pulse.Lib.C.FuncPtr.fsti`. Unconditionally present (even as a
+        // trivial `erased unit` when no witness is needed) so `of_fn`/
+        // `of_fn_div`/`call`/`call_div` share one uniform shape.
         let wrap_sig = Doc::text(wrap_kw)
             .append(wrap_name.clone())
             .append(" (x_fp: ")
             .append(domain.clone())
+            .append(") (y_fp: erased ")
+            .append(witness_domain)
             .append(")")
             .append(Doc::hardline())
             .append("  requires ")
@@ -7311,26 +7715,143 @@ impl<'a> Emitter<'a> {
 
     fn emit_global_var(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
         if !gv.is_pure {
-            self.report(
-                "non-pure global variables are not yet supported".to_string(),
-                &gv.name.loc,
-            );
-            return Doc::nil();
+            // A mutable global gets an address but no value: its storage cannot
+            // be read or written, so there is nothing for an initializer to
+            // mean and nothing for a spec value to describe.
+            return match self.emit_global_addr(env, gv) {
+                Some(addr) => addr,
+                None => {
+                    // Only an array reaches here: an enumerator is always pure.
+                    self.report(
+                        "non-pure array globals are not yet supported".to_string(),
+                        &gv.name.loc,
+                    );
+                    Doc::nil()
+                }
+            };
         }
         let name = self.emit_name(Name::Var(gv.name.val.clone()));
         let ty = self.emit_type(env, &gv.ty);
-        let body = match &gv.init {
-            Some(init) => self.emit_rvalue(env, init),
-            None => self.emit_type_default(env, &gv.ty),
+        // A global defined in another translation unit has no value to emit, so
+        // assume one rather than invent 0: only a tentative definition is
+        // guaranteed to be zero. This is sound because the object really does
+        // exist in the defining unit, and `assume val` says no more than that
+        // some value of this type is what every read of it yields.
+        let def = if gv.is_extern {
+            mk_assume_val(vec![], name.clone(), &[], ty)
+        } else {
+            let body = match &gv.init {
+                Some(init) => self.emit_rvalue(env, init),
+                None => self.emit_type_default(env, &gv.ty),
+            };
+            mk_let(name.clone(), &[], ty, body)
         };
-        let def = mk_let(name.clone(), &[], ty, body);
-        if gv.opaque_to_smt {
+        let def = if gv.opaque_to_smt {
             Doc::text("[@@\"opaque_to_smt\"]")
                 .append(Doc::hardline())
                 .append(def)
         } else {
             def
+        };
+        match self.emit_global_addr(env, gv) {
+            Some(addr) => def.append(Doc::hardline()).append(addr),
+            None => def,
         }
+    }
+
+    /// Emit a global's address: an assumed `ref` (one per global, so distinct
+    /// globals get distinct addresses) and a non-null axiom. A `_pure` global
+    /// additionally gets the acquire that hands out *read-only* ownership of
+    /// its storage; a mutable one gets no acquire at all.
+    ///
+    /// A mutable global has no `var_g` for a `pts_to` to mention, and giving
+    /// out ownership of something writable would be unsound anyway. Emitting
+    /// the bare address is still safe: with no `pts_to` in existence there is
+    /// no permission to obtain, so the pointer can be compared but never read
+    /// or written through.
+    ///
+    /// Reads of a `_pure` global are ownership-free, which is only sound if the
+    /// storage holds `var_g` forever -- so the pointer must never be writable.
+    /// Hiding the permission under an existential achieves that, and it must
+    /// stay existential rather than some fixed fraction `k`: `k` acquired `n`
+    /// times gathers to `n * k`, and `pts_to_perm_bound` (`p <=. 1.0R`) would
+    /// then prove `False` for `n > 1/k`.
+    ///
+    /// The `pts_to` is emitted literally, not behind an abbreviation: Pulse's
+    /// `[@@pulse_intro] __aux_raw_unfold` only fires on a literal `pts_to`,
+    /// which the struct-global case depends on.
+    ///
+    /// The acquire is an `assume val` rather than an admitted `ghost fn`: the
+    /// ownership is *assumed* to exist, being a fraction of the one reserved
+    /// for the global at program start. Callers release it with `drop_`.
+    ///
+    /// Emitted for every eligible global, whether or not its address is taken
+    /// (the `&g` may live in another module), as for the `__fp` wrappers.
+    /// See `doc/pal_surface_syntax.md`.
+    fn emit_global_addr(&mut self, env: &Env, gv: &GlobalVar) -> Option<Doc> {
+        // An enumerator is a constant, not an object: it has no storage, and
+        // `&Color_Red` cannot be written in C. Giving it an address would assume
+        // a cell that nothing can ever produce.
+        if global_var_is_array(gv) || gv.is_enum_constant {
+            return None;
+        }
+        let addr = self.emit_name(Name::GlobalAddr(gv.name.val.clone()));
+        let ty = self.emit_type(env, &gv.ty);
+        let ref_ty = parens(Doc::text("ref").append(Doc::line()).append(ty).nest(2));
+
+        let addr_val = Doc::text("assume val ")
+            .append(addr.clone())
+            .append(Doc::text(" : "))
+            .append(ref_ty.clone());
+        let not_null = Doc::text("assume val ")
+            .append(self.emit_name(Name::GlobalAddrNotNull(gv.name.val.clone())))
+            .append(Doc::text(" : squash (~(Pulse.Lib.Reference.is_null "))
+            .append(addr.clone())
+            .append(Doc::text("))"));
+
+        // A mutable global gets the address and nothing else: the acquire below
+        // mentions `var_g`, which is not emitted for it, and handing out
+        // ownership of a mutable object is exactly what must not happen.
+        if !gv.is_pure {
+            return Some(addr_val.append(Doc::hardline()).append(not_null));
+        }
+
+        let var = self.emit_name(Name::Var(gv.name.val.clone()));
+        let perm = Doc::text("p");
+        let pts_to = naryfn([
+            Doc::text("Pulse.Lib.Reference.pts_to"),
+            addr,
+            Doc::text("#").append(perm.clone()),
+            var,
+        ]);
+        let addr_of = mk_assume_val(
+            vec![],
+            self.emit_name(Name::GlobalAcquire(gv.name.val.clone())),
+            &[],
+            naryfn([
+                Doc::text("unit"),
+                Doc::text("->"),
+                Doc::text("stt_ghost"),
+                Doc::text("unit"),
+                Doc::text("emp_inames"),
+                Doc::text("emp"),
+                mk_thunk(wrap_exists(
+                    &[ExBinding {
+                        name: perm,
+                        ty: Doc::text("perm"),
+                    }],
+                    vec![pts_to],
+                )),
+            ]),
+        );
+
+        Some(
+            addr_val
+                .append(Doc::hardline())
+                .append(not_null)
+                .append(Doc::hardline())
+                .append(addr_of),
+        )
     }
 
     fn emit_decl(&mut self, env: &Env, decl: &Decl) -> Doc {
@@ -7476,11 +7997,19 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         // `pre`/`post` definitions and wrapper signature go in the `.fsti`. The
         // wrapper body's `func_<g>` reference qualifies to `Func_<g>.func_<g>`
         // because `current_module` is the fnptr module while emitting.
-        if let DeclT::FnDefn(fn_defn) = &decl.val {
-            if !fn_defn.decl.is_pure && addr_taken.contains(&fn_defn.decl.name.val) {
-                let fp_mod = funcptr_module_name(&fn_defn.decl.name.val);
+        // A declaration gets one too: its `Func_<g>` stub carries the declared
+        // contract for the wrapper body to delegate to. `merge` drops a `FnDecl`
+        // that has a matching `FnDefn`, so only one arm fires per function.
+        let wrapper_decl: Option<&FnDecl> = match &decl.val {
+            DeclT::FnDefn(fn_defn) => Some(&fn_defn.decl),
+            DeclT::FnDecl(fn_decl) => Some(fn_decl),
+            _ => None,
+        };
+        if let Some(fn_decl) = wrapper_decl {
+            if !fn_decl.is_pure && addr_taken.contains(&fn_decl.name.val) {
+                let fp_mod = funcptr_module_name(&fn_decl.name.val);
                 emitter.current_module = fp_mod.clone();
-                let (fst_extra, fsti_extra) = emitter.emit_fnptr_triple(&env, &fn_defn.decl);
+                let (fst_extra, fsti_extra) = emitter.emit_fnptr_triple(&env, fn_decl);
 
                 let mut fp_writer = StrWriter::new();
                 fst_extra.render_raw(100, &mut fp_writer).unwrap();

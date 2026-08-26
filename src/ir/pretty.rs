@@ -666,8 +666,8 @@ impl PrettyIR for FieldT {
 
 impl PrettyIR for StructDefn {
     fn to_doc(&self) -> RcDoc<'_, ()> {
-        RcDoc::text("struct ")
-            .append(self.name.to_doc())
+        self.refines
+            .to_doc()
             .append(" {")
             .append(RcDoc::line_())
             .append(RcDoc::concat(self.fields.iter().map(|f| f.val.to_doc())))
@@ -862,6 +862,11 @@ impl PrettyIR for GlobalVar {
             RcDoc::text("_pure ")
         } else {
             RcDoc::nil()
+        };
+        let prefix = if self.is_extern {
+            prefix.append(RcDoc::text("extern "))
+        } else {
+            prefix
         };
         let init = match &self.init {
             Some(e) => RcDoc::text(" = ").append(e.to_doc()),

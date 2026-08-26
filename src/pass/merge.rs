@@ -255,6 +255,39 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             };
             if let Some(key) = key {
                 if let Some(&first) = first_idx.get(&key) {
+                    // If this is a second (or later) bare `FnDecl` for a function
+                    // that was already seen (no `FnDefn` involved — that case is
+                    // handled separately in Phase 2), and both occurrences carry
+                    // specs, make sure the specs agree (up to parameter
+                    // renaming) instead of silently keeping whichever
+                    // occurrence happens to be processed last.
+                    if key.0 == 5 {
+                        if let (DeclT::FnDecl(first_decl), DeclT::FnDecl(this_decl)) =
+                            (&tu.decls[first].val, &decl.val)
+                        {
+                            let first_has_specs =
+                                !first_decl.requires.is_empty() || !first_decl.ensures.is_empty();
+                            let this_has_specs =
+                                !this_decl.requires.is_empty() || !this_decl.ensures.is_empty();
+                            if first_has_specs && this_has_specs {
+                                let renames = param_renames(first_decl, this_decl);
+                                let renamed_requires = rename_specs(&first_decl.requires, &renames);
+                                let renamed_ensures = rename_specs(&first_decl.ensures, &renames);
+                                if renamed_requires != this_decl.requires
+                                    || renamed_ensures != this_decl.ensures
+                                {
+                                    report(
+                                        diags,
+                                        format!(
+                                            "multiple declarations of {} have differing specifications",
+                                            this_decl.name.val
+                                        ),
+                                        &this_decl.name.loc,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // Copy this (later, more complete) decl back to the first position
                     // and mark this duplicate for removal.
                     moves.push((i, first));
@@ -268,7 +301,51 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         // Apply moves in order so the final value at each first position is the
         // last (most complete) occurrence.
         for &(src, dst) in &moves {
-            tu.decls[dst] = tu.decls[src].clone();
+            let later = tu.decls[src].clone();
+            // A global's value, purity and externness belong to the object, not
+            // to any one of its declarations, so "last wins" would discard
+            // information an earlier declaration carried: in
+            // `const T g = 1; const T g;` the later declaration has no
+            // initializer, and a file that only sees `extern T g;` says nothing
+            // about the value another file defines. Merge field-wise instead,
+            // which also makes the declaration orderings agree.
+            if let DeclT::GlobalVar(later_gv) = &later.val
+                && let DeclT::GlobalVar(earlier_gv) = &tu.decls[dst].val
+            {
+                // Being an enumerator is fixed for the entity, so the two
+                // declarations cannot disagree: C forbids redeclaring an
+                // enumerator, and one sharing a name with a global is a
+                // redeclaration clang rejects before we see it.
+                debug_assert_eq!(earlier_gv.is_enum_constant, later_gv.is_enum_constant);
+                let merged = GlobalVar {
+                    name: later_gv.name.clone(),
+                    ty: later_gv.ty.clone(),
+                    init: later_gv.init.clone().or_else(|| earlier_gv.init.clone()),
+                    is_pure: earlier_gv.is_pure || later_gv.is_pure,
+                    // The object is external only if *no* file in this build
+                    // defines it: one file seeing only an `extern` declaration
+                    // does not make it external when another defines it.
+                    is_extern: earlier_gv.is_extern && later_gv.is_extern,
+                    opaque_to_smt: earlier_gv.opaque_to_smt || later_gv.opaque_to_smt,
+                    is_enum_constant: later_gv.is_enum_constant,
+                };
+                // Point at whichever declaration says most about the object:
+                // the one carrying the initializer, else one that defines it.
+                let loc = if later_gv.init.is_some() {
+                    later.loc.clone()
+                } else if earlier_gv.init.is_some() || (later_gv.is_extern && !earlier_gv.is_extern)
+                {
+                    tu.decls[dst].loc.clone()
+                } else {
+                    later.loc.clone()
+                };
+                tu.decls[dst] = Ast {
+                    loc,
+                    val: DeclT::GlobalVar(merged),
+                };
+            } else {
+                tu.decls[dst] = later;
+            }
         }
 
         to_remove.sort_unstable();
@@ -305,6 +382,16 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // reintroduce into a definition that declared none (see below).
     let mut spec_copies: Vec<(usize, Exprs, Exprs, Vec<GhostArg>)> = Vec::new();
 
+    // A parameter refinement written on a declaration (`_refine` inside the
+    // parameter's type) names the declaration's parameters. Under
+    // `_Use_decl_annotations_` the definition inherits those types verbatim
+    // while keeping its own parameter names, which C permits to differ. The
+    // requires/ensures are already mapped across by `param_renames`; the
+    // refinements carried in the argument types need the same treatment, or the
+    // definition is checked against a predicate mentioning names it does not
+    // bind.
+    let mut arg_type_renames: Vec<(usize, HashMap<Rc<str>, Rc<Ident>>)> = Vec::new();
+
     // Build an Env for type comparison (need typedef resolution)
     let mut env = Env::new();
     for decl in tu.decls.iter() {
@@ -334,6 +421,11 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                         continue;
                     }
 
+                    let renames = param_renames(fn_decl, &defn.decl);
+                    if !renames.is_empty() {
+                        arg_type_renames.push((defn_idx, renames.clone()));
+                    }
+
                     let decl_has_specs =
                         !fn_decl.requires.is_empty() || !fn_decl.ensures.is_empty();
                     let defn_has_specs =
@@ -354,9 +446,12 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && defn_has_specs {
-                        // Both have specs — they must match
-                        if fn_decl.requires != defn.decl.requires
-                            || fn_decl.ensures != defn.decl.ensures
+                        // Both have specs — they must match, up to
+                        // declaration/definition parameter renaming.
+                        let renamed_requires = rename_specs(&fn_decl.requires, &renames);
+                        let renamed_ensures = rename_specs(&fn_decl.ensures, &renames);
+                        if renamed_requires != defn.decl.requires
+                            || renamed_ensures != defn.decl.ensures
                         {
                             report(
                                 diags,
@@ -371,7 +466,6 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && !defn_has_specs {
-                        let renames = param_renames(fn_decl, &defn.decl);
                         // The specs we copy below (and the definition's own body)
                         // reference the declaration's ghost-argument variables. If
                         // the definition declared no ghost args of its own, the
@@ -436,6 +530,17 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 }
             }
             _ => {}
+        }
+    }
+
+    // Map declaration parameter names onto definition parameter names inside the
+    // argument types, so a `_refine` on one parameter that mentions another is
+    // checked against the names the definition actually binds.
+    for (defn_idx, renames) in arg_type_renames {
+        if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
+            for arg in defn.decl.args.iter_mut() {
+                rename_type_in_place(Rc::make_mut(&mut arg.ty), &renames);
+            }
         }
     }
 
@@ -743,6 +848,7 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
         match &d.val {
             DeclT::Typedef(t) => collect_type_refs(&t.body, &mut refs),
             DeclT::StructDefn(s) => {
+                collect_type_refs(&s.refines, &mut refs);
                 for f in &s.fields {
                     collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
                 }

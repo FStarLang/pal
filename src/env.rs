@@ -170,6 +170,8 @@ impl Env {
                 if !self.globals.structs.contains_key(&name.val) {
                     self.push_struct(StructDefn {
                         name: name.clone(),
+                        refines: TypeT::TypeRef(TypeRefKind::Struct(name.clone()))
+                            .with_loc(name.loc.clone()),
                         fields: vec![],
                         eager_unfold_pred: false,
                     });
@@ -255,6 +257,70 @@ impl Env {
 
     pub fn lookup_union(&self, ident: &Ident) -> Option<&UnionDefn> {
         self.globals.unions.get(&ident.val)
+    }
+
+    /// Whether a value of `ty` occupies storage, i.e. `sizeof(ty) > 0`.
+    ///
+    /// Almost everything in C does; the exceptions are all GNU zero-size
+    /// extensions, and all of them are structural, so this is derivable from
+    /// the IR rather than something the frontend has to tell us:
+    ///   - a zero-length array `T[0]`, or an array of a zero-size element type;
+    ///   - a flexible array member `T[]`, which contributes no storage;
+    ///   - a struct or union whose fields are all themselves zero-size (in
+    ///     particular one with no fields at all);
+    ///   - the anonymous `int :0;` bit-field, which is alignment-only.
+    ///
+    /// Termination: the only recursive cases are arrays and by-value struct or
+    /// union fields, and C forbids a type from containing itself by value, so
+    /// the recursion is well-founded. Pointers stop it immediately.
+    pub fn occupies_space(&self, ty: MaybeRc<Type>) -> bool {
+        match &self.vtype_whnf(ty).val {
+            TypeT::Bool
+            | TypeT::Int { .. }
+            | TypeT::Float { .. }
+            | TypeT::SizeT
+            | TypeT::PtrdiffT
+            | TypeT::Pointer(..)
+            | TypeT::FnPtr { .. } => true,
+
+            TypeT::FixedArray(elem, len) => *len > 0 && self.occupies_space(elem.clone().into()),
+            TypeT::FlexArray(_) | TypeT::Void => false,
+
+            TypeT::TypeRef(TypeRefKind::Struct(name)) => self
+                .lookup_struct(name)
+                .is_some_and(|s| s.fields.iter().any(|f| self.field_occupies_space(f))),
+            TypeT::TypeRef(TypeRefKind::Union(name)) => self
+                .lookup_union(name)
+                .is_some_and(|u| u.fields.iter().any(|f| self.field_occupies_space(f))),
+
+            // Spec-only types have no runtime representation, and a typedef
+            // that `vtype_whnf` could not resolve is not one we should claim a
+            // size for.
+            TypeT::SpecInt
+            | TypeT::SpecNat
+            | TypeT::SLProp
+            | TypeT::TypeRef(TypeRefKind::Typedef(_))
+            | TypeT::Unknown
+            | TypeT::Error => false,
+
+            // Already peeled by `vtype_whnf`.
+            TypeT::Refine(..)
+            | TypeT::RefineAlways(..)
+            | TypeT::RefineUninit(..)
+            | TypeT::RefineValue(..)
+            | TypeT::Plain(_)
+            | TypeT::Nullable(_) => false,
+        }
+    }
+
+    /// Whether `field` contributes storage to its enclosing struct or union.
+    fn field_occupies_space(&self, field: &Field) -> bool {
+        match &field.val {
+            FieldT::Plain { ty, .. } => self.occupies_space(ty.clone().into()),
+            // A named bit-field must have positive width; only the anonymous
+            // `int :0;` alignment marker contributes no storage.
+            FieldT::BitField { width, .. } => *width > 0,
+        }
     }
 
     pub fn lookup_var(&self, ident: &Ident) -> Option<&LocalDecl> {
@@ -708,6 +774,52 @@ impl Env {
     }
     pub fn is_slprop(&self, a: MaybeRc<Type>) -> bool {
         matches!(&self.vtype_whnf(a).val, TypeT::SLProp)
+    }
+
+    /// Whether `&expr` is allowed, i.e. `expr` denotes storage.
+    ///
+    /// This is `is_lvalue` plus the address-taking-only cases. Neither a
+    /// `_pure` global nor a mutable one is an lvalue -- PAL emits the former as
+    /// a plain top-level F* value and the latter as nothing but an address --
+    /// yet both can have their address taken. See `addressable_global`.
+    pub fn is_addressable(&self, expr: &Expr) -> bool {
+        if self.is_lvalue(expr) {
+            return true;
+        }
+        matches!(&expr.val, ExprT::Var(x) if self.addressable_global(x).is_some())
+    }
+
+    /// The global named by `ident`, if `&ident` is supported.
+    ///
+    /// Every non-array global that denotes an object qualifies, whether or not
+    /// it is `_pure`, because an address is not ownership. The two shapes reach
+    /// it differently:
+    ///
+    /// * A `_pure` global additionally gets an acquire handing out *read-only*
+    ///   ownership (the permission is hidden under an existential, so the
+    ///   pointer can never be written through), which is what keeps its
+    ///   ownership-free reads sound.
+    /// * A mutable global gets the address and nothing else -- no `var_g` and
+    ///   no acquire. Since no `pts_to` is ever produced for it, no permission to
+    ///   read or write through the pointer can be obtained, so handing out the
+    ///   address is inert. Reads of the global itself are rejected in the
+    ///   emitter.
+    ///
+    /// Excluded:
+    ///
+    /// * An array global is exposed as a *spec* (`full_array_lspec`) and read
+    ///   ownership-free via `array_spec_idx`. Handing out a pointer to it would
+    ///   let a caller observe storage that the spec value no longer describes.
+    ///   (Arrays have no pointer path at all today, so this rejects nothing that
+    ///   used to work.)
+    /// * An enumerator is a constant, not an object: it has no storage, and
+    ///   `&Color_Red` cannot be written in C.
+    pub fn addressable_global(&self, ident: &Ident) -> Option<&GlobalVar> {
+        let gv = self.lookup_global_var(ident)?;
+        if global_var_is_array(gv) || gv.is_enum_constant {
+            return None;
+        }
+        Some(gv)
     }
 
     pub fn is_lvalue(&self, expr: &Expr) -> bool {

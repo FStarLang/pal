@@ -216,6 +216,16 @@ impl<'a> Elaborator<'a> {
             TypeT::Pointer(to, kind) => {
                 self.elab_type(env, Rc::make_mut(to));
                 match kind {
+                    // A `void *` has no pointee type to be parametric in, so it
+                    // becomes a raw `core_ref` rather than a `ref unit`: `unit`
+                    // is a real inhabited type, and `ref unit` would be
+                    // incompatible with every typed pointer. Defaulting here
+                    // rather than in the frontend keeps the explicit `_array`,
+                    // `_arrayptr` and `_core_ref` annotations winning, since
+                    // they set a non-`Unknown` kind earlier.
+                    PointerKind::Unknown if matches!(to.val, TypeT::Void) => {
+                        *kind = PointerKind::Core
+                    }
                     PointerKind::Unknown => *kind = PointerKind::Ref,
                     PointerKind::Ref => {}
                     PointerKind::Array => {}
@@ -475,7 +485,7 @@ impl<'a> Elaborator<'a> {
                         return;
                     }
                 }
-                if !env.is_lvalue(v) {
+                if !env.is_addressable(v) {
                     self.report(format!("expected lvalue for &, got {}", v), &rval.loc);
                 }
             }
@@ -638,6 +648,31 @@ impl<'a> Elaborator<'a> {
                             )
                         {
                             *rhs_ty = lhs_ty.to_rc();
+                            return;
+                        }
+                    }
+                    // A function pointer compared against null. `func_ptr` is
+                    // abstract and has no equality, so both spellings (`f == 0`
+                    // and `f == NULL`, a cast of 0) are normalized to a zero
+                    // literal at the function-pointer type; emit lowers that to
+                    // `FuncPtr.is_null`. Without this the zero keeps its
+                    // `_specint`/`void*` type and `meet_type` rejects the
+                    // comparison.
+                    if let TypeT::FnPtr { .. } = &lhs_ty.val {
+                        let rhs = Rc::make_mut(rhs);
+                        let is_null_lit = match &rhs.val {
+                            ExprT::IntLit(n, _) => **n == BigInt::ZERO,
+                            ExprT::Cast(inner, cast_ty) => {
+                                matches!(&inner.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
+                                    && matches!(
+                                        &env.vtype_whnf(cast_ty.clone().into()).val,
+                                        TypeT::Pointer(_, _) | TypeT::FnPtr { .. }
+                                    )
+                            }
+                            _ => false,
+                        };
+                        if is_null_lit {
+                            rhs.val = ExprT::IntLit(Rc::new(BigInt::ZERO), lhs_ty.to_rc());
                             return;
                         }
                     }
@@ -819,9 +854,36 @@ impl<'a> Elaborator<'a> {
             ExprT::UnionInit(_, _, fld_val) => {
                 self.elab_rvalue(env, Rc::make_mut(fld_val), None);
             }
-            ExprT::ArrayInit { elems, .. } => {
-                for elem in elems {
+            ExprT::ArrayInit {
+                elem_ty,
+                elems,
+                is_static,
+            } => {
+                for elem in elems.iter_mut() {
                     self.elab_rvalue(env, Rc::make_mut(elem), None);
+                }
+                // Per C11 6.7.9p14/p21, a narrow string literal shorter than
+                // its destination fixed-size array implicitly zero-pads the
+                // trailing elements. `is_static` marks array literals derived
+                // from string literals (see `ArrayInit`'s doc comment); pad
+                // them out to the destination's declared length here, using
+                // the `expected` type threaded down from the enclosing
+                // declaration, assignment, or struct field.
+                if *is_static {
+                    if let Some(exp) = expected {
+                        if let TypeT::FixedArray(_, target_len) =
+                            env.vtype_whnf(exp.clone().into()).val
+                        {
+                            let target_len = target_len as usize;
+                            let pad_loc = rval.loc.clone();
+                            while elems.len() < target_len {
+                                elems.push(
+                                    ExprT::IntLit(Rc::new(BigInt::ZERO), elem_ty.clone())
+                                        .with_loc(pad_loc.clone()),
+                                );
+                            }
+                        }
+                    }
                 }
             }
             ExprT::Cond(cond, then_expr, else_expr) => {
@@ -1008,9 +1070,18 @@ impl<'a> Elaborator<'a> {
     /// pointer kind (e.g. `int *a = malloc(sizeof(int) * 10)` → Array), and
     /// update the Decl's type before it is pushed to the environment.
     fn refine_decl_pointer_kind(env: &Env, stmts: &mut Vec<Rc<Stmt>>, decl_idx: usize) {
-        let StmtT::Decl(decl_name, _) = &stmts[decl_idx].val else {
+        let StmtT::Decl(decl_name, decl_ty) = &stmts[decl_idx].val else {
             return;
         };
+        // A `void *` local is always a raw `core_ref`, whatever it is assigned
+        // from: it has no pointee type to be refined to. Without this guard the
+        // initializer's kind wins here, before `elab_type` runs, and the local
+        // is pinned to `Ref` — i.e. `ref unit`.
+        if let TypeT::Pointer(to, _) = &decl_ty.val
+            && matches!(to.val, TypeT::Void)
+        {
+            return;
+        }
         let var_name = &decl_name.val;
         for j in (decl_idx + 1)..stmts.len() {
             let StmtT::Assign(x, v) = &stmts[j].val else {
@@ -1191,8 +1262,12 @@ impl<'a> Elaborator<'a> {
                 self.in_view_body = false;
             }
             DeclT::StructDefn(StructDefn {
-                name: _, fields, ..
+                name: _,
+                refines,
+                fields,
+                ..
             }) => {
+                self.elab_type(env, Rc::make_mut(refines));
                 let siblings = fields.clone();
                 for f in fields {
                     self.elab_field(env, f, &siblings);
@@ -1239,7 +1314,9 @@ impl<'a> Elaborator<'a> {
                 ty,
                 init,
                 is_pure: _,
+                is_extern: _,
                 opaque_to_smt: _,
+                is_enum_constant: _,
             }) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 if let Some(init) = init {
@@ -1347,9 +1424,15 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 let env = &mut env.clone();
                 for ga in &mut fn_decl.ghost_args {
                     elab.elab_type(env, Rc::make_mut(&mut ga.ty));
+                    env.push_var_decl(&ga.name, ga.ty.clone(), LocalDeclKind::RValue);
                 }
+                // Bring each parameter into scope as it is elaborated: a
+                // refinement on one parameter may name an earlier one, which is
+                // how an output's contract says what it was computed from.
                 for arg in &mut fn_decl.args {
                     elab.elab_type(env, Rc::make_mut(&mut arg.ty));
+                    let arg = arg.clone();
+                    env.push_arg(&arg, LocalDeclKind::RValue);
                 }
                 elab.elab_type(env, Rc::make_mut(&mut fn_decl.ret_type));
             }
@@ -1358,7 +1441,10 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                 elab.elab_type(&env, Rc::make_mut(&mut td.body));
                 elab.in_view_body = false;
             }
-            DeclT::StructDefn(StructDefn { fields, .. }) => {
+            DeclT::StructDefn(StructDefn {
+                refines, fields, ..
+            }) => {
+                elab.elab_type(&env, Rc::make_mut(refines));
                 let siblings = fields.clone();
                 for f in fields {
                     elab.elab_field(&env, f, &siblings);
