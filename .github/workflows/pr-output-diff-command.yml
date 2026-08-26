@@ -1,0 +1,67 @@
+name: PR Output Diff Command
+
+# Lets a reviewer regenerate the generated-output diff on demand by commenting
+# `!diff` on a pull request. This re-runs the "PR Output Diff" workflow for the
+# pull request, which in turn refreshes the diff comment.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  pull-requests: write
+
+jobs:
+  rerun:
+    if: >-
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '!diff')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Acknowledge the command
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes >/dev/null
+
+      - name: Re-run the output diff workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          head_sha=$(gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid)
+          head_ref=$(gh pr view "$PR" -R "$REPO" --json headRefName -q .headRefName)
+          echo "pull request #$PR is at $head_sha ($head_ref)"
+
+          runs=$(gh run list -R "$REPO" \
+            --workflow "PR Output Diff" --event pull_request --limit 100 \
+            --json databaseId,headSha,headBranch,status)
+
+          # Prefer a run for the exact commit, and fall back to the most recent
+          # run for the pull request's branch.
+          run_id=$(echo "$runs" | jq -r \
+            --arg sha "$head_sha" --arg ref "$head_ref" \
+            '([.[] | select(.headSha == $sha)] + [.[] | select(.headBranch == $ref)])
+             | first | .databaseId // empty')
+
+          if [ -z "$run_id" ]; then
+            gh pr comment "$PR" -R "$REPO" --body \
+              "Sorry, I couldn't find a \`PR Output Diff\` run for \`$head_sha\` to re-run. Push a commit to the pull request to generate one."
+            exit 1
+          fi
+
+          status=$(gh run view "$run_id" -R "$REPO" --json status -q .status)
+          if [ "$status" != "completed" ]; then
+            gh pr comment "$PR" -R "$REPO" --body \
+              "A \`PR Output Diff\` run for this pull request is already $status; the diff comment will be updated when it finishes."
+            exit 0
+          fi
+
+          echo "re-running workflow run $run_id"
+          gh run rerun "$run_id" -R "$REPO"

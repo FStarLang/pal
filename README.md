@@ -122,6 +122,26 @@ pal [OPTIONS] <FILES>...
 
 ---
 
+## Reviewing pull requests
+
+Changes to the translator are easiest to judge by looking at the F\* code they
+produce. Every pull request therefore gets an automatic comment showing a diff
+of the output `pal` generates for the whole test suite, base versus head. The
+full diff is also attached to the workflow run as the `pal-output-diff`
+artifact.
+
+Comment `!diff` on a pull request to regenerate the report on demand.
+
+The workflows live in [`.github/workflows/`](.github/workflows):
+`pr-output-diff.yml` builds both revisions and computes the diff (via
+[`.github/scripts/pal-snapshot.sh`](.github/scripts/pal-snapshot.sh)),
+`pr-output-diff-comment.yml` posts it, and `pr-output-diff-command.yml`
+handles the `!diff` command. Configure a `PAL_GIST_TOKEN` repository secret
+(a token with the `gist` scope) to additionally publish each full diff as a
+gist; without it the comment links to the artifact instead.
+
+---
+
 ## Documentation
 
 Detailed references live in [`doc/`](doc/):
