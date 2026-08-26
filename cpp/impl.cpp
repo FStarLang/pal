@@ -311,7 +311,8 @@ public:
           ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
           trTypeAttrs(f->getAttrs(),
                       trQualType(f->getType(), f->getSourceRange(), liftStructs,
-                                 findFnProtoTypeLoc(f->getTypeSourceInfo()))));
+                                 findFnProtoTypeLoc(f->getTypeSourceInfo())),
+                      f->getType(), f->getSourceRange()));
     }
   }
 
@@ -522,11 +523,41 @@ public:
     return mk_type_err(std::move(loc));
   }
 
+  // `_array`, `_arrayptr` and `_core_ref` reclassify a *pointer*. When the
+  // declared type only reaches the pointer through a typedef (e.g.
+  // `typedef E* PE;`), the translated type is an opaque type reference and the
+  // classification has nothing to attach to. Desugar to the underlying pointer
+  // type in that case so the attribute applies to the pointer it names.
+  static bool isPointerKindAttr(AnnotateAttr *ann) {
+    if (ann->args_size() != 0)
+      return false;
+    auto name = ann->getAnnotation();
+    return name == "pal-array" || name == "pal-arrayptr" ||
+           name == "pal-core-ref";
+  }
+
+  Rc<ir::Type> desugarPointerTypedef(Rc<ir::Type> &&ty, QualType declQt,
+                                     SourceRange declRange) {
+    if (declQt.isNull())
+      return std::move(ty);
+    auto qt = declQt.IgnoreParens();
+    auto ptr = qt->getAs<PointerType>();
+    if (!ptr || isa<PointerType>(qt.getTypePtr()))
+      return std::move(ty);
+    return trQualType(astCtx->getPointerType(ptr->getPointeeType()), declRange);
+  }
+
   Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty,
                            QualType declQt = QualType(),
                            SourceRange declRange = SourceRange()) {
-    (void)declQt;
-    (void)declRange;
+    for (auto attr : attrs) {
+      if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
+        if (isPointerKindAttr(ann)) {
+          ty = desugarPointerTypedef(std::move(ty), declQt, declRange);
+          break;
+        }
+      }
+    }
     bool sawNullable = false;
     std::optional<Rc<ir::SourceInfo>> nullableLoc;
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
@@ -2285,7 +2316,8 @@ public:
             auto ty = trTypeAttrs(
                 vd->getAttrs(),
                 trQualType(vd->getType(), vd->getSourceRange(), nullptr,
-                           findFnProtoTypeLoc(vd->getTypeSourceInfo())));
+                           findFnProtoTypeLoc(vd->getTypeSourceInfo())),
+                vd->getType(), vd->getSourceRange());
             stmts.push(mk_var_decl(dloc.clone(), id.clone(), std::move(ty)));
             if (vd->hasInit()) {
               stmts.push(mk_assign(dloc.clone(),
@@ -2545,7 +2577,8 @@ public:
       }
       builder.return_type(trTypeAttrs(
           FD->getAttrs(),
-          trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange())));
+          trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
+          FD->getReturnType(), FD->getReturnTypeSourceRange()));
       for (auto attr : FD->getAttrs()) {
         if (FD->hasBody() && attr->isInherited())
           continue;
