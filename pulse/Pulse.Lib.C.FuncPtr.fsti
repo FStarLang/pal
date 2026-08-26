@@ -28,9 +28,11 @@ open Pulse.Lib.C.Inhabited
      - is_null         : decidable null test
 
    DERIVABLE (defined/proven from the axioms above -- nothing new is assumed):
-     - is_valid      : `let`-definition, `pure (valid ..)`
-     - drop_is_valid : proven `ghost fn` (just `unfold`s `is_valid` to `emp`)
-     - valid_cast    : proven `ghost fn` (unfold/fold across a value equality)
+     - is_valid        : `let`-definition, `pure (valid ..)`
+     - drop_is_valid   : proven `ghost fn` (just `unfold`s `is_valid` to `emp`)
+     - valid_cast      : proven `ghost fn` (unfold/fold across a value equality)
+     - prevent_lifting : `unfold` identity on `slprop`, used as a syntactic
+                         barrier against precondition lifting (see below)
 
    Every combinator above is additionally parametrized by a witness type `c`,
    with `pre`/`post` taking a `c`-typed argument and the wrapped function
@@ -179,3 +181,26 @@ instance has_zero_default_func_ptr (a b: Type0) : has_zero_default (func_ptr a b
 (* `has_is_null` instance so a func-pointer parameter can be marked `_nullable`. *)
 instance has_is_null_func_ptr (a b: Type0) : Pulse.Lib.C.Nullable.has_is_null (func_ptr a b) =
   { test_null = (fun f -> is_null f) }
+
+(* A semantic no-op on `slprop`s that acts as a SYNTACTIC barrier against
+   Pulse's precondition lifting.
+
+   The lifting described in the witness-parameter note at the top of this file
+   is a surface-AST transform: when Pulse can see a `with_pure` (or `exists*`)
+   at the top of a `requires`, it opens the binder it carries -- for
+   `with_pure p`, the `squash p` -- into a HIDDEN implicit binder after the
+   function's explicit parameters. That gives the wrapper a type with one more
+   binder than `pre_of`/`post_of`'s flat
+   `x:a -> y:erased c -> stt_div b (pre x y) (fun r -> post x y r)` pattern, so
+   their higher-order unification fails with F* Error 189.
+
+   Behind an application the frontend no longer sees a liftable head, so no
+   binder is opened; `unfold` then erases this wrapper during typechecking,
+   leaving the original `slprop` -- `with_pure` included -- in place inside the
+   precondition. PAL wraps every `__fp` wrapper's `requires` in this, which is
+   what lets a `_refine`d parameter's `with_pure` survive decay through
+   `of_fn`/`of_fn_div`.
+
+   The `ensures` needs no such treatment: postconditions are not lifted this
+   way, and `post_of` matches them as emitted. *)
+unfold let prevent_lifting (p: slprop) = p
