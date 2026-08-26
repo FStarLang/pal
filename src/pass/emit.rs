@@ -6654,8 +6654,26 @@ impl<'a> Emitter<'a> {
                 ))
             }
         };
-        let req_props: Vec<Doc> = decl
-            .requires
+        // `_requires`/`_ensures` are slprop-typed. A *boolean* annotation
+        // reaches us as `Cast(bool_expr, SLProp)`; anything else is already a
+        // genuine slprop (e.g. an `_inline_pulse` `pts_to`). Only the former
+        // may go inside `pure`, which is a `prop` position. `emit_fn_sig_inner`
+        // gets this split for free by routing everything through `emit_rvalue`,
+        // whose `Bool -> SLProp` cast case emits `with_pure`.
+        //
+        // Note this narrows the `req ==> ens` implication below to the boolean
+        // annotations: an slprop precondition no longer guards an slprop
+        // postcondition. That is the only form the implication can take, since
+        // `==>` is on `prop`.
+        let is_pure_prop =
+            |e: &Expr| matches!(&e.val, ExprT::Cast(_, ty) if matches!(ty.val, TypeT::SLProp));
+        let (req_pure, req_slprop): (Vec<_>, Vec<_>) =
+            decl.requires.iter().partition(|r| is_pure_prop(r));
+        for r in &req_slprop {
+            let d = self.emit_rvalue(env, r);
+            requires_props.push(d);
+        }
+        let req_props: Vec<Doc> = req_pure
             .iter()
             .map(|r| self.emit_pure_prop(env, r))
             .collect();
@@ -6693,8 +6711,13 @@ impl<'a> Emitter<'a> {
             }
         }
         // Pure ensures reference the pointee value via the normal lowering.
-        let ens_props_pure: Vec<Doc> = decl
-            .ensures
+        let (ens_pure, ens_slprop): (Vec<_>, Vec<_>) =
+            decl.ensures.iter().partition(|r| is_pure_prop(r));
+        for r in &ens_slprop {
+            let d = self.emit_rvalue(env, r);
+            ensures_props.push(d);
+        }
+        let ens_props_pure: Vec<Doc> = ens_pure
             .iter()
             .map(|r| self.emit_pure_prop(env, r))
             .collect();
