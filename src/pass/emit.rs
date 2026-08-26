@@ -14,20 +14,9 @@ use crate::{
     mayberc::MaybeRc,
 };
 
-pub type SourceRangeMap = Vec<(Location, Range)>;
+use super::normalize_casts::normalize_unsigned;
 
-/// Normalize a possibly-negative integer literal into the unsigned range
-/// [0, 2^width).
-///
-/// clang hands us the signed interpretation of an N-bit bit pattern (see
-/// `toBigInt` in `cpp/impl.cpp`, which uses `toStringSigned`), so an unsigned
-/// literal with the high bit set arrives as a negative `BigInt` (e.g. the u32
-/// value 0xFFFFFFFF as -1). F* unsigned literals must be non-negative, so we
-/// reduce the value modulo 2^width before emitting it.
-fn normalize_unsigned(val: &BigInt, width: u32) -> BigInt {
-    let modulus = BigInt::from(1u32) << width;
-    ((val % &modulus) + &modulus) % &modulus
-}
+pub type SourceRangeMap = Vec<(Location, Range)>;
 
 /// The module holding a function's fnptr wrapper (`func_<g>__fp`), whose type
 /// carries the inlined pre/post spec. Kept separate from the function's own
@@ -318,6 +307,82 @@ impl<'a> RenderAnnotated<'a, Annotation> for StrWriter {
 
 fn annotated<T>(ast: &Ast<T>, doc: impl FnOnce() -> Doc) -> Doc {
     doc().annotate(ast.loc.clone())
+}
+
+/// Render an integer literal for use as a function argument. F* lexes a leading
+/// `-` as the infix subtraction operator, so `Int16.int_to_t -1` parses as
+/// `Int16.int_to_t - 1`; negative values must be parenthesized.
+fn paren_if_negative(val: &BigInt) -> String {
+    if val.sign() == num_bigint::Sign::Minus {
+        format!("({})", val)
+    } else {
+        format!("{}", val)
+    }
+}
+
+/// Render a suffixed literal such as `-1l`. A leading `-` also has to be
+/// parenthesized: F* lexes `=-` and `:=-` as single operators, so a negative
+/// literal in a record field or an assignment would otherwise not parse.
+/// The F* literal for a C machine-integer constant, if the type has a literal
+/// suffix. Emitting `62586880L` rather than `Int64.int_to_t 62586880` is not
+/// only shorter: the constructor's argument carries the refinement
+/// `FStar.Int.size 62586880 64`, which only the SMT solver discharges. That
+/// makes a constructor application ill-typed wherever the checker runs without
+/// SMT -- notably while Pulse searches for a witness to an existential, where
+/// a constant of this shape appears as a candidate.
+fn machine_int_literal(val: &BigInt, ty: &TypeT) -> Option<String> {
+    let (suffix, unsigned_width) = match ty {
+        TypeT::Int {
+            signed: true,
+            width: 8,
+        } => ("y", None),
+        TypeT::Int {
+            signed: false,
+            width: 8,
+        } => ("uy", Some(8)),
+        TypeT::Int {
+            signed: true,
+            width: 16,
+        } => ("s", None),
+        TypeT::Int {
+            signed: false,
+            width: 16,
+        } => ("us", Some(16)),
+        TypeT::Int {
+            signed: true,
+            width: 32,
+        } => ("l", None),
+        TypeT::Int {
+            signed: false,
+            width: 32,
+        } => ("ul", Some(32)),
+        TypeT::Int {
+            signed: true,
+            width: 64,
+        } => ("L", None),
+        TypeT::Int {
+            signed: false,
+            width: 64,
+        } => ("uL", Some(64)),
+        TypeT::SizeT => ("sz", None),
+        _ => return None,
+    };
+    match unsigned_width {
+        // clang hands us the signed interpretation of the bit pattern (see
+        // toBigInt in cpp/impl.cpp), so an unsigned literal with the high bit
+        // set arrives as a negative BigInt (e.g. 0xFFFFFFFF as -1). F*'s
+        // unsigned literals must lie in [0, 2^width), so normalize first.
+        Some(width) => Some(format!("{}{}", normalize_unsigned(val, width), suffix)),
+        None => Some(suffixed_literal(val, suffix)),
+    }
+}
+
+fn suffixed_literal(val: &BigInt, suffix: &str) -> String {
+    if val.sign() == num_bigint::Sign::Minus {
+        format!("({}{})", val, suffix)
+    } else {
+        format!("{}{}", val, suffix)
+    }
 }
 
 fn parens(doc: Doc) -> Doc {
@@ -2456,42 +2521,7 @@ impl<'a> Emitter<'a> {
     fn emit_pattern(&mut self, env: &Env, pattern: &Expr) -> Doc {
         if let ExprT::IntLit(val, ty) = &pattern.val {
             let resolved = env.vtype_whnf(ty.clone().into());
-            let literal = match resolved.val {
-                TypeT::Int {
-                    signed: true,
-                    width: 8,
-                } => Some(format!("{}y", val)),
-                TypeT::Int {
-                    signed: false,
-                    width: 8,
-                } => Some(format!("{}uy", normalize_unsigned(val, 8))),
-                TypeT::Int {
-                    signed: true,
-                    width: 16,
-                } => Some(format!("{}s", val)),
-                TypeT::Int {
-                    signed: false,
-                    width: 16,
-                } => Some(format!("{}us", normalize_unsigned(val, 16))),
-                TypeT::Int {
-                    signed: true,
-                    width: 32,
-                } => Some(format!("{}l", val)),
-                TypeT::Int {
-                    signed: false,
-                    width: 32,
-                } => Some(format!("{}ul", normalize_unsigned(val, 32))),
-                TypeT::Int {
-                    signed: true,
-                    width: 64,
-                } => Some(format!("{}L", val)),
-                TypeT::Int {
-                    signed: false,
-                    width: 64,
-                } => Some(format!("{}uL", normalize_unsigned(val, 64))),
-                TypeT::SizeT => Some(format!("{}sz", val)),
-                _ => None,
-            };
+            let literal = machine_int_literal(val, &resolved.val);
             if let Some(literal) = literal {
                 return Doc::text(literal);
             }
@@ -2505,26 +2535,22 @@ impl<'a> Emitter<'a> {
                 ExprT::BoolLit(v) => Doc::text(if *v { "true" } else { "false" }),
                 ExprT::IntLit(val, ty) => {
                     let resolved = env.vtype_whnf(ty.clone().into());
+                    if let Some(literal) = machine_int_literal(val, &resolved.val) {
+                        return Doc::text(literal);
+                    }
                     match resolved.val {
-                        TypeT::Int {
-                            signed: true,
-                            width: 32,
-                        } => Doc::text(format!("{}l", val)),
-                        TypeT::Int {
-                            signed: false,
-                            width: 32,
-                        } => {
-                            // clang hands us the signed interpretation of the
-                            // bit pattern (see toBigInt in cpp/impl.cpp), so a
-                            // u32 literal with the high bit set arrives as a
-                            // negative BigInt (e.g. 0xFFFFFFFF as -1). F*'s `ul`
-                            // literals must lie in [0, 2^32), so normalize first.
-                            Doc::text(format!("{}ul", normalize_unsigned(val, 32)))
-                        }
+                        // Widths without an F* literal suffix keep the
+                        // constructor form; they do not occur in practice.
                         TypeT::Int {
                             signed: true,
                             width,
-                        } => Doc::text(format!("(Int{}.int_to_t {})", width, val)),
+                        } => Doc::text(format!(
+                            // A bare negative argument would be parsed as
+                            // subtraction (`int_to_t - 1`), so parenthesize it.
+                            "(Int{}.int_to_t {})",
+                            width,
+                            paren_if_negative(val)
+                        )),
                         TypeT::Int {
                             signed: false,
                             width,
@@ -2533,8 +2559,7 @@ impl<'a> Emitter<'a> {
                             width,
                             normalize_unsigned(val, width)
                         )),
-                        TypeT::SizeT => Doc::text(format!("{}sz", val)),
-                        TypeT::SpecInt | TypeT::SpecNat => Doc::text(format!("{}", val)),
+                        TypeT::SpecInt | TypeT::SpecNat => Doc::text(suffixed_literal(val, "")),
                         TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
                             if **val == BigInt::ZERO =>
                         {
@@ -2619,6 +2644,7 @@ impl<'a> Emitter<'a> {
                         // Same underlying type, no cast necessary.
                         return val_doc;
                     }
+
                     let default_msg = format!("unsupported cast from {} to {}", from_ty, to_ty);
                     match (&from_ty.val, &to_ty.val) {
                         (TypeT::Bool, TypeT::Int { signed, width }) => {
