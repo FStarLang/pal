@@ -22,15 +22,8 @@ _plain const char *get_name() {
     return "hello";
 }
 
-/* A local array with an initializer is allocated correctly and its length is
-   inferred correctly, but the initializer assigns the array *spec* into the
-   variable instead of writing the contents into the array just allocated:
-   `var_buf := array_spec_of_list_with_len ..`. F* reports Error 19.
-
-   The call position is irrelevant -- the failure is at the declaration -- so
-   one call site suffices. Note this breaks statement position, which `foo`
-   above shows working when the literal is passed inline. */
-
+/* A local array with an initializer writes its contents into the array just
+   allocated, via array_multiple_writes. */
 void init_from_string(void) {
     char buf[] = "lo";
     write(buf, 3);
@@ -42,4 +35,22 @@ void init_from_braces(void) {
     char buf[3] = {'o', 'k', '\0'};
     write(buf, 3);
 }
+
+/* A string shorter than the array: the initializer is padded with NULs up to
+   the declared length, so every cell is written and the length is 8, not 3. */
+void init_shorter_string(void) {
+    char buf[8] = "lo";
+    write(buf, 8);
+}
+
+/* Not supported: truncating a string literal to drop its NUL. This is legal C,
+   but the literal elaborates at its natural length and PAL has no truncating
+   array-to-array cast --
+     error: unsupported cast from int8_t[3] to int8_t[2]
+
+void init_truncated(void) {
+    char buf[2] = "lo";
+    write(buf, 2);
+}
+*/
 
