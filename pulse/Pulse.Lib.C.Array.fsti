@@ -80,10 +80,12 @@ let array_spec_get #a (s: array_spec a) (i: nat) : GTot (option a) =
 let array_spec_of #a (x: array a) #p #y =
   observe (array_pts_to x p) #y
 
-fn array_read_all u#a (#a: Type u#a) (x: array a)
-  preserves array_pts_to x 'p 'y
+// Ghost, not concrete: an array_spec records Uninit/OutOfMask cells, which no
+// C program can read.
+ghost fn array_read_all u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
+  preserves array_pts_to x p y
   returns z: array_spec a
-  ensures rewrites_to z 'y
+  ensures rewrites_to z y
 
 ghost fn array_value_of u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
   preserves array_pts_to x p y
@@ -209,7 +211,12 @@ fn stack_alloc_array u#a (#a:Type u#a) {| small_type u#a |} (sz:SZ.t)
 fn stack_free_array u#a (#a:Type u#a) (r:array a)
   requires array_pts_to_uninit' r
 
-fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |} (s: full_array_spec a)
+// The SZ.fits refinement is required for soundness: without it the spec is
+// unsatisfiable (array_spec_zeroed builds a full_array_spec of arbitrary
+// length), and since Array.Core.length carries `ensures SZ.fits`, admitting it
+// would let a caller derive SZ.fits n for any n. See the .fst for detail.
+fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |}
+  (s: full_array_spec a { SZ.fits (array_spec_len s) })
   returns r : array a
   ensures array_pts_to_full r 1.0R s
 

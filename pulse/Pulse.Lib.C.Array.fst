@@ -27,6 +27,10 @@ let array_spec_initd #a (s: array_spec a) (i: nat) : prop = i < Seq.length s /\ 
 let array_spec_mask #a (s: array_spec a) (i: nat) : prop = i < Seq.length s /\ ~(OutOfMask? (Seq.index s i))
 let array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : Tot a = let Val x = Seq.index s i in x
 
+// Deliberately unspecified: there is no postcondition, so `null` would
+// discharge this admit while turning an honest gap into a silent extraction
+// bug. The real fix is to give it a spec (an immutable pts_to at the literal's
+// contents), which is a design change, not a proof.
 let array_literal_to_ref #a #n (_: full_array_lspec a n) : Tot (R.ref a) =
   admit ()
 
@@ -74,12 +78,15 @@ let array_spec_zeroed_idx a n x i = ()
 let array_pts_to #a (x: array a) (p: perm) (y: array_spec a) : slprop =
   A.pts_to_mask x #p (to_seq y) (to_mask y)
 
-fn array_read_all u#a (#a: Type u#a) (x: array a)
-  preserves array_pts_to x 'p 'y
+// Ghost, not concrete: an array_spec records Uninit/OutOfMask cells, which no
+// C program can read. The 'p/'y sugar binds erased implicits, so a concrete fn
+// could not return y either.
+ghost fn array_read_all u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
+  preserves array_pts_to x p y
   returns z: array_spec a
-  ensures rewrites_to z 'y
+  ensures rewrites_to z y
 {
-  admit ()
+  y
 }
 
 ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
@@ -239,17 +246,29 @@ fn stack_free_array u#a (#a:Type u#a) (r:array a)
   free_array r;
 }
 
-fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |} (s: full_array_spec a)
+// The SZ.fits refinement is required for soundness, not just convenience.
+// Without it the spec is unsatisfiable: array_spec_zeroed builds a
+// full_array_spec of arbitrary length, so this would promise to allocate an
+// array of, say, 2^70 elements. Since Pulse.Lib.Array.Core.length carries
+// `ensures SZ.fits`, admitting that promise lets a caller derive SZ.fits n for
+// any n, and hence build a size_t too large for any machine word.
+// It is also the premise a real implementation needs: allocating requires an
+// SZ.t length, which cannot be built from array_spec_len s without it.
+fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |}
+  (s: full_array_spec a { SZ.fits (array_spec_len s) })
   returns r : array a
   ensures array_pts_to_full r 1.0R s
 {
+  // Still admitted: a full proof additionally needs a loop to fill the array
+  // with s's contents.
   admit ()
 }
 
 fn stack_free_array_full u#a (#a: Type u#a) (r: array a) (#s: erased (full_array_spec a))
   requires array_pts_to_full r 1.0R s
 {
-  admit ()
+  intro_array_pts_to_uninit' r;
+  stack_free_array r;
 }
 
 fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} (sz:SZ.t)
@@ -575,9 +594,9 @@ fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
   ensures rewrites_to res (array_spec_idx s (arrayptr_off x y + SZ.v i))
 {
   admit ()
-  // Stuck: need to compute the actual index into y's backing array
-  // from the arrayptr offset, unfold array_pts_to, and call mask_read
-  // at the computed index. Requires showing SZ.fits for the index.
+  // Stuck: permission is held on the backing array y, but the runtime handle
+  // is x, and the connecting offset `arrayptr_off x y` is GTot. So there is no
+  // runtime index to pass to mask_read.
 }
 
 fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
@@ -590,8 +609,8 @@ fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
     pure (s' == array_spec_upd s (arrayptr_off x y + SZ.v i) v)
 {
   admit ()
-  // Stuck: same issue as arrayptr_read — need to compute index,
-  // unfold, call mask_write, then refold with updated spec.
+  // Stuck: same issue as arrayptr_read — `arrayptr_off x y` is GTot, so there
+  // is no runtime index to pass to mask_write.
 }
 
 fn arrayptr_assign_ret u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
