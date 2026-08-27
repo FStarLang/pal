@@ -319,9 +319,8 @@ public:
   }
 
   // `_ghost_arg` on a function-pointer-typed declaration -- a struct field or
-  // a local variable. An indirect call site derives the ghost arity from the
-  // callee's static type alone, so the annotation has to travel with the type.
-  // Parsed with a scratch DeclBuilder purely as an accumulator.
+  // a local variable. See `TypeT::FnPtr` in src/ir/mod.rs for why the type
+  // carries them. Parsed with a scratch DeclBuilder purely as an accumulator.
   Rc<ir::Type> attachDeclGhostArgs(Rc<ir::Type> ty, NamedDecl *d) {
     if (!d->hasAttrs())
       return ty;

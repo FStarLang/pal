@@ -12,9 +12,10 @@
 
    An indirect call site has no callee declaration, so it can only learn the
    ghost arity from the type written in `struct ops` -- hence the `_ghost_arg`
-   annotations on the fields. It then emits `hide (elims, (_, .., _))`: the
-   tuple spine must be written out, since Pulse solves a hole standing for a
-   tuple leaf but not one standing for a whole tuple. */
+   annotations on the fields. It then emits `hide (elims, (_, .., _))`: values
+   on the elim side, holes on the ghost side, and the tuple spine written out,
+   since Pulse solves a hole standing for a tuple leaf but not one standing for
+   a whole tuple. */
 
 /* One ghost argument. It occurs inside an slprop, so it is recoverable by
    matching against the caller's context. */
@@ -35,9 +36,7 @@ int32_t impl_two(_plain int32_t *q, _plain int32_t *r) { return 0; }
 
      c = ((ty_int32_t & ty_int32_t) & (ty_int32_t & ty_int32_t))
 
-   the wrapper projects all four bindings at depth 2, and a call site has to
-   write `hide ((!a, !b), (_, _))` -- values on the elim side, holes on the
-   ghost side. */
+   and the wrapper projects all four bindings at depth 2. */
 _ghost_arg(int32_t v)
 _ghost_arg(int32_t w)
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
@@ -74,13 +73,13 @@ int32_t impl_elim_two(int32_t *a, int32_t *b)
    `pure (p /\ q)`, so writing them together would make them useless for
    matching -- and matching them is what pins the call site's ghost holes.
 
-   Both are `pulse_eager_unfold`, like `pre_of`/`post_of` themselves: a plain
-   `let` would be opaque to the slprop matcher and the ghost holes at the
-   indirect call site would stay unsolved.
-
-   `m_wpost` needs `prevent_lifting` because `post_of` has a top-level
-   `exists*`, which Pulse would otherwise eliminate into hidden implicit
-   binders, changing the coercion's type (Error 189). */
+   `pre_w` is `pulse_eager_unfold`, like `pre_of` itself: a plain `let` would
+   be opaque to the slprop matcher and the ghost holes at the indirect call
+   site would stay unsolved. The post is not weakened at all, so `post_of` is
+   passed through directly and `m_wpost` is an identity coercion -- it still
+   has to exist, since `weaken` demands one. It needs `prevent_lifting` because
+   `post_of` has a top-level `exists*`, which Pulse would otherwise eliminate
+   into hidden implicit binders, changing the coercion's type (Error 189). */
 _include_pulse(Ops_spec,
   let m_dom : Type0 =
     ((ref Typedef_int32_t.ty_int32_t) & (ref Typedef_int32_t.ty_int32_t) &
@@ -96,10 +95,6 @@ _include_pulse(Ops_spec,
     pure (fst (snd (reveal y)) == 0l) **
     pure (snd (snd (reveal y)) == 1l)
 
-  [@@pulse_eager_unfold]
-  unfold let m_post_w (x: m_dom) (y: erased m_wit) (r: Typedef_int32_t.ty_int32_t) : slprop =
-    Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r
-
   ghost fn m_wpre (x: m_dom) (y: erased m_wit)
     requires m_pre_w x y
     ensures Pulse.Lib.C.FuncPtr.pre_of Funcptr_impl_mixed.func_impl_mixed__fp x y
@@ -111,7 +106,7 @@ _include_pulse(Ops_spec,
   ghost fn m_wpost (x: m_dom) (y: erased m_wit) (r: Typedef_int32_t.ty_int32_t)
     requires Pulse.Lib.C.FuncPtr.prevent_lifting
                (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r)
-    ensures m_post_w x y r
+    ensures Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r
   {
     ()
   }
@@ -119,12 +114,7 @@ _include_pulse(Ops_spec,
 
 /* The `m` field carries the weakened contract as a field-level `_refine`, so
    any owner of a `struct ops` value may call through `m` without first
-   re-deriving validity from `impl_mixed`.
-
-   Unlike the `destroy` field of `struct itemx` in test/func_pointer, this
-   closes no module cycle: `impl_mixed`'s signature never mentions
-   `struct ops`, so `Funcptr_impl_mixed` (hence `Ops_spec`) does not depend
-   back on `Struct_ops`. */
+   re-deriving validity from `impl_mixed`. */
 struct ops {
     _ghost_arg(int32_t v)
     int32_t (*f)(_plain int32_t *q);
@@ -134,7 +124,8 @@ struct ops {
     _ghost_arg(int32_t v)
     _ghost_arg(int32_t w)
     _refine((_slprop) _inline_pulse(
-        Pulse.Lib.C.FuncPtr.is_valid $(this) true Ops_spec.m_pre_w Ops_spec.m_post_w))
+        Pulse.Lib.C.FuncPtr.is_valid $(this) true Ops_spec.m_pre_w
+          (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)))
     int32_t (*m)(int32_t *a, int32_t *b, _plain int32_t *q, _plain int32_t *r);
     int32_t (*e)(int32_t *a, int32_t *b);
 };
@@ -143,21 +134,9 @@ static const struct ops o = {
     .f = impl_one, .g = impl_two, .m = impl_mixed, .e = impl_elim_two
 };
 
-/* Direct calls, for contrast: the ghost arguments are ordinary implicits and
-   any number of them is already fine. */
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-int32_t call_direct_one(_plain int32_t *q)
-{
-    return impl_one(q);
-}
-
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
-int32_t call_direct_two(_plain int32_t *q, _plain int32_t *r)
-{
-    return impl_two(q, r);
-}
-
+/* A direct call, for contrast: the ghost arguments are ordinary implicits and
+   any number of them is already fine. (test/ghost_arg declares ghost-arg
+   functions but never calls one, so this is the only direct-call coverage.) */
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
@@ -193,8 +172,7 @@ int32_t call_via_o_two(_plain int32_t *q, _plain int32_t *r)
     _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
 }
 
-/* The mixed case through the pointer: two elim components (written as reads)
-   and two ghost components (written as holes), all at depth 2. */
+/* The mixed case through the pointer: `hide ((!a, !b), (_, _))`. */
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
@@ -265,7 +243,8 @@ struct ops *get_ops(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken _ true true
                     (Pulse.Lib.C.FuncPtr.pre_of Funcptr_impl_mixed.func_impl_mixed__fp)
                     (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)
-                    Ops_spec.m_pre_w Ops_spec.m_post_w
+                    Ops_spec.m_pre_w
+                    (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)
                     Ops_spec.m_wpre Ops_spec.m_wpost);
     return p;
 }

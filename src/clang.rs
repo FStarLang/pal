@@ -387,16 +387,16 @@ impl<'a> Ctx<'a> {
     }
 
     /// Attach the ghost args accumulated in `builder` to a function-pointer
-    /// type. Used for `_ghost_arg` written on a function-pointer-typed struct
-    /// field: an indirect call site sees only the field's type, so the ghost
-    /// arity has to travel with the type.
+    /// type. See `TypeT::FnPtr` for why the type carries them at all.
     fn fnptr_with_ghost_args(&mut self, ty: Rc<Type>, builder: &mut DeclBuilder) -> Rc<Type> {
         if builder.ghost_args.is_empty() {
             return ty;
         }
-        // A `_refine` (or `_plain`, ...) on the same declaration wraps the
-        // function-pointer type, so descend through the wrappers and rebuild
-        // them around the annotated inner type.
+        // A `_refine`, `_plain`, `_nullable` etc. on the same declaration wraps
+        // the function-pointer type, so descend through the wrappers and
+        // rebuild them around the annotated inner type. `trTypeAttrs` applies
+        // these by attribute name without consulting the underlying type, so
+        // any of them can sit on a function-pointer declaration.
         macro_rules! rewrap {
             ($ctor:path, $inner:expr $(, $rest:expr)*) => {{
                 let inner = self.fnptr_with_ghost_args($inner.clone(), builder);
@@ -422,7 +422,7 @@ impl<'a> Ctx<'a> {
                 self.report_diag(
                     ty.loc.clone(),
                     true,
-                    "_ghost_arg is only supported on function-pointer fields",
+                    "_ghost_arg is only supported on function-pointer declarations",
                 );
                 ty
             }

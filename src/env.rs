@@ -453,8 +453,10 @@ impl Env {
                         .reuse_loc(TypeT::FnPtr {
                             args,
                             ret: f_decl.ret_type.clone(),
-                            // `&g` knows `g`'s ghost args exactly, so the
-                            // decayed pointer type carries them.
+                            // `&g` knows `g`'s ghost args exactly. No emitted
+                            // output currently observes this (an indirect call
+                            // reads a field or a local, never a bare `FnRef`),
+                            // but `vec![]` here would be a lie.
                             ghost_args: f_decl.ghost_args.clone(),
                         })
                         .into())
