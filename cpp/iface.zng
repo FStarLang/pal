@@ -207,6 +207,7 @@ mod crate::clang {
 
         fn mk_ghost_stmt(&mut self, Rc<SourceInfo>, u32, &SnippetMap) -> Rc<Stmt>;
         fn parse_ghost_arg(&mut self, &mut DeclBuilder, Rc<SourceInfo>, u32, &SnippetMap);
+        fn fnptr_with_ghost_args(&mut self, Rc<Type>, &mut DeclBuilder) -> Rc<Type>;
 
         fn parse_rvalue(&mut self, Rc<SourceInfo>, u32, &SnippetMap) -> Rc<Expr>;
 

@@ -239,9 +239,16 @@ impl<'a> Elaborator<'a> {
             TypeT::FlexArray(elem_ty) => {
                 self.elab_type(env, Rc::make_mut(elem_ty));
             }
-            TypeT::FnPtr { args, ret } => {
+            TypeT::FnPtr {
+                args,
+                ret,
+                ghost_args,
+            } => {
                 for a in args.iter_mut() {
                     self.elab_type(env, Rc::make_mut(a));
+                }
+                for ga in ghost_args.iter_mut() {
+                    self.elab_type(env, Rc::make_mut(&mut ga.ty));
                 }
                 self.elab_type(env, Rc::make_mut(ret));
             }

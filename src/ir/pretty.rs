@@ -138,15 +138,25 @@ impl PrettyIR for TypeT {
             TypeT::Pointer(ty, PointerKind::Unknown) => ty.to_doc().append(RcDoc::text("[?]")),
             TypeT::FixedArray(ty, len) => ty.to_doc().append(RcDoc::text(format!("[{}]", len))),
             TypeT::FlexArray(ty) => ty.to_doc().append(RcDoc::text("[]")),
-            TypeT::FnPtr { args, ret } => ret
-                .to_doc()
-                .append(RcDoc::text(" (*)("))
-                .append(RcDoc::intersperse(
-                    args.iter().map(|a| a.to_doc()),
-                    RcDoc::text(", "),
-                ))
-                .append(RcDoc::text(")"))
-                .group(),
+            TypeT::FnPtr {
+                args,
+                ret,
+                ghost_args,
+            } => RcDoc::concat(ghost_args.iter().map(|ga| {
+                RcDoc::text("_ghost_arg(")
+                    .append(ga.ty.to_doc())
+                    .append(RcDoc::text(" "))
+                    .append(RcDoc::text(ga.name.val.to_string()))
+                    .append(RcDoc::text(") "))
+            }))
+            .append(ret.to_doc())
+            .append(RcDoc::text(" (*)("))
+            .append(RcDoc::intersperse(
+                args.iter().map(|a| a.to_doc()),
+                RcDoc::text(", "),
+            ))
+            .append(RcDoc::text(")"))
+            .group(),
             TypeT::SpecInt => RcDoc::text("_specint"),
             TypeT::SpecNat => RcDoc::text("_specnat"),
             TypeT::SLProp => RcDoc::text("_slprop"),

@@ -453,6 +453,9 @@ impl Env {
                         .reuse_loc(TypeT::FnPtr {
                             args,
                             ret: f_decl.ret_type.clone(),
+                            // `&g` knows `g`'s ghost args exactly, so the
+                            // decayed pointer type carries them.
+                            ghost_args: f_decl.ghost_args.clone(),
                         })
                         .into())
                 }

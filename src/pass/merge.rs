@@ -207,9 +207,16 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
             rename_type_in_place(Rc::make_mut(binder_ty), renames);
             rename_shadowed_expr(binder, pred, renames);
         }
-        TypeT::FnPtr { args, ret } => {
+        TypeT::FnPtr {
+            args,
+            ret,
+            ghost_args,
+        } => {
             for a in args {
                 rename_type_in_place(Rc::make_mut(a), renames);
+            }
+            for ga in ghost_args {
+                rename_type_in_place(Rc::make_mut(&mut ga.ty), renames);
             }
             rename_type_in_place(Rc::make_mut(ret), renames);
         }

@@ -176,9 +176,20 @@ pub enum TypeT {
     /// In the deep (physical) model a function-pointer value is stored as a real
     /// `Pulse.Lib.C.FuncPtr.func_ptr ARG RET` value, where `ARG` is the tupled
     /// argument type and `RET` the return type.
+    ///
+    /// `ghost_args` mirrors the `_ghost_arg`s of the functions this pointer is
+    /// expected to hold. They are NOT part of the pointer's F* type (the
+    /// witness type `c` is a parameter of `valid`/`call_div`, not of
+    /// `func_ptr`), and `Env::vtype_eq` ignores them, so they do not affect
+    /// assignability. They exist because an *indirect* call has no callee
+    /// declaration to consult, yet must still write the ghost half of the
+    /// `erased c` witness -- and a hole standing for the whole ghost tuple is
+    /// not solvable, so the arity has to be known statically. See
+    /// `emit_fnptr_spec_core`.
     FnPtr {
         args: Vec<Rc<Type>>,
         ret: Rc<Type>,
+        ghost_args: Vec<GhostArg>,
     },
     /// Fixed-size C array type `T[N]`. Decays to `Pointer(T, Array)` in
     /// function parameters (handled by the decay pass).

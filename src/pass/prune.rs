@@ -100,9 +100,16 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
         TypeT::FlexArray(elem_ty) => {
             scan_type(deps, elem_ty);
         }
-        TypeT::FnPtr { args, ret } => {
+        TypeT::FnPtr {
+            args,
+            ret,
+            ghost_args,
+        } => {
             for a in args {
                 scan_type(deps, a);
+            }
+            for ga in ghost_args {
+                scan_type(deps, &ga.ty);
             }
             scan_type(deps, ret);
         }
