@@ -1,36 +1,46 @@
 #include "pal.h"
 #include <stdint.h>
 
-/* FAILS. Postconditions about a pointee do not survive an indirect call --
+/* Specs that mention a *pointee* across an indirect call --
    https://github.com/FStarLang/pal/issues/279.
 
-   The `__fp` wrapper states its pure postcondition as `PRE ==> POST`, reusing
-   the same `req_conj` it emitted for the `requires`. In the `ensures` that
-   `PRE` is read in the *post* state, so for a callee that mutates a pointee it
-   mentions, the implication is a tautology and carries nothing.
+   The `__fp` wrapper owns each pointer argument's existential in a witness
+   `y_fp: erased c`, whose elim half holds the pre-state pointee values. The
+   underlying defect was that the wrapper had no way to *name* those values
+   where it needed them, which broke both sides of the arrow:
 
-   The issue records the two halves as separate defects. On this branch only
-   the first still behaves as filed; see `call_indirect_old`. The last case,
-   `call_indirect_deep`, is a third symptom the issue does not mention: for a
-   double pointer the *precondition* breaks too. */
+     - the `ensures`, as filed in #279;
+     - the `requires`, for a pointer of depth > 1 -- a symptom the issue does
+       not mention, see `call_indirect_deep`.
 
-/* The guard alone is enough to lose the postcondition -- nothing here is
-   relational and there is no `_old`.
+   Each case below records the error it used to produce. All four verify now;
+   the historical text is kept because it is the fastest way to recognise a
+   regression. */
 
-   The wrapper's `requires` binds the pointee from the witness as `val_p_0`,
-   and its `ensures` introduces a *fresh* `exists* (val_p_0: ..)`, so the copy
-   of `PRE` is captured by the post-state binder:
+/* Exercises: the `PRE ==> POST` guard alone, with nothing relational and no
+   `_old`. This is the minimal shape -- if it regresses, everything below will
+   too.
+
+   Used to break: the `requires` binds the pointee from the witness as
+   `val_p_0`, and the `ensures` introduced a *fresh* `exists* (val_p_0: ..)`,
+   so the copy of `PRE` spliced into the post was captured by the post-state
+   binder:
 
      ensures (exists* (val_p_0: ty_int32_t).
        pts_to var_p #1.0R val_p_0 ** ty_int32_t__pred val_p_0 1.0R **
        pure ((v val_p_0 < 100) ==> (v (!var_p) < 101)))
 
-   Both sides now denote the post value, so the conjunct says
-   `(x < 100) ==> (x < 101)`. (Filed against a9ebbed, where the same collapse
-   happened by re-reading `(!var_p)` on both sides rather than by capture.)
+   Both sides denoted the post value, so the conjunct said
+   `(x < 100) ==> (x < 101)` and carried nothing. (Filed against a9ebbed, where
+   the same collapse happened by re-reading `(!var_p)` on both sides rather
+   than by capture.)
 
      * Error 19 at out/Func_call_indirect_norel.fst(28,2-28,41):
-       - Failed to prove pure property: 'v _val_p_015 < 101' */
+       - Failed to prove pure property: 'v _val_p_015 < 101'
+
+   Now holds: the antecedent is rebuilt over a separate `old_val_p_0` projected
+   out of the witness, so it denotes the pre state and the consequent survives
+   to the call site. */
 void inc2(int32_t *p) _requires(*p < 100) _ensures(*p < 101) { *p = *p + 1; }
 
 _requires(*q < 100)
@@ -43,12 +53,14 @@ void call_indirect_norel(int32_t *q)
   _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-/* The relational case, and it no longer matches the issue. #279 reports that
-   `old (...)` is emitted with no binder in scope, so the wrapper is vacuous
-   and silently accepts even a false `_old` contract. That is no longer true:
-   the wrapper does not typecheck at all.
+/* Exercises: the relational case, `_old` of a pointee the callee mutates.
 
-   `old (!var_p)` sends Pulse looking for the *pre*-state `pts_to`, which is
+   Used to break, and *not* in the way the issue describes. #279 reports that
+   `old (...)` is emitted with no binder in scope, so the wrapper is vacuous
+   and silently accepts even a false `_old` contract. By this branch that had
+   already stopped being true: the wrapper did not typecheck at all.
+
+   `old (!var_p)` sent Pulse looking for the *pre*-state `pts_to`, which sits
    under the witness's pattern `let` -- the binding form the call site's
    inference depends on -- and Pulse does not elaborate `!` into a match
    branch:
@@ -59,10 +71,14 @@ void call_indirect_norel(int32_t *q)
            let w_fp_e, _ = y_fp in
            (Pulse.Lib.Reference.pts_to x_fp w_fp_e ** ...
 
-   So `_old` on an address-taken function is now a hard failure rather than a
-   silent one, and `Func_call_indirect_old` below is never reached. `Func_inc`
-   itself verifies: the contract is true of the body, and a direct call
-   propagates it. */
+   So `_old` on an address-taken function was a hard failure rather than a
+   silent one, and `Func_call_indirect_old` was never even reached. `Func_inc`
+   itself always verified: the contract is true of the body, and a direct call
+   propagates it -- only the indirect path was broken.
+
+   Now holds: `_old(*p)` no longer emits `old (...)` at all. It resolves to the
+   witness leaf, which *is* the pre-state value, so there is nothing left to
+   read through the pointer. */
 void inc(int32_t *p) _requires(*p < 100) _ensures(*p == _old(*p) + 1) { *p = *p + 1; }
 
 _requires(*q < 100)
@@ -75,15 +91,25 @@ void call_indirect_old(int32_t *q)
   _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
-/* Every witness feature at once, plus two mutated pointees.
+/* Exercises: every witness feature at once, plus two mutated pointees.
 
    `d` contributes two elim leaves (its value and `struct_dep__spec`, since the
    `y` field is a pointer), so `a`'s pre-state value sits at elim index 2 and
    `b`'s at 3 -- the post has to project each one out at its own offset, not at
    0. The two `_old`s appear together in one conjunct, `q` is `_plain` (so it
    is `preserves`d and takes no elim leaf), and the `_ghost_arg` fills the
-   ghost half. The body updates `*b` before `*a`, so reading either `_old` in
-   the post state gives the wrong answer rather than a vacuous one. */
+   ghost half, making both halves of the witness non-trivial. The body updates
+   `*b` before `*a`, so reading either `_old` in the post state gives a wrong
+   answer rather than a vacuous one.
+
+   The witness comes out as
+
+     erased ((struct_dep & (struct_dep__spec & (ty_int32_t & ty_int32_t)))
+             & ty_int32_t)
+
+   Used to break: Error 228, the same missing pre-state `pts_to` as
+   `call_indirect_old`. Now holds with each `_old` projected at its own offset;
+   a shared or mis-indexed binding could not satisfy `_old(*b) + _old(*a)`. */
 struct dep {
   int32_t x;
   int32_t *y;
@@ -128,19 +154,27 @@ int32_t call_mixed(struct dep *d, int32_t *a, int32_t *b, _plain int32_t *q)
   _ghost_stmt(drop_ (exists* fr. pts_to Global_o_m.addr_var_o_m #fr _));
 }
 
-/* A pointee reached through *two* derefs. `bump` on its own verifies: a normal
+/* Exercises: a pointee reached through *two* derefs, which is where the
+   `requires` side shows up. `bump` on its own always verified -- a normal
    function states `**p` as `!(!var_p)` and `_old(**p)` as `old (!(!var_p))`,
-   both fine. Address-taking it breaks the precondition as well as the post,
-   because only the innermost `*p` is rewritten to a witness binding:
+   both fine -- so this is specific to the address-taken path.
+
+   Used to break on *both* sides. #279 only covers the `ensures`; the
+   precondition failed too, because only the innermost `*p` was rewritten to a
+   witness binding:
 
      * Error 12 at out/Funcptr_bump.fsti(17,37-17,47):
        - Expected type FStar.Int32.t but !val_p_0 has type
            fn requires val_p_0 |-> Pulse.Class.PtsTo.Frac _ _ ...
 
-   `**p` comes out as `!val_p_0`, and the `requires` sits under the witness's
-   pattern `let` where Pulse will not elaborate `!`, so the read stays a `fn`
-   instead of a value. The witness already carries the leaf (`val_p_1`); the
-   spec just does not name it. */
+   `**p` came out as `!val_p_0`, and the `requires` sits under the witness's
+   pattern `let` where Pulse will not elaborate `!`, so the read stayed a `fn`
+   instead of a value. The witness already carried the leaf; the spec just did
+   not name it.
+
+   Now holds: bindings are keyed by deref *depth*, so `**p` resolves to
+   `val_p_1` in the `requires` and `old_val_p_1` in the `ensures`. This is why
+   the fix keys on the whole chain rather than a single level. */
 void bump(int32_t **p) _requires(**p < 100) _ensures(**p == _old(**p) + 1) { **p = **p + 1; }
 
 _requires(**q < 100)

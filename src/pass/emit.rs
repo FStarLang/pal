@@ -700,6 +700,10 @@ struct Emitter<'a> {
     /// brings `squash p` into scope for the conjuncts to its right, which no
     /// wrapper `requires` relies on.
     pure_not_with_pure: bool,
+    /// Pre-state pointee bindings that `subst_spec_rvalue` actually used for an
+    /// `_old`, so `emit_fnptr_spec_core` can bind exactly those in the post and
+    /// leave every other wrapper's output unchanged.
+    spec_old_used: Vec<Rc<str>>,
     tmp_counter: usize,
 }
 
@@ -749,16 +753,33 @@ impl<'a> Emitter<'a> {
     }
 }
 
+/// One pointee value the spec already has a name for: the address parameter it
+/// hangs off, how many derefs reach it (`*p` is 1, `**p` is 2), the name it is
+/// bound at, and its index in the flattened elim half of a function-pointer
+/// witness.
+#[derive(Clone)]
+struct PointeeBinding {
+    base: Rc<IdentT>,
+    depth: usize,
+    name: Rc<str>,
+    elim_idx: usize,
+}
+
 /// Free-name environment for the spec expressions `emit_type_slprop` and
 /// `emit_fnptr_spec_core` rewrite before emitting.
 struct SpecSubst<'a> {
     /// What `$(this)` in a `_refine` stands for, when there is one.
     this: Option<&'a Rc<Expr>>,
-    /// Address parameters whose pointee value is already bound in the spec,
-    /// paired with the binding's name. A `*p` for one of these must name the
-    /// binding: in a function-pointer wrapper the whole `requires` sits under
-    /// the witness's pattern `match`, where Pulse will not elaborate `!p`.
-    pointees: &'a [(Rc<IdentT>, Rc<str>)],
+    /// Pointee values already bound in the spec. A deref chain reaching one of
+    /// these must name the binding: in a function-pointer wrapper the whole
+    /// `requires` sits under the witness's pattern `match`, where Pulse will
+    /// not elaborate `!p`.
+    pointees: &'a [PointeeBinding],
+    /// The same, but consulted only *underneath* an `_old`, and naming the
+    /// pre-state copies. An `_old(*p)` becomes that name outright, with the
+    /// `old` dropped: in a wrapper's `ensures` there is no pre-state `pts_to`
+    /// for `old` to read through, but the witness carries the value.
+    old_pointees: &'a [PointeeBinding],
 }
 
 impl<'a> SpecSubst<'a> {
@@ -766,15 +787,75 @@ impl<'a> SpecSubst<'a> {
         SpecSubst {
             this: Some(this),
             pointees: &[],
+            old_pointees: &[],
         }
     }
 
-    fn pointees(pointees: &'a [(Rc<IdentT>, Rc<str>)]) -> Self {
+    fn pointees(pointees: &'a [PointeeBinding]) -> Self {
         SpecSubst {
             this: None,
             pointees,
+            old_pointees: &[],
         }
     }
+
+    fn olds(old_pointees: &'a [PointeeBinding]) -> Self {
+        SpecSubst {
+            this: None,
+            pointees: &[],
+            old_pointees,
+        }
+    }
+}
+
+/// Peel a `Deref^n(Var(x))` chain, returning the base and the depth. `None` for
+/// anything else (a member access, an arithmetic expression, ...).
+fn deref_chain(e: &Expr) -> Option<(Rc<IdentT>, usize)> {
+    match &e.val {
+        ExprT::Var(x) => Some((x.val.clone(), 0)),
+        ExprT::Deref(inner) => deref_chain(inner).map(|(b, d)| (b, d + 1)),
+        _ => None,
+    }
+}
+
+/// Whether `e` contains an `ExprT::SpecVal` bound at `name`. Used to emit only
+/// the pre-state `let`s a wrapper's post actually refers to, so every wrapper
+/// without a guarded or `_old` postcondition keeps its current output.
+fn expr_mentions_val(e: &Expr, name: &Rc<str>) -> bool {
+    let mut found = false;
+    walk_expr_tree(e, &mut |x| {
+        if let ExprT::SpecVal(n, _) = &x.val {
+            if n == name {
+                found = true;
+            }
+        }
+    });
+    found
+}
+
+/// How many times a value of this type can be dereferenced through plain
+/// pointers. Typedefs are not resolved, so this is a lower bound: under-
+/// counting only costs the extra `**p` naming and falls back to today's
+/// behaviour.
+fn pointer_depth(ty: &Rc<Type>) -> usize {
+    match &peel_type(ty).val {
+        TypeT::Pointer(inner, _) => 1 + pointer_depth(inner),
+        _ => 0,
+    }
+}
+
+/// The binding for the deepest prefix of `e`'s deref chain that `pointees`
+/// knows about. `**p` prefers `val_p_1` over `!val_p_0` -- both denote the same
+/// value, but only the former survives inside the witness's pattern `match`.
+fn lookup_pointee(e: &Expr, pointees: &[PointeeBinding]) -> Option<Rc<str>> {
+    let (base, depth) = deref_chain(e)?;
+    if depth == 0 {
+        return None;
+    }
+    pointees
+        .iter()
+        .find(|b| b.base == base && b.depth == depth)
+        .map(|b| b.name.clone())
 }
 
 fn extract_base_ident(this: &Rc<Expr>) -> Rc<IdentT> {
@@ -1354,35 +1435,45 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Copy of `r` with every `*p` for a bound pointee replaced by that
-    /// binding's name.
-    fn subst_pointees(
-        &mut self,
-        env: &Env,
-        r: &Rc<Expr>,
-        pointees: &[(Rc<IdentT>, Rc<str>)],
-    ) -> Rc<Expr> {
+    /// Copy of `r` with every deref chain reaching a bound pointee replaced by
+    /// that binding's name.
+    fn subst_pointees(&mut self, env: &Env, r: &Rc<Expr>, pointees: &[PointeeBinding]) -> Rc<Expr> {
         let mut r = r.clone();
         self.subst_spec_rvalue(env, Rc::make_mut(&mut r), &SpecSubst::pointees(pointees));
         r
     }
 
+    /// Copy of `r` with every `_old(*p)` replaced by the pre-state binding's
+    /// name, dropping the `old`. Records what it used in `spec_old_used`.
+    fn subst_olds(&mut self, env: &Env, r: &Rc<Expr>, olds: &[PointeeBinding]) -> Rc<Expr> {
+        let mut r = r.clone();
+        self.subst_spec_rvalue(env, Rc::make_mut(&mut r), &SpecSubst::olds(olds));
+        r
+    }
+
     fn subst_spec_rvalue(&mut self, env: &Env, rvalue: &mut Expr, this: &SpecSubst) {
-        // `*p` for an address parameter whose pointee the caller has already
-        // bound names that binding instead.
-        let bound_pointee = match &rvalue.val {
-            ExprT::Deref(inner) => match &inner.val {
-                ExprT::Var(x) => this
-                    .pointees
-                    .iter()
-                    .find(|(p, _)| *p == x.val)
-                    .map(|(_, name)| ExprT::SpecVal(name.clone(), inner.clone())),
-                _ => None,
-            },
-            _ => None,
+        // `SpecVal` denotes a *pointee*, so its operand is the pointer: the
+        // operand of the chain's outermost `Deref`. `Env::infer_expr` relies on
+        // this to type the node, and so does the coercion the enclosing cast
+        // emits.
+        let pointer_of = |e: &Expr| match &e.val {
+            ExprT::Deref(inner) => inner.clone(),
+            _ => unreachable!("lookup_pointee matched a non-deref"),
         };
-        if let Some(v) = bound_pointee {
-            rvalue.val = v;
+        // `_old(*p)` names the witness's pre-state copy directly. Checked
+        // before the recursion below so the `old` is dropped rather than
+        // wrapped around the substituted operand.
+        if let ExprT::Old(inner) = &rvalue.val {
+            if let Some(name) = lookup_pointee(inner, this.old_pointees) {
+                self.spec_old_used.push(name.clone());
+                rvalue.val = ExprT::SpecVal(name, pointer_of(inner));
+                return;
+            }
+        }
+        // A deref chain whose value the caller has already bound names that
+        // binding instead.
+        if let Some(name) = lookup_pointee(rvalue, this.pointees) {
+            rvalue.val = ExprT::SpecVal(name, pointer_of(rvalue));
             return;
         }
         match &mut rvalue.val {
@@ -6755,11 +6846,15 @@ impl<'a> Emitter<'a> {
         // `Pulse.Lib.C.FuncPtr.fsti`). Ensures-side `exists*`s aren't part of
         // the wrapper's arrow type, so they keep using `wrap_exists`.
         let mut req_witness_groups: Vec<(Vec<ExBinding>, Vec<Doc>)> = vec![];
-        // For each address parameter whose pointee the witness carries: the
-        // parameter name and the binding its pointee value is stated at. The
-        // user's `_requires` sits inside the witness's pattern `let`s, so a
-        // `*p` in it must name that binding rather than read through `p`.
-        let mut pointee_bindings: Vec<(Rc<IdentT>, Rc<str>)> = vec![];
+        // Every pointee value the witness carries, keyed by deref depth: `*p`
+        // is depth 1, `**p` depth 2. The user's `_requires` sits inside the
+        // witness's pattern `let`s, so a deref chain in it must name the
+        // binding rather than read through the pointer -- Pulse will not
+        // elaborate `!` inside a `match` branch.
+        let mut pointee_bindings: Vec<PointeeBinding> = vec![];
+        // Running count of elim leaves emitted so far, so each binding knows
+        // which component of the witness's elim half to project back out of.
+        let mut elim_offset = 0usize;
         for (n, arg) in arg_names.iter().zip(decl.args.iter()) {
             match arg.mode {
                 ParamMode::Regular | ParamMode::Consumed => {
@@ -6774,11 +6869,6 @@ impl<'a> Emitter<'a> {
                         quote: false,
                         bindings: &mut type_bindings,
                     };
-                    let pointee_name: Rc<str> = self
-                        .nm
-                        .mangle(&Name::Val(n.val.clone(), 0))
-                        .to_string()
-                        .into();
                     self.pure_not_with_pure = true;
                     self.emit_type_slprop(
                         env,
@@ -6796,7 +6886,25 @@ impl<'a> Emitter<'a> {
                         if let ParamMode::Regular = arg.mode {
                             ensures_props.push(wrap_exists(&type_bindings, type_props.clone()));
                         }
-                        pointee_bindings.push((n.val.clone(), pointee_name));
+                        // Binding `k` of the group is the value reached by
+                        // `k+1` derefs, so register one entry per level of the
+                        // parameter's pointer chain. Bounding by the chain
+                        // depth keeps non-pointee leaves out -- a `struct S *`
+                        // emits a second binding for the struct's `__spec`,
+                        // which is not `**s`.
+                        for k in 0..pointer_depth(&arg.ty).min(type_bindings.len()) {
+                            pointee_bindings.push(PointeeBinding {
+                                base: n.val.clone(),
+                                depth: k + 1,
+                                name: self
+                                    .nm
+                                    .mangle(&Name::Val(n.val.clone(), k as u32))
+                                    .to_string()
+                                    .into(),
+                                elim_idx: elim_offset + k,
+                            });
+                        }
+                        elim_offset += type_bindings.len();
                         req_witness_groups.push((type_bindings, type_props));
                     }
                 }
@@ -6837,6 +6945,9 @@ impl<'a> Emitter<'a> {
                     );
                     drop(naming);
                     if !uninit_props.is_empty() {
+                        // Uninitialised, so there is no pre-state value worth
+                        // naming; only the offset matters.
+                        elim_offset += uninit_bindings.len();
                         req_witness_groups.push((uninit_bindings, uninit_props));
                     }
                     let mut type_bindings = vec![];
@@ -6880,6 +6991,7 @@ impl<'a> Emitter<'a> {
             .iter()
             .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
             .collect();
+        let elim_len = elim_names.len();
         let witness_domain = parens(
             nested_fold_doc(elim_ty_docs)
                 .append(" & ")
@@ -6967,6 +7079,17 @@ impl<'a> Emitter<'a> {
         // keeps partial operations in `ens` (e.g. `Int32.add`) well-defined,
         // since the inlined post `slprop` does not carry the precondition in
         // scope.
+        //
+        // `old_bindings` is `pointee_bindings` renamed: the same values, but as
+        // the post refers to them, bound out of the witness rather than by the
+        // `requires`' pattern `let`s.
+        let old_bindings: Vec<PointeeBinding> = pointee_bindings
+            .iter()
+            .map(|b| PointeeBinding {
+                name: format!("old_{}", b.name).into(),
+                ..b.clone()
+            })
+            .collect();
         let conj = |props: Vec<Doc>| -> Doc {
             if props.is_empty() {
                 Doc::text("True")
@@ -7013,8 +7136,11 @@ impl<'a> Emitter<'a> {
         let has_req = !req_props.is_empty();
         let req_conj = conj(req_props);
         if has_req {
-            requires_props.push(unaryfn(Doc::text("pure"), req_conj.clone()));
+            requires_props.push(unaryfn(Doc::text("pure"), req_conj));
         }
+        // Everything from here to `elim_post_prefix` builds the post, and any
+        // pre-state binding it reaches for is recorded in `spec_old_used`.
+        self.spec_old_used.clear();
 
         let return_id = env
             .push_return(decl.ret_type.clone())
@@ -7043,26 +7169,74 @@ impl<'a> Emitter<'a> {
                 ensures_props.push(wrap_exists(&ret_bindings, ret_props));
             }
         }
-        // Pure ensures reference the pointee value via the normal lowering.
+        // Pure ensures reference the pointee value via the normal lowering: a
+        // bare `*p` reads the post state, which the `exists*` groups above put
+        // in scope. Only `_old(*p)` needs redirecting -- there is no pre-state
+        // `pts_to` here for `old` to read through, but the witness carries the
+        // value, so `subst_olds` names it directly and drops the `old`.
         let (ens_pure, ens_slprop): (Vec<_>, Vec<_>) =
             decl.ensures.iter().partition(|r| is_pure_prop(r));
         for r in &ens_slprop {
-            let d = self.emit_rvalue(env, r);
+            let r = self.subst_olds(env, r, &old_bindings);
+            let d = self.emit_rvalue(env, &r);
             ensures_props.push(d);
         }
         let ens_props_pure: Vec<Doc> = ens_pure
             .iter()
-            .map(|r| self.emit_pure_prop(env, r))
+            .map(|r| {
+                let r = self.subst_olds(env, r, &old_bindings);
+                self.emit_pure_prop(env, &r)
+            })
             .collect();
         if !ens_props_pure.is_empty() {
             let ens_conj = conj(ens_props_pure);
             let implied = if has_req {
-                parens(req_conj.append(" ==> ").append(ens_conj))
+                // The antecedent, over the *pre-state* names. Built here rather
+                // than reusing the `requires`' `req_conj` doc: sharing one doc
+                // would let the `exists*`s above capture the names the
+                // `requires` bound from the witness, silently turning the
+                // implication into `P(post) ==> Q(post)` -- a tautology for any
+                // callee that mutates a pointee it constrains (issue #279).
+                let props: Vec<Doc> = req_pure
+                    .iter()
+                    .map(|r| {
+                        let r = self.subst_pointees(env, r, &old_bindings);
+                        let used: Vec<Rc<str>> = old_bindings
+                            .iter()
+                            .filter(|b| expr_mentions_val(&r, &b.name))
+                            .map(|b| b.name.clone())
+                            .collect();
+                        self.spec_old_used.extend(used);
+                        self.emit_pure_prop(env, &r)
+                    })
+                    .collect();
+                parens(conj(props).append(" ==> ").append(ens_conj))
             } else {
                 ens_conj
             };
             ensures_props.push(unaryfn(Doc::text("pure"), implied));
         }
+        // Bind exactly the pre-state values the post ended up using, by
+        // *projection* out of the witness's elim half. A pattern `let` -- what
+        // the `requires` uses, to leave the witness unsolved for the call
+        // site's inference -- would hide the `exists*` groups' `pts_to` from
+        // the `!` auto-deref in the conjuncts above. The wrapper body's
+        // `witness_rewrites` eta-expansion is what makes the two forms agree.
+        let mut used: Vec<Rc<str>> = std::mem::take(&mut self.spec_old_used);
+        used.dedup_by(|a, b| a == b);
+        let elim_post_prefix = Doc::concat(
+            old_bindings
+                .iter()
+                .filter(|b| used.contains(&b.name))
+                .map(|b| {
+                    Doc::text("let ")
+                        .append(Doc::text(b.name.to_string()))
+                        .append(" = ")
+                        .append(nested_tuple_proj(elim_path.clone(), b.elim_idx, elim_len))
+                        .append(" in")
+                        .append(Doc::hardline())
+                }),
+        );
 
         let pre_body = mk_star(requires_props);
         let post_body = mk_star(ensures_props);
@@ -7088,6 +7262,7 @@ impl<'a> Emitter<'a> {
         let post_expr = parens(
             bind_prefix(&name_docs)
                 .append(ghost_post_prefix)
+                .append(elim_post_prefix)
                 .append(post_body),
         );
 
@@ -8346,6 +8521,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         typedef_override_map,
         current_fn_total: false,
         pure_not_with_pure: false,
+        spec_old_used: vec![],
         tmp_counter: 0,
     };
 
