@@ -493,7 +493,7 @@ int32_t use_hof(void)
 _include_pulse(Apply_weaker_spec,
   unfold
   let aw_post (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-              (y_fp: erased unit)
+              (y_fp: erased (unit & unit))
               (return_1: Typedef_int32_t.ty_int32_t) : slprop =
     let var_a = fst x_fp in
     let var_b = snd x_fp in
@@ -508,7 +508,7 @@ _include_pulse(Apply_weaker_spec,
 
   ghost
   fn wpost_weak (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-                (y: erased unit)
+                (y: erased (unit & unit))
                 (r: Typedef_int32_t.ty_int32_t)
     requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y r
     ensures aw_post x y r
@@ -516,7 +516,7 @@ _include_pulse(Apply_weaker_spec,
 
   ghost
   fn wpre_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-             (y: erased unit)
+             (y: erased (unit & unit))
     requires (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
     ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
@@ -601,7 +601,7 @@ _include_pulse(Reassign_join_spec,
   unfold
   let rj_pre (g: bool)
              (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-             (y_fp: erased unit) : slprop =
+             (y_fp: erased (unit & unit)) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
     ((Typedef_int32_t.ty_int32_t__pred var_a 1.0R)) **
@@ -621,7 +621,7 @@ _include_pulse(Reassign_join_spec,
   unfold
   let rj_post (g: bool)
               (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-              (y_fp: erased unit)
+              (y_fp: erased (unit & unit))
               (return_1: Typedef_int32_t.ty_int32_t) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
@@ -642,14 +642,14 @@ _include_pulse(Reassign_join_spec,
 
   ghost
   fn wpre_sub (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-              (y: erased unit)
+              (y: erased (unit & unit))
     requires rj_pre true x y
     ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
 
   ghost
   fn wpost_sub (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: erased unit)
+               (y: erased (unit & unit))
                (r: Typedef_int32_t.ty_int32_t)
     requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y r
     ensures rj_post true x y r
@@ -657,14 +657,14 @@ _include_pulse(Reassign_join_spec,
 
   ghost
   fn wpre_add (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-              (y: erased unit)
+              (y: erased (unit & unit))
     requires rj_pre false x y
     ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) x y
   { () }
 
   ghost
   fn wpost_add (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: erased unit)
+               (y: erased (unit & unit))
                (r: Typedef_int32_t.ty_int32_t)
     requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) x y r
     ensures rj_post false x y r
@@ -998,14 +998,14 @@ int32_t apply_t(int32_t (*op)(int32_t, int32_t)
 _include_pulse(Total_to_div_spec,
   ghost
   fn wpre_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-             (y: erased unit)
+             (y: erased (unit & unit))
     requires (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
     ensures (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
   { () }
 
   ghost
   fn wpost_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: erased unit)
+               (y: erased (unit & unit))
                (r: Typedef_int32_t.ty_int32_t)
     requires (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
     ensures (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y r

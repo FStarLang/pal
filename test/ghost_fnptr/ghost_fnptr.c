@@ -244,9 +244,10 @@ int32_t call_across_shapes(int32_t *a, int32_t *b)
 }
 
 /* The same mixed callee through a *local* function pointer rather than a
-   struct field. The local's declared type is all the call site has to go on,
-   so it carries the `_ghost_arg`s too. No global is involved, so unlike the
-   `o` cases there is nothing to acquire or drop besides the validity fact. */
+   struct field. The local carries NO `_ghost_arg`s: the witness is inferred at
+   the call site, so the declared type does not have to describe the callee's
+   ghost arity. No global is involved, so unlike the `o` cases there is nothing
+   to acquire or drop besides the validity fact. */
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
@@ -254,8 +255,6 @@ int32_t call_via_local_fp(int32_t *a, int32_t *b,
                           _plain int32_t *q, _plain int32_t *r)
 {
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
-    _ghost_arg(int32_t v)
-    _ghost_arg(int32_t w)
     int32_t (*fp)(int32_t *, int32_t *, _plain int32_t *, _plain int32_t *) = impl_mixed;
     return fp(a, b, q, r);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
