@@ -98,3 +98,36 @@ int32_t call_mixed(struct dep *d, int32_t *a, _plain int32_t *q)
   _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
   _ghost_stmt(drop_ (exists* fr. pts_to Global_o_m.addr_var_o_m #fr _));
 }
+
+/* Repro: a struct whose fields carry `_array` length refinements, passed by
+   pointer to a function that is address-taken. `Func_use` verifies; emitting
+   the `__fp` wrapper for it is what fails. */
+struct cell {
+  int v;
+};
+
+struct _refine(this.arr._length == 4) _refine(this.brr._length == 4) box {
+  _array struct cell *arr;
+  _array struct cell *brr;
+};
+
+void use(struct box *b) {}
+
+struct ops_arr {
+  void (*fn)(struct box *b);
+};
+
+static const struct ops_arr o_arr = {.fn = use};
+
+/* The same failure with the struct passed *by value*, which is the sharper
+   form: with no `pts_to` to eliminate, the witness's elim half is just the
+   `__spec`, and the two failing `pure` conjuncts mention only `x_fp` -- a
+   plain parameter -- rather than any witness binding. They still fail, purely
+   because they sit inside the witness pattern `let`'s scope. */
+void use_byval(struct box b) {}
+
+struct ops_byval {
+  void (*fn)(struct box b);
+};
+
+static const struct ops_byval o_byval = {.fn = use_byval};
