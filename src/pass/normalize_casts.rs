@@ -144,6 +144,7 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
         ExprT::Deref(value)
         | ExprT::Member(value, _)
         | ExprT::VAttr(_, value)
+        | ExprT::SpecVal(_, value)
         | ExprT::Ref(value)
         | ExprT::UnOp(_, value)
         | ExprT::Live(value)

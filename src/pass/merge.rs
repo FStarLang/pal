@@ -90,7 +90,8 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
         | ExprT::PostDecr(a)
         | ExprT::Free(a)
         | ExprT::Member(a, _)
-        | ExprT::VAttr(_, a) => rename_expr_in_place(Rc::make_mut(a), renames),
+        | ExprT::VAttr(_, a)
+        | ExprT::SpecVal(_, a) => rename_expr_in_place(Rc::make_mut(a), renames),
         ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
             rename_expr_in_place(Rc::make_mut(a), renames);
             rename_expr_in_place(Rc::make_mut(b), renames);
@@ -638,7 +639,8 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
         | ExprT::PostDecr(a)
         | ExprT::Free(a)
         | ExprT::Member(a, _)
-        | ExprT::VAttr(_, a) => collect_refs_expr(a, out),
+        | ExprT::VAttr(_, a)
+        | ExprT::SpecVal(_, a) => collect_refs_expr(a, out),
         ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
             collect_refs_expr(a, out);
             collect_refs_expr(b, out);

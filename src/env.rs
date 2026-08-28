@@ -417,6 +417,14 @@ impl Env {
                     _ => Err(InferError::CannotAccessMember(x_ty)),
                 }
             }
+            // Denotes a pointer's pointee, so it types like a dereference.
+            ExprT::SpecVal(_, p) => {
+                let p_ty = self.vtype_whnf(self.infer_expr(p)?);
+                match &p_ty.val {
+                    TypeT::Pointer(to, _) => Ok(to.clone().into()),
+                    _ => Err(InferError::CannotDeref(p_ty)),
+                }
+            }
             ExprT::VAttr(VAttr::Length, _) => {
                 Ok(TypeT::SpecInt.with_loc_core(expr.loc.clone()).into())
             }

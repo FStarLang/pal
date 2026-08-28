@@ -167,6 +167,7 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
         ExprT::Deref(v) => scan_expr(deps, v),
         ExprT::Member(x, _a) => scan_expr(deps, x),
         ExprT::VAttr(_, x) => scan_expr(deps, x),
+        ExprT::SpecVal(_, x) => scan_expr(deps, x),
         ExprT::Index(arr, idx) => {
             scan_expr(deps, arr);
             scan_expr(deps, idx);

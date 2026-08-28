@@ -220,9 +220,19 @@ struct FnPtrSpecCore {
     callee: Doc,
     domain: Doc,
     /// The type `c` of the wrapper's explicit `y_fp: erased c` witness
-    /// parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc);
-    /// `unit` when no parameter needs one.
+    /// parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc).
+    ///
+    /// Always the pair `(ELIMS & GHOSTS)`: the existentials eliminated from
+    /// the pointer arguments, and the `_ghost_arg`s, each side right-nested
+    /// (`unit` when empty). Every level is a `tuple2` so that
+    /// `eta_expanded_pair` can solve the spine at a call site, which is what
+    /// lets call sites emit `_` and lets one function-pointer *variable* hold
+    /// callees of different `_plain`/ghost shapes.
     witness_domain: Doc,
+    /// The wrapper body's `rewrite each` prelude, one line per pattern `let`
+    /// in the `requires` (outermost first). Without it the body faces the
+    /// same stuck match the pattern `let`s introduce.
+    witness_rewrites: Doc,
     ret_name: Doc,
     ret_ty_doc: Doc,
     projs: Vec<Doc>,
@@ -679,6 +689,17 @@ struct Emitter<'a> {
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
+    /// Emit a `bool`-to-`slprop` cast as `pure` rather than `with_pure`.
+    ///
+    /// Set only while emitting a function-pointer wrapper's `requires`, whose
+    /// conjunction sits inside the witness pattern `let`s. Those desugar to a
+    /// `match`, and Pulse's frontend does not traverse a match branch when it
+    /// supplies `with_pure`'s continuation -- the term is then left as the
+    /// partially-applied `with_pure p` and fails to typecheck as an `slprop`.
+    /// `pure p` needs no continuation. The two differ only in that `with_pure`
+    /// brings `squash p` into scope for the conjuncts to its right, which no
+    /// wrapper `requires` relies on.
+    pure_not_with_pure: bool,
     tmp_counter: usize,
 }
 
@@ -728,10 +749,38 @@ impl<'a> Emitter<'a> {
     }
 }
 
+/// Free-name environment for the spec expressions `emit_type_slprop` and
+/// `emit_fnptr_spec_core` rewrite before emitting.
+struct SpecSubst<'a> {
+    /// What `$(this)` in a `_refine` stands for, when there is one.
+    this: Option<&'a Rc<Expr>>,
+    /// Address parameters whose pointee value is already bound in the spec,
+    /// paired with the binding's name. A `*p` for one of these must name the
+    /// binding: in a function-pointer wrapper the whole `requires` sits under
+    /// the witness's pattern `match`, where Pulse will not elaborate `!p`.
+    pointees: &'a [(Rc<IdentT>, Rc<str>)],
+}
+
+impl<'a> SpecSubst<'a> {
+    fn this(this: &'a Rc<Expr>) -> Self {
+        SpecSubst {
+            this: Some(this),
+            pointees: &[],
+        }
+    }
+
+    fn pointees(pointees: &'a [(Rc<IdentT>, Rc<str>)]) -> Self {
+        SpecSubst {
+            this: None,
+            pointees,
+        }
+    }
+}
+
 fn extract_base_ident(this: &Rc<Expr>) -> Rc<IdentT> {
     match &this.val {
         ExprT::Var(x) => x.val.clone(),
-        ExprT::Deref(inner) => extract_base_ident(inner),
+        ExprT::Deref(inner) | ExprT::SpecVal(_, inner) => extract_base_ident(inner),
         ExprT::Member(_, field) => field.val.clone(),
         _ => Rc::from("v"),
     }
@@ -791,22 +840,111 @@ fn nary_tuple_proj(base: Doc, i: usize, n: usize) -> Doc {
     parens(Doc::text(format!("Mktuple{n}?._{} ", i + 1)).append(base))
 }
 
-/// If `ty` is a bare (non-`_plain`, non-`_core_ref`, non-`_nullable`) pointer
-/// type, return its pointee type -- this is exactly the pointer shape whose
-/// ownership `emit_fnptr_spec_core` witnesses via an explicit `erased c`
-/// wrapper parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter
-/// doc). Used at `FnPtrCall` call sites (from the callee's static `FnPtr`
-/// argument types alone) to determine, in argument order, which call
-/// arguments contribute a witness component.
-fn fnptr_witness_pointee(ty: &Rc<Type>) -> Option<Rc<Type>> {
-    match &ty.val {
-        TypeT::Refine(inner, _)
-        | TypeT::RefineAlways(inner, _)
-        | TypeT::RefineUninit(inner, _)
-        | TypeT::RefineValue(inner, ..) => fnptr_witness_pointee(inner),
-        TypeT::Pointer(pointee, PointerKind::Ref | PointerKind::Unknown) => Some(pointee.clone()),
-        _ => None,
+/// A *right-nested binary* tuple type over `docs`: `unit` for 0 components,
+/// the bare type for 1, and `(a & (b & c))` for >= 2.
+///
+/// Used for the function-pointer witness `c` (NOT the `ARG` domain, which is
+/// flat -- see `fnptr_domain_doc`). The witness is inferred at call sites by
+/// `Pulse.Lib.C.FuncPtr`'s `eta_expanded_pair` rule, which is *binary*; F*'s
+/// `a & b & c` is a flat `tuple3`, not nested `tuple2`s, so a binary rule
+/// never fires on it. Right-nesting keeps every level a `tuple2`.
+fn nested_fold_doc(docs: Vec<Doc>) -> Doc {
+    match docs.len() {
+        0 => Doc::text("unit"),
+        1 => docs.into_iter().next().unwrap(),
+        _ => {
+            let mut it = docs.into_iter().rev();
+            let mut acc = it.next().unwrap();
+            for d in it {
+                acc = parens(d.append(" & ").append(acc));
+            }
+            acc
+        }
     }
+}
+
+/// The projection for component `i` (0-indexed) of an `n`-component
+/// right-nested binary tuple value `base` (see `nested_fold_doc`):
+/// `snd^i base` for the last component, `fst (snd^i base)` otherwise.
+fn nested_tuple_proj(base: Doc, i: usize, n: usize) -> Doc {
+    if n <= 1 {
+        return base;
+    }
+    let mut e = base;
+    for _ in 0..i {
+        e = parens(Doc::text("snd ").append(e));
+    }
+    if i < n - 1 {
+        e = parens(Doc::text("fst ").append(e));
+    }
+    e
+}
+
+/// Destructure `base_val` -- a right-nested binary tuple of `names.len()`
+/// components -- into `names`, using a chain of *binary pattern* `let`s.
+///
+/// The pattern form is essential: Pulse infers a witness component only when
+/// the spec destructures the witness by pattern. A pattern applied to an
+/// unsolved witness metavariable is a *stuck match*, so the prover defers,
+/// `eta_expanded_pair` solves the spine, the match reduces, and the leaves
+/// fall out of ordinary slprop matching. Projections (`fst`/`snd`) look
+/// matchable immediately, so the prover commits and is then left with the
+/// non-invertible `fst (reveal ?w) =?= val_a_0`.
+fn nested_pattern_lets(base_val: Doc, names: &[Doc], tmp_prefix: &str) -> Doc {
+    let mk_let = |lhs: Doc, rhs: Doc| {
+        Doc::text("let ")
+            .append(lhs)
+            .append(" = ")
+            .append(rhs)
+            .append(" in")
+            .append(Doc::hardline())
+    };
+    match names.len() {
+        0 => Doc::nil(),
+        1 => mk_let(names[0].clone(), base_val),
+        n => {
+            let mut lets = vec![];
+            let mut cur = base_val;
+            for i in 0..n - 1 {
+                let rest = if i == n - 2 {
+                    names[i + 1].clone()
+                } else {
+                    Doc::text(format!("{tmp_prefix}{}", i + 1))
+                };
+                lets.push(mk_let(
+                    parens(names[i].clone().append(", ").append(rest.clone())),
+                    cur,
+                ));
+                cur = rest;
+            }
+            Doc::concat(lets)
+        }
+    }
+}
+
+/// The fully eta-expanded form of a right-nested binary tuple `path` holding
+/// `n` components: `(Mktuple2 c0 (Mktuple2 c1 c2))`, each `ci` written as its
+/// own projection out of `path`. For `n <= 1` there is nothing to expand and
+/// `path` is returned unchanged.
+///
+/// The wrapper body `rewrite each`es the witness into this form to unstick the
+/// matches its `requires` introduces. It must be a *single* rewrite of the
+/// whole witness: rewriting one level at a time works only to depth 1, then
+/// fails to prove the tuple-eta equality for the inner Ghost projection
+/// (F* Error 76, "Expected a Total computation, but got Ghost").
+fn eta_expand_doc(path: Doc, n: usize) -> Doc {
+    if n <= 1 {
+        return path;
+    }
+    parens(
+        Doc::text("Mktuple2 ")
+            .append(parens(Doc::text("fst ").append(path.clone())))
+            .append(" ")
+            .append(eta_expand_doc(
+                parens(Doc::text("snd ").append(path)),
+                n - 1,
+            )),
+    )
 }
 
 /// Visit every sub-expression of `e`, outermost first.
@@ -829,6 +967,7 @@ fn walk_expr_tree(e: &Expr, f: &mut impl FnMut(&Expr)) {
         ExprT::Deref(a)
         | ExprT::Member(a, _)
         | ExprT::VAttr(_, a)
+        | ExprT::SpecVal(_, a)
         | ExprT::Ref(a)
         | ExprT::UnOp(_, a)
         | ExprT::Cast(a, _)
@@ -1215,97 +1354,131 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn subst_this_rvalue(&mut self, env: &Env, rvalue: &mut Expr, this: &Rc<Expr>) {
+    /// Copy of `r` with every `*p` for a bound pointee replaced by that
+    /// binding's name.
+    fn subst_pointees(
+        &mut self,
+        env: &Env,
+        r: &Rc<Expr>,
+        pointees: &[(Rc<IdentT>, Rc<str>)],
+    ) -> Rc<Expr> {
+        let mut r = r.clone();
+        self.subst_spec_rvalue(env, Rc::make_mut(&mut r), &SpecSubst::pointees(pointees));
+        r
+    }
+
+    fn subst_spec_rvalue(&mut self, env: &Env, rvalue: &mut Expr, this: &SpecSubst) {
+        // `*p` for an address parameter whose pointee the caller has already
+        // bound names that binding instead.
+        let bound_pointee = match &rvalue.val {
+            ExprT::Deref(inner) => match &inner.val {
+                ExprT::Var(x) => this
+                    .pointees
+                    .iter()
+                    .find(|(p, _)| *p == x.val)
+                    .map(|(_, name)| ExprT::SpecVal(name.clone(), inner.clone())),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(v) = bound_pointee {
+            rvalue.val = v;
+            return;
+        }
         match &mut rvalue.val {
             ExprT::Var(x) => {
                 if &*x.val == "this" {
-                    *rvalue = (**this).clone()
+                    if let Some(t) = this.this {
+                        *rvalue = (**t).clone()
+                    }
                 }
             }
-            ExprT::Deref(rv) => self.subst_this_rvalue(env, Rc::make_mut(rv), this),
-            ExprT::Member(x, _a) => self.subst_this_rvalue(env, Rc::make_mut(x), this),
+            ExprT::Deref(rv) => self.subst_spec_rvalue(env, Rc::make_mut(rv), this),
+            ExprT::Member(x, _a) => self.subst_spec_rvalue(env, Rc::make_mut(x), this),
             ExprT::BoolLit(_) => {}
             ExprT::IntLit(..) => {}
             ExprT::FloatLit(..) => {}
-            ExprT::Ref(lv) => self.subst_this_rvalue(env, Rc::make_mut(lv), this),
+            ExprT::Ref(lv) => self.subst_spec_rvalue(env, Rc::make_mut(lv), this),
             ExprT::UnOp(_, arg) => {
-                self.subst_this_rvalue(env, Rc::make_mut(arg), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(arg), this);
             }
             ExprT::BinOp(_, lhs, rhs) => {
-                self.subst_this_rvalue(env, Rc::make_mut(lhs), this);
-                self.subst_this_rvalue(env, Rc::make_mut(rhs), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(lhs), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(rhs), this);
             }
             ExprT::FnCall(_f, args) => {
                 for arg in args {
-                    self.subst_this_rvalue(env, Rc::make_mut(arg), this);
+                    self.subst_spec_rvalue(env, Rc::make_mut(arg), this);
                 }
             }
             ExprT::FnRef(_) => {}
             ExprT::FnPtrCall(f, args) => {
-                self.subst_this_rvalue(env, Rc::make_mut(f), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(f), this);
                 for arg in args {
-                    self.subst_this_rvalue(env, Rc::make_mut(arg), this);
+                    self.subst_spec_rvalue(env, Rc::make_mut(arg), this);
                 }
             }
             ExprT::Cast(val, _) => {
-                self.subst_this_rvalue(env, Rc::make_mut(val), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(val), this);
             }
             ExprT::InlinePulse(val, _) => {
                 self.subst_inline_pulse_code_this(env, Rc::make_mut(val), this)
             }
             ExprT::Error(_ty) => {}
-            ExprT::Live(val) => self.subst_this_rvalue(env, Rc::make_mut(val), this),
-            ExprT::Old(val) => self.subst_this_rvalue(env, Rc::make_mut(val), this),
+            ExprT::Live(val) => self.subst_spec_rvalue(env, Rc::make_mut(val), this),
+            ExprT::Old(val) => self.subst_spec_rvalue(env, Rc::make_mut(val), this),
             ExprT::Forall(_, _, body) | ExprT::Exists(_, _, body) => {
-                self.subst_this_rvalue(env, Rc::make_mut(body), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(body), this);
             }
             ExprT::StructInit(_, fields) => {
                 for (_fld, val) in fields {
-                    self.subst_this_rvalue(env, Rc::make_mut(val), this);
+                    self.subst_spec_rvalue(env, Rc::make_mut(val), this);
                 }
             }
             ExprT::UnionInit(_, _, val) => {
-                self.subst_this_rvalue(env, Rc::make_mut(val), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(val), this);
             }
             ExprT::ArrayInit { elems, .. } => {
                 for elem in elems {
-                    self.subst_this_rvalue(env, Rc::make_mut(elem), this);
+                    self.subst_spec_rvalue(env, Rc::make_mut(elem), this);
                 }
             }
             ExprT::Malloc(_) | ExprT::Calloc(_) => {}
             ExprT::MallocArray(_, count) | ExprT::CallocArray(_, count) => {
-                self.subst_this_rvalue(env, Rc::make_mut(count), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(count), this);
             }
             ExprT::MallocFlex(_, count) | ExprT::CallocFlex(_, count) => {
-                self.subst_this_rvalue(env, Rc::make_mut(count), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(count), this);
             }
             ExprT::Memset(_, ptr, value, count) => {
-                self.subst_this_rvalue(env, Rc::make_mut(ptr), this);
-                self.subst_this_rvalue(env, Rc::make_mut(value), this);
-                self.subst_this_rvalue(env, Rc::make_mut(count), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(ptr), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(value), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(count), this);
             }
             ExprT::MemsetZero(_, ptr) => {
-                self.subst_this_rvalue(env, Rc::make_mut(ptr), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(ptr), this);
             }
-            ExprT::Free(val) => self.subst_this_rvalue(env, Rc::make_mut(val), this),
-            ExprT::ContainerOf(ptr, _, _) => self.subst_this_rvalue(env, Rc::make_mut(ptr), this),
+            ExprT::Free(val) => self.subst_spec_rvalue(env, Rc::make_mut(val), this),
+            ExprT::ContainerOf(ptr, _, _) => self.subst_spec_rvalue(env, Rc::make_mut(ptr), this),
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)
             | ExprT::PreDecr(val)
-            | ExprT::PostDecr(val) => self.subst_this_rvalue(env, Rc::make_mut(val), this),
-            ExprT::VAttr(_, x) => self.subst_this_rvalue(env, Rc::make_mut(x), this),
+            | ExprT::PostDecr(val) => self.subst_spec_rvalue(env, Rc::make_mut(val), this),
+            ExprT::VAttr(_, x) | ExprT::SpecVal(_, x) => {
+                self.subst_spec_rvalue(env, Rc::make_mut(x), this)
+            }
             ExprT::Index(arr, idx) => {
-                self.subst_this_rvalue(env, Rc::make_mut(arr), this);
-                self.subst_this_rvalue(env, Rc::make_mut(idx), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(arr), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(idx), this);
             }
             ExprT::Cond(cond, then_expr, else_expr) => {
-                self.subst_this_rvalue(env, Rc::make_mut(cond), this);
-                self.subst_this_rvalue(env, Rc::make_mut(then_expr), this);
-                self.subst_this_rvalue(env, Rc::make_mut(else_expr), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(cond), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(then_expr), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(else_expr), this);
             }
             ExprT::AssignExpr(lhs, rhs) => {
-                self.subst_this_rvalue(env, Rc::make_mut(lhs), this);
-                self.subst_this_rvalue(env, Rc::make_mut(rhs), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(lhs), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(rhs), this);
             }
             ExprT::SizeOf(_) | ExprT::AlignOf(_) => {}
         }
@@ -1315,7 +1488,7 @@ impl<'a> Emitter<'a> {
         &mut self,
         env: &Env,
         val: &mut InlinePulseCode,
-        this: &Rc<Expr>,
+        this: &SpecSubst,
     ) {
         for tok in &mut val.tokens {
             match tok {
@@ -1326,7 +1499,7 @@ impl<'a> Emitter<'a> {
                 | InlinePulseToken::Declare { .. } => {}
                 InlinePulseToken::RValueAntiquot { expr, .. }
                 | InlinePulseToken::LValueAntiquot { expr, .. } => {
-                    self.subst_this_rvalue(env, Rc::make_mut(expr), this);
+                    self.subst_spec_rvalue(env, Rc::make_mut(expr), this);
                 }
             }
         }
@@ -1464,26 +1637,31 @@ impl<'a> Emitter<'a> {
     }
 
     /// Push a val binding using the naming strategy, with an auto-generated name based on `this`.
-    /// Returns the Doc to use as the val reference in the slprop.
-    fn push_val_binding(&mut self, naming: &mut ValNaming, this: &Rc<Expr>, ty: Doc) -> Doc {
-        match naming {
+    /// Returns the binding's name, which is always a single atom: as a Doc for
+    /// the slprop, and as the plain string that goes into an `ExprT::SpecVal`.
+    fn push_val_binding_named(
+        &mut self,
+        naming: &mut ValNaming,
+        this: &Rc<Expr>,
+        ty: Doc,
+    ) -> (Doc, Rc<str>) {
+        let name: Rc<str> = match naming {
             ValNaming::Standard { quote, bindings } => {
                 let idx = bindings.len() as u32;
-                let raw = Doc::text(
-                    self.nm
-                        .mangle(&Name::Val(extract_base_ident(this), idx))
-                        .to_string(),
-                );
-                let val_name = if *quote {
-                    Doc::text("'").append(raw)
+                let raw = self
+                    .nm
+                    .mangle(&Name::Val(extract_base_ident(this), idx))
+                    .to_string();
+                let name: Rc<str> = if *quote {
+                    format!("'{}", raw).into()
                 } else {
-                    raw
+                    raw.into()
                 };
                 bindings.push(ExBinding {
-                    name: val_name.clone(),
+                    name: Doc::text(name.to_string()),
                     ty,
                 });
-                val_name
+                name
             }
             ValNaming::SpecRecord {
                 spec_param,
@@ -1493,25 +1671,27 @@ impl<'a> Emitter<'a> {
             } => {
                 let idx = bindings.len() as u32;
                 let spec_field_name_str = format!("{}_{}", field_name, idx);
-                let spec_field_name = Doc::text(
-                    self.nm
-                        .mangle(&Name::TypeRefSpecField(
-                            (*type_ref).clone(),
-                            spec_field_name_str,
-                        ))
-                        .to_string(),
-                );
-                let val_access = spec_param
-                    .clone()
-                    .append(".")
-                    .append(spec_field_name.clone());
+                let spec_field_name = self
+                    .nm
+                    .mangle(&Name::TypeRefSpecField(
+                        (*type_ref).clone(),
+                        spec_field_name_str,
+                    ))
+                    .to_string();
+                let name: Rc<str> =
+                    format!("{}.{}", spec_param.pretty(usize::MAX), spec_field_name).into();
                 bindings.push(SpecFieldBinding {
-                    field_name: spec_field_name,
+                    field_name: Doc::text(spec_field_name),
                     ty,
                 });
-                val_access
+                name
             }
-        }
+        };
+        (Doc::text(name.to_string()), name)
+    }
+
+    fn push_val_binding(&mut self, naming: &mut ValNaming, this: &Rc<Expr>, ty: Doc) -> Doc {
+        self.push_val_binding_named(naming, this, ty).0
     }
 
     /// Push a val binding with an explicit name (used by RefineValue).
@@ -1600,13 +1780,14 @@ impl<'a> Emitter<'a> {
                     PointerKind::Ref | PointerKind::Unknown => match variant {
                         SLPropVariant::Init { perm } => {
                             let pointee_type_doc = self.emit_type(env, pointee_ty);
-                            let val_name = self.push_val_binding(naming, this, pointee_type_doc);
+                            let (val_doc, val_name) =
+                                self.push_val_binding_named(naming, this, pointee_type_doc);
                             let slprop = annotated(ty, || {
                                 naryfn([
                                     Doc::text("Pulse.Lib.Reference.pts_to"),
                                     this_doc,
                                     Doc::text("#").append(perm.clone()),
-                                    val_name,
+                                    val_doc,
                                 ])
                             });
                             props.push(slprop);
@@ -1618,14 +1799,24 @@ impl<'a> Emitter<'a> {
                                 _ => false,
                             };
                             if !is_self_ref {
-                                let derefed = ExprT::Deref(this.clone()).with_loc(this.loc.clone());
+                                // Everything below this point talks about the
+                                // pointee, which the `pts_to` just above bound
+                                // to `val_name`. Hand that binding down rather
+                                // than a `Deref` that would render as `!p`:
+                                // `!` is a frontend rewrite that needs to see
+                                // the ambient `pts_to`, and in a function-
+                                // pointer wrapper the whole `requires` sits
+                                // under the witness's pattern `match`, where
+                                // Pulse does not perform it.
+                                let pointee = ExprT::SpecVal(val_name, this.clone())
+                                    .with_loc(this.loc.clone());
                                 self.emit_type_slprop_inner(
                                     env,
                                     pointee_ty,
                                     variant,
                                     naming,
                                     props,
-                                    &derefed,
+                                    &pointee,
                                     resolving_struct,
                                 );
                             }
@@ -1737,7 +1928,7 @@ impl<'a> Emitter<'a> {
                 );
                 if let SLPropVariant::Init { .. } = variant {
                     let p = &mut p.clone();
-                    self.subst_this_rvalue(env, Rc::make_mut(p), this);
+                    self.subst_spec_rvalue(env, Rc::make_mut(p), &SpecSubst::this(this));
                     props.push(self.emit_rvalue(env, p));
                 }
             }
@@ -1752,7 +1943,7 @@ impl<'a> Emitter<'a> {
                     resolving_struct,
                 );
                 let p = &mut p.clone();
-                self.subst_this_rvalue(env, Rc::make_mut(p), this);
+                self.subst_spec_rvalue(env, Rc::make_mut(p), &SpecSubst::this(this));
                 props.push(self.emit_rvalue(env, p));
             }
             TypeT::RefineUninit(ty, p) => {
@@ -1767,7 +1958,7 @@ impl<'a> Emitter<'a> {
                 );
                 if let SLPropVariant::Uninit = variant {
                     let p = &mut p.clone();
-                    self.subst_this_rvalue(env, Rc::make_mut(p), this);
+                    self.subst_spec_rvalue(env, Rc::make_mut(p), &SpecSubst::this(this));
                     props.push(self.emit_rvalue(env, p));
                 }
             }
@@ -1789,7 +1980,7 @@ impl<'a> Emitter<'a> {
                         self.push_val_binding_explicit(naming, raw_name, binding_type_doc);
                     let _ = val_name; // name is used implicitly in the refinement prop
                     let p = &mut p.clone();
-                    self.subst_this_rvalue(env, Rc::make_mut(p), this);
+                    self.subst_spec_rvalue(env, Rc::make_mut(p), &SpecSubst::this(this));
                     let mut env = env.clone();
                     env.push_var_decl(binding_name, binding_ty.clone(), LocalDeclKind::RValue);
                     // Pre-register the binding name in the mangler so it emits without
@@ -2101,6 +2292,10 @@ impl<'a> Emitter<'a> {
                     ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
                 }
             },
+            // Already the name of a binding in the spec: emit it verbatim.
+            ExprT::SpecVal(name, _) => {
+                ExprKind::RValue(annotated(v, || Doc::text(name.to_string())))
+            }
             ExprT::VAttr(VAttr::Length, x) => ExprKind::RValue(annotated(v, || {
                 // For FixedArray, emit the statically known length as a plain integer
                 let x_ty = env.infer_expr(x).ok().map(|ty| env.vtype_whnf(ty));
@@ -2490,6 +2685,15 @@ impl<'a> Emitter<'a> {
         self.emit_expr(env, v).to_rvalue_decayed()
     }
 
+    /// See `Emitter::pure_not_with_pure`.
+    fn pure_keyword(&self) -> &'static str {
+        if self.pure_not_with_pure {
+            "pure"
+        } else {
+            "with_pure"
+        }
+    }
+
     fn emit_pattern(&mut self, env: &Env, pattern: &Expr) -> Doc {
         if let ExprT::IntLit(val, ty) = &pattern.val {
             let resolved = env.vtype_whnf(ty.clone().into());
@@ -2507,6 +2711,7 @@ impl<'a> Emitter<'a> {
     fn emit_rvalue_inner(&mut self, env: &Env, v: &Expr) -> Doc {
         annotated(v, || {
             match &v.val {
+                ExprT::SpecVal(name, _) => Doc::text(name.to_string()),
                 ExprT::BoolLit(v) => Doc::text(if *v { "true" } else { "false" }),
                 ExprT::IntLit(val, ty) => {
                     let resolved = env.vtype_whnf(ty.clone().into());
@@ -2628,7 +2833,7 @@ impl<'a> Emitter<'a> {
                         // an assertion arrives, since the preprocessor has
                         // already turned it into the literal 0.
                         (TypeT::SpecInt | TypeT::SpecNat, TypeT::SLProp) => unaryfn(
-                            Doc::text("with_pure"),
+                            Doc::text(self.pure_keyword()),
                             parens(
                                 val_doc
                                     .append(Doc::line())
@@ -2651,7 +2856,9 @@ impl<'a> Emitter<'a> {
                                 .append("else")
                                 .append(Doc::line().append("0sz").nest(2)),
                         ),
-                        (TypeT::Bool, TypeT::SLProp) => unaryfn(Doc::text("with_pure"), val_doc),
+                        (TypeT::Bool, TypeT::SLProp) => {
+                            unaryfn(Doc::text(self.pure_keyword()), val_doc)
+                        }
                         (TypeT::Bool, TypeT::Float { width }) => {
                             if let Some(m) = get_float_mod(width) {
                                 unaryfn(Doc::text(format!("{}_of_bool", m)), val_doc)
@@ -3274,56 +3481,25 @@ impl<'a> Emitter<'a> {
                     } else {
                         "Pulse.Lib.C.FuncPtr.call_div"
                     };
-                    // The explicit `w: erased c` witness argument (see
-                    // `Pulse.Lib.C.FuncPtr.fsti`): one component per bare
-                    // (non-`_plain`/non-`_core_ref`) pointer argument, holding
-                    // that pointee's CURRENT value (`hide !arg`), matching the
-                    // same argument-order convention `emit_fnptr_spec_core`
-                    // uses to build the callee wrapper's own witness tuple.
-                    // Ordinary (non-witnessing) call sites pass `hide ()`.
-                    //
-                    // NOTE: self-dispatch (`self->field(self, ..)`) verifies
-                    // when `self` is `_consumes` -- see `destroy_via_field` in
-                    // test/func_pointer/func_pointer.c. With a borrowed
-                    // `self`, the field getter's own unfold and this witness
-                    // read open two independent existentials for the same
-                    // value that Pulse can't unify.
-                    let param_tys: Option<Vec<Rc<Type>>> = env
-                        .infer_expr(f)
-                        .ok()
-                        .map(|t| env.vtype_whnf(t))
-                        .and_then(|t| match &t.val {
-                            TypeT::FnPtr { args, .. } => Some(args.clone()),
-                            _ => None,
-                        });
-                    let witness_vals: Vec<Doc> = param_tys
-                        .iter()
-                        .flatten()
-                        .zip(args.iter())
-                        .filter(|(ty, _)| fnptr_witness_pointee(ty).is_some())
-                        .map(|(_, a)| {
-                            let derefed = ExprT::Deref(a.clone()).with_loc(a.loc.clone());
-                            self.emit_rvalue(env, &derefed)
-                        })
-                        .collect();
-                    let witness_arg = match witness_vals.len() {
-                        0 => Doc::text("(hide ())"),
-                        1 => parens(
-                            Doc::text("hide ")
-                                .append(parens(witness_vals.into_iter().next().unwrap())),
-                        ),
-                        _ => parens(
-                            Doc::text("hide ")
-                                .append(parens(Doc::intersperse(witness_vals, Doc::text(", ")))),
-                        ),
-                    };
+                    // The `w: erased c` witness argument is a hole too. The
+                    // callee wrapper's `requires` destructures the witness by
+                    // *pattern* (see `nested_pattern_lets`), so the prover
+                    // defers rather than committing; `eta_expanded_pair` then
+                    // solves the right-nested spine and the leaves fall out of
+                    // ordinary slprop matching against the `is_valid` in
+                    // scope. Inferring it -- rather than reading the pointee
+                    // values off the *declared* fnptr type, as this used to --
+                    // is what lets one fnptr variable hold callees with
+                    // different `_plain` annotations and different
+                    // `_ghost_arg`s: their witnesses differ, but the call site
+                    // no longer names either.
                     parens(naryfn([
                         Doc::text(call_prim),
                         Doc::text("_"),
                         Doc::text("_"),
                         callee_val,
                         arg_tuple,
-                        witness_arg,
+                        Doc::text("_"),
                     ]))
                 }
                 ExprT::Live(v) => {
@@ -6512,6 +6688,22 @@ impl<'a> Emitter<'a> {
             .map(|n| self.emit_name(Name::Var(n.val.clone())))
             .collect();
 
+        // `_ghost_arg`s become the GHOST half of the witness pair. Unlike the
+        // implicit `#(v: erased t)` parameters `emit_fn_sig_inner` emits for
+        // the direct function, they cannot be implicits here: the wrapper's
+        // type has to stay the flat `x:a -> y:erased c -> stt_div ..` shape
+        // that `pre_of`/`post_of` unify against. Pushed as `RValue` so a
+        // `$(v)` in an `_inline_pulse` annotation emits `var_v`, not `(!var_v)`.
+        let mut ghost_name_docs: Vec<Doc> = vec![];
+        let mut ghost_ty_docs: Vec<Doc> = vec![];
+        for ga in &decl.ghost_args {
+            ghost_name_docs.push(annotated(&ga.name, || {
+                self.emit_name(Name::Var(ga.name.val.clone()))
+            }));
+            ghost_ty_docs.push(self.emit_type(env, &ga.ty));
+            env.push_var_decl(&ga.name, ga.ty.clone(), LocalDeclKind::RValue);
+        }
+
         // Bind each tuple component to its parameter name via projections
         // (rather than a `let (a,b) = x_fp` pattern match). Because the
         // projection form is definitionally equal to the corresponding
@@ -6563,15 +6755,31 @@ impl<'a> Emitter<'a> {
         // `Pulse.Lib.C.FuncPtr.fsti`). Ensures-side `exists*`s aren't part of
         // the wrapper's arrow type, so they keep using `wrap_exists`.
         let mut req_witness_groups: Vec<(Vec<ExBinding>, Vec<Doc>)> = vec![];
+        // For each address parameter whose pointee the witness carries: the
+        // parameter name and the binding its pointee value is stated at. The
+        // user's `_requires` sits inside the witness's pattern `let`s, so a
+        // `*p` in it must name that binding rather than read through `p`.
+        let mut pointee_bindings: Vec<(Rc<IdentT>, Rc<str>)> = vec![];
         for (n, arg) in arg_names.iter().zip(decl.args.iter()) {
             match arg.mode {
                 ParamMode::Regular | ParamMode::Consumed => {
+                    // One emission serves both the `requires` (under the
+                    // witness's pattern `let`s) and the `ensures` (under its
+                    // own `exists*`): a pointee read `*p` comes out as the
+                    // binding name `val_p_0` either way, which the `exists*`
+                    // rebinds identically.
                     let mut type_bindings = vec![];
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
                         bindings: &mut type_bindings,
                     };
+                    let pointee_name: Rc<str> = self
+                        .nm
+                        .mangle(&Name::Val(n.val.clone(), 0))
+                        .to_string()
+                        .into();
+                    self.pure_not_with_pure = true;
                     self.emit_type_slprop(
                         env,
                         &arg.ty,
@@ -6582,11 +6790,13 @@ impl<'a> Emitter<'a> {
                         &mut type_props,
                         &mk_rvar(n),
                     );
+                    self.pure_not_with_pure = false;
                     drop(naming);
                     if !type_props.is_empty() {
                         if let ParamMode::Regular = arg.mode {
                             ensures_props.push(wrap_exists(&type_bindings, type_props.clone()));
                         }
+                        pointee_bindings.push((n.val.clone(), pointee_name));
                         req_witness_groups.push((type_bindings, type_props));
                     }
                 }
@@ -6652,44 +6862,100 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        // Combine every requires-side existential group's bindings (in arg
-        // order) into a single flat witness type tuple `c`, and bind them all
-        // with `let`s projecting out of ONE explicit `y_fp: erased c` wrapper
-        // parameter (see comment above).
-        let witness_count: usize = req_witness_groups.iter().map(|(b, _)| b.len()).sum();
-        let witness_ty_docs: Vec<Doc> = req_witness_groups
+        // The witness `c` is always the pair `(ELIMS & GHOSTS)`: the
+        // existentials eliminated from the pointer arguments (in arg order),
+        // and the `_ghost_arg`s. Each side is right-nested binary
+        // (`nested_fold_doc`) so that `eta_expanded_pair` can solve the whole
+        // spine from an `_` at a call site.
+        //
+        // The pair is unconditional -- an argument-less, ghost-less function
+        // gets `(unit & unit)` -- so that every function pointer of the same C
+        // type has the same `c` regardless of its `_plain` annotations, which
+        // is what lets one fnptr *variable* hold several of them.
+        let elim_names: Vec<Doc> = req_witness_groups
+            .iter()
+            .flat_map(|(b, _)| b.iter().map(|eb| eb.name.clone()))
+            .collect();
+        let elim_ty_docs: Vec<Doc> = req_witness_groups
             .iter()
             .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
             .collect();
-        let witness_domain = fnptr_domain_doc(witness_ty_docs);
-        // Every group's `let`s are hoisted into ONE prefix placed in front of
-        // the whole `requires` conjunction, rather than each group carrying
-        // its own. A `let` is a term-level binder, so it cannot appear as the
-        // right operand of `**`: emitting it per group parses only while
-        // there is a single group, and is a syntax error from two groups on.
-        // Hoisting also keeps every witness binding in scope for the trailing
-        // `pure` conjunct below.
-        let witness_let_prefix = {
-            let witness_base = parens(Doc::text("reveal y_fp"));
-            let mut widx = 0usize;
-            let mut lets: Vec<Doc> = vec![];
-            for (bindings, props) in req_witness_groups {
-                for b in &bindings {
-                    let proj = nary_tuple_proj(witness_base.clone(), widx, witness_count);
-                    widx += 1;
-                    lets.push(
-                        Doc::text("let ")
-                            .append(b.name.clone())
-                            .append(" = ")
-                            .append(proj)
-                            .append(" in")
-                            .append(Doc::hardline()),
-                    );
-                }
-                requires_props.push(mk_star(props));
+        let witness_domain = parens(
+            nested_fold_doc(elim_ty_docs)
+                .append(" & ")
+                .append(nested_fold_doc(ghost_ty_docs)),
+        );
+
+        let witness_base = parens(Doc::text("reveal y_fp"));
+        let elim_path = parens(Doc::text("fst ").append(witness_base.clone()));
+        let ghost_path = parens(Doc::text("snd ").append(witness_base.clone()));
+
+        // Bind the witness with *binary pattern* `let`s -- see
+        // `nested_pattern_lets` for why projections do not work -- hoisted
+        // into ONE prefix in front of the whole `requires` conjunction rather
+        // than one per group. A `let` is a term-level binder, so it cannot
+        // appear as the right operand of `**`; and hoisting keeps every
+        // binding in scope for the trailing `pure` conjunct.
+        let mut witness_lets: Vec<Doc> = vec![];
+        let mut needs_rewrite = false;
+        if !elim_names.is_empty() || !ghost_name_docs.is_empty() {
+            witness_lets.push(
+                Doc::text("let ")
+                    .append(parens(Doc::text("w_fp_e, w_fp_g")))
+                    .append(" = ")
+                    .append(witness_base.clone())
+                    .append(" in")
+                    .append(Doc::hardline()),
+            );
+            needs_rewrite = true;
+            for (base_val, names, prefix) in [
+                (Doc::text("w_fp_e"), &elim_names, "w_fp_e"),
+                (Doc::text("w_fp_g"), &ghost_name_docs, "w_fp_g"),
+            ] {
+                witness_lets.push(nested_pattern_lets(base_val, names, prefix));
             }
-            Doc::concat(lets)
+        }
+        let witness_let_prefix = Doc::concat(witness_lets);
+        for (_, props) in req_witness_groups {
+            requires_props.push(mk_star(props));
+        }
+
+        // The `ensures` needs the ghost names in scope too, but binds them by
+        // *projection*: the post has nothing to infer (the witness is already
+        // solved by then), and a pattern here would break the `!` auto-deref
+        // in the `exists*` groups exactly as it does in the pre.
+        let ghost_post_prefix = Doc::concat(ghost_name_docs.iter().enumerate().map(|(i, n)| {
+            Doc::text("let ")
+                .append(n.clone())
+                .append(" = ")
+                .append(nested_tuple_proj(
+                    ghost_path.clone(),
+                    i,
+                    ghost_name_docs.len(),
+                ))
+                .append(" in")
+                .append(Doc::hardline())
+        }));
+
+        // The body must eta-expand the witness to unstick the matches the
+        // `requires` introduced -- in ONE rewrite of the whole thing; see
+        // `eta_expand_doc`.
+        let witness_rewrites = if needs_rewrite {
+            Doc::text("rewrite each ")
+                .append(witness_base.clone())
+                .append(" as ")
+                .append(parens(
+                    Doc::text("Mktuple2 ")
+                        .append(eta_expand_doc(elim_path.clone(), elim_names.len()))
+                        .append(" ")
+                        .append(eta_expand_doc(ghost_path.clone(), ghost_name_docs.len())),
+                ))
+                .append(";")
+                .append(Doc::hardline())
+        } else {
+            Doc::nil()
         };
+
         // `preserves` (const params) hold across the call, so they belong in
         // both the pre and the post.
         requires_props.extend(preserves_props.iter().cloned());
@@ -6726,14 +6992,24 @@ impl<'a> Emitter<'a> {
             |e: &Expr| matches!(&e.val, ExprT::Cast(_, ty) if matches!(ty.val, TypeT::SLProp));
         let (req_pure, req_slprop): (Vec<_>, Vec<_>) =
             decl.requires.iter().partition(|r| is_pure_prop(r));
+        // The user's `_requires` are inside the witness's pattern `let` scope:
+        // they must name the pointee bindings rather than read through the
+        // pointers, and must not use `with_pure`. The `_ensures` below is
+        // outside that scope and needs neither.
+        self.pure_not_with_pure = true;
         for r in &req_slprop {
-            let d = self.emit_rvalue(env, r);
+            let r = self.subst_pointees(env, r, &pointee_bindings);
+            let d = self.emit_rvalue(env, &r);
             requires_props.push(d);
         }
         let req_props: Vec<Doc> = req_pure
             .iter()
-            .map(|r| self.emit_pure_prop(env, r))
+            .map(|r| {
+                let r = self.subst_pointees(env, r, &pointee_bindings);
+                self.emit_pure_prop(env, &r)
+            })
             .collect();
+        self.pure_not_with_pure = false;
         let has_req = !req_props.is_empty();
         let req_conj = conj(req_props);
         if has_req {
@@ -6809,7 +7085,11 @@ impl<'a> Emitter<'a> {
                     .append(pre_body),
             ),
         ));
-        let post_expr = parens(bind_prefix(&name_docs).append(post_body));
+        let post_expr = parens(
+            bind_prefix(&name_docs)
+                .append(ghost_post_prefix)
+                .append(post_body),
+        );
 
         FnPtrSpecCore {
             pre_expr,
@@ -6818,6 +7098,7 @@ impl<'a> Emitter<'a> {
             callee,
             domain,
             witness_domain,
+            witness_rewrites,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6835,6 +7116,7 @@ impl<'a> Emitter<'a> {
             callee,
             domain,
             witness_domain,
+            witness_rewrites,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6892,6 +7174,7 @@ impl<'a> Emitter<'a> {
             .append(Doc::hardline())
             .append(Doc::text("{"))
             .append(Doc::hardline())
+            .append(Doc::text("  ").append(witness_rewrites).nest(2))
             .append(Doc::text("  ").append(call_body).nest(2))
             .append(Doc::hardline())
             .append(Doc::text("}"));
@@ -8062,6 +8345,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         fn_module_map,
         typedef_override_map,
         current_fn_total: false,
+        pure_not_with_pure: false,
         tmp_counter: 0,
     };
 

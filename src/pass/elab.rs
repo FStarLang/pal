@@ -429,7 +429,7 @@ impl<'a> Elaborator<'a> {
                     }
                 }
             }
-            ExprT::VAttr(_, x) => {
+            ExprT::VAttr(_, x) | ExprT::SpecVal(_, x) => {
                 self.elab_rvalue(env, Rc::make_mut(x), None);
             }
             ExprT::Index(arr, idx) => {

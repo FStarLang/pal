@@ -328,6 +328,17 @@ pub enum ExprT {
     // Virtual attribute (introduced by elab)
     VAttr(VAttr, Rc<Expr>),
 
+    /// The spec-level value a pointer's ownership is stated at, introduced by
+    /// the emitter. When `emit_type_slprop` emits `pts_to p #perm val_p_0` it
+    /// binds `val_p_0` to `p`'s pointee, and everything it goes on to say about
+    /// that pointee must name the binding rather than re-read through `p` with
+    /// `!p`: a function-pointer wrapper's `requires` is under a `match` (the
+    /// witness is bound by pattern), and Pulse does not elaborate `!` there.
+    /// Holds the binding's already-mangled name and the pointer expression it
+    /// came from — the latter only so that a nested binding keeps deriving its
+    /// name from the same base identifier.
+    SpecVal(Rc<str>, Rc<Expr>),
+
     // RValue variants
     BoolLit(bool),
     IntLit(Rc<BigInt>, Rc<Type>),

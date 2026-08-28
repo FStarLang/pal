@@ -272,7 +272,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            ExprT::VAttr(_, x) => {
+            ExprT::VAttr(_, x) | ExprT::SpecVal(_, x) => {
                 self.check_rvalue(env, x);
             }
             ExprT::Index(arr, idx) => {

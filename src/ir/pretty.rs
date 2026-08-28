@@ -204,6 +204,7 @@ impl PrettyIR for ExprT {
             ExprT::Var(x) => x.to_doc(),
             ExprT::Deref(rval) => RcDoc::text("(*").append(rval.to_doc()).append(")"),
             ExprT::Member(x, n) => x.to_doc().append(RcDoc::text(".")).append(n.to_doc()),
+            ExprT::SpecVal(name, _) => RcDoc::text(name.to_string()),
             ExprT::VAttr(VAttr::Length, x) => x.to_doc().append(RcDoc::text("._length")),
             ExprT::VAttr(VAttr::Active(fld), x) => x
                 .to_doc()
