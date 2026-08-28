@@ -700,6 +700,13 @@ struct Emitter<'a> {
     /// brings `squash p` into scope for the conjuncts to its right, which no
     /// wrapper `requires` relies on.
     pure_not_with_pure: bool,
+    /// Structs whose ownership predicate is in scope, as triples of the
+    /// rendered `this`, the struct's `TypeRef`, and the spec record binding.
+    ///
+    /// Pushed while a struct's slprop is emitted and dropped once the enclosing
+    /// refinement has been emitted, so a `_refine` can reach the spec record
+    /// that the predicate right beside it just bound. See `VAttr(Length)`.
+    spec_scope: Vec<(String, TypeRef, Doc)>,
     tmp_counter: usize,
 }
 
@@ -1747,7 +1754,9 @@ impl<'a> Emitter<'a> {
         props: &mut Vec<Doc>,
         this: &Rc<Expr>,
     ) {
+        let scope_mark = self.spec_scope.len();
         self.emit_type_slprop_inner(env, ty, variant, naming, props, this, None);
+        self.spec_scope.truncate(scope_mark);
     }
 
     fn emit_type_slprop_inner(
@@ -1908,6 +1917,19 @@ impl<'a> Emitter<'a> {
                 for vp_type in &val_param_types {
                     let val_name = self.push_val_binding(naming, this, vp_type.clone());
                     val_args.push(val_name);
+                }
+                // A struct's predicate binds its spec record, whose fields hold
+                // each array field's `array_spec`. Record it so that a `_refine`
+                // emitted just after this can spell `_length` as a pure
+                // projection of that record rather than a `length_of` call.
+                if let (SLPropVariant::Init { .. }, TypeRefKind::Struct(_), [spec_name]) =
+                    (variant, n, &val_args[..])
+                {
+                    self.spec_scope.push((
+                        this_doc.pretty(usize::MAX).to_string(),
+                        TypeRef::from(n),
+                        spec_name.clone(),
+                    ));
                 }
                 let mut args: Vec<Doc> = vec![pred_name, this_doc];
                 if let SLPropVariant::Init { perm, .. } = variant {
@@ -2296,28 +2318,71 @@ impl<'a> Emitter<'a> {
             ExprT::SpecVal(name, _) => {
                 ExprKind::RValue(annotated(v, || Doc::text(name.to_string())))
             }
-            ExprT::VAttr(VAttr::Length, x) => ExprKind::RValue(annotated(v, || {
-                // For FixedArray, emit the statically known length as a plain integer
+            ExprT::VAttr(VAttr::Length, x) => {
                 let x_ty = env.infer_expr(x).ok().map(|ty| env.vtype_whnf(ty));
-                if let Some(ref ty) = x_ty {
-                    if let TypeT::FixedArray(_, length) = &ty.val {
-                        return Doc::text(format!("{}", length));
+                // A directly-owned array field of a struct whose predicate is in
+                // scope: take the length from that predicate's spec record
+                // instead of calling `length_of`. `length_of` is a ghost fn that
+                // needs the array's `array_pts_to` in the ambient context and
+                // answers through `rewrites_to`, so it does not elaborate inside
+                // a function pointer wrapper, where the whole `requires` sits
+                // under the witness's pattern `match`. `array_spec_len` is a
+                // pure projection and elaborates anywhere.
+                let is_owned_array = matches!(
+                    x_ty.as_ref().map(|ty| &ty.val),
+                    Some(TypeT::Pointer(_, PointerKind::Array))
+                );
+                let spec_len = match (is_owned_array, &x.val) {
+                    (true, ExprT::Member(base, fld)) => {
+                        let base_doc = self.emit_rvalue(env, base).pretty(usize::MAX).to_string();
+                        self.spec_scope
+                            .iter()
+                            .rev()
+                            .find(|(b, _, _)| *b == base_doc)
+                            .map(|(_, type_ref, spec_name)| {
+                                (type_ref.clone(), spec_name.clone(), fld.val.to_string())
+                            })
+                            .map(|(type_ref, spec_name, fld)| {
+                                let field = self.emit_name(Name::TypeRefSpecField(
+                                    type_ref,
+                                    format!("{fld}_0"),
+                                ));
+                                parens(
+                                    Doc::text("array_spec_len")
+                                        .append(Doc::line())
+                                        .append(spec_name)
+                                        .append(".")
+                                        .append(field),
+                                )
+                            })
                     }
-                    // A flexible array member is an inline `array_spec`, so its
-                    // length is `array_spec_len` of the stored contents.
-                    if matches!(&ty.val, TypeT::FlexArray(_)) {
-                        return parens(
-                            Doc::text("array_spec_len")
-                                .append(Doc::line())
-                                .append(self.emit_rvalue(env, x)),
-                        );
+                    _ => None,
+                };
+                ExprKind::RValue(annotated(v, || {
+                    if let Some(doc) = spec_len {
+                        return doc;
                     }
-                }
-                unaryfn(
-                    Doc::text("reveal"),
-                    unaryfn(Doc::text("length_of"), self.emit_rvalue(env, x)),
-                )
-            })),
+                    if let Some(ref ty) = x_ty {
+                        // For FixedArray, emit the statically known length as a plain integer
+                        if let TypeT::FixedArray(_, length) = &ty.val {
+                            return Doc::text(format!("{}", length));
+                        }
+                        // A flexible array member is an inline `array_spec`, so its
+                        // length is `array_spec_len` of the stored contents.
+                        if matches!(&ty.val, TypeT::FlexArray(_)) {
+                            return parens(
+                                Doc::text("array_spec_len")
+                                    .append(Doc::line())
+                                    .append(self.emit_rvalue(env, x)),
+                            );
+                        }
+                    }
+                    unaryfn(
+                        Doc::text("reveal"),
+                        unaryfn(Doc::text("length_of"), self.emit_rvalue(env, x)),
+                    )
+                }))
+            }
             ExprT::VAttr(VAttr::Active(fld), base) => {
                 let base_ty = env.vtype_whnf(env.infer_expr(base).unwrap());
                 let TypeT::TypeRef(TypeRefKind::Union(union_name)) = &base_ty.val else {
@@ -8346,6 +8411,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         typedef_override_map,
         current_fn_total: false,
         pure_not_with_pure: false,
+        spec_scope: vec![],
         tmp_counter: 0,
     };
 

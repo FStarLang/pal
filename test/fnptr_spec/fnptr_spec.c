@@ -99,9 +99,11 @@ int32_t call_mixed(struct dep *d, int32_t *a, _plain int32_t *q)
   _ghost_stmt(drop_ (exists* fr. pts_to Global_o_m.addr_var_o_m #fr _));
 }
 
-/* Repro: a struct whose fields carry `_array` length refinements, passed by
-   pointer to a function that is address-taken. `Func_use` verifies; emitting
-   the `__fp` wrapper for it is what fails. */
+/* A struct-level `_refine` that reads an `_array` field's `_length`, on a
+   function whose address is taken. The refinement becomes a `pure` conjunct
+   inside the wrapper's witness pattern `let`, so it may not name a ghost fn:
+   `_length` is emitted as the pure projection `array_spec_len` of the
+   predicate's spec record rather than as a `length_of` call. */
 struct cell {
   int v;
 };
@@ -119,11 +121,11 @@ struct ops_arr {
 
 static const struct ops_arr o_arr = {.fn = use};
 
-/* The same failure with the struct passed *by value*, which is the sharper
-   form: with no `pts_to` to eliminate, the witness's elim half is just the
-   `__spec`, and the two failing `pure` conjuncts mention only `x_fp` -- a
-   plain parameter -- rather than any witness binding. They still fail, purely
-   because they sit inside the witness pattern `let`'s scope. */
+/* The same, with the struct passed *by value*. This is the sharper case: with
+   no `pts_to` to eliminate, the witness's elim half is just the `__spec`, so
+   the refinement conjuncts mention only `x_fp` -- a plain parameter -- and no
+   witness binding at all. They are still constrained by sitting inside the
+   pattern `let`, which is what makes the ghost fn unusable there. */
 void use_byval(struct box b) {}
 
 struct ops_byval {
