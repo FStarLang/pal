@@ -57,6 +57,16 @@ int32_t impl_elim_two(int32_t *a, int32_t *b)
     return *a + *b;
 }
 
+/* Same C signature as `impl_elim_two`, but both parameters are `_plain`, so
+   this one's witness is empty (`c = unit`) where `impl_elim_two`'s carries
+   both pointees (`c = (ty_int32_t & ty_int32_t)`). Nothing else distinguishes
+   them, so a variable holding either has the same C type. */
+_ensures(return == 0)
+int32_t impl_plain_two(_plain int32_t *a, _plain int32_t *b)
+{
+    return 0;
+}
+
 /* A *weaker* contract for `impl_mixed`, advertised by the `m` field of
    `struct ops` below.
 
@@ -197,6 +207,40 @@ int32_t call_via_o_elim_two(int32_t *a, int32_t *b)
     return p->e(a, b);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+}
+
+/* One variable, both shapes written into it. Assignment is witness-agnostic:
+   `func_ptr` is indexed by argument and return type only, so both `of_fn_div`
+   results have the same type regardless of what each callee's witness is. */
+void assign_across_shapes(void)
+{
+    int32_t (*fp)(int32_t *, int32_t *);
+    fp = impl_elim_two;
+    fp = impl_plain_two;
+    fp = impl_elim_two;
+}
+
+/* The same variable, called after each write. `impl_elim_two` needs a
+   two-component witness and `impl_plain_two` needs none, so no single declared
+   type can describe both -- which is the point. Each call's `pre`, `post` and
+   witness are pinned by the `is_valid` in scope, and PAL already emits `_` for
+   `pre` and `post`; only the witness is still read off the declaration. */
+_requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
+int32_t call_across_shapes(int32_t *a, int32_t *b)
+{
+    int32_t (*fp)(int32_t *, int32_t *);
+
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_elim_two.func_impl_elim_two__fp);
+    fp = impl_elim_two;
+    int32_t r1 = fp(a, b);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_plain_two.func_impl_plain_two__fp);
+    fp = impl_plain_two;
+    int32_t r2 = fp(a, b);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+
+    return r1 + r2;
 }
 
 /* The same mixed callee through a *local* function pointer rather than a

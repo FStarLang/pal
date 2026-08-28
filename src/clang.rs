@@ -386,49 +386,6 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Attach the ghost args accumulated in `builder` to a function-pointer
-    /// type. See `TypeT::FnPtr` for why the type carries them at all.
-    fn fnptr_with_ghost_args(&mut self, ty: Rc<Type>, builder: &mut DeclBuilder) -> Rc<Type> {
-        if builder.ghost_args.is_empty() {
-            return ty;
-        }
-        // A `_refine`, `_plain`, `_nullable` etc. on the same declaration wraps
-        // the function-pointer type, so descend through the wrappers and
-        // rebuild them around the annotated inner type. `trTypeAttrs` applies
-        // these by attribute name without consulting the underlying type, so
-        // any of them can sit on a function-pointer declaration.
-        macro_rules! rewrap {
-            ($ctor:path, $inner:expr $(, $rest:expr)*) => {{
-                let inner = self.fnptr_with_ghost_args($inner.clone(), builder);
-                return mk_ast(ty.loc.clone(), $ctor(inner $(, $rest.clone())*));
-            }};
-        }
-        match &ty.val {
-            TypeT::FnPtr { args, ret, .. } => mk_ast(
-                ty.loc.clone(),
-                TypeT::FnPtr {
-                    args: args.clone(),
-                    ret: ret.clone(),
-                    ghost_args: std::mem::take(&mut builder.ghost_args),
-                },
-            ),
-            TypeT::Refine(inner, p) => rewrap!(TypeT::Refine, inner, p),
-            TypeT::RefineAlways(inner, p) => rewrap!(TypeT::RefineAlways, inner, p),
-            TypeT::RefineUninit(inner, p) => rewrap!(TypeT::RefineUninit, inner, p),
-            TypeT::RefineValue(inner, n, t, p) => rewrap!(TypeT::RefineValue, inner, n, t, p),
-            TypeT::Plain(inner) => rewrap!(TypeT::Plain, inner),
-            TypeT::Nullable(inner) => rewrap!(TypeT::Nullable, inner),
-            _ => {
-                self.report_diag(
-                    ty.loc.clone(),
-                    true,
-                    "_ghost_arg is only supported on function-pointer declarations",
-                );
-                ty
-            }
-        }
-    }
-
     fn parse_rvalue(&mut self, loc: Rc<SourceInfo>, idx: u32, snippets: &SnippetMap) -> Rc<Expr> {
         match snippets.snippets.get(&idx) {
             Some(code) => parse_expr(
@@ -662,14 +619,7 @@ fn mk_flex_array_type(loc: Rc<SourceInfo>, elem_ty: Rc<Type>) -> Rc<Type> {
     mk_ast(loc, TypeT::FlexArray(elem_ty))
 }
 fn mk_type_fnptr(loc: Rc<SourceInfo>, args: Vec<Rc<Type>>, ret: Rc<Type>) -> Rc<Type> {
-    mk_ast(
-        loc,
-        TypeT::FnPtr {
-            args,
-            ret,
-            ghost_args: vec![],
-        },
-    )
+    mk_ast(loc, TypeT::FnPtr { args, ret })
 }
 fn mk_type_struct(loc: Rc<SourceInfo>, n: Rc<Ident>) -> Rc<Type> {
     mk_ast(loc, TypeT::TypeRef(TypeRefKind::Struct(n)))

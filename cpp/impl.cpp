@@ -308,37 +308,13 @@ public:
       reportUnsupported(f->getSourceRange(), floc,
                         "unsupported non-constant-length array field", "");
     } else {
-      auto fieldTy =
+      builder.field(
+          ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
           trTypeAttrs(f->getAttrs(),
                       trQualType(f->getType(), f->getSourceRange(), liftStructs,
                                  findFnProtoTypeLoc(f->getTypeSourceInfo())),
-                      f->getType(), f->getSourceRange());
-      builder.field(ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
-                    attachDeclGhostArgs(std::move(fieldTy), f));
+                      f->getType(), f->getSourceRange()));
     }
-  }
-
-  // `_ghost_arg` on a function-pointer-typed declaration -- a struct field or
-  // a local variable. See `TypeT::FnPtr` in src/ir/mod.rs for why the type
-  // carries them. Parsed with a scratch DeclBuilder purely as an accumulator.
-  Rc<ir::Type> attachDeclGhostArgs(Rc<ir::Type> ty, NamedDecl *d) {
-    if (!d->hasAttrs())
-      return ty;
-    std::optional<DeclBuilder> scratch;
-    for (auto *attr : d->getAttrs()) {
-      if (auto ctr = isUnaryAttrCounter(attr, "pal-ghost-arg")) {
-        auto aloc = getRange(attr->getRange());
-        if (!scratch)
-          scratch.emplace(DeclBuilder::new_(
-              aloc.clone(),
-              ctx.mk_ident(toStr(d->getIdentifier() ? d->getName() : "_"),
-                           aloc.clone())));
-        ctx.parse_ghost_arg(*scratch, std::move(aloc), ctr.value(), snippets);
-      }
-    }
-    if (!scratch)
-      return ty;
-    return ctx.fnptr_with_ghost_args(std::move(ty), *scratch);
   }
 
   void trRecordDecl(Rc<ir::Ident> ident, RecordDecl *decl,
@@ -2605,7 +2581,6 @@ public:
                 trQualType(vd->getType(), vd->getSourceRange(), nullptr,
                            findFnProtoTypeLoc(vd->getTypeSourceInfo())),
                 vd->getType(), vd->getSourceRange());
-            ty = attachDeclGhostArgs(std::move(ty), vd);
             stmts.push(mk_var_decl(dloc.clone(), id.clone(), std::move(ty)));
             if (vd->hasInit()) {
               stmts.push(mk_assign(dloc.clone(),

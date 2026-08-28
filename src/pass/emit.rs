@@ -3288,18 +3288,14 @@ impl<'a> Emitter<'a> {
                     // `self`, the field getter's own unfold and this witness
                     // read open two independent existentials for the same
                     // value that Pulse can't unify.
-                    let (param_tys, ghost_count): (Option<Vec<Rc<Type>>>, usize) = match env
+                    let param_tys: Option<Vec<Rc<Type>>> = env
                         .infer_expr(f)
                         .ok()
                         .map(|t| env.vtype_whnf(t))
-                        .as_ref()
-                        .map(|t| &t.val)
-                    {
-                        Some(TypeT::FnPtr {
-                            args, ghost_args, ..
-                        }) => (Some(args.clone()), ghost_args.len()),
-                        _ => (None, 0),
-                    };
+                        .and_then(|t| match &t.val {
+                            TypeT::FnPtr { args, .. } => Some(args.clone()),
+                            _ => None,
+                        });
                     let witness_vals: Vec<Doc> = param_tys
                         .iter()
                         .flatten()
@@ -3310,35 +3306,16 @@ impl<'a> Emitter<'a> {
                             self.emit_rvalue(env, &derefed)
                         })
                         .collect();
-                    let elim_count = witness_vals.len();
-                    let elim_doc = match elim_count {
-                        0 => Doc::text("()"),
-                        1 => witness_vals.into_iter().next().unwrap(),
-                        _ => parens(Doc::intersperse(witness_vals, Doc::text(", "))),
-                    };
-                    // When the callee's type carries `_ghost_arg`s, the
-                    // witness is `(elims, ghosts)` and each ghost is a hole.
-                    // The tuple *spine* has to be written out: Pulse only
-                    // solves a hole standing for a tuple leaf, never one
-                    // standing for a whole tuple (`snd (reveal ?u)` is inert
-                    // because `_simpl_proj` needs a real `Mktuple2`).
-                    let witness_arg = if ghost_count > 0 {
-                        let ghosts = if ghost_count == 1 {
-                            Doc::text("_")
-                        } else {
-                            parens(Doc::intersperse(
-                                (0..ghost_count).map(|_| Doc::text("_")),
-                                Doc::text(", "),
-                            ))
-                        };
-                        parens(
+                    let witness_arg = match witness_vals.len() {
+                        0 => Doc::text("(hide ())"),
+                        1 => parens(
                             Doc::text("hide ")
-                                .append(parens(elim_doc.append(Doc::text(", ")).append(ghosts))),
-                        )
-                    } else if elim_count == 0 {
-                        Doc::text("(hide ())")
-                    } else {
-                        parens(Doc::text("hide ").append(parens(elim_doc)))
+                                .append(parens(witness_vals.into_iter().next().unwrap())),
+                        ),
+                        _ => parens(
+                            Doc::text("hide ")
+                                .append(parens(Doc::intersperse(witness_vals, Doc::text(", ")))),
+                        ),
                     };
                     parens(naryfn([
                         Doc::text(call_prim),
@@ -6515,19 +6492,6 @@ impl<'a> Emitter<'a> {
     fn emit_fnptr_spec_core(&mut self, env: &Env, decl: &FnDecl) -> FnPtrSpecCore {
         let env = &mut env.clone();
 
-        // Ghost arguments become a second component of the witness type `c`
-        // (see below). Register them as ordinary rvalues *first*, exactly as
-        // `emit_fn_sig_inner` does: without this the `$(v)` antiquotation in an
-        // `_inline_pulse` slprop lowers as a C variable *read* (`!var_v`)
-        // rather than a plain name.
-        let mut ghost_names: Vec<Doc> = vec![];
-        let mut ghost_ty_docs: Vec<Doc> = vec![];
-        for ga in &decl.ghost_args {
-            ghost_names.push(self.emit_name(Name::Var(ga.name.val.clone())));
-            ghost_ty_docs.push(self.emit_type(env, &ga.ty));
-            env.push_var_decl(&ga.name, ga.ty.clone(), LocalDeclKind::RValue);
-        }
-
         let mut arg_names: Vec<Rc<Ident>> = vec![];
         let mut arg_ty_docs: Vec<Doc> = vec![];
         for (i, arg) in decl.args.iter().enumerate() {
@@ -6697,48 +6661,7 @@ impl<'a> Emitter<'a> {
             .iter()
             .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
             .collect();
-        let elim_domain = fnptr_domain_doc(witness_ty_docs);
-        // Ghost arguments have no C expression a call site could read back, so
-        // they cannot live in the elim tuple (whose components are recovered by
-        // dereferencing the corresponding argument). They get their own second
-        // component: `c = (elim_tuple & ghost_tuple)`.
-        //
-        // The pair is only introduced when the function actually HAS ghost
-        // args. Making it unconditional would give every ordinary function
-        // pointer a `unit` ghost slot that the wrapper never mentions, so
-        // nothing constrains it and a call site could only fill it by writing
-        // `()` literally -- an inference hole there is unsolvable.
-        let ghost_count = ghost_ty_docs.len();
-        let has_ghosts = ghost_count > 0;
-        let witness_domain = if has_ghosts {
-            parens(
-                elim_domain
-                    .append(Doc::text(" & "))
-                    .append(fnptr_domain_doc(ghost_ty_docs)),
-            )
-        } else {
-            elim_domain
-        };
-        let reveal_base = parens(Doc::text("reveal y_fp"));
-        let (elim_base, ghost_base) = if has_ghosts {
-            (
-                parens(Doc::text("fst ").append(reveal_base.clone())),
-                parens(Doc::text("snd ").append(reveal_base)),
-            )
-        } else {
-            (reveal_base, Doc::nil())
-        };
-        // Ghost `let`s are needed by the *post* as well as the pre (a
-        // `_preserves` slprop mentioning a ghost lands in both), unlike the
-        // elim bindings, which the post re-existentializes via `wrap_exists`.
-        let ghost_let_prefix = Doc::concat(ghost_names.iter().enumerate().map(|(gi, name)| {
-            Doc::text("let ")
-                .append(name.clone())
-                .append(" = ")
-                .append(nary_tuple_proj(ghost_base.clone(), gi, ghost_count))
-                .append(" in")
-                .append(Doc::hardline())
-        }));
+        let witness_domain = fnptr_domain_doc(witness_ty_docs);
         // Every group's `let`s are hoisted into ONE prefix placed in front of
         // the whole `requires` conjunction, rather than each group carrying
         // its own. A `let` is a term-level binder, so it cannot appear as the
@@ -6747,7 +6670,7 @@ impl<'a> Emitter<'a> {
         // Hoisting also keeps every witness binding in scope for the trailing
         // `pure` conjunct below.
         let witness_let_prefix = {
-            let witness_base = elim_base;
+            let witness_base = parens(Doc::text("reveal y_fp"));
             let mut widx = 0usize;
             let mut lets: Vec<Doc> = vec![];
             for (bindings, props) in req_witness_groups {
@@ -6882,16 +6805,11 @@ impl<'a> Emitter<'a> {
             Doc::text("Pulse.Lib.C.FuncPtr.prevent_lifting"),
             parens(
                 bind_prefix(&name_docs)
-                    .append(ghost_let_prefix.clone())
                     .append(witness_let_prefix)
                     .append(pre_body),
             ),
         ));
-        let post_expr = parens(
-            bind_prefix(&name_docs)
-                .append(ghost_let_prefix)
-                .append(post_body),
-        );
+        let post_expr = parens(bind_prefix(&name_docs).append(post_body));
 
         FnPtrSpecCore {
             pre_expr,

@@ -117,16 +117,9 @@ impl<'a> Checker<'a> {
             TypeT::FlexArray(elem_ty) => {
                 self.check_type(env, elem_ty);
             }
-            TypeT::FnPtr {
-                args,
-                ret,
-                ghost_args,
-            } => {
+            TypeT::FnPtr { args, ret, .. } => {
                 for a in args {
                     self.check_type(env, a);
-                }
-                for g in ghost_args {
-                    self.check_type(env, &g.ty);
                 }
                 self.check_type(env, ret);
             }
