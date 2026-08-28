@@ -5,17 +5,17 @@
 /* `_ghost_arg` on a function whose address is taken.
 
    The `__fp` wrapper binds each ghost from the erased witness `c`, which is
-   widened from the elim tuple alone to `(elims & ghosts)`:
+   the pair `(elims & ghosts)` -- the existentials eliminated from the pointer
+   arguments, and the ghost arguments:
 
      Funcptr_impl_one.fsti   (y_fp: erased (unit & ty_int32_t))
-                             let var_v = snd (reveal y_fp)
+     Funcptr_impl_two.fsti   (y_fp: erased (unit & (ty_int32_t & ty_int32_t)))
 
-   An indirect call site has no callee declaration, so it can only learn the
-   ghost arity from the type written in `struct ops` -- hence the `_ghost_arg`
-   annotations on the fields. It then emits `hide (elims, (_, .., _))`: values
-   on the elim side, holes on the ghost side, and the tuple spine written out,
-   since Pulse solves a hole standing for a tuple leaf but not one standing for
-   a whole tuple. */
+   An indirect call site writes `_` for the witness and Pulse infers it, so no
+   function-pointer *declaration* -- neither a local nor a `struct` field --
+   has to describe the callee's ghost arity. `assign_across_shapes` and
+   `call_across_shapes` below are the point of that: they put callees
+   disagreeing on both halves of the witness into a single variable. */
 
 /* One ghost argument. It occurs inside an slprop, so it is recoverable by
    matching against the caller's context. */
@@ -66,6 +66,15 @@ int32_t impl_plain_two(_plain int32_t *a, _plain int32_t *b)
 {
     return 0;
 }
+
+/* Ghost arity 1 at the same C signature as `impl_plain_two` and `impl_two`.
+   `r` is unused: it is here only so that this callee, `impl_plain_two` (0
+   ghosts) and `impl_two` (2 ghosts) share one C type and so can be written
+   into one function-pointer variable. */
+_ghost_arg(int32_t v)
+_ensures(return == 0)
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(v)))
+int32_t impl_one_of_two(_plain int32_t *q, _plain int32_t *r) { return 0; }
 
 /* A *weaker* contract for `impl_mixed`, advertised by the `m` field of
    `struct ops` below.
@@ -126,13 +135,8 @@ _include_pulse(Ops_spec,
    any owner of a `struct ops` value may call through `m` without first
    re-deriving validity from `impl_mixed`. */
 struct ops {
-    _ghost_arg(int32_t v)
     int32_t (*f)(_plain int32_t *q);
-    _ghost_arg(int32_t v)
-    _ghost_arg(int32_t w)
     int32_t (*g)(_plain int32_t *q, _plain int32_t *r);
-    _ghost_arg(int32_t v)
-    _ghost_arg(int32_t w)
     _refine((_slprop) _inline_pulse(
         Pulse.Lib.C.FuncPtr.is_valid $(this) true Ops_spec.m_pre_w
           (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)))
@@ -209,22 +213,35 @@ int32_t call_via_o_elim_two(int32_t *a, int32_t *b)
     _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
 }
 
-/* One variable, both shapes written into it. Assignment is witness-agnostic:
-   `func_ptr` is indexed by argument and return type only, so both `of_fn_div`
-   results have the same type regardless of what each callee's witness is. */
+/* One variable, four different witness shapes written into it. Assignment is
+   witness-agnostic: `func_ptr` is indexed by argument and return type only, so
+   every `of_fn_div` result has the same type no matter what its callee's
+   witness is. The four span both halves of the witness pair,
+
+     impl_elim_two    2 elims, 0 ghosts   c = ((i32 & i32) & unit)
+     impl_plain_two   0 elims, 0 ghosts   c = (unit & unit)
+     impl_one_of_two  0 elims, 1 ghost    c = (unit & i32)
+     impl_two         0 elims, 2 ghosts   c = (unit & (i32 & i32))
+
+   so neither the number of eliminated existentials nor the number of ghost
+   arguments has to agree. */
 void assign_across_shapes(void)
 {
     int32_t (*fp)(int32_t *, int32_t *);
     fp = impl_elim_two;
     fp = impl_plain_two;
+    fp = impl_one_of_two;
+    fp = impl_two;
     fp = impl_elim_two;
 }
 
-/* The same variable, called after each write. `impl_elim_two` needs a
-   two-component witness and `impl_plain_two` needs none, so no single declared
-   type can describe both -- which is the point. Each call's `pre`, `post` and
-   witness are pinned by the `is_valid` in scope, and PAL already emits `_` for
-   `pre` and `post`; only the witness is still read off the declaration. */
+/* The same variable, called after each write -- the point of the whole
+   exercise. The four callees disagree on both halves of the witness: on how
+   many existentials are eliminated (`impl_elim_two` two, the rest none) and on
+   how many ghost arguments there are (zero, one and two). No single declared
+   type could describe all four, and none has to: the declaration names neither
+   half. Each call's `pre`, `post` and witness are pinned entirely by the
+   `is_valid` in scope, and PAL emits `_` for all three. */
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
 int32_t call_across_shapes(int32_t *a, int32_t *b)
 {
@@ -240,7 +257,23 @@ int32_t call_across_shapes(int32_t *a, int32_t *b)
     int32_t r2 = fp(a, b);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 
-    return r1 + r2;
+    /* One ghost. Its value is recovered by matching `pts_to a` against the
+       caller's context, so the call site never names it. */
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_one_of_two.func_impl_one_of_two__fp);
+    fp = impl_one_of_two;
+    int32_t r3 = fp(a, b);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+
+    /* Two ghosts, so the ghost half of the witness is itself a pair. The
+       result is discarded: `impl_two` states no `_ensures`, so folding it into
+       the sum below would be an unprovable `int32` overflow check and nothing
+       to do with witnesses. */
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_two.func_impl_two__fp);
+    fp = impl_two;
+    fp(a, b);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+
+    return r1 + r2 + r3;
 }
 
 /* The same mixed callee through a *local* function pointer rather than a
