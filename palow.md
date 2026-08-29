@@ -47,15 +47,24 @@ they are arrays/references/etc., and no matter what type they point to.
 ### Layer 0: pointers and bytes
 
 ```fstar
+val alloc_id : eqtype
+
+// PNVI-style provenance; see "Provenance" below. `None` is the empty
+// provenance, i.e. "not derived from any allocation".
+type prov = option alloc_id
+
+noeq type byte = {
+  value: option UInt8.t;   // None = uninitialized
+  prov:  prov;             // provenance of the pointer this byte came from
+}
+
+[@@erasable] type bytes = Seq.seq byte
+
 val ptr : Type0
 val null : ptr
 
-// Byte offset. Only defined when the result stays within the same object
-// (see "Provenance" below).
+// Byte offset. Only defined when the result stays within the same object.
 val ( +! ) (a: ptr) (n: SizeT.t) : ptr
-
-// arrays of `option UInt8.t`; `None` is an uninitialized byte
-[@@erasable] val bytes : Type0
 
 val mem_pts_to (a: ptr) (p: perm) (b: bytes) : slprop
 ```
@@ -64,6 +73,11 @@ val mem_pts_to (a: ptr) (p: perm) (b: bytes) : slprop
 by bit-twiddling on the containing bytes, which is what
 `pulse/Pulse.Lib.C.BitField.fst` already does; making every byte a bit sequence
 would make every other proof more expensive to pay for one feature.
+
+Every byte carries provenance, not just a value. This is forced: a pointer
+stored to memory and read back has to keep its allocation identity, so
+provenance necessarily leaks through `bytes`. It is therefore part of the
+design from the start rather than something to retrofit.
 
 Core lemmas that everything else is built on:
 
@@ -91,51 +105,63 @@ a subrange of a large allocation is just splitting the byte-level resource.
 
 ### Provenance
 
-Layer 0 needs a decision on what a `ptr` *is*. Two options, both used in
-practice:
+We follow **PNVI-ae-udi** (provenance-not-via-integers, with address-exposure
+and user disambiguation), the Cerberus model of de-facto C. A pointer is a
+concrete address plus a provenance tag:
 
-**Option 1 — concrete addresses.** A pointer is (isomorphic to) an integer
-address; memory is one flat partial map from addresses to bytes. `ptr` stays
-abstract, but there is a ghost `addr_of : ptr -> GTot SizeT.t` and `a +! n`
-is just address arithmetic.
+```fstar
+val addr_of (a: ptr) : GTot SizeT.t
+val prov_of (a: ptr) : GTot prov
 
-- *Pros.* Simple. Pointer arithmetic, comparison and subtraction across
-  objects are total. `uintptr_t` round-trips are free. A stored pointer is
-  literally the bytes of its address, so `ptr_repr` is *definable* rather than
-  axiomatized, and `bytes = Seq (option UInt8.t)` suffices. Allocator idioms
-  (metadata headers recovered by subtracting from the user pointer, alignment
-  by masking low bits) work with no extra machinery.
-- *Cons.* Unfaithful to ISO C: programs that forge a pointer from an unrelated
-  integer are accepted even though a real compiler may miscompile them. Note
-  that we do *not* lose non-aliasing of distinct allocations — that still
-  follows from separation (`mem_pts_to_disjoint`), not from provenance.
+val ptr_ext (a1 a2: ptr)
+  : Lemma (requires addr_of a1 == addr_of a2 /\ prov_of a1 == prov_of a2)
+          (ensures  a1 == a2)
+```
 
-**Option 2 — provenance-carrying pointers.** A pointer is an allocation
-identity plus an offset (CompCert's `block * ofs`), or an address plus a
-provenance tag (Cerberus' PNVI). `mem_pts_to` is indexed by the allocation, and
-an access is only valid when the pointer's provenance matches.
+An access through `a` is only valid when `prov_of a` is the allocation whose
+footprint contains the accessed range; `mem_pts_to a p b` carries that
+invariant. Pointer arithmetic (`+!`) preserves provenance and is only defined
+within the allocation's footprint (plus one-past-the-end).
 
-- *Pros.* Faithful to ISO C and to what compilers actually assume; genuine UB
-  (integer-forged pointers, out-of-bounds arithmetic) is rejected.
-- *Cons.* Considerably more machinery. Crucially, **a pointer stored in memory
-  can no longer be represented as plain bytes**, because provenance is not a
-  bit pattern: `bytes` would need a `Fragment of ptr & nat` case (as in
-  CompCert's `memval`), and every `*_repr` for a pointer type becomes
-  axiomatic. Integer-pointer casts need an "exposed address" discipline
-  (PNVI-ae-udi, or the VIP model).
+Because provenance lives in the bytes, `ptr_repr` is *definable* rather than
+axiomatized: the bytes of a pointer are the target-endian bytes of its address,
+each tagged with the pointer's provenance. Reading a pointer back recovers the
+provenance when all the covered bytes agree on it, and the empty provenance
+otherwise. Writing a non-pointer type sets the provenance of the bytes it
+covers to `None`, and `memcpy` transports provenance along with values — which
+is what makes a byte-copied pointer still usable.
 
-**Recommendation.** Start with Option 1, but keep `ptr` abstract and gate
-`uintptr_t`-to-pointer casts behind an explicit operation rather than exposing
-a bijection with `SizeT.t`. Under that discipline the two options have the
-*same user-facing API* — only the model underneath differs — so the choice can
-be deferred until we have real allocator code to test against. Note that the
-headline acceptance test (an allocator handing out interior pointers of one
-block) is fine under *both* options, since interior pointers inherit the
-block's provenance; provenance only bites on `free` of a derived pointer and
-on integer round-trips.
+The "ae" part is an exposure token, which is duplicable and monotonic:
 
-The `bytes` definition is the one place where the choice leaks, so it is worth
-deciding before layer 0 is widely used.
+```fstar
+val exposed (i: alloc_id) : slprop   // duplicable
+
+ghost fn expose (a: ptr) (#i: alloc_id) (...)
+  ensures exposed i
+
+fn ptr_to_uintptr (a: ptr) (#i: alloc_id) (...)
+  returns  n : SizeT.t
+  ensures  exposed i ** pure (v n == v (addr_of a))
+
+fn uintptr_to_ptr (n: SizeT.t) (#i: alloc_id)
+  requires exposed i ** pure (in_footprint i n)
+  returns  a : ptr
+  ensures  pure (addr_of a == n /\ prov_of a == Some i)
+```
+
+The "udi" part — the nondeterministic choice among several exposed allocations
+that could match an address, resolved by how the resulting pointer is later
+used — collapses nicely in a verification setting: the caller supplies `i` as a
+ghost argument, which *is* the disambiguation, decided statically instead of
+by the semantics.
+
+*Alternatives considered.* A flat concrete-address model (no provenance) is
+simpler but accepts programs that clang may miscompile, and does not actually
+buy much here since the custom-allocator idioms we care about work under PNVI
+too — interior pointers inherit the block's provenance. CompCert's
+`block * offset`, with no integer address at all, cannot express the
+address-arithmetic idioms real allocators use (alignment by masking, metadata
+headers recovered by subtraction).
 
 ### Layer 1: per-type representation and points-to
 
@@ -171,12 +197,18 @@ We need type-specific read and write operations, e.g.
 fn uint32_t_read (a: ptr) (#p: perm) (#x: UInt32.t)
   requires uint32_t_pts_to a p x
   returns  y : UInt32.t
-  ensures  uint32_t_pts_to a p x ** pure (y == x)
+  ensures  rewrites_to y x
+  ensures  uint32_t_pts_to a p x
 
 fn uint32_t_write (a: ptr) (y: UInt32.t) (#x: UInt32.t)
   requires uint32_t_pts_to a 1.0R x
   ensures  uint32_t_pts_to a 1.0R y
 ```
+
+The `rewrites_to y x` in the read postcondition is what makes nested
+dereferences such as `**x` work: the result of the inner read has to be
+definitionally connected to the logical pointee so that the outer read can
+resolve its own points-to from the context.
 
 ### Sizes, alignments and offsets
 
@@ -239,14 +271,31 @@ the `Malloc`/`MallocArray`/`MallocFlex` IR nodes and their emit-time special
 cases can be deleted. A custom `xmalloc` is specified by writing the same
 postcondition.
 
-Whether `freeable` itself needs to be splittable (to let an allocator carve a
-block into independently freeable chunks) is an open question; the first cut
-should keep it atomic and require the whole block back.
+`freeable` does **not** split. A pool allocator that carves a block into
+chunks hands out its own `pool_freeable` predicate instead, which is what stops
+a caller from passing a `pool_malloc`'d pointer to `free`. Keeping the two
+predicates distinct is a feature, not a limitation.
 
-Local variables are allocated on the stack similar to how we do arrays right
-now, with manual allocation + `defer` to ensure they don't escape. Note that
-only *address-taken* locals actually need this treatment; the rest can keep
-using ordinary Pulse locals, and should, for proof performance.
+### Local variables
+
+Local variables get per-type stack allocation and deallocation functions,
+paired with `defer` to ensure they don't escape:
+
+```fstar
+fn uint32_t_stack_alloc ()
+  returns  a : ptr
+  ensures  uint32_t_pts_to_uninit a
+
+fn uint32_t_stack_free (a: ptr)
+  requires uint32_t_pts_to_uninit a
+```
+
+We deliberately do *not* fall back to Pulse locals for the non-address-taken
+cases: they behave quite differently, and having two kinds of local in the
+translator would be a permanent source of special cases. With dedicated
+per-type stack alloc/free the performance impact should be small; if it isn't,
+the right fix is upstream in Pulse rather than a second local-variable
+mechanism here.
 
 ### Aggregates and padding
 
@@ -360,15 +409,14 @@ tracking on later only affects layer 0 and the aggregate lemmas.
 
 ## Open questions
 
- - Provenance: Option 1 or Option 2 (see above). Affects the definition of
-   `bytes`, so worth settling early.
- - Should `freeable` be splittable, so an allocator can hand out independently
-   freeable chunks?
  - How much of the proof cost of the extra indirection can be hidden? The
-   typed layer must be *as cheap to use* as today's axiomatized `pts_to`, or
-   the change is a net loss for ordinary code.
+   typed layer should be close to as cheap to use as today's axiomatized
+   `pts_to`; where it isn't, the preferred fix is upstream in Pulse.
  - Variable-length arrays and variably-modified types: does `*_sizeof` need to
    become a function in some cases?
+ - How much of PNVI-ae-udi do we need up front? Provenance in `bytes` and on
+   `ptr` is required from day one; the `exposed` machinery is only needed once
+   we translate `uintptr_t` round-trips.
  - `volatile`, `restrict`, `const`, and atomics are out of scope for now.
 
 ## Related work
@@ -382,16 +430,18 @@ tracking on later only affects layer 0 and the aggregate lemmas.
 | VST (Appel et al.) | CompCert's | CompCert's | no | `memory_block` → `data_at`/`field_at` |
 | RefinedC (Sammler et al., PLDI 2021) | Caesium (CompCert-like) | bytes | no | layout types → refined ownership types |
 | Low\* / Pulse (today) | typed, parametric `ref a` | none | n/a | flat, typed only |
-| **Palow** | TBD (see above) | `option UInt8.t` | staged, see above | `mem_pts_to` → `t_pts_to` |
+| **Palow** | PNVI-ae-udi | `option UInt8.t` + provenance | staged, see above | `mem_pts_to` → `t_pts_to` |
 
 The closest fit is **VST**: `memory_block sh n p` underneath
 `data_at sh t v p`, with `field_at` for field-granular shares, is almost
 exactly the `mem_pts_to` / `t_pts_to` / struct-split structure proposed here,
 and is good evidence that the layering scales to real programs.
 
-**VIP** is the most relevant point of comparison for the custom-allocator
-acceptance test: it was designed specifically to verify real-world C idioms
-involving integer-pointer casts, and lands between Options 1 and 2.
+**Cerberus/PNVI** is the model we adopt. **VIP** is the most relevant point of
+comparison for the custom-allocator acceptance test: it was designed
+specifically to verify real-world C idioms involving integer-pointer casts, and
+is a useful sanity check on whether our `exposed` discipline is ergonomic
+enough for the allocator we want to write.
 
 **CH₂O** is the reference for effective types; the proposal above is a
 flattened, per-byte version of its memory trees, chosen because our aggregates
@@ -408,26 +458,45 @@ are already flattened into `bytes`.
    ```
  - We can write a custom allocator that first allocates some number of bytes
    and then hands out pointers into that range, and it is usable just like
-   `malloc` today; the allocator can also reclaim and reuse a subrange.
+   `malloc` today. The allocator exposes its own `pool_freeable` predicate, so
+   passing a `pool_malloc`'d pointer to `free` does not verify.
  - `_core_ref` is deleted, and the recursive-struct tests that motivated it
    still verify.
  - We can write `memcpy` between two objects of different types and relate the
-   results at both types.
- - The existing `test/` suite still verifies, without annotation churn beyond
-   the mechanical removal of `_core_ref`, and without a large regression in
-   verification time. This is the main risk of the whole design and deserves a
-   number attached to it.
+   results at both types, including transporting a stored pointer's provenance
+   through the copy.
+ - The existing `test/` suite still verifies, with no annotation churn beyond
+   the mechanical removal of `_core_ref`.
+
+## Evaluating the cost
+
+The purpose of this refactor is to evaluate whether a lower-level memory model
+is *feasible* for PAL, so the outcome we want is a number, not a pass/fail
+gate. An increase in verification time or annotation overhead may well be worth
+paying for verifiable custom allocators and a real account of type-punning —
+but we should know what we are paying.
+
+Measure, before and after, over the whole `test/` suite:
+
+ - total and per-file F\* verification time;
+ - number of Z3 queries and rlimit consumed;
+ - lines of annotation in the `.c` inputs, and lines of generated `.fst`;
+ - number of `_include_pulse` / manual-proof escape hatches needed.
+
+Record the numbers in this document when the evaluation is done.
 
 ## Milestones
 
-1. Layer 0: `ptr`, `bytes`, `mem_pts_to`, split/join/disjointness. No
-   translator changes.
-2. Re-derive the scalar typed layer on top; switch the translator to emit
-   `t_pts_to`. Existing scalar tests pass.
+1. Layer 0: `ptr` with provenance, `bytes`, `mem_pts_to`, split/join/
+   disjointness. No translator changes.
+2. Re-derive the scalar typed layer on top, including per-type stack alloc/free
+   and `rewrites_to` on reads; switch the translator to emit `t_pts_to`.
+   Existing scalar tests pass.
 3. Per-C-type `sizeof`/`alignof`/`offsetof` from clang; retire
    `Pulse.Lib.C.Sizeof`.
 4. Aggregates: struct/union `*_repr`, field split/join, padding.
 5. `malloc`/`calloc`/`free` as ordinary specifications; delete the AST special
    cases; delete `_core_ref`.
-6. Custom allocators; decide whether `freeable` splits.
-7. Effective types.
+6. Custom allocators, with their own `freeable` predicates.
+7. `exposed` / `uintptr_t` round-trips.
+8. Effective types.
