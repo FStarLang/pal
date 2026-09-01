@@ -68,22 +68,18 @@ fn uint8_t_write (a: ptr) (y: U8.t) (#x: erased U8.t)
 
    Locals get per-type stack allocation and deallocation rather than reusing
    Pulse's own locals: Pulse locals behave differently enough that supporting
-   both would be a permanent source of special cases in the translator. The
-   `stack_freeable` token is what prevents a heap pointer from being returned
-   to the stack allocator, and vice versa.
+   both would be a permanent source of special cases in the translator.
+
+   There is deliberately no token pairing an allocation with its deallocator,
+   matching how Pulse's own `let mut` works. Handing a `malloc`ed pointer to
+   `uint32_t_stack_free` would indeed be wrong, but PAL controls the
+   translation and never emits it, so paying for a token everywhere to rule out
+   a program we do not generate is not worth it.
    --------------------------------------------------------------------------- *)
-
-val stack_freeable ([@@@mkey] a: ptr) (n: SZ.t) : slprop
-
-val stack_freeable_timeless (a: ptr) (n: SZ.t)
-  : Lemma (timeless (stack_freeable a n))
-          [SMTPat (timeless (stack_freeable a n))]
 
 fn uint32_t_stack_alloc ()
   returns  a : ptr
   ensures  uint32_t_pts_to_uninit a
-  ensures  stack_freeable a uint32_t_sizeof
 
 fn uint32_t_stack_free (a: ptr)
   requires uint32_t_pts_to_uninit a
-  requires stack_freeable a uint32_t_sizeof

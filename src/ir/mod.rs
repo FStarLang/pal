@@ -823,8 +823,52 @@ pub enum DeclT {
     GlobalVar(GlobalVar),
 }
 
+/// Identifies a named C type whose layout is recorded in [`LayoutTable`].
+///
+/// Only named types need an entry: the size and alignment of every other type
+/// (scalars, pointers, arrays) is computed structurally by
+/// [`crate::layout::size_of_type`].
+#[derive(Debug, PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
+pub enum LayoutKey {
+    Typedef(Rc<str>),
+    Struct(Rc<str>),
+    Union(Rc<str>),
+}
+
+impl LayoutKey {
+    pub fn of_type_ref(kind: &TypeRefKind) -> LayoutKey {
+        match kind {
+            TypeRefKind::Typedef(i) => LayoutKey::Typedef(i.val.clone()),
+            TypeRefKind::Struct(i) => LayoutKey::Struct(i.val.clone()),
+            TypeRefKind::Union(i) => LayoutKey::Union(i.val.clone()),
+        }
+    }
+}
+
+/// Layout of a named C type, as computed by clang for the target ABI.
+///
+/// Sizes and offsets are in bytes. `field_offsets` is empty for typedefs and
+/// unions (all union members start at offset 0).
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Default)]
+pub struct TypeLayout {
+    pub size: u64,
+    pub align: u64,
+    pub field_offsets: Vec<(Rc<str>, u64)>,
+}
+
+/// Target-specific layout of every named C type in the translation unit.
+///
+/// Populated by the clang frontend (see `cpp/impl.cpp`) and consumed by the
+/// emitter, which turns `sizeof`/`_Alignof` into concrete `SizeT` literals
+/// instead of opaque, F*-type-indexed `c_sizeof`/`c_alignof` applications.
+pub type LayoutTable = std::collections::BTreeMap<LayoutKey, TypeLayout>;
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct TranslationUnit {
     pub main_file_names: Vec<Rc<str>>,
     pub decls: Vec<Decl>,
+    /// Layout of named C types, keyed by [`LayoutKey`]. See [`LayoutTable`].
+    pub layouts: LayoutTable,
+    /// Size of a data pointer in bytes, as reported by clang.
+    pub pointer_size: u64,
 }

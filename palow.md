@@ -248,6 +248,16 @@ target-dependent — which is already true today (`long` translates to `int64_t`
 on Linux and `int32_t` on Windows), so this is not a new constraint, but it
 should be documented.
 
+**Implemented.** The clang frontend records the size, alignment and field
+offsets of every named C type (`recordTypeLayout`/`recordFieldOffsets` in
+`cpp/impl.cpp`) into `ir::LayoutTable`; `src/layout.rs` derives the size of
+every other type structurally. `sizeof(T)` and `_Alignof(T)` now emit a plain
+`SizeT` literal, which subsumes the old `c_sizeof_*_pos` axioms (positivity is
+a computation) and the `c_sizeof_array` axiom (`sizeof(int[8])` is just `32sz`).
+`sizeof` inside inline-Pulse annotations, which `src/hauntedc.rs` parses without
+a clang AST at hand, resolves through the same table, so specifications and code
+agree by construction.
+
 ### Permissions
 
 Fractional permissions apply to whole objects, not to individual bytes:
@@ -292,17 +302,16 @@ paired with `defer` to ensure they don't escape:
 fn uint32_t_stack_alloc ()
   returns  a : ptr
   ensures  uint32_t_pts_to_uninit a
-  ensures  stack_freeable a uint32_t_sizeof
 
 fn uint32_t_stack_free (a: ptr)
   requires uint32_t_pts_to_uninit a
-  requires stack_freeable a uint32_t_sizeof
 ```
 
-The `stack_freeable` token plays the same role for automatic storage that
-`freeable` plays for allocated storage: without it, nothing would stop a
-`malloc`ed pointer from being handed to the stack deallocator, or a local from
-being handed to `free`.
+There is deliberately no token pairing an allocation with its deallocator, the
+same design Pulse's own `let mut` uses. Passing a `malloc`ed pointer to
+`uint32_t_stack_free` would be wrong, but PAL controls the translation and
+never emits it, so the token would cost ownership bookkeeping everywhere to
+rule out a program we do not generate.
 
 We deliberately do *not* fall back to Pulse locals for the non-address-taken
 cases: they behave quite differently, and having two kinds of local in the
@@ -420,6 +429,7 @@ tracking on later only affects layer 0 and the aggregate lemmas.
 - `ExprT::Malloc`, `MallocArray` and `MallocFlex` and their emit special cases
   are deleted.
 - `Pulse.Lib.C.Sizeof` (F\*-type-indexed) is replaced by per-C-type constants.
+  **Done:** the module is gone, and `sizeof`/`_Alignof` translate to literals.
 
 ## Open questions
 
@@ -514,7 +524,7 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Scalar` | proved | `uint8_t`/`uint32_t` `*_repr`, `*_pts_to`, `*_sizeof`, agreement, share/gather, reveal/conceal |
 | `Pulse.Lib.C.Palow.Nullable` | proved | `unless_null` with its intro/elim pair |
 | `Pulse.Lib.C.Palow.Alloc` | axiomatized | `freeable`, `malloc`, `calloc`, `free` |
-| `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, `stack_freeable`, stack alloc/free |
+| `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, stack alloc/free |
 | `Pulse.Lib.C.Palow.Aggregate` | proved | `struct S { uint32_t f; uint8_t g; }` with padding, field split/join |
 | `Pulse.Lib.C.Palow.Pool` | proved | bump allocator handing out `uint32_t`s from a byte range |
 
@@ -531,8 +541,14 @@ sunk the design:
   bare `uint32_t_pts_to_uninit` and never `Alloc.freeable`, so calling `free`
   on a chunk is unprovable -- which is precisely why `freeable` does not split.
 
+Milestone 3 is the first change to the translator itself, and it is done: sizes
+and alignments no longer go through `Pulse.Lib.C.Sizeof` (deleted) but are taken
+from clang and emitted as literals. The plumbing is `ir::LayoutTable` (filled by
+`cpp/impl.cpp`), `src/layout.rs` (structural sizing) and `emit_layout_const` in
+`src/pass/emit.rs`.
+
 Not yet implemented: the `exposed`/`uintptr_t` discipline, effective types,
-arrays, unions, and any translator changes. `Machine` and `Alloc` are
+arrays, unions, and the remaining translator changes. `Machine` and `Alloc` are
 axiomatized because their operations are machine primitives, but note that
 their *specifications* are written entirely in terms of the derived layer-1
 predicates, so they add operations rather than new facts about memory.
@@ -553,8 +569,10 @@ predicates, so they add operations rather than new facts about memory.
 2. *In progress.* Re-derive the scalar typed layer on top, including per-type
    stack alloc/free and `rewrites_to` on reads (done); switch the translator to
    emit `t_pts_to` (not started). Existing scalar tests pass.
-3. Per-C-type `sizeof`/`alignof`/`offsetof` from clang; retire
-   `Pulse.Lib.C.Sizeof`.
+3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
+   target ABI and are emitted as concrete `SizeT` literals;
+   `Pulse.Lib.C.Sizeof` is deleted. Field offsets are collected from clang too
+   but are not consumed yet — they are what milestone 4 needs.
 4. *In progress.* Aggregates: struct `*_repr`, field split/join and padding are
    done for one worked example; unions and generated-per-struct lemmas are not.
 5. `malloc`/`calloc`/`free` as ordinary specifications (specs done); delete the

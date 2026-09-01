@@ -188,6 +188,10 @@ mod crate::clang {
         fn get_include_path(&self, usize) -> &str;
 
         fn set_target_int_widths(&mut self, TargetIntWidths);
+        fn set_pointer_size(&mut self, u64);
+
+        fn set_type_layout(&mut self, u32, &str, u64, u64);
+        fn set_field_offset(&mut self, u32, &str, &str, u64);
 
         fn intern_str(&mut self, &str) -> Rc<str>;
 
@@ -252,6 +256,8 @@ mod crate::clang {
     fn mk_array_init(Rc<SourceInfo>, Rc<Type>, Vec<Rc<Expr>>, bool) -> Rc<Expr>;
 
     fn str_from_parts(*const u8, usize) -> &str;
+
+    fn ident_name(&Rc<Ident>) -> &str;
 
     fn mk_original_location(Rc<str>, u32, u32, u32, u32) -> Rc<SourceInfo>;
     fn mk_fallback_sourceinfo(&Rc<SourceInfo>) -> Rc<SourceInfo>;

@@ -135,9 +135,6 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::TypeRefPredFold(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
         Name::TypeRefPredFold(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefPredFold(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
-        Name::TypeRefSizeofPos(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
-        Name::TypeRefSizeofPos(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
-        Name::TypeRefSizeofPos(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
         // Global address names live in the global's own module.
         Name::GlobalAddr(v) | Name::GlobalAddrNotNull(v) | Name::GlobalAcquire(v) => {
             Some(format!("Global_{}", v))
@@ -422,7 +419,6 @@ enum Name {
     TypeRefSpecField(TypeRef, String),
     TypeRefPredUnfold(TypeRef),
     TypeRefPredFold(TypeRef),
-    TypeRefSizeofPos(TypeRef),
 
     StructFieldProj(Rc<IdentT>, Rc<IdentT>),
     StructDirectFieldName(Rc<IdentT>, Rc<IdentT>),
@@ -495,9 +491,6 @@ impl Name {
             }
             Name::TypeRefPredFold(type_ref) => {
                 format!("{}__pred_fold", typeref_to_string(type_ref))
-            }
-            Name::TypeRefSizeofPos(type_ref) => {
-                format!("{}__sizeof_pos", typeref_to_string(type_ref))
             }
             Name::TypeRefSpec(type_ref) => format!("{}__spec", typeref_to_string(type_ref)),
             Name::TypeRefSpecField(type_ref, fld) => {
@@ -680,6 +673,9 @@ struct Emitter<'a> {
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
     tmp_counter: usize,
+    /// Target-ABI sizes, alignments and field offsets, as computed by clang.
+    /// Used to turn `sizeof`/`_Alignof` into concrete `SizeT` literals.
+    layouts: crate::layout::LayoutCtx<'a>,
 }
 
 impl<'a> Emitter<'a> {
@@ -695,6 +691,24 @@ impl<'a> Emitter<'a> {
         let tmp = Doc::text(format!("__pal_{}_{}", prefix, self.tmp_counter));
         self.tmp_counter += 1;
         tmp
+    }
+
+    /// Render a clang-computed layout quantity (a `sizeof` or `_Alignof`) as a
+    /// concrete `FStar.SizeT` literal.
+    ///
+    /// `value` is `None` only for types that have no target layout at all —
+    /// ghost-only types, incomplete types and flexible array members. Those
+    /// cannot legally appear under `sizeof` in C, so reaching this is a bug in
+    /// an earlier pass rather than a user error; we still report it as a
+    /// diagnostic instead of panicking.
+    fn emit_layout_const(&mut self, ty: &Type, value: Option<u64>, what: &str) -> Doc {
+        match value {
+            Some(n) => Doc::text(format!("{}sz", n)),
+            None => {
+                self.report(format!("cannot compute {} of {}", what, ty), &ty.loc);
+                Doc::text("0sz")
+            }
+        }
     }
 
     /// Emit a Name with full module qualification when it refers to a different module.
@@ -3739,24 +3753,16 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 ExprT::SizeOf(ty) => {
-                    // `emit_type` renders a fixed-size array `T[N]` as
-                    // `full_array_lspec T N`, so `sizeof(T[N])` becomes
-                    // `c_sizeof (full_array_lspec T N)` and its length
-                    // participates in the size (see the `c_sizeof_array` axiom).
-                    // Other types size opaquely.
-                    unaryfn(
-                        Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"),
-                        self.emit_type(env, ty),
-                    )
+                    // Sizes come straight from clang's target ABI, so
+                    // `sizeof(T)` is a concrete `SizeT` literal. This is both
+                    // stronger and simpler than the old opaque
+                    // `Pulse.Lib.C.Sizeof.c_sizeof <fstar-type>`, which could
+                    // not distinguish two C types sharing an F* representation
+                    // and needed an axiom for every fact about sizes.
+                    self.emit_layout_const(ty, self.layouts.size_of(ty), "sizeof")
                 }
                 ExprT::AlignOf(ty) => {
-                    let ty_doc = match &ty.val {
-                        TypeT::FixedArray(elem, _) => {
-                            unaryfn(Doc::text("array"), self.emit_type(env, elem))
-                        }
-                        _ => self.emit_type(env, ty),
-                    };
-                    unaryfn(Doc::text("Pulse.Lib.C.Sizeof.c_alignof"), ty_doc)
+                    self.emit_layout_const(ty, self.layouts.align_of(ty), "_Alignof")
                 }
             }
         })
@@ -4843,33 +4849,6 @@ fn mk_assume_val(attrs: Vec<Doc>, n: Doc, args: &[Doc], ty: Doc) -> Doc {
         .group()
 }
 
-fn mk_sizeof_pos_axiom(name: Doc, ty: Doc) -> Doc {
-    let ty_arg = parens(
-        Doc::text("a: Type0 { a ==")
-            .append(Doc::line())
-            .append(ty)
-            .append(Doc::line())
-            .append("}")
-            .group(),
-    );
-    let sizeof = unaryfn(Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"), Doc::text("a"));
-    let sizeof_value = unaryfn(Doc::text("FStar.SizeT.v"), sizeof);
-    mk_assume_val(
-        vec![],
-        name,
-        &[ty_arg],
-        Doc::text("Lemma")
-            .append(Doc::line())
-            .append(parens(sizeof_value.clone().append(Doc::text(" > 0"))))
-            .append(Doc::line())
-            .append(
-                Doc::text("[SMTPat ")
-                    .append(sizeof_value)
-                    .append(Doc::text("]")),
-            ),
-    )
-}
-
 fn mk_fun(arg: Doc, body: Doc) -> Doc {
     parens(
         Doc::text("fun")
@@ -5005,13 +4984,6 @@ impl<'a> Emitter<'a> {
                 .append("}")
                 .group(),
         );
-        if env.occupies_space(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()).into()) {
-            ses.push(mk_sizeof_pos_axiom(
-                self.emit_name(Name::TypeRefSizeofPos(k.into())),
-                struct_type_name.clone(),
-            ));
-        }
-
         // Generate struct spec type and pred by gathering slprops from fields
         let env = &mut env.clone();
         let this = env
@@ -6006,13 +5978,6 @@ impl<'a> Emitter<'a> {
                 })))
                 .group(),
         );
-        if env.occupies_space(TypeT::TypeRef(k.clone()).with_loc(name.loc.clone()).into()) {
-            ses.push(mk_sizeof_pos_axiom(
-                self.emit_name(Name::TypeRefSizeofPos(k.into())),
-                union_type_name.clone(),
-            ));
-        }
-
         // Emit predicate (emp for MVP)
         let env = &mut env.clone();
         let this = env
@@ -8063,6 +8028,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         typedef_override_map,
         current_fn_total: false,
         tmp_counter: 0,
+        layouts: crate::layout::LayoutCtx::of_tu(tu),
     };
 
     let addr_taken = collect_addr_taken(&tu.decls);

@@ -15,6 +15,7 @@ mod diag;
 mod env;
 mod hauntedc;
 mod ir;
+mod layout;
 mod mayberc;
 mod pass;
 mod source_range_info;
@@ -130,6 +131,8 @@ fn main() {
     let mut combined_tu = ir::TranslationUnit {
         main_file_names: Vec::new(),
         decls: Vec::new(),
+        layouts: ir::LayoutTable::new(),
+        pointer_size: 8,
     };
     let mut diags = Diagnostics::empty();
 
@@ -150,6 +153,8 @@ fn main() {
             .main_file_names
             .push(tu.main_file_names[0].clone());
         combined_tu.decls.extend(tu.decls);
+        combined_tu.layouts.extend(tu.layouts);
+        combined_tu.pointer_size = tu.pointer_size;
         diags.merge(file_diags);
     }
     if cli.time_passes {
