@@ -103,3 +103,27 @@ let encode_injective (n: nat) (p: prov) (x y: nat)
           (ensures  x == y)
   = decode_encode_exact n p x;
     decode_encode_exact n p y
+
+(* ---------------------------------------------------------------------------
+   Signed integers
+
+   C leaves the signed representation implementation-defined, but every target
+   PAL supports uses two's complement, and C23 mandates it. So a signed value
+   is encoded as its non-negative residue: the same `encode` as an unsigned
+   value of the same width, applied to `to_bits`.
+
+   `to_bits` is stated on the bit width rather than the byte count because that
+   is where the asymmetry of the signed range lives, and it carries the range
+   through in its result type so that `encode` can be applied without a side
+   condition at every use. *)
+let to_bits (w: pos) (x: int { -(pow2 (w - 1)) <= x /\ x < pow2 (w - 1) })
+  : n:nat { n < pow2 w }
+  = M.pow2_double_sum (w - 1);
+    if x < 0 then x + pow2 w else x
+
+let to_bits_injective (w: pos)
+                      (x: int { -(pow2 (w - 1)) <= x /\ x < pow2 (w - 1) })
+                      (y: int { -(pow2 (w - 1)) <= y /\ y < pow2 (w - 1) })
+  : Lemma (requires to_bits w x == to_bits w y)
+          (ensures  x == y)
+  = M.pow2_double_sum (w - 1)

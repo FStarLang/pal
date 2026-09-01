@@ -22,10 +22,17 @@ open Pulse.Lib.C.Palow.Bytes
 open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Scalar
+open Pulse.Lib.C.Palow.CTypes
 
 module SZ = FStar.SizeT
 module U8 = FStar.UInt8
+module U16 = FStar.UInt16
 module U32 = FStar.UInt32
+module U64 = FStar.UInt64
+module I8 = FStar.Int8
+module I16 = FStar.Int16
+module I32 = FStar.Int32
+module I64 = FStar.Int64
 
 (* ---------------------------------------------------------------------------
    Loads and stores
@@ -121,3 +128,167 @@ fn ptr_stack_alloc ()
 fn ptr_stack_free (a: ptr) (#b: erased bytes)
   requires mem_pts_to a 1.0R b
   requires pure (len b == SZ.v ptr_sizeof)
+
+(* ---------------------------------------------------------------------------
+   The remaining C scalar types
+
+   `uint32_t` above is the exemplar; this is the same group for every other
+   scalar type, over the layer-1 predicates in `Pulse.Lib.C.Palow.CTypes`.
+   `uint8_t`'s read and write are already given above, so it appears here only
+   for its uninitialized store and its automatic storage.
+
+   Five operations per type is the whole per-type cost on the machine side: a
+   load, two stores (one over a known value, one over storage of unknown
+   contents), and an allocate/deallocate pair.
+   --------------------------------------------------------------------------- *)
+
+fn bool_t_read (a: ptr) (#p: perm) (#x: erased bool)
+  preserves bool_t_pts_to a p x
+  returns  y : bool
+  ensures  rewrites_to y (reveal x)
+
+fn bool_t_write (a: ptr) (y: bool) (#x: erased bool)
+  requires bool_t_pts_to a 1.0R x
+  ensures  bool_t_pts_to a 1.0R y
+
+fn bool_t_write_uninit (a: ptr) (y: bool)
+  requires bool_t_pts_to_uninit a
+  ensures  bool_t_pts_to a 1.0R y
+
+fn bool_t_stack_alloc ()
+  returns  a : ptr
+  ensures  bool_t_pts_to_uninit a
+
+fn bool_t_stack_free (a: ptr)
+  requires bool_t_pts_to_uninit a
+
+fn int8_t_read (a: ptr) (#p: perm) (#x: erased I8.t)
+  preserves int8_t_pts_to a p x
+  returns  y : I8.t
+  ensures  rewrites_to y (reveal x)
+
+fn int8_t_write (a: ptr) (y: I8.t) (#x: erased I8.t)
+  requires int8_t_pts_to a 1.0R x
+  ensures  int8_t_pts_to a 1.0R y
+
+fn int8_t_write_uninit (a: ptr) (y: I8.t)
+  requires int8_t_pts_to_uninit a
+  ensures  int8_t_pts_to a 1.0R y
+
+fn int8_t_stack_alloc ()
+  returns  a : ptr
+  ensures  int8_t_pts_to_uninit a
+
+fn int8_t_stack_free (a: ptr)
+  requires int8_t_pts_to_uninit a
+
+fn int16_t_read (a: ptr) (#p: perm) (#x: erased I16.t)
+  preserves int16_t_pts_to a p x
+  returns  y : I16.t
+  ensures  rewrites_to y (reveal x)
+
+fn int16_t_write (a: ptr) (y: I16.t) (#x: erased I16.t)
+  requires int16_t_pts_to a 1.0R x
+  ensures  int16_t_pts_to a 1.0R y
+
+fn int16_t_write_uninit (a: ptr) (y: I16.t)
+  requires int16_t_pts_to_uninit a
+  ensures  int16_t_pts_to a 1.0R y
+
+fn int16_t_stack_alloc ()
+  returns  a : ptr
+  ensures  int16_t_pts_to_uninit a
+
+fn int16_t_stack_free (a: ptr)
+  requires int16_t_pts_to_uninit a
+
+fn int32_t_read (a: ptr) (#p: perm) (#x: erased I32.t)
+  preserves int32_t_pts_to a p x
+  returns  y : I32.t
+  ensures  rewrites_to y (reveal x)
+
+fn int32_t_write (a: ptr) (y: I32.t) (#x: erased I32.t)
+  requires int32_t_pts_to a 1.0R x
+  ensures  int32_t_pts_to a 1.0R y
+
+fn int32_t_write_uninit (a: ptr) (y: I32.t)
+  requires int32_t_pts_to_uninit a
+  ensures  int32_t_pts_to a 1.0R y
+
+fn int32_t_stack_alloc ()
+  returns  a : ptr
+  ensures  int32_t_pts_to_uninit a
+
+fn int32_t_stack_free (a: ptr)
+  requires int32_t_pts_to_uninit a
+
+fn int64_t_read (a: ptr) (#p: perm) (#x: erased I64.t)
+  preserves int64_t_pts_to a p x
+  returns  y : I64.t
+  ensures  rewrites_to y (reveal x)
+
+fn int64_t_write (a: ptr) (y: I64.t) (#x: erased I64.t)
+  requires int64_t_pts_to a 1.0R x
+  ensures  int64_t_pts_to a 1.0R y
+
+fn int64_t_write_uninit (a: ptr) (y: I64.t)
+  requires int64_t_pts_to_uninit a
+  ensures  int64_t_pts_to a 1.0R y
+
+fn int64_t_stack_alloc ()
+  returns  a : ptr
+  ensures  int64_t_pts_to_uninit a
+
+fn int64_t_stack_free (a: ptr)
+  requires int64_t_pts_to_uninit a
+
+fn uint8_t_write_uninit (a: ptr) (y: U8.t)
+  requires uint8_t_pts_to_uninit a
+  ensures  uint8_t_pts_to a 1.0R y
+
+fn uint8_t_stack_alloc ()
+  returns  a : ptr
+  ensures  uint8_t_pts_to_uninit a
+
+fn uint8_t_stack_free (a: ptr)
+  requires uint8_t_pts_to_uninit a
+
+fn uint16_t_read (a: ptr) (#p: perm) (#x: erased U16.t)
+  preserves uint16_t_pts_to a p x
+  returns  y : U16.t
+  ensures  rewrites_to y (reveal x)
+
+fn uint16_t_write (a: ptr) (y: U16.t) (#x: erased U16.t)
+  requires uint16_t_pts_to a 1.0R x
+  ensures  uint16_t_pts_to a 1.0R y
+
+fn uint16_t_write_uninit (a: ptr) (y: U16.t)
+  requires uint16_t_pts_to_uninit a
+  ensures  uint16_t_pts_to a 1.0R y
+
+fn uint16_t_stack_alloc ()
+  returns  a : ptr
+  ensures  uint16_t_pts_to_uninit a
+
+fn uint16_t_stack_free (a: ptr)
+  requires uint16_t_pts_to_uninit a
+
+fn uint64_t_read (a: ptr) (#p: perm) (#x: erased U64.t)
+  preserves uint64_t_pts_to a p x
+  returns  y : U64.t
+  ensures  rewrites_to y (reveal x)
+
+fn uint64_t_write (a: ptr) (y: U64.t) (#x: erased U64.t)
+  requires uint64_t_pts_to a 1.0R x
+  ensures  uint64_t_pts_to a 1.0R y
+
+fn uint64_t_write_uninit (a: ptr) (y: U64.t)
+  requires uint64_t_pts_to_uninit a
+  ensures  uint64_t_pts_to a 1.0R y
+
+fn uint64_t_stack_alloc ()
+  returns  a : ptr
+  ensures  uint64_t_pts_to_uninit a
+
+fn uint64_t_stack_free (a: ptr)
+  requires uint64_t_pts_to_uninit a

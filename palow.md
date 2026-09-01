@@ -558,13 +558,15 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, `memcpy`, stack alloc/free |
 | `Pulse.Lib.C.Palow.Expose` | axiomatized | `exposed`, `in_footprint`, `expose`, `ptr_to_uintptr`, `uintptr_to_ptr` |
 | `Pulse.Lib.C.Palow.Provenance` | proved | the `uintptr_t` round trip, and `memcpy` transporting a stored pointer |
+| `Pulse.Lib.C.Palow.CTypes` | proved | the remaining C scalar types (`_Bool`, `int8_t`..`int64_t`, `uint16_t`, `uint64_t`, `uint8_t`'s derived set) |
+| `Pulse.Lib.C.Palow.Examples` | proved | hand-written Palow renditions of programs PAL already translates |
 | `Pulse.Lib.C.Palow.Etype` | proved | `ctype`, per-byte effective-type entries, `access_ok`, the store rule, and the union/array/punning theorems |
 | `Pulse.Lib.C.Palow.Aggregate` | proved | two structs (with and without padding), field split/join, flexible array members |
 | `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus |
 | `Pulse.Lib.C.Palow.Union` | proved | `union U { uint32_t x; struct T t; }`, member views, the type-punning acceptance test |
 | `Pulse.Lib.C.Palow.Pool` | proved | bump allocator handing out `uint32_t`s from a byte range |
 
-Seven results are worth calling out, because they are the ones that would have
+Eight results are worth calling out, because they are the ones that would have
 sunk the design:
 
 - **Field split/join for a struct with padding is provable from `mem_split` and
@@ -608,6 +610,16 @@ sunk the design:
   `.t.z` are both readable, and the proof is by computation. What the rules
   *do* reject is the case they are supposed to reject -- reading a pointer out
   of storage whose last store was an integer.
+- **The per-type emission strategy costs about 105 lines per C scalar type,
+  and none of it is an axiom.** `Pulse.Lib.C.Palow.CTypes` covers `_Bool`,
+  `int8_t` through `int64_t`, `uint16_t` and `uint64_t` in 849 lines, generated
+  mechanically from a table of (name, F* type, size, signedness) -- exactly the
+  information the translator has. Signed types differ from unsigned ones only
+  in composing `Encoding.to_bits`, `_Bool` only in mapping `true`/`false` to
+  1/0, and the seven derived resource lemmas are textually identical for every
+  type. Every one of the eight type groups verified on the first attempt, which
+  is the evidence that mattered: if the derivation had needed per-type
+  ingenuity, per-type emission would not be viable.
 
 Milestone 3 is the first change to the translator itself, and it is done: sizes
 and alignments no longer go through `Pulse.Lib.C.Sizeof` (deleted) but are taken
@@ -667,9 +679,14 @@ new facts about memory.
 
 1. **Done.** Layer 0: `ptr` with provenance, `bytes`, `mem_pts_to`, split/join/
    disjointness. No translator changes.
-2. *In progress.* Re-derive the scalar typed layer on top, including per-type
-   stack alloc/free and `rewrites_to` on reads (done); switch the translator to
-   emit `t_pts_to` (not started). Existing scalar tests pass.
+2. *In progress.* Re-derive the scalar typed layer on top: done, and now for
+   the full set of C scalar types, together with per-type stack alloc/free,
+   `rewrites_to` on reads, and `memcpy`. `Pulse.Lib.C.Palow.Examples` fixes the
+   target by hand: it is what the generated code should look like for programs
+   PAL already translates. What remains is the translator itself -- emitting
+   `ptr` instead of `ref t`, `t_pts_to` instead of `Pulse.Lib.Reference.pts_to`,
+   `t_read`/`t_write` instead of `!`/`:=`, and stack alloc/free instead of
+   `let mut`.
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;
    `Pulse.Lib.C.Sizeof` is deleted. Field offsets are collected from clang too
