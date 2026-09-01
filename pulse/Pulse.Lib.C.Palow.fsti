@@ -22,6 +22,8 @@ open Pulse
 open Pulse.Lib.C.Palow.Bytes
 open Pulse.Lib.C.Palow.Ptr
 module SZ = FStar.SizeT
+module Seq = FStar.Seq
+module Etype = Pulse.Lib.C.Palow.Etype
 
 val mem_pts_to ([@@@mkey] a: ptr) (p: perm) (b: bytes) : slprop
 
@@ -118,3 +120,66 @@ ghost fn mem_join (a: ptr) (#p: perm) (#b1 #b2: bytes) (n: SZ.t { SZ.v n == len 
   requires mem_pts_to a p b1
   requires mem_pts_to (a +! n) p b2
   ensures  mem_pts_to a p (append b1 b2)
+
+(* ---------------------------------------------------------------------------
+   Effective types
+
+   `mem_pts_to_at` is `mem_pts_to` refined with a per-byte effective-type index
+   (see `Pulse.Lib.C.Palow.Etype` for the index itself and for the access
+   rules). It is here now, rather than later, because it is the one change to
+   layer 0 that cannot be made cheaply after the fact: adding an index to
+   `mem_pts_to` touches every module in the stack.
+
+   In this first cut the index is present but not *enforced*: `mem_recall` and
+   `mem_forget` together make `mem_pts_to a p b` equivalent to
+   `exists* e. mem_pts_to_at a p b e`, so an unconstrained index can always be
+   conjured and discarded, and no layer-1 predicate has to mention one. Turning
+   enforcement on means deleting `mem_recall`'s unconstrained form and making
+   the typed loads and stores in `Pulse.Lib.C.Palow.Machine` demand
+   `Etype.read_ok` and produce `Etype.store_etypes`. That change is confined to
+   this module and to `Machine`; the aggregate, array and union lemmas do not
+   mention the index at all, since splitting and joining bytes splits and joins
+   the index alongside them.
+   --------------------------------------------------------------------------- *)
+
+val mem_pts_to_at ([@@@mkey] a: ptr) (p: perm) (b: bytes) (e: Etype.etypes) : slprop
+
+val mem_pts_to_at_timeless (a: ptr) (p: perm) (b: bytes) (e: Etype.etypes)
+  : Lemma (timeless (mem_pts_to_at a p b e))
+          [SMTPat (timeless (mem_pts_to_at a p b e))]
+
+(* Every byte owned has an index entry, even if that entry is `None`. *)
+ghost fn mem_recall (a: ptr) (#p: perm) (#b: bytes)
+  requires mem_pts_to a p b
+  ensures  exists* e. mem_pts_to_at a p b e ** pure (Etype.elen e == len b)
+
+ghost fn mem_forget (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  requires mem_pts_to_at a p b e
+  ensures  mem_pts_to a p b
+
+(* Splitting a range splits its index at the same point. This is the reason the
+   aggregate and array lemmas survive the addition of effective types untouched:
+   they are stated over `mem_pts_to`, and the index follows the bytes. *)
+ghost fn mem_split_at (a: ptr) (#p: perm) (#b: bytes)
+                      (#e: Etype.etypes { Etype.elen e == len b })
+                      (n: SZ.t { SZ.v n <= len b })
+  requires mem_pts_to_at a p b e
+  ensures  mem_pts_to_at a p (slice b 0 (SZ.v n)) (Seq.slice e 0 (SZ.v n))
+  ensures  mem_pts_to_at (a +! n) p (slice b (SZ.v n) (len b))
+                         (Seq.slice e (SZ.v n) (Etype.elen e))
+
+ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
+                     (#e1: Etype.etypes { Etype.elen e1 == len b1 })
+                     (#e2: Etype.etypes { Etype.elen e2 == len b2 })
+                     (n: SZ.t { SZ.v n == len b1 })
+  requires mem_pts_to_at a p b1 e1 ** mem_pts_to_at (a +! n) p b2 e2
+  ensures  mem_pts_to_at a p (append b1 b2) (Seq.append e1 e2)
+
+(* A store at type `u` relabels allocated storage and leaves declared objects
+   alone; a read at `u` requires the covered entries to be compatible with it.
+   These are the two hooks the typed operations in `Pulse.Lib.C.Palow.Machine`
+   will take once enforcement is switched on. *)
+ghost fn mem_store_etypes (a: ptr) (#b: bytes) (#e: Etype.etypes)
+                          (u: Etype.ctype { Etype.elen e == Etype.csize u })
+  requires mem_pts_to_at a 1.0R b e
+  ensures  mem_pts_to_at a 1.0R b (Etype.store_etypes e u)

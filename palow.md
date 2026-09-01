@@ -425,9 +425,28 @@ Access rules:
 - Declared objects (`fixed = true`) get their entries at allocation and keep
   them for their lifetime.
 
-First cut: instantiate `etypes = unit` and make every rule trivially true. The
-typed layer's interface does not mention `etypes` at all, so turning the
-tracking on later only affects layer 0 and the aggregate lemmas.
+**Implemented.** `Pulse.Lib.C.Palow.Etype` defines the vocabulary and the
+access rules, and proves the facts that decide whether they are usable:
+reading a `uint32_t` out of a `union U` object is allowed at *both* member
+offsets (so acceptance test 2 survives), an array is readable element by
+element, and reading a pointer out of storage whose last store was an integer
+is not allowed. `access_ok` is defined by cases over a closed `ctype`, which is
+exactly the shape a code generator emits; the enumeration is instantiated here
+at the types the rest of the model uses.
+
+Layer 0 reserves the index as `mem_pts_to_at`, with `mem_recall`/`mem_forget`
+and index-aware split/join. In this first cut the index is present but not
+enforced: recall and forget together make `mem_pts_to a p b` equivalent to
+`exists* e. mem_pts_to_at a p b e`, so no layer-1 predicate has to mention one
+and no existing proof changes. Switching enforcement on means deleting
+`mem_recall`'s unconstrained form and making the typed loads and stores in
+`Machine` demand `read_ok` and produce `store_etypes`. That change is confined
+to layer 0 and `Machine`: the aggregate, array and union lemmas never mention
+the index, because splitting bytes splits the index alongside them.
+
+The reason to do this before the translator port rather than after is that it
+is the one change to layer 0 that cannot be made cheaply later -- adding an
+index to `mem_pts_to` touches every module in the stack.
 
 ## Consequences for the translator
 
@@ -539,12 +558,13 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, `memcpy`, stack alloc/free |
 | `Pulse.Lib.C.Palow.Expose` | axiomatized | `exposed`, `in_footprint`, `expose`, `ptr_to_uintptr`, `uintptr_to_ptr` |
 | `Pulse.Lib.C.Palow.Provenance` | proved | the `uintptr_t` round trip, and `memcpy` transporting a stored pointer |
+| `Pulse.Lib.C.Palow.Etype` | proved | `ctype`, per-byte effective-type entries, `access_ok`, the store rule, and the union/array/punning theorems |
 | `Pulse.Lib.C.Palow.Aggregate` | proved | two structs (with and without padding), field split/join, flexible array members |
 | `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus |
 | `Pulse.Lib.C.Palow.Union` | proved | `union U { uint32_t x; struct T t; }`, member views, the type-punning acceptance test |
 | `Pulse.Lib.C.Palow.Pool` | proved | bump allocator handing out `uint32_t`s from a byte range |
 
-Six results are worth calling out, because they are the ones that would have
+Seven results are worth calling out, because they are the ones that would have
 sunk the design:
 
 - **Field split/join for a struct with padding is provable from `mem_split` and
@@ -582,6 +602,12 @@ sunk the design:
   representation is a sequence of plain `uint8_t`s this program is not
   provable at all, and no strengthening of `memcpy`'s spec short of adding
   provenance to bytes would make it so.
+- **Effective types do not conflict with type punning through a union.** The
+  worry was that adding C11 6.5p7 would retract acceptance test 2. It does not:
+  the union rule is "every member is accessible at offset 0", so `.x` and
+  `.t.z` are both readable, and the proof is by computation. What the rules
+  *do* reject is the case they are supposed to reject -- reading a pointer out
+  of storage whose last store was an integer.
 
 Milestone 3 is the first change to the translator itself, and it is done: sizes
 and alignments no longer go through `Pulse.Lib.C.Sizeof` (deleted) but are taken
@@ -595,7 +621,11 @@ theorems that give it content are proved in `Provenance`: the `uintptr_t` round
 trip returns the pointer you started with, and `memcpy` preserves a stored
 pointer's usability.
 
-Not yet implemented: effective types, and the remaining translator changes.
+Milestone 8 is done for the model: the rules are defined and proved, and layer
+0 carries the index, but nothing enforces it yet -- see the effective-types
+section for what switching it on costs.
+
+Not yet implemented: the remaining translator changes.
 `Machine`, `Alloc` and `Expose` are axiomatized because their operations are
 machine primitives, but note that their *specifications* are written entirely
 in terms of the derived layer-1 predicates, so they add operations rather than
@@ -623,6 +653,15 @@ new facts about memory.
   choosing nondeterministically among the exposed allocations containing the
   address. This is PNVI-ae-udi's "user disambiguation" resolved statically, and
   it is a restriction only for programs that genuinely rely on the ambiguity.
+- The effective-type index is defined and carried by layer 0 but not enforced:
+  `mem_recall` hands out an unconstrained index. Until that is removed we are
+  strictly more permissive than ISO C, in the direction of accepting programs
+  clang may miscompile.
+- `Etype.ctype` is a closed enumeration covering the types the model uses,
+  standing in for what PAL would generate per translation unit. Making it open
+  would mean generating `access_ok` per type, which is the same code-generation
+  step as every other per-type definition; nothing in the development relies on
+  the enumeration being fixed.
 
 ## Milestones
 
@@ -648,4 +687,7 @@ new facts about memory.
    stored pointers (`ptr_repr`, `ptr_read`, `ptr_write`). What remains is
    emitting casts between pointers and `uintptr_t` from the translator, which
    is blocked on milestone 2.
-8. Effective types.
+8. **Done for the model.** Effective types: `ctype`, the per-byte index,
+   `access_ok` and the store rule, with the union, array and integer/pointer
+   punning theorems. The index is reserved in layer 0 as `mem_pts_to_at` but is
+   not yet enforced by the typed loads and stores.
