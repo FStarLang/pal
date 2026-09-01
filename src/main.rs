@@ -46,6 +46,12 @@ struct Cli {
     )]
     time_passes: bool,
 
+    #[arg(
+        long = "palow",
+        help = "Emit the Palow specification surface instead of the current model (milestone 2, stage 1)"
+    )]
+    palow: bool,
+
     #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
     quiet: bool,
 
@@ -246,6 +252,26 @@ fn main() {
 
     if cli.print_ir {
         println!("{}", combined_tu);
+        return;
+    }
+
+    if cli.palow {
+        let modules = pass::emit_palow::emit_palow(&combined_tu);
+        if let Some(outdir) = &cli.outdir {
+            let outdir = Path::new(&outdir).to_path_buf();
+            std::fs::create_dir_all(&outdir).unwrap();
+            for module in &modules {
+                let path = outdir.join(format!("{}.fsti", module.module_name));
+                write_if_changed(&path, module.code.as_bytes());
+            }
+        } else {
+            for module in &modules {
+                println!("{}", module.code);
+            }
+        }
+        if !cli.quiet {
+            diags.print_to_stderr(&mut *vfs);
+        }
         return;
     }
 

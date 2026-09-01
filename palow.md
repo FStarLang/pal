@@ -558,7 +558,7 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, `memcpy`, stack alloc/free |
 | `Pulse.Lib.C.Palow.Expose` | axiomatized | `exposed`, `in_footprint`, `expose`, `ptr_to_uintptr`, `uintptr_to_ptr` |
 | `Pulse.Lib.C.Palow.Provenance` | proved | the `uintptr_t` round trip, and `memcpy` transporting a stored pointer |
-| `Pulse.Lib.C.Palow.CTypes` | proved | the remaining C scalar types (`_Bool`, `int8_t`..`int64_t`, `uint16_t`, `uint64_t`, `uint8_t`'s derived set) |
+| `Pulse.Lib.C.Palow.CTypes` | proved | the remaining C scalar types (`_Bool`, `int8_t`..`int64_t`, `uint16_t`, `uint64_t`, `size_t`, `uint8_t`'s derived set) |
 | `Pulse.Lib.C.Palow.Examples` | proved | hand-written Palow renditions of programs PAL already translates |
 | `Pulse.Lib.C.Palow.Etype` | proved | `ctype`, per-byte effective-type entries, `access_ok`, the store rule, and the union/array/punning theorems |
 | `Pulse.Lib.C.Palow.Aggregate` | proved | two structs (with and without padding), field split/join, flexible array members |
@@ -669,6 +669,12 @@ new facts about memory.
   `mem_recall` hands out an unconstrained index. Until that is removed we are
   strictly more permissive than ISO C, in the direction of accepting programs
   clang may miscompile.
+- `size_t` is eight bytes and `SizeT.v` is assumed to be below `pow2 64`, for
+  the same reason and with the same justification as `Ptr.addr_bound`.
+- `--palow` drops the user's `_requires`/`_ensures` clauses, so the generated
+  specifications are weaker than the ones PAL emits today. They are not wrong,
+  but a passing `make palow-check` says the *shape* of the translation
+  typechecks, not that the functions could be implemented against it.
 - `Etype.ctype` is a closed enumeration covering the types the model uses,
   standing in for what PAL would generate per translation unit. Making it open
   would mean generating `access_ok` per type, which is the same code-generation
@@ -679,14 +685,29 @@ new facts about memory.
 
 1. **Done.** Layer 0: `ptr` with provenance, `bytes`, `mem_pts_to`, split/join/
    disjointness. No translator changes.
-2. *In progress.* Re-derive the scalar typed layer on top: done, and now for
-   the full set of C scalar types, together with per-type stack alloc/free,
-   `rewrites_to` on reads, and `memcpy`. `Pulse.Lib.C.Palow.Examples` fixes the
-   target by hand: it is what the generated code should look like for programs
-   PAL already translates. What remains is the translator itself -- emitting
-   `ptr` instead of `ref t`, `t_pts_to` instead of `Pulse.Lib.Reference.pts_to`,
-   `t_read`/`t_write` instead of `!`/`:=`, and stack alloc/free instead of
-   `let mut`.
+2. *In progress; the specification surface is translated.* The scalar typed
+   layer is done for the full set of C scalar types (now including `size_t`),
+   together with per-type stack alloc/free, `rewrites_to` on reads, and
+   `memcpy`. `Pulse.Lib.C.Palow.Examples` fixes the target by hand.
+
+   The translator now has a `--palow` mode (`src/pass/emit_palow.rs`) that
+   emits, for a whole translation unit, a single `PalowSpecs.fsti` containing
+   one bodyless Pulse `fn` per C function: `ptr` parameters instead of
+   `ref t`, `t_pts_to` instead of `Pulse.Lib.Reference.pts_to`, and erased
+   ghost binders for the pointed-to values. `make palow-check` runs this over
+   every test and typechecks the result; all 154 of them pass, covering 585 of
+   the suite's functions, with 173 skipped because they mention a struct,
+   union, array, float or function pointer (milestone 4).
+
+   Emitting this much already settles the part of the port that carries the
+   model decisions, and it demonstrates the payoff claimed in the overview: the
+   F\* type of a parameter is `ptr` regardless of how the pointer is used, so
+   the pointer-kind inference in `elab` has nothing left to decide. What
+   remains is bodies -- `t_read`/`t_write` for `!`/`:=`, stack alloc/free
+   instead of `let mut` -- and translating the user's own `_requires`/`_ensures`
+   predicates, which needs the expression emitter. Until then the generated
+   postconditions are the weakest ones that return the same ownership, and each
+   skipped function says why it was skipped.
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;
    `Pulse.Lib.C.Sizeof` is deleted. Field offsets are collected from clang too

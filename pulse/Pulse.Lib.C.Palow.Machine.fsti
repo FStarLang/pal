@@ -292,3 +292,23 @@ fn uint64_t_stack_alloc ()
 
 fn uint64_t_stack_free (a: ptr)
   requires uint64_t_pts_to_uninit a
+
+fn size_t_read (a: ptr) (#p: perm) (#x: erased SZ.t)
+  preserves size_t_pts_to a p x
+  returns  y : SZ.t
+  ensures  rewrites_to y (reveal x)
+
+fn size_t_write (a: ptr) (y: SZ.t) (#x: erased SZ.t)
+  requires size_t_pts_to a 1.0R x
+  ensures  size_t_pts_to a 1.0R y
+
+fn size_t_write_uninit (a: ptr) (y: SZ.t)
+  requires size_t_pts_to_uninit a
+  ensures  size_t_pts_to a 1.0R y
+
+fn size_t_stack_alloc ()
+  returns  a : ptr
+  ensures  size_t_pts_to_uninit a
+
+fn size_t_stack_free (a: ptr)
+  requires size_t_pts_to_uninit a

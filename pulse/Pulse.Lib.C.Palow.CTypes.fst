@@ -752,6 +752,117 @@ ghost fn uint64_t_claim (a: ptr) (#b: bytes) (x: U64.t)
   fold uint64_t_pts_to a 1.0R x;
 }
 
+(* -------------------------------- size_t --------------------------------
+
+   `size_t` is not a fixed-width type in C, but PAL already commits to a
+   concrete target (LP64) everywhere else, so it is eight bytes here. F*'s
+   `FStar.SizeT.fits` is abstract, so the bound that `encode` needs is not
+   derivable and has to be assumed -- exactly as for `Ptr.addr_bound`, and
+   recorded alongside it under "Known deviations". *)
+
+assume
+val size_t_bound (x: SZ.t) : Lemma (SZ.v x < pow2 64) [SMTPat (SZ.v x)]
+
+let size_t_sizeof : SZ.t = 8sz
+let size_t_alignof : SZ.t = 8sz
+
+let size_t_repr (x: SZ.t) (b: bytes) : prop =
+  b == encode (SZ.v size_t_sizeof) None (SZ.v x)
+
+let size_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: SZ.t) : slprop =
+  mem_pts_to a p (encode (SZ.v size_t_sizeof) None (SZ.v x))
+
+let size_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
+  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v size_t_sizeof)
+
+let size_t_repr_no_prov (x: SZ.t) (b: bytes)
+  : Lemma (requires size_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v size_t_sizeof)
+  = ()
+
+let size_t_repr_injective (x y: SZ.t) (b: bytes)
+  : Lemma (requires size_t_repr x b /\ size_t_repr y b)
+          (ensures  x == y)
+  = assert_norm (pow2 (8 * 8) == pow2 64);
+    encode_injective (SZ.v size_t_sizeof) None (SZ.v x) (SZ.v y)
+
+ghost fn size_t_pts_to_not_null (a: ptr) (#p: perm) (#x: SZ.t)
+  preserves size_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold size_t_pts_to a p x;
+  mem_pts_to_not_null a;
+  fold size_t_pts_to a p x;
+}
+
+[@@allow_ambiguous]
+ghost fn size_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: SZ.t)
+  preserves size_t_pts_to a p1 x
+  preserves size_t_pts_to a p2 y
+  ensures   pure (x == y)
+{
+  unfold size_t_pts_to a p1 x;
+  unfold size_t_pts_to a p2 y;
+  mem_pts_to_injective a;
+  size_t_repr_injective x y (encode (SZ.v size_t_sizeof) None (SZ.v x));
+  fold size_t_pts_to a p1 x;
+  fold size_t_pts_to a p2 y;
+}
+
+ghost fn size_t_share (a: ptr) (#p: perm) (#x: SZ.t)
+  requires size_t_pts_to a p x
+  ensures  size_t_pts_to a (p /. 2.0R) x ** size_t_pts_to a (p /. 2.0R) x
+{
+  unfold size_t_pts_to a p x;
+  mem_share a;
+  fold size_t_pts_to a (p /. 2.0R) x;
+  fold size_t_pts_to a (p /. 2.0R) x;
+}
+
+[@@allow_ambiguous]
+ghost fn size_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: SZ.t)
+  requires size_t_pts_to a p1 x ** size_t_pts_to a p2 y
+  ensures  size_t_pts_to a (p1 +. p2) x ** pure (x == y)
+{
+  unfold size_t_pts_to a p1 x;
+  unfold size_t_pts_to a p2 y;
+  mem_gather a;
+  size_t_repr_injective x y (encode (SZ.v size_t_sizeof) None (SZ.v x));
+  fold size_t_pts_to a (p1 +. p2) x;
+}
+
+ghost fn size_t_reveal (a: ptr) (#p: perm) (#x: SZ.t)
+  requires size_t_pts_to a p x
+  ensures  exists* b. mem_pts_to a p b ** pure (size_t_repr x b)
+{
+  unfold size_t_pts_to a p x;
+}
+
+ghost fn size_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: SZ.t)
+  requires mem_pts_to a p b
+  requires pure (size_t_repr x b)
+  ensures  size_t_pts_to a p x
+{
+  fold size_t_pts_to a p x;
+}
+
+ghost fn size_t_forget (a: ptr) (#x: SZ.t)
+  requires size_t_pts_to a 1.0R x
+  ensures  size_t_pts_to_uninit a
+{
+  unfold size_t_pts_to a 1.0R x;
+  fold size_t_pts_to_uninit a;
+}
+
+ghost fn size_t_claim (a: ptr) (#b: bytes) (x: SZ.t)
+  requires mem_pts_to a 1.0R b
+  requires pure (size_t_repr x b)
+  ensures  size_t_pts_to a 1.0R x
+{
+  fold size_t_pts_to a 1.0R x;
+}
+
+
 (* ------------------------------- uint8_t -------------------------------
 
    `uint8_t`'s size, representation and points-to are in
