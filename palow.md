@@ -525,10 +525,12 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Nullable` | proved | `unless_null` with its intro/elim pair |
 | `Pulse.Lib.C.Palow.Alloc` | axiomatized | `freeable`, `malloc`, `calloc`, `free` |
 | `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, stack alloc/free |
-| `Pulse.Lib.C.Palow.Aggregate` | proved | `struct S { uint32_t f; uint8_t g; }` with padding, field split/join |
+| `Pulse.Lib.C.Palow.Aggregate` | proved | two structs (with and without padding), field split/join, flexible array members |
+| `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus |
+| `Pulse.Lib.C.Palow.Union` | proved | `union U { uint32_t x; struct T t; }`, member views, the type-punning acceptance test |
 | `Pulse.Lib.C.Palow.Pool` | proved | bump allocator handing out `uint32_t`s from a byte range |
 
-Two results are worth calling out, because they are the ones that would have
+Four results are worth calling out, because they are the ones that would have
 sunk the design:
 
 - **Field split/join for a struct with padding is provable from `mem_split` and
@@ -540,6 +542,19 @@ sunk the design:
   model the program cannot even be stated. Note also that the pool hands out
   bare `uint32_t_pts_to_uninit` and never `Alloc.freeable`, so calling `free`
   on a chunk is unprovable -- which is precisely why `freeable` does not split.
+- **Type punning through a union verifies.** Acceptance test 2 is an ordinary
+  Pulse program: store through `.x`, load through `.y`, and the value survives.
+  Two variants are proved, one where the union's trailing bytes are never
+  initialized (so `.z` is not readable, but `.y` is) and one where the union
+  really holds its struct member. Nothing about it is union-specific machinery;
+  both members name the same bytes, so both member views produce the same
+  resource at the same address.
+- **Arrays need no per-type definitions at all.** `array_repr` is a combinator
+  over the element's own `t_repr` and size, so PAL emits nothing for `T[N]`,
+  and `array_focus` -- ownership of `a[i]` at `a + sizeof(T) * i` -- is two
+  `mem_split`s. Flexible array members fall out as a struct predicate
+  conjoined with an `array_pts_to` at the header's size, with no `MallocFlex`
+  special case and no ghost length field pinned inside the record.
 
 Milestone 3 is the first change to the translator itself, and it is done: sizes
 and alignments no longer go through `Pulse.Lib.C.Sizeof` (deleted) but are taken
@@ -547,8 +562,8 @@ from clang and emitted as literals. The plumbing is `ir::LayoutTable` (filled by
 `cpp/impl.cpp`), `src/layout.rs` (structural sizing) and `emit_layout_const` in
 `src/pass/emit.rs`.
 
-Not yet implemented: the `exposed`/`uintptr_t` discipline, effective types,
-arrays, unions, and the remaining translator changes. `Machine` and `Alloc` are
+Not yet implemented: the `exposed`/`uintptr_t` discipline, effective types, and
+the remaining translator changes. `Machine` and `Alloc` are
 axiomatized because their operations are machine primitives, but note that
 their *specifications* are written entirely in terms of the derived layer-1
 predicates, so they add operations rather than new facts about memory.
@@ -573,8 +588,11 @@ predicates, so they add operations rather than new facts about memory.
    target ABI and are emitted as concrete `SizeT` literals;
    `Pulse.Lib.C.Sizeof` is deleted. Field offsets are collected from clang too
    but are not consumed yet — they are what milestone 4 needs.
-4. *In progress.* Aggregates: struct `*_repr`, field split/join and padding are
-   done for one worked example; unions and generated-per-struct lemmas are not.
+4. **Done for the model.** Aggregates: struct `*_repr` and field split/join
+   with and without padding, the generic array combinator with per-element
+   focus, flexible array members, and unions with the type-punning acceptance
+   test. What remains is emitting these per struct from the translator, which
+   is blocked on milestone 2 (the translator does not emit `t_pts_to` yet).
 5. `malloc`/`calloc`/`free` as ordinary specifications (specs done); delete the
    AST special cases; delete `_core_ref`.
 6. *Done for the model.* Custom allocators, with their own `freeable`
