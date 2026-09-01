@@ -63,6 +63,36 @@ fn uint8_t_write (a: ptr) (y: U8.t) (#x: erased U8.t)
   requires uint8_t_pts_to a 1.0R x
   ensures  uint8_t_pts_to a 1.0R y
 
+(* Loading and storing a pointer value. `rewrites_to` matters most here: it is
+   what makes `**x` work, since the pointer read out of `x` has to be usable as
+   the subject of the next `mem_pts_to` without the caller restating it. *)
+fn ptr_read (a: ptr) (#p: perm) (#x: erased ptr)
+  preserves ptr_pts_to a p x
+  returns  y : ptr
+  ensures  rewrites_to y (reveal x)
+
+fn ptr_write (a: ptr) (y: ptr) (#x: erased ptr)
+  requires ptr_pts_to a 1.0R x
+  ensures  ptr_pts_to a 1.0R y
+
+(* ---------------------------------------------------------------------------
+   Byte-wise copying
+
+   `memcpy` is the one place where C is explicit that objects are sequences of
+   bytes, and it is the reason layer 0 is stated in terms of bytes at all. The
+   spec is as strong as it can be and needs no side conditions about types:
+   the destination ends up holding *the same bytes*, which for a stored pointer
+   means the same provenance too, so a pointer copied through `memcpy` remains
+   dereferenceable. Nothing extra has to be said to get that; see
+   `Pulse.Lib.C.Palow.Provenance`.
+   --------------------------------------------------------------------------- *)
+
+fn memcpy (dst src: ptr) (n: SZ.t) (#p: perm) (#bs #bd: erased bytes)
+  preserves mem_pts_to src p bs
+  requires  mem_pts_to dst 1.0R bd
+  requires  pure (len bs == SZ.v n /\ len bd == SZ.v n)
+  ensures   mem_pts_to dst 1.0R bs
+
 (* ---------------------------------------------------------------------------
    Automatic storage
 
@@ -83,3 +113,11 @@ fn uint32_t_stack_alloc ()
 
 fn uint32_t_stack_free (a: ptr)
   requires uint32_t_pts_to_uninit a
+
+fn ptr_stack_alloc ()
+  returns  a : ptr
+  ensures  mem_pts_to a 1.0R (uninit (SZ.v ptr_sizeof))
+
+fn ptr_stack_free (a: ptr) (#b: erased bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v ptr_sizeof)

@@ -134,24 +134,36 @@ is what makes a byte-copied pointer still usable.
 The "ae" part is an exposure token, which is duplicable and monotonic:
 
 ```fstar
-val exposed (i: alloc_id) : slprop   // duplicable
+val exposed (q: prov) : slprop   // duplicable
+val in_footprint (q: prov) (x: nat) : prop
 
-ghost fn expose (a: ptr) (#i: alloc_id) (...)
-  ensures exposed i
+ghost fn expose (a: ptr) (#p: perm) (#b: bytes)
+  preserves mem_pts_to a p b
+  requires  pure (len b > 0)
+  ensures   exposed (prov_of a)
 
-fn ptr_to_uintptr (a: ptr) (#i: alloc_id) (...)
-  returns  n : SizeT.t
-  ensures  exposed i ** pure (v n == v (addr_of a))
+fn ptr_to_uintptr (a: ptr)
+  preserves exposed (prov_of a)
+  returns   n : SizeT.t
+  ensures   pure (SizeT.v n == addr_of a)
 
-fn uintptr_to_ptr (n: SizeT.t) (#i: alloc_id)
-  requires exposed i ** pure (in_footprint i n)
-  returns  a : ptr
-  ensures  pure (addr_of a == n /\ prov_of a == Some i)
+fn uintptr_to_ptr (n: SizeT.t) (q: erased prov)
+  preserves exposed q
+  requires  pure (in_footprint q (SizeT.v n))
+  returns   a : ptr
+  ensures   pure (addr_of a == SizeT.v n /\ prov_of a == reveal q)
 ```
+
+Both are indexed by a `prov` rather than an `alloc_id` so that every signature
+can be written in terms of `prov_of a` without a `Some?` refinement on the
+binder. `exposed None` is harmless: it is `in_footprint` that decides whether an
+integer can become a *usable* pointer, and `in_footprint None x` is never
+provable, because the only way to establish `in_footprint` is from ownership,
+and ownership implies a real allocation.
 
 The "udi" part — the nondeterministic choice among several exposed allocations
 that could match an address, resolved by how the resulting pointer is later
-used — collapses nicely in a verification setting: the caller supplies `i` as a
+used — collapses nicely in a verification setting: the caller supplies `q` as a
 ghost argument, which *is* the disambiguation, decided statically instead of
 by the semantics.
 
@@ -521,16 +533,18 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Ptr` | axiomatized | `ptr`, `addr_of`, `prov_of`, `ptr_ext`, `( +! )`, `disjoint_ranges` |
 | `Pulse.Lib.C.Palow` | axiomatized | `mem_pts_to`, `mem_split`/`mem_join`, disjointness, injectivity, share/gather |
 | `Pulse.Lib.C.Palow.Encoding` | proved | little-endian `encode`/`decode`, round-trip and injectivity |
-| `Pulse.Lib.C.Palow.Scalar` | proved | `uint8_t`/`uint32_t` `*_repr`, `*_pts_to`, `*_sizeof`, agreement, share/gather, reveal/conceal |
+| `Pulse.Lib.C.Palow.Scalar` | proved | `uint8_t`/`uint32_t`/stored-pointer `*_repr`, `*_pts_to`, `*_sizeof`, agreement, share/gather, reveal/conceal |
 | `Pulse.Lib.C.Palow.Nullable` | proved | `unless_null` with its intro/elim pair |
 | `Pulse.Lib.C.Palow.Alloc` | axiomatized | `freeable`, `malloc`, `calloc`, `free` |
-| `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, stack alloc/free |
+| `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, `memcpy`, stack alloc/free |
+| `Pulse.Lib.C.Palow.Expose` | axiomatized | `exposed`, `in_footprint`, `expose`, `ptr_to_uintptr`, `uintptr_to_ptr` |
+| `Pulse.Lib.C.Palow.Provenance` | proved | the `uintptr_t` round trip, and `memcpy` transporting a stored pointer |
 | `Pulse.Lib.C.Palow.Aggregate` | proved | two structs (with and without padding), field split/join, flexible array members |
 | `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus |
 | `Pulse.Lib.C.Palow.Union` | proved | `union U { uint32_t x; struct T t; }`, member views, the type-punning acceptance test |
 | `Pulse.Lib.C.Palow.Pool` | proved | bump allocator handing out `uint32_t`s from a byte range |
 
-Four results are worth calling out, because they are the ones that would have
+Six results are worth calling out, because they are the ones that would have
 sunk the design:
 
 - **Field split/join for a struct with padding is provable from `mem_split` and
@@ -555,6 +569,19 @@ sunk the design:
   `mem_split`s. Flexible array members fall out as a struct predicate
   conjoined with an `array_pts_to` at the header's size, with no `MallocFlex`
   special case and no ghost length field pinned inside the record.
+- **`ptr_repr` is a definition, not an axiom.** A stored pointer's object
+  representation is the little-endian bytes of its address, each tagged with
+  the pointer's provenance. Injectivity (a stored pointer is recovered exactly,
+  provenance included) and the fact that an integer store destroys it (integer
+  representations are provenance-free) are then both consequences of that one
+  definition rather than two separate assumptions.
+- **`memcpy` transports provenance for free.** Its specification says only that
+  the destination ends up holding the same *bytes*; because bytes carry
+  provenance, a pointer copied byte-wise stays dereferenceable, and acceptance
+  test 5 is an ordinary Pulse program. Under a model where the object
+  representation is a sequence of plain `uint8_t`s this program is not
+  provable at all, and no strengthening of `memcpy`'s spec short of adding
+  provenance to bytes would make it so.
 
 Milestone 3 is the first change to the translator itself, and it is done: sizes
 and alignments no longer go through `Pulse.Lib.C.Sizeof` (deleted) but are taken
@@ -562,11 +589,17 @@ from clang and emitted as literals. The plumbing is `ir::LayoutTable` (filled by
 `cpp/impl.cpp`), `src/layout.rs` (structural sizing) and `emit_layout_const` in
 `src/pass/emit.rs`.
 
-Not yet implemented: the `exposed`/`uintptr_t` discipline, effective types, and
-the remaining translator changes. `Machine` and `Alloc` are
-axiomatized because their operations are machine primitives, but note that
-their *specifications* are written entirely in terms of the derived layer-1
-predicates, so they add operations rather than new facts about memory.
+Milestone 7 is done in the model. `Expose` is axiomatized -- exposure is a
+property of the machine and its allocator, not of any program -- but the two
+theorems that give it content are proved in `Provenance`: the `uintptr_t` round
+trip returns the pointer you started with, and `memcpy` preserves a stored
+pointer's usability.
+
+Not yet implemented: effective types, and the remaining translator changes.
+`Machine`, `Alloc` and `Expose` are axiomatized because their operations are
+machine primitives, but note that their *specifications* are written entirely
+in terms of the derived layer-1 predicates, so they add operations rather than
+new facts about memory.
 
 ### Known deviations
 
@@ -576,6 +609,20 @@ predicates, so they add operations rather than new facts about memory.
 - `mem_pts_to_disjoint` requires one side to be exclusively owned rather than
   the general `~(p1 +. p2 <=. 1.0R)`. Writes need full permission anyway, and
   the restricted form is far easier for the prover to apply.
+- Addresses are assumed to fit in 64 bits (`Ptr.addr_bound`), so that a stored
+  pointer's address round-trips through `ptr_sizeof` bytes. This is a target
+  property, and is the same LP64 assumption the scalar sizes already make.
+  It cannot be derived from `SizeT.fits`, which is abstract.
+- `uint8_t_pts_to` requires provenance-free bytes, so a pointer's
+  representation bytes cannot be read one at a time as `unsigned char`. Real C
+  (and PNVI) allows this and expects the copy to preserve provenance. `memcpy`
+  covers the common case; a byte-at-a-time copy loop would need a `byte`-level
+  read/write pair that keeps the provenance, which is easy to add but not yet
+  there.
+- `uintptr_to_ptr` takes the intended allocation as a ghost argument instead of
+  choosing nondeterministically among the exposed allocations containing the
+  address. This is PNVI-ae-udi's "user disambiguation" resolved statically, and
+  it is a restriction only for programs that genuinely rely on the ambiguity.
 
 ## Milestones
 
@@ -597,5 +644,8 @@ predicates, so they add operations rather than new facts about memory.
    AST special cases; delete `_core_ref`.
 6. *Done for the model.* Custom allocators, with their own `freeable`
    predicates.
-7. `exposed` / `uintptr_t` round-trips.
+7. **Done for the model.** `exposed` / `uintptr_t` round-trips, `memcpy`, and
+   stored pointers (`ptr_repr`, `ptr_read`, `ptr_write`). What remains is
+   emitting casts between pointers and `uintptr_t` from the translator, which
+   is blocked on milestone 2.
 8. Effective types.

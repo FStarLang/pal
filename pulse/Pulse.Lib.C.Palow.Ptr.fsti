@@ -6,8 +6,8 @@ module Pulse.Lib.C.Palow.Ptr
    Following PNVI-ae-udi, a pointer is a concrete address together with a
    provenance tag naming the allocation it was derived from. Both projections
    are ghost: running code may compare pointers and offset them, but may not
-   observe an address as an integer without going through the (as yet
-   unimplemented, see milestone 7 in `palow.md`) exposure discipline.
+   observe an address as an integer without going through the exposure
+   discipline in `Pulse.Lib.C.Palow.Expose`.
 
    This interface is axiomatized: there is no `.fst`. It describes the machine,
    not a program.
@@ -39,6 +39,14 @@ val ptr_ext (a1 a2: ptr)
           (ensures  a1 == a2)
 
 val null_addr : squash (addr_of null == 0 /\ prov_of null == None)
+
+(* Every address fits in a pointer-sized word. Stated as an explicit bound
+   rather than as `SizeT.fits`, which is abstract, because the byte encoding of
+   a *stored* pointer needs its address to round-trip through `ptr_sizeof`
+   bytes. Like the rest of Palow this fixes an LP64 target; see `palow.md`. *)
+val addr_bound (a: ptr)
+  : Lemma (addr_of a < pow2 64)
+          [SMTPat (addr_of a)]
 
 (* Byte offset. Provenance-preserving, as required for interior pointers of an
    allocation to remain usable -- this is what lets a pool allocator hand out

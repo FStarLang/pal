@@ -185,3 +185,119 @@ ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
 {
   fold uint32_t_pts_to a 1.0R x;
 }
+
+(* ---------------------------------------------------------------------------
+   Pointers as stored values
+
+   This is where putting provenance in the bytes pays for itself. A stored
+   pointer's object representation is the target-endian bytes of its address,
+   each carrying the pointer's provenance -- so `ptr_repr` is *defined*, not
+   axiomatized, and three facts that would otherwise each need an axiom become
+   consequences of the definition:
+
+   - a stored pointer is recovered exactly, provenance included
+     (`ptr_repr_injective`);
+   - overwriting it with an integer makes it unrecoverable, because integer
+     representations carry no provenance (`ptr_repr_no_prov`);
+   - a byte-wise copy preserves it, because copying bytes copies provenance
+     (see `Pulse.Lib.C.Palow.Provenance`).
+
+   Under a model where bytes are plain `uint8_t`s, the first and third are
+   indistinguishable from the second, and there is no way to say which of them
+   should hold.
+   --------------------------------------------------------------------------- *)
+
+let ptr_sizeof : SZ.t = 8sz
+let ptr_alignof : SZ.t = 8sz
+
+let ptr_repr (a: ptr) (b: bytes) : prop =
+  b == encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a)
+
+let ptr_pts_to ([@@@mkey] dest: ptr) (p: perm) (a: ptr) : slprop =
+  mem_pts_to dest p (encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a))
+
+let ptr_repr_len (a: ptr) (b: bytes)
+  : Lemma (requires ptr_repr a b)
+          (ensures  len b == SZ.v ptr_sizeof /\ initialized b /\
+                    has_prov (prov_of a) b)
+  = ()
+
+let ptr_repr_injective (a1 a2: ptr) (b: bytes)
+  : Lemma (requires ptr_repr a1 b /\ ptr_repr a2 b)
+          (ensures  a1 == a2)
+  = assert_norm (pow2 (8 * 8) == pow2 64);
+    assert (get b 0 == byte_at (prov_of a1) (addr_of a1) 0);
+    assert (get b 0 == byte_at (prov_of a2) (addr_of a2) 0);
+    addr_bound a1;
+    addr_bound a2;
+    encode_injective (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1) (addr_of a2);
+    ptr_ext a1 a2
+
+(* Writing an integer over a stored pointer strips the provenance of the bytes
+   it covers, and no pointer derived from an allocation is represented by
+   provenance-free bytes. So the only pointer still recoverable from those bytes
+   is one with the empty provenance, which cannot be dereferenced. *)
+let ptr_repr_no_prov (a: ptr) (b: bytes)
+  : Lemma (requires ptr_repr a b /\ no_prov b)
+          (ensures  prov_of a == None)
+  = ()
+
+ghost fn ptr_pts_to_not_null (dest: ptr) (#p: perm) (#a: ptr)
+  preserves ptr_pts_to dest p a
+  ensures   pure (not (is_null dest) /\ Some? (prov_of dest))
+{
+  unfold ptr_pts_to dest p a;
+  mem_pts_to_not_null dest;
+  fold ptr_pts_to dest p a;
+}
+
+[@@allow_ambiguous]
+ghost fn ptr_agree (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
+  preserves ptr_pts_to dest p1 a1
+  preserves ptr_pts_to dest p2 a2
+  ensures   pure (a1 == a2)
+{
+  unfold ptr_pts_to dest p1 a1;
+  unfold ptr_pts_to dest p2 a2;
+  mem_pts_to_injective dest;
+  ptr_repr_injective a1 a2 (encode (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
+  fold ptr_pts_to dest p1 a1;
+  fold ptr_pts_to dest p2 a2;
+}
+
+ghost fn ptr_share (dest: ptr) (#p: perm) (#a: ptr)
+  requires ptr_pts_to dest p a
+  ensures  ptr_pts_to dest (p /. 2.0R) a ** ptr_pts_to dest (p /. 2.0R) a
+{
+  unfold ptr_pts_to dest p a;
+  mem_share dest;
+  fold ptr_pts_to dest (p /. 2.0R) a;
+  fold ptr_pts_to dest (p /. 2.0R) a;
+}
+
+[@@allow_ambiguous]
+ghost fn ptr_gather (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
+  requires ptr_pts_to dest p1 a1 ** ptr_pts_to dest p2 a2
+  ensures  ptr_pts_to dest (p1 +. p2) a1 ** pure (a1 == a2)
+{
+  unfold ptr_pts_to dest p1 a1;
+  unfold ptr_pts_to dest p2 a2;
+  mem_gather dest;
+  ptr_repr_injective a1 a2 (encode (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
+  fold ptr_pts_to dest (p1 +. p2) a1;
+}
+
+ghost fn ptr_reveal (dest: ptr) (#p: perm) (#a: ptr)
+  requires ptr_pts_to dest p a
+  ensures  exists* b. mem_pts_to dest p b ** pure (ptr_repr a b)
+{
+  unfold ptr_pts_to dest p a;
+}
+
+ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
+  requires mem_pts_to dest p b
+  requires pure (ptr_repr a b)
+  ensures  ptr_pts_to dest p a
+{
+  fold ptr_pts_to dest p a;
+}
