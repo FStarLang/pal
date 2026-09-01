@@ -191,6 +191,13 @@ The existential over `b` is load-bearing: it is exactly what makes padding
 bytes unobservable through the typed view. See
 [Aggregates and padding](#aggregates-and-padding).
 
+For a scalar type the existential can be dropped, because the representation is
+*unique*: an unsigned integer type with no padding bits has exactly one object
+representation per value, so `uint32_t_pts_to a p x` is literally
+`mem_pts_to a p (encode 4 None (v x))`. The general existential shape is needed
+only where the representation is not unique, i.e. aggregates with padding, and
+unions.
+
 We need type-specific read and write operations, e.g.
 
 ```fstar
@@ -285,10 +292,17 @@ paired with `defer` to ensure they don't escape:
 fn uint32_t_stack_alloc ()
   returns  a : ptr
   ensures  uint32_t_pts_to_uninit a
+  ensures  stack_freeable a uint32_t_sizeof
 
 fn uint32_t_stack_free (a: ptr)
   requires uint32_t_pts_to_uninit a
+  requires stack_freeable a uint32_t_sizeof
 ```
+
+The `stack_freeable` token plays the same role for automatic storage that
+`freeable` plays for allocated storage: without it, nothing would stop a
+`malloc`ed pointer from being handed to the stack deallocator, or a local from
+being handed to `free`.
 
 We deliberately do *not* fall back to Pulse locals for the non-address-taken
 cases: they behave quite differently, and having two kinds of local in the
@@ -485,18 +499,67 @@ Measure, before and after, over the whole `test/` suite:
 
 Record the numbers in this document when the evaluation is done.
 
+## Implementation status
+
+Milestone 1 is implemented in `pulse/`, together with enough of milestones 2, 4
+and 6 to check that the layering actually works. Everything below verifies as
+part of `make -C pulse`.
+
+| Module | Kind | Contents |
+| --- | --- | --- |
+| `Pulse.Lib.C.Palow.Bytes` | proved | `alloc_id`, `prov`, `byte`, `bytes`, `uninit`/`zeroed`, `strip_prov`, slice/append lemmas |
+| `Pulse.Lib.C.Palow.Ptr` | axiomatized | `ptr`, `addr_of`, `prov_of`, `ptr_ext`, `( +! )`, `disjoint_ranges` |
+| `Pulse.Lib.C.Palow` | axiomatized | `mem_pts_to`, `mem_split`/`mem_join`, disjointness, injectivity, share/gather |
+| `Pulse.Lib.C.Palow.Encoding` | proved | little-endian `encode`/`decode`, round-trip and injectivity |
+| `Pulse.Lib.C.Palow.Scalar` | proved | `uint8_t`/`uint32_t` `*_repr`, `*_pts_to`, `*_sizeof`, agreement, share/gather, reveal/conceal |
+| `Pulse.Lib.C.Palow.Nullable` | proved | `unless_null` with its intro/elim pair |
+| `Pulse.Lib.C.Palow.Alloc` | axiomatized | `freeable`, `malloc`, `calloc`, `free` |
+| `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, `stack_freeable`, stack alloc/free |
+| `Pulse.Lib.C.Palow.Aggregate` | proved | `struct S { uint32_t f; uint8_t g; }` with padding, field split/join |
+| `Pulse.Lib.C.Palow.Pool` | proved | bump allocator handing out `uint32_t`s from a byte range |
+
+Two results are worth calling out, because they are the ones that would have
+sunk the design:
+
+- **Field split/join for a struct with padding is provable from `mem_split` and
+  `mem_join` alone.** PAL can therefore *generate* these lemmas per struct
+  rather than axiomatizing an ownership predicate per struct as it does today.
+- **The bump allocator needs no new axioms.** `pool_alloc_uint32` is an
+  ordinary Pulse function; its proof is "split the remaining range at four
+  bytes, keep the tail in the invariant, claim the head". Under the current
+  model the program cannot even be stated. Note also that the pool hands out
+  bare `uint32_t_pts_to_uninit` and never `Alloc.freeable`, so calling `free`
+  on a chunk is unprovable -- which is precisely why `freeable` does not split.
+
+Not yet implemented: the `exposed`/`uintptr_t` discipline, effective types,
+arrays, unions, and any translator changes. `Machine` and `Alloc` are
+axiomatized because their operations are machine primitives, but note that
+their *specifications* are written entirely in terms of the derived layer-1
+predicates, so they add operations rather than new facts about memory.
+
+### Known deviations
+
+- `( +! )` is total, so forming an out-of-bounds pointer is not itself
+  rejected; only out-of-bounds *access* is, because `mem_pts_to` is available
+  only for in-bounds ranges. This is strictly more permissive than ISO C.
+- `mem_pts_to_disjoint` requires one side to be exclusively owned rather than
+  the general `~(p1 +. p2 <=. 1.0R)`. Writes need full permission anyway, and
+  the restricted form is far easier for the prover to apply.
+
 ## Milestones
 
-1. Layer 0: `ptr` with provenance, `bytes`, `mem_pts_to`, split/join/
+1. **Done.** Layer 0: `ptr` with provenance, `bytes`, `mem_pts_to`, split/join/
    disjointness. No translator changes.
-2. Re-derive the scalar typed layer on top, including per-type stack alloc/free
-   and `rewrites_to` on reads; switch the translator to emit `t_pts_to`.
-   Existing scalar tests pass.
+2. *In progress.* Re-derive the scalar typed layer on top, including per-type
+   stack alloc/free and `rewrites_to` on reads (done); switch the translator to
+   emit `t_pts_to` (not started). Existing scalar tests pass.
 3. Per-C-type `sizeof`/`alignof`/`offsetof` from clang; retire
    `Pulse.Lib.C.Sizeof`.
-4. Aggregates: struct/union `*_repr`, field split/join, padding.
-5. `malloc`/`calloc`/`free` as ordinary specifications; delete the AST special
-   cases; delete `_core_ref`.
-6. Custom allocators, with their own `freeable` predicates.
+4. *In progress.* Aggregates: struct `*_repr`, field split/join and padding are
+   done for one worked example; unions and generated-per-struct lemmas are not.
+5. `malloc`/`calloc`/`free` as ordinary specifications (specs done); delete the
+   AST special cases; delete `_core_ref`.
+6. *Done for the model.* Custom allocators, with their own `freeable`
+   predicates.
 7. `exposed` / `uintptr_t` round-trips.
 8. Effective types.
