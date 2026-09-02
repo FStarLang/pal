@@ -219,8 +219,38 @@ fn is_shared(mode: ParamMode) -> bool {
     matches!(mode, ParamMode::Const)
 }
 
+/// One piece of memory the body owns, and how to say so. Pulse's `if` does
+/// not frame its `ensures`, so a branching body has to be able to restate its
+/// entire ownership at the join, which means keeping this around.
+#[derive(Clone)]
+struct Owned {
+    /// The slprop, with `{}` where the value goes.
+    render: String,
+    /// The F\* type of that value.
+    vty: String,
+    /// Set when the value cannot change, so that restating the frame does not
+    /// forget it. `_const` parameters are the case that matters: a
+    /// `preserves` postcondition needs the exact value back.
+    fixed: Option<String>,
+    /// The C name, and the slprop to use before the first store, for `_out`
+    /// parameters: they arrive holding storage rather than a value.
+    uninit: Option<(String, String)>,
+    /// The C name of the parameter this ownership belongs to.
+    name: String,
+    /// The value it holds on entry, if it holds one.
+    entry: Option<String>,
+}
+
+impl Owned {
+    fn at(&self, value: &str) -> String {
+        self.render.replace("{}", value)
+    }
+}
+
 struct FnSurface {
     decl: String,
+    /// The ownership the parameters bring in, in declaration order.
+    params: Vec<Owned>,
     /// Whether the C function's own `_requires`/`_ensures` made it into the
     /// specification. When they did not, the contract we emit is weaker than
     /// the source says, and in particular cannot discharge an overflow
@@ -530,6 +560,7 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
     let mut fresh: Vec<(String, String, String)> = Vec::new();
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut arrays: HashSet<String> = HashSet::new();
+    let mut owned: Vec<Owned> = Vec::new();
 
     for (i, arg) in decl.args.iter().enumerate() {
         let pname = match &arg.name {
@@ -591,7 +622,15 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
             // uninitialised points-to.
             ParamMode::Out if extent(tds, &arg.ty) == Some(Extent::One) => {
                 req.push(format!("{}_pts_to_uninit {}", pn, pname));
-                fresh.push((format!("{}'", vname), vty, pts_to("1.0R", "")));
+                fresh.push((format!("{}'", vname), vty.clone(), pts_to("1.0R", "")));
+                owned.push(Owned {
+                    render: pts_to("1.0R", "{}"),
+                    vty,
+                    fixed: None,
+                    uninit: Some((base.clone(), format!("{}_pts_to_uninit {}", pn, pname))),
+                    name: base.clone(),
+                    entry: None,
+                });
                 pointees.insert(base, (None, Some(format!("{}'", vname))));
             }
             ParamMode::Out => return Err(format!("parameter {} is an `_out` array", pname)),
@@ -600,18 +639,42 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
                 perms.push(format!("(#{}: perm)", perm));
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                 preserved.push(pts_to(&perm, &vname));
+                owned.push(Owned {
+                    render: pts_to(&perm, "{}"),
+                    vty,
+                    fixed: Some(format!("(reveal {})", vname)),
+                    uninit: None,
+                    name: base.clone(),
+                    entry: Some(format!("(reveal {})", vname)),
+                });
                 let v = format!("(reveal {})", vname);
                 pointees.insert(base, (Some(v.clone()), Some(v)));
             }
             ParamMode::Consumed => {
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                 req.push(pts_to("1.0R", &vname));
+                owned.push(Owned {
+                    render: pts_to("1.0R", "{}"),
+                    vty,
+                    fixed: None,
+                    uninit: None,
+                    name: base.clone(),
+                    entry: Some(format!("(reveal {})", vname)),
+                });
                 pointees.insert(base, (Some(format!("(reveal {})", vname)), None));
             }
             ParamMode::Regular => {
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                 req.push(pts_to("1.0R", &vname));
-                fresh.push((format!("{}'", vname), vty, pts_to("1.0R", "")));
+                fresh.push((format!("{}'", vname), vty.clone(), pts_to("1.0R", "")));
+                owned.push(Owned {
+                    render: pts_to("1.0R", "{}"),
+                    vty,
+                    fixed: None,
+                    uninit: None,
+                    name: base.clone(),
+                    entry: Some(format!("(reveal {})", vname)),
+                });
                 pointees.insert(
                     base,
                     (
@@ -714,6 +777,7 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
 
     Ok(FnSurface {
         decl: out,
+        params: owned,
         contract: contract_ok,
     })
 }
@@ -776,7 +840,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
 
         let body = match defn {
             None => Err("it has no definition here".to_string()),
-            Some(d) => emit_body(&tds, env, d, sig.contract),
+            Some(d) => emit_body(&tds, env, d, &sig),
         };
         code += &sig.decl;
         match body {
@@ -830,7 +894,27 @@ use num_bigint::BigInt;
 struct Slot {
     name: String,
     palow_ty: String,
+    /// The F* type of the value the slot holds, needed to restate the frame.
+    vty: String,
     init: bool,
+    /// A term for what the slot currently holds, when we know one. Carrying
+    /// this is what lets a join say `if c then .. else ..` instead of
+    /// forgetting the value.
+    value: Option<String>,
+}
+
+/// What one arm of an `if` produced: its statements, and the state it leaves
+/// the enclosing scope in.
+struct BranchResult {
+    lines: Vec<String>,
+    inits: Vec<bool>,
+    slot_values: Vec<Option<String>>,
+    out_params: Vec<String>,
+    param_values: Vec<Option<String>>,
+}
+
+fn indent(line: &str) -> String {
+    format!("  {}", line)
 }
 
 struct Body<'a> {
@@ -842,17 +926,46 @@ struct Body<'a> {
     /// Pointer parameters declared `_out`: they arrive holding storage rather
     /// than a value, so the first store through one is an initialising store.
     out_params: Vec<String>,
+    /// The ownership brought in by the parameters, for restating the frame.
+    params: Vec<Owned>,
+    /// What each of those currently holds, in the same order.
+    param_values: Vec<Option<String>>,
+    /// How deeply nested in `if` arms we are, and at what depth each `let` we
+    /// emitted was bound. A join can only mention terms bound outside it.
+    depth: usize,
+    binds: Vec<(String, usize)>,
     tmp: usize,
     /// Whether signed arithmetic may be emitted. Its overflow obligation is
     /// discharged by the function's `_requires` clause, so emitting it without
     /// one produces a failure that says nothing about the memory model.
     signed_ok: bool,
+    /// Whether the function's postcondition constrains values, which decides
+    /// whether a join may forget one.
+    has_ensures: bool,
 }
 
 impl<'a> Body<'a> {
     fn fresh(&mut self, hint: &str) -> String {
         self.tmp += 1;
-        format!("tmp{}_{}", self.tmp, hint)
+        let name = format!("tmp{}_{}", self.tmp, hint);
+        self.binds.push((name.clone(), self.depth));
+        name
+    }
+
+    /// How deeply nested the bindings a term mentions were introduced. A term
+    /// is usable at a join only if this is no deeper than the join itself.
+    fn term_depth(&self, term: &str) -> usize {
+        self.binds
+            .iter()
+            .filter(|(n, _)| term.contains(n.as_str()))
+            .map(|(_, d)| *d)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn usable(&self, term: &Option<String>) -> Option<String> {
+        let t = term.as_ref()?;
+        (self.term_depth(t) <= self.depth).then(|| t.clone())
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
@@ -887,7 +1000,7 @@ impl<'a> Body<'a> {
         match &e.val {
             ExprT::VAttr(_, inner) => self.rvalue(inner),
             ExprT::Var(v) => {
-                if let Some(s) = self.slots.iter().find(|s| s.name == *v.val) {
+                if let Some(s) = self.slots.iter().rev().find(|s| s.name == *v.val) {
                     if !s.init {
                         return Err(format!("`{}` is read before it is written", v.val));
                     }
@@ -948,12 +1061,16 @@ impl<'a> Body<'a> {
     fn alloc_slot(&mut self, name: &Ident, ty: &Type) -> Result<String, String> {
         let pn = palow_name(self.tds, ty)
             .ok_or_else(|| format!("local `{}` is {}", name.val, describe(self.tds.resolve(ty))))?;
+        let vty = fstar_type(self.tds, ty)
+            .ok_or_else(|| format!("local `{}` is {}", name.val, describe(self.tds.resolve(ty))))?;
         self.lines
             .push(format!("let loc_{} = {}_stack_alloc ();", name.val, pn));
         self.slots.push(Slot {
             name: name.val.to_string(),
             palow_ty: pn.clone(),
+            vty,
             init: false,
+            value: None,
         });
         Ok(pn)
     }
@@ -967,21 +1084,28 @@ impl<'a> Body<'a> {
                     self.out_params.remove(i);
                     self.lines
                         .push(format!("{}_write_uninit var_{} {};", pn, v.val, value));
+                    self.set_param_value(&v.val, value);
                     return Ok(());
                 }
             }
         }
         if let ExprT::Var(v) = &lhs.val {
-            if let Some(i) = self.slots.iter().position(|s| s.name == *v.val) {
+            if let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val) {
                 let op = if self.slots[i].init {
                     "write"
                 } else {
                     "write_uninit"
                 };
                 self.slots[i].init = true;
+                self.slots[i].value = Some(value.to_string());
                 self.lines
                     .push(format!("{}_{} loc_{} {};", pn, op, v.val, value));
                 return Ok(());
+            }
+        }
+        if let ExprT::Deref(inner) = &lhs.val {
+            if let ExprT::Var(v) = &inner.val {
+                self.set_param_value(&v.val, value);
             }
         }
         let a = self.addr(lhs)?;
@@ -989,7 +1113,17 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    fn set_param_value(&mut self, name: &str, value: &str) {
+        if let Some(i) = self.params.iter().position(|o| o.name == name) {
+            self.param_values[i] = Some(value.to_string());
+        }
+    }
+
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
+        self.stmt_at(s, false)
+    }
+
+    fn stmt_at(&mut self, s: &Stmt, tail: bool) -> Result<(), String> {
         match &s.val {
             StmtT::Decl(name, ty) => {
                 self.alloc_slot(name, ty)?;
@@ -1000,7 +1134,9 @@ impl<'a> Body<'a> {
                 let pn = self.alloc_slot(name, ty)?;
                 self.lines
                     .push(format!("{}_write_uninit loc_{} {};", pn, name.val, v));
-                self.slots.last_mut().unwrap().init = true;
+                let slot = self.slots.last_mut().unwrap();
+                slot.init = true;
+                slot.value = Some(v);
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
@@ -1011,15 +1147,249 @@ impl<'a> Body<'a> {
                 self.store(lhs, &pn, &v)
             }
             StmtT::Return(None) => Ok(()),
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                // The join annotation restates ownership but not values, so
+                // anything the branches computed is forgotten at the join
+                // unless the `if` carries its own `_ensures` to preserve it.
+                // A `_live` clause says only that a variable is still owned,
+                // which the frame already says, so it costs nothing to ignore.
+                if let Some(e) = ensures.iter().find(|e| !is_liveness(e)) {
+                    return Err(format!(
+                        "an `if` whose `_ensures` mentions {}",
+                        expr_kind(e)
+                    ));
+                }
+                let cty = self.ty_of(cond)?;
+                if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
+                    return Err("an `if` on a non-boolean condition".to_string());
+                }
+                let c = self.rvalue(cond)?;
+
+                // Pulse's `if` needs both branches to end in the same slprop,
+                // so the two have to agree on which slots hold a value and
+                // which still hold uninitialised storage. That is a real
+                // restriction on the C we accept, not an artefact: an `if`
+                // that initialises a local on one path only genuinely has two
+                // different states afterwards, and saying so needs the
+                // `_ensures` the user wrote on the `if`.
+                // Both arms start from the state at the `if`, so the second
+                // has to be translated against a restored snapshot rather
+                // than against whatever the first left behind.
+                let entry_out = self.out_params.clone();
+                let entry_params = self.param_values.clone();
+                let entry_slots: Vec<(bool, Option<String>)> = self
+                    .slots
+                    .iter()
+                    .map(|s| (s.init, s.value.clone()))
+                    .collect();
+                let then = self.branch(then_branch)?;
+                self.out_params = entry_out;
+                self.param_values = entry_params;
+                for (slot, (init, value)) in self.slots.iter_mut().zip(&entry_slots) {
+                    slot.init = *init;
+                    slot.value = value.clone();
+                }
+                let els = self.branch(else_branch)?;
+                if then.inits != els.inits || then.out_params != els.out_params {
+                    return Err(
+                        "an `if` whose branches leave different variables initialised".to_string(),
+                    );
+                }
+                let (binders, conjuncts, param_values, slot_values, forgot) =
+                    self.join(&then, &els);
+                // A forgotten value can still be constrained by the function's
+                // own postcondition, and there is nothing left to prove it
+                // with. The `_ensures` the user wrote on the `if` is what
+                // would carry it across, and translating those is the next
+                // step rather than this one.
+                if forgot && self.has_ensures {
+                    return Err(
+                        "an `if` that changes a value the postcondition constrains".to_string()
+                    );
+                }
+                self.out_params = then.out_params.clone();
+                self.param_values = param_values;
+                for (i, slot) in self.slots.iter_mut().enumerate() {
+                    slot.init = then.inits[i];
+                    slot.value = slot_values[i].clone();
+                }
+
+                self.lines.push(format!("if ({})", c));
+                if tail {
+                    // Pulse already has the function's postcondition here, and
+                    // rejects a second annotation for the same join.
+                } else if binders.is_empty() {
+                    self.lines
+                        .push(indent(&format!("ensures {}", conjuncts.join(" ** "))));
+                } else {
+                    self.lines.push(indent(&format!(
+                        "ensures exists* {}. {}",
+                        binders.join(" "),
+                        conjuncts.join(" ** ")
+                    )));
+                }
+                self.lines.push("{".to_string());
+                self.lines.extend(then.lines.iter().map(|l| indent(l)));
+                self.lines.push("} else {".to_string());
+                self.lines.extend(els.lines.iter().map(|l| indent(l)));
+                self.lines.push("};".to_string());
+                Ok(())
+            }
             _ => Err(format!("{} is not translated yet", stmt_kind(s))),
         }
+    }
+
+    /// Restate everything the body owns at a join. Pulse's `if` does not
+    /// frame its `ensures`, so the annotation has to be the whole state.
+    ///
+    /// The interesting part is the value. A location both arms left holding
+    /// the same term -- which is most of them, since an `if` usually touches
+    /// one or two variables -- keeps that term, so the annotation is not the
+    /// blunt instrument it looks like. A location the arms disagree about is
+    /// existentially quantified and its value genuinely forgotten; the caller
+    /// checks whether that is affordable.
+    fn join(
+        &mut self,
+        then: &BranchResult,
+        els: &BranchResult,
+    ) -> (
+        Vec<String>,
+        Vec<String>,
+        Vec<Option<String>>,
+        Vec<Option<String>>,
+        bool,
+    ) {
+        let mut binders = Vec::new();
+        let mut conjuncts = Vec::new();
+        self.tmp += 1;
+        let n = self.tmp;
+
+        let mut forgot = false;
+        let mut merge = |binders: &mut Vec<String>,
+                         forgot: &mut bool,
+                         a: &Option<String>,
+                         b: &Option<String>,
+                         vty: &str|
+         -> (String, Option<String>) {
+            match self.usable(a).zip(self.usable(b)) {
+                Some((x, y)) if x == y => (x.clone(), Some(x)),
+                _ => {
+                    *forgot = true;
+                    let v = format!("jn{}_{}", n, binders.len());
+                    binders.push(format!("({}: {})", v, vty));
+                    (v, None)
+                }
+            }
+        };
+
+        let mut param_values = Vec::new();
+        for (i, o) in self.params.iter().enumerate() {
+            if let Some((name, uninit)) = &o.uninit {
+                if then.out_params.iter().any(|p| p == name) {
+                    conjuncts.push(uninit.clone());
+                    param_values.push(None);
+                    continue;
+                }
+            }
+            if let Some(v) = &o.fixed {
+                conjuncts.push(o.at(v));
+                param_values.push(Some(v.clone()));
+                continue;
+            }
+            let (term, kept) = merge(
+                &mut binders,
+                &mut forgot,
+                &then.param_values[i],
+                &els.param_values[i],
+                &o.vty,
+            );
+            conjuncts.push(o.at(&term));
+            param_values.push(kept);
+        }
+
+        let mut slot_values = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            if !then.inits[i] {
+                conjuncts.push(format!("{}_pts_to_uninit loc_{}", slot.palow_ty, slot.name));
+                slot_values.push(None);
+                continue;
+            }
+            let (term, kept) = merge(
+                &mut binders,
+                &mut forgot,
+                &then.slot_values[i],
+                &els.slot_values[i],
+                &slot.vty,
+            );
+            conjuncts.push(format!(
+                "{}_pts_to loc_{} 1.0R {}",
+                slot.palow_ty, slot.name, term
+            ));
+            slot_values.push(kept);
+        }
+
+        (binders, conjuncts, param_values, slot_values, forgot)
+    }
+
+    /// Translate one arm of an `if` into its own line buffer. The arm is a C
+    /// block, so the locals it declares are released at its end and its
+    /// declarations do not escape; what does escape is which of the
+    /// *enclosing* slots it left initialised, which is what the two arms have
+    /// to agree on.
+    fn branch(&mut self, stmts: &Stmts) -> Result<BranchResult, String> {
+        let mark = self.slots.len();
+        let outer_env = self.env.clone();
+        let outer_lines = std::mem::take(&mut self.lines);
+        let outer_out = self.out_params.clone();
+        self.depth += 1;
+
+        let result = (|| -> Result<(), String> {
+            for s in stmts.iter() {
+                if matches!(s.val, StmtT::Return(_)) {
+                    return Err("a `return` inside an `if`".to_string());
+                }
+                self.env.push_stmt(s);
+                self.stmt(s)?;
+            }
+            Ok(())
+        })();
+
+        let out = (|| {
+            result?;
+            self.release_from(mark);
+            Ok(BranchResult {
+                lines: std::mem::take(&mut self.lines),
+                inits: self.slots[..mark].iter().map(|s| s.init).collect(),
+                slot_values: self.slots[..mark].iter().map(|s| s.value.clone()).collect(),
+                out_params: std::mem::take(&mut self.out_params),
+                param_values: self.param_values.clone(),
+            })
+        })();
+
+        self.depth -= 1;
+        self.slots.truncate(mark);
+        self.env = outer_env;
+        self.lines = outer_lines;
+        if out.is_err() {
+            self.out_params = outer_out;
+        }
+        out
     }
 
     /// Release every slot, innermost first. A slot holding a value needs
     /// `_forget` first, because deallocation must not depend on what was last
     /// stored in it.
     fn release(&mut self) {
-        for i in (0..self.slots.len()).rev() {
+        self.release_from(0);
+    }
+
+    fn release_from(&mut self, mark: usize) {
+        for i in (mark..self.slots.len()).rev() {
             let (name, pn, init) = {
                 let s = &self.slots[i];
                 (s.name.clone(), s.palow_ty.clone(), s.init)
@@ -1171,7 +1541,7 @@ fn emit_body(
     tds: &Typedefs,
     env: Env,
     defn: &FnDefn,
-    contract: bool,
+    sig: &FnSurface,
 ) -> Result<Vec<String>, String> {
     // An array parameter's ownership is a sequence, so every access through it
     // needs `array_focus` rather than a plain read. The contract already says
@@ -1197,8 +1567,13 @@ fn emit_body(
             .filter(|a| a.mode == ParamMode::Out)
             .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
             .collect(),
+        param_values: sig.params.iter().map(|o| o.entry.clone()).collect(),
+        params: sig.params.clone(),
+        depth: 0,
+        binds: Vec::new(),
         tmp: 0,
-        signed_ok: contract,
+        signed_ok: sig.contract,
+        has_ensures: !defn.decl.ensures.is_empty(),
     };
 
     // Straight-line bodies only, with an optional trailing `return`. A
@@ -1224,7 +1599,10 @@ fn emit_body(
             }
             _ => {
                 b.env.push_stmt(l);
-                b.stmt(l)?;
+                // Nothing follows but the stack frees, so if there are no
+                // slots this statement's join is the function's own.
+                let tail = b.slots.is_empty();
+                b.stmt_at(l, tail)?;
             }
         }
     }
@@ -1239,6 +1617,17 @@ fn emit_body(
 /// Names for the constructs the subset does not cover. These end up in the
 /// generated file next to each `admit()`, which is what turns it into a list
 /// of what to do next rather than a list of failures.
+/// `_live(x)` and conjunctions of it say only that something is still owned,
+/// which the restated frame already says.
+fn is_liveness(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::Live(..) => true,
+        ExprT::Cast(inner, _) => is_liveness(inner),
+        ExprT::BinOp(BinOp::LogAnd, l, r) => is_liveness(l) && is_liveness(r),
+        _ => false,
+    }
+}
+
 fn stmt_kind(s: &Stmt) -> &'static str {
     match &s.val {
         StmtT::Call(..) => "a function call",

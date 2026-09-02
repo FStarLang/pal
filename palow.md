@@ -738,6 +738,12 @@ new facts about memory.
   `make palow-check` therefore says that the translation typechecks, not that
   every function could be implemented against its real contract -- for a
   dropped contract the function has no obligations left to fail.
+- A value that an `if`'s two arms disagree about is forgotten at the join,
+  because the annotation Pulse requires there restates ownership rather than
+  contents. Functions whose postcondition depends on such a value are admitted
+  rather than mistranslated, but the effect is that `--palow` covers fewer
+  branching functions than PAL does today, where the user's `_ensures` on the
+  `if` carries the information across.
 - An array parameter's postcondition indexes the *final* sequence, so
   `_ensures(return == *p)` becomes `Seq.index val_p' 0` rather than an
   index into the initial one. That is the right reading for a function that
@@ -794,8 +800,30 @@ new facts about memory.
    precondition for its own well-typedness, the emitter collects the bounds it
    needs and conjoins them into the same `pure`.
 
-   As of this milestone: **592 specifications, 150 of them with real bodies,
-   442 admitted, 182 functions skipped** because they mention a struct, union,
+   Conditionals are translated. The awkward part is that Pulse does not frame
+   the `ensures` on an `if`: the annotation at a join has to restate the whole
+   state, not just the part the branches touched, which means the emitter has
+   to be able to name everything the body owns. It therefore carries, for each
+   parameter and each stack slot, both the slprop and a term for the value it
+   currently holds. A location both arms left holding the same term -- most of
+   them, since an `if` usually touches one or two variables -- keeps that term
+   across the join. A location the arms disagree about is existentially
+   quantified and its value forgotten, and when the function has an `_ensures`
+   that could have constrained it, the body is admitted instead of emitted:
+   there would be nothing left to prove the postcondition with. Carrying the
+   value across as `if c then .. else ..` was tried and does typecheck in
+   Pulse only until a later statement writes the same location, so it is the
+   `_ensures` the user wrote on the `if` that has to carry it, and translating
+   those is the next step.
+
+   The branches also have to agree on which locals hold a value and which
+   still hold uninitialised storage, since those are different slprops. That is
+   a real restriction on the C we accept rather than an artefact: an `if` that
+   initialises a local on one path only genuinely leaves two different states
+   behind. `test/palow_if` is the test for all of this.
+
+   As of this milestone: **595 specifications, 154 of them with real bodies,
+   441 admitted, 182 functions skipped** because they mention a struct, union,
    float or function pointer (milestone 4); **373 of 480 contracts are
    translated and 107 dropped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -806,16 +834,19 @@ new facts about memory.
    parameter's F\* type is `ptr` regardless of how the pointer is used, so the
    pointer-kind inference in `elab` has nothing left to decide.
 
-   The `admit()` reasons, in order, are what to do next. `if` and loops (70)
-   need the user's `_invariant` and a join for the slot-initialisation state.
-   Function calls (37) need the callee's real contract, not the weakest one we
-   currently emit. Inline Pulse (62) has to be re-expressed against the new
-   predicates and is a source change, not a translator change. Signed
-   arithmetic (32) is refused on purpose: its overflow obligation is discharged
-   by the `_requires` clause, and emitting it before those clauses are
-   translated would produce failures that say nothing about the memory model.
-   The rest -- address-of, subscripts, allocation, globals -- are milestones 4
-   and 5.
+   The `admit()` reasons, in order, are what to do next. Inline Pulse (60) has
+   to be re-expressed against the new predicates and is a source change, not a
+   translator change. Function calls (43) need the callee's contract, which now
+   exists. `sizeof` (37) is a literal the emitter already computes for the
+   model but does not yet emit in a body. Array parameters (36) and subscripts
+   (18) need `array_focus`, which the model has. A `return` inside an `if` (24)
+   needs both arms to release their slots and agree on a value, which is a
+   restructuring rather than a translation. Loops (17) need the user's
+   `_invariant`. Signed arithmetic (20) is refused on purpose: its overflow
+   obligation is discharged by the `_requires` clause, and emitting it where
+   that clause did not translate would produce failures that say nothing about
+   the memory model. The rest -- address-of, allocation, globals -- are
+   milestones 4 and 5.
 
    The dropped contracts are a shorter list, and none of them is about memory.
    Arithmetic on machine integers inside a contract (32) is refused because
