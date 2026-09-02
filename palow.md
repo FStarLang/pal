@@ -830,9 +830,8 @@ new facts about memory.
    artefact: an `if` that initialises a local on one path only genuinely
    leaves two different states behind. `test/palow_if` is the test for all of this.
 
-   As of this milestone: **599 specifications, 242 of them with real bodies,
-   357 admitted, 182 functions skipped** because they mention a struct, union,
-   float or function pointer (milestone 4). The generated `swap` is line-for-line the
+   As of this milestone: **683 specifications, 272 of them with real bodies,
+   411 admitted, 139 functions skipped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
 
@@ -877,15 +876,53 @@ new facts about memory.
    functions whose own contract is not translated (13) are the same problems as
    in the bodies.
 
+   Structs are translated, and the generated shape is a deliberate departure
+   from the byte-level definition in `Pulse.Lib.C.Palow.Aggregate`. There a
+   struct's points-to is one `mem_pts_to` over the whole object with a `_repr`
+   relating it to the field values, and the split is a chain of `mem_split`s
+   plus enough `slice` reasoning to line the pieces up. That is the right
+   definition for reasoning about representation -- type punning needs it -- and
+   the wrong one to generate, because then every field access would carry that
+   proof.
+
+   So `struct_S_pts_to` is generated *as* the separating conjunction of its
+   fields' points-to predicates, and the split and join are an `unfold` and a
+   `fold`. Per field there is a hole predicate and a focus/unfocus pair, which
+   is the same triple the array combinator has, on purpose: a field access and
+   a subscript are the same operation on a sub-range and the emitter should not
+   have to tell them apart. The byte-level view is still reachable -- each
+   field's `t_reveal` gives its bytes and `mem_join` puts them back -- but
+   deliberately rather than by default, which is the principle the scalar layer
+   already follows.
+
+   What the generated shape does not say is anything about padding: a struct's
+   ownership is its fields', not its bytes, so it falls short of the whole
+   object by however many bytes clang inserted between the fields. That is
+   enough for field access, which is all the translator does with it. A
+   whole-object `memcpy`, a `free`, or an array of structs needs the byte-level
+   `_repr`, and arrays of structs are refused for exactly that reason.
+
+   The other thing this exposed is that ownership has to come from somewhere.
+   `s->next->x` and `**p` read a pointer *out of memory* and then dereference
+   it, and nothing in the translated contract grants ownership of what it points
+   to; the caller would have had to say so in a `_requires` that is not
+   translated. Such dereferences are refused with that reason rather than
+   emitted to fail. Only a parameter's pointee is owned, because only
+   parameters appear in the contract. `test/palow_struct` covers reads, writes,
+   two fields of one struct, mixed field widths, and two structs at once.
+
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;
    `Pulse.Lib.C.Sizeof` is deleted. Field offsets are collected from clang too
    but are not consumed yet — they are what milestone 4 needs.
-4. **Done for the model.** Aggregates: struct `*_repr` and field split/join
-   with and without padding, the generic array combinator with per-element
-   focus, flexible array members, and unions with the type-punning acceptance
-   test. What remains is emitting these per struct from the translator, which
-   is blocked on milestone 2 (the translator does not emit `t_pts_to` yet).
+4. **Done for structs; unions and byte-level struct `_repr` remain.**
+   Aggregates: struct `*_repr` and field split/join with and without padding,
+   the generic array combinator with per-element focus, flexible array members,
+   and unions with the type-punning acceptance test. The translator now
+   generates a Palow type per struct -- record, layout constants, points-to and
+   per-field focus/unfocus -- and translates field access in bodies and field
+   projection in contracts. What remains is the byte-level `_repr` per struct,
+   which arrays of structs and whole-object copies need, and unions.
 5. `malloc`/`calloc`/`free` as ordinary specifications (specs done); delete the
    AST special cases; delete `_core_ref`.
 6. *Done for the model.* Custom allocators, with their own `freeable`

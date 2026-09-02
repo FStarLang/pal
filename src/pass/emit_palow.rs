@@ -46,7 +46,28 @@ use crate::ir::*;
 /// translatable. Struct and union typedefs are left folded; they are milestone
 /// 4's problem, and unfolding them here would only change the wording of the
 /// skip message.
-struct Typedefs<'a>(HashMap<&'a str, &'a Rc<Type>>);
+/// One field of a struct the emitter generated a type for.
+struct StructField {
+    /// The C field name.
+    name: String,
+    ty: Rc<Type>,
+    /// Byte offset from the start of the struct, per clang's target ABI.
+    offset: u64,
+}
+
+/// A struct the emitter generated a Palow type for. Only structs whose every
+/// field has a Palow type get one; the rest stay unknown and any function that
+/// mentions them is skipped, as before.
+struct StructInfo {
+    fields: Vec<StructField>,
+    size: u64,
+    align: u64,
+}
+
+struct Typedefs<'a> {
+    typedefs: HashMap<&'a str, &'a Rc<Type>>,
+    structs: HashMap<String, StructInfo>,
+}
 
 impl<'a> Typedefs<'a> {
     fn new(tu: &'a TranslationUnit) -> Self {
@@ -56,7 +77,10 @@ impl<'a> Typedefs<'a> {
                 m.insert(&*td.name.val, &td.body);
             }
         }
-        Typedefs(m)
+        Typedefs {
+            typedefs: m,
+            structs: HashMap::new(),
+        }
     }
 
     fn resolve<'b>(&'b self, ty: &'b Type) -> &'b Type
@@ -68,7 +92,7 @@ impl<'a> Typedefs<'a> {
         // rather than trust the input.
         for _ in 0..64 {
             match &ty.val {
-                TypeT::TypeRef(TypeRefKind::Typedef(n)) => match self.0.get(&*n.val) {
+                TypeT::TypeRef(TypeRefKind::Typedef(n)) => match self.typedefs.get(&*n.val) {
                     Some(body) => ty = body,
                     None => return ty,
                 },
@@ -124,6 +148,9 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
         TypeT::SizeT => Some("size_t".to_string()),
         // Every pointer kind is the same type here; that is the point.
         TypeT::Pointer(..) => Some("ptr".to_string()),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
+            Some(format!("struct_{}", n.val))
+        }
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -144,6 +171,9 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         }
         TypeT::SizeT => Some("SizeT.t".to_string()),
         TypeT::Pointer(..) => Some("ptr".to_string()),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
+            Some(format!("struct_{}", n.val))
+        }
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -152,6 +182,18 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         | TypeT::Nullable(t) => fstar_type(tds, t),
         _ => None,
     }
+}
+
+/// Whether a type has a byte-level `_repr` relation. Every scalar does; a
+/// generated struct does not, because its points-to is defined as the
+/// conjunction of its fields' rather than over its bytes. Arrays are indexed by
+/// `_repr`, so this is what an array's element type has to satisfy.
+fn has_repr(tds: &Typedefs, ty: &Type) -> bool {
+    palow_name(tds, ty).is_some()
+        && !matches!(
+            tds.resolve(ty).val,
+            TypeT::TypeRef(TypeRefKind::Struct(_)) | TypeT::TypeRef(TypeRefKind::Union(_))
+        )
 }
 
 /// How much memory a pointer parameter owns. Palow makes every C pointer the
@@ -188,6 +230,7 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
         TypeT::Int { width, .. } => Some((*width / 8) as u64),
         TypeT::SizeT | TypeT::PtrdiffT | TypeT::Pointer(..) | TypeT::FnPtr { .. } => Some(8),
         TypeT::FixedArray(t, n) => palow_sizeof(tds, t).map(|s| s * n),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).map(|s| s.size),
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -203,6 +246,7 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
 fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     match &tds.resolve(ty).val {
         TypeT::FixedArray(t, _) => palow_alignof(tds, t),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).map(|s| s.align),
         _ => palow_sizeof(tds, ty),
     }
 }
@@ -487,6 +531,18 @@ impl<'a> Spec<'a> {
             }
             ExprT::Deref(inner) => self.pointee_at(inner, None, w),
             ExprT::Index(base, idx) => self.pointee_at(base, Some(idx), w),
+            // A struct value is an F* record, so a field of one is a
+            // projection. `s->f` reaches here as `(*s).f`.
+            ExprT::Member(base, f) => {
+                let bty = self.ty_of(base)?;
+                if palow_name(self.tds, &bty).is_none() {
+                    return Err(format!(
+                        "a contract that projects a field of {}",
+                        describe(self.tds.resolve(&bty))
+                    ));
+                }
+                Ok(format!("({}).fld_{}", self.value(base, w)?, f.val))
+            }
             ExprT::UnOp(op, inner) => {
                 let ety = self.ty_of(e)?;
                 let ty = self.tds.resolve(&ety);
@@ -591,6 +647,13 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
                     )
                 }
                 Extent::Array => {
+                    if !has_repr(tds, pt) {
+                        return Err(format!(
+                            "parameter {} is an array of {}, which has no byte-level `_repr`",
+                            pname,
+                            describe(tds.resolve(pt))
+                        ));
+                    }
                     arrays.insert(base.clone());
                     let esize = palow_sizeof(tds, pt).ok_or_else(|| {
                         format!("parameter {} is an array of {}", pname, describe(pt))
@@ -754,8 +817,208 @@ const HEADER: &str = r#"(* Generated by pal --palow.
    coverage measurement this file exists to produce. *)
 "#;
 
+/// Generate the Palow type for every struct in the translation unit whose
+/// fields the model covers, and the code that goes with it.
+///
+/// The shape is a deliberate departure from the byte-level definition in
+/// `Pulse.Lib.C.Palow.Aggregate`. There a struct's points-to is one
+/// `mem_pts_to` over the whole object with a `_repr` relating it to the field
+/// values, and the split is a chain of `mem_split`s plus enough `slice`
+/// reasoning to line the pieces up. That definition is the right one for
+/// reasoning about representation -- type punning needs it -- but it is the
+/// wrong one to generate, because every field access would carry that proof.
+///
+/// Here `struct_S_pts_to` is instead defined *as* the separating conjunction of
+/// its fields' points-to predicates, so the split and the join are an `unfold`
+/// and a `fold` and always go through. The byte-level view is still reachable:
+/// each field's own `t_reveal` produces its bytes and `mem_join` puts them back
+/// together. It is reachable deliberately rather than by default, which is the
+/// same principle the scalar layer follows.
+///
+/// What this shape does not say is anything about padding. A struct's ownership
+/// here is the ownership of its fields, not of its bytes, so it is short of the
+/// whole object by however many padding bytes clang inserted. That is fine for
+/// field access, which is all the translator does with it, and it is what a
+/// whole-object `memcpy` or `free` would need a bridge lemma for.
+fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> String {
+    let layouts = crate::layout::LayoutCtx::of_tu(tu);
+    let mut code = String::new();
+    for decl in &tu.decls {
+        let DeclT::StructDefn(sd) = &decl.val else {
+            continue;
+        };
+        let name = sd.name.val.to_string();
+        let key = TypeRefKind::Struct(sd.name.clone());
+        let (Some(size), Some(align)) = (
+            layouts
+                .table
+                .get(&LayoutKey::of_type_ref(&key))
+                .map(|l| l.size),
+            layouts
+                .table
+                .get(&LayoutKey::of_type_ref(&key))
+                .map(|l| l.align),
+        ) else {
+            continue;
+        };
+        // Every field has to have a Palow type. Structs are processed in
+        // declaration order, so a field of an earlier struct type works and a
+        // field of a later one does not -- which is also all C allows.
+        let mut fields = Vec::new();
+        let mut ok = true;
+        for f in &sd.fields {
+            let fname = f.val.name().val.to_string();
+            let fty = f.val.logical_type(&f.loc);
+            let (Some(off), true) = (
+                layouts.offset_of(&key, &fname),
+                palow_name(tds, &fty).is_some() && fstar_type(tds, &fty).is_some(),
+            ) else {
+                ok = false;
+                break;
+            };
+            fields.push(StructField {
+                name: fname,
+                ty: fty,
+                offset: off,
+            });
+        }
+        if !ok || fields.is_empty() {
+            code += &format!(
+                "(* skipped struct {}: a field has no Palow type *)\n\n",
+                name
+            );
+            continue;
+        }
+        tds.structs.insert(
+            name.clone(),
+            StructInfo {
+                fields,
+                size,
+                align,
+            },
+        );
+        code += &emit_struct(tds, &name);
+    }
+    code
+}
+
+/// The generated code for one struct: the record, its layout constants, its
+/// points-to, and per field a hole predicate with the focus/unfocus pair that
+/// opens and closes it. The per-field triple is the same shape as the array
+/// combinator's, on purpose: a field access and a subscript are the same
+/// operation on a sub-range, and the emitter should not have to tell them
+/// apart.
+fn emit_struct(tds: &Typedefs, name: &str) -> String {
+    let si = &tds.structs[name];
+    let sn = format!("struct_{}", name);
+    let mut c = String::new();
+
+    c += &format!(
+        "noeq type {} = {{ {} }}\n\n",
+        sn,
+        si.fields
+            .iter()
+            .map(|f| format!("fld_{}: {}", f.name, fstar_type(tds, &f.ty).unwrap()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    c += &format!("let {}_sizeof : SizeT.t = {}sz\n", sn, si.size);
+    c += &format!("let {}_alignof : SizeT.t = {}sz\n", sn, si.align);
+    for f in &si.fields {
+        c += &format!(
+            "let {}_offsetof_{} : SizeT.t = {}sz\n",
+            sn, f.name, f.offset
+        );
+    }
+    c += "\n";
+
+    // The field points-to at a given record expression, for every field but
+    // one; `None` excludes nothing.
+    let conj = |x: &str, skip: Option<&str>| -> String {
+        let parts: Vec<String> = si
+            .fields
+            .iter()
+            .filter(|f| Some(f.name.as_str()) != skip)
+            .map(|f| {
+                format!(
+                    "{}_pts_to (a +! {}_offsetof_{}) p ({}).fld_{}",
+                    palow_name(tds, &f.ty).unwrap(),
+                    sn,
+                    f.name,
+                    x,
+                    f.name
+                )
+            })
+            .collect();
+        if parts.is_empty() {
+            "emp".to_string()
+        } else {
+            parts.join(" **\n  ")
+        }
+    };
+
+    c += &format!(
+        "let {}_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {}) : slprop =\n  {}\n\n",
+        sn,
+        sn,
+        conj("x", None)
+    );
+
+    for f in &si.fields {
+        let fpn = palow_name(tds, &f.ty).unwrap();
+        let fty = fstar_type(tds, &f.ty).unwrap();
+        let at = format!("(a +! {}_offsetof_{})", sn, f.name);
+        let upd = format!("({{ x with fld_{} = y }})", f.name);
+        c += &format!(
+            "let {}_hole_{} (a: ptr) (p: perm) (x: {}) : slprop =\n  {}\n\n",
+            sn,
+            f.name,
+            sn,
+            conj("x", Some(&f.name))
+        );
+        c += &format!(
+            "ghost fn {sn}_focus_{f} (a: ptr) (#p: perm) (#x: {sn})\n\
+             \x20 requires {sn}_pts_to a p x\n\
+             \x20 ensures  {fpn}_pts_to {at} p x.fld_{f}\n\
+             \x20 ensures  {sn}_hole_{f} a p x\n\
+             {{\n  unfold {sn}_pts_to a p x;\n  fold {sn}_hole_{f} a p x;\n}}\n\n",
+            sn = sn,
+            f = f.name,
+            fpn = fpn,
+            at = at
+        );
+        c += &format!(
+            "ghost fn {sn}_unfocus_{f} (a: ptr) (#p: perm) (#x: {sn}) (#y: {fty})\n\
+             \x20 requires {sn}_hole_{f} a p x\n\
+             \x20 requires {fpn}_pts_to {at} p y\n\
+             \x20 ensures  {sn}_pts_to a p {upd}\n\
+             {{\n  unfold {sn}_hole_{f} a p x;\n  fold {sn}_pts_to a p {upd};\n}}\n\n",
+            sn = sn,
+            f = f.name,
+            fpn = fpn,
+            fty = fty,
+            at = at,
+            upd = upd
+        );
+        c += &format!(
+            "ghost fn {sn}_unfocus_read_{f} (a: ptr) (#p: perm) (#x: {sn})\n\
+             \x20 requires {sn}_hole_{f} a p x\n\
+             \x20 requires {fpn}_pts_to {at} p x.fld_{f}\n\
+             \x20 ensures  {sn}_pts_to a p x\n\
+             {{\n  unfold {sn}_hole_{f} a p x;\n  fold {sn}_pts_to a p x;\n}}\n\n",
+            sn = sn,
+            f = f.name,
+            fpn = fpn,
+            at = at
+        );
+    }
+    c
+}
+
 pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
-    let tds = Typedefs::new(tu);
+    let mut tds = Typedefs::new(tu);
+    let structs = collect_structs(tu, &mut tds);
+    let tds = tds;
     let mut base = Env::new();
     for decl in &tu.decls {
         base.push_decl(decl);
@@ -779,6 +1042,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         code += &format!("module {} = FStar.{}\n", m, m);
     }
     code += "module SizeT = FStar.SizeT\n\n";
+    code += &structs;
 
     let mut callees: HashMap<String, Callee> = HashMap::new();
     for decl in &tu.decls {
@@ -933,6 +1197,9 @@ struct Body<'a> {
     in_branch: bool,
     /// Array-kind pointer parameters, by C name.
     arrays: HashMap<String, ArrayParam>,
+    /// The function's parameters, by C name. Ownership of what a pointer points
+    /// to is granted by the contract, and the contract only names parameters.
+    params: HashSet<String>,
 }
 
 /// What a subscript through an array parameter needs: the element's Palow type
@@ -977,6 +1244,13 @@ impl<'a> Body<'a> {
                     return Err(format!("`{}` is addressed inside an `if`", v.val));
                 }
                 let ty = self.ty_of(e)?;
+                if !has_repr(self.tds, &ty) {
+                    return Err(format!(
+                        "`{}` is {}",
+                        v.val,
+                        describe(self.tds.resolve(&ty))
+                    ));
+                }
                 let pn = palow_name(self.tds, &ty)
                     .ok_or_else(|| format!("`{}` has an unsupported type", v.val))?;
                 self.lines
@@ -990,7 +1264,22 @@ impl<'a> Body<'a> {
                 });
                 Ok(format!("loc_{}", v.val))
             }
-            ExprT::Deref(inner) => self.rvalue(inner),
+            // The address of `*e` is the value of `e`, but only ownership we
+            // can name is ownership we have. A parameter or a local carries its
+            // pointee in the contract; a pointer that was itself loaded out of
+            // memory -- `*s->next`, `**p` -- does not, and the caller would
+            // have had to grant it in a `_requires` that is not translated.
+            ExprT::Deref(inner) => match &strip_vattr(inner).val {
+                ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => self.rvalue(inner),
+                ExprT::Var(v) => Err(format!(
+                    "a dereference of local `{}`, whose target the contract does not grant",
+                    v.val
+                )),
+                other => Err(format!(
+                    "a dereference of {}, whose target the contract does not grant",
+                    expr_kind_of(other)
+                )),
+            },
             ExprT::VAttr(_, inner) => self.addr(inner),
             _ => Err("unsupported lvalue".to_string()),
         }
@@ -1062,6 +1351,38 @@ impl<'a> Body<'a> {
         Ok((at, pn, close))
     }
 
+    /// Open one field of a struct for a single access. The same shape as
+    /// `focus` for arrays -- prologue here, matching unfocus at the call site,
+    /// nothing in between -- because it is the same operation on a sub-range.
+    /// Returns the field's address, its Palow type, and the arguments the
+    /// matching unfocus needs.
+    fn focus_field(&mut self, base: &Expr, f: &Ident) -> Result<(String, String, String), String> {
+        let bty = self.ty_of(base)?;
+        let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(&bty).val else {
+            return Err(format!("a field of {}", describe(self.tds.resolve(&bty))));
+        };
+        let sn = format!("struct_{}", sname.val);
+        if !self.tds.structs.contains_key(&*sname.val) {
+            return Err(format!("a field of {}", describe(self.tds.resolve(&bty))));
+        }
+        let fty = self.ty_of(&Ast {
+            val: ExprT::Member(Rc::new(base.clone()), Rc::new(f.clone())),
+            loc: base.loc.clone(),
+        })?;
+        let fpn = palow_name(self.tds, &fty)
+            .ok_or_else(|| format!("a field of type {}", describe(self.tds.resolve(&fty))))?;
+        if !has_repr(self.tds, &fty) {
+            return Err(format!(
+                "a field of type {}",
+                describe(self.tds.resolve(&fty))
+            ));
+        }
+        let a = self.addr(base)?;
+        let at = format!("({} +! {}_offsetof_{})", a, sn, f.val);
+        self.lines.push(format!("{}_focus_{} {};", sn, f.val, a));
+        Ok((at, fpn, format!("{}_unfocus_{}#{}", sn, f.val, a)))
+    }
+
     /// An rvalue, as an F* expression. Reads are effectful, so they are bound
     /// to a fresh name and the binding is pushed onto `lines`.
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
@@ -1110,6 +1431,13 @@ impl<'a> Body<'a> {
                 let a = self.addr(e)?;
                 let t = self.fresh("deref");
                 self.lines.push(format!("let {} = {}_read {};", t, pn, a));
+                Ok(t)
+            }
+            ExprT::Member(base, f) => {
+                let (at, pn, close) = self.focus_field(base, f)?;
+                let t = self.fresh(&f.val);
+                self.lines.push(format!("let {} = {}_read {};", t, pn, at));
+                self.lines.push(unfocus(&close, true));
                 Ok(t)
             }
             ExprT::Index(base, idx) => {
@@ -1233,6 +1561,18 @@ impl<'a> Body<'a> {
     }
 
     fn alloc_slot(&mut self, name: &Ident, ty: &Type) -> Result<String, String> {
+        // Only scalars have machine operations, so only scalars can have a
+        // stack slot. A struct local needs a `struct_S_stack_alloc`, which the
+        // generated struct layer does not provide: its points-to is the
+        // conjunction of its fields' and says nothing about the storage as a
+        // whole.
+        if !has_repr(self.tds, ty) {
+            return Err(format!(
+                "local `{}` is {}",
+                name.val,
+                describe(self.tds.resolve(ty))
+            ));
+        }
         let pn = palow_name(self.tds, ty)
             .ok_or_else(|| format!("local `{}` is {}", name.val, describe(self.tds.resolve(ty))))?;
         self.lines
@@ -1282,6 +1622,12 @@ impl<'a> Body<'a> {
                     return Ok(());
                 }
             }
+        }
+        if let ExprT::Member(base, f) = &lhs.val {
+            let (at, fpn, close) = self.focus_field(base, f)?;
+            self.lines.push(format!("{}_write {} {};", fpn, at, value));
+            self.lines.push(unfocus(&close, false));
+            return Ok(());
         }
         if let ExprT::Index(base, idx) = &lhs.val {
             let (at, epn, close) = self.focus(base, Some(idx))?;
@@ -1730,6 +2076,35 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     }
 }
 
+/// Peel the virtual attributes `elab` wraps around an expression.
+fn strip_vattr(e: &Expr) -> &Expr {
+    match &e.val {
+        ExprT::VAttr(_, inner) => strip_vattr(inner),
+        _ => e,
+    }
+}
+
+fn expr_kind_of(e: &ExprT) -> &'static str {
+    match e {
+        ExprT::Member(..) => "a struct field",
+        ExprT::Index(..) => "an array element",
+        ExprT::Deref(..) => "another dereference",
+        _ => "a computed pointer",
+    }
+}
+
+/// The unfocus that closes a `focus_field`. The read form puts the field back
+/// unchanged, so the struct value is the one that went in; the write form lets
+/// Pulse infer the new field value and rebuilds the record around it.
+fn unfocus(close: &str, read: bool) -> String {
+    let (call, a) = close.split_once('#').unwrap();
+    if read {
+        format!("{} {};", call.replace("_unfocus_", "_unfocus_read_"), a)
+    } else {
+        format!("{} {};", call, a)
+    }
+}
+
 /// Translate a function body, or say why not. `env` must already have the
 /// function's parameters pushed.
 fn emit_body(
@@ -1753,6 +2128,9 @@ fn emit_body(
         let (Some(pn), Some(esize)) = (palow_name(tds, pt), palow_sizeof(tds, pt)) else {
             continue;
         };
+        if !has_repr(tds, pt) {
+            continue;
+        }
         arrays.insert(
             name.val.to_string(),
             ArrayParam {
@@ -1780,6 +2158,12 @@ fn emit_body(
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
         arrays,
+        params: defn
+            .decl
+            .args
+            .iter()
+            .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+            .collect(),
     };
 
     let tail = b.rest(&defn.body)?;
