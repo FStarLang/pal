@@ -738,12 +738,16 @@ new facts about memory.
   `make palow-check` therefore says that the translation typechecks, not that
   every function could be implemented against its real contract -- for a
   dropped contract the function has no obligations left to fail.
-- A value that an `if`'s two arms disagree about is forgotten at the join,
-  because the annotation Pulse requires there restates ownership rather than
-  contents. Functions whose postcondition depends on such a value are admitted
-  rather than mistranslated, but the effect is that `--palow` covers fewer
-  branching functions than PAL does today, where the user's `_ensures` on the
-  `if` carries the information across.
+- An `if`'s two arms must agree on which locals and `_out` parameters hold a
+  value and which still hold uninitialised storage; those are different
+  slprops and there is nothing to join them to. This is a real restriction on
+  the C we accept rather than an artefact. The `_ensures` a user writes on an
+  `if` is ignored, since Pulse infers the join without it.
+- The layer-1 points-to predicates are abstract (`CTypes.fsti`,
+  `Scalar.fsti`). This is not a matter of taste: a transparent definition
+  makes F\* unfold to `encode` when it has to equate two branch-joined values,
+  and the proof fails. Byte-level reasoning goes through `t_reveal` and
+  `t_conceal`.
 - An array parameter's postcondition indexes the *final* sequence, so
   `_ensures(return == *p)` becomes `Seq.index val_p' 0` rather than an
   index into the initial one. That is the right reading for a function that
@@ -800,30 +804,34 @@ new facts about memory.
    precondition for its own well-typedness, the emitter collects the bounds it
    needs and conjoins them into the same `pure`.
 
-   Conditionals are translated. The awkward part is that Pulse does not frame
-   the `ensures` on an `if`: the annotation at a join has to restate the whole
-   state, not just the part the branches touched, which means the emitter has
-   to be able to name everything the body owns. It therefore carries, for each
-   parameter and each stack slot, both the slprop and a term for the value it
-   currently holds. A location both arms left holding the same term -- most of
-   them, since an `if` usually touches one or two variables -- keeps that term
-   across the join. A location the arms disagree about is existentially
-   quantified and its value forgotten, and when the function has an `_ensures`
-   that could have constrained it, the body is admitted instead of emitted:
-   there would be nothing left to prove the postcondition with. Carrying the
-   value across as `if c then .. else ..` was tried and does typecheck in
-   Pulse only until a later statement writes the same location, so it is the
-   `_ensures` the user wrote on the `if` that has to carry it, and translating
-   those is the next step.
+   Conditionals are translated, and the translator does not have to help.
+   Pulse computes the join itself: every Palow points-to predicate carries
+   `@@@mkey` on its pointer argument, so the two arms' slprops are matched by
+   location and the differing value argument is joined into a `match` on the
+   condition. No `ensures` annotation is emitted on an `if` at all, and the
+   emitter tracks no values -- the same way `let mut` behaves in ordinary
+   Pulse code.
 
-   The branches also have to agree on which locals hold a value and which
-   still hold uninitialised storage, since those are different slprops. That is
-   a real restriction on the C we accept rather than an artefact: an `if` that
-   initialises a local on one path only genuinely leaves two different states
-   behind. `test/palow_if` is the test for all of this.
+   Getting there required abstracting layer 1. As long as `t_pts_to` was a
+   transparent `let`, F\* would unfold it past `mem_pts_to` down to the
+   `encode` call and then try to prove two `encode` applications equal, which
+   it cannot do for the `match` terms a join produces; with `t_pts_to` an
+   abstract `val`, the goal is discharged by congruence on the value argument
+   and goes through. `CTypes` and `Scalar` therefore have interfaces now, and
+   sizes, alignments and the `t_repr` relations live in the `.fsti` while the
+   predicates are opaque. Clients that used to `fold`/`unfold` a scalar
+   predicate go through the `t_reveal`/`t_conceal` pair the modules already
+   exported for exactly this purpose -- which is also what the design intended:
+   the byte-level view is reachable, but only deliberately.
 
-   As of this milestone: **595 specifications, 154 of them with real bodies,
-   441 admitted, 182 functions skipped** because they mention a struct, union,
+   The one thing the branches do have to agree on is which locals hold a value
+   and which still hold uninitialised storage, since those are different
+   slprops. That is a real restriction on the C we accept rather than an
+   artefact: an `if` that initialises a local on one path only genuinely
+   leaves two different states behind. `test/palow_if` is the test for all of this.
+
+   As of this milestone: **595 specifications, 159 of them with real bodies,
+   436 admitted, 182 functions skipped** because they mention a struct, union,
    float or function pointer (milestone 4); **373 of 480 contracts are
    translated and 107 dropped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

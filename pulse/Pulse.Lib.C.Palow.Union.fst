@@ -84,7 +84,7 @@ ghost fn union_U_split_x (a: ptr) (#p: perm) (#v: U32.t)
   with b. assert (mem_pts_to a p b ** pure (union_U_repr (U_x v) b));
   mem_split a 4sz;
   Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v v));
-  fold uint32_t_pts_to a p v;
+  uint32_t_conceal a #p #_ #v;
   fold union_U_x_rest a p;
 }
 
@@ -93,7 +93,7 @@ ghost fn union_U_join_x (a: ptr) (#p: perm) (#v: U32.t)
   requires union_U_x_rest a p
   ensures  union_U_pts_to a p (U_x v)
 {
-  unfold uint32_t_pts_to a p v;
+  uint32_t_reveal a #p #v;
   unfold union_U_x_rest a p;
   with rest. assert (mem_pts_to (a +! 4sz) p rest);
   mem_join a #p #(encode 4 None (U32.v v)) #rest 4sz;
@@ -178,7 +178,7 @@ fn union_pun_test (a: ptr) (#u0: erased union_U)
   unfold union_U_pts_to a 1.0R u0;
   with b0. assert (mem_pts_to a 1.0R b0 ** pure (union_U_repr u0 b0));
   mem_split a 4sz;
-  fold uint32_t_pts_to_uninit a;
+  uint32_t_claim_uninit a;
   uint32_t_write_uninit a 10ul;
   fold union_U_x_rest a 1.0R;
 

@@ -71,10 +71,10 @@ fn transport (src dst: ptr) (#target: ptr) (#bd: bytes) (#x: erased U32.t)
   ensures   ptr_pts_to src 1.0R target ** ptr_pts_to dst 1.0R target
   ensures   pure (y == reveal x)
 {
-  unfold ptr_pts_to src 1.0R target;
+  ptr_reveal src #1.0R #target;
   memcpy dst src ptr_sizeof;
-  fold ptr_pts_to src 1.0R target;
-  fold ptr_pts_to dst 1.0R target;
+  ptr_conceal src #1.0R #_ #target;
+  ptr_conceal dst #1.0R #_ #target;
   let p = ptr_read dst;
   uint32_t_read p;
 }

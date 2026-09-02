@@ -71,7 +71,7 @@ fn pool_alloc_uint32 (rp: R.ref ptr) (rn: R.ref SZ.t)
     rp := cur +! uint32_t_sizeof;
     rn := SZ.sub rem uint32_t_sizeof;
     fold pool_inv rp rn;
-    fold uint32_t_pts_to_uninit cur;
+    uint32_t_claim_uninit cur;
     intro_unless_null cur (uint32_t_pts_to_uninit cur);
     cur
   } else {

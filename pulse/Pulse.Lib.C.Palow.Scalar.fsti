@@ -40,64 +40,67 @@ module M = FStar.Math.Lemmas
    uint8_t
    --------------------------------------------------------------------------- *)
 
+let uint8_t_sizeof : SZ.t = 1sz
+let uint8_t_alignof : SZ.t = 1sz
+
+let uint8_t_repr (x: U8.t) (b: bytes) : prop =
+  b == encode (SZ.v uint8_t_sizeof) None (U8.v x)
+
+val uint8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U8.t) : slprop
 
 
-let uint8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U8.t) : slprop =
-  mem_pts_to a p (encode (SZ.v uint8_t_sizeof) None (U8.v x))
-
-let uint8_t_repr_len (x: U8.t) (b: bytes)
+val uint8_t_repr_len (x: U8.t) (b: bytes)
   : Lemma (requires uint8_t_repr x b)
           (ensures  len b == SZ.v uint8_t_sizeof)
-  = ()
+
 
 ghost fn uint8_t_reveal (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
   ensures  exists* b. mem_pts_to a p b ** pure (uint8_t_repr x b)
-{
-  unfold uint8_t_pts_to a p x;
-}
+
 
 ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U8.t)
   requires mem_pts_to a p b
   requires pure (uint8_t_repr x b)
   ensures  uint8_t_pts_to a p x
-{
-  fold uint8_t_pts_to a p x;
-}
+
 
 (* ---------------------------------------------------------------------------
    uint32_t
    --------------------------------------------------------------------------- *)
 
+let uint32_t_sizeof : SZ.t = 4sz
+let uint32_t_alignof : SZ.t = 4sz
+
+let uint32_t_repr (x: U32.t) (b: bytes) : prop =
+  b == encode (SZ.v uint32_t_sizeof) None (U32.v x)
+
+val uint32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U32.t) : slprop
 
 
-let uint32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U32.t) : slprop =
-  mem_pts_to a p (encode (SZ.v uint32_t_sizeof) None (U32.v x))
-
-let uint32_t_repr_len (x: U32.t) (b: bytes)
+val uint32_t_repr_len (x: U32.t) (b: bytes)
   : Lemma (requires uint32_t_repr x b)
           (ensures  len b == SZ.v uint32_t_sizeof)
-  = ()
+
 
 (* Write-only ownership of storage that is the right size for a `uint32_t` but
    whose contents we know nothing about: what a stack allocation hands out, and
    what a deallocation takes back. *)
-let uint32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
-  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint32_t_sizeof)
+val uint32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop
+
 
 (* An integer object carries no provenance: this is what distinguishes it from
    a stored pointer with the same bit pattern, and is why writing an integer
    over a stored pointer makes the pointer unrecoverable. *)
-let uint32_t_repr_no_prov (x: U32.t) (b: bytes)
+val uint32_t_repr_no_prov (x: U32.t) (b: bytes)
   : Lemma (requires uint32_t_repr x b)
           (ensures  no_prov b /\ initialized b)
-  = ()
 
-let uint32_t_repr_injective (x y: U32.t) (b: bytes)
+
+val uint32_t_repr_injective (x y: U32.t) (b: bytes)
   : Lemma (requires uint32_t_repr x b /\ uint32_t_repr y b)
           (ensures  x == y)
-  = assert_norm (pow2 (8 * 4) == pow2 32);
-    encode_injective (SZ.v uint32_t_sizeof) None (U32.v x) (U32.v y)
+
 
 (* ---------------------------------------------------------------------------
    Derived resource facts
@@ -110,47 +113,25 @@ let uint32_t_repr_injective (x y: U32.t) (b: bytes)
 ghost fn uint32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U32.t)
   preserves uint32_t_pts_to a p x
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
-{
-  unfold uint32_t_pts_to a p x;
-  mem_pts_to_not_null a;
-  fold uint32_t_pts_to a p x;
-}
+
 
 [@@allow_ambiguous]
 ghost fn uint32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
   preserves uint32_t_pts_to a p1 x
   preserves uint32_t_pts_to a p2 y
   ensures   pure (x == y)
-{
-  unfold uint32_t_pts_to a p1 x;
-  unfold uint32_t_pts_to a p2 y;
-  mem_pts_to_injective a;
-  uint32_t_repr_injective x y (encode (SZ.v uint32_t_sizeof) None (U32.v x));
-  fold uint32_t_pts_to a p1 x;
-  fold uint32_t_pts_to a p2 y;
-}
+
 
 ghost fn uint32_t_share (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
   ensures  uint32_t_pts_to a (p /. 2.0R) x ** uint32_t_pts_to a (p /. 2.0R) x
-{
-  unfold uint32_t_pts_to a p x;
-  mem_share a;
-  fold uint32_t_pts_to a (p /. 2.0R) x;
-  fold uint32_t_pts_to a (p /. 2.0R) x;
-}
+
 
 [@@allow_ambiguous]
 ghost fn uint32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
   requires uint32_t_pts_to a p1 x ** uint32_t_pts_to a p2 y
   ensures  uint32_t_pts_to a (p1 +. p2) x ** pure (x == y)
-{
-  unfold uint32_t_pts_to a p1 x;
-  unfold uint32_t_pts_to a p2 y;
-  mem_gather a;
-  uint32_t_repr_injective x y (encode (SZ.v uint32_t_sizeof) None (U32.v x));
-  fold uint32_t_pts_to a (p1 +. p2) x;
-}
+
 
 (* Reveal the byte-level view of a scalar object, and put it back. This pair is
    the escape hatch the whole design exists for: it is what a custom allocator
@@ -159,17 +140,13 @@ ghost fn uint32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
 ghost fn uint32_t_reveal (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
   ensures  exists* b. mem_pts_to a p b ** pure (uint32_t_repr x b)
-{
-  unfold uint32_t_pts_to a p x;
-}
+
 
 ghost fn uint32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U32.t)
   requires mem_pts_to a p b
   requires pure (uint32_t_repr x b)
   ensures  uint32_t_pts_to a p x
-{
-  fold uint32_t_pts_to a p x;
-}
+
 
 (* Forget the value of an object, recovering the write-only view. Needed to hand
    a local back to `uint32_t_stack_free`, which must not care what was last
@@ -177,18 +154,13 @@ ghost fn uint32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U32.t)
 ghost fn uint32_t_forget (a: ptr) (#x: U32.t)
   requires uint32_t_pts_to a 1.0R x
   ensures  uint32_t_pts_to_uninit a
-{
-  unfold uint32_t_pts_to a 1.0R x;
-  fold uint32_t_pts_to_uninit a;
-}
+
 
 ghost fn uint32_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
   requires pure (len b == SZ.v uint32_t_sizeof)
   ensures  uint32_t_pts_to_uninit a
-{
-  fold uint32_t_pts_to_uninit a;
-}
+
 
 (* Raw storage of the right size can be claimed as a `uint32_t` object as soon as
    we can exhibit a value it represents. This is the step a custom allocator
@@ -197,9 +169,7 @@ ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
   requires mem_pts_to a 1.0R b
   requires pure (uint32_t_repr x b)
   ensures  uint32_t_pts_to a 1.0R x
-{
-  fold uint32_t_pts_to a 1.0R x;
-}
+
 
 (* ---------------------------------------------------------------------------
    Pointers as stored values
@@ -222,107 +192,76 @@ ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
    should hold.
    --------------------------------------------------------------------------- *)
 
+let ptr_sizeof : SZ.t = 8sz
+let ptr_alignof : SZ.t = 8sz
+
+let ptr_repr (a: ptr) (b: bytes) : prop =
+  b == encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a)
+
+val ptr_pts_to ([@@@mkey] dest: ptr) (p: perm) (a: ptr) : slprop
 
 
-let ptr_pts_to ([@@@mkey] dest: ptr) (p: perm) (a: ptr) : slprop =
-  mem_pts_to dest p (encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a))
-
-let ptr_repr_len (a: ptr) (b: bytes)
+val ptr_repr_len (a: ptr) (b: bytes)
   : Lemma (requires ptr_repr a b)
           (ensures  len b == SZ.v ptr_sizeof /\ initialized b /\
                     has_prov (prov_of a) b)
-  = ()
 
-let ptr_repr_injective (a1 a2: ptr) (b: bytes)
+
+val ptr_repr_injective (a1 a2: ptr) (b: bytes)
   : Lemma (requires ptr_repr a1 b /\ ptr_repr a2 b)
           (ensures  a1 == a2)
-  = assert_norm (pow2 (8 * 8) == pow2 64);
-    assert (get b 0 == byte_at (prov_of a1) (addr_of a1) 0);
-    assert (get b 0 == byte_at (prov_of a2) (addr_of a2) 0);
-    addr_bound a1;
-    addr_bound a2;
-    encode_injective (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1) (addr_of a2);
-    ptr_ext a1 a2
+
 
 (* Writing an integer over a stored pointer strips the provenance of the bytes
    it covers, and no pointer derived from an allocation is represented by
    provenance-free bytes. So the only pointer still recoverable from those bytes
    is one with the empty provenance, which cannot be dereferenced. *)
-let ptr_repr_no_prov (a: ptr) (b: bytes)
+val ptr_repr_no_prov (a: ptr) (b: bytes)
   : Lemma (requires ptr_repr a b /\ no_prov b)
           (ensures  prov_of a == None)
-  = ()
+
 
 ghost fn ptr_pts_to_not_null (dest: ptr) (#p: perm) (#a: ptr)
   preserves ptr_pts_to dest p a
   ensures   pure (not (is_null dest) /\ Some? (prov_of dest))
-{
-  unfold ptr_pts_to dest p a;
-  mem_pts_to_not_null dest;
-  fold ptr_pts_to dest p a;
-}
+
 
 [@@allow_ambiguous]
 ghost fn ptr_agree (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
   preserves ptr_pts_to dest p1 a1
   preserves ptr_pts_to dest p2 a2
   ensures   pure (a1 == a2)
-{
-  unfold ptr_pts_to dest p1 a1;
-  unfold ptr_pts_to dest p2 a2;
-  mem_pts_to_injective dest;
-  ptr_repr_injective a1 a2 (encode (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
-  fold ptr_pts_to dest p1 a1;
-  fold ptr_pts_to dest p2 a2;
-}
+
 
 ghost fn ptr_share (dest: ptr) (#p: perm) (#a: ptr)
   requires ptr_pts_to dest p a
   ensures  ptr_pts_to dest (p /. 2.0R) a ** ptr_pts_to dest (p /. 2.0R) a
-{
-  unfold ptr_pts_to dest p a;
-  mem_share dest;
-  fold ptr_pts_to dest (p /. 2.0R) a;
-  fold ptr_pts_to dest (p /. 2.0R) a;
-}
+
 
 [@@allow_ambiguous]
 ghost fn ptr_gather (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
   requires ptr_pts_to dest p1 a1 ** ptr_pts_to dest p2 a2
   ensures  ptr_pts_to dest (p1 +. p2) a1 ** pure (a1 == a2)
-{
-  unfold ptr_pts_to dest p1 a1;
-  unfold ptr_pts_to dest p2 a2;
-  mem_gather dest;
-  ptr_repr_injective a1 a2 (encode (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
-  fold ptr_pts_to dest (p1 +. p2) a1;
-}
+
 
 ghost fn ptr_reveal (dest: ptr) (#p: perm) (#a: ptr)
   requires ptr_pts_to dest p a
   ensures  exists* b. mem_pts_to dest p b ** pure (ptr_repr a b)
-{
-  unfold ptr_pts_to dest p a;
-}
+
 
 ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
   requires mem_pts_to dest p b
   requires pure (ptr_repr a b)
   ensures  ptr_pts_to dest p a
-{
-  fold ptr_pts_to dest p a;
-}
+
 
 (* A pointer-typed local, before anything has been stored in it. This is the
    same `_pts_to_uninit`/`_forget` pair every scalar type has; it exists so the
    translator can allocate and release a local without a case for pointers. *)
-let ptr_pts_to_uninit ([@@@mkey] dest: ptr) : slprop =
-  exists* b. mem_pts_to dest 1.0R b ** pure (len b == SZ.v ptr_sizeof)
+val ptr_pts_to_uninit ([@@@mkey] dest: ptr) : slprop
+
 
 ghost fn ptr_forget (dest: ptr) (#a: ptr)
   requires ptr_pts_to dest 1.0R a
   ensures  ptr_pts_to_uninit dest
-{
-  unfold ptr_pts_to dest 1.0R a;
-  fold ptr_pts_to_uninit dest;
-}
+
