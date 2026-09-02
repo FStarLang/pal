@@ -876,6 +876,7 @@ use num_bigint::BigInt;
 /// `_write`, and releasing one must not `_forget` a value it never held.
 /// Tracking this with a flag is only sound because the translated subset is
 /// straight-line; a branch would need a join.
+#[derive(Clone)]
 struct Slot {
     name: String,
     palow_ty: String,
@@ -927,6 +928,9 @@ struct Body<'a> {
     /// Whether this function has a contract to prove. If it does not, a call
     /// to a function whose own contract was dropped is harmless.
     has_contract: bool,
+    /// Whether we are translating the arm of an `if`, where a slot introduced
+    /// now would not outlive the arm.
+    in_branch: bool,
 }
 
 impl<'a> Body<'a> {
@@ -947,13 +951,35 @@ impl<'a> Body<'a> {
         match &e.val {
             ExprT::Var(v) => {
                 if self.slots.iter().any(|s| s.name == *v.val) {
-                    Ok(format!("loc_{}", v.val))
-                } else {
-                    // A parameter of scalar type has no address in the Palow
-                    // model unless the C code takes one, in which case the
-                    // translation would have to give it a slot too.
-                    Err(format!("`{}` has no address", v.val))
+                    return Ok(format!("loc_{}", v.val));
                 }
+                // A C parameter is an ordinary mutable object; Palow passes it
+                // by value, so it only acquires storage if the body asks for
+                // it. It does here, so give it a slot now and copy the
+                // incoming value in. Every later mention goes through the slot
+                // because the slot lookup comes first.
+                if self.env.lookup_var(v).is_none() {
+                    return Err(format!("`{}` is a global", v.val));
+                }
+                if self.in_branch {
+                    // The slot would be scoped to the arm, but uses of the
+                    // parameter after the `if` would still read the value that
+                    // was passed in.
+                    return Err(format!("`{}` is addressed inside an `if`", v.val));
+                }
+                let ty = self.ty_of(e)?;
+                let pn = palow_name(self.tds, &ty)
+                    .ok_or_else(|| format!("`{}` has an unsupported type", v.val))?;
+                self.lines
+                    .push(format!("let loc_{} = {}_stack_alloc ();", v.val, pn));
+                self.lines
+                    .push(format!("{}_write_uninit loc_{} var_{};", pn, v.val, v.val));
+                self.slots.push(Slot {
+                    name: v.val.to_string(),
+                    palow_ty: pn,
+                    init: true,
+                });
+                Ok(format!("loc_{}", v.val))
             }
             ExprT::Deref(inner) => self.rvalue(inner),
             ExprT::VAttr(_, inner) => self.addr(inner),
@@ -1020,6 +1046,48 @@ impl<'a> Body<'a> {
             ExprT::UnOp(UnOp::Not, inner) => {
                 let a = self.rvalue(inner)?;
                 Ok(format!("(not {})", a))
+            }
+            ExprT::UnOp(UnOp::Neg, inner) => {
+                // C negates modulo 2^width at unsigned type; at signed type it
+                // is the same overflow obligation as subtraction.
+                let ty = self.ty_of(e)?;
+                let a = self.rvalue(inner)?;
+                match &self.tds.resolve(&ty).val {
+                    TypeT::Int {
+                        signed: false,
+                        width,
+                    } => Ok(format!(
+                        "(0{} `Pulse.Lib.C.UInt{}.sub_wrap` {})",
+                        int_suffix(false, *width)?,
+                        width,
+                        a
+                    )),
+                    TypeT::Int {
+                        signed: true,
+                        width,
+                    } if self.signed_ok => Ok(format!(
+                        "(0{} `FStar.Int{}.sub` {})",
+                        int_suffix(true, *width)?,
+                        width,
+                        a
+                    )),
+                    TypeT::Int { signed: true, .. } => Err(
+                        "signed arithmetic, whose overflow obligation needs the untranslated `_requires`"
+                            .to_string(),
+                    ),
+                    _ => Err(format!("a negation of {}", describe(&ty))),
+                }
+            }
+            ExprT::UnOp(UnOp::BitNot, inner) => {
+                let ty = self.ty_of(e)?;
+                let a = self.rvalue(inner)?;
+                match &self.tds.resolve(&ty).val {
+                    TypeT::Int {
+                        signed: false,
+                        width,
+                    } => Ok(format!("(FStar.UInt{}.lognot {})", width, a)),
+                    _ => Err(format!("a bitwise complement of {}", describe(&ty))),
+                }
             }
             ExprT::Ref(inner) => self.addr(inner),
             ExprT::FnCall(name, args) => {
@@ -1209,6 +1277,97 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// Translate a statement sequence that runs to the end of the function:
+    /// it either falls off the end or returns, and either way it is
+    /// responsible for releasing every slot the function allocated. A
+    /// `return` inside an `if` is what makes this recursive rather than a
+    /// loop -- the statements after such an `if` are the arm the `return` did
+    /// not take, so they become the other branch.
+    fn rest(&mut self, stmts: &[Rc<Stmt>]) -> Result<Option<String>, String> {
+        for (i, s) in stmts.iter().enumerate() {
+            match &s.val {
+                StmtT::Return(e) => {
+                    let v = match e {
+                        Some(e) => Some(self.rvalue(e)?),
+                        None => None,
+                    };
+                    self.release_from(0);
+                    return Ok(v);
+                }
+                StmtT::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ..
+                } if returns(then_branch) || returns(else_branch) => {
+                    let cty = self.ty_of(cond)?;
+                    if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
+                        return Err("an `if` on a non-boolean condition".to_string());
+                    }
+                    let c = self.rvalue(cond)?;
+                    // Whatever follows the `if` is only reached on the paths
+                    // that did not return, so it belongs to the arm that falls
+                    // through. Appending it to that arm is what turns an early
+                    // `return` into an expression.
+                    let after = &stmts[i + 1..];
+                    let mut then_stmts: Vec<Rc<Stmt>> = then_branch.to_vec();
+                    let mut else_stmts: Vec<Rc<Stmt>> = else_branch.to_vec();
+                    if !returns(then_branch) {
+                        then_stmts.extend(after.iter().cloned());
+                    }
+                    if !returns(else_branch) {
+                        else_stmts.extend(after.iter().cloned());
+                    }
+                    let (then_lines, then_val) = self.tail_arm(&then_stmts)?;
+                    let (else_lines, else_val) = self.tail_arm(&else_stmts)?;
+                    if then_val.is_some() != else_val.is_some() {
+                        return Err("an `if` where only one arm returns a value".to_string());
+                    }
+                    self.lines.push(format!("if ({})", c));
+                    self.lines.push("{".to_string());
+                    self.lines.extend(then_lines.iter().map(|l| indent(l)));
+                    if let Some(v) = then_val {
+                        self.lines.push(indent(&v));
+                    }
+                    self.lines.push("} else {".to_string());
+                    self.lines.extend(else_lines.iter().map(|l| indent(l)));
+                    if let Some(v) = else_val {
+                        self.lines.push(indent(&v));
+                    }
+                    self.lines.push("}".to_string());
+                    return Ok(None);
+                }
+                _ => {
+                    self.env.push_stmt(s);
+                    self.stmt(s)?;
+                }
+            }
+        }
+        self.release_from(0);
+        Ok(None)
+    }
+
+    /// One arm of a returning `if`, translated into its own line buffer
+    /// against a copy of the state at the `if`.
+    fn tail_arm(&mut self, stmts: &[Rc<Stmt>]) -> Result<(Vec<String>, Option<String>), String> {
+        let outer_env = self.env.clone();
+        let outer_lines = std::mem::take(&mut self.lines);
+        let outer_out = self.out_params.clone();
+        let outer_slots = self.slots.clone();
+        let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
+
+        let out = self
+            .rest(stmts)
+            .map(|v| (std::mem::take(&mut self.lines), v));
+
+        self.in_branch = outer_in_branch;
+        self.slots = outer_slots;
+        self.out_params = outer_out;
+        self.env = outer_env;
+        self.lines = outer_lines;
+        out
+    }
+
     /// Translate one arm of an `if` into its own line buffer. The arm is a C
     /// block, so the locals it declares are released at its end and its
     /// declarations do not escape; what does escape is which of the
@@ -1219,6 +1378,7 @@ impl<'a> Body<'a> {
         let outer_env = self.env.clone();
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
+        let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
 
         let result = (|| -> Result<(), String> {
             for s in stmts.iter() {
@@ -1231,6 +1391,7 @@ impl<'a> Body<'a> {
             Ok(())
         })();
 
+        self.in_branch = outer_in_branch;
         let out = (|| {
             result?;
             self.release_from(mark);
@@ -1323,6 +1484,34 @@ fn convert(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             let m = format!("{}Int{}", if *signed { "" } else { "U" }, width);
             Ok(format!("(not ({} `{}.eq` 0{}))", v, m, z))
         }
+        // `size_t` is eight unsigned bytes, but F* keeps it a separate type
+        // with its own casts rather than an `Int` of a known width.
+        (
+            TypeT::Int {
+                signed: false,
+                width,
+            },
+            TypeT::SizeT,
+        ) if *width != 8 => Ok(format!("(sizet_of_uint{} {})", width, v)),
+        (
+            TypeT::SizeT,
+            TypeT::Int {
+                signed: false,
+                width,
+            },
+        ) if *width == 32 || *width == 64 => {
+            Ok(format!("(FStar.SizeT.sizet_to_uint{} {})", width, v))
+        }
+        (
+            TypeT::SizeT,
+            TypeT::Int {
+                signed: false,
+                width,
+            },
+        ) => Ok(format!(
+            "(FStar.Int.Cast.uint64_to_uint{} (FStar.SizeT.sizet_to_uint64 {}))",
+            width, v
+        )),
         _ => Err(format!(
             "a conversion from {} to {}",
             describe(from),
@@ -1441,41 +1630,20 @@ fn emit_body(
         tmp: 0,
         signed_ok: sig.contract,
         has_contract: !defn.decl.ensures.is_empty(),
+        in_branch: false,
     };
 
-    // Straight-line bodies only, with an optional trailing `return`. A
-    // `return` anywhere else would have to release the slots on that path too,
-    // which is a restructuring rather than a translation.
-    let (last, init) = match defn.body.split_last() {
-        Some((l, i)) => (Some(l), i),
-        None => (None, &defn.body[..]),
-    };
-    for s in init {
-        if matches!(s.val, StmtT::Return(_)) {
-            return Err("an early return".to_string());
-        }
-        b.env.push_stmt(s);
-        b.stmt(s)?;
-    }
-
-    let mut tail = None;
-    if let Some(l) = last {
-        match &l.val {
-            StmtT::Return(Some(e)) => {
-                tail = Some(b.rvalue(e)?);
-            }
-            _ => {
-                b.env.push_stmt(l);
-                b.stmt(l)?;
-            }
-        }
-    }
-
-    b.release();
+    let tail = b.rest(&defn.body)?;
     if let Some(t) = tail {
         b.lines.push(t);
     }
     Ok(b.lines)
+}
+
+/// Whether a C block always leaves the function. Only the shape the
+/// translation needs: a trailing `return`.
+fn returns(stmts: &Stmts) -> bool {
+    matches!(stmts.last().map(|s| &s.val), Some(StmtT::Return(_)))
 }
 
 /// Names for the constructs the subset does not cover. These end up in the

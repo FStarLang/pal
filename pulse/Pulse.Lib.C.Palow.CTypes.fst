@@ -735,6 +735,24 @@ ghost fn uint64_t_claim (a: ptr) (#b: bytes) (x: U64.t)
 let size_t_bound (x: SZ.t) : Lemma (SZ.v x < pow2 64) [SMTPat (SZ.v x)] =
   assume (SZ.v x < pow2 64)
 
+(* LP64 again: `size_t` is sixty-four bits wide, so `FStar.SizeT.fits_u64`
+   holds. F* keeps it abstract, so the conversions out of the fixed-width
+   unsigned types are unavailable without assuming it -- the same assumption as
+   `size_t_bound`, stated where the casts need it. *)
+
+let sizet_of_uint16 (x: U16.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U16.v x) =
+  SZ.uint16_to_sizet x
+
+let sizet_of_uint32 (x: U32.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U32.v x) =
+  assume SZ.fits_u64;
+  SZ.fits_u64_implies_fits_32 ();
+  SZ.uint32_to_sizet x
+
+let sizet_of_uint64 (x: U64.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U64.v x) =
+  assume SZ.fits_u64;
+  SZ.uint64_to_sizet x
+
+
 
 
 let size_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: SZ.t) : slprop =

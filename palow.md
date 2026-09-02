@@ -830,8 +830,8 @@ new facts about memory.
    artefact: an `if` that initialises a local on one path only genuinely
    leaves two different states behind. `test/palow_if` is the test for all of this.
 
-   As of this milestone: **595 specifications, 184 of them with real bodies,
-   411 admitted, 182 functions skipped** because they mention a struct, union,
+   As of this milestone: **595 specifications, 225 of them with real bodies,
+   370 admitted, 182 functions skipped** because they mention a struct, union,
    float or function pointer (milestone 4); **373 of 480 contracts are
    translated and 107 dropped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
