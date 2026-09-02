@@ -1549,12 +1549,34 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
                 _ => Err("an unsupported boolean operator".to_string()),
             };
         }
+        // Pointers are one F* type in Palow, and it is an `eqtype`, so
+        // comparing two of them is comparing two of them.
+        TypeT::Pointer(..) | TypeT::FnPtr { .. } => {
+            return match op {
+                BinOp::Eq => Ok("=".to_string()),
+                _ => Err("an operator on a pointer".to_string()),
+            };
+        }
         _ => return Err(format!("an operator on {}", describe(t))),
     };
     match op {
         BinOp::Eq => return Ok("=".to_string()),
         BinOp::Lt => return Ok(format!("`{}.lt`", m)),
         BinOp::LEq => return Ok(format!("`{}.lte`", m)),
+        // The bitwise operators are defined on the whole range at both
+        // signednesses, so they need no obligation and no wrapping variant.
+        // `FStar.SizeT` does not have them, hence the guard.
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor if matches!(t.val, TypeT::Int { .. }) => {
+            return Ok(format!(
+                "`FStar.{}.log{}`",
+                m,
+                match op {
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    _ => "xor",
+                }
+            ));
+        }
         _ => {}
     }
 
