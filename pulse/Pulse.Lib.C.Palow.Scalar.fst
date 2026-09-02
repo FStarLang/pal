@@ -30,6 +30,7 @@ open Pulse.Lib.C.Palow.Bytes
 open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow
+open Pulse.Lib.C.Palow.Array
 
 module SZ = FStar.SizeT
 module U8 = FStar.UInt8
@@ -326,3 +327,62 @@ ghost fn ptr_forget (dest: ptr) (#a: ptr)
   unfold ptr_pts_to dest 1.0R a;
   fold ptr_pts_to_uninit dest;
 }
+
+(* ---------------------------------------------------------------------------
+   Elements of an array
+
+   `array_focus` hands back an `elem_pts_to t_repr`, which is the generic
+   "there exist bytes representing this value" form. Every scalar type has its
+   own points-to predicate instead, so each one gets a pair of ghost functions
+   trading between the two. They are what makes an emitted subscript short: the
+   value stays implicit throughout, so PAL never has to name `Seq.index xs i`.
+   --------------------------------------------------------------------------- *)
+
+ghost fn uint8_t_of_elem (a: ptr) (#p: perm) (#x: U8.t)
+  requires elem_pts_to uint8_t_repr a p x
+  ensures  uint8_t_pts_to a p x
+{
+  elem_reveal uint8_t_repr a;
+  uint8_t_conceal a #p #_ #x;
+}
+
+ghost fn uint8_t_to_elem (a: ptr) (#p: perm) (#x: U8.t)
+  requires uint8_t_pts_to a p x
+  ensures  elem_pts_to uint8_t_repr a p x
+{
+  uint8_t_reveal a;
+  elem_conceal uint8_t_repr a #p #_ #x;
+}
+
+ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
+  requires elem_pts_to uint32_t_repr a p x
+  ensures  uint32_t_pts_to a p x
+{
+  elem_reveal uint32_t_repr a;
+  uint32_t_conceal a #p #_ #x;
+}
+
+ghost fn uint32_t_to_elem (a: ptr) (#p: perm) (#x: U32.t)
+  requires uint32_t_pts_to a p x
+  ensures  elem_pts_to uint32_t_repr a p x
+{
+  uint32_t_reveal a;
+  elem_conceal uint32_t_repr a #p #_ #x;
+}
+
+ghost fn ptr_of_elem (a: ptr) (#p: perm) (#x: ptr)
+  requires elem_pts_to ptr_repr a p x
+  ensures  ptr_pts_to a p x
+{
+  elem_reveal ptr_repr a;
+  ptr_conceal a #p #_ #x;
+}
+
+ghost fn ptr_to_elem (a: ptr) (#p: perm) (#x: ptr)
+  requires ptr_pts_to a p x
+  ensures  elem_pts_to ptr_repr a p x
+{
+  ptr_reveal a;
+  elem_conceal ptr_repr a #p #_ #x;
+}
+

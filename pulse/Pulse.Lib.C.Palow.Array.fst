@@ -258,3 +258,116 @@ ghost fn array_focus (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: S
   Seq.lemma_eq_intro (Seq.slice tail 1 (Seq.length tail))
                      (Seq.slice xs (SZ.v i + 1) (Seq.length xs));
 }
+
+(* ---------------------------------------------------------------------------
+   Putting the element back
+
+   `array_focus` on its own is only half of `a[i]`: a read has to give the
+   element back unchanged and a write has to give a different one back, and
+   both are this. Taking the new element as an implicit `y` rather than
+   insisting it is `Seq.index xs i` is what makes the write case work, and the
+   read case is `y == Seq.index xs i`, where `Seq.upd` is the identity.
+
+   The side condition is the one place where a representation relation has to
+   be a *function* of the value's width: putting `y` back into an array whose
+   stride is `esize` is only meaningful if `y`'s bytes are `esize` long. Every
+   `t_repr` PAL generates satisfies it -- that is what `t_repr_len` says --
+   and it is stated rather than assumed because `elem_pts_to` alone does not
+   know the stride.
+   --------------------------------------------------------------------------- *)
+
+let upd_split (#t: Type) (xs: Seq.seq t) (i: nat { i < Seq.length xs }) (y: t)
+  : Lemma (Seq.upd xs i y
+           == Seq.append (Seq.slice xs 0 i)
+                         (Seq.append (Seq.create 1 y)
+                                     (Seq.slice xs (i + 1) (Seq.length xs))))
+  = Seq.lemma_eq_intro (Seq.upd xs i y)
+                       (Seq.append (Seq.slice xs 0 i)
+                                   (Seq.append (Seq.create 1 y)
+                                               (Seq.slice xs (i + 1) (Seq.length xs))))
+
+ghost fn array_unfocus (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                       (#p: perm) (#xs: Seq.seq t) (#y: t)
+                       (i: SZ.t { SZ.v i < Seq.length xs })
+                       (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) a p (Seq.slice xs 0 (SZ.v i))
+  requires elem_pts_to t_repr (a +! off) p y
+  requires array_pts_to t_repr (SZ.v esize) ((a +! off) +! esize) p
+                        (Seq.slice xs (SZ.v i + 1) (Seq.length xs))
+  requires pure (forall (b: bytes). t_repr y b ==> len b == SZ.v esize)
+  ensures  array_pts_to t_repr (SZ.v esize) a p (Seq.upd xs (SZ.v i) y)
+{
+  array_singleton_intro t_repr (a +! off) esize;
+  array_join t_repr (a +! off) esize esize
+             #p #(Seq.create 1 y) #(Seq.slice xs (SZ.v i + 1) (Seq.length xs));
+  array_join t_repr a esize off
+             #p #(Seq.slice xs 0 (SZ.v i))
+             #(Seq.append (Seq.create 1 y) (Seq.slice xs (SZ.v i + 1) (Seq.length xs)));
+  upd_split xs (SZ.v i) y;
+  rewrite (array_pts_to t_repr (SZ.v esize) a p
+                        (Seq.append (Seq.slice xs 0 (SZ.v i))
+                                    (Seq.append (Seq.create 1 y)
+                                                (Seq.slice xs (SZ.v i + 1) (Seq.length xs)))))
+       as (array_pts_to t_repr (SZ.v esize) a p (Seq.upd xs (SZ.v i) y));
+}
+
+(* The generic layer-1 view of one element, opened and closed. A scalar's own
+   `t_reveal`/`t_conceal` produce and consume exactly this shape, so these two
+   are the adapters between an array element and the machine operations. *)
+
+ghost fn elem_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (#p: perm) (#x: t)
+  requires elem_pts_to t_repr a p x
+  ensures  exists* b. mem_pts_to a p b ** pure (t_repr x b)
+{
+  unfold elem_pts_to t_repr a p x;
+}
+
+ghost fn elem_conceal (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                      (#p: perm) (#b: bytes) (#x: t)
+  requires mem_pts_to a p b
+  requires pure (t_repr x b)
+  ensures  elem_pts_to t_repr a p x
+{
+  fold elem_pts_to t_repr a p x;
+}
+
+(* Closing a focus that only read: the sequence that comes back is the one that
+   went in. This is `array_unfocus` plus the observation that `Seq.upd xs i
+   (Seq.index xs i)` is `xs`, done once here so that every emitted subscript
+   read does not have to repeat it. *)
+ghost fn array_unfocus_read (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                            (#p: perm) (#xs: Seq.seq t)
+                            (i: SZ.t { SZ.v i < Seq.length xs })
+                            (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) a p (Seq.slice xs 0 (SZ.v i))
+  requires elem_pts_to t_repr (a +! off) p (Seq.index xs (SZ.v i))
+  requires array_pts_to t_repr (SZ.v esize) ((a +! off) +! esize) p
+                        (Seq.slice xs (SZ.v i + 1) (Seq.length xs))
+  requires pure (forall (b: bytes).
+                   t_repr (Seq.index xs (SZ.v i)) b ==> len b == SZ.v esize)
+  ensures  array_pts_to t_repr (SZ.v esize) a p xs
+{
+  array_unfocus t_repr a esize i off;
+  Seq.lemma_eq_intro (Seq.upd xs (SZ.v i) (Seq.index xs (SZ.v i))) xs;
+  rewrite (array_pts_to t_repr (SZ.v esize) a p (Seq.upd xs (SZ.v i) (Seq.index xs (SZ.v i))))
+       as (array_pts_to t_repr (SZ.v esize) a p xs);
+}
+
+(* The byte offset of an in-bounds element fits in a `size_t`, so the
+   multiplication a subscript needs is well-defined. This is not an extra
+   assumption: owning the array means owning `esize * length xs` bytes at `a`,
+   and `mem_pts_to_fits` says a live range ends at an address that fits. C says
+   the same thing, and for the same reason. *)
+ghost fn array_offset_fits (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                           (#p: perm) (#xs: Seq.seq t)
+                           (i: SZ.t { SZ.v i < Seq.length xs })
+  preserves array_pts_to t_repr (SZ.v esize) a p xs
+  ensures   pure (SZ.fits (SZ.v esize * SZ.v i))
+{
+  unfold array_pts_to t_repr (SZ.v esize) a p xs;
+  with b. assert (mem_pts_to a p b ** pure (array_repr t_repr (SZ.v esize) xs b));
+  mem_pts_to_fits a;
+  elem_fits (SZ.v esize) (Seq.length xs) (SZ.v i);
+  SZ.fits_lte (SZ.v esize * SZ.v i) (addr_of a + len b);
+  fold array_pts_to t_repr (SZ.v esize) a p xs;
+}

@@ -32,6 +32,9 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.CTypes
 open Pulse.Lib.C.Palow.Machine
+open Pulse.Lib.C.Palow.Array
+module Seq = FStar.Seq
+module SZ = FStar.SizeT
 
 module I32 = FStar.Int32
 
@@ -109,4 +112,45 @@ fn sum_two (x y: ptr) (#px #py: perm) (#a #b: erased I32.t)
   let va = int32_t_read x;
   let vb = int32_t_read y;
   I32.add va vb
+}
+
+(* ---------------------------------------------------------------------------
+   Subscripts
+
+   `uint32_t a[]` in C is one pointer with a sequence's worth of ownership, and
+   `a[i]` is `array_focus`, a machine operation on the element, and
+   `array_unfocus`. This is the shape PAL emits: the offset arithmetic is
+   `esize * i` with its `fits` obligation discharged from the ownership itself,
+   the element is traded between the generic `elem_pts_to` and the scalar's own
+   predicate by the `reveal`/`conceal` pair, and the sequence that comes back
+   is `Seq.upd`, which for a read is the identity.
+   --------------------------------------------------------------------------- *)
+
+fn array_get (a: ptr) (i: SZ.t) (#p: perm) (#xs: erased (Seq.seq U32.t))
+  preserves array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a p xs
+  requires  pure (SZ.v i < Seq.length xs)
+  returns   v : U32.t
+  ensures   pure (v == Seq.index xs (SZ.v i))
+{
+  array_offset_fits uint32_t_repr a uint32_t_sizeof i;
+  array_focus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
+  uint32_t_of_elem (a +! (uint32_t_sizeof `SZ.mul` i));
+  let v = uint32_t_read (a +! (uint32_t_sizeof `SZ.mul` i));
+  uint32_t_to_elem (a +! (uint32_t_sizeof `SZ.mul` i));
+  array_unfocus_read uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
+  v
+}
+
+fn array_set (a: ptr) (i: SZ.t) (w: U32.t) (#xs: erased (Seq.seq U32.t))
+  requires array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a 1.0R xs
+  requires pure (SZ.v i < Seq.length xs)
+  ensures  array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a 1.0R
+                        (Seq.upd xs (SZ.v i) w)
+{
+  array_offset_fits uint32_t_repr a uint32_t_sizeof i;
+  array_focus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
+  uint32_t_of_elem (a +! (uint32_t_sizeof `SZ.mul` i));
+  uint32_t_write (a +! (uint32_t_sizeof `SZ.mul` i)) w;
+  uint32_t_to_elem (a +! (uint32_t_sizeof `SZ.mul` i));
+  array_unfocus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
 }

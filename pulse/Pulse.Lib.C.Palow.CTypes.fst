@@ -29,6 +29,7 @@ open Pulse.Lib.C.Palow.Bytes
 open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow
+open Pulse.Lib.C.Palow.Array
 open Pulse.Lib.C.Palow.Scalar
 
 module SZ = FStar.SizeT
@@ -929,3 +930,142 @@ ghost fn uint8_t_claim (a: ptr) (#b: bytes) (x: U8.t)
 {
   uint8_t_conceal a #1.0R #b #x;
 }
+
+(* ---------------------------------------------------------------------------
+   Elements of an array
+
+   `array_focus` hands back an `elem_pts_to t_repr`, which is the generic
+   "there exist bytes representing this value" form. Every scalar type has its
+   own points-to predicate instead, so each one gets a pair of ghost functions
+   trading between the two. They are what makes an emitted subscript short: the
+   value stays implicit throughout, so PAL never has to name `Seq.index xs i`.
+   --------------------------------------------------------------------------- *)
+
+ghost fn bool_t_of_elem (a: ptr) (#p: perm) (#x: bool)
+  requires elem_pts_to bool_t_repr a p x
+  ensures  bool_t_pts_to a p x
+{
+  elem_reveal bool_t_repr a;
+  bool_t_conceal a #p #_ #x;
+}
+
+ghost fn bool_t_to_elem (a: ptr) (#p: perm) (#x: bool)
+  requires bool_t_pts_to a p x
+  ensures  elem_pts_to bool_t_repr a p x
+{
+  bool_t_reveal a;
+  elem_conceal bool_t_repr a #p #_ #x;
+}
+
+ghost fn int8_t_of_elem (a: ptr) (#p: perm) (#x: I8.t)
+  requires elem_pts_to int8_t_repr a p x
+  ensures  int8_t_pts_to a p x
+{
+  elem_reveal int8_t_repr a;
+  int8_t_conceal a #p #_ #x;
+}
+
+ghost fn int8_t_to_elem (a: ptr) (#p: perm) (#x: I8.t)
+  requires int8_t_pts_to a p x
+  ensures  elem_pts_to int8_t_repr a p x
+{
+  int8_t_reveal a;
+  elem_conceal int8_t_repr a #p #_ #x;
+}
+
+ghost fn int16_t_of_elem (a: ptr) (#p: perm) (#x: I16.t)
+  requires elem_pts_to int16_t_repr a p x
+  ensures  int16_t_pts_to a p x
+{
+  elem_reveal int16_t_repr a;
+  int16_t_conceal a #p #_ #x;
+}
+
+ghost fn int16_t_to_elem (a: ptr) (#p: perm) (#x: I16.t)
+  requires int16_t_pts_to a p x
+  ensures  elem_pts_to int16_t_repr a p x
+{
+  int16_t_reveal a;
+  elem_conceal int16_t_repr a #p #_ #x;
+}
+
+ghost fn int32_t_of_elem (a: ptr) (#p: perm) (#x: I32.t)
+  requires elem_pts_to int32_t_repr a p x
+  ensures  int32_t_pts_to a p x
+{
+  elem_reveal int32_t_repr a;
+  int32_t_conceal a #p #_ #x;
+}
+
+ghost fn int32_t_to_elem (a: ptr) (#p: perm) (#x: I32.t)
+  requires int32_t_pts_to a p x
+  ensures  elem_pts_to int32_t_repr a p x
+{
+  int32_t_reveal a;
+  elem_conceal int32_t_repr a #p #_ #x;
+}
+
+ghost fn int64_t_of_elem (a: ptr) (#p: perm) (#x: I64.t)
+  requires elem_pts_to int64_t_repr a p x
+  ensures  int64_t_pts_to a p x
+{
+  elem_reveal int64_t_repr a;
+  int64_t_conceal a #p #_ #x;
+}
+
+ghost fn int64_t_to_elem (a: ptr) (#p: perm) (#x: I64.t)
+  requires int64_t_pts_to a p x
+  ensures  elem_pts_to int64_t_repr a p x
+{
+  int64_t_reveal a;
+  elem_conceal int64_t_repr a #p #_ #x;
+}
+
+ghost fn uint16_t_of_elem (a: ptr) (#p: perm) (#x: U16.t)
+  requires elem_pts_to uint16_t_repr a p x
+  ensures  uint16_t_pts_to a p x
+{
+  elem_reveal uint16_t_repr a;
+  uint16_t_conceal a #p #_ #x;
+}
+
+ghost fn uint16_t_to_elem (a: ptr) (#p: perm) (#x: U16.t)
+  requires uint16_t_pts_to a p x
+  ensures  elem_pts_to uint16_t_repr a p x
+{
+  uint16_t_reveal a;
+  elem_conceal uint16_t_repr a #p #_ #x;
+}
+
+ghost fn uint64_t_of_elem (a: ptr) (#p: perm) (#x: U64.t)
+  requires elem_pts_to uint64_t_repr a p x
+  ensures  uint64_t_pts_to a p x
+{
+  elem_reveal uint64_t_repr a;
+  uint64_t_conceal a #p #_ #x;
+}
+
+ghost fn uint64_t_to_elem (a: ptr) (#p: perm) (#x: U64.t)
+  requires uint64_t_pts_to a p x
+  ensures  elem_pts_to uint64_t_repr a p x
+{
+  uint64_t_reveal a;
+  elem_conceal uint64_t_repr a #p #_ #x;
+}
+
+ghost fn size_t_of_elem (a: ptr) (#p: perm) (#x: SZ.t)
+  requires elem_pts_to size_t_repr a p x
+  ensures  size_t_pts_to a p x
+{
+  elem_reveal size_t_repr a;
+  size_t_conceal a #p #_ #x;
+}
+
+ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
+  requires size_t_pts_to a p x
+  ensures  elem_pts_to size_t_repr a p x
+{
+  size_t_reveal a;
+  elem_conceal size_t_repr a #p #_ #x;
+}
+
