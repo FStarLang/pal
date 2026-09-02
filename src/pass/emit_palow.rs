@@ -358,11 +358,25 @@ fn is_shared(mode: ParamMode) -> bool {
 
 struct FnSurface {
     decl: String,
+    /// The ownership the contract grants over what the parameters point to.
+    /// A function body never has to restate this -- Pulse carries it -- except
+    /// at a loop, whose invariant Pulse cannot invent.
+    owned: Vec<OwnedParam>,
     /// Whether the C function's own `_requires`/`_ensures` made it into the
     /// specification. When they did not, the contract we emit is weaker than
     /// the source says, and in particular cannot discharge an overflow
     /// obligation -- see `Body::signed_ok`.
     contract: bool,
+}
+
+/// One parameter's pointee ownership, in the form a loop invariant needs: the
+/// C name of the parameter, the F* type of the value, and the points-to less
+/// its final value argument.
+struct OwnedParam {
+    base: String,
+    vty: String,
+    /// `array_pts_to uint32_t_repr 4 var_a 1.0R ` -- append a value to it.
+    pre: String,
 }
 
 /// Which values a specification expression refers to: the ones on entry, the
@@ -392,6 +406,11 @@ struct Spec<'a> {
     /// conjoined into the same proposition.
     guards: RefCell<Vec<String>>,
     ret: String,
+    /// C locals that the specification may mention, mapped to the term
+    /// standing for their current value. A function contract has none -- a
+    /// local is not in scope at the boundary -- but a loop invariant does:
+    /// every live slot is bound existentially and named here.
+    locals: HashMap<String, String>,
 }
 
 impl<'a> Spec<'a> {
@@ -413,6 +432,10 @@ impl<'a> Spec<'a> {
                 self.prop(inner, w)
             }
             ExprT::Old(inner) => self.prop(inner, When::Old),
+            // `_live(x)` says the storage exists. A loop invariant restates the
+            // whole ownership frame anyway, so by the time this is read the
+            // claim has already been made and there is nothing left to say.
+            ExprT::Live(_) => Ok("True".to_string()),
             ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner, w)?)),
             ExprT::BoolLit(b) => Ok(if *b { "True" } else { "False" }.to_string()),
             ExprT::BinOp(op, l, r) => {
@@ -423,7 +446,18 @@ impl<'a> Spec<'a> {
                     _ => None,
                 };
                 if let Some(o) = logical {
-                    return Ok(format!("({} {} {})", self.prop(l, w)?, o, self.prop(r, w)?));
+                    let (a, b) = (self.prop(l, w)?, self.prop(r, w)?);
+                    // `_live(x) && p` is just `p` once the frame carries the
+                    // storage, and a loop invariant is mostly `_live` clauses.
+                    if matches!(op, BinOp::LogAnd) {
+                        if a == "True" {
+                            return Ok(b);
+                        }
+                        if b == "True" {
+                            return Ok(a);
+                        }
+                    }
+                    return Ok(format!("({} {} {})", a, o, b));
                 }
                 let ty = self.ty_of(l)?;
                 if matches!(op, BinOp::Eq) {
@@ -594,7 +628,9 @@ impl<'a> Spec<'a> {
                 }
             }
             ExprT::Var(v) => {
-                if &*v.val == "return" {
+                if let Some(l) = self.locals.get(&*v.val.to_string()) {
+                    Ok(l.clone())
+                } else if &*v.val == "return" {
                     Ok(self.ret.clone())
                 } else if self.env.lookup_var(v).is_some() {
                     Ok(format!("var_{}", v.val))
@@ -665,7 +701,18 @@ impl<'a> Spec<'a> {
             ExprT::BinOp(op, l, r) => {
                 let ty = self.ty_of(l)?;
                 if !matches!(self.tds.resolve(&ty).val, TypeT::SpecInt | TypeT::SpecNat) {
-                    return Err("arithmetic on machine integers in a contract".to_string());
+                    // Machine arithmetic in a specification means what it means
+                    // in a body: unsigned wraps, and signed is undefined unless
+                    // something rules the overflow out. The same operator table
+                    // serves both, so a contract cannot quietly describe an
+                    // operation the body would not perform.
+                    let o = binop(self.tds, *op, &ty, false)?;
+                    return Ok(format!(
+                        "({} {} {})",
+                        self.value(l, w)?,
+                        o,
+                        self.value(r, w)?
+                    ));
                 }
                 let o = match op {
                     BinOp::Add => "+",
@@ -700,6 +747,7 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
     // existential binder, its type, and the points-to less its value argument.
     let mut fresh: Vec<(String, String, String)> = Vec::new();
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    let mut owned: Vec<OwnedParam> = Vec::new();
     let mut arrays: HashSet<String> = HashSet::new();
 
     for (i, arg) in decl.args.iter().enumerate() {
@@ -778,17 +826,32 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
                 perms.push(format!("(#{}: perm)", perm));
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                 preserved.push(pts_to(&perm, &vname));
+                owned.push(OwnedParam {
+                    base: base.clone(),
+                    vty: vty.clone(),
+                    pre: pts_to(&perm, ""),
+                });
                 let v = format!("(reveal {})", vname);
                 pointees.insert(base, (Some(v.clone()), Some(v)));
             }
             ParamMode::Consumed => {
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                 req.push(pts_to("1.0R", &vname));
+                owned.push(OwnedParam {
+                    base: base.clone(),
+                    vty: vty.clone(),
+                    pre: pts_to("1.0R", ""),
+                });
                 pointees.insert(base, (Some(format!("(reveal {})", vname)), None));
             }
             ParamMode::Regular => {
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                 req.push(pts_to("1.0R", &vname));
+                owned.push(OwnedParam {
+                    base: base.clone(),
+                    vty: vty.clone(),
+                    pre: pts_to("1.0R", ""),
+                });
                 fresh.push((format!("{}'", vname), vty, pts_to("1.0R", "")));
                 pointees.insert(
                     base,
@@ -814,6 +877,7 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
         arrays,
         guards: RefCell::new(Vec::new()),
         ret: ret_name.clone(),
+        locals: HashMap::new(),
     };
     let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
         es.iter()
@@ -892,6 +956,7 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
 
     Ok(FnSurface {
         decl: out,
+        owned,
         contract: contract_ok,
     })
 }
@@ -1160,9 +1225,13 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             None => Err("it has no definition here".to_string()),
             Some(d) => emit_body(&tds, env, d, &sig, &callees),
         };
+        match &body {
+            Ok(b) if b.divergent => code += "divergent\n",
+            _ => {}
+        }
         code += &sig.decl;
         match body {
-            Ok(lines) => {
+            Ok(TranslatedBody { lines, .. }) => {
                 code += "{\n";
                 for l in &lines {
                     code += &format!("  {}\n", l);
@@ -1239,6 +1308,9 @@ use num_bigint::BigInt;
 struct Slot {
     name: String,
     palow_ty: String,
+    /// The F* type of the value the slot holds. A loop invariant has to bind
+    /// one existential per live slot, and the binder needs a type.
+    fstar_ty: String,
     init: bool,
 }
 
@@ -1299,6 +1371,16 @@ struct Body<'a> {
     /// obligations are discharged by it, so without one there is nothing to
     /// discharge them with.
     requires_ok: bool,
+    /// The ownership the contract grants over the parameters' pointees, which
+    /// a loop invariant has to restate.
+    owned: &'a [OwnedParam],
+    /// Whether any parameter is `_out`. Such a parameter's storage is
+    /// uninitialised on entry and initialised by the body, so it is not a
+    /// fixed part of the frame a loop invariant can restate.
+    has_out: bool,
+    /// Set by a loop: the function has to be declared `divergent`, since PAL
+    /// translates no `decreases` measure.
+    divergent: bool,
 }
 
 /// What a subscript through an array parameter needs: the element's Palow type
@@ -1359,6 +1441,8 @@ impl<'a> Body<'a> {
                 self.slots.push(Slot {
                     name: v.val.to_string(),
                     palow_ty: pn,
+                    fstar_ty: fstar_type(self.tds, &ty)
+                        .ok_or_else(|| format!("`{}` has no F* type", v.val))?,
                     init: true,
                 });
                 Ok(format!("loc_{}", v.val))
@@ -1613,29 +1697,41 @@ impl<'a> Body<'a> {
 
     /// An rvalue, as an F* expression. Reads are effectful, so they are bound
     /// to a fresh name and the binding is pushed onto `lines`.
-    /// An operand of an assertion.
+    /// An operand of a specification, with its loads left in place.
     ///
-    /// Pulse A-normalises a call appearing inside `assert (pure ...)`, so a
-    /// load does not have to be lifted to a `let` first, and leaving it in
-    /// place is what makes the resulting obligation mention the contract's own
-    /// ghost binder instead of a generated temporary. This inlines the load
-    /// when the access needs nothing else -- a plain scalar. An access that
-    /// also has to open and close a focus keeps its name, because the load
-    /// then sits between the two and more than one such access in a single
-    /// proposition could not be nested.
-    fn read(&mut self, e: &Expr) -> Result<String, String> {
+    /// Pulse A-normalises calls appearing in an `assert (pure ...)` or in a
+    /// `while` head, so the loads an operand needs do not have to be lifted to
+    /// `let`s first. Leaving them in place is what makes the resulting
+    /// obligation mention the contract's or the invariant's own ghost binder
+    /// instead of a generated temporary.
+    ///
+    /// The decision is made from the lines the access actually emitted rather
+    /// than from the shape of the expression: if all of them are simple
+    /// bindings they are substituted back and dropped, and if any of them is
+    /// not -- a focus has to be opened and closed around its load, and two of
+    /// those in one operand could not be nested -- the names stay.
+    fn inline(&mut self, e: &Expr) -> Result<String, String> {
         let before = self.lines.len();
-        let v = self.rvalue(e)?;
-        if self.lines.len() == before + 1 {
-            if let Some(rest) = self.lines[before]
-                .strip_prefix(&format!("let {} = ", v))
-                .and_then(|r| r.strip_suffix(';'))
-            {
-                let rest = format!("({})", rest);
-                self.lines.pop();
-                return Ok(rest);
+        let mut v = self.rvalue(e)?;
+        let added: Vec<String> = self.lines[before..].to_vec();
+        let mut bound = Vec::new();
+        for l in &added {
+            let Some(rest) = l.strip_prefix("let ").and_then(|r| r.strip_suffix(';')) else {
+                return Ok(v);
+            };
+            let Some((n, d)) = rest.split_once(" = ") else {
+                return Ok(v);
+            };
+            bound.push((n.to_string(), format!("({})", d)));
+        }
+        for i in (0..bound.len()).rev() {
+            let (n, d) = bound[i].clone();
+            v = v.replace(&n, &d);
+            for j in 0..i {
+                bound[j].1 = bound[j].1.replace(&n, &d);
             }
         }
+        self.lines.truncate(before);
         Ok(v)
     }
 
@@ -1699,7 +1795,7 @@ impl<'a> Body<'a> {
             _ => {
                 let ty = self.ty_of(e)?;
                 if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
-                    Ok(format!("({} == true)", self.read(e)?))
+                    Ok(format!("({} == true)", self.inline(e)?))
                 } else {
                     Err(format!("{} in an assertion", expr_kind(e)))
                 }
@@ -1724,8 +1820,8 @@ impl<'a> Body<'a> {
             return Err("a specification computation in an assertion".to_string());
         }
         match int_module(self.tds, &ty) {
-            Some(m) => Ok(format!("({}.v {})", m, self.read(e)?)),
-            None => self.read(e),
+            Some(m) => Ok(format!("({}.v {})", m, self.inline(e)?)),
+            None => self.inline(e),
         }
     }
 
@@ -1931,6 +2027,8 @@ impl<'a> Body<'a> {
         self.slots.push(Slot {
             name: name.val.to_string(),
             palow_ty: pn.clone(),
+            fstar_ty: fstar_type(self.tds, ty)
+                .ok_or_else(|| format!("local `{}` has no F* type", name.val))?,
             init: false,
         });
         Ok(pn)
@@ -1985,6 +2083,139 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    /// A `while` loop.
+    ///
+    /// This is the one place where the model asks the source for something the
+    /// old one did not. Pulse computes the join for an `if` by itself, but no
+    /// system invents a loop invariant, so the invariant has to name the whole
+    /// ownership frame: one existential per live local and per parameter
+    /// pointee, the points-to that binds each, and only then the proposition
+    /// the C source wrote. `_live(x)` in the source therefore carries no
+    /// information any more -- the frame already claims the storage -- and the
+    /// C invariant is read purely as a proposition over those binders.
+    ///
+    /// Nothing has to relate the loop's boolean to those binders: Pulse re-runs
+    /// the condition against the invariant and hands its truth to the body and
+    /// its falsity to the exit. The condition is therefore translated once, as
+    /// a computation, with its loads left in the `while` head so that
+    /// `rewrites_to` states them in terms of the invariant's own binders.
+    ///
+    /// A loop makes the function divergent. PAL does not translate a
+    /// `decreases` measure, and C gives it nothing to derive one from.
+    fn loop_(
+        &mut self,
+        cond: &Expr,
+        inv: &Exprs,
+        requires: &Exprs,
+        ensures: &Exprs,
+        body: &Stmts,
+    ) -> Result<(), String> {
+        if !requires.is_empty() || !ensures.is_empty() {
+            return Err("a loop with its own `requires` or `ensures`".to_string());
+        }
+        if self.has_out {
+            return Err("a loop in a function with an `_out` parameter".to_string());
+        }
+
+        let mut binders: Vec<String> = Vec::new();
+        let mut owns: Vec<String> = Vec::new();
+        let mut locals: HashMap<String, String> = HashMap::new();
+        for s in &self.slots {
+            if !s.init {
+                // The frame would have to say that the slot still holds
+                // storage rather than a value, and the body would have to
+                // leave it that way. C that writes a local for the first time
+                // inside a loop is real, but it is not this milestone.
+                return Err(format!("a loop with `{}` not yet written", s.name));
+            }
+            let b = format!("inv_{}", s.name);
+            binders.push(format!("({}: {})", b, s.fstar_ty));
+            owns.push(format!("{}_pts_to loc_{} 1.0R {}", s.palow_ty, s.name, b));
+            locals.insert(s.name.clone(), b);
+        }
+        let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        for o in self.owned {
+            let b = format!("inv_val_{}", o.base);
+            binders.push(format!("({}: {})", b, o.vty));
+            owns.push(format!("{}{}", o.pre, b));
+            pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
+        }
+
+        let spec = Spec {
+            tds: self.tds,
+            env: &self.env,
+            pointees,
+            arrays: self.arrays.keys().cloned().collect(),
+            guards: RefCell::new(Vec::new()),
+            ret: String::new(),
+            locals,
+        };
+        let mut props: Vec<String> = Vec::new();
+        for e in inv.iter() {
+            spec.guards.borrow_mut().clear();
+            let p = spec.prop(e, When::Pre)?;
+            let guards = spec.guards.borrow();
+            // `_live` clauses translate to `True`: the frame has already
+            // claimed the storage. Dropping them keeps the invariant readable.
+            if p == "True" && guards.is_empty() {
+                continue;
+            }
+            props.push(if guards.is_empty() {
+                p
+            } else {
+                format!("({} /\\ {})", guards.join(" /\\ "), p)
+            });
+        }
+
+        let before = self.lines.len();
+        let head = self.inline(cond)?;
+        if self.lines.len() != before {
+            self.lines.truncate(before);
+            return Err("a loop whose condition needs a focused access".to_string());
+        }
+
+        let outer = std::mem::take(&mut self.lines);
+        let was_branch = self.in_branch;
+        self.in_branch = true;
+        let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+        let r = (|| -> Result<(), String> {
+            for s in body.iter() {
+                self.stmt(s)?;
+            }
+            Ok(())
+        })();
+        self.in_branch = was_branch;
+        let body_lines = std::mem::replace(&mut self.lines, outer);
+        r?;
+        if self.slots.iter().map(|s| s.init).ne(inits) {
+            return Err("a loop that first writes a local in its body".to_string());
+        }
+
+        self.lines.push(format!("while ({})", head));
+        // Pulse is indentation-sensitive and these lines are written out with
+        // the statement indent applied only to the first of them, so the
+        // continuations carry their own and must sit deeper than `invariant`.
+        let quant = if binders.is_empty() {
+            String::new()
+        } else {
+            format!("exists* {}.\n      ", binders.join(" "))
+        };
+        let mut body = if owns.is_empty() {
+            "emp".to_string()
+        } else {
+            owns.join(" **\n      ")
+        };
+        if !props.is_empty() {
+            body = format!("{} **\n      pure ({})", body, props.join(" /\\ "));
+        }
+        self.lines.push(format!("  invariant {}{}", quant, body));
+        self.divergent = true;
+        self.lines.push("{".to_string());
+        self.lines.extend(body_lines.iter().map(|l| indent(l)));
+        self.lines.push("};".to_string());
+        Ok(())
+    }
+
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
         match &s.val {
             StmtT::Decl(name, ty) => {
@@ -2005,6 +2236,16 @@ impl<'a> Body<'a> {
                     .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
                 let v = self.rvalue(rhs)?;
                 self.store(lhs, &pn, &v)
+            }
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => {
+                self.loop_(cond, inv, requires, ensures, body)?;
+                Ok(())
             }
             StmtT::Assert(e) => {
                 let p = self.prop(e)?;
@@ -2450,6 +2691,13 @@ fn expr_kind_of(e: &ExprT) -> &'static str {
     }
 }
 
+/// A translated body: its lines, and whether it needs the `divergent`
+/// qualifier on the enclosing `fn`.
+struct TranslatedBody {
+    lines: Vec<String>,
+    divergent: bool,
+}
+
 /// Translate a function body, or say why not. `env` must already have the
 /// function's parameters pushed.
 fn emit_body(
@@ -2458,7 +2706,7 @@ fn emit_body(
     defn: &FnDefn,
     sig: &FnSurface,
     callees: &HashMap<String, Callee>,
-) -> Result<Vec<String>, String> {
+) -> Result<TranslatedBody, String> {
     // An array parameter's ownership is a sequence, so every access through it
     // goes through `array_focus` rather than a plain read. Record what each one
     // needs to be focused: the element's Palow type and its size.
@@ -2504,6 +2752,9 @@ fn emit_body(
         in_branch: false,
         arrays,
         requires_ok: sig.contract && !defn.decl.requires.is_empty(),
+        owned: &sig.owned,
+        has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
+        divergent: false,
         params: defn
             .decl
             .args
@@ -2516,7 +2767,10 @@ fn emit_body(
     if let Some(t) = tail {
         b.lines.push(t);
     }
-    Ok(b.lines)
+    Ok(TranslatedBody {
+        lines: b.lines,
+        divergent: b.divergent,
+    })
 }
 
 /// Whether a C block always leaves the function. Only the shape the

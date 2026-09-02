@@ -849,8 +849,47 @@ new facts about memory.
    assertion following a write, two pointees at once, an ordering through
    `_specint`, and an element of an array parameter.
 
-   As of this milestone: **707 specifications, 298 of them with real bodies,
-   409 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
+   Loops are translated. This is the one construct where the translation has
+   to ask the C source for something the old model never needed. Pulse infers
+   the join for an `if`, but nothing invents a loop invariant, so the emitted
+   `invariant` has to restate the *whole* ownership frame: one existential
+   binder per live local and per parameter pointee, the points-to that binds
+   it, and only then the proposition the C source wrote. A consequence is that
+   `_live(x)` carries no information any more and is translated to `True` and
+   dropped -- the restated frame already claims the storage, and the old
+   model's habit of listing `_live(*p)` in an invariant to keep a pointee
+   framed has no analogue here.
+
+   Two syntactic facts about Pulse shaped the output. There is no boolean
+   binder on an invariant: `invariant b. ...` parses as a projection and is a
+   syntax error, and nothing has to relate the loop's condition to the frame,
+   because Pulse re-runs the condition against the invariant and hands its
+   truth to the body and its falsity to the exit. And no `decreases` is
+   translated -- C has no termination annotation to translate -- so a function
+   containing a loop is emitted `divergent`. The loop head keeps the same
+   inlining treatment as an assertion, since Pulse A-normalises a call there
+   too. `test/palow_loop` covers a loop over locals only, one writing through
+   a pointer parameter, and one focusing and unfocusing an array element in
+   its body while the invariant holds the whole sequence.
+
+   The refusals in `Body::loop_` are each a real gap rather than caution: a
+   loop carrying its own `_requires`/`_ensures`, a loop in a function with an
+   `_out` parameter, one over a still-uninitialised slot, one whose condition
+   needs a focused access, and one that first initialises a local in its body.
+   The body is translated as if it were a branch, so it cannot introduce
+   slots.
+
+   A note on how this was validated, because it nearly was not. F\* comments
+   *nest*, and quoted C is full of accidental delimiters: `_ensures(*x)` opens
+   a nested comment and `(int *)` closes one. `Examples` had been unbalanced
+   since it was written, so everything after line 41 -- `swap`, `sum_two`,
+   `array_get`, `array_set` -- was a comment, and F\* reported "Verified
+   module" for code it had never read. Fixing the comment exposed four real
+   errors in the previously dead half. `opt/check-comments.py`, run from `make
+   test`, now guards against this class of silent success.
+
+   As of this milestone: **710 specifications, 312 of them with real bodies,
+   398 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
 
@@ -859,11 +898,13 @@ new facts about memory.
    parameter's F\* type is `ptr` regardless of how the pointer is used, so the
    pointer-kind inference in `elab` has nothing left to decide.
 
-   The `admit()` reasons, in order, are what to do next. Inline Pulse (60) has
+   The `admit()` reasons, in order, are what to do next. Inline Pulse (67) has
    to be re-expressed against the new predicates and is a source change, not a
-   translator change. Function pointers (46) are milestone 4. Loops (18) need
-   the user's `_invariant`. Globals (17) need a decision about who owns them.
-   Signed arithmetic (21) is refused on purpose: its overflow
+   translator change. Function pointers (50, split between locals and calls
+   through them) are milestone 4 and need a model decision first, since there
+   is no function-pointer predicate yet. Globals (27) need a decision about
+   who owns a translation unit's globals. Signed arithmetic (22) is refused on
+   purpose: its overflow
    obligation is discharged by the `_requires` clause, and emitting it where
    that clause did not translate would produce failures that say nothing about
    the memory model. The rest -- address-of, allocation, globals -- are
