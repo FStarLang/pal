@@ -199,6 +199,17 @@ pub struct PalowModule {
 
 /// The Palow name of a C type: the prefix of its `_pts_to`, `_repr`, `_read`
 /// and `_sizeof` definitions. `None` for types the model does not cover yet.
+/// The F* module whose `v` takes a machine integer to a mathematical one.
+fn int_module(tds: &Typedefs, ty: &Type) -> Option<String> {
+    match &tds.resolve(ty).val {
+        TypeT::Int { signed, width } => {
+            Some(format!("{}Int{}", if *signed { "" } else { "U" }, width))
+        }
+        TypeT::SizeT => Some("SizeT".to_string()),
+        _ => None,
+    }
+}
+
 fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
     match &tds.resolve(ty).val {
         TypeT::Bool => Some("bool_t".to_string()),
@@ -385,13 +396,7 @@ struct Spec<'a> {
 
 impl<'a> Spec<'a> {
     fn int_module(&self, ty: &Type) -> Option<String> {
-        match &self.tds.resolve(ty).val {
-            TypeT::Int { signed, width } => {
-                Some(format!("{}Int{}", if *signed { "" } else { "U" }, width))
-            }
-            TypeT::SizeT => Some("SizeT".to_string()),
-            _ => None,
-        }
+        int_module(self.tds, ty)
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
@@ -1608,6 +1613,94 @@ impl<'a> Body<'a> {
 
     /// An rvalue, as an F* expression. Reads are effectful, so they are bound
     /// to a fresh name and the binding is pushed onto `lines`.
+    /// A specification proposition in *statement* position, as in `_assert`.
+    ///
+    /// A contract has ghost binders for everything it owns, so it can name a
+    /// pointee without touching memory. Inside a body there are no such
+    /// binders -- the translator deliberately tracks no values -- so each
+    /// mention of an object becomes a real load. That is sound and loses
+    /// nothing: a read is the identity on the state, and `rewrites_to` in its
+    /// postcondition makes the loaded name definitionally the stored value, so
+    /// the assertion Pulse checks is the one the C source wrote.
+    fn prop(&mut self, e: &Expr) -> Result<String, String> {
+        match &e.val {
+            ExprT::VAttr(_, inner) => self.prop(inner),
+            ExprT::Cast(inner, to) if matches!(self.tds.resolve(to).val, TypeT::SLProp) => {
+                self.prop(inner)
+            }
+            ExprT::Old(_) => Err("an assertion about the state on entry".to_string()),
+            ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner)?)),
+            ExprT::BoolLit(b) => Ok(if *b { "True" } else { "False" }.to_string()),
+            ExprT::BinOp(op, l, r) => {
+                let logical = match op {
+                    BinOp::LogAnd => Some("/\\"),
+                    BinOp::LogOr => Some("\\/"),
+                    BinOp::Implies => Some("==>"),
+                    _ => None,
+                };
+                if let Some(o) = logical {
+                    // Both sides are evaluated, because the loads have to
+                    // happen before the assertion rather than under it. C's
+                    // short-circuiting is invisible here: an assertion has no
+                    // side effects, and the loads it needs are exactly the
+                    // ones the surrounding ownership already permits.
+                    let a = self.prop(l)?;
+                    let b = self.prop(r)?;
+                    return Ok(format!("({} {} {})", a, o, b));
+                }
+                let ty = self.ty_of(l)?;
+                if matches!(op, BinOp::Eq) {
+                    if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
+                        let a = self.prop(l)?;
+                        let b = self.prop(r)?;
+                        return Ok(format!("({} <==> {})", a, b));
+                    }
+                    let a = self.num(l)?;
+                    let b = self.num(r)?;
+                    return Ok(format!("({} == {})", a, b));
+                }
+                let o = match op {
+                    BinOp::Lt => "<",
+                    BinOp::LEq => "<=",
+                    _ => return Err("an unsupported operator in an assertion".to_string()),
+                };
+                let a = self.num(l)?;
+                let b = self.num(r)?;
+                Ok(format!("({} {} {})", a, o, b))
+            }
+            _ => {
+                let ty = self.ty_of(e)?;
+                if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
+                    Ok(format!("({} == true)", self.rvalue(e)?))
+                } else {
+                    Err(format!("{} in an assertion", expr_kind(e)))
+                }
+            }
+        }
+    }
+
+    /// A specification expression inside a body, as a mathematical integer.
+    fn num(&mut self, e: &Expr) -> Result<String, String> {
+        if let ExprT::Cast(inner, to) = &e.val {
+            if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) {
+                return self.num(inner);
+            }
+        }
+        let ty = self.ty_of(e)?;
+        if matches!(self.tds.resolve(&ty).val, TypeT::SpecInt | TypeT::SpecNat) {
+            // Already mathematical: a literal, or an arithmetic expression
+            // over specification integers.
+            if let ExprT::IntLit(n, _) = &strip_vattr(e).val {
+                return Ok(format!("({})", n));
+            }
+            return Err("a specification computation in an assertion".to_string());
+        }
+        match int_module(self.tds, &ty) {
+            Some(m) => Ok(format!("({}.v {})", m, self.rvalue(e)?)),
+            None => self.rvalue(e),
+        }
+    }
+
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         match &e.val {
             ExprT::VAttr(_, inner) => self.rvalue(inner),
@@ -1884,6 +1977,11 @@ impl<'a> Body<'a> {
                     .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
                 let v = self.rvalue(rhs)?;
                 self.store(lhs, &pn, &v)
+            }
+            StmtT::Assert(e) => {
+                let p = self.prop(e)?;
+                self.lines.push(format!("assert (pure {});", p));
+                Ok(())
             }
             StmtT::Return(None) => Ok(()),
             StmtT::Call(e) => match &e.val {

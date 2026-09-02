@@ -830,8 +830,22 @@ new facts about memory.
    artefact: an `if` that initialises a local on one path only genuinely
    leaves two different states behind. `test/palow_if` is the test for all of this.
 
-   As of this milestone: **701 specifications, 285 of them with real bodies,
-   416 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
+   Assertions are translated. `_assert(p)` becomes the loads that `p`
+   mentions followed by a Pulse `assert (pure ...)`. This is where the
+   deliberate absence of value tracking has to be paid for and turns out to
+   cost nothing: a contract has a ghost binder for everything it owns and can
+   name a pointee without touching memory, but a body has no such binders, so
+   an assertion about `*p` loads `*p` first. A load is the identity on the
+   state and its postcondition carries `rewrites_to`, so the proposition Pulse
+   ends up checking is exactly the one the C source wrote. Both sides of a
+   conjunction are loaded, since the loads have to precede the assertion rather
+   than sit under it; C's short-circuiting is invisible because an assertion
+   has no side effects. `test/palow_assert` covers locals, pointees, an
+   assertion following a write, two pointees at once, an ordering through
+   `_specint`, and an element of an array parameter.
+
+   As of this milestone: **707 specifications, 298 of them with real bodies,
+   409 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
 
