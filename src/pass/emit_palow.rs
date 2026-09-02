@@ -186,7 +186,8 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     match &tds.resolve(ty).val {
         TypeT::Bool => Some(1),
         TypeT::Int { width, .. } => Some((*width / 8) as u64),
-        TypeT::SizeT | TypeT::Pointer(..) => Some(8),
+        TypeT::SizeT | TypeT::PtrdiffT | TypeT::Pointer(..) | TypeT::FnPtr { .. } => Some(8),
+        TypeT::FixedArray(t, n) => palow_sizeof(tds, t).map(|s| s * n),
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -194,6 +195,27 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
         | TypeT::Plain(t)
         | TypeT::Nullable(t) => palow_sizeof(tds, t),
         _ => None,
+    }
+}
+
+/// The alignment of a type the model covers. Every scalar Palow knows about is
+/// aligned to its own width on LP64, and an array is aligned like its element.
+fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
+    match &tds.resolve(ty).val {
+        TypeT::FixedArray(t, _) => palow_alignof(tds, t),
+        _ => palow_sizeof(tds, ty),
+    }
+}
+
+/// Whether a parameter type carries a `_refine`, anywhere under the wrappers
+/// or through the pointer.
+fn refined(tds: &Typedefs, ty: &Type) -> bool {
+    match &tds.resolve(ty).val {
+        TypeT::Refine(..) | TypeT::RefineAlways(..) | TypeT::RefineUninit(..) => true,
+        TypeT::RefineValue(t, ..) | TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => {
+            refined(tds, t)
+        }
+        _ => false,
     }
 }
 
@@ -758,6 +780,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     }
     code += "module SizeT = FStar.SizeT\n\n";
 
+    let mut callees: HashMap<String, Callee> = HashMap::new();
     for decl in &tu.decls {
         let (fndecl, defn) = match &decl.val {
             DeclT::FnDefn(d) => (&d.decl, Some(d)),
@@ -776,7 +799,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
 
         let body = match defn {
             None => Err("it has no definition here".to_string()),
-            Some(d) => emit_body(&tds, env, d, &sig),
+            Some(d) => emit_body(&tds, env, d, &sig, &callees),
         };
         code += &sig.decl;
         match body {
@@ -791,6 +814,32 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                 code += &format!("{{\n  admit() (* body: {} *)\n}}\n\n", why);
             }
         }
+
+        // A call may only pass ownership it can name: a value, or a pointer to
+        // an object the caller holds and gets back unchanged. `_out` and
+        // `_consumes` parameters move ownership across the call, which the
+        // caller's slot bookkeeping does not model yet.
+        callees.insert(
+            fndecl.name.val.to_string(),
+            Callee {
+                simple: fndecl
+                    .args
+                    .iter()
+                    .all(|a| matches!(a.mode, ParamMode::Regular | ParamMode::Const))
+                    && fndecl.ghost_args.is_empty()
+                    && !fndecl
+                        .args
+                        .iter()
+                        .any(|a| extent(&tds, &a.ty) == Some(Extent::Array))
+                    // A `_refine` on a parameter is part of the contract on
+                    // both sides of the call, and is not translated yet; a
+                    // caller that could not see it would be proving against a
+                    // specification weaker than the source's.
+                    && !fndecl.args.iter().any(|a| refined(&tds, &a.ty)),
+                void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
+                contract: sig.contract,
+            },
+        );
     }
 
     vec![PalowModule {
@@ -845,9 +894,25 @@ fn indent(line: &str) -> String {
     format!("  {}", line)
 }
 
+/// What the emitter needs to know about a function it has already emitted in
+/// order to call it: whether every parameter is one the call translation can
+/// pass, and whether the result is a value.
+struct Callee {
+    simple: bool,
+    void: bool,
+    /// Whether the callee's own `_requires`/`_ensures` were translated. If they
+    /// were not its specification says only what memory comes back, and a
+    /// caller that has a contract of its own has nothing to prove it with.
+    contract: bool,
+}
+
 struct Body<'a> {
     tds: &'a Typedefs<'a>,
     env: Env,
+    /// Functions emitted earlier in this module, by C name. A call to anything
+    /// else -- a function defined further down the file, or one whose
+    /// specification was skipped -- has no name to refer to.
+    callees: &'a HashMap<String, Callee>,
     lines: Vec<String>,
     /// C locals with a stack slot, in allocation order.
     slots: Vec<Slot>,
@@ -859,6 +924,9 @@ struct Body<'a> {
     /// discharged by the function's `_requires` clause, so emitting it without
     /// one produces a failure that says nothing about the memory model.
     signed_ok: bool,
+    /// Whether this function has a contract to prove. If it does not, a call
+    /// to a function whose own contract was dropped is harmless.
+    has_contract: bool,
 }
 
 impl<'a> Body<'a> {
@@ -953,8 +1021,52 @@ impl<'a> Body<'a> {
                 let a = self.rvalue(inner)?;
                 Ok(format!("(not {})", a))
             }
+            ExprT::Ref(inner) => self.addr(inner),
+            ExprT::FnCall(name, args) => {
+                let t = self.fresh(&name.val);
+                let call = self.call(name, args)?;
+                self.lines.push(format!("let {} = {};", t, call));
+                Ok(t)
+            }
+            ExprT::SizeOf(t) => {
+                let n = palow_sizeof(self.tds, t)
+                    .ok_or_else(|| format!("`sizeof` of {}", describe(self.tds.resolve(t))))?;
+                Ok(format!("{}sz", n))
+            }
+            ExprT::AlignOf(t) => {
+                let n = palow_alignof(self.tds, t)
+                    .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
+                Ok(format!("{}sz", n))
+            }
             _ => Err(format!("{} is not translated yet", expr_kind(e))),
         }
+    }
+
+    /// The F* application for a call to an already-emitted function. Every
+    /// argument is translated first, since translating one may emit reads.
+    fn call(&mut self, name: &Ident, args: &Exprs) -> Result<String, String> {
+        let c = self
+            .callees
+            .get(&*name.val.to_string())
+            .ok_or_else(|| format!("`{}` is not declared earlier in this file", name.val))?;
+        if !c.simple {
+            return Err(format!(
+                "`{}` takes ownership the caller cannot pass",
+                name.val
+            ));
+        }
+        if !c.contract && self.has_contract {
+            return Err(format!("`{}`'s contract was dropped", name.val));
+        }
+        let mut out = format!("func_{}", name.val);
+        for a in args.iter() {
+            let v = self.rvalue(a)?;
+            out += &format!(" {}", v);
+        }
+        if args.is_empty() {
+            out += " ()";
+        }
+        Ok(format!("({})", out))
     }
 
     fn alloc_slot(&mut self, name: &Ident, ty: &Type) -> Result<String, String> {
@@ -1023,6 +1135,23 @@ impl<'a> Body<'a> {
                 self.store(lhs, &pn, &v)
             }
             StmtT::Return(None) => Ok(()),
+            StmtT::Call(e) => match &e.val {
+                ExprT::FnCall(name, args) => {
+                    let void = self
+                        .callees
+                        .get(&*name.val.to_string())
+                        .is_some_and(|c| c.void);
+                    let call = self.call(name, args)?;
+                    if void {
+                        self.lines.push(format!("{};", call));
+                    } else {
+                        let t = self.fresh(&name.val);
+                        self.lines.push(format!("let {} = {};", t, call));
+                    }
+                    Ok(())
+                }
+                _ => Err("a call through a function pointer".to_string()),
+            },
             StmtT::If {
                 cond,
                 then_branch,
@@ -1282,6 +1411,7 @@ fn emit_body(
     env: Env,
     defn: &FnDefn,
     sig: &FnSurface,
+    callees: &HashMap<String, Callee>,
 ) -> Result<Vec<String>, String> {
     // An array parameter's ownership is a sequence, so every access through it
     // needs `array_focus` rather than a plain read. The contract already says
@@ -1298,6 +1428,7 @@ fn emit_body(
     let mut b = Body {
         tds,
         env,
+        callees,
         lines: Vec::new(),
         slots: Vec::new(),
         out_params: defn
@@ -1309,6 +1440,7 @@ fn emit_body(
             .collect(),
         tmp: 0,
         signed_ok: sig.contract,
+        has_contract: !defn.decl.ensures.is_empty(),
     };
 
     // Straight-line bodies only, with an optional trailing `return`. A
