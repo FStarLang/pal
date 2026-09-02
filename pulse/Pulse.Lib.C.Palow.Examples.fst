@@ -35,13 +35,14 @@ open Pulse.Lib.C.Palow.Machine
 open Pulse.Lib.C.Palow.Array
 module Seq = FStar.Seq
 module SZ = FStar.SizeT
+module U32 = FStar.UInt32
 
 module I32 = FStar.Int32
 
 (* test/swap/swap.c:
 
      void swap(int *x, int *y)
-       _ensures(*y == _old(*x) && *x == _old(*y))
+       _ensures( *y == _old( *x) && *x == _old( *y))
      { int tmp = *y; *y = *x; *x = tmp; }
 
    The postcondition is the specification rather than a `with_pure` afterthought,
@@ -105,8 +106,8 @@ fn write_nested (pp: ptr) (w: I32.t) (#p: perm) (#q: erased ptr) (#v: erased I32
 fn sum_two (x y: ptr) (#px #py: perm) (#a #b: erased I32.t)
   preserves int32_t_pts_to x px a
   preserves int32_t_pts_to y py b
-  returns   r : I32.t
   requires  pure (I32.fits (I32.v a + I32.v b))
+  returns   r : I32.t
   ensures   pure (I32.v r == I32.v a + I32.v b)
 {
   let va = int32_t_read x;
@@ -130,7 +131,10 @@ fn array_get (a: ptr) (i: SZ.t) (#p: perm) (#xs: erased (Seq.seq U32.t))
   preserves array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a p xs
   requires  pure (SZ.v i < Seq.length xs)
   returns   v : U32.t
-  ensures   pure (v == Seq.index xs (SZ.v i))
+  // The precondition is not in scope when the postcondition is typed, and
+  // `Seq.index` is partial, so the bound has to be repeated here. This is what
+  // the emitter's `guards` mechanism does for a generated contract.
+  ensures   pure (SZ.v i < Seq.length xs /\ v == Seq.index xs (SZ.v i))
 {
   array_offset_fits uint32_t_repr a uint32_t_sizeof i;
   array_focus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
@@ -144,8 +148,11 @@ fn array_get (a: ptr) (i: SZ.t) (#p: perm) (#xs: erased (Seq.seq U32.t))
 fn array_set (a: ptr) (i: SZ.t) (w: U32.t) (#xs: erased (Seq.seq U32.t))
   requires array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a 1.0R xs
   requires pure (SZ.v i < Seq.length xs)
-  ensures  array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a 1.0R
-                        (Seq.upd xs (SZ.v i) w)
+  // Same story as `array_get`: `Seq.upd` is partial, so the sequence that
+  // comes back is named and constrained rather than written out in the slprop.
+  ensures  exists* (ys: Seq.seq U32.t).
+             array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a 1.0R ys **
+             pure (SZ.v i < Seq.length xs /\ ys == Seq.upd xs (SZ.v i) w)
 {
   array_offset_fits uint32_t_repr a uint32_t_sizeof i;
   array_focus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
@@ -153,4 +160,53 @@ fn array_set (a: ptr) (i: SZ.t) (w: U32.t) (#xs: erased (Seq.seq U32.t))
   uint32_t_write (a +! (uint32_t_sizeof `SZ.mul` i)) w;
   uint32_t_to_elem (a +! (uint32_t_sizeof `SZ.mul` i));
   array_unfocus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
+}
+
+(* ---------------------------------------------------------------------------
+   A loop.
+
+   This is `test/multiply_by_repeated_addition` written against Palow, and it
+   is where the model's one real annotation cost shows up. Pulse computes the
+   join for an `if` on its own, but it cannot invent a loop invariant, so the
+   invariant has to restate the whole ownership frame: one existential ghost
+   binder per live local, the points-to that binds it, and only then the
+   proposition the C source wrote.
+
+   The condition is read inside the `while` head rather than lifted out, for
+   the same reason it is left inside an `assert`: Pulse A-normalises the call
+   and `rewrites_to` states the resulting obligation in terms of the
+   invariant's own binder. Nothing has to relate the loop's boolean to those
+   binders -- Pulse re-runs the condition against the invariant and hands the
+   body and the exit its truth and its falsity respectively.
+
+   A loop makes the function divergent, since Palow does not translate the
+   `decreases` measure that would keep it total.
+   --------------------------------------------------------------------------- *)
+
+divergent
+fn multiply_by_repeated_addition (x y: U32.t)
+  requires pure (U32.v x * U32.v y <= 4294967295)
+  returns  r : U32.t
+  ensures  pure (U32.v r == U32.v x * U32.v y)
+{
+  let loc_ctr = uint32_t_stack_alloc ();
+  uint32_t_write_uninit loc_ctr 0ul;
+  let loc_acc = uint32_t_stack_alloc ();
+  uint32_t_write_uninit loc_acc 0ul;
+  while (UInt32.lt (uint32_t_read loc_ctr) x)
+    invariant exists* (vctr: U32.t) (vacc: U32.t).
+      uint32_t_pts_to loc_ctr 1.0R vctr **
+      uint32_t_pts_to loc_acc 1.0R vacc **
+      pure (U32.v vctr <= U32.v x /\
+            U32.v vacc == U32.v vctr * U32.v y)
+  {
+    uint32_t_write loc_ctr (UInt32.add (uint32_t_read loc_ctr) 1ul);
+    uint32_t_write loc_acc (UInt32.add (uint32_t_read loc_acc) y);
+  };
+  let r = uint32_t_read loc_acc;
+  uint32_t_forget loc_ctr;
+  uint32_t_stack_free loc_ctr;
+  uint32_t_forget loc_acc;
+  uint32_t_stack_free loc_acc;
+  r
 }
