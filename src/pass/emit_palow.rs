@@ -1613,6 +1613,32 @@ impl<'a> Body<'a> {
 
     /// An rvalue, as an F* expression. Reads are effectful, so they are bound
     /// to a fresh name and the binding is pushed onto `lines`.
+    /// An operand of an assertion.
+    ///
+    /// Pulse A-normalises a call appearing inside `assert (pure ...)`, so a
+    /// load does not have to be lifted to a `let` first, and leaving it in
+    /// place is what makes the resulting obligation mention the contract's own
+    /// ghost binder instead of a generated temporary. This inlines the load
+    /// when the access needs nothing else -- a plain scalar. An access that
+    /// also has to open and close a focus keeps its name, because the load
+    /// then sits between the two and more than one such access in a single
+    /// proposition could not be nested.
+    fn read(&mut self, e: &Expr) -> Result<String, String> {
+        let before = self.lines.len();
+        let v = self.rvalue(e)?;
+        if self.lines.len() == before + 1 {
+            if let Some(rest) = self.lines[before]
+                .strip_prefix(&format!("let {} = ", v))
+                .and_then(|r| r.strip_suffix(';'))
+            {
+                let rest = format!("({})", rest);
+                self.lines.pop();
+                return Ok(rest);
+            }
+        }
+        Ok(v)
+    }
+
     /// A specification proposition in *statement* position, as in `_assert`.
     ///
     /// A contract has ghost binders for everything it owns, so it can name a
@@ -1621,7 +1647,9 @@ impl<'a> Body<'a> {
     /// mention of an object becomes a real load. That is sound and loses
     /// nothing: a read is the identity on the state, and `rewrites_to` in its
     /// postcondition makes the loaded name definitionally the stored value, so
-    /// the assertion Pulse checks is the one the C source wrote.
+    /// the assertion Pulse checks is the one the C source wrote. Pulse hoists
+    /// the loads out of the `assert` itself, so most of them need no name --
+    /// see `read`.
     fn prop(&mut self, e: &Expr) -> Result<String, String> {
         match &e.val {
             ExprT::VAttr(_, inner) => self.prop(inner),
@@ -1671,7 +1699,7 @@ impl<'a> Body<'a> {
             _ => {
                 let ty = self.ty_of(e)?;
                 if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
-                    Ok(format!("({} == true)", self.rvalue(e)?))
+                    Ok(format!("({} == true)", self.read(e)?))
                 } else {
                     Err(format!("{} in an assertion", expr_kind(e)))
                 }
@@ -1696,8 +1724,8 @@ impl<'a> Body<'a> {
             return Err("a specification computation in an assertion".to_string());
         }
         match int_module(self.tds, &ty) {
-            Some(m) => Ok(format!("({}.v {})", m, self.rvalue(e)?)),
-            None => self.rvalue(e),
+            Some(m) => Ok(format!("({}.v {})", m, self.read(e)?)),
+            None => self.read(e),
         }
     }
 

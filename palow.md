@@ -837,10 +837,15 @@ new facts about memory.
    name a pointee without touching memory, but a body has no such binders, so
    an assertion about `*p` loads `*p` first. A load is the identity on the
    state and its postcondition carries `rewrites_to`, so the proposition Pulse
-   ends up checking is exactly the one the C source wrote. Both sides of a
-   conjunction are loaded, since the loads have to precede the assertion rather
-   than sit under it; C's short-circuiting is invisible because an assertion
-   has no side effects. `test/palow_assert` covers locals, pointees, an
+   ends up checking is exactly the one the C source wrote. Pulse A-normalises
+   a call inside `assert (pure ...)`, so most of those loads need no name at
+   all, and leaving them in place is better than lifting them: the obligation
+   then mentions the contract's own ghost binder rather than a generated
+   temporary. An access that also has to open and close a focus does keep its
+   name, because the load sits between the two. Both sides of a conjunction
+   are loaded, since the loads have to precede the assertion rather than sit
+   under it; C's short-circuiting is invisible because an assertion has no
+   side effects. `test/palow_assert` covers locals, pointees, an
    assertion following a write, two pointees at once, an ordering through
    `_specint`, and an element of an array parameter.
 
