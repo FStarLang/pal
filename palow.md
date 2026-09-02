@@ -830,10 +830,9 @@ new facts about memory.
    artefact: an `if` that initialises a local on one path only genuinely
    leaves two different states behind. `test/palow_if` is the test for all of this.
 
-   As of this milestone: **595 specifications, 231 of them with real bodies,
-   364 admitted, 182 functions skipped** because they mention a struct, union,
-   float or function pointer (milestone 4); **373 of 480 contracts are
-   translated and 107 dropped**. The generated `swap` is line-for-line the
+   As of this milestone: **599 specifications, 242 of them with real bodies,
+   357 admitted, 182 functions skipped** because they mention a struct, union,
+   float or function pointer (milestone 4). The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
 
@@ -844,17 +843,29 @@ new facts about memory.
 
    The `admit()` reasons, in order, are what to do next. Inline Pulse (60) has
    to be re-expressed against the new predicates and is a source change, not a
-   translator change. Function calls (43) need the callee's contract, which now
-   exists. `sizeof` (37) is a literal the emitter already computes for the
-   model but does not yet emit in a body. Array parameters (36) and subscripts
-   (18) need `array_focus`, which the model has. A `return` inside an `if` (24)
-   needs both arms to release their slots and agree on a value, which is a
-   restructuring rather than a translation. Loops (17) need the user's
-   `_invariant`. Signed arithmetic (20) is refused on purpose: its overflow
+   translator change. Function pointers (46) are milestone 4. Loops (18) need
+   the user's `_invariant`. Globals (17) need a decision about who owns them.
+   Signed arithmetic (21) is refused on purpose: its overflow
    obligation is discharged by the `_requires` clause, and emitting it where
    that clause did not translate would produce failures that say nothing about
    the memory model. The rest -- address-of, allocation, globals -- are
    milestones 4 and 5.
+
+   Subscripts are translated. `a[i]` on an array parameter is not a read but a
+   six-line sandwich -- discharge the offset's `fits` fact, `array_focus`, trade
+   the generic element predicate for the type's own, do the machine operation,
+   trade back, `array_unfocus` -- and that is the honest cost of a byte-level
+   model: the array really is in pieces for the duration of the access. All six
+   lines are mechanical, and the model was shaped so that they can be: the value
+   never appears in them, so the emitter never has to name `Seq.index xs i`.
+   `*p` on an array parameter goes down the same path, since it is `p[0]`.
+
+   Two obligations are not the emitter's to discharge. `i < Seq.length xs` can
+   only come from the function's own `_requires`, so a subscript in a function
+   whose contract did not translate is refused (7) rather than emitted to fail.
+   The offset's `esize * i` needs to fit in a `size_t`, which `array_offset_fits`
+   derives from the ownership itself. `test/palow_array` covers reads, writes,
+   a read and a write through one array, and two arrays at once.
 
    The dropped contracts are a shorter list, and none of them is about memory.
    Arithmetic on machine integers inside a contract (32) is refused because

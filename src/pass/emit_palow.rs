@@ -931,6 +931,15 @@ struct Body<'a> {
     /// Whether we are translating the arm of an `if`, where a slot introduced
     /// now would not outlive the arm.
     in_branch: bool,
+    /// Array-kind pointer parameters, by C name.
+    arrays: HashMap<String, ArrayParam>,
+}
+
+/// What a subscript through an array parameter needs: the element's Palow type
+/// name, and its size as a `size_t` literal.
+struct ArrayParam {
+    pn: String,
+    esize: String,
 }
 
 impl<'a> Body<'a> {
@@ -987,6 +996,72 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// The index of a subscript, as a `size_t`. C allows any integer type
+    /// here; a signed one would need `i >= 0` to convert, which is exactly the
+    /// obligation the dropped `_requires` would have carried.
+    fn index(&mut self, e: &Expr) -> Result<String, String> {
+        let ty = self.ty_of(e)?;
+        let v = self.rvalue(e)?;
+        match &self.tds.resolve(&ty).val {
+            TypeT::SizeT => Ok(v),
+            TypeT::Int {
+                signed: false,
+                width,
+            } if *width != 8 => Ok(format!("(sizet_of_uint{} {})", width, v)),
+            _ => Err(format!("a subscript indexed by {}", describe(&ty))),
+        }
+    }
+
+    /// Open one element of an array parameter for a single access. Emits the
+    /// prologue -- the offset's `fits` fact, the focus, and the trade from the
+    /// generic element predicate into the type's own -- and returns the
+    /// element's address together with what the epilogue needs.
+    ///
+    /// The caller must emit the matching `unfocus` immediately after the read
+    /// or write, with nothing in between: the array is in pieces until then.
+    fn focus(
+        &mut self,
+        base: &Expr,
+        idx: Option<&Expr>,
+    ) -> Result<(String, String, String), String> {
+        let ExprT::Var(v) = &base.val else {
+            return Err("a subscript of a computed pointer".to_string());
+        };
+        let Some(ap) = self.arrays.get(&*v.val.to_string()) else {
+            return Err(format!(
+                "a subscript of `{}`, which is not an array parameter",
+                v.val
+            ));
+        };
+        let (pn, esize) = (ap.pn.clone(), ap.esize.clone());
+        // `array_focus` demands `i < Seq.length xs`, which only the function's
+        // own `_requires` can supply.
+        if !self.signed_ok {
+            return Err(
+                "a subscript, whose bounds obligation needs the untranslated `_requires`"
+                    .to_string(),
+            );
+        }
+        let i = match idx {
+            Some(e) => self.index(e)?,
+            None => "0sz".to_string(),
+        };
+        let arr = format!("var_{}", v.val);
+        let off = format!("({} `SizeT.mul` {})", esize, i);
+        let at = format!("({} +! {})", arr, off);
+        self.lines.push(format!(
+            "array_offset_fits {}_repr {} {} {};",
+            pn, arr, esize, i
+        ));
+        self.lines.push(format!(
+            "array_focus {}_repr {} {} {} {};",
+            pn, arr, esize, i, off
+        ));
+        self.lines.push(format!("{}_of_elem {};", pn, at));
+        let close = format!("{} {} {} {}", arr, esize, i, off);
+        Ok((at, pn, close))
+    }
+
     /// An rvalue, as an F* expression. Reads are effectful, so they are bound
     /// to a fresh name and the binding is pushed onto `lines`.
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
@@ -1017,6 +1092,17 @@ impl<'a> Body<'a> {
                     if self.out_params.iter().any(|n| *n == *v.val) {
                         return Err(format!("`*{}` is read before it is written", v.val));
                     }
+                    // `*p` on an array parameter is `p[0]`: the ownership is a
+                    // sequence either way, so the access has to be focused.
+                    if self.arrays.contains_key(&*v.val.to_string()) {
+                        let (at, pn, close) = self.focus(inner, None)?;
+                        let t = self.fresh("elem");
+                        self.lines.push(format!("let {} = {}_read {};", t, pn, at));
+                        self.lines.push(format!("{}_to_elem {};", pn, at));
+                        self.lines
+                            .push(format!("array_unfocus_read {}_repr {};", pn, close));
+                        return Ok(t);
+                    }
                 }
                 let ty = self.ty_of(e)?;
                 let pn = palow_name(self.tds, &ty)
@@ -1024,6 +1110,15 @@ impl<'a> Body<'a> {
                 let a = self.addr(e)?;
                 let t = self.fresh("deref");
                 self.lines.push(format!("let {} = {}_read {};", t, pn, a));
+                Ok(t)
+            }
+            ExprT::Index(base, idx) => {
+                let (at, pn, close) = self.focus(base, Some(idx))?;
+                let t = self.fresh("elem");
+                self.lines.push(format!("let {} = {}_read {};", t, pn, at));
+                self.lines.push(format!("{}_to_elem {};", pn, at));
+                self.lines
+                    .push(format!("array_unfocus_read {}_repr {};", pn, close));
                 Ok(t)
             }
             ExprT::BoolLit(b) => Ok(if *b { "true" } else { "false" }.to_string()),
@@ -1175,6 +1270,26 @@ impl<'a> Body<'a> {
                     .push(format!("{}_{} loc_{} {};", pn, op, v.val, value));
                 return Ok(());
             }
+        }
+        if let ExprT::Deref(inner) = &lhs.val {
+            if let ExprT::Var(v) = &inner.val {
+                if self.arrays.contains_key(&*v.val.to_string()) {
+                    let (at, epn, close) = self.focus(inner, None)?;
+                    self.lines.push(format!("{}_write {} {};", epn, at, value));
+                    self.lines.push(format!("{}_to_elem {};", epn, at));
+                    self.lines
+                        .push(format!("array_unfocus {}_repr {};", epn, close));
+                    return Ok(());
+                }
+            }
+        }
+        if let ExprT::Index(base, idx) = &lhs.val {
+            let (at, epn, close) = self.focus(base, Some(idx))?;
+            self.lines.push(format!("{}_write {} {};", epn, at, value));
+            self.lines.push(format!("{}_to_elem {};", epn, at));
+            self.lines
+                .push(format!("array_unfocus {}_repr {};", epn, close));
+            return Ok(());
         }
         let a = self.addr(lhs)?;
         self.lines.push(format!("{}_write {} {};", pn, a, value));
@@ -1549,11 +1664,11 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
                 _ => Err("an unsupported boolean operator".to_string()),
             };
         }
-        // Pointers are one F* type in Palow, and it is an `eqtype`, so
-        // comparing two of them is comparing two of them.
+        // `ptr` is abstract and so has no decidable equality of its own; the
+        // model provides one, which is what C's `==` on pointers means.
         TypeT::Pointer(..) | TypeT::FnPtr { .. } => {
             return match op {
-                BinOp::Eq => Ok("=".to_string()),
+                BinOp::Eq => Ok("`ptr_eq`".to_string()),
                 _ => Err("an operator on a pointer".to_string()),
             };
         }
@@ -1625,15 +1740,26 @@ fn emit_body(
     callees: &HashMap<String, Callee>,
 ) -> Result<Vec<String>, String> {
     // An array parameter's ownership is a sequence, so every access through it
-    // needs `array_focus` rather than a plain read. The contract already says
-    // so; the body translation does not do it yet.
-    if defn
-        .decl
-        .args
-        .iter()
-        .any(|a| extent(tds, &a.ty) == Some(Extent::Array))
-    {
-        return Err("an array parameter".to_string());
+    // goes through `array_focus` rather than a plain read. Record what each one
+    // needs to be focused: the element's Palow type and its size.
+    let mut arrays = HashMap::new();
+    for a in &defn.decl.args {
+        if extent(tds, &a.ty) != Some(Extent::Array) {
+            continue;
+        }
+        let (Some(name), Some(pt)) = (a.name.as_ref(), pointee(tds, &a.ty)) else {
+            continue;
+        };
+        let (Some(pn), Some(esize)) = (palow_name(tds, pt), palow_sizeof(tds, pt)) else {
+            continue;
+        };
+        arrays.insert(
+            name.val.to_string(),
+            ArrayParam {
+                pn,
+                esize: format!("{}sz", esize),
+            },
+        );
     }
 
     let mut b = Body {
@@ -1653,6 +1779,7 @@ fn emit_body(
         signed_ok: sig.contract,
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
+        arrays,
     };
 
     let tail = b.rest(&defn.body)?;
