@@ -531,14 +531,74 @@ gate. An increase in verification time or annotation overhead may well be worth
 paying for verifiable custom allocators and a real account of type-punning —
 but we should know what we are paying.
 
-Measure, before and after, over the whole `test/` suite:
+### First measurements
 
- - total and per-file F\* verification time;
- - number of Z3 queries and rlimit consumed;
- - lines of annotation in the `.c` inputs, and lines of generated `.fst`;
- - number of `_include_pulse` / manual-proof escape hatches needed.
+Taken with the port at the state described under "Implementation status":
+specifications for every function whose types the model covers, and bodies for
+straight-line scalar code. The Palow side is therefore *partial*, and the
+numbers below are not a verdict. What they are good for is ruling out the
+failure mode we were most worried about — that a byte-level model would be
+ruinously slow — and identifying what actually dominates the cost today.
 
-Record the numbers in this document when the evaluation is done.
+Whole `test/` suite, from a clean cache:
+
+| | current model | Palow (partial) |
+| --- | --- | --- |
+| wall time | 3 m 54 s (`-j8`) | 2.5 s (`-j256`) |
+| CPU time | 23 m 13 s | 2 m 28 s |
+| generated modules | 2358 | 158 |
+| generated lines | 53 350 | 10 556 |
+
+Two comparable single tests, controlling for what is actually being verified:
+
+| | current model | Palow |
+| --- | --- | --- |
+| `swap` (1 function) | 1.75 s, 3 modules, 31 lines | 0.70 s, 1 module, 52 lines |
+| `issue51_test` (60 functions) | 89.7 s, 137 modules, 1762 lines | 1.34 s, 1 module, 513 lines |
+
+`issue51_test` is the useful one: all 60 of its functions are translated with
+real bodies and none are skipped, so the two columns verify the same program.
+
+### What the numbers say
+
+**Verification cost is dominated by module granularity, not by the memory
+model.** F\* spends about 0.65–0.85 s on a generated module regardless of its
+contents: an eleven-line `Func_cmp1.fst` from `issue51_test` takes 844 ms on
+its own, and an empty module with no Pulse in scope still takes 238 ms. PAL
+emits one module per declaration, so `issue51_test`'s 89.7 s is roughly
+137 × 0.65 s of fixed cost. The Palow emitter happens to produce one module per
+translation unit, which is why it looks 67× faster; almost all of that is
+packaging. Anyone repeating this measurement later must control for it, and it
+is worth asking separately whether the current one-module-per-declaration
+scheme is paying for itself.
+
+**Byte-level reasoning did not show up as a cost.** The scalar layer folds to a
+single `mem_pts_to` with a concrete `encode`, and the derived lemmas discharge
+without visible solver effort. The `pulse/` library itself — including the
+proved `Encoding`, `Aggregate`, `Union`, `Etype` and `Provenance` modules —
+verifies as part of the ordinary build.
+
+**Generated code is smaller per function**, though not by as much as the table
+suggests. `issue51_test` is 29 lines per function today against about 8 for
+Palow (513 lines less a 36-line module header, over 60 functions). Some of that
+is real — no per-declaration module preamble, no pointer-kind-specific
+predicate — and some is the untranslated contracts.
+
+### Still to measure
+
+These need the port to be further along to mean anything:
+
+ - Z3 queries and rlimit consumed. `--query_stats` reports nothing on a
+   successful run in this build, so this needs a different harness.
+ - Annotation lines in the `.c` inputs. Today's suite has 28 829 lines of C
+   and headers, 4092 of which mention a PAL annotation, and 341
+   `_include_pulse` uses. The question the refactor has to answer is whether
+   those numbers go up, and the `_include_pulse` count is the one to watch: it
+   is the escape hatch, and every use is a place the model was not expressive
+   enough. All 341 are currently untranslated, so we do not know yet.
+ - Verification time for aggregates, which is where a byte-level model is most
+   likely to hurt — a struct's points-to unfolds to a `mem_pts_to` over a
+   concrete byte layout, and nothing in the suite exercises that at scale yet.
 
 ## Implementation status
 
