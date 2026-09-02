@@ -731,12 +731,19 @@ new facts about memory.
   clang may miscompile.
 - `size_t` is eight bytes and `SizeT.v` is assumed to be below `pow2 64`, for
   the same reason and with the same justification as `Ptr.addr_bound`.
-- `--palow` drops the user's `_requires`/`_ensures` clauses, so the generated
-  specifications are weaker than the ones PAL emits today. They are not wrong,
-  but a passing `make palow-check` says the shape of the translation
-  typechecks against bodies we could translate, not that every function could
-  be implemented against its real contract. The most visible consequence is
-  that signed arithmetic has to be refused rather than emitted.
+- `--palow` translates the user's `_requires`/`_ensures` clauses where it can,
+  but all-or-nothing per function: if any clause is untranslatable the whole
+  contract is dropped and a `(* contract dropped: ... *)` comment is emitted in
+  its place. 107 of 480 contracts are currently dropped this way. A passing
+  `make palow-check` therefore says that the translation typechecks, not that
+  every function could be implemented against its real contract -- for a
+  dropped contract the function has no obligations left to fail.
+- An array parameter's postcondition indexes the *final* sequence, so
+  `_ensures(return == *p)` becomes `Seq.index val_p' 0` rather than an
+  index into the initial one. That is the right reading for a function that
+  may write through `p`, but it differs from PAL today, where `*p` in an
+  `_ensures` is resolved against the pointer's current contents in a model
+  that does not name the two states separately.
 - A translated local always gets a stack slot, even when it is never assigned
   and its address is never taken. An F\* `let` would be cheaper, but choosing
   it needs an analysis whose failure mode is silent, so it is deferred until
@@ -751,7 +758,8 @@ new facts about memory.
 
 1. **Done.** Layer 0: `ptr` with provenance, `bytes`, `mem_pts_to`, split/join/
    disjointness. No translator changes.
-2. *In progress; specifications and straight-line bodies are translated.* The
+2. *In progress; specifications, contracts and straight-line bodies are
+   translated.* The
    scalar typed layer is done for the full set of C scalar types (now including
    `size_t`), together with per-type stack alloc/free, `rewrites_to` on reads,
    and `memcpy`. `Pulse.Lib.C.Palow.Examples` fixes the target by hand.
@@ -766,11 +774,32 @@ new facts about memory.
    stopped it. `make palow-check` runs this over every test and typechecks the
    result.
 
-   As of this milestone: **598 specifications, 145 of them with real bodies,
-   453 admitted, 176 functions skipped** because they mention a struct, union,
-   array, float or function pointer (milestone 4). The generated `swap` is
-   line-for-line the hand-written `swap_addressable` in `Examples`, which is
-   the check that mattered.
+   Contracts are translated too. What makes this tractable is that `elab`
+   already inserts the explicit `(_specint)` and `(_slprop)` casts that mark
+   where a machine value becomes a mathematical one, so the emitter has only to
+   follow them. The parameter modes become different ownership shapes rather
+   than different types: `_out` starts from `t_pts_to_uninit`, `_const` uses
+   `preserves` with a permission binder, `_consumes` appears in the
+   precondition only, and a plain parameter gets an existential final value.
+
+   Pointer *extent* is the one thing Palow does not make go away. Every C
+   pointer has the same F\* type, which is what removes the pointer-kind
+   inference from the translator's type assignment -- but a `T p[]` still owns
+   a sequence rather than a single `T`, and that has to be said somewhere. It
+   is said in the contract: array parameters get
+   `array_pts_to t_repr esize p perm xs` with a `Seq.seq` ghost binder,
+   `p._length` becomes `Seq.length xs`, and `*p` becomes `Seq.index xs 0`. The
+   distinction moves from the type to the specification; it does not vanish.
+   Because `Seq.index` is partial and a postcondition cannot appeal to the
+   precondition for its own well-typedness, the emitter collects the bounds it
+   needs and conjoins them into the same `pure`.
+
+   As of this milestone: **592 specifications, 150 of them with real bodies,
+   442 admitted, 182 functions skipped** because they mention a struct, union,
+   float or function pointer (milestone 4); **373 of 480 contracts are
+   translated and 107 dropped**. The generated `swap` is line-for-line the
+   hand-written `swap_addressable` in `Examples`, which is the check that
+   mattered.
 
    Emitting this much settles the part of the port that carries the model
    decisions, and demonstrates the payoff claimed in the overview: a
@@ -787,6 +816,16 @@ new facts about memory.
    translated would produce failures that say nothing about the memory model.
    The rest -- address-of, subscripts, allocation, globals -- are milestones 4
    and 5.
+
+   The dropped contracts are a shorter list, and none of them is about memory.
+   Arithmetic on machine integers inside a contract (32) is refused because
+   `Int32.v (a + b)` is not `Int32.v a + Int32.v b`: for unsigned types the C
+   operation wraps, and for signed ones the equality holds only under the
+   no-overflow assumption that the surrounding contract is there to establish.
+   Distributing it would silently change the specification, so it waits for a
+   translation that carries the modulus. Inline Pulse (17) and calls to
+   functions whose own contract is not translated (13) are the same problems as
+   in the bodies.
 
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;

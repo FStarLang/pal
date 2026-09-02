@@ -35,7 +35,8 @@
 //! is the property that makes the pointer-kind inference in
 //! [`crate::pass::elab`] unnecessary.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ir::*;
@@ -153,6 +154,49 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
     }
 }
 
+/// How much memory a pointer parameter owns. Palow makes every C pointer the
+/// same F* *type*, which is what removes the pointer-kind inference from
+/// `elab` -- but it does not make the *extent* of the ownership go away. A
+/// `T *` that C uses as an array still has to appear in the contract as an
+/// array, and clang's pointer kind is what tells us which it is. The
+/// distinction moves from the type to the specification; it does not vanish.
+#[derive(Clone, Copy, PartialEq)]
+enum Extent {
+    One,
+    Array,
+}
+
+fn extent(tds: &Typedefs, ty: &Type) -> Option<Extent> {
+    match &tds.resolve(ty).val {
+        TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => Some(Extent::Array),
+        TypeT::Pointer(..) => Some(Extent::One),
+        TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t) => extent(tds, t),
+        _ => None,
+    }
+}
+
+/// The size in bytes of a type the model covers. These are clang's LP64 sizes,
+/// which the rest of the model already assumes.
+fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
+    match &tds.resolve(ty).val {
+        TypeT::Bool => Some(1),
+        TypeT::Int { width, .. } => Some((*width / 8) as u64),
+        TypeT::SizeT | TypeT::Pointer(..) => Some(8),
+        TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t) => palow_sizeof(tds, t),
+        _ => None,
+    }
+}
+
 /// The pointee of a pointer parameter, skipping the wrappers that do not
 /// change the representation.
 fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
@@ -177,20 +221,315 @@ fn is_shared(mode: ParamMode) -> bool {
 
 struct FnSurface {
     decl: String,
+    /// Whether the C function's own `_requires`/`_ensures` made it into the
+    /// specification. When they did not, the contract we emit is weaker than
+    /// the source says, and in particular cannot discharge an overflow
+    /// obligation -- see `Body::signed_ok`.
+    contract: bool,
+}
+
+/// Which values a specification expression refers to: the ones on entry, the
+/// ones on exit, or -- inside `_old` -- the ones on entry again.
+#[derive(Clone, Copy, PartialEq)]
+enum When {
+    Pre,
+    Post,
+    Old,
+}
+
+/// Enough of the function's signature to translate its contract: what each
+/// pointer parameter's pointee is called before and after the call, and what
+/// the result is called.
+struct Spec<'a> {
+    tds: &'a Typedefs<'a>,
+    env: &'a Env,
+    /// C parameter name -> (term for the pointee on entry, on exit).
+    /// `None` on entry means an `_out` parameter, which has no incoming value;
+    /// `None` on exit means ownership the function does not give back.
+    pointees: HashMap<String, (Option<String>, Option<String>)>,
+    /// Parameters whose `pointees` entry is a sequence rather than a value.
+    arrays: HashSet<String>,
+    /// Well-definedness side conditions raised while translating the clause
+    /// currently in flight. `Seq.index` is partial, and a postcondition cannot
+    /// appeal to the precondition for its own typing, so the bound has to be
+    /// conjoined into the same proposition.
+    guards: RefCell<Vec<String>>,
+    ret: String,
+}
+
+impl<'a> Spec<'a> {
+    fn int_module(&self, ty: &Type) -> Option<String> {
+        match &self.tds.resolve(ty).val {
+            TypeT::Int { signed, width } => {
+                Some(format!("{}Int{}", if *signed { "" } else { "U" }, width))
+            }
+            TypeT::SizeT => Some("SizeT".to_string()),
+            _ => None,
+        }
+    }
+
+    fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
+        self.env
+            .infer_expr(e)
+            .map(|t| t.to_rc())
+            .map_err(|_| "a subexpression whose type could not be inferred".to_string())
+    }
+
+    /// A specification expression in proposition position.
+    fn prop(&self, e: &Expr, w: When) -> Result<String, String> {
+        match &e.val {
+            ExprT::Cast(inner, to) if matches!(self.tds.resolve(to).val, TypeT::SLProp) => {
+                self.prop(inner, w)
+            }
+            ExprT::Old(inner) => self.prop(inner, When::Old),
+            ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner, w)?)),
+            ExprT::BoolLit(b) => Ok(if *b { "True" } else { "False" }.to_string()),
+            ExprT::BinOp(op, l, r) => {
+                let logical = match op {
+                    BinOp::LogAnd => Some("/\\"),
+                    BinOp::LogOr => Some("\\/"),
+                    BinOp::Implies => Some("==>"),
+                    _ => None,
+                };
+                if let Some(o) = logical {
+                    return Ok(format!("({} {} {})", self.prop(l, w)?, o, self.prop(r, w)?));
+                }
+                let ty = self.ty_of(l)?;
+                if matches!(op, BinOp::Eq) {
+                    // `_Bool` equality is equivalence of the two conditions,
+                    // not equality of two values: one side is often a
+                    // comparison, which has no value in F*.
+                    if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
+                        return Ok(format!("({} <==> {})", self.prop(l, w)?, self.prop(r, w)?));
+                    }
+                    // `num` rather than `value`: machine-integer `v` is
+                    // injective, so this is the same proposition, and it is
+                    // the only form that also works for `p._length`.
+                    return Ok(format!("({} == {})", self.num(l, w)?, self.num(r, w)?));
+                }
+                let o = match op {
+                    BinOp::Lt => "<",
+                    BinOp::LEq => "<=",
+                    _ => return Err("an unsupported operator in a contract".to_string()),
+                };
+                // C compares machine integers directly; F* orders only
+                // mathematical ones, so an uncast comparison needs the `.v`
+                // that an explicit `(_specint)` would have supplied.
+                Ok(format!("({} {} {})", self.num(l, w)?, o, self.num(r, w)?))
+            }
+            _ => {
+                // A bare `_Bool`-valued condition.
+                let ty = self.ty_of(e)?;
+                if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
+                    Ok(format!("({} == true)", self.value(e, w)?))
+                } else {
+                    Err(format!("{} in a contract", expr_kind(e)))
+                }
+            }
+        }
+    }
+
+    /// A specification expression as a mathematical integer.
+    /// `p._length` is the one specification form that is already
+    /// mathematical: an array parameter's ownership *is* a sequence, so the
+    /// length is `Seq.length` of it and never goes through `SizeT.v`.
+    fn length_of(&self, e: &Expr, w: When) -> Option<Result<String, String>> {
+        let ExprT::VAttr(VAttr::Length, inner) = &e.val else {
+            return None;
+        };
+        let ExprT::Var(v) = &inner.val else {
+            return Some(Err("`_length` of a computed pointer".to_string()));
+        };
+        Some(match self.pointees.get(&*v.val) {
+            None => Err(format!("`{}._length` in a contract", v.val)),
+            Some((pre, post)) => {
+                let chosen = match w {
+                    When::Post => post,
+                    When::Pre | When::Old => pre,
+                };
+                match chosen {
+                    Some(s) => Ok(format!("(Seq.length {})", s)),
+                    None => Err(format!("`{}._length` is not available here", v.val)),
+                }
+            }
+        })
+    }
+
+    /// `*p` and `p[i]`. For a scalar parameter the pointee *is* the ghost
+    /// value; for an array parameter it is an index into the ghost sequence,
+    /// which is why the two cannot share a translation.
+    fn pointee_at(&self, base: &Expr, idx: Option<&Expr>, w: When) -> Result<String, String> {
+        let ExprT::Var(v) = &base.val else {
+            return Err("a contract that dereferences a computed pointer".to_string());
+        };
+        let Some((pre, post)) = self.pointees.get(&*v.val) else {
+            return Err(format!("`*{}` in a contract", v.val));
+        };
+        let chosen = match w {
+            When::Post => post,
+            When::Pre | When::Old => pre,
+        };
+        let Some(term) = chosen else {
+            return Err(format!(
+                "`*{}` has no {} value",
+                v.val,
+                if w == When::Post { "final" } else { "initial" }
+            ));
+        };
+        if self.arrays.contains(&*v.val) {
+            let i = match idx {
+                None => "0".to_string(),
+                Some(i) => self.num(i, w)?,
+            };
+            self.guards
+                .borrow_mut()
+                .push(format!("{} < Seq.length {}", i, term));
+            Ok(format!("(Seq.index {} {})", term, i))
+        } else if idx.is_some() {
+            Err(format!("`{}[i]` on a non-array in a contract", v.val))
+        } else {
+            Ok(term.clone())
+        }
+    }
+
+    fn num(&self, e: &Expr, w: When) -> Result<String, String> {
+        if let ExprT::Old(inner) = &e.val {
+            return self.num(inner, When::Old);
+        }
+        if let Some(l) = self.length_of(e, w) {
+            return l;
+        }
+        let ty = self.ty_of(e)?;
+        match self.int_module(&ty) {
+            Some(m) => Ok(format!("({}.v {})", m, self.value(e, w)?)),
+            None => self.value(e, w),
+        }
+    }
+
+    /// A specification expression in value position.
+    fn value(&self, e: &Expr, w: When) -> Result<String, String> {
+        match &e.val {
+            ExprT::Old(inner) => self.value(inner, When::Old),
+            ExprT::Cast(inner, to) => {
+                let to = self.tds.resolve(to);
+                match &to.val {
+                    // `(_specint) e` is where a machine value becomes a
+                    // mathematical one. This is what lets a contract state an
+                    // overflow bound at all, so it is the case that matters.
+                    TypeT::SpecInt | TypeT::SpecNat => {
+                        if let Some(l) = self.length_of(inner, w) {
+                            return l;
+                        }
+                        let ity = self.ty_of(inner)?;
+                        match self.int_module(&ity) {
+                            Some(m) => Ok(format!("({}.v {})", m, self.value(inner, w)?)),
+                            None if matches!(
+                                self.tds.resolve(&ity).val,
+                                TypeT::SpecInt | TypeT::SpecNat
+                            ) =>
+                            {
+                                self.value(inner, w)
+                            }
+                            // C's integer promotion of `_Bool`.
+                            None if matches!(self.tds.resolve(&ity).val, TypeT::Bool) => {
+                                Ok(format!("(if {} then 1 else 0)", self.value(inner, w)?))
+                            }
+                            None => Err(format!(
+                                "a contract that measures {}",
+                                describe(self.tds.resolve(&ity))
+                            )),
+                        }
+                    }
+                    _ => {
+                        let from = self.ty_of(inner)?;
+                        if fstar_type(self.tds, &from) == fstar_type(self.tds, to) {
+                            self.value(inner, w)
+                        } else {
+                            Err(format!(
+                                "a contract converting {} to {}",
+                                describe(self.tds.resolve(&from)),
+                                describe(to)
+                            ))
+                        }
+                    }
+                }
+            }
+            ExprT::Var(v) => {
+                if &*v.val == "return" {
+                    Ok(self.ret.clone())
+                } else if self.env.lookup_var(v).is_some() {
+                    Ok(format!("var_{}", v.val))
+                } else {
+                    Err(format!("`{}` in a contract", v.val))
+                }
+            }
+            ExprT::Deref(inner) => self.pointee_at(inner, None, w),
+            ExprT::Index(base, idx) => self.pointee_at(base, Some(idx), w),
+            ExprT::UnOp(op, inner) => {
+                let ety = self.ty_of(e)?;
+                let ty = self.tds.resolve(&ety);
+                match (op, &ty.val) {
+                    // Only at specification level, where there is no
+                    // wraparound to get wrong.
+                    (UnOp::Neg, TypeT::SpecInt | TypeT::SpecNat) => {
+                        Ok(format!("(0 - {})", self.value(inner, w)?))
+                    }
+                    (UnOp::Not, TypeT::Bool) => Ok(format!("(not {})", self.value(inner, w)?)),
+                    _ => Err(format!(
+                        "`{}` on {} in a contract",
+                        op.to_str(),
+                        describe(ty)
+                    )),
+                }
+            }
+            ExprT::BoolLit(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+            ExprT::IntLit(n, ty) => match &self.tds.resolve(ty).val {
+                TypeT::SpecInt | TypeT::SpecNat => Ok(if **n < BigInt::ZERO {
+                    format!("({})", n)
+                } else {
+                    n.to_string()
+                }),
+                _ => int_literal(self.tds, n, ty),
+            },
+            ExprT::BinOp(op, l, r) => {
+                let ty = self.ty_of(l)?;
+                if !matches!(self.tds.resolve(&ty).val, TypeT::SpecInt | TypeT::SpecNat) {
+                    return Err("arithmetic on machine integers in a contract".to_string());
+                }
+                let o = match op {
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    BinOp::Mul => "*",
+                    BinOp::Div => "/",
+                    BinOp::Mod => "%",
+                    _ => return Err("an unsupported operator in a contract".to_string()),
+                };
+                Ok(format!(
+                    "({} {} {})",
+                    self.value(l, w)?,
+                    o,
+                    self.value(r, w)?
+                ))
+            }
+            _ => Err(format!("{} in a contract", expr_kind(e))),
+        }
+    }
 }
 
 /// Build the Pulse declaration for one C function, or explain why we cannot.
-fn emit_fn(tds: &Typedefs, decl: &FnDecl) -> Result<FnSurface, String> {
+fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String> {
     let name = format!("func_{}", decl.name.val);
 
     let mut params: Vec<String> = Vec::new();
     let mut ghosts: Vec<String> = Vec::new();
     let mut perms: Vec<String> = Vec::new();
-    // (points-to slprop, whether it is preserved unchanged)
-    let mut owned: Vec<(String, bool)> = Vec::new();
-    // For ownership returned with a possibly-changed value: the value binder
-    // name, its type, and the points-to applied to everything but the value.
+    let mut req: Vec<String> = Vec::new();
+    let mut preserved: Vec<String> = Vec::new();
+    // Ownership handed back with a value the contract may constrain: the
+    // existential binder, its type, and the points-to less its value argument.
     let mut fresh: Vec<(String, String, String)> = Vec::new();
+    let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    let mut arrays: HashSet<String> = HashSet::new();
 
     for (i, arg) in decl.args.iter().enumerate() {
         let pname = match &arg.name {
@@ -201,87 +540,170 @@ fn emit_fn(tds: &Typedefs, decl: &FnDecl) -> Result<FnSurface, String> {
             .ok_or_else(|| format!("parameter {} is {}", pname, describe(tds.resolve(&arg.ty))))?;
         params.push(format!("({}: {})", pname, fty));
 
-        if let Some(pt) = pointee(tds, &arg.ty) {
-            // `void *` and pointers to aggregates are not modelled yet.
-            let pn = palow_name(tds, pt).ok_or_else(|| {
-                format!(
-                    "parameter {} points to {}",
-                    pname,
-                    describe(tds.resolve(pt))
-                )
-            })?;
-            let vty = fstar_type(tds, pt).unwrap();
-            let vname = format!("val_{}", pname.trim_start_matches("var_"));
-            ghosts.push(format!("(#{}: erased {})", vname, vty));
-            let shared = is_shared(arg.mode);
-            let perm = if shared {
-                let p = format!("perm_{}", pname.trim_start_matches("var_"));
-                perms.push(format!("(#{}: perm)", p));
-                p
-            } else {
-                "1.0R".to_string()
+        let Some(pt) = pointee(tds, &arg.ty) else {
+            continue;
+        };
+        let pn = palow_name(tds, pt).ok_or_else(|| {
+            format!(
+                "parameter {} points to {}",
+                pname,
+                describe(tds.resolve(pt))
+            )
+        })?;
+        let vty = fstar_type(tds, pt).unwrap();
+        let base = pname.trim_start_matches("var_").to_string();
+        let vname = format!("val_{}", base);
+
+        // `T *p` owns one `T`; `T p[]` owns a sequence of them. Same F* type,
+        // different contract.
+        let (vty, pts_to): (String, Box<dyn Fn(&str, &str) -> String>) =
+            match extent(tds, &arg.ty).unwrap() {
+                Extent::One => {
+                    let pn = pn.clone();
+                    let p = pname.clone();
+                    (
+                        vty,
+                        Box::new(move |perm: &str, v: &str| {
+                            format!("{}_pts_to {} {} {}", pn, p, perm, v)
+                        }),
+                    )
+                }
+                Extent::Array => {
+                    arrays.insert(base.clone());
+                    let esize = palow_sizeof(tds, pt).ok_or_else(|| {
+                        format!("parameter {} is an array of {}", pname, describe(pt))
+                    })?;
+                    let pn = pn.clone();
+                    let p = pname.clone();
+                    (
+                        format!("Seq.seq {}", vty),
+                        Box::new(move |perm: &str, v: &str| {
+                            format!("array_pts_to {}_repr {} {} {} {}", pn, esize, p, perm, v)
+                        }),
+                    )
+                }
             };
-            owned.push((
-                format!("{}_pts_to {} {} {}", pn, pname, perm, vname),
-                shared,
-            ));
-            if !shared {
-                fresh.push((
-                    format!("{}'", vname),
-                    vty,
-                    format!("{}_pts_to {} 1.0R", pn, pname),
-                ));
+
+        match arg.mode {
+            // `_out`: the callee is handed storage, not a value. This is the
+            // one parameter mode the current model cannot express at all --
+            // a `ref t` always holds a `t` -- and here it is just the
+            // uninitialised points-to.
+            ParamMode::Out if extent(tds, &arg.ty) == Some(Extent::One) => {
+                req.push(format!("{}_pts_to_uninit {}", pn, pname));
+                fresh.push((format!("{}'", vname), vty, pts_to("1.0R", "")));
+                pointees.insert(base, (None, Some(format!("{}'", vname))));
+            }
+            ParamMode::Out => return Err(format!("parameter {} is an `_out` array", pname)),
+            ParamMode::Const => {
+                let perm = format!("perm_{}", base);
+                perms.push(format!("(#{}: perm)", perm));
+                ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                preserved.push(pts_to(&perm, &vname));
+                let v = format!("(reveal {})", vname);
+                pointees.insert(base, (Some(v.clone()), Some(v)));
+            }
+            ParamMode::Consumed => {
+                ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                req.push(pts_to("1.0R", &vname));
+                pointees.insert(base, (Some(format!("(reveal {})", vname)), None));
+            }
+            ParamMode::Regular => {
+                ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                req.push(pts_to("1.0R", &vname));
+                fresh.push((format!("{}'", vname), vty, pts_to("1.0R", "")));
+                pointees.insert(
+                    base,
+                    (
+                        Some(format!("(reveal {})", vname)),
+                        Some(format!("{}'", vname)),
+                    ),
+                );
             }
         }
     }
 
     let ret = fstar_type(tds, &decl.ret_type)
         .ok_or_else(|| format!("it returns {}", describe(tds.resolve(&decl.ret_type))))?;
+    let ret_name = format!("ret_{}", decl.name.val);
+
+    // The contract is all-or-nothing: a half-translated one would be silently
+    // weaker in a way nothing downstream could detect.
+    let spec = Spec {
+        tds,
+        env,
+        pointees,
+        arrays,
+        guards: RefCell::new(Vec::new()),
+        ret: ret_name.clone(),
+    };
+    let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
+        es.iter()
+            .map(|e| {
+                spec.guards.borrow_mut().clear();
+                let p = spec.prop(e, w)?;
+                let guards = spec.guards.borrow();
+                Ok(if guards.is_empty() {
+                    p
+                } else {
+                    format!("{} /\\ {}", guards.join(" /\\ "), p)
+                })
+            })
+            .collect()
+    };
+    let contract = translate(&decl.requires, When::Pre)
+        .and_then(|pre| translate(&decl.ensures, When::Post).map(|post| (pre, post)));
+    let (pre_props, post_props, contract_ok, dropped) = match contract {
+        Ok((pre, post)) => (pre, post, true, None),
+        Err(why) => (
+            Vec::new(),
+            Vec::new(),
+            decl.requires.is_empty() && decl.ensures.is_empty(),
+            Some(why),
+        ),
+    };
 
     let mut out = String::new();
+    if let Some(why) = dropped {
+        // Silently weakening a contract would be undetectable downstream, so
+        // say so in the generated file.
+        out += &format!("(* contract dropped: {} *)\n", why);
+    }
     out += &format!("fn {}", name);
     if params.is_empty() && perms.is_empty() && ghosts.is_empty() {
         // Pulse has no nullary `fn`; `f(void)` becomes `f ()`.
         out += " ()";
     }
-    for p in &params {
+    for p in params.iter().chain(perms.iter()).chain(ghosts.iter()) {
         out += &format!(" {}", p);
-    }
-    for g in &perms {
-        out += &format!(" {}", g);
-    }
-    for g in &ghosts {
-        out += &format!(" {}", g);
     }
     out += "\n";
 
-    // Ownership that the function gives back unchanged is `preserves`; the rest
-    // is a `requires`/`ensures` pair, with the postcondition existentially
-    // quantified because we are not translating the user's contract yet.
-    let mut req: Vec<String> = Vec::new();
-    for (slprop, shared) in &owned {
-        if *shared {
-            out += &format!("  preserves {}\n", slprop);
-        } else {
-            req.push(slprop.clone());
-        }
+    for slprop in &preserved {
+        out += &format!("  preserves {}\n", slprop);
     }
+    let mut req = req;
+    req.extend(pre_props.iter().map(|p| format!("pure ({})", p)));
     if req.is_empty() {
         out += "  requires emp\n";
     } else {
         out += &format!("  requires {}\n", req.join(" **\n           "));
     }
-    out += &format!("  returns  ret_{} : {}\n", decl.name.val, ret);
-    if fresh.is_empty() {
+    out += &format!("  returns  {} : {}\n", ret_name, ret);
+
+    let mut bodies: Vec<String> = fresh
+        .iter()
+        .map(|(b, _, s)| format!("{} {}", s.trim_end(), b))
+        .collect();
+    bodies.extend(post_props.iter().map(|p| format!("pure ({})", p)));
+    if bodies.is_empty() {
         out += "  ensures  emp\n";
+    } else if fresh.is_empty() {
+        out += &format!("  ensures  {}\n", bodies.join(" **\n           "));
     } else {
         let binders: Vec<String> = fresh
             .iter()
             .map(|(b, t, _)| format!("({}: {})", b, t))
-            .collect();
-        let bodies: Vec<String> = fresh
-            .iter()
-            .map(|(b, _, s)| format!("{} {}", s, b))
             .collect();
         out += &format!(
             "  ensures  exists* {}.\n             {}\n",
@@ -290,7 +712,10 @@ fn emit_fn(tds: &Typedefs, decl: &FnDecl) -> Result<FnSurface, String> {
         );
     }
 
-    Ok(FnSurface { decl: out })
+    Ok(FnSurface {
+        decl: out,
+        contract: contract_ok,
+    })
 }
 
 const HEADER: &str = r#"(* Generated by pal --palow.
@@ -322,7 +747,9 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     code += "open Pulse.Lib.C.Palow\n";
     code += "open Pulse.Lib.C.Palow.Scalar\n";
     code += "open Pulse.Lib.C.Palow.CTypes\n";
-    code += "open Pulse.Lib.C.Palow.Machine\n\n";
+    code += "open Pulse.Lib.C.Palow.Machine\n";
+    code += "open Pulse.Lib.C.Palow.Array\n";
+    code += "module Seq = FStar.Seq\n\n";
     for m in ["Int8", "Int16", "Int32", "Int64"] {
         code += &format!("module {} = FStar.{}\n", m, m);
     }
@@ -337,7 +764,9 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             DeclT::FnDecl(d) => (d, None),
             _ => continue,
         };
-        let sig = match emit_fn(&tds, fndecl) {
+        let mut env = base.clone();
+        env.push_fn_decl_args_for_body(fndecl);
+        let sig = match emit_fn(&tds, &env, fndecl) {
             Ok(s) => s,
             Err(why) => {
                 code += &format!("(* skipped {}: {} *)\n\n", fndecl.name.val, why);
@@ -347,11 +776,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
 
         let body = match defn {
             None => Err("it has no definition here".to_string()),
-            Some(d) => {
-                let mut env = base.clone();
-                env.push_fn_decl_args_for_body(fndecl);
-                emit_body(&tds, env, d)
-            }
+            Some(d) => emit_body(&tds, env, d, sig.contract),
         };
         code += &sig.decl;
         match body {
@@ -414,7 +839,14 @@ struct Body<'a> {
     lines: Vec<String>,
     /// C locals with a stack slot, in allocation order.
     slots: Vec<Slot>,
+    /// Pointer parameters declared `_out`: they arrive holding storage rather
+    /// than a value, so the first store through one is an initialising store.
+    out_params: Vec<String>,
     tmp: usize,
+    /// Whether signed arithmetic may be emitted. Its overflow obligation is
+    /// discharged by the function's `_requires` clause, so emitting it without
+    /// one produces a failure that says nothing about the memory model.
+    signed_ok: bool,
 }
 
 impl<'a> Body<'a> {
@@ -474,7 +906,12 @@ impl<'a> Body<'a> {
                     Err(format!("`{}` is a global", v.val))
                 }
             }
-            ExprT::Deref(_) => {
+            ExprT::Deref(inner) => {
+                if let ExprT::Var(v) = &inner.val {
+                    if self.out_params.iter().any(|n| *n == *v.val) {
+                        return Err(format!("`*{}` is read before it is written", v.val));
+                    }
+                }
                 let ty = self.ty_of(e)?;
                 let pn = palow_name(self.tds, &ty)
                     .ok_or_else(|| format!("a dereference yields {}", describe(&ty)))?;
@@ -495,7 +932,7 @@ impl<'a> Body<'a> {
             }
             ExprT::BinOp(op, l, r) => {
                 let ty = self.ty_of(l)?;
-                let opstr = binop(self.tds, *op, &ty)?;
+                let opstr = binop(self.tds, *op, &ty, self.signed_ok)?;
                 let a = self.rvalue(l)?;
                 let b = self.rvalue(r)?;
                 Ok(format!("({} {} {})", a, opstr, b))
@@ -524,6 +961,16 @@ impl<'a> Body<'a> {
     /// Store into an lvalue, choosing the initialising store when the target
     /// is a slot that has not been written yet.
     fn store(&mut self, lhs: &Expr, pn: &str, value: &str) -> Result<(), String> {
+        if let ExprT::Deref(inner) = &lhs.val {
+            if let ExprT::Var(v) = &inner.val {
+                if let Some(i) = self.out_params.iter().position(|n| *n == *v.val) {
+                    self.out_params.remove(i);
+                    self.lines
+                        .push(format!("{}_write_uninit var_{} {};", pn, v.val, value));
+                    return Ok(());
+                }
+            }
+        }
         if let ExprT::Var(v) = &lhs.val {
             if let Some(i) = self.slots.iter().position(|s| s.name == *v.val) {
                 let op = if self.slots[i].init {
@@ -659,7 +1106,7 @@ fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
     })
 }
 
-fn binop(tds: &Typedefs, op: BinOp, ty: &Type) -> Result<String, String> {
+fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {
     let t = tds.resolve(ty);
     let m = match &t.val {
         TypeT::Int { signed, width } => {
@@ -685,11 +1132,10 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type) -> Result<String, String> {
 
     // C's unsigned arithmetic wraps, so it is total and always translatable.
     // Signed arithmetic is undefined on overflow, which PAL turns into a proof
-    // obligation -- and that obligation is exactly what the function's
-    // `_requires` clause discharges. Since those clauses are not translated
-    // yet, emitting signed arithmetic would produce a body that cannot verify
-    // for a reason that has nothing to do with the memory model. Refusing it
-    // here keeps the measurement honest.
+    // obligation, and that obligation is discharged by the function's
+    // `_requires` clause. When the contract did not translate, emitting it
+    // would produce a failure that says nothing about the memory model, so it
+    // is refused instead.
     if let TypeT::Int {
         signed: false,
         width,
@@ -706,10 +1152,13 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type) -> Result<String, String> {
         });
     }
     match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul => Err(
+        BinOp::Add | BinOp::Sub | BinOp::Mul if !signed_ok => Err(
             "signed arithmetic, whose overflow obligation needs the untranslated `_requires`"
                 .to_string(),
         ),
+        BinOp::Add => Ok(format!("`{}.add`", m)),
+        BinOp::Sub => Ok(format!("`{}.sub`", m)),
+        BinOp::Mul => Ok(format!("`{}.mul`", m)),
         BinOp::Div => Ok(format!("`{}.div`", m)),
         BinOp::Mod => Ok(format!("`{}.rem`", m)),
         _ => Err("an unsupported operator".to_string()),
@@ -718,13 +1167,38 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type) -> Result<String, String> {
 
 /// Translate a function body, or say why not. `env` must already have the
 /// function's parameters pushed.
-fn emit_body(tds: &Typedefs, env: Env, defn: &FnDefn) -> Result<Vec<String>, String> {
+fn emit_body(
+    tds: &Typedefs,
+    env: Env,
+    defn: &FnDefn,
+    contract: bool,
+) -> Result<Vec<String>, String> {
+    // An array parameter's ownership is a sequence, so every access through it
+    // needs `array_focus` rather than a plain read. The contract already says
+    // so; the body translation does not do it yet.
+    if defn
+        .decl
+        .args
+        .iter()
+        .any(|a| extent(tds, &a.ty) == Some(Extent::Array))
+    {
+        return Err("an array parameter".to_string());
+    }
+
     let mut b = Body {
         tds,
         env,
         lines: Vec::new(),
         slots: Vec::new(),
+        out_params: defn
+            .decl
+            .args
+            .iter()
+            .filter(|a| a.mode == ParamMode::Out)
+            .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+            .collect(),
         tmp: 0,
+        signed_ok: contract,
     };
 
     // Straight-line bodies only, with an optional trailing `return`. A
