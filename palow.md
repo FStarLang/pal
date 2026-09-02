@@ -830,8 +830,8 @@ new facts about memory.
    artefact: an `if` that initialises a local on one path only genuinely
    leaves two different states behind. `test/palow_if` is the test for all of this.
 
-   As of this milestone: **683 specifications, 272 of them with real bodies,
-   411 admitted, 139 functions skipped**. The generated `swap` is line-for-line the
+   As of this milestone: **701 specifications, 285 of them with real bodies,
+   416 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
 
@@ -902,6 +902,21 @@ new facts about memory.
    whole-object `memcpy`, a `free`, or an array of structs needs the byte-level
    `_repr`, and arrays of structs are refused for exactly that reason.
 
+   A fixed-size array field is the one field shape that is not a single
+   points-to. In C `T f[N]` inside a struct is N elements of storage rather than
+   a pointer, so the field owns a whole `array_pts_to`, and its length goes into
+   the record type as `(s: Seq.seq T { Seq.length s == N })` rather than into a
+   side condition -- which is what makes `Seq.upd` through it obviously
+   length-preserving. Focus and unfocus are unchanged: only the predicate a
+   field owns differs, not how it is opened.
+
+   That makes `s->f[i]` a composition of two focuses, and it is worth noting
+   where the bounds obligation comes from in each. An array *parameter*'s length
+   is whatever the caller passed, so `i < Seq.length xs` can only come from the
+   function's own `_requires`, and a subscript in a function without one is
+   refused. An array *field*'s length is in its type, so it needs no help at
+   all.
+
    The other thing this exposed is that ownership has to come from somewhere.
    `s->next->x` and `**p` read a pointer *out of memory* and then dereference
    it, and nothing in the translated contract grants ownership of what it points
@@ -923,6 +938,8 @@ new facts about memory.
    per-field focus/unfocus -- and translates field access in bodies and field
    projection in contracts. What remains is the byte-level `_repr` per struct,
    which arrays of structs and whole-object copies need, and unions.
+   Fixed-size array fields are covered; bit-fields are not, since the model has
+   no sub-byte addressing to give them a byte offset.
 5. `malloc`/`calloc`/`free` as ordinary specifications (specs done); delete the
    AST special cases; delete `_core_ref`.
 6. *Done for the model.* Custom allocators, with their own `freeable`

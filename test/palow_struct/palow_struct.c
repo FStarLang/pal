@@ -1,5 +1,6 @@
 #include "pal.h"
 #include <stdint.h>
+#include <stddef.h>
 
 // Struct field access. Under Palow a struct's points-to is the separating
 // conjunction of its fields', so `s->f` is a focus of one field, a machine
@@ -52,4 +53,33 @@ void copy_point(struct point *a, const struct point *b)
 {
   a->x = b->x;
   a->y = b->y;
+}
+
+// A fixed-size array field. In C `T f[N]` inside a struct is N elements of
+// storage, not a pointer, so the field owns a whole `array_pts_to` and its
+// length is part of the record type. A subscript through one focuses the field
+// out of the struct and then the element out of the field.
+struct buf {
+  uint32_t len;
+  uint32_t data[4];
+};
+
+uint32_t first(const struct buf *b)
+  _ensures(return == b->data[0])
+{
+  return b->data[0];
+}
+
+void store(struct buf *b, size_t i, uint32_t v)
+  _requires(i < 4)
+  _ensures(b->data[i] == v)
+{
+  b->data[i] = v;
+}
+
+// A scalar field and an array field of the same struct, in one function.
+void set_len(struct buf *b, uint32_t v)
+  _ensures(b->len == v && b->data[0] == _old(b->data[0]))
+{
+  b->len = v;
 }

@@ -53,6 +53,66 @@ struct StructField {
     ty: Rc<Type>,
     /// Byte offset from the start of the struct, per clang's target ABI.
     offset: u64,
+    shape: FieldShape,
+}
+
+/// How a struct field is owned. A scalar or nested struct field is one
+/// points-to; a fixed-size array field is a whole `array_pts_to`, because in C
+/// `T f[N]` inside a struct is N elements of storage and not a pointer.
+enum FieldShape {
+    One { pn: String },
+    Array { pn: String, esize: u64, len: u64 },
+}
+
+impl FieldShape {
+    /// The F* type of the field's value. An array field's length is part of
+    /// the type rather than a side condition, so that `Seq.upd` through it
+    /// obviously preserves it.
+    fn value_type(&self, elem: &str) -> String {
+        match self {
+            FieldShape::One { .. } => elem.to_string(),
+            FieldShape::Array { len, .. } => {
+                format!("(s: Seq.seq {} {{ Seq.length s == {} }})", elem, len)
+            }
+        }
+    }
+
+    fn pts_to(&self, at: &str, value: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_pts_to {} p {}", pn, at, value),
+            FieldShape::Array { pn, esize, .. } => {
+                format!("array_pts_to {}_repr {} {} p {}", pn, esize, at, value)
+            }
+        }
+    }
+}
+
+/// How a struct field is owned, or `None` if the model does not cover it.
+fn field_shape(tds: &Typedefs, ty: &Type) -> Option<FieldShape> {
+    match &tds.resolve(ty).val {
+        TypeT::FixedArray(t, n) => {
+            if !has_repr(tds, t) {
+                return None;
+            }
+            Some(FieldShape::Array {
+                pn: palow_name(tds, t)?,
+                esize: palow_sizeof(tds, t)?,
+                len: *n,
+            })
+        }
+        _ => Some(FieldShape::One {
+            pn: palow_name(tds, ty)?,
+        }),
+    }
+}
+
+/// The F* type of a struct field's value.
+fn field_type(tds: &Typedefs, ty: &Type) -> Option<String> {
+    let elem = match &tds.resolve(ty).val {
+        TypeT::FixedArray(t, _) => fstar_type(tds, t)?,
+        _ => fstar_type(tds, ty)?,
+    };
+    Some(field_shape(tds, ty)?.value_type(&elem))
 }
 
 /// A struct the emitter generated a Palow type for. Only structs whose every
@@ -508,6 +568,14 @@ impl<'a> Spec<'a> {
                     }
                     _ => {
                         let from = self.ty_of(inner)?;
+                        // A literal written at specification level and cast to
+                        // a machine type -- which is what `a[0]` elaborates to
+                        // -- is just that literal at that type.
+                        if let (ExprT::IntLit(n, _), TypeT::SpecInt | TypeT::SpecNat) =
+                            (&inner.val, &self.tds.resolve(&from).val)
+                        {
+                            return int_literal(self.tds, n, to);
+                        }
                         if fstar_type(self.tds, &from) == fstar_type(self.tds, to) {
                             self.value(inner, w)
                         } else {
@@ -530,7 +598,27 @@ impl<'a> Spec<'a> {
                 }
             }
             ExprT::Deref(inner) => self.pointee_at(inner, None, w),
-            ExprT::Index(base, idx) => self.pointee_at(base, Some(idx), w),
+            ExprT::Index(base, idx) if matches!(strip_vattr(base).val, ExprT::Var(_)) => {
+                self.pointee_at(base, Some(idx), w)
+            }
+            // A fixed-size array *field* is a sequence in the struct's record,
+            // so indexing it is `Seq.index` of a projection rather than a
+            // lookup in a parameter's own sequence.
+            ExprT::Index(base, idx) => {
+                let bty = self.ty_of(base)?;
+                if !matches!(self.tds.resolve(&bty).val, TypeT::FixedArray(..)) {
+                    return Err(format!(
+                        "a contract that indexes {}",
+                        describe(self.tds.resolve(&bty))
+                    ));
+                }
+                let seq = self.value(base, w)?;
+                let i = self.num(idx, w)?;
+                self.guards
+                    .borrow_mut()
+                    .push(format!("{} < Seq.length {}", i, seq));
+                Ok(format!("(Seq.index {} {})", seq, i))
+            }
             // A struct value is an F* record, so a field of one is a
             // projection. `s->f` reaches here as `(*s).f`.
             ExprT::Member(base, f) => {
@@ -866,27 +954,36 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> String {
         // field of a later one does not -- which is also all C allows.
         let mut fields = Vec::new();
         let mut ok = true;
+        let mut bad = String::new();
         for f in &sd.fields {
             let fname = f.val.name().val.to_string();
             let fty = f.val.logical_type(&f.loc);
-            let (Some(off), true) = (
+            let (Some(off), Some(shape), true) = (
                 layouts.offset_of(&key, &fname),
-                palow_name(tds, &fty).is_some() && fstar_type(tds, &fty).is_some(),
+                field_shape(tds, &fty),
+                field_type(tds, &fty).is_some(),
             ) else {
                 ok = false;
+                bad = match layouts.offset_of(&key, &fname) {
+                    // Bit-fields have no byte offset, and the model has no
+                    // sub-byte addressing to give them one.
+                    None => format!("field `{}` has no byte offset", fname),
+                    Some(_) => format!("field `{}` is {}", fname, describe(tds.resolve(&fty))),
+                };
                 break;
             };
             fields.push(StructField {
                 name: fname,
                 ty: fty,
                 offset: off,
+                shape,
             });
         }
         if !ok || fields.is_empty() {
-            code += &format!(
-                "(* skipped struct {}: a field has no Palow type *)\n\n",
-                name
-            );
+            if bad.is_empty() {
+                bad = "it has no fields".to_string();
+            }
+            code += &format!("(* skipped struct {}: {} *)\n\n", name, bad);
             continue;
         }
         tds.structs.insert(
@@ -918,7 +1015,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         sn,
         si.fields
             .iter()
-            .map(|f| format!("fld_{}: {}", f.name, fstar_type(tds, &f.ty).unwrap()))
+            .map(|f| format!("fld_{}: {}", f.name, field_type(tds, &f.ty).unwrap()))
             .collect::<Vec<_>>()
             .join("; ")
     );
@@ -940,13 +1037,9 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             .iter()
             .filter(|f| Some(f.name.as_str()) != skip)
             .map(|f| {
-                format!(
-                    "{}_pts_to (a +! {}_offsetof_{}) p ({}).fld_{}",
-                    palow_name(tds, &f.ty).unwrap(),
-                    sn,
-                    f.name,
-                    x,
-                    f.name
+                f.shape.pts_to(
+                    &format!("(a +! {}_offsetof_{})", sn, f.name),
+                    &format!("({}).fld_{}", x, f.name),
                 )
             })
             .collect();
@@ -965,10 +1058,10 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     );
 
     for f in &si.fields {
-        let fpn = palow_name(tds, &f.ty).unwrap();
-        let fty = fstar_type(tds, &f.ty).unwrap();
+        let fty = field_type(tds, &f.ty).unwrap();
         let at = format!("(a +! {}_offsetof_{})", sn, f.name);
         let upd = format!("({{ x with fld_{} = y }})", f.name);
+        let owned = |v: &str| f.shape.pts_to(&at, v);
         c += &format!(
             "let {}_hole_{} (a: ptr) (p: perm) (x: {}) : slprop =\n  {}\n\n",
             sn,
@@ -979,37 +1072,34 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         c += &format!(
             "ghost fn {sn}_focus_{f} (a: ptr) (#p: perm) (#x: {sn})\n\
              \x20 requires {sn}_pts_to a p x\n\
-             \x20 ensures  {fpn}_pts_to {at} p x.fld_{f}\n\
+             \x20 ensures  {owned}\n\
              \x20 ensures  {sn}_hole_{f} a p x\n\
              {{\n  unfold {sn}_pts_to a p x;\n  fold {sn}_hole_{f} a p x;\n}}\n\n",
             sn = sn,
             f = f.name,
-            fpn = fpn,
-            at = at
+            owned = owned(&format!("x.fld_{}", f.name))
         );
         c += &format!(
             "ghost fn {sn}_unfocus_{f} (a: ptr) (#p: perm) (#x: {sn}) (#y: {fty})\n\
              \x20 requires {sn}_hole_{f} a p x\n\
-             \x20 requires {fpn}_pts_to {at} p y\n\
+             \x20 requires {owned}\n\
              \x20 ensures  {sn}_pts_to a p {upd}\n\
              {{\n  unfold {sn}_hole_{f} a p x;\n  fold {sn}_pts_to a p {upd};\n}}\n\n",
             sn = sn,
             f = f.name,
-            fpn = fpn,
             fty = fty,
-            at = at,
+            owned = owned("y"),
             upd = upd
         );
         c += &format!(
             "ghost fn {sn}_unfocus_read_{f} (a: ptr) (#p: perm) (#x: {sn})\n\
              \x20 requires {sn}_hole_{f} a p x\n\
-             \x20 requires {fpn}_pts_to {at} p x.fld_{f}\n\
+             \x20 requires {owned}\n\
              \x20 ensures  {sn}_pts_to a p x\n\
              {{\n  unfold {sn}_hole_{f} a p x;\n  fold {sn}_pts_to a p x;\n}}\n\n",
             sn = sn,
             f = f.name,
-            fpn = fpn,
-            at = at
+            owned = owned(&format!("x.fld_{}", f.name))
         );
     }
     c
@@ -1200,6 +1290,10 @@ struct Body<'a> {
     /// The function's parameters, by C name. Ownership of what a pointer points
     /// to is granted by the contract, and the contract only names parameters.
     params: HashSet<String>,
+    /// Whether the function has a translated `_requires`. Bounds and overflow
+    /// obligations are discharged by it, so without one there is nothing to
+    /// discharge them with.
+    requires_ok: bool,
 }
 
 /// What a subscript through an array parameter needs: the element's Palow type
@@ -1351,36 +1445,165 @@ impl<'a> Body<'a> {
         Ok((at, pn, close))
     }
 
-    /// Open one field of a struct for a single access. The same shape as
-    /// `focus` for arrays -- prologue here, matching unfocus at the call site,
-    /// nothing in between -- because it is the same operation on a sub-range.
-    /// Returns the field's address, its Palow type, and the arguments the
-    /// matching unfocus needs.
-    fn focus_field(&mut self, base: &Expr, f: &Ident) -> Result<(String, String, String), String> {
+    /// Open a place -- a field, an array element, or a field's array element --
+    /// for a single access, emitting the prologue and returning what closes it.
+    ///
+    /// A field access and a subscript are the same operation on a sub-range, so
+    /// they compose: `s->f[i]` focuses the field, then the element inside it.
+    /// The caller emits the closing lines immediately after the read or write,
+    /// with nothing in between: the object is in pieces until then.
+    fn place(&mut self, e: &Expr) -> Result<Focus, String> {
+        match &strip_vattr(e).val {
+            ExprT::Member(base, f) => {
+                let (sn, at) = self.focus_field(base, f)?;
+                Ok(Focus {
+                    pn: self.field_pn(base, f)?,
+                    at,
+                    close_read: vec![format!("{}_unfocus_read_{} {};", sn.0, f.val, sn.1)],
+                    close_write: vec![format!("{}_unfocus_{} {};", sn.0, f.val, sn.1)],
+                })
+            }
+            ExprT::Index(base, idx) => self.focus_elem(base, Some(idx)),
+            _ => Err(format!("a place that is {}", expr_kind_of(&e.val))),
+        }
+    }
+
+    /// The struct a field belongs to, if the emitter generated a type for it.
+    fn struct_of(&self, base: &Expr) -> Result<(String, Rc<Type>), String> {
         let bty = self.ty_of(base)?;
         let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(&bty).val else {
             return Err(format!("a field of {}", describe(self.tds.resolve(&bty))));
         };
-        let sn = format!("struct_{}", sname.val);
         if !self.tds.structs.contains_key(&*sname.val) {
             return Err(format!("a field of {}", describe(self.tds.resolve(&bty))));
         }
-        let fty = self.ty_of(&Ast {
+        Ok((format!("struct_{}", sname.val), bty.clone()))
+    }
+
+    fn field_ty(&self, base: &Expr, f: &Ident) -> Result<Rc<Type>, String> {
+        self.ty_of(&Ast {
             val: ExprT::Member(Rc::new(base.clone()), Rc::new(f.clone())),
             loc: base.loc.clone(),
-        })?;
-        let fpn = palow_name(self.tds, &fty)
-            .ok_or_else(|| format!("a field of type {}", describe(self.tds.resolve(&fty))))?;
+        })
+    }
+
+    fn field_pn(&self, base: &Expr, f: &Ident) -> Result<String, String> {
+        let fty = self.field_ty(base, f)?;
         if !has_repr(self.tds, &fty) {
             return Err(format!(
                 "a field of type {}",
                 describe(self.tds.resolve(&fty))
             ));
         }
+        palow_name(self.tds, &fty)
+            .ok_or_else(|| format!("a field of type {}", describe(self.tds.resolve(&fty))))
+    }
+
+    /// Emit the focus of one field. Returns the struct's Palow name and base
+    /// address, and the field's address.
+    fn focus_field(
+        &mut self,
+        base: &Expr,
+        f: &Ident,
+    ) -> Result<((String, String), String), String> {
+        let (sn, _) = self.struct_of(base)?;
         let a = self.addr(base)?;
         let at = format!("({} +! {}_offsetof_{})", a, sn, f.val);
         self.lines.push(format!("{}_focus_{} {};", sn, f.val, a));
-        Ok((at, fpn, format!("{}_unfocus_{}#{}", sn, f.val, a)))
+        Ok(((sn, a), at))
+    }
+
+    /// The array an element access indexes: its base address, element type and
+    /// size, and the lines that give it back. Either a parameter, which owns
+    /// its sequence outright, or a fixed-size array field, which has to be
+    /// focused out of its struct first.
+    fn array_place(&mut self, e: &Expr) -> Result<(String, String, String, Vec<String>), String> {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) => {
+                let Some(ap) = self.arrays.get(&*v.val.to_string()) else {
+                    return Err(format!(
+                        "a subscript of `{}`, which is not an array parameter",
+                        v.val
+                    ));
+                };
+                // An array parameter's length is whatever the caller passed, so
+                // `i < Seq.length xs` can only come from the function's own
+                // `_requires`. An array *field*'s length is part of its type,
+                // so it needs no such help -- hence the gate is here and not in
+                // `focus_elem`.
+                if !self.requires_ok {
+                    return Err(
+                        "a subscript, whose bounds obligation needs a `_requires` that is not \
+                         translated"
+                            .to_string(),
+                    );
+                }
+                Ok((
+                    format!("var_{}", v.val),
+                    ap.pn.clone(),
+                    ap.esize.clone(),
+                    Vec::new(),
+                ))
+            }
+            ExprT::Member(base, f) => {
+                let fty = self.field_ty(base, f)?;
+                let Some(FieldShape::Array { pn, esize, .. }) = field_shape(self.tds, &fty) else {
+                    return Err(format!(
+                        "a subscript of a field of type {}",
+                        describe(self.tds.resolve(&fty))
+                    ));
+                };
+                let (sn, at) = self.focus_field(base, f)?;
+                // Even a read through an array field goes back with the
+                // general unfocus: what comes out of the element access is a
+                // sequence, and `Seq.upd xs i (Seq.index xs i)` is only `xs`
+                // up to a lemma that is not worth generating per field.
+                Ok((
+                    at,
+                    pn,
+                    format!("{}sz", esize),
+                    vec![format!("{}_unfocus_{} {};", sn.0, f.val, sn.1)],
+                ))
+            }
+            other => Err(format!("a subscript of {}", expr_kind_of(other))),
+        }
+    }
+
+    /// Open one element of an array for a single access.
+    fn focus_elem(&mut self, base: &Expr, idx: Option<&Expr>) -> Result<Focus, String> {
+        let (arr, pn, esize, close) = self.array_place(base)?;
+        let i = match idx {
+            Some(e) => self.index(e)?,
+            None => "0sz".to_string(),
+        };
+        let off = format!("({} `SizeT.mul` {})", esize, i);
+        let at = format!("({} +! {})", arr, off);
+        self.lines.push(format!(
+            "array_offset_fits {}_repr {} {} {};",
+            pn, arr, esize, i
+        ));
+        self.lines.push(format!(
+            "array_focus {}_repr {} {} {} {};",
+            pn, arr, esize, i, off
+        ));
+        self.lines.push(format!("{}_of_elem {};", pn, at));
+        let common = format!("{} {} {} {}", arr, esize, i, off);
+        let mut close_read = vec![
+            format!("{}_to_elem {};", pn, at),
+            format!("array_unfocus_read {}_repr {};", pn, common),
+        ];
+        let mut close_write = vec![
+            format!("{}_to_elem {};", pn, at),
+            format!("array_unfocus {}_repr {};", pn, common),
+        ];
+        close_read.extend(close.iter().cloned());
+        close_write.extend(close);
+        Ok(Focus {
+            at,
+            pn,
+            close_read,
+            close_write,
+        })
     }
 
     /// An rvalue, as an F* expression. Reads are effectful, so they are bound
@@ -1416,12 +1639,11 @@ impl<'a> Body<'a> {
                     // `*p` on an array parameter is `p[0]`: the ownership is a
                     // sequence either way, so the access has to be focused.
                     if self.arrays.contains_key(&*v.val.to_string()) {
-                        let (at, pn, close) = self.focus(inner, None)?;
+                        let f = self.focus_elem(inner, None)?;
                         let t = self.fresh("elem");
-                        self.lines.push(format!("let {} = {}_read {};", t, pn, at));
-                        self.lines.push(format!("{}_to_elem {};", pn, at));
                         self.lines
-                            .push(format!("array_unfocus_read {}_repr {};", pn, close));
+                            .push(format!("let {} = {}_read {};", t, f.pn, f.at));
+                        self.lines.extend(f.close_read);
                         return Ok(t);
                     }
                 }
@@ -1433,26 +1655,34 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("let {} = {}_read {};", t, pn, a));
                 Ok(t)
             }
-            ExprT::Member(base, f) => {
-                let (at, pn, close) = self.focus_field(base, f)?;
-                let t = self.fresh(&f.val);
-                self.lines.push(format!("let {} = {}_read {};", t, pn, at));
-                self.lines.push(unfocus(&close, true));
-                Ok(t)
-            }
-            ExprT::Index(base, idx) => {
-                let (at, pn, close) = self.focus(base, Some(idx))?;
-                let t = self.fresh("elem");
-                self.lines.push(format!("let {} = {}_read {};", t, pn, at));
-                self.lines.push(format!("{}_to_elem {};", pn, at));
+            ExprT::Member(..) | ExprT::Index(..) => {
+                let hint = match &e.val {
+                    ExprT::Member(_, f) => f.val.to_string(),
+                    _ => "elem".to_string(),
+                };
+                let f = self.place(e)?;
+                let t = self.fresh(&hint);
                 self.lines
-                    .push(format!("array_unfocus_read {}_repr {};", pn, close));
+                    .push(format!("let {} = {}_read {};", t, f.pn, f.at));
+                self.lines.extend(f.close_read);
                 Ok(t)
             }
             ExprT::BoolLit(b) => Ok(if *b { "true" } else { "false" }.to_string()),
             ExprT::IntLit(n, ty) => int_literal(self.tds, n, ty),
             ExprT::Cast(inner, to) => {
                 let from = self.ty_of(inner)?;
+                // A literal cast to another integer type is that literal at
+                // that type. C has already reduced it, and going through
+                // `convert` would emit a cast that cannot always be justified
+                // -- `(size_t) 0` is a signed-to-unsigned conversion whose
+                // obligation nothing discharges.
+                if let ExprT::IntLit(n, _) = &strip_vattr(inner).val {
+                    if **n >= BigInt::ZERO {
+                        if let Ok(l) = int_literal(self.tds, n, to) {
+                            return Ok(l);
+                        }
+                    }
+                }
                 if fstar_type(self.tds, &from) == fstar_type(self.tds, to) {
                     return self.rvalue(inner);
                 }
@@ -1614,27 +1844,19 @@ impl<'a> Body<'a> {
         if let ExprT::Deref(inner) = &lhs.val {
             if let ExprT::Var(v) = &inner.val {
                 if self.arrays.contains_key(&*v.val.to_string()) {
-                    let (at, epn, close) = self.focus(inner, None)?;
-                    self.lines.push(format!("{}_write {} {};", epn, at, value));
-                    self.lines.push(format!("{}_to_elem {};", epn, at));
+                    let f = self.focus_elem(inner, None)?;
                     self.lines
-                        .push(format!("array_unfocus {}_repr {};", epn, close));
+                        .push(format!("{}_write {} {};", f.pn, f.at, value));
+                    self.lines.extend(f.close_write);
                     return Ok(());
                 }
             }
         }
-        if let ExprT::Member(base, f) = &lhs.val {
-            let (at, fpn, close) = self.focus_field(base, f)?;
-            self.lines.push(format!("{}_write {} {};", fpn, at, value));
-            self.lines.push(unfocus(&close, false));
-            return Ok(());
-        }
-        if let ExprT::Index(base, idx) = &lhs.val {
-            let (at, epn, close) = self.focus(base, Some(idx))?;
-            self.lines.push(format!("{}_write {} {};", epn, at, value));
-            self.lines.push(format!("{}_to_elem {};", epn, at));
+        if matches!(lhs.val, ExprT::Member(..) | ExprT::Index(..)) {
+            let f = self.place(lhs)?;
             self.lines
-                .push(format!("array_unfocus {}_repr {};", epn, close));
+                .push(format!("{}_write {} {};", f.pn, f.at, value));
+            self.lines.extend(f.close_write);
             return Ok(());
         }
         let a = self.addr(lhs)?;
@@ -2076,6 +2298,15 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     }
 }
 
+/// A place opened for one access: where it is, what type it is, and the lines
+/// that put it back after a read or after a write.
+struct Focus {
+    at: String,
+    pn: String,
+    close_read: Vec<String>,
+    close_write: Vec<String>,
+}
+
 /// Peel the virtual attributes `elab` wraps around an expression.
 fn strip_vattr(e: &Expr) -> &Expr {
     match &e.val {
@@ -2090,18 +2321,6 @@ fn expr_kind_of(e: &ExprT) -> &'static str {
         ExprT::Index(..) => "an array element",
         ExprT::Deref(..) => "another dereference",
         _ => "a computed pointer",
-    }
-}
-
-/// The unfocus that closes a `focus_field`. The read form puts the field back
-/// unchanged, so the struct value is the one that went in; the write form lets
-/// Pulse infer the new field value and rebuilds the record around it.
-fn unfocus(close: &str, read: bool) -> String {
-    let (call, a) = close.split_once('#').unwrap();
-    if read {
-        format!("{} {};", call.replace("_unfocus_", "_unfocus_read_"), a)
-    } else {
-        format!("{} {};", call, a)
     }
 }
 
@@ -2158,6 +2377,7 @@ fn emit_body(
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
         arrays,
+        requires_ok: sig.contract && !defn.decl.requires.is_empty(),
         params: defn
             .decl
             .args
