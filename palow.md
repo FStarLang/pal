@@ -673,8 +673,14 @@ new facts about memory.
   the same reason and with the same justification as `Ptr.addr_bound`.
 - `--palow` drops the user's `_requires`/`_ensures` clauses, so the generated
   specifications are weaker than the ones PAL emits today. They are not wrong,
-  but a passing `make palow-check` says the *shape* of the translation
-  typechecks, not that the functions could be implemented against it.
+  but a passing `make palow-check` says the shape of the translation
+  typechecks against bodies we could translate, not that every function could
+  be implemented against its real contract. The most visible consequence is
+  that signed arithmetic has to be refused rather than emitted.
+- A translated local always gets a stack slot, even when it is never assigned
+  and its address is never taken. An F\* `let` would be cheaper, but choosing
+  it needs an analysis whose failure mode is silent, so it is deferred until
+  there are measurements to justify it.
 - `Etype.ctype` is a closed enumeration covering the types the model uses,
   standing in for what PAL would generate per translation unit. Making it open
   would mean generating `access_ok` per type, which is the same code-generation
@@ -685,29 +691,43 @@ new facts about memory.
 
 1. **Done.** Layer 0: `ptr` with provenance, `bytes`, `mem_pts_to`, split/join/
    disjointness. No translator changes.
-2. *In progress; the specification surface is translated.* The scalar typed
-   layer is done for the full set of C scalar types (now including `size_t`),
-   together with per-type stack alloc/free, `rewrites_to` on reads, and
-   `memcpy`. `Pulse.Lib.C.Palow.Examples` fixes the target by hand.
+2. *In progress; specifications and straight-line bodies are translated.* The
+   scalar typed layer is done for the full set of C scalar types (now including
+   `size_t`), together with per-type stack alloc/free, `rewrites_to` on reads,
+   and `memcpy`. `Pulse.Lib.C.Palow.Examples` fixes the target by hand.
 
-   The translator now has a `--palow` mode (`src/pass/emit_palow.rs`) that
-   emits, for a whole translation unit, a single `PalowSpecs.fsti` containing
-   one bodyless Pulse `fn` per C function: `ptr` parameters instead of
-   `ref t`, `t_pts_to` instead of `Pulse.Lib.Reference.pts_to`, and erased
-   ghost binders for the pointed-to values. `make palow-check` runs this over
-   every test and typechecks the result; all 154 of them pass, covering 585 of
-   the suite's functions, with 173 skipped because they mention a struct,
-   union, array, float or function pointer (milestone 4).
+   The translator has a `--palow` mode (`src/pass/emit_palow.rs`) that emits,
+   for a whole translation unit, a single `PalowSpecs.fst`: one Pulse `fn` per
+   C function, with `ptr` parameters instead of `ref t`, `t_pts_to` instead of
+   `Pulse.Lib.Reference.pts_to`, and erased ghost binders for the pointed-to
+   values. Bodies are translated for straight-line scalar code -- locals as
+   `t_stack_alloc`/`t_stack_free` pairs, dereference as `t_read`, assignment as
+   `t_write` -- and everything else gets an `admit()` naming the construct that
+   stopped it. `make palow-check` runs this over every test and typechecks the
+   result.
 
-   Emitting this much already settles the part of the port that carries the
-   model decisions, and it demonstrates the payoff claimed in the overview: the
-   F\* type of a parameter is `ptr` regardless of how the pointer is used, so
-   the pointer-kind inference in `elab` has nothing left to decide. What
-   remains is bodies -- `t_read`/`t_write` for `!`/`:=`, stack alloc/free
-   instead of `let mut` -- and translating the user's own `_requires`/`_ensures`
-   predicates, which needs the expression emitter. Until then the generated
-   postconditions are the weakest ones that return the same ownership, and each
-   skipped function says why it was skipped.
+   As of this milestone: **598 specifications, 145 of them with real bodies,
+   453 admitted, 176 functions skipped** because they mention a struct, union,
+   array, float or function pointer (milestone 4). The generated `swap` is
+   line-for-line the hand-written `swap_addressable` in `Examples`, which is
+   the check that mattered.
+
+   Emitting this much settles the part of the port that carries the model
+   decisions, and demonstrates the payoff claimed in the overview: a
+   parameter's F\* type is `ptr` regardless of how the pointer is used, so the
+   pointer-kind inference in `elab` has nothing left to decide.
+
+   The `admit()` reasons, in order, are what to do next. `if` and loops (70)
+   need the user's `_invariant` and a join for the slot-initialisation state.
+   Function calls (37) need the callee's real contract, not the weakest one we
+   currently emit. Inline Pulse (62) has to be re-expressed against the new
+   predicates and is a source change, not a translator change. Signed
+   arithmetic (32) is refused on purpose: its overflow obligation is discharged
+   by the `_requires` clause, and emitting it before those clauses are
+   translated would produce failures that say nothing about the memory model.
+   The rest -- address-of, subscripts, allocation, globals -- are milestones 4
+   and 5.
+
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;
    `Pulse.Lib.C.Sizeof` is deleted. Field offsets are collected from clang too

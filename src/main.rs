@@ -261,7 +261,7 @@ fn main() {
             let outdir = Path::new(&outdir).to_path_buf();
             std::fs::create_dir_all(&outdir).unwrap();
             for module in &modules {
-                let path = outdir.join(format!("{}.fsti", module.module_name));
+                let path = outdir.join(format!("{}.fst", module.module_name));
                 write_if_changed(&path, module.code.as_bytes());
             }
         } else {

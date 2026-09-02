@@ -121,13 +121,16 @@ fn uint32_t_stack_alloc ()
 fn uint32_t_stack_free (a: ptr)
   requires uint32_t_pts_to_uninit a
 
+fn ptr_write_uninit (a: ptr) (y: ptr)
+  requires ptr_pts_to_uninit a
+  ensures  ptr_pts_to a 1.0R y
+
 fn ptr_stack_alloc ()
   returns  a : ptr
-  ensures  mem_pts_to a 1.0R (uninit (SZ.v ptr_sizeof))
+  ensures  ptr_pts_to_uninit a
 
-fn ptr_stack_free (a: ptr) (#b: erased bytes)
-  requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v ptr_sizeof)
+fn ptr_stack_free (a: ptr)
+  requires ptr_pts_to_uninit a
 
 (* ---------------------------------------------------------------------------
    The remaining C scalar types

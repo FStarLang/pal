@@ -301,3 +301,17 @@ ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
 {
   fold ptr_pts_to dest p a;
 }
+
+(* A pointer-typed local, before anything has been stored in it. This is the
+   same `_pts_to_uninit`/`_forget` pair every scalar type has; it exists so the
+   translator can allocate and release a local without a case for pointers. *)
+let ptr_pts_to_uninit ([@@@mkey] dest: ptr) : slprop =
+  exists* b. mem_pts_to dest 1.0R b ** pure (len b == SZ.v ptr_sizeof)
+
+ghost fn ptr_forget (dest: ptr) (#a: ptr)
+  requires ptr_pts_to dest 1.0R a
+  ensures  ptr_pts_to_uninit dest
+{
+  unfold ptr_pts_to dest 1.0R a;
+  fold ptr_pts_to_uninit dest;
+}

@@ -22,8 +22,11 @@ mkdir -p "$WORK"
 
 check_one() {
   local cfile=$1
+  # One output directory per .c file, not per test directory: several tests
+  # have more than one translation unit and they all produce a module of the
+  # same name.
   local name
-  name=$(basename "$(dirname "$cfile")")
+  name=$(basename "$(dirname "$cfile")")/$(basename "$cfile" .c)
   local dir="$WORK/$name"
   mkdir -p "$dir"
 
@@ -43,7 +46,7 @@ check_one() {
       --cache_checked_modules --cache_dir "$dir/_cache" \
       --already_cached 'Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' \
       --include "$ROOT/pulse/_cache" --include "$dir" \
-      "$dir/PalowSpecs.fsti" 2>&1); then
+      "$dir/PalowSpecs.fst" 2>&1); then
     echo "FAIL $name"
     echo "$out"
     return 1
@@ -65,6 +68,7 @@ if grep -q '^FAIL' "$WORK/log"; then
   exit 1
 fi
 
-emitted=$(grep -hc '^fn ' "$WORK"/*/PalowSpecs.fsti | awk '{s+=$1} END {print s}')
-skipped=$(grep -hc '^(\* skipped' "$WORK"/*/PalowSpecs.fsti | awk '{s+=$1} END {print s}')
-echo "palow-check: ok; $emitted functions translated, $skipped skipped"
+emitted=$(cat "$WORK"/*/*/PalowSpecs.fst | grep -c '^fn ')
+skipped=$(cat "$WORK"/*/*/PalowSpecs.fst | grep -c '^(\* skipped')
+admitted=$(cat "$WORK"/*/*/PalowSpecs.fst | grep -c 'admit() (\* body')
+echo "palow-check: ok; $emitted specifications, $((emitted - admitted)) with bodies, $admitted admitted, $skipped skipped"
