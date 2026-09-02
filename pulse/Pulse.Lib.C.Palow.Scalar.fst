@@ -202,6 +202,13 @@ ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
   fold uint32_t_pts_to a 1.0R x;
 }
 
+ghost fn uint32_t_reveal_uninit (a: ptr)
+  requires uint32_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint32_t_sizeof)
+{
+  unfold uint32_t_pts_to_uninit a;
+}
+
 (* ---------------------------------------------------------------------------
    Pointers as stored values
 
@@ -326,6 +333,21 @@ ghost fn ptr_forget (dest: ptr) (#a: ptr)
 {
   unfold ptr_pts_to dest 1.0R a;
   fold ptr_pts_to_uninit dest;
+}
+
+ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes)
+  requires mem_pts_to dest 1.0R b
+  requires pure (len b == SZ.v ptr_sizeof)
+  ensures  ptr_pts_to_uninit dest
+{
+  fold ptr_pts_to_uninit dest;
+}
+
+ghost fn ptr_reveal_uninit (dest: ptr)
+  requires ptr_pts_to_uninit dest
+  ensures  exists* b. mem_pts_to dest 1.0R b ** pure (len b == SZ.v ptr_sizeof)
+{
+  unfold ptr_pts_to_uninit dest;
 }
 
 (* ---------------------------------------------------------------------------

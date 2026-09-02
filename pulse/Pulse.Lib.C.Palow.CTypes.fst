@@ -139,6 +139,21 @@ ghost fn bool_t_claim (a: ptr) (#b: bytes) (x: bool)
   fold bool_t_pts_to a 1.0R x;
 }
 
+ghost fn bool_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v bool_t_sizeof)
+  ensures  bool_t_pts_to_uninit a
+{
+  fold bool_t_pts_to_uninit a;
+}
+
+ghost fn bool_t_reveal_uninit (a: ptr)
+  requires bool_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v bool_t_sizeof)
+{
+  unfold bool_t_pts_to_uninit a;
+}
+
 (* ------------------------------- int8_t ------------------------------- *)
 
 
@@ -235,6 +250,21 @@ ghost fn int8_t_claim (a: ptr) (#b: bytes) (x: I8.t)
   ensures  int8_t_pts_to a 1.0R x
 {
   fold int8_t_pts_to a 1.0R x;
+}
+
+ghost fn int8_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v int8_t_sizeof)
+  ensures  int8_t_pts_to_uninit a
+{
+  fold int8_t_pts_to_uninit a;
+}
+
+ghost fn int8_t_reveal_uninit (a: ptr)
+  requires int8_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int8_t_sizeof)
+{
+  unfold int8_t_pts_to_uninit a;
 }
 
 (* ------------------------------- int16_t ------------------------------- *)
@@ -335,6 +365,21 @@ ghost fn int16_t_claim (a: ptr) (#b: bytes) (x: I16.t)
   fold int16_t_pts_to a 1.0R x;
 }
 
+ghost fn int16_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v int16_t_sizeof)
+  ensures  int16_t_pts_to_uninit a
+{
+  fold int16_t_pts_to_uninit a;
+}
+
+ghost fn int16_t_reveal_uninit (a: ptr)
+  requires int16_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int16_t_sizeof)
+{
+  unfold int16_t_pts_to_uninit a;
+}
+
 (* ------------------------------- int32_t ------------------------------- *)
 
 
@@ -431,6 +476,21 @@ ghost fn int32_t_claim (a: ptr) (#b: bytes) (x: I32.t)
   ensures  int32_t_pts_to a 1.0R x
 {
   fold int32_t_pts_to a 1.0R x;
+}
+
+ghost fn int32_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v int32_t_sizeof)
+  ensures  int32_t_pts_to_uninit a
+{
+  fold int32_t_pts_to_uninit a;
+}
+
+ghost fn int32_t_reveal_uninit (a: ptr)
+  requires int32_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int32_t_sizeof)
+{
+  unfold int32_t_pts_to_uninit a;
 }
 
 (* ------------------------------- int64_t ------------------------------- *)
@@ -531,6 +591,21 @@ ghost fn int64_t_claim (a: ptr) (#b: bytes) (x: I64.t)
   fold int64_t_pts_to a 1.0R x;
 }
 
+ghost fn int64_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v int64_t_sizeof)
+  ensures  int64_t_pts_to_uninit a
+{
+  fold int64_t_pts_to_uninit a;
+}
+
+ghost fn int64_t_reveal_uninit (a: ptr)
+  requires int64_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int64_t_sizeof)
+{
+  unfold int64_t_pts_to_uninit a;
+}
+
 (* ------------------------------- uint16_t ------------------------------- *)
 
 
@@ -628,6 +703,21 @@ ghost fn uint16_t_claim (a: ptr) (#b: bytes) (x: U16.t)
   fold uint16_t_pts_to a 1.0R x;
 }
 
+ghost fn uint16_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v uint16_t_sizeof)
+  ensures  uint16_t_pts_to_uninit a
+{
+  fold uint16_t_pts_to_uninit a;
+}
+
+ghost fn uint16_t_reveal_uninit (a: ptr)
+  requires uint16_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint16_t_sizeof)
+{
+  unfold uint16_t_pts_to_uninit a;
+}
+
 (* ------------------------------- uint64_t ------------------------------- *)
 
 
@@ -723,6 +813,21 @@ ghost fn uint64_t_claim (a: ptr) (#b: bytes) (x: U64.t)
   ensures  uint64_t_pts_to a 1.0R x
 {
   fold uint64_t_pts_to a 1.0R x;
+}
+
+ghost fn uint64_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v uint64_t_sizeof)
+  ensures  uint64_t_pts_to_uninit a
+{
+  fold uint64_t_pts_to_uninit a;
+}
+
+ghost fn uint64_t_reveal_uninit (a: ptr)
+  requires uint64_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint64_t_sizeof)
+{
+  unfold uint64_t_pts_to_uninit a;
 }
 
 (* -------------------------------- size_t --------------------------------
@@ -849,6 +954,21 @@ ghost fn size_t_claim (a: ptr) (#b: bytes) (x: SZ.t)
   fold size_t_pts_to a 1.0R x;
 }
 
+ghost fn size_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v size_t_sizeof)
+  ensures  size_t_pts_to_uninit a
+{
+  fold size_t_pts_to_uninit a;
+}
+
+ghost fn size_t_reveal_uninit (a: ptr)
+  requires size_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v size_t_sizeof)
+{
+  unfold size_t_pts_to_uninit a;
+}
+
 
 (* ------------------------------- uint8_t -------------------------------
 
@@ -929,6 +1049,21 @@ ghost fn uint8_t_claim (a: ptr) (#b: bytes) (x: U8.t)
   ensures  uint8_t_pts_to a 1.0R x
 {
   uint8_t_conceal a #1.0R #b #x;
+}
+
+ghost fn uint8_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v uint8_t_sizeof)
+  ensures  uint8_t_pts_to_uninit a
+{
+  fold uint8_t_pts_to_uninit a;
+}
+
+ghost fn uint8_t_reveal_uninit (a: ptr)
+  requires uint8_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint8_t_sizeof)
+{
+  unfold uint8_t_pts_to_uninit a;
 }
 
 (* ---------------------------------------------------------------------------

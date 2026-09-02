@@ -172,6 +172,13 @@ ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
   ensures  uint32_t_pts_to a 1.0R x
 
 
+(* And the reverse of `claim_uninit`: an allocation's block has to be handed
+   back to `free` as bytes, so write-only ownership has to be spendable. *)
+ghost fn uint32_t_reveal_uninit (a: ptr)
+  requires uint32_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint32_t_sizeof)
+
+
 (* ---------------------------------------------------------------------------
    Pointers as stored values
 
@@ -265,6 +272,17 @@ val ptr_pts_to_uninit ([@@@mkey] dest: ptr) : slprop
 ghost fn ptr_forget (dest: ptr) (#a: ptr)
   requires ptr_pts_to dest 1.0R a
   ensures  ptr_pts_to_uninit dest
+
+
+ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes)
+  requires mem_pts_to dest 1.0R b
+  requires pure (len b == SZ.v ptr_sizeof)
+  ensures  ptr_pts_to_uninit dest
+
+
+ghost fn ptr_reveal_uninit (dest: ptr)
+  requires ptr_pts_to_uninit dest
+  ensures  exists* b. mem_pts_to dest 1.0R b ** pure (len b == SZ.v ptr_sizeof)
 
 (* ---------------------------------------------------------------------------
    Elements of an array

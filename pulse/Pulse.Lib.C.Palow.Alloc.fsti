@@ -51,6 +51,7 @@ fn calloc (n: SZ.t)
    nothing about its contents. Requiring `len b == SZ.v n` is what makes
    freeing a strict subrange -- or a pointer into the middle of a block --
    unprovable. *)
-fn free (a: ptr) (#n: SZ.t) (#b: bytes { len b == SZ.v n })
-  requires freeable a n
-  requires mem_pts_to a 1.0R b
+fn free (a: ptr) (#n: erased SZ.t) (#b: erased bytes)
+  requires freeable a (reveal n)
+  requires mem_pts_to a 1.0R (reveal b)
+  requires pure (len b == SZ.v n)

@@ -33,6 +33,8 @@ open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.CTypes
 open Pulse.Lib.C.Palow.Machine
 open Pulse.Lib.C.Palow.Array
+open Pulse.Lib.C.Palow.Nullable
+open Pulse.Lib.C.Palow.Alloc
 module Seq = FStar.Seq
 module SZ = FStar.SizeT
 module U32 = FStar.UInt32
@@ -209,4 +211,41 @@ fn multiply_by_repeated_addition (x y: U32.t)
   uint32_t_forget loc_acc;
   uint32_t_stack_free loc_acc;
   r
+}
+
+
+(* An allocation whose null test is written the other way round:
+
+     void alloc_ne_null(void)
+     {
+       uint32_t *p = malloc(sizeof(uint32_t));
+       if (p != NULL) { *p = 7; free(p); }
+     }
+
+   This is the polarity in which the *then* arm owns the block. The translator
+   emits it, but it cannot be an acceptance test, because the old model's
+   allocator cannot fail: on the arm this C takes when the pointer is null the
+   old model still owns the block, and that arm leaks. Here it is instead.
+
+   The `unless_null` guard is what makes `malloc` an ordinary function rather
+   than a built-in the emitter has to pattern-match on -- and what makes the C
+   source's null test load-bearing. The elimination is by `rewrite`, which
+   cannot see through the `if` inside `unless_null` on its own, so the payload
+   is spelled out on both arms. After it, a block is indistinguishable from a
+   stack allocation, except for the `freeable` beside it. *)
+
+fn alloc_ne_null ()
+  returns _: unit
+{
+  let p = malloc uint32_t_sizeof;
+  if (not (is_null p)) {
+    elim_unless_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof);
+    uint32_t_claim_uninit p;
+    uint32_t_write_uninit p 7ul;
+    uint32_t_forget p;
+    uint32_t_reveal_uninit p;
+    free p;
+  } else {
+    elim_unless_null_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof);
+  };
 }

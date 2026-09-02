@@ -110,6 +110,19 @@ ghost fn bool_t_claim (a: ptr) (#b: bytes) (x: bool)
   requires pure (bool_t_repr x b)
   ensures  bool_t_pts_to a 1.0R x
 
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn bool_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v bool_t_sizeof)
+  ensures  bool_t_pts_to_uninit a
+
+
+ghost fn bool_t_reveal_uninit (a: ptr)
+  requires bool_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v bool_t_sizeof)
+
+
 
 (* ------------------------------- int8_t ------------------------------- *)
 
@@ -178,6 +191,19 @@ ghost fn int8_t_claim (a: ptr) (#b: bytes) (x: I8.t)
   requires mem_pts_to a 1.0R b
   requires pure (int8_t_repr x b)
   ensures  int8_t_pts_to a 1.0R x
+
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn int8_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v int8_t_sizeof)
+  ensures  int8_t_pts_to_uninit a
+
+
+ghost fn int8_t_reveal_uninit (a: ptr)
+  requires int8_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int8_t_sizeof)
+
 
 
 (* ------------------------------- int16_t ------------------------------- *)
@@ -248,6 +274,19 @@ ghost fn int16_t_claim (a: ptr) (#b: bytes) (x: I16.t)
   requires pure (int16_t_repr x b)
   ensures  int16_t_pts_to a 1.0R x
 
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn int16_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v int16_t_sizeof)
+  ensures  int16_t_pts_to_uninit a
+
+
+ghost fn int16_t_reveal_uninit (a: ptr)
+  requires int16_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int16_t_sizeof)
+
+
 
 (* ------------------------------- int32_t ------------------------------- *)
 
@@ -316,6 +355,19 @@ ghost fn int32_t_claim (a: ptr) (#b: bytes) (x: I32.t)
   requires mem_pts_to a 1.0R b
   requires pure (int32_t_repr x b)
   ensures  int32_t_pts_to a 1.0R x
+
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn int32_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v int32_t_sizeof)
+  ensures  int32_t_pts_to_uninit a
+
+
+ghost fn int32_t_reveal_uninit (a: ptr)
+  requires int32_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int32_t_sizeof)
+
 
 
 (* ------------------------------- int64_t ------------------------------- *)
@@ -386,6 +438,19 @@ ghost fn int64_t_claim (a: ptr) (#b: bytes) (x: I64.t)
   requires pure (int64_t_repr x b)
   ensures  int64_t_pts_to a 1.0R x
 
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn int64_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v int64_t_sizeof)
+  ensures  int64_t_pts_to_uninit a
+
+
+ghost fn int64_t_reveal_uninit (a: ptr)
+  requires int64_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int64_t_sizeof)
+
+
 
 (* ------------------------------- uint16_t ------------------------------- *)
 
@@ -455,6 +520,19 @@ ghost fn uint16_t_claim (a: ptr) (#b: bytes) (x: U16.t)
   requires pure (uint16_t_repr x b)
   ensures  uint16_t_pts_to a 1.0R x
 
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn uint16_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v uint16_t_sizeof)
+  ensures  uint16_t_pts_to_uninit a
+
+
+ghost fn uint16_t_reveal_uninit (a: ptr)
+  requires uint16_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint16_t_sizeof)
+
+
 
 (* ------------------------------- uint64_t ------------------------------- *)
 
@@ -523,6 +601,19 @@ ghost fn uint64_t_claim (a: ptr) (#b: bytes) (x: U64.t)
   requires mem_pts_to a 1.0R b
   requires pure (uint64_t_repr x b)
   ensures  uint64_t_pts_to a 1.0R x
+
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn uint64_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v uint64_t_sizeof)
+  ensures  uint64_t_pts_to_uninit a
+
+
+ghost fn uint64_t_reveal_uninit (a: ptr)
+  requires uint64_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint64_t_sizeof)
+
 
 
 (* -------------------------------- size_t --------------------------------
@@ -613,6 +704,19 @@ ghost fn size_t_claim (a: ptr) (#b: bytes) (x: SZ.t)
   requires pure (size_t_repr x b)
   ensures  size_t_pts_to a 1.0R x
 
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn size_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v size_t_sizeof)
+  ensures  size_t_pts_to_uninit a
+
+
+ghost fn size_t_reveal_uninit (a: ptr)
+  requires size_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v size_t_sizeof)
+
+
 
 
 (* ------------------------------- uint8_t -------------------------------
@@ -666,6 +770,19 @@ ghost fn uint8_t_claim (a: ptr) (#b: bytes) (x: U8.t)
   requires mem_pts_to a 1.0R b
   requires pure (uint8_t_repr x b)
   ensures  uint8_t_pts_to a 1.0R x
+
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn uint8_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v uint8_t_sizeof)
+  ensures  uint8_t_pts_to_uninit a
+
+
+ghost fn uint8_t_reveal_uninit (a: ptr)
+  requires uint8_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint8_t_sizeof)
+
 
 (* ---------------------------------------------------------------------------
    Elements of an array

@@ -1194,6 +1194,8 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     code += "open Pulse.Lib.C.Palow.CTypes\n";
     code += "open Pulse.Lib.C.Palow.Machine\n";
     code += "open Pulse.Lib.C.Palow.Array\n";
+    code += "open Pulse.Lib.C.Palow.Nullable\n";
+    code += "open Pulse.Lib.C.Palow.Alloc\n";
     code += "module Seq = FStar.Seq\n\n";
     for m in ["Int8", "Int16", "Int32", "Int64"] {
         code += &format!("module {} = FStar.{}\n", m, m);
@@ -1314,6 +1316,39 @@ struct Slot {
     init: bool,
 }
 
+/// A block of heap storage held in a local pointer.
+///
+/// `malloc` may fail, so between the allocation and the null test the block is
+/// under `unless_null` and nothing at all can be done with it. Once the source
+/// tests the pointer, the non-null arm eliminates the guard and claims the
+/// bytes at the pointee's type, and from there the block behaves exactly like
+/// a stack slot -- with a `freeable` alongside it, which is what `free` spends.
+#[derive(Clone)]
+struct Block {
+    /// The C local holding the pointer.
+    var: String,
+    /// The name the allocation was bound to. The local is not reassigned while
+    /// the block is tracked, so this names the same pointer the local holds,
+    /// and using it directly avoids a load whose result the frame would then
+    /// have to be re-stated in terms of.
+    tmp: String,
+    /// The pointee's Palow type name.
+    pn: String,
+    /// The byte pattern the allocator promises: `uninit` for `malloc`,
+    /// `zeroed` for `calloc`. The zeroing is not carried into the claim yet, so
+    /// a `calloc`ed block still arrives write-only; the shape only has to match
+    /// what the allocator's postcondition said.
+    fill: &'static str,
+    /// Whether the null test has been passed. Until it has, the block is under
+    /// `unless_null` and unusable.
+    checked: bool,
+    /// Whether the pointee has been written. `malloc` hands back uninitialised
+    /// storage, so the first store through the pointer is an initialising one.
+    init: bool,
+    /// Whether `free` has already taken the block back.
+    freed: bool,
+}
+
 /// What one arm of an `if` produced: its statements, and the state it leaves
 /// the enclosing scope in.
 struct BranchResult {
@@ -1381,6 +1416,8 @@ struct Body<'a> {
     /// Set by a loop: the function has to be declared `divergent`, since PAL
     /// translates no `decreases` measure.
     divergent: bool,
+    /// Heap blocks held in locals, in allocation order.
+    blocks: Vec<Block>,
 }
 
 /// What a subscript through an array parameter needs: the element's Palow type
@@ -1453,7 +1490,32 @@ impl<'a> Body<'a> {
             // memory -- `*s->next`, `**p` -- does not, and the caller would
             // have had to grant it in a `_requires` that is not translated.
             ExprT::Deref(inner) => match &strip_vattr(inner).val {
+                // A checked block's pointee is owned just like a parameter's,
+                // and naming the allocation directly rather than loading the
+                // local keeps the frame stated in terms of the same pointer.
+                ExprT::Var(v)
+                    if self
+                        .blocks
+                        .iter()
+                        .any(|b| b.var == *v.val && b.checked && !b.freed) =>
+                {
+                    let b = self
+                        .blocks
+                        .iter()
+                        .find(|b| b.var == *v.val && b.checked && !b.freed)
+                        .unwrap();
+                    Ok(b.tmp.clone())
+                }
                 ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => self.rvalue(inner),
+                // `malloc` may fail, so an allocation the source never tested
+                // is genuinely not owned. This is a real difference from the
+                // old model, whose allocator could not return null.
+                ExprT::Var(v) if self.blocks.iter().any(|b| b.var == *v.val && !b.freed) => {
+                    Err(format!(
+                        "a dereference of `{}`, whose allocation was not checked for null",
+                        v.val
+                    ))
+                }
                 ExprT::Var(v) => Err(format!(
                     "a dereference of local `{}`, whose target the contract does not grant",
                     v.val
@@ -2034,6 +2096,182 @@ impl<'a> Body<'a> {
         Ok(pn)
     }
 
+    /// The `unless_null` payload of an allocation: the block's bytes and the
+    /// right to give them back. It has to be written out in full because the
+    /// elimination is by `rewrite`, which cannot see through the `if` inside
+    /// `unless_null` on its own.
+    fn block_slprop(b: &Block) -> String {
+        format!(
+            "(mem_pts_to {t} 1.0R ({f} (SizeT.v {pn}_sizeof)) ** freeable {t} {pn}_sizeof)",
+            t = b.tmp,
+            f = b.fill,
+            pn = b.pn
+        )
+    }
+
+    /// An allocation of a single object, with the Palow name of the type
+    /// allocated. `malloc(sizeof(T) * n)` is an array allocation and is not
+    /// this; nor is a flexible-array-member allocation.
+    fn alloc_of(&self, e: &Expr) -> Option<(&'static str, String)> {
+        let e = strip_vattr(e);
+        let e = match &e.val {
+            ExprT::Cast(inner, _) => strip_vattr(inner),
+            _ => e,
+        };
+        match &e.val {
+            ExprT::Malloc(ty) => palow_name(self.tds, ty).map(|pn| ("malloc", pn)),
+            ExprT::Calloc(ty) => palow_name(self.tds, ty).map(|pn| ("calloc", pn)),
+            _ => None,
+        }
+    }
+
+    /// `p = malloc(sizeof(T))` for a local pointer `p`.
+    ///
+    /// The pointer itself is an ordinary value and goes into `p`'s slot like
+    /// any other. What is new is the resource that comes with it, which stays
+    /// under `unless_null` until the source tests the pointer.
+    fn allocate(&mut self, var: &Ident, which: &str, pn: &str) -> Result<String, String> {
+        if self.in_branch {
+            return Err("an allocation inside a branch".to_string());
+        }
+        let tmp = self.fresh(&var.val);
+        self.lines
+            .push(format!("let {} = {} {}_sizeof;", tmp, which, pn));
+        self.blocks.retain(|b| b.var != *var.val);
+        self.blocks.push(Block {
+            var: var.val.to_string(),
+            tmp: tmp.clone(),
+            pn: pn.to_string(),
+            fill: if which == "calloc" {
+                "zeroed"
+            } else {
+                "uninit"
+            },
+            checked: false,
+            init: false,
+            freed: false,
+        });
+        Ok(tmp)
+    }
+
+    /// A test of a tracked block's pointer against null, as an index into
+    /// `blocks` and whether it is the *then* arm that runs when the pointer is
+    /// null.
+    fn null_test(&self, cond: &Expr) -> Option<(usize, bool)> {
+        // `p != NULL` reaches the IR as `!(p == 0)`; there is no `Ne`.
+        // `if (p)` reaches the IR as `if ((_Bool) p)`, which carries no
+        // information the test does not.
+        fn peel(e: &Expr) -> Rc<Expr> {
+            match &strip_vattr(e).val {
+                ExprT::Cast(inner, _) => peel(inner),
+                _ => Rc::new(strip_vattr(e).clone()),
+            }
+        }
+        let (cond, mut null_when_true) = match &peel(cond).val {
+            ExprT::UnOp(UnOp::Not, inner) => (peel(inner), false),
+            _ => (peel(cond), true),
+        };
+        let (a, b) = match &strip_vattr(&cond).val {
+            ExprT::BinOp(BinOp::Eq, a, b) => (a.clone(), b.clone()),
+            // `if (p)` is a bare truth test on the pointer.
+            ExprT::Var(_) => {
+                null_when_true = !null_when_true;
+                let i = self
+                    .blocks
+                    .iter()
+                    .position(|blk| match &strip_vattr(&cond).val {
+                        ExprT::Var(v) => blk.var == *v.val,
+                        _ => false,
+                    })?;
+                return if self.blocks[i].checked {
+                    None
+                } else {
+                    Some((i, null_when_true))
+                };
+            }
+            _ => return None,
+        };
+        let is_zero =
+            |e: &Expr| matches!(&strip_vattr(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO);
+        let var = if is_zero(&b) {
+            strip_vattr(&a)
+        } else if is_zero(&a) {
+            strip_vattr(&b)
+        } else {
+            return None;
+        };
+        let name = match &var.val {
+            ExprT::Var(v) => v.val.to_string(),
+            _ => return None,
+        };
+        let i = self.blocks.iter().position(|blk| blk.var == name)?;
+        if self.blocks[i].checked {
+            return None;
+        }
+        Some((i, null_when_true))
+    }
+
+    /// The emitted condition of a null test, in the polarity the C source
+    /// wrote it, so that the arms stay where the source put them.
+    fn null_cond(tmp: &str, null_when_true: bool) -> String {
+        if null_when_true {
+            format!("is_null {}", tmp)
+        } else {
+            format!("not (is_null {})", tmp)
+        }
+    }
+
+    /// The lines that open each arm of a null test. The arm that runs when the
+    /// pointer is non-null eliminates the guard and claims the bytes at the
+    /// pointee's type, which is exactly the state a stack allocation would
+    /// have left; the other arm discards the guard, which is `emp` there.
+    fn null_test_arms(&self, i: usize) -> (Vec<String>, Vec<String>) {
+        let b = &self.blocks[i];
+        let sl = Self::block_slprop(b);
+        (
+            vec![format!("elim_unless_null_null {} {};", b.tmp, sl)],
+            vec![
+                format!("elim_unless_null {} {};", b.tmp, sl),
+                format!("{}_claim_uninit {};", b.pn, b.tmp),
+            ],
+        )
+    }
+
+    /// `free(p)`.
+    ///
+    /// The block goes back the way it came: forget whatever the pointee last
+    /// held, spend the write-only view for the bytes it stands for, and hand
+    /// those and the `freeable` to `free`. Requiring the whole block back at
+    /// full permission is what makes freeing a subrange, or a pointer into the
+    /// middle of a block, unprovable.
+    fn free(&mut self, arg: &Expr) -> Result<(), String> {
+        let name = match &strip_vattr(arg).val {
+            ExprT::Var(v) => v.val.to_string(),
+            _ => return Err("a `free` of something other than a local".to_string()),
+        };
+        let i = self
+            .blocks
+            .iter()
+            .position(|b| b.var == name && b.checked && !b.freed)
+            .ok_or_else(|| {
+                format!(
+                    "a `free` of `{}`, which does not hold a checked block",
+                    name
+                )
+            })?;
+        let (tmp, pn, init) = {
+            let b = &self.blocks[i];
+            (b.tmp.clone(), b.pn.clone(), b.init)
+        };
+        if init {
+            self.lines.push(format!("{}_forget {};", pn, tmp));
+        }
+        self.lines.push(format!("{}_reveal_uninit {};", pn, tmp));
+        self.lines.push(format!("free {};", tmp));
+        self.blocks[i].freed = true;
+        Ok(())
+    }
+
     /// Store into an lvalue, choosing the initialising store when the target
     /// is a slot that has not been written yet.
     fn store(&mut self, lhs: &Expr, pn: &str, value: &str) -> Result<(), String> {
@@ -2058,6 +2296,25 @@ impl<'a> Body<'a> {
                 self.lines
                     .push(format!("{}_{} loc_{} {};", pn, op, v.val, value));
                 return Ok(());
+            }
+        }
+        if let ExprT::Deref(inner) = &lhs.val {
+            if let ExprT::Var(v) = &strip_vattr(inner).val {
+                if let Some(i) = self
+                    .blocks
+                    .iter()
+                    .position(|b| b.var == *v.val && b.checked && !b.freed)
+                {
+                    let op = if self.blocks[i].init {
+                        "write"
+                    } else {
+                        "write_uninit"
+                    };
+                    self.blocks[i].init = true;
+                    let tmp = self.blocks[i].tmp.clone();
+                    self.lines.push(format!("{}_{} {} {};", pn, op, tmp, value));
+                    return Ok(());
+                }
             }
         }
         if let ExprT::Deref(inner) = &lhs.val {
@@ -2223,7 +2480,10 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Let(name, ty, init) => {
-                let v = self.rvalue(init)?;
+                let v = match self.alloc_of(init) {
+                    Some((which, pointee)) => self.allocate(name, which, &pointee)?,
+                    None => self.rvalue(init)?,
+                };
                 let pn = self.alloc_slot(name, ty)?;
                 self.lines
                     .push(format!("{}_write_uninit loc_{} {};", pn, name.val, v));
@@ -2234,6 +2494,12 @@ impl<'a> Body<'a> {
                 let ty = self.ty_of(lhs)?;
                 let pn = palow_name(self.tds, &ty)
                     .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
+                if let (ExprT::Var(v), Some((which, pointee))) =
+                    (&strip_vattr(lhs).val, self.alloc_of(rhs))
+                {
+                    let value = self.allocate(v, which, &pointee)?;
+                    return self.store(lhs, &pn, &value);
+                }
                 let v = self.rvalue(rhs)?;
                 self.store(lhs, &pn, &v)
             }
@@ -2268,6 +2534,7 @@ impl<'a> Body<'a> {
                     }
                     Ok(())
                 }
+                ExprT::Free(arg) => self.free(arg),
                 _ => Err("a call through a function pointer".to_string()),
             },
             StmtT::If {
@@ -2280,11 +2547,17 @@ impl<'a> Body<'a> {
                 // translated, and does not need to be: Pulse computes the join
                 // itself from the two branches, so the annotation exists only
                 // to be checked, not to make the code typecheck.
-                let cty = self.ty_of(cond)?;
-                if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
-                    return Err("an `if` on a non-boolean condition".to_string());
-                }
-                let c = self.rvalue(cond)?;
+                let nt = self.null_test(cond);
+                let c = match nt {
+                    Some((i, when)) => Self::null_cond(&self.blocks[i].tmp, when),
+                    None => {
+                        let cty = self.ty_of(cond)?;
+                        if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
+                            return Err("an `if` on a non-boolean condition".to_string());
+                        }
+                        self.rvalue(cond)?
+                    }
+                };
 
                 // Whether a slot holds a value or still holds uninitialised
                 // storage decides which of two *different* slprops it has, and
@@ -2299,12 +2572,38 @@ impl<'a> Body<'a> {
                 // whatever the first left behind.
                 let entry_out = self.out_params.clone();
                 let entry_inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+                let entry_blocks = self.blocks.clone();
+                let live_then = matches!(nt, Some((_, false)));
+                if let Some((i, _)) = nt {
+                    self.blocks[i].checked = live_then;
+                }
                 let then = self.branch(then_branch)?;
+                let then_blocks = self.blocks.clone();
+                self.blocks = entry_blocks.clone();
                 self.out_params = entry_out;
                 for (slot, init) in self.slots.iter_mut().zip(&entry_inits) {
                     slot.init = *init;
                 }
+                if let Some((i, _)) = nt {
+                    self.blocks[i].checked = !live_then;
+                }
                 let els = self.branch(else_branch)?;
+                let els_blocks = self.blocks.clone();
+                self.blocks = entry_blocks;
+                if let Some((i, _)) = nt {
+                    // The arm that owns the block has to give it back, or the
+                    // two arms leave different frames behind and there is
+                    // nothing to join.
+                    let live = if live_then { &then_blocks } else { &els_blocks };
+                    if !live[i].freed {
+                        return Err(format!(
+                            "an `if` whose non-null arm does not free `{}`",
+                            live[i].var
+                        ));
+                    }
+                    self.blocks[i].freed = true;
+                    self.blocks[i].checked = false;
+                }
                 if then.inits != els.inits || then.out_params != els.out_params {
                     return Err(
                         "an `if` whose branches leave different variables initialised".to_string(),
@@ -2315,10 +2614,19 @@ impl<'a> Body<'a> {
                     slot.init = *init;
                 }
 
+                let (then_pre, else_pre) = match nt {
+                    Some((i, null_when_true)) => {
+                        let (n, l) = self.null_test_arms(i);
+                        if null_when_true { (n, l) } else { (l, n) }
+                    }
+                    None => (Vec::new(), Vec::new()),
+                };
                 self.lines.push(format!("if ({})", c));
                 self.lines.push("{".to_string());
+                self.lines.extend(then_pre.iter().map(|l| indent(l)));
                 self.lines.extend(then.lines.iter().map(|l| indent(l)));
                 self.lines.push("} else {".to_string());
+                self.lines.extend(else_pre.iter().map(|l| indent(l)));
                 self.lines.extend(els.lines.iter().map(|l| indent(l)));
                 self.lines.push("};".to_string());
                 Ok(())
@@ -2350,11 +2658,21 @@ impl<'a> Body<'a> {
                     else_branch,
                     ..
                 } if returns(then_branch) || returns(else_branch) => {
-                    let cty = self.ty_of(cond)?;
-                    if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
-                        return Err("an `if` on a non-boolean condition".to_string());
-                    }
-                    let c = self.rvalue(cond)?;
+                    // A test of a freshly allocated pointer is the one
+                    // condition that is not just a value: it decides which arm
+                    // owns the block, so each arm opens by eliminating the
+                    // guard in the direction the test settled.
+                    let nt = self.null_test(cond);
+                    let c = match nt {
+                        Some((i, when)) => Self::null_cond(&self.blocks[i].tmp, when),
+                        None => {
+                            let cty = self.ty_of(cond)?;
+                            if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
+                                return Err("an `if` on a non-boolean condition".to_string());
+                            }
+                            self.rvalue(cond)?
+                        }
+                    };
                     // Whatever follows the `if` is only reached on the paths
                     // that did not return, so it belongs to the arm that falls
                     // through. Appending it to that arm is what turns an early
@@ -2368,8 +2686,36 @@ impl<'a> Body<'a> {
                     if !returns(else_branch) {
                         else_stmts.extend(after.iter().cloned());
                     }
+                    let (mut null_arm, mut live_arm) = match nt {
+                        Some((i, _)) => {
+                            let (n, l) = self.null_test_arms(i);
+                            (n, l)
+                        }
+                        None => (Vec::new(), Vec::new()),
+                    };
+                    let (then_pre, else_pre) = match nt {
+                        Some((_, true)) => {
+                            (std::mem::take(&mut null_arm), std::mem::take(&mut live_arm))
+                        }
+                        Some((_, false)) => {
+                            (std::mem::take(&mut live_arm), std::mem::take(&mut null_arm))
+                        }
+                        None => (Vec::new(), Vec::new()),
+                    };
+                    let live_then = matches!(nt, Some((_, false)));
+                    let entry_blocks = self.blocks.clone();
+                    if let Some((i, _)) = nt {
+                        self.blocks[i].checked = live_then;
+                    }
                     let (then_lines, then_val) = self.tail_arm(&then_stmts)?;
+                    self.blocks = entry_blocks.clone();
+                    if let Some((i, _)) = nt {
+                        self.blocks[i].checked = !live_then;
+                    }
                     let (else_lines, else_val) = self.tail_arm(&else_stmts)?;
+                    self.blocks = entry_blocks;
+                    let then_lines: Vec<String> = then_pre.into_iter().chain(then_lines).collect();
+                    let else_lines: Vec<String> = else_pre.into_iter().chain(else_lines).collect();
                     if then_val.is_some() != else_val.is_some() {
                         return Err("an `if` where only one arm returns a value".to_string());
                     }
@@ -2755,6 +3101,7 @@ fn emit_body(
         owned: &sig.owned,
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
+        blocks: Vec::new(),
         params: defn
             .decl
             .args

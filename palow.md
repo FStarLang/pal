@@ -888,7 +888,43 @@ new facts about memory.
    errors in the previously dead half. `opt/check-comments.py`, run from `make
    test`, now guards against this class of silent success.
 
-   As of this milestone: **710 specifications, 312 of them with real bodies,
+   Allocation is translated, and it is where the payoff of layer 0 shows up
+   most directly: `malloc` is an ordinary function with an ordinary
+   specification, so the emitter has no `Malloc` case that pattern-matches on
+   the AST to guess an allocated type. It emits `malloc t_sizeof`, and the only
+   thing about the C type that reaches the model is its size. A custom
+   `xmalloc` with the same postcondition would need no translator support at
+   all.
+
+   The price is that the specification is *honest about failure*, and that
+   turns out to change what C is acceptable. The old model's `alloc_ref` cannot
+   return null, so C that ignores the result of `malloc` verifies against it;
+   Palow's `malloc` hands the block back under `unless_null`, so the source has
+   to test the pointer before it can touch the storage. Three test bodies that
+   verified under the old model are now refused with "whose allocation was not
+   checked for null", and that is the right answer: those programs have a null
+   dereference in them. The `unless_null` elimination has to be spelled out on
+   both arms, since a bare `rewrite` cannot see through an `if` decided by a
+   pure fact.
+
+   After the check, a block is indistinguishable from a stack allocation --
+   `t_claim_uninit` turns the bytes into the same write-only view a
+   `t_stack_alloc` hands out -- except for the `freeable` beside it, which is
+   what `free` spends. So the store, load and assertion machinery needed no
+   changes at all; only the diagnostics did, since a dereference of an
+   unchecked block is a different failure from a dereference the contract never
+   granted. `calloc` differs only in the byte pattern its postcondition names;
+   its zeroing is not yet carried into the claim, so a `calloc`ed block still
+   arrives write-only.
+
+   `test/palow_alloc` covers `==`, a bare truth test, `calloc`, reading a block
+   back, and allocating a pointer-sized object. The remaining polarity --
+   `if (p != NULL) { ... }`, where the *then* arm owns the block -- is
+   translated but cannot be an acceptance test, because the old model still
+   owns the block on the arm that C takes when the pointer is null and
+   therefore leaks there; the emitted shape is in `Examples` instead.
+
+   As of this milestone: **715 specifications, 317 of them with real bodies,
    398 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
@@ -1000,8 +1036,12 @@ new facts about memory.
    which arrays of structs and whole-object copies need, and unions.
    Fixed-size array fields are covered; bit-fields are not, since the model has
    no sub-byte addressing to give them a byte offset.
-5. `malloc`/`calloc`/`free` as ordinary specifications (specs done); delete the
-   AST special cases; delete `_core_ref`.
+5. **Done for single objects.** `malloc`/`calloc`/`free` are ordinary
+   specifications and the translator emits calls to them: `malloc(sizeof(T))`
+   is a `malloc t_sizeof` and nothing about `T` reaches the emitter except its
+   size. What remains is array and flexible-array allocation, `free` of a
+   `_consumes` parameter, deleting the `Malloc`/`MallocArray`/`MallocFlex` IR
+   nodes, and deleting `_core_ref`.
 6. *Done for the model.* Custom allocators, with their own `freeable`
    predicates.
 7. **Done for the model.** `exposed` / `uintptr_t` round-trips, `memcpy`, and
