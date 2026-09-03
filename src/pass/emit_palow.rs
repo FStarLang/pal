@@ -267,6 +267,10 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
             Some(format!("{}Int{}.t", if *signed { "" } else { "U" }, width))
         }
         TypeT::SizeT => Some("SizeT.t".to_string()),
+        // A specification integer is unbounded, which is what `_let` needs to
+        // state a range condition without first having to prove it.
+        TypeT::SpecInt => Some("int".to_string()),
+        TypeT::SpecNat => Some("nat".to_string()),
         TypeT::Pointer(..) => Some("ptr".to_string()),
         TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
             Some(format!("struct_{}", n.val))
@@ -782,7 +786,38 @@ impl<'a> Spec<'a> {
                 _ => int_literal(self.tds, n, ty),
             },
             ExprT::BinOp(op, l, r) => {
+                // A `_Bool`-valued expression in *value* position -- the body
+                // of a `_let`, say -- has to come out as an F* `bool`, not as a
+                // proposition, because something is going to compare it with
+                // `true`.
+                if let Some(o) = match op {
+                    BinOp::LogAnd => Some("&&"),
+                    BinOp::LogOr => Some("||"),
+                    _ => None,
+                } {
+                    return Ok(format!(
+                        "({} {} {})",
+                        self.value(l, w)?,
+                        o,
+                        self.value(r, w)?
+                    ));
+                }
                 let ty = self.ty_of(l)?;
+                if matches!(self.tds.resolve(&ty).val, TypeT::SpecInt | TypeT::SpecNat)
+                    && let Some(o) = match op {
+                        BinOp::Eq => Some("="),
+                        BinOp::Lt => Some("<"),
+                        BinOp::LEq => Some("<="),
+                        _ => None,
+                    }
+                {
+                    return Ok(format!(
+                        "({} {} {})",
+                        self.value(l, w)?,
+                        o,
+                        self.value(r, w)?
+                    ));
+                }
                 if !matches!(self.tds.resolve(&ty).val, TypeT::SpecInt | TypeT::SpecNat) {
                     // Machine arithmetic in a specification means what it means
                     // in a body: unsigned wraps, and signed is undefined unless
@@ -831,6 +866,86 @@ impl<'a> Spec<'a> {
             _ => Err(format!("{} in a contract", expr_kind(e))),
         }
     }
+}
+
+/// Build the F* definition for one `_let`, or explain why we cannot.
+///
+/// A `_let` exists only at specification level: it is a name for a
+/// proposition or a mathematical value that several contracts share. There is
+/// no code for it and no memory involved, so nothing about it depends on the
+/// memory model -- it is the same definition Palow would want under any model.
+fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, String> {
+    if ld.is_impure {
+        return Err("it is impure".to_string());
+    }
+    if ld.is_rec {
+        return Err("it is recursive".to_string());
+    }
+    if matches!(tds.resolve(&ld.ret_type).val, TypeT::SLProp) {
+        return Err("it defines an slprop".to_string());
+    }
+    let mut params: Vec<String> = Vec::new();
+    for (i, arg) in ld.params.iter().enumerate() {
+        let pname = match &arg.name {
+            Some(n) => format!("var_{}", n.val),
+            None => format!("arg_{}", i),
+        };
+        let fty = fstar_type(tds, &arg.ty)
+            .ok_or_else(|| format!("parameter {} is {}", pname, describe(tds.resolve(&arg.ty))))?;
+        params.push(format!("({}: {})", pname, fty));
+    }
+    if params.is_empty() {
+        params.push("()".to_string());
+    }
+    let ret = fstar_type(tds, &ld.ret_type)
+        .ok_or_else(|| format!("it returns {}", describe(tds.resolve(&ld.ret_type))))?;
+
+    let sp = Spec {
+        tds,
+        env,
+        pointees: HashMap::new(),
+        arrays: HashSet::new(),
+        guards: RefCell::new(Vec::new()),
+        ret: "ret".to_string(),
+        locals: HashMap::new(),
+    };
+    let clause = |es: &Exprs| -> Result<String, String> {
+        let mut props: Vec<String> = Vec::new();
+        for e in es.iter() {
+            sp.guards.borrow_mut().clear();
+            let p = sp.prop(e, When::Pre)?;
+            if !sp.guards.borrow().is_empty() {
+                return Err("a contract with a side condition".to_string());
+            }
+            props.push(p);
+        }
+        Ok(if props.is_empty() {
+            "True".to_string()
+        } else {
+            props.join(r" /\ ")
+        })
+    };
+    let req = clause(&ld.requires)?;
+    let ens = clause(&ld.ensures)?;
+    let body = sp.value(&ld.body, When::Pre)?;
+
+    // `GTot` rather than `Tot`: a `_let` is only ever used in a specification,
+    // and keeping it ghost means nothing can accidentally extract it.
+    let ty = if req == "True" && ens == "True" {
+        format!("GTot {}", ret)
+    } else {
+        format!(
+            "Ghost {} (requires ({})) (ensures (fun {} -> {}))",
+            ret, req, sp.ret, ens
+        )
+    };
+    Ok(format!(
+        "let func_{} {} : {} =\n  {}\n\n",
+        ld.name.val,
+        params.join(" "),
+        ty,
+        body
+    ))
 }
 
 /// Build the F* definition for one `_pure` C function, or explain why we
@@ -1659,6 +1774,29 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     code += "module SizeT = FStar.SizeT\n\n";
     code += &structs;
     code += &emit_globals(&tds, tu);
+
+    // `_let` definitions first: they are the vocabulary the `_pure` functions
+    // and the contracts are written in.
+    for decl in &tu.decls {
+        let DeclT::LetDecl(ld) = &decl.val else {
+            continue;
+        };
+        let mut env = base.clone();
+        for a in &ld.params {
+            env.push_arg(a, crate::env::LocalDeclKind::RValue);
+        }
+        tds.pure_fns.insert(ld.name.val.to_string());
+        match emit_let_decl(&tds, &env, ld) {
+            Ok(t) => code += &t,
+            Err(why) => {
+                tds.pure_fns.remove(&*ld.name.val.to_string());
+                code += &format!(
+                    "(* `{}` is not an F* definition: {} *)\n\n",
+                    ld.name.val, why
+                );
+            }
+        }
+    }
 
     // `_pure` functions first, and as F* definitions rather than Pulse `fn`s.
     // A `_pure` function is the vocabulary a contract is written in, so it has

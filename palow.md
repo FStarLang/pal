@@ -980,8 +980,23 @@ new facts about memory.
    that C does not supply, so a call that closes a cycle is refused by name and
    the rest of the body is kept.
 
-   As of this milestone: **703 specifications, 364 of them with real bodies,
-   339 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   `_let` declarations are translated too, and they are the clearest case of
+   something the memory model has no opinion about: a `_let` is a name for a
+   proposition or a mathematical value that several contracts share, with no
+   code and no memory behind it, so the definition Palow emits is the one it
+   would emit under any model. It becomes a `GTot` -- or a `Ghost` with the
+   `requires`/`ensures` it carries -- and goes into the same table as the
+   `_pure` functions, so a contract that mentions one is translated by exactly
+   the same path.
+
+   This needed `Spec::value` to learn the boolean connectives. A `_Bool`-valued
+   `_let` is *used* as a proposition but has to be *defined* as an F\* `bool`,
+   since something will go on to compare it with `true`; the two readings of
+   `&&` had to be kept apart. Five bodies came back, all of them functions
+   whose overflow obligation was stated with a shared range predicate.
+
+   As of this milestone: **703 specifications, 369 of them with real bodies,
+   334 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
