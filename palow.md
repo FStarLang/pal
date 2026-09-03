@@ -924,8 +924,34 @@ new facts about memory.
    owns the block on the arm that C takes when the pointer is null and
    therefore leaks there; the emitted shape is in `Examples` instead.
 
-   As of this milestone: **715 specifications, 317 of them with real bodies,
-   398 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
+   Globals are translated, and here Palow deliberately changes nothing. The
+   design PAL already settled on is about *who owns a global*, and that
+   question does not depend on how memory is modelled, so the same three pieces
+   come across unchanged: an immutable global -- `const`, or `_pure` -- is
+   published as an F\* constant and read with no ownership at all, its address
+   is an assumed `ptr`, and the permission that would let something write
+   through that address stays under an existential in an assumed `acquire`, so
+   no client can ever gather a full one. A mutable global gets the address and
+   nothing else; with no points-to ever produced for it, no permission can be
+   derived, which is what makes handing the address out inert.
+
+   Assuming the address rather than allocating it is what C says -- a global
+   has one fixed address for the whole run -- and it is why `&g == &g` holds
+   definitionally rather than needing a lemma. The one thing that had to be
+   separated is the address from the value: a struct or array global still has
+   an address even though the model has no constant for its contents, so `&g`
+   is translated for every addressable global while reads are translated only
+   where a value was published. An access *through* a global's address is
+   refused, because nothing here owns the storage behind it.
+
+   This was the largest single unblocking so far -- 17 bodies -- mostly because
+   a great many test functions mention a constant in passing.
+   `test/palow_global` covers assertions over an immutable global, an immutable
+   global read as a value, and the pointer identity of a mutable global's
+   address.
+
+   As of this milestone: **718 specifications, 337 of them with real bodies,
+   381 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
 
@@ -938,8 +964,7 @@ new facts about memory.
    to be re-expressed against the new predicates and is a source change, not a
    translator change. Function pointers (50, split between locals and calls
    through them) are milestone 4 and need a model decision first, since there
-   is no function-pointer predicate yet. Globals (27) need a decision about
-   who owns a translation unit's globals. Signed arithmetic (22) is refused on
+   is no function-pointer predicate yet. Signed arithmetic (22) is refused on
    purpose: its overflow
    obligation is discharged by the `_requires` clause, and emitting it where
    that clause did not translate would produce failures that say nothing about

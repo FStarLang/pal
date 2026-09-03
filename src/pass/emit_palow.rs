@@ -1175,6 +1175,114 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     c
 }
 
+/// A global's initialiser, as a closed F* term. Only literals qualify: a
+/// global whose value has to be computed has an initialiser the emitter would
+/// have to evaluate, and C's constant expressions are not the subset this pass
+/// covers.
+fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
+    // `_Bool b = true;` reaches the IR as a cast of `1`, so the target type
+    // decides how the literal reads, not the literal itself.
+    if matches!(tds.resolve(ty).val, TypeT::Bool) {
+        return match &strip_vattr(e).val {
+            ExprT::BoolLit(b) => Some(if *b { "true" } else { "false" }.to_string()),
+            ExprT::IntLit(n, _) => {
+                Some(if **n == BigInt::ZERO { "false" } else { "true" }.to_string())
+            }
+            ExprT::Cast(inner, _) => const_expr(tds, ty, inner),
+            _ => None,
+        };
+    }
+    match &strip_vattr(e).val {
+        ExprT::IntLit(n, _) => int_literal(tds, n, ty).ok(),
+        // A negative initialiser is a negation of a literal, not a negative
+        // literal; folding it here keeps `int_literal`'s signedness check.
+        ExprT::UnOp(UnOp::Neg, inner) => match &strip_vattr(inner).val {
+            ExprT::IntLit(n, _) => int_literal(tds, &-(**n).clone(), ty).ok(),
+            _ => None,
+        },
+        ExprT::Cast(inner, _) => const_expr(tds, ty, inner),
+        _ => None,
+    }
+}
+
+/// The globals of a translation unit.
+///
+/// Palow does not change the design PAL already settled on here, because that
+/// design is about *who owns a global*, and the answer does not depend on how
+/// memory is modelled. An immutable global -- `const`, or annotated `_pure` --
+/// has a value that is fixed for the life of the program, so it is published
+/// as an F* constant and read with no ownership at all; the permission that
+/// would let something write through its address stays under an existential in
+/// `acquire`, so no client can ever obtain a full one. A mutable global gets
+/// its address and nothing else: with no points-to ever produced for it, no
+/// permission to read or write through the address can be derived, so handing
+/// the address out is inert, and reads of the global itself are refused.
+///
+/// The addresses are assumed rather than allocated. C gives a global a single
+/// fixed address for the whole run, which is exactly a constant of type `ptr`,
+/// and pointer identity between two mentions of `&g` then holds definitionally.
+fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
+    let mut out = String::new();
+    for decl in &tu.decls {
+        let gv = match &decl.val {
+            DeclT::GlobalVar(g) => g,
+            _ => continue,
+        };
+        if gv.is_enum_constant || global_var_is_array(gv) {
+            continue;
+        }
+        let name = &gv.name.val;
+        // The address is a `ptr` whatever the global's type is, so it is
+        // published for every addressable global; only the value and the
+        // permission that goes with it need a type the model covers.
+        let typed = palow_name(tds, &gv.ty)
+            .filter(|_| has_repr(tds, &gv.ty))
+            .and_then(|pn| fstar_type(tds, &gv.ty).map(|fty| (pn, fty)));
+        // The value is known only for an immutable global that this file
+        // initialises. `extern const T g;` is immutable but its value lives in
+        // another translation unit; a tentative `const T g;` is zero, but
+        // spelling that out per type is the aggregate work milestone 5 left.
+        let value = if gv.is_pure && !gv.is_extern {
+            gv.init.as_ref().and_then(|e| const_expr(tds, &gv.ty, e))
+        } else {
+            None
+        };
+        out += &format!(
+            "assume val addr_var_{} : ptr
+",
+            name
+        );
+        out += &format!(
+            "assume val addr_var_{}_not_null : squash (not (is_null addr_var_{}))
+",
+            name, name
+        );
+        if let (Some(v), Some((pn, fty))) = (value, typed) {
+            out += &format!(
+                "let var_{} : {} = {}
+",
+                name, fty, v
+            );
+            // The permission is existentially quantified, so a client can read
+            // through the address but can never gather a full one and write.
+            out += &format!(
+                "assume val acquire_var_{} : unit -> stt_ghost unit emp_inames emp\n  (fun _ -> exists* (p: perm). {}_pts_to addr_var_{} p var_{})\n",
+                name, pn, name, name
+            );
+        }
+        out += "
+";
+    }
+    if out.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "(* Globals. An immutable global is an F* constant plus an address; a\n   mutable one is an address and nothing else, which is inert because no\n   permission for it can ever be derived. *)\n\n{}",
+            out
+        )
+    }
+}
+
 pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     let mut tds = Typedefs::new(tu);
     let structs = collect_structs(tu, &mut tds);
@@ -1205,6 +1313,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     }
     code += "module SizeT = FStar.SizeT\n\n";
     code += &structs;
+    code += &emit_globals(&tds, tu);
 
     let mut callees: HashMap<String, Callee> = HashMap::new();
     for decl in &tu.decls {
@@ -1440,6 +1549,25 @@ impl<'a> Body<'a> {
             .map_err(|_| "the type of a subexpression could not be inferred".to_string())
     }
 
+    /// Whether a global has a value published as an F* constant: it is
+    /// immutable, this file initialises it, and the initialiser is a literal.
+    fn global_value(&self, v: &Ident) -> bool {
+        match self.env.lookup_global_var(v) {
+            Some(gv) => {
+                !gv.is_enum_constant
+                    && !global_var_is_array(gv)
+                    && gv.is_pure
+                    && !gv.is_extern
+                    && has_repr(self.tds, &gv.ty)
+                    && gv
+                        .init
+                        .as_ref()
+                        .is_some_and(|e| const_expr(self.tds, &gv.ty, e).is_some())
+            }
+            None => false,
+        }
+    }
+
     /// The address of an lvalue, as an F* expression of type `ptr`.
     fn addr(&mut self, e: &Expr) -> Result<String, String> {
         match &e.val {
@@ -1453,6 +1581,10 @@ impl<'a> Body<'a> {
                 // incoming value in. Every later mention goes through the slot
                 // because the slot lookup comes first.
                 if self.env.lookup_var(v).is_none() {
+                    // A global has an address, but nothing here owns the
+                    // storage behind it, so an access *through* that address
+                    // has nothing to prove itself with. `&g` on its own is
+                    // fine, and goes through `global_addr` instead.
                     return Err(format!("`{}` is a global", v.val));
                 }
                 if self.in_branch {
@@ -1876,10 +2008,27 @@ impl<'a> Body<'a> {
         if matches!(self.tds.resolve(&ty).val, TypeT::SpecInt | TypeT::SpecNat) {
             // Already mathematical: a literal, or an arithmetic expression
             // over specification integers.
-            if let ExprT::IntLit(n, _) = &strip_vattr(e).val {
-                return Ok(format!("({})", n));
+            // Mathematical integers are F*'s own, so arithmetic over them is
+            // the same arithmetic with no overflow obligation attached.
+            match &strip_vattr(e).val {
+                ExprT::IntLit(n, _) => return Ok(format!("({})", n)),
+                ExprT::UnOp(UnOp::Neg, inner) => {
+                    let v = self.num(inner)?;
+                    return Ok(format!("(- {})", v));
+                }
+                ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) => {
+                    let a = self.num(l)?;
+                    let b = self.num(r)?;
+                    return Ok(format!("({} {} {})", a, op.to_str(), b));
+                }
+                _ => {}
             }
             return Err("a specification computation in an assertion".to_string());
+        }
+        // `(_specint) b` on a `_Bool` is C's integer promotion, which is what
+        // makes `_assert(my_true == 1)` mean what the source says.
+        if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
+            return Ok(format!("(if {} then 1 else 0)", self.inline(e)?));
         }
         match int_module(self.tds, &ty) {
             Some(m) => Ok(format!("({}.v {})", m, self.inline(e)?)),
@@ -1904,10 +2053,18 @@ impl<'a> Body<'a> {
                     Ok(t)
                 } else if self.env.lookup_var(v).is_some() {
                     Ok(format!("var_{}", v.val))
+                } else if self.global_value(v) {
+                    // An immutable global is a constant, and reading it needs
+                    // no ownership at all -- which is the whole point of
+                    // publishing it as one.
+                    Ok(format!("var_{}", v.val))
+                } else if self.env.lookup_global_var(v).is_some() {
+                    Err(format!(
+                        "a read of `{}`, a global whose value is not fixed here",
+                        v.val
+                    ))
                 } else {
-                    // A global: it has storage, and translating it means
-                    // deciding who owns it. Milestone 2 does not cover that.
-                    Err(format!("`{}` is a global", v.val))
+                    Err(format!("`{}` is not in scope", v.val))
                 }
             }
             ExprT::Deref(inner) => {
@@ -2021,7 +2178,20 @@ impl<'a> Body<'a> {
                     _ => Err(format!("a bitwise complement of {}", describe(&ty))),
                 }
             }
-            ExprT::Ref(inner) => self.addr(inner),
+            ExprT::Ref(inner) => match &strip_vattr(inner).val {
+                // A global's address is a constant of type `ptr`, so it needs
+                // no slot -- and two mentions of `&g` are the same pointer
+                // definitionally, which is what C says. Nothing can be done
+                // with it without ownership, which is what makes handing it
+                // out inert.
+                ExprT::Var(v)
+                    if self.env.lookup_var(v).is_none()
+                        && self.env.addressable_global(v).is_some() =>
+                {
+                    Ok(format!("addr_var_{}", v.val))
+                }
+                _ => self.addr(inner),
+            },
             ExprT::FnCall(name, args) => {
                 let t = self.fresh(&name.val);
                 let call = self.call(name, args)?;
