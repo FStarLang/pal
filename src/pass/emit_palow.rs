@@ -127,6 +127,9 @@ struct StructInfo {
 struct Typedefs<'a> {
     typedefs: HashMap<&'a str, &'a Rc<Type>>,
     structs: HashMap<String, StructInfo>,
+    /// `_pure` functions that were successfully emitted as F* definitions, and
+    /// so may appear in a specification and in a body without being sequenced.
+    pure_fns: HashSet<String>,
 }
 
 impl<'a> Typedefs<'a> {
@@ -140,6 +143,7 @@ impl<'a> Typedefs<'a> {
         Typedefs {
             typedefs: m,
             structs: HashMap::new(),
+            pure_fns: HashSet::new(),
         }
     }
 
@@ -161,6 +165,28 @@ impl<'a> Typedefs<'a> {
         }
         ty
     }
+}
+
+/// A type with typedefs *and* the annotation wrappers stripped.
+///
+/// `resolve` only follows typedefs, which is what the points-to layer wants: a
+/// `_plain int32_t *` and an `int32_t *` have the same predicate but are not
+/// the same C declaration. An *operator*, though, is chosen by the underlying
+/// scalar type alone, and `_plain` says nothing about it.
+fn peel<'b>(tds: &'b Typedefs, ty: &'b Type) -> &'b Type {
+    let mut ty = tds.resolve(ty);
+    for _ in 0..64 {
+        ty = match &ty.val {
+            TypeT::Refine(t, _)
+            | TypeT::RefineAlways(t, _)
+            | TypeT::RefineUninit(t, _)
+            | TypeT::RefineValue(t, ..)
+            | TypeT::Plain(t)
+            | TypeT::Nullable(t) => tds.resolve(t),
+            _ => return ty,
+        };
+    }
+    ty
 }
 
 /// How a type is described in a skip message.
@@ -610,10 +636,36 @@ impl<'a> Spec<'a> {
                         // A literal written at specification level and cast to
                         // a machine type -- which is what `a[0]` elaborates to
                         // -- is just that literal at that type.
-                        if let (ExprT::IntLit(n, _), TypeT::SpecInt | TypeT::SpecNat) =
-                            (&inner.val, &self.tds.resolve(&from).val)
-                        {
-                            return int_literal(self.tds, n, to);
+                        // A literal cast to a scalar type is that literal at
+                        // that type. C has already reduced it, so no
+                        // conversion is being described -- this is how `a[0]`
+                        // elaborates, and how `true` and `false` reach here.
+                        if let ExprT::IntLit(n, _) = &strip_vattr(inner).val {
+                            if let Ok(l) = int_literal(self.tds, n, to) {
+                                return Ok(l);
+                            }
+                        }
+                        // C's conversions to and from `_Bool`, which is how
+                        // a predicate written over integers reaches a `bool`
+                        // and back. Neither can lose information, so neither
+                        // raises an obligation.
+                        if matches!(to.val, TypeT::Bool) {
+                            if let Some(m) = self.int_module(&from) {
+                                return Ok(format!("({}.v {} <> 0)", m, self.value(inner, w)?));
+                            }
+                        }
+                        if matches!(self.tds.resolve(&from).val, TypeT::Bool) {
+                            if let (Ok(one), Ok(zero)) = (
+                                int_literal(self.tds, &BigInt::from(1), to),
+                                int_literal(self.tds, &BigInt::ZERO, to),
+                            ) {
+                                return Ok(format!(
+                                    "(if {} then {} else {})",
+                                    self.value(inner, w)?,
+                                    one,
+                                    zero
+                                ));
+                            }
                         }
                         if fstar_type(self.tds, &from) == fstar_type(self.tds, to) {
                             self.value(inner, w)
@@ -729,9 +781,185 @@ impl<'a> Spec<'a> {
                     self.value(r, w)?
                 ))
             }
+            ExprT::Cond(c, t, f) => Ok(format!(
+                "(if {} then {} else {})",
+                self.value(c, w)?,
+                self.value(t, w)?,
+                self.value(f, w)?
+            )),
+            ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
+                let mut out = format!("func_{}", name.val);
+                for a in args.iter() {
+                    out += &format!(" {}", self.value(a, w)?);
+                }
+                if args.is_empty() {
+                    out += " ()";
+                }
+                Ok(format!("({})", out))
+            }
             _ => Err(format!("{} in a contract", expr_kind(e))),
         }
     }
+}
+
+/// Build the F* definition for one `_pure` C function, or explain why we
+/// cannot.
+///
+/// A `_pure` function has no side effects and no memory of its own, so its
+/// body is an expression rather than a sequence of statements. That is what
+/// makes it usable in a specification: `_assert(f(x) == 1)` is a proposition
+/// about a term, and the term is this definition, unfolded by the SMT solver
+/// like any other.
+fn emit_pure_fn(tds: &Typedefs, env: &Env, decl: &FnDecl, body: &Stmts) -> Result<String, String> {
+    // A ghost argument needs an erased implicit, which is not translated yet.
+    if decl.is_rec && decl.decreases.is_none() {
+        return Err("it is recursive without a `_decreases`".to_string());
+    }
+    if !decl.ghost_args.is_empty() {
+        return Err("it takes a ghost argument".to_string());
+    }
+    let mut params: Vec<String> = Vec::new();
+    for (i, arg) in decl.args.iter().enumerate() {
+        let pname = match &arg.name {
+            Some(n) => format!("var_{}", n.val),
+            None => format!("arg_{}", i),
+        };
+        let fty = fstar_type(tds, &arg.ty)
+            .ok_or_else(|| format!("parameter {} is {}", pname, describe(tds.resolve(&arg.ty))))?;
+        params.push(format!("({}: {})", pname, fty));
+    }
+    if params.is_empty() {
+        params.push("()".to_string());
+    }
+    let ret = fstar_type(tds, &decl.ret_type).unwrap_or_else(|| "unit".to_string());
+
+    let mut sp = Spec {
+        tds,
+        env,
+        pointees: HashMap::new(),
+        arrays: HashSet::new(),
+        guards: RefCell::new(Vec::new()),
+        ret: "ret".to_string(),
+        locals: HashMap::new(),
+    };
+    let clause = |sp: &Spec, es: &Exprs| -> Result<String, String> {
+        let mut props: Vec<String> = Vec::new();
+        for e in es.iter() {
+            sp.guards.borrow_mut().clear();
+            let p = sp.prop(e, When::Pre)?;
+            if !sp.guards.borrow().is_empty() {
+                return Err("a contract with a side condition".to_string());
+            }
+            props.push(p);
+        }
+        Ok(if props.is_empty() {
+            "True".to_string()
+        } else {
+            props.join(r" /\ ")
+        })
+    };
+    let req = clause(&sp, &decl.requires)?;
+    let ens = clause(&sp, &decl.ensures)?;
+
+    let dec = match &decl.decreases {
+        Some(d) => {
+            sp.guards.borrow_mut().clear();
+            Some(sp.num(d, When::Pre)?)
+        }
+        None => None,
+    };
+
+    let value = pure_body(&mut sp, body)?;
+    let ty = if req == "True" && ens == "True" && dec.is_none() {
+        ret
+    } else {
+        let mut t = format!(
+            "Pure {} (requires ({})) (ensures (fun {} -> {}))",
+            ret, req, sp.ret, ens
+        );
+        if let Some(d) = dec {
+            t += &format!(" (decreases ({}))", d);
+        }
+        t
+    };
+    Ok(format!(
+        "let {}func_{} {} : {} =\n  {}\n\n",
+        if decl.is_rec { "rec " } else { "" },
+        decl.name.val,
+        params.join(" "),
+        ty,
+        value
+    ))
+}
+
+/// The body of a `_pure` function, as a single F* term.
+///
+/// Statements after an `if` belong to both of its arms, exactly as in the
+/// existing translator: C's control flow joins, and an expression's does not,
+/// so the continuation is duplicated instead.
+fn pure_body(sp: &mut Spec, stmts: &[Rc<Stmt>]) -> Result<String, String> {
+    let Some(first) = stmts.first() else {
+        return Err("a pure function that falls off the end".to_string());
+    };
+    let rest = &stmts[1..];
+    match &first.val {
+        StmtT::Return(Some(e)) => sp.value(e, When::Pre),
+        StmtT::Return(None) => Ok("()".to_string()),
+        StmtT::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let c = sp.value(cond, When::Pre)?;
+            let mut t: Vec<Rc<Stmt>> = then_branch.to_vec();
+            t.extend_from_slice(rest);
+            let mut f: Vec<Rc<Stmt>> = else_branch.to_vec();
+            f.extend_from_slice(rest);
+            let a = pure_body(sp, &t)?;
+            let b = pure_body(sp, &f)?;
+            Ok(format!("(if {} then {} else {})", c, a, b))
+        }
+        StmtT::Let(name, _, init) => {
+            let v = sp.value(init, When::Pre)?;
+            pure_let(sp, name, v, rest)
+        }
+        // `T x; x = e;` is the same thing spelled in two statements. Only that
+        // shape is accepted: a local assigned twice is not a `let`, and a
+        // local read before it is assigned has no value at all.
+        StmtT::Decl(name, _) => {
+            let Some(next) = rest.first() else {
+                return Err("a pure local that is never assigned".to_string());
+            };
+            let StmtT::Assign(lhs, rhs) = &next.val else {
+                return Err("a pure local that is not assigned immediately".to_string());
+            };
+            match &strip_vattr(lhs).val {
+                ExprT::Var(v) if v.val == name.val => {}
+                _ => return Err("a pure local that is not assigned immediately".to_string()),
+            }
+            let value = sp.value(rhs, When::Pre)?;
+            pure_let(sp, name, value, &rest[1..])
+        }
+        _ => Err(format!("{} in a pure function", stmt_kind(first))),
+    }
+}
+
+/// Bind one local and translate what follows under the binding.
+fn pure_let(
+    sp: &mut Spec,
+    name: &Ident,
+    value: String,
+    rest: &[Rc<Stmt>],
+) -> Result<String, String> {
+    let n = format!("var_{}", name.val);
+    let shadowed = sp.locals.insert(name.val.to_string(), n.clone());
+    let body = pure_body(sp, rest);
+    match shadowed {
+        Some(old) => sp.locals.insert(name.val.to_string(), old),
+        None => sp.locals.remove(&*name.val.to_string()),
+    };
+    Ok(format!("(let {} = {} in {})", n, value, body?))
 }
 
 /// Build the Pulse declaration for one C function, or explain why we cannot.
@@ -1286,7 +1514,6 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
 pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     let mut tds = Typedefs::new(tu);
     let structs = collect_structs(tu, &mut tds);
-    let tds = tds;
     let mut base = Env::new();
     for decl in &tu.decls {
         base.push_decl(decl);
@@ -1315,6 +1542,41 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     code += &structs;
     code += &emit_globals(&tds, tu);
 
+    // `_pure` functions first, and as F* definitions rather than Pulse `fn`s.
+    // A `_pure` function is the vocabulary a contract is written in, so it has
+    // to be a term an `_ensures` or an `_assert` can mention; a `fn` is a
+    // computation, and Pulse rejects one in a specification because its
+    // postcondition carries no `rewrites_to`.
+    for decl in &tu.decls {
+        let DeclT::FnDefn(d) = &decl.val else {
+            continue;
+        };
+        if !d.decl.is_pure {
+            continue;
+        }
+        let mut env = base.clone();
+        env.push_fn_decl_args_for_body(&d.decl);
+        // Inserted first so that a recursive body can name itself; taken back
+        // out again if the definition does not come out.
+        tds.pure_fns.insert(d.decl.name.val.to_string());
+        match emit_pure_fn(&tds, &env, &d.decl, &d.body) {
+            Ok(t) => {
+                code += &t;
+            }
+            // Falling back to the Pulse `fn` keeps the function callable from
+            // code even when it cannot be a term. Only a specification that
+            // mentions it is lost.
+            Err(why) => {
+                tds.pure_fns.remove(&*d.decl.name.val.to_string());
+                code += &format!(
+                    "(* `{}` is not an F* definition: {} *)\n\n",
+                    d.decl.name.val, why
+                );
+            }
+        }
+    }
+    let tds = tds;
+
     let mut callees: HashMap<String, Callee> = HashMap::new();
     for decl in &tu.decls {
         let (fndecl, defn) = match &decl.val {
@@ -1322,6 +1584,9 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             DeclT::FnDecl(d) => (d, None),
             _ => continue,
         };
+        if tds.pure_fns.contains(&*fndecl.name.val.to_string()) {
+            continue;
+        }
         let mut env = base.clone();
         env.push_fn_decl_args_for_body(fndecl);
         let sig = match emit_fn(&tds, &env, fndecl) {
@@ -1904,6 +2169,13 @@ impl<'a> Body<'a> {
     /// bindings they are substituted back and dropped, and if any of them is
     /// not -- a focus has to be opened and closed around its load, and two of
     /// those in one operand could not be nested -- the names stay.
+    ///
+    /// Only a *read* may be substituted back. A read's postcondition says
+    /// `rewrites_to`, which is exactly what lets Pulse use it in a
+    /// specification; an ordinary call has no such postcondition, and putting
+    /// one in an `assert` is refused with "cannot find rewrites_to in post".
+    /// A call therefore keeps its binding, and the specification mentions the
+    /// name.
     fn inline(&mut self, e: &Expr) -> Result<String, String> {
         let before = self.lines.len();
         let mut v = self.rvalue(e)?;
@@ -1916,16 +2188,31 @@ impl<'a> Body<'a> {
             let Some((n, d)) = rest.split_once(" = ") else {
                 return Ok(v);
             };
-            bound.push((n.to_string(), format!("({})", d)));
+            let inlinable = d
+                .split_whitespace()
+                .next()
+                .is_some_and(|h| h.ends_with("_read"));
+            bound.push((n.to_string(), format!("({})", d), inlinable));
         }
         for i in (0..bound.len()).rev() {
-            let (n, d) = bound[i].clone();
+            if !bound[i].2 {
+                continue;
+            }
+            let (n, d) = (bound[i].0.clone(), bound[i].1.clone());
             v = v.replace(&n, &d);
-            for j in 0..i {
-                bound[j].1 = bound[j].1.replace(&n, &d);
+            for j in 0..bound.len() {
+                if j != i {
+                    bound[j].1 = bound[j].1.replace(&n, &d);
+                }
             }
         }
         self.lines.truncate(before);
+        for (n, d, inlinable) in bound {
+            if !inlinable {
+                // `d` was parenthesised when it was collected.
+                self.lines.push(format!("let {} = {};", n, d));
+            }
+        }
         Ok(v)
     }
 
@@ -2192,6 +2479,17 @@ impl<'a> Body<'a> {
                 }
                 _ => self.addr(inner),
             },
+            ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
+                let mut out = format!("func_{}", name.val);
+                for a in args.iter() {
+                    let v = self.rvalue(a)?;
+                    out += &format!(" {}", v);
+                }
+                if args.is_empty() {
+                    out += " ()";
+                }
+                Ok(format!("({})", out))
+            }
             ExprT::FnCall(name, args) => {
                 let t = self.fresh(&name.val);
                 let call = self.call(name, args)?;
@@ -2999,7 +3297,7 @@ impl<'a> Body<'a> {
 }
 
 fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> {
-    match &tds.resolve(ty).val {
+    match &peel(tds, ty).val {
         TypeT::Int { signed, width } => {
             let suffix = int_suffix(*signed, *width)?;
             if *n < BigInt::ZERO {
@@ -3015,6 +3313,9 @@ fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> 
             }
         }
         TypeT::SizeT => Ok(format!("{}sz", n)),
+        // `true` and `false` are macros for the integer literals 1 and 0, so
+        // they reach the IR as literals at type `_Bool`.
+        TypeT::Bool => Ok(if *n == BigInt::ZERO { "false" } else { "true" }.to_string()),
         _ => Err("an integer literal of an unsupported type".to_string()),
     }
 }
@@ -3101,7 +3402,7 @@ fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
 }
 
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {
-    let t = tds.resolve(ty);
+    let t = peel(tds, ty);
     let m = match &t.val {
         TypeT::Int { signed, width } => {
             format!("{}Int{}", if *signed { "" } else { "U" }, width)

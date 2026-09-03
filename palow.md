@@ -950,8 +950,9 @@ new facts about memory.
    global read as a value, and the pointer identity of a mutable global's
    address.
 
-   As of this milestone: **718 specifications, 337 of them with real bodies,
-   381 admitted, 114 functions skipped**. The generated `swap` is line-for-line the
+   As of this milestone: **703 specifications, 330 of them with real bodies,
+   373 admitted, 114 functions skipped**, plus **15 `_pure` functions emitted as
+   F\* definitions**. The generated `swap` is line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
 
@@ -970,6 +971,42 @@ new facts about memory.
    that clause did not translate would produce failures that say nothing about
    the memory model. The rest -- address-of, allocation, globals -- are
    milestones 4 and 5.
+
+   `_pure` functions are F\* definitions, not Pulse `fn`s. This was the last
+   structural divergence from the existing translator, and it mattered for the
+   same reason it does there: a `_pure` function is the vocabulary a contract
+   is written in, so it has to be a *term* an `_ensures` or an `_assert` can
+   mention. Pulse rejects a `fn` in a specification -- "cannot find
+   rewrites\_to in post" -- because a computation has no value until it is
+   sequenced. So a `_pure` definition is translated to
+   `let func_f (var_x: T) : Pure R (requires ...) (ensures fun ret -> ...) = e`,
+   where `e` is the body as one expression: an `if` becomes `if/then/else` with
+   the continuation duplicated into both arms, and a local becomes a `let`.
+   The contract translator is reused verbatim for the body, which is the point
+   -- a pure body and a specification are the same language. When the
+   definition does not come out (inline Pulse, an untranslated `_requires`) the
+   function falls back to the Pulse `fn`, so only specifications that mention
+   it are lost, not the ability to call it. 15 of 17 `_pure` functions in the
+   test suite come out as definitions, including the recursive ones, whose
+   `_decreases` becomes F\*'s.
+
+   Three narrower fixes came with it, each a case of a wrapper hiding a type.
+   `resolve` follows typedefs but deliberately not the annotation wrappers, so
+   `_plain int32_t *` never reached the pointer case of the operator table and
+   `a == b` on two `_plain` pointers was refused as "an operator on a pointer"
+   even though `ptr_eq` was right there; operators and literals now go through
+   a `peel` that strips `_plain`, `_refine` and `_nullable` as well, since an
+   operator is chosen by the underlying scalar type alone. `true` and `false`
+   are macros for the literals `1` and `0` at type `_Bool`, so integer literals
+   had to be given a `_Bool` case. And C's conversions to and from `_Bool`
+   -- `(_Bool) n` and `(int) b` -- are now translated in contracts, neither
+   being able to lose information.
+
+   Substituting a read back into an `assert` is only sound for a read.
+   The rule had been "if every line the operand emitted was a simple `let`,
+   inline them all", which is right for `t_read` (whose postcondition says
+   `rewrites_to`) and wrong for a call (whose postcondition says nothing of the
+   sort). The two are now distinguished, and a call keeps its binding.
 
    Subscripts are translated. `a[i]` on an array parameter is not a read but a
    six-line sandwich -- discharge the offset's `fits` fact, `array_focus`, trade
