@@ -1563,6 +1563,72 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
     }
 }
 
+/// One function's place in the output: its generated text, and which other
+/// functions in this file that text names.
+struct FnItem<'a> {
+    name: String,
+    code: String,
+    uses: HashSet<String>,
+    defn: Option<&'a FnDefn>,
+    env: Env,
+    sig: Option<FnSurface>,
+}
+
+/// The order to write the functions out in, callees first.
+///
+/// C only needs a declaration before a call; F* needs the definition, and
+/// everything Palow emits lands in one module. Returning the back edges rather
+/// than an order lets the caller re-translate just the bodies that close a
+/// cycle.
+fn toposort(items: &[FnItem]) -> Result<Vec<usize>, Vec<(String, String)>> {
+    let index: HashMap<&str, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| (it.name.as_str(), i))
+        .collect();
+    let mut state = vec![0u8; items.len()];
+    let mut order = Vec::new();
+    let mut back = Vec::new();
+    // An explicit stack: a deep call chain is not the place to run out of
+    // native stack. `(node, next child)`.
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for start in 0..items.len() {
+        if state[start] != 0 {
+            continue;
+        }
+        state[start] = 1;
+        stack.push((start, 0));
+        while let Some((n, k)) = stack.pop() {
+            // The neighbours are taken in a fixed order so the output does not
+            // depend on the hash set's iteration order.
+            let mut kids: Vec<&str> = items[n].uses.iter().map(|s| s.as_str()).collect();
+            kids.sort_unstable();
+            if k < kids.len() {
+                stack.push((n, k + 1));
+                let Some(&m) = index.get(kids[k]) else {
+                    continue;
+                };
+                match state[m] {
+                    0 => {
+                        state[m] = 1;
+                        stack.push((m, 0));
+                    }
+                    1 => back.push((items[n].name.clone(), items[m].name.clone())),
+                    _ => {}
+                }
+            } else {
+                state[n] = 2;
+                order.push(n);
+            }
+        }
+    }
+    if back.is_empty() {
+        Ok(order)
+    } else {
+        Err(back)
+    }
+}
+
 pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     let mut tds = Typedefs::new(tu);
     let structs = collect_structs(tu, &mut tds);
@@ -1641,7 +1707,12 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     }
     let tds = tds;
 
+    // The whole callee map is built before any body is translated. What a call
+    // may do depends only on the callee's *signature*, so nothing here needs
+    // the callees' code -- and building it up front is what lets a body call a
+    // function defined further down the file, which C allows and F* does not.
     let mut callees: HashMap<String, Callee> = HashMap::new();
+    let mut items: Vec<FnItem> = Vec::new();
     for decl in &tu.decls {
         let (fndecl, defn) = match &decl.val {
             DeclT::FnDefn(d) => (&d.decl, Some(d)),
@@ -1656,32 +1727,17 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         let sig = match emit_fn(&tds, &env, fndecl) {
             Ok(s) => s,
             Err(why) => {
-                code += &format!("(* skipped {}: {} *)\n\n", fndecl.name.val, why);
+                items.push(FnItem {
+                    name: fndecl.name.val.to_string(),
+                    code: format!("(* skipped {}: {} *)\n\n", fndecl.name.val, why),
+                    uses: HashSet::new(),
+                    defn: None,
+                    env,
+                    sig: None,
+                });
                 continue;
             }
         };
-
-        let body = match defn {
-            None => Err("it has no definition here".to_string()),
-            Some(d) => emit_body(&tds, env, d, &sig, &callees),
-        };
-        match &body {
-            Ok(b) if b.divergent => code += "divergent\n",
-            _ => {}
-        }
-        code += &sig.decl;
-        match body {
-            Ok(TranslatedBody { lines, .. }) => {
-                code += "{\n";
-                for l in &lines {
-                    code += &format!("  {}\n", l);
-                }
-                code += "}\n\n";
-            }
-            Err(why) => {
-                code += &format!("{{\n  admit() (* body: {} *)\n}}\n\n", why);
-            }
-        }
 
         // A call may only pass ownership it can name: a value, or a pointer to
         // an object the caller holds and gets back unchanged. `_out` and
@@ -1708,6 +1764,66 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                 contract: sig.contract,
             },
         );
+        items.push(FnItem {
+            name: fndecl.name.val.to_string(),
+            code: String::new(),
+            uses: HashSet::new(),
+            defn,
+            env,
+            sig: Some(sig),
+        });
+    }
+
+    // Recursion has to be broken somewhere: F* would need `let rec`/`rec fn`
+    // and a termination argument that C does not supply, so a call on a cycle
+    // is refused and the rest of the body is kept. `forbidden` grows until the
+    // call graph is acyclic, which it must reach because each round removes at
+    // least one edge.
+    let mut forbidden: HashMap<String, HashSet<String>> = HashMap::new();
+    let order = loop {
+        for it in &mut items {
+            let Some(sig) = &it.sig else { continue };
+            let empty = HashSet::new();
+            let no = forbidden.get(&it.name).unwrap_or(&empty);
+            let body = match it.defn {
+                None => Err("it has no definition here".to_string()),
+                Some(d) => emit_body(&tds, it.env.clone(), d, sig, &callees, no),
+            };
+            it.uses = match &body {
+                Ok(b) => b.uses.clone(),
+                Err(_) => HashSet::new(),
+            };
+            let mut out = String::new();
+            match &body {
+                Ok(b) if b.divergent => out += "divergent\n",
+                _ => {}
+            }
+            out += &sig.decl;
+            match body {
+                Ok(TranslatedBody { lines, .. }) => {
+                    out += "{\n";
+                    for l in &lines {
+                        out += &format!("  {}\n", l);
+                    }
+                    out += "}\n\n";
+                }
+                Err(why) => {
+                    out += &format!("{{\n  admit() (* body: {} *)\n}}\n\n", why);
+                }
+            }
+            it.code = out;
+        }
+        match toposort(&items) {
+            Ok(o) => break o,
+            Err(back) => {
+                for (from, to) in back {
+                    forbidden.entry(from).or_default().insert(to);
+                }
+            }
+        }
+    };
+    for i in order {
+        code += &items[i].code;
     }
 
     vec![PalowModule {
@@ -1818,6 +1934,10 @@ struct Body<'a> {
     /// else -- a function defined further down the file, or one whose
     /// specification was skipped -- has no name to refer to.
     callees: &'a HashMap<String, Callee>,
+    /// Functions this body must not call, because doing so would close a cycle
+    /// in the call graph.
+    forbidden: &'a HashSet<String>,
+    uses: HashSet<String>,
     lines: Vec<String>,
     /// C locals with a stack slot, in allocation order.
     slots: Vec<Slot>,
@@ -1990,7 +2110,10 @@ impl<'a> Body<'a> {
                 )),
             },
             ExprT::VAttr(_, inner) => self.addr(inner),
-            _ => Err("unsupported lvalue".to_string()),
+            other => Err(format!(
+                "{}, which is not an lvalue Palow can address",
+                expr_kind_of(other)
+            )),
         }
     }
 
@@ -2598,7 +2721,11 @@ impl<'a> Body<'a> {
         let c = self
             .callees
             .get(&*name.val.to_string())
-            .ok_or_else(|| format!("`{}` is not declared earlier in this file", name.val))?;
+            .ok_or_else(|| format!("`{}` is not declared in this file", name.val))?;
+        if self.forbidden.contains(&*name.val.to_string()) {
+            return Err(format!("`{}`, which is recursive", name.val));
+        }
+        self.uses.insert(name.val.to_string());
         if !c.simple {
             return Err(format!(
                 "`{}` takes ownership the caller cannot pass",
@@ -3735,6 +3862,9 @@ fn expr_kind_of(e: &ExprT) -> &'static str {
 struct TranslatedBody {
     lines: Vec<String>,
     divergent: bool,
+    /// The functions in this file the body calls, which is what fixes the
+    /// order they have to be written out in.
+    uses: HashSet<String>,
 }
 
 /// Translate a function body, or say why not. `env` must already have the
@@ -3745,6 +3875,7 @@ fn emit_body(
     defn: &FnDefn,
     sig: &FnSurface,
     callees: &HashMap<String, Callee>,
+    forbidden: &HashSet<String>,
 ) -> Result<TranslatedBody, String> {
     // An array parameter's ownership is a sequence, so every access through it
     // goes through `array_focus` rather than a plain read. Record what each one
@@ -3796,6 +3927,8 @@ fn emit_body(
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
         blocks: Vec::new(),
+        uses: HashSet::new(),
+        forbidden,
         params: defn
             .decl
             .args
@@ -3811,6 +3944,7 @@ fn emit_body(
     Ok(TranslatedBody {
         lines: b.lines,
         divergent: b.divergent,
+        uses: b.uses,
     })
 }
 

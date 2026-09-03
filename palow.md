@@ -969,6 +969,17 @@ new facts about memory.
    by an earlier pass, and those were already translated. A case listing
    several labels duplicates its body, since Pulse has no or-pattern.
 
+   Functions are now written out in call-graph order rather than source order.
+   C only requires a *declaration* before a call, while F\* requires the
+   definition, and everything Palow emits lands in one module -- so a body that
+   called a function defined further down the file used to be refused for a
+   reason that had nothing to do with the memory model. The callee map is built
+   from signatures alone, before any body is translated, and the bodies are
+   then sorted by what they actually call. Recursion is the one case that
+   cannot be sorted away: F\* would want `let rec` and a termination argument
+   that C does not supply, so a call that closes a cycle is refused by name and
+   the rest of the body is kept.
+
    As of this milestone: **703 specifications, 364 of them with real bodies,
    339 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
