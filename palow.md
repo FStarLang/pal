@@ -995,8 +995,19 @@ new facts about memory.
    `&&` had to be kept apart. Five bodies came back, all of them functions
    whose overflow obligation was stated with a shared range predicate.
 
-   As of this milestone: **703 specifications, 369 of them with real bodies,
-   334 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   A batch of scalar gaps was closed at the same time, none of which had
+   anything to do with the memory model and all of which were blocking whole
+   test files: the shift operators, the conversions between `size_t` and the
+   signed types, a pointer used as a truth value, and a negative constant at an
+   unsigned type. The last is the only one with a decision in it -- C reduces
+   the constant modulo the width, and F\* has no negative unsigned literal to
+   write the result with, so the reduction is done in the translator. The
+   shifts are gated on the contract having translated, for the same reason
+   signed arithmetic is: their width obligation comes from the source's
+   `_requires`.
+
+   As of this milestone: **703 specifications, 381 of them with real bodies,
+   322 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

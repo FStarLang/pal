@@ -3785,10 +3785,13 @@ fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> 
             let suffix = int_suffix(*signed, *width)?;
             if *n < BigInt::ZERO {
                 if !*signed {
-                    // The literal has already been reduced mod 2^width in C;
-                    // reproducing that here is easy but pointless until the
-                    // arithmetic that consumes it is translated.
-                    return Err("a negative literal at unsigned type".to_string());
+                    // C converts a negative constant to an unsigned type by
+                    // reducing it modulo the width -- `(uint32_t)-1` is
+                    // `4294967295` -- and F* has no negative unsigned literal
+                    // to write it with, so the reduction is done here.
+                    let m = BigInt::from(1u8) << *width;
+                    let r = ((n % &m) + &m) % &m;
+                    return Ok(format!("{}{}", r, suffix));
                 }
                 Ok(format!("({}{})", n, suffix))
             } else {
@@ -3866,6 +3869,37 @@ fn convert(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             "(FStar.Int.Cast.uint64_to_uint{} (FStar.SizeT.sizet_to_uint64 {}))",
             width, v
         )),
+        // `size_t` and the signed types have no direct cast either way, so
+        // both go through `uint64_t`. C says both directions reduce modulo the
+        // target's range, and that is what the composite does.
+        (
+            TypeT::SizeT,
+            TypeT::Int {
+                signed: true,
+                width,
+            },
+        ) => Ok(format!(
+            "(FStar.Int.Cast.uint64_to_int{} (FStar.SizeT.sizet_to_uint64 {}))",
+            width, v
+        )),
+        (
+            TypeT::Int {
+                signed: true,
+                width,
+            },
+            TypeT::SizeT,
+        ) => Ok(format!(
+            "(sizet_of_uint64 (FStar.Int.Cast.int{}_to_uint64 {}))",
+            width, v
+        )),
+        (TypeT::Bool, TypeT::SizeT) => Ok(format!("(if {} then 1sz else 0sz)", v)),
+        (TypeT::SizeT, TypeT::Bool) => Ok(format!("(not ({} `SizeT.eq` 0sz))", v)),
+        // A pointer is true exactly when it is not null, which is the one
+        // question the model lets a program ask about an address it does not
+        // own.
+        (TypeT::Pointer(..) | TypeT::FnPtr { .. }, TypeT::Bool) => {
+            Ok(format!("(not (is_null {}))", v))
+        }
         _ => Err(format!(
             "a conversion from {} to {}",
             describe(from),
@@ -3920,6 +3954,28 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         // The bitwise operators are defined on the whole range at both
         // signednesses, so they need no obligation and no wrapping variant.
         // `FStar.SizeT` does not have them, hence the guard.
+        // C requires the shift count to be below the width, which PAL turns
+        // into a proof obligation and the source discharges with a
+        // `_requires`; a signed left shift additionally needs a non-negative
+        // operand. Both come out of the contract, so an untranslated one has
+        // to refuse rather than emit a failure about something else.
+        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. }) => {
+            if !signed_ok {
+                return Err(
+                    "a shift, whose width obligation needs the untranslated `_requires`"
+                        .to_string(),
+                );
+            }
+            return Ok(format!(
+                "`{}.shift_{}`",
+                m,
+                if matches!(op, BinOp::Shl) {
+                    "left"
+                } else {
+                    "right"
+                }
+            ));
+        }
         BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor if matches!(t.val, TypeT::Int { .. }) => {
             return Ok(format!(
                 "`FStar.{}.log{}`",
