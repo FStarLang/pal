@@ -950,8 +950,27 @@ new facts about memory.
    global read as a value, and the pointer identity of a mutable global's
    address.
 
-   As of this milestone: **703 specifications, 358 of them with real bodies,
-   345 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   `switch` is translated, and it is the one statement where the shape of the
+   Pulse output mattered more than the translation. Desugaring a `switch` into
+   a chain of `if`s is correct and it verifies, but the cost is not tolerable:
+   Pulse infers a join and a frame at every level of the chain, so a
+   sixteen-case function nests sixteen deep and ran for over sixteen CPU
+   minutes on its own. Emitting a flat Pulse `match` instead brings the whole
+   file to twelve seconds. The price of the flat form is that Pulse infers the
+   join of an `if` but not of a `match`, so the frame at the join has to be
+   written out -- which is exactly the loop-invariant machinery, an `exists*`
+   over every live slot with its points-to, plus a `pure` clause. That clause
+   comes from the annotation PAL already requires on a `switch`, so no new
+   source annotation was introduced; the invariant construction was simply
+   factored out and shared between the two.
+
+   Only a `switch` whose cases all end in `break` reaches this code at all --
+   fallthrough and a `return` inside a case are desugared into locals and `if`s
+   by an earlier pass, and those were already translated. A case listing
+   several labels duplicates its body, since Pulse has no or-pattern.
+
+   As of this milestone: **703 specifications, 364 of them with real bodies,
+   339 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

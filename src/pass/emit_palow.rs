@@ -2909,21 +2909,18 @@ impl<'a> Body<'a> {
     ///
     /// A loop makes the function divergent. PAL does not translate a
     /// `decreases` measure, and C gives it nothing to derive one from.
-    fn loop_(
-        &mut self,
-        cond: &Expr,
-        inv: &Exprs,
-        requires: &Exprs,
-        ensures: &Exprs,
-        body: &Stmts,
-    ) -> Result<(), String> {
-        if !requires.is_empty() || !ensures.is_empty() {
-            return Err("a loop with its own `requires` or `ensures`".to_string());
-        }
-        if self.has_out {
-            return Err("a loop in a function with an `_out` parameter".to_string());
-        }
-
+    /// The ownership frame at a control-flow join, as `exists*` binders, the
+    /// points-to conjuncts over them, and whatever the source's own clause
+    /// says about their values.
+    ///
+    /// A loop invariant and the join of a `switch` need exactly the same
+    /// thing: nothing here tracks values, so every live slot has to be bound
+    /// existentially and the annotation written in terms of those binders.
+    fn frame(
+        &self,
+        clause: &Exprs,
+        what: &str,
+    ) -> Result<(Vec<String>, Vec<String>, Vec<String>), String> {
         let mut binders: Vec<String> = Vec::new();
         let mut owns: Vec<String> = Vec::new();
         let mut locals: HashMap<String, String> = HashMap::new();
@@ -2933,7 +2930,7 @@ impl<'a> Body<'a> {
                 // storage rather than a value, and the body would have to
                 // leave it that way. C that writes a local for the first time
                 // inside a loop is real, but it is not this milestone.
-                return Err(format!("a loop with `{}` not yet written", s.name));
+                return Err(format!("{} with `{}` not yet written", what, s.name));
             }
             let b = format!("inv_{}", s.name);
             binders.push(format!("({}: {})", b, s.fstar_ty));
@@ -2958,7 +2955,7 @@ impl<'a> Body<'a> {
             locals,
         };
         let mut props: Vec<String> = Vec::new();
-        for e in inv.iter() {
+        for e in clause.iter() {
             spec.guards.borrow_mut().clear();
             let p = spec.prop(e, When::Pre)?;
             let guards = spec.guards.borrow();
@@ -2970,9 +2967,48 @@ impl<'a> Body<'a> {
             props.push(if guards.is_empty() {
                 p
             } else {
-                format!("({} /\\ {})", guards.join(" /\\ "), p)
+                format!(r"({} /\ {})", guards.join(r" /\ "), p)
             });
         }
+        Ok((binders, owns, props))
+    }
+
+    /// The same frame, written out as one slprop.
+    fn frame_slprop(&self, clause: &Exprs, what: &str, indent: &str) -> Result<String, String> {
+        let (binders, owns, props) = self.frame(clause, what)?;
+        let sep = format!("\n{}", indent);
+        let quant = if binders.is_empty() {
+            String::new()
+        } else {
+            format!("exists* {}.{}", binders.join(" "), sep)
+        };
+        let mut body = if owns.is_empty() {
+            "emp".to_string()
+        } else {
+            owns.join(&format!(" **{}", sep))
+        };
+        if !props.is_empty() {
+            body = format!("{} **{}pure ({})", body, sep, props.join(r" /\ "));
+        }
+        Ok(format!("{}{}", quant, body))
+    }
+
+    fn loop_(
+        &mut self,
+        cond: &Expr,
+        inv: &Exprs,
+        requires: &Exprs,
+        ensures: &Exprs,
+        body: &Stmts,
+    ) -> Result<(), String> {
+        if !requires.is_empty() || !ensures.is_empty() {
+            return Err("a loop with its own `requires` or `ensures`".to_string());
+        }
+        if self.has_out {
+            return Err("a loop in a function with an `_out` parameter".to_string());
+        }
+
+        let (binders, owns, props) = self.frame(inv, "a loop")?;
 
         let before = self.lines.len();
         self.in_guard = true;
@@ -3064,6 +3100,103 @@ impl<'a> Body<'a> {
                 body,
             } => {
                 self.loop_(cond, inv, requires, ensures, body)?;
+                Ok(())
+            }
+            // A `switch` whose cases all end in `break` reaches the IR as a
+            // `Match`; anything with fallthrough or a `return` in a case has
+            // already been desugared into flags and `if`s by an earlier pass.
+            //
+            // Pulse has a `match` on integer literals, and it is what this
+            // must use. Desugaring into a chain of `if`s works and is much
+            // simpler, but `switch` on sixteen cases then nests sixteen deep,
+            // and Pulse infers a join and a frame at every level: one such
+            // function took over sixteen minutes on its own. A `match` is
+            // flat. `case 1: case 2:` becomes two arms with the same body,
+            // which is what C means by it.
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => {
+                let scrut = self.rvalue(scrutinee)?;
+                let sty = self.ty_of(scrutinee)?;
+
+                let entry_out = self.out_params.clone();
+                let entry_inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+                let entry_blocks = self.blocks.clone();
+                let restore = |b: &mut Self| {
+                    b.blocks = entry_blocks.clone();
+                    b.out_params = entry_out.clone();
+                    for (slot, init) in b.slots.iter_mut().zip(&entry_inits) {
+                        slot.init = *init;
+                    }
+                };
+
+                let mut arms: Vec<(String, BranchResult)> = Vec::new();
+                for br in branches.iter() {
+                    for p in br.patterns.iter() {
+                        let lit = match &strip_vattr(p).val {
+                            ExprT::IntLit(n, _) => int_literal(self.tds, n, &sty)?,
+                            ExprT::UnOp(UnOp::Neg, inner) => match &strip_vattr(inner).val {
+                                ExprT::IntLit(n, _) => {
+                                    int_literal(self.tds, &-(**n).clone(), &sty)?
+                                }
+                                _ => return Err("a `case` that is not a literal".to_string()),
+                            },
+                            _ => return Err("a `case` that is not a literal".to_string()),
+                        };
+                        restore(self);
+                        arms.push((format!("({})", lit), self.branch(&br.body)?));
+                    }
+                }
+                restore(self);
+                arms.push(("_".to_string(), self.branch(default_branch)?));
+
+                // Every arm has to leave the same state behind, or there is no
+                // join. The `default` arm is the one C always has, so it is
+                // the reference.
+                let (_, last) = arms.last().unwrap();
+                let inits = last.inits.clone();
+                let outs = last.out_params.clone();
+                if arms
+                    .iter()
+                    .any(|(_, a)| a.inits != inits || a.out_params != outs)
+                {
+                    return Err(
+                        "a `switch` whose cases leave different variables initialised".to_string(),
+                    );
+                }
+                restore(self);
+                self.out_params = outs;
+                for (slot, init) in self.slots.iter_mut().zip(&inits) {
+                    slot.init = *init;
+                }
+
+                // Pulse infers the join of an `if` but not of a `match`, so
+                // the frame at the join has to be written out. `switch` is the
+                // one statement PAL already asks the source to annotate, and
+                // that annotation is what goes in the `pure` part.
+                let join = self.frame_slprop(ensures, "a `switch`", "      ")?;
+
+                self.lines.push("{".to_string());
+                self.lines.push(indent(&format!("match ({}) {{", scrut)));
+                for (pat, arm) in &arms {
+                    self.lines.push(indent(&indent(&format!("{} -> {{", pat))));
+                    self.lines
+                        .extend(arm.lines.iter().map(|l| indent(&indent(&indent(l)))));
+                    self.lines.push(indent(&indent("}")));
+                }
+                self.lines.push(indent("};"));
+                self.lines.push("}".to_string());
+                // Parenthesised because an `exists*` body would otherwise
+                // swallow the statement that follows the annotation.
+                self.lines.push(format!("ensures ({})", join));
+                // Pulse wants a labelled statement to attach the annotation
+                // to; without one the parser runs the annotation into
+                // whatever follows the `switch`.
+                let label = self.fresh("match_join");
+                self.lines.push(format!("label {}:;", label));
                 Ok(())
             }
             StmtT::Assert(e) => {
