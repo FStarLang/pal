@@ -362,15 +362,20 @@ fn refined(tds: &Typedefs, ty: &Type) -> bool {
 
 /// The pointee of a pointer parameter, skipping the wrappers that do not
 /// change the representation.
+///
+/// `_plain` is not one of them. It is exactly the annotation that says the
+/// parameter is a bare address and the function owns nothing behind it, which
+/// is what lets a caller pass `NULL`. `_nullable` is not one either: what it
+/// owns is `unless_null p (...)`, which is not translated yet, and pretending
+/// it were an unconditional points-to would be a contract no caller could
+/// satisfy.
 fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
     match &tds.resolve(ty).val {
         TypeT::Pointer(to, _) => Some(to),
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
-        | TypeT::RefineValue(t, ..)
-        | TypeT::Plain(t)
-        | TypeT::Nullable(t) => pointee(tds, t),
+        | TypeT::RefineValue(t, ..) => pointee(tds, t),
         _ => None,
     }
 }
@@ -591,6 +596,24 @@ impl<'a> Spec<'a> {
             return l;
         }
         let ty = self.ty_of(e)?;
+        // Signed arithmetic is undefined on overflow, so where a contract
+        // measures it the source can only mean the mathematical result, and
+        // the two agree on every program C defines. Saying it that way rather
+        // than as `Int32.v (a `Int32.add` b)` also avoids a term whose own
+        // typing needs the `_requires` -- which Pulse does not have in scope
+        // when it types the `ensures`. Unsigned arithmetic wraps and is
+        // defined, so it must keep its operator.
+        if let ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) = &strip_vattr(e).val
+        {
+            if matches!(self.tds.resolve(&ty).val, TypeT::Int { signed: true, .. }) {
+                return Ok(format!(
+                    "({} {} {})",
+                    self.num(l, w)?,
+                    op.to_str(),
+                    self.num(r, w)?
+                ));
+            }
+        }
         match self.int_module(&ty) {
             Some(m) => Ok(format!("({}.v {})", m, self.value(e, w)?)),
             None => self.value(e, w),
@@ -727,6 +750,14 @@ impl<'a> Spec<'a> {
             ExprT::UnOp(op, inner) => {
                 let ety = self.ty_of(e)?;
                 let ty = self.tds.resolve(&ety);
+                if let (UnOp::Neg, ExprT::IntLit(n, _)) = (op, &strip_vattr(inner).val) {
+                    // `-1000` is a literal, not a negation of one: C has no
+                    // negative literals, so this is the only way one is
+                    // written.
+                    if let Ok(l) = int_literal(self.tds, &-(**n).clone(), ty) {
+                        return Ok(l);
+                    }
+                }
                 match (op, &ty.val) {
                     // Only at specification level, where there is no
                     // wraparound to get wrong.
@@ -3370,6 +3401,10 @@ fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> 
         // `true` and `false` are macros for the integer literals 1 and 0, so
         // they reach the IR as literals at type `_Bool`.
         TypeT::Bool => Ok(if *n == BigInt::ZERO { "false" } else { "true" }.to_string()),
+        // `NULL` is the integer literal `0` at a pointer type. Any other
+        // integer at a pointer type is manufacturing an address, which the
+        // model deliberately does not let a program do.
+        TypeT::Pointer(..) | TypeT::FnPtr { .. } if *n == BigInt::ZERO => Ok("null".to_string()),
         _ => Err("an integer literal of an unsupported type".to_string()),
     }
 }

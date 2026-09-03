@@ -950,8 +950,8 @@ new facts about memory.
    global read as a value, and the pointer identity of a mutable global's
    address.
 
-   As of this milestone: **700 specifications, 334 of them with real bodies,
-   366 admitted, 114 functions skipped**, plus **18 `_pure` functions emitted as
+   As of this milestone: **703 specifications, 358 of them with real bodies,
+   345 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -1023,6 +1023,36 @@ new facts about memory.
    inline them all", which is right for `t_read` (whose postcondition says
    `rewrites_to`) and wrong for a call (whose postcondition says nothing of the
    sort). The two are now distinguished, and a call keeps its binding.
+
+   Three things about *contracts* were wrong, and between them accounted for
+   more admitted bodies than any translator feature.
+
+   A contract that measures signed arithmetic now says the mathematical
+   result. `_ensures(return == a + b)` had been refused outright, on the
+   principle that a contract must not describe an operation the body would not
+   perform; but that is the wrong reading. Signed overflow is undefined, so on
+   every program C defines `Int32.v (a `+` b)` and `Int32.v a + Int32.v b`
+   agree, and the second is a total term whose typing does not need the
+   `_requires` -- which matters, because Pulse does not have the `requires` in
+   scope when it types the `ensures`. Unsigned arithmetic wraps and is
+   defined, so it keeps its operator. C has no negative literals either, so
+   `-1000` arrives as a negation of `1000` and had to be recognised as the
+   literal it is. Together these unblocked 15 bodies.
+
+   `NULL` is the integer literal `0` at a pointer type, and is translated to
+   `null`. Any other integer at a pointer type is manufacturing an address,
+   which the model deliberately does not let a program do.
+
+   `_plain` means the function owns nothing behind the pointer. Palow had
+   been granting a points-to for every pointer parameter regardless, which is
+   exactly backwards: `_plain` is the annotation a source writes precisely so
+   that a caller may pass `NULL`, and the existing translator emits no slprop
+   for it. The bug was invisible until `NULL` became translatable and
+   `check_null(NULL)` turned into an unprovable `int32_t_pts_to null`. Dropping
+   the grant *raised* coverage by nine bodies, because a weaker contract is
+   easier to call; a body that dereferences a `_plain` pointer is now refused,
+   which is what the annotation asked for. `_nullable` is refused for the same
+   reason, and will stay refused until `unless_null` appears in contracts.
 
    Subscripts are translated. `a[i]` on an array parameter is not a read but a
    six-line sandwich -- discharge the offset's `fits` fact, `array_focus`, trade
