@@ -83,3 +83,30 @@ void set_len(struct buf *b, uint32_t v)
 {
   b->len = v;
 }
+
+// A struct with a hole in it: `c` at offset 8 leaves three bytes of padding
+// before the end of the object. Those bytes belong to the object in C, so
+// `struct_padded_pts_to` owns them too -- otherwise a struct that came out of
+// automatic storage could never go back into it, having dropped the gap on the
+// way through the points-to.
+struct padded {
+  int32_t a;
+  int32_t b;
+  uint8_t c;
+};
+
+uint8_t tag(const struct padded *p)
+  _ensures(return == p->c)
+{
+  return p->c;
+}
+
+// A struct local. Its storage is carved out of one flat byte range by the
+// generated `struct_padded_stack_alloc`, field by field and gap by gap, and
+// handed back the same way at the end of the block.
+int32_t pick_local(int32_t x)
+  _ensures(return == x)
+{
+  struct padded p = {.a = x, .b = 0, .c = 0};
+  return p.a;
+}

@@ -1017,8 +1017,47 @@ new facts about memory.
    remaining ones -- `_out`/`_consumes` parameters, and `_refine`d ones --
    became visible as separate problems.
 
-   As of this milestone: **703 specifications, 386 of them with real bodies,
-   317 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   A struct local was the last kind of automatic storage with nothing behind
+   it. The machine layer got `mem_stack_alloc`/`mem_stack_free`, which hand out
+   and take back a flat range of bytes, and everything above that is
+   *generated* rather than axiomatised: for each struct Palow emits a
+   `stack_alloc` whose body carves the range into the fields with the same
+   `mem_split` the scalar layer uses, a `stack_free` that puts it back with
+   `mem_join`, a `forget` that drops the values, and a `write_uninit` that
+   installs them. This is the payoff the aggregate experiment was for -- there
+   is no new axiom for aggregates, only a proof per struct.
+
+   Two things about the carve are worth writing down. It has to run *right to
+   left*: `mem_split a n` leaves the prefix at `a` and the suffix at `a +! n`,
+   so splitting at descending offsets keeps every suffix pointer literally
+   `a +! <absolute offset>`, whereas splitting the other way round nests the
+   arithmetic into `((a +! 4) +! 4) +! 1` and the solver does not see through
+   it. And the first field is written as plain `a`, not `a +! 0sz`, because a
+   `rewrite` will use `add_zero` but slprop matching will not.
+
+   The other half of this was padding. `struct_S_pts_to` was the separating
+   conjunction of its fields, which is what makes field access an `unfold`, but
+   it left the gaps clang inserts owned by nobody -- so a struct that came out
+   of automatic storage could never go back into it, having dropped the gap on
+   the way through the points-to. Ownership of a struct now includes a
+   `struct_S_padding` conjunct, one existentially quantified byte range per gap
+   with only its length pinned, which is also the more faithful reading of C:
+   the padding is part of the object. It costs nothing at a field access, since
+   it sits in the hole predicate untouched, and it is what makes `forget` and
+   `write_uninit` pass storage straight through.
+
+   With storage available, a struct initialiser became worth translating, and
+   it is an F\* record literal. A *partial* initialiser is still refused: C
+   fills the fields the source leaves out with zero and the emitter has no zero
+   to write for an arbitrary field type, so it says so rather than guessing.
+   The nineteen "local `X` is struct S" admits are gone; five bodies came back
+   immediately and the rest moved on to their next blocker, which is mostly
+   that the struct is read or written a field at a time before it has been
+   initialised as a whole -- the `init` flag is per slot, and a struct wants it
+   per field.
+
+   As of this milestone: **705 specifications, 393 of them with real bodies,
+   312 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

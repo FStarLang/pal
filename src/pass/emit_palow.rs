@@ -53,6 +53,9 @@ struct StructField {
     ty: Rc<Type>,
     /// Byte offset from the start of the struct, per clang's target ABI.
     offset: u64,
+    /// Its size in bytes, which together with the offset is what says where
+    /// the padding is.
+    size: u64,
     shape: FieldShape,
 }
 
@@ -83,6 +86,24 @@ impl FieldShape {
             FieldShape::Array { pn, esize, .. } => {
                 format!("array_pts_to {}_repr {} {} p {}", pn, esize, at, value)
             }
+        }
+    }
+
+    /// How many bytes of the object the field occupies.
+    fn size(&self, tds: &Typedefs, ty: &Type) -> Option<u64> {
+        match self {
+            FieldShape::One { .. } => palow_sizeof(tds, ty),
+            FieldShape::Array { esize, len, .. } => Some(esize * len),
+        }
+    }
+
+    /// The write-only view of the field's storage. An array has no such view
+    /// in the model, which is what keeps a struct with an array field out of
+    /// automatic storage for now.
+    fn uninit(&self, at: &str) -> Option<String> {
+        match self {
+            FieldShape::One { pn } => Some(format!("{}_pts_to_uninit {}", pn, at)),
+            FieldShape::Array { .. } => None,
         }
     }
 }
@@ -1437,10 +1458,16 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> String {
                 };
                 break;
             };
+            let Some(fsize) = shape.size(tds, &fty) else {
+                ok = false;
+                bad = format!("field `{}` has no size", fname);
+                break;
+            };
             fields.push(StructField {
                 name: fname,
                 ty: fty,
                 offset: off,
+                size: fsize,
                 shape,
             });
         }
@@ -1515,11 +1542,53 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         }
     };
 
+    // The bytes of the object that belong to no field. C says they are part
+    // of the object, so ownership of the struct has to include them: otherwise
+    // a struct that came out of automatic storage could never go back into it,
+    // having lost the gaps on the way through `_pts_to`. They carry no value,
+    // so they are existentially quantified and only their length is pinned.
+    let mut gaps: Vec<(u64, u64)> = Vec::new();
+    let mut sorted: Vec<&StructField> = si.fields.iter().collect();
+    sorted.sort_by_key(|f| f.offset);
+    let mut cursor = 0u64;
+    for f in &sorted {
+        if f.offset > cursor {
+            gaps.push((cursor, f.offset - cursor));
+        }
+        cursor = cursor.max(f.offset + f.size);
+    }
+    if si.size > cursor {
+        gaps.push((cursor, si.size - cursor));
+    }
     c += &format!(
-        "let {}_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {}) : slprop =\n  {}\n\n",
+        "let {}_padding (a: ptr) (p: perm) : slprop =\n  {}\n\n",
+        sn,
+        if gaps.is_empty() {
+            "emp".to_string()
+        } else {
+            gaps.iter()
+                .map(|(off, len)| {
+                    format!(
+                        "(exists* g. mem_pts_to {} p g ** pure (len g == {}))",
+                        if *off == 0 {
+                            "a".to_string()
+                        } else {
+                            format!("(a +! {}sz)", off)
+                        },
+                        len
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" **\n  ")
+        }
+    );
+
+    c += &format!(
+        "let {}_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {}) : slprop =\n  {} **\n  {}_padding a p\n\n",
         sn,
         sn,
-        conj("x", None)
+        conj("x", None),
+        sn
     );
 
     for f in &si.fields {
@@ -1528,11 +1597,12 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         let upd = format!("({{ x with fld_{} = y }})", f.name);
         let owned = |v: &str| f.shape.pts_to(&at, v);
         c += &format!(
-            "let {}_hole_{} (a: ptr) (p: perm) (x: {}) : slprop =\n  {}\n\n",
+            "let {}_hole_{} (a: ptr) (p: perm) (x: {}) : slprop =\n  {} **\n  {}_padding a p\n\n",
             sn,
             f.name,
             sn,
-            conj("x", Some(&f.name))
+            conj("x", Some(&f.name)),
+            sn
         );
         c += &format!(
             "ghost fn {sn}_focus_{f} (a: ptr) (#p: perm) (#x: {sn})\n\
@@ -1567,7 +1637,190 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             owned = owned(&format!("x.fld_{}", f.name))
         );
     }
+    c += &emit_struct_storage(tds, name, &gaps);
     c
+}
+
+/// The automatic-storage operations for one struct: allocate, initialise,
+/// forget and free. There is no axiom here for the struct; there is a proof,
+/// carving `mem_stack_alloc`'s flat byte range into the fields and the gaps
+/// with the same `mem_split` the scalar layer uses.
+///
+/// The carve goes right to left. `mem_split a n` leaves the prefix at `a` and
+/// the suffix at `a +! n`, so splitting at descending offsets keeps every
+/// suffix pointer literally `a +! <absolute offset>`. Splitting the other way
+/// round nests the arithmetic -- `((a +! 4) +! 4) +! 1` -- and the solver does
+/// not see through it.
+fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
+    let si = &tds.structs[name];
+    let sn = format!("struct_{}", name);
+    // A field with no write-only view keeps the whole struct out of automatic
+    // storage: there would be no way to hand back what was never claimed.
+    let mut uninit = Vec::new();
+    for f in &si.fields {
+        // A nested struct field would need its own `_claim_uninit`, which the
+        // generated layer does not have yet: the carve stops at the scalars.
+        let u = if has_repr(tds, &f.ty) {
+            f.shape
+                .uninit(&format!("(a +! {}_offsetof_{})", sn, f.name))
+        } else {
+            None
+        };
+        let Some(u) = u else {
+            return format!(
+                "(* struct {}: no automatic storage, field `{}` has no uninitialised view *)\n\n",
+                name, f.name
+            );
+        };
+        uninit.push(u);
+    }
+
+    // `a +! 0sz` is `a` only up to `add_zero`, and a `rewrite` will use that
+    // lemma but slprop matching will not. Writing the first field's address as
+    // plain `a` keeps the two in step.
+    let at = |off: u64| {
+        if off == 0 {
+            "a".to_string()
+        } else {
+            format!("(a +! {}sz)", off)
+        }
+    };
+
+    let mut c = String::new();
+    c += &format!(
+        "let {}_pts_to_uninit (a: ptr) : slprop =\n  {} **\n  {}_padding a 1.0R\n\n",
+        sn,
+        uninit.join(" **\n  "),
+        sn
+    );
+
+    // Every boundary inside the object, in the order the splits have to run.
+    let mut bounds: Vec<u64> = si
+        .fields
+        .iter()
+        .map(|f| f.offset)
+        .chain(gaps.iter().map(|(off, _)| *off))
+        .filter(|off| *off != 0)
+        .collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let mut alloc = String::new();
+    for off in bounds.iter().rev() {
+        alloc += &format!("  mem_split a {}sz;\n", off);
+    }
+    for f in &si.fields {
+        let FieldShape::One { pn } = &f.shape else {
+            unreachable!()
+        };
+        alloc += &format!("  {}_claim_uninit {};\n", pn, at(f.offset));
+        alloc += &format!(
+            "  rewrite ({pn}_pts_to_uninit {off})\n    as ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}));\n",
+            pn = pn,
+            off = at(f.offset),
+            sn = sn,
+            f = f.name
+        );
+    }
+    c += &format!(
+        "fn {sn}_stack_alloc ()\n\
+         \x20 returns a : ptr\n\
+         \x20 ensures {sn}_pts_to_uninit a\n\
+         {{\n\
+         \x20 let a = mem_stack_alloc {sn}_sizeof;\n\
+         {alloc}\
+         \x20 fold {sn}_padding a 1.0R;\n\
+         \x20 fold {sn}_pts_to_uninit a;\n\
+         \x20 a\n}}\n\n",
+        sn = sn,
+        alloc = alloc
+    );
+
+    // Freeing runs the carve backwards. `mem_join a n` needs the two halves
+    // adjacent, so the joins go left to right, which is the reverse of the
+    // order the splits ran in.
+    let mut free = String::new();
+    free += &format!("  unfold {}_pts_to_uninit a;\n", sn);
+    free += &format!("  unfold {}_padding a 1.0R;\n", sn);
+    for f in &si.fields {
+        let FieldShape::One { pn } = &f.shape else {
+            unreachable!()
+        };
+        free += &format!(
+            "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n",
+            pn = pn,
+            sn = sn,
+            f = f.name,
+            off = at(f.offset)
+        );
+        free += &format!("  {}_reveal_uninit {};\n", pn, at(f.offset));
+    }
+    for off in bounds.iter() {
+        free += &format!("  mem_join a {}sz;\n", off);
+    }
+    c += &format!(
+        "fn {sn}_stack_free (a: ptr)\n\
+         \x20 requires {sn}_pts_to_uninit a\n\
+         {{\n{free}  mem_stack_free a;\n}}\n\n",
+        sn = sn,
+        free = free
+    );
+
+    // Going from a live struct back to storage is per field: the padding is
+    // already in both predicates and passes straight through.
+    let mut forget = String::new();
+    forget += &format!("  unfold {}_pts_to a 1.0R x;\n", sn);
+    for f in &si.fields {
+        let FieldShape::One { pn } = &f.shape else {
+            unreachable!()
+        };
+        forget += &format!("  {}_forget (a +! {}_offsetof_{});\n", pn, sn, f.name);
+    }
+    c += &format!(
+        "ghost fn {sn}_forget (a: ptr) (#x: {sn})\n\
+         \x20 requires {sn}_pts_to a 1.0R x\n\
+         \x20 ensures  {sn}_pts_to_uninit a\n\
+         {{\n{forget}  fold {sn}_pts_to_uninit a;\n}}\n\n",
+        sn = sn,
+        forget = forget
+    );
+
+    let mut write = String::new();
+    write += &format!("  unfold {}_pts_to_uninit a;\n", sn);
+    for f in &si.fields {
+        let FieldShape::One { pn } = &f.shape else {
+            unreachable!()
+        };
+        write += &format!(
+            "  {}_write_uninit (a +! {}_offsetof_{}) x.fld_{};\n",
+            pn, sn, f.name, f.name
+        );
+    }
+    c += &format!(
+        "fn {sn}_write_uninit (a: ptr) (x: {sn})\n\
+         \x20 requires {sn}_pts_to_uninit a\n\
+         \x20 ensures  {sn}_pts_to a 1.0R x\n\
+         {{\n{write}  fold {sn}_pts_to a 1.0R x;\n}}\n\n",
+        sn = sn,
+        write = write
+    );
+    c
+}
+
+/// Whether a struct has the generated automatic-storage operations, which is
+/// the same condition `emit_struct_storage` checks: every field needs an
+/// uninitialised view, and an array field has none.
+fn storable_struct(tds: &Typedefs, ty: &Type) -> bool {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return false;
+    };
+    match tds.structs.get(&*n.val) {
+        Some(si) => si
+            .fields
+            .iter()
+            .all(|f| matches!(f.shape, FieldShape::One { .. }) && has_repr(tds, &f.ty)),
+        None => false,
+    }
 }
 
 /// A global's initialiser, as a closed F* term. Only literals qualify: a
@@ -2675,6 +2928,39 @@ impl<'a> Body<'a> {
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         match &e.val {
             ExprT::VAttr(_, inner) => self.rvalue(inner),
+            // A struct literal is an F* record literal. C fills any field the
+            // initialiser leaves out with zero, and the emitter has no zero to
+            // write for an arbitrary field type, so a partial initialiser is
+            // refused rather than guessed at.
+            ExprT::StructInit(sname, inits) => {
+                let Some(si) = self.tds.structs.get(&*sname.val) else {
+                    return Err(format!("an initialiser for struct {}", sname.val));
+                };
+                let order: Vec<String> = si.fields.iter().map(|f| f.name.clone()).collect();
+                if order.len() != inits.len() {
+                    return Err(format!(
+                        "a partial initialiser for struct {}, which leaves fields at zero",
+                        sname.val
+                    ));
+                }
+                let mut vals = Vec::new();
+                for fname in &order {
+                    let Some((_, fe)) = inits.iter().find(|(n, _)| *n.val == **fname) else {
+                        return Err(format!(
+                            "an initialiser for struct {} that does not name `{}`",
+                            sname.val, fname
+                        ));
+                    };
+                    vals.push((fname.clone(), self.rvalue(fe)?));
+                }
+                Ok(format!(
+                    "({{ {} }})",
+                    vals.iter()
+                        .map(|(n, v)| format!("fld_{} = {}", n, v))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ))
+            }
             ExprT::Var(v) => {
                 if let Some(s) = self.slots.iter().rev().find(|s| s.name == *v.val) {
                     if !s.init {
@@ -2891,12 +3177,10 @@ impl<'a> Body<'a> {
     }
 
     fn alloc_slot(&mut self, name: &Ident, ty: &Type) -> Result<String, String> {
-        // Only scalars have machine operations, so only scalars can have a
-        // stack slot. A struct local needs a `struct_S_stack_alloc`, which the
-        // generated struct layer does not provide: its points-to is the
-        // conjunction of its fields' and says nothing about the storage as a
-        // whole.
-        if !has_repr(self.tds, ty) {
+        // A slot needs the four automatic-storage operations. Scalars get them
+        // from the machine layer; a struct gets them generated, provided every
+        // field has an uninitialised view to carve out of the raw bytes.
+        if !has_repr(self.tds, ty) && !storable_struct(self.tds, ty) {
             return Err(format!(
                 "local `{}` is {}",
                 name.val,

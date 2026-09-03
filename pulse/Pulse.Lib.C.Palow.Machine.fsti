@@ -132,6 +132,17 @@ fn ptr_stack_alloc ()
 fn ptr_stack_free (a: ptr)
   requires ptr_pts_to_uninit a
 
+(* Automatic storage for an aggregate, which has no single scalar type to hang
+   an allocation off. This is the raw byte range; the generated per-struct
+   `_stack_alloc` carves it into the fields' write-only views, which is a proof
+   from `mem_split` rather than another axiom. *)
+fn mem_stack_alloc (n: SZ.t)
+  returns  a : ptr
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v n)
+
+fn mem_stack_free (a: ptr) (#b: erased bytes)
+  requires mem_pts_to a 1.0R b
+
 (* ---------------------------------------------------------------------------
    The remaining C scalar types
 
