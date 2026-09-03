@@ -810,7 +810,12 @@ impl<'a> Spec<'a> {
 /// makes it usable in a specification: `_assert(f(x) == 1)` is a proposition
 /// about a term, and the term is this definition, unfolded by the SMT solver
 /// like any other.
-fn emit_pure_fn(tds: &Typedefs, env: &Env, decl: &FnDecl, body: &Stmts) -> Result<String, String> {
+fn emit_pure_fn(
+    tds: &Typedefs,
+    env: &Env,
+    decl: &FnDecl,
+    body: Option<&[Rc<Stmt>]>,
+) -> Result<String, String> {
     // A ghost argument needs an erased implicit, which is not translated yet.
     if decl.is_rec && decl.decreases.is_none() {
         return Err("it is recursive without a `_decreases`".to_string());
@@ -869,7 +874,10 @@ fn emit_pure_fn(tds: &Typedefs, env: &Env, decl: &FnDecl, body: &Stmts) -> Resul
         None => None,
     };
 
-    let value = pure_body(&mut sp, body)?;
+    let value = match body {
+        Some(b) => Some(pure_body(&mut sp, b)?),
+        None => None,
+    };
     let ty = if req == "True" && ens == "True" && dec.is_none() {
         ret
     } else {
@@ -881,6 +889,19 @@ fn emit_pure_fn(tds: &Typedefs, env: &Env, decl: &FnDecl, body: &Stmts) -> Resul
             t += &format!(" (decreases ({}))", d);
         }
         t
+    };
+    // A `_pure` function that is only declared here -- `pal_c_assert_enabled`
+    // in `pal.h` is the one that matters -- still has to be a term, or an
+    // `_assert` that mentions it could not be translated. Assuming it is
+    // exactly as safe as the existing translator's treatment: the contract is
+    // all a caller may rely on either way.
+    let Some(value) = value else {
+        return Ok(format!(
+            "assume val func_{} {} : {}\n\n",
+            decl.name.val,
+            params.join(" "),
+            ty
+        ));
     };
     Ok(format!(
         "let {}func_{} {} : {} =\n  {}\n\n",
@@ -1547,19 +1568,31 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     // to be a term an `_ensures` or an `_assert` can mention; a `fn` is a
     // computation, and Pulse rejects one in a specification because its
     // postcondition carries no `rewrites_to`.
+    let defined: HashSet<String> = tu
+        .decls
+        .iter()
+        .filter_map(|d| match &d.val {
+            DeclT::FnDefn(d) => Some(d.decl.name.val.to_string()),
+            _ => None,
+        })
+        .collect();
     for decl in &tu.decls {
-        let DeclT::FnDefn(d) = &decl.val else {
-            continue;
+        let (fndecl, body) = match &decl.val {
+            DeclT::FnDefn(d) => (&d.decl, Some(&*d.body)),
+            // A declaration whose definition is elsewhere in this file is
+            // handled when the definition is reached.
+            DeclT::FnDecl(d) if !defined.contains(&*d.name.val.to_string()) => (d, None),
+            _ => continue,
         };
-        if !d.decl.is_pure {
+        if !fndecl.is_pure {
             continue;
         }
         let mut env = base.clone();
-        env.push_fn_decl_args_for_body(&d.decl);
+        env.push_fn_decl_args_for_body(fndecl);
         // Inserted first so that a recursive body can name itself; taken back
         // out again if the definition does not come out.
-        tds.pure_fns.insert(d.decl.name.val.to_string());
-        match emit_pure_fn(&tds, &env, &d.decl, &d.body) {
+        tds.pure_fns.insert(fndecl.name.val.to_string());
+        match emit_pure_fn(&tds, &env, fndecl, body) {
             Ok(t) => {
                 code += &t;
             }
@@ -1567,10 +1600,10 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             // code even when it cannot be a term. Only a specification that
             // mentions it is lost.
             Err(why) => {
-                tds.pure_fns.remove(&*d.decl.name.val.to_string());
+                tds.pure_fns.remove(&*fndecl.name.val.to_string());
                 code += &format!(
                     "(* `{}` is not an F* definition: {} *)\n\n",
-                    d.decl.name.val, why
+                    fndecl.name.val, why
                 );
             }
         }
@@ -1771,6 +1804,9 @@ struct Body<'a> {
     /// Whether we are translating the arm of an `if`, where a slot introduced
     /// now would not outlive the arm.
     in_branch: bool,
+    /// Whether the expression being translated is a loop guard rather than a
+    /// specification. A guard is real code, so a call may stay in it.
+    in_guard: bool,
     /// Array-kind pointer parameters, by C name.
     arrays: HashMap<String, ArrayParam>,
     /// The function's parameters, by C name. Ownership of what a pointer points
@@ -2174,8 +2210,19 @@ impl<'a> Body<'a> {
     /// `rewrites_to`, which is exactly what lets Pulse use it in a
     /// specification; an ordinary call has no such postcondition, and putting
     /// one in an `assert` is refused with "cannot find rewrites_to in post".
-    /// A call therefore keeps its binding, and the specification mentions the
-    /// name.
+    ///
+    /// Nor may the call be lifted out and the name used instead. An `_assert`
+    /// is a specification: it does not run, and it must not make the program
+    /// do anything it would not otherwise do. A C function may have side
+    /// effects, so hoisting `_assert(f(x) > 0)` into `let t = f x; assert (t >
+    /// 0)` changes the meaning of the program. Such an assertion is refused.
+    /// Only a `_pure` function, which is emitted as an F* definition rather
+    /// than as a computation, can be mentioned in one.
+    ///
+    /// A loop guard is the other way round. It is real code -- `while (f(i))`
+    /// calls `f` on every iteration, so lifting the call out would run it
+    /// once -- and Pulse accepts a computation in the head of a `while`. So a
+    /// guard keeps the call where the source put it, and nothing is refused.
     fn inline(&mut self, e: &Expr) -> Result<String, String> {
         let before = self.lines.len();
         let mut v = self.rvalue(e)?;
@@ -2188,10 +2235,10 @@ impl<'a> Body<'a> {
             let Some((n, d)) = rest.split_once(" = ") else {
                 return Ok(v);
             };
-            let inlinable = d
-                .split_whitespace()
-                .next()
-                .is_some_and(|h| h.ends_with("_read"));
+            let inlinable = self.in_guard
+                || d.split_whitespace()
+                    .next()
+                    .is_some_and(|h| h.ends_with("_read"));
             bound.push((n.to_string(), format!("({})", d), inlinable));
         }
         for i in (0..bound.len()).rev() {
@@ -2207,11 +2254,15 @@ impl<'a> Body<'a> {
             }
         }
         self.lines.truncate(before);
-        for (n, d, inlinable) in bound {
-            if !inlinable {
-                // `d` was parenthesised when it was collected.
-                self.lines.push(format!("let {} = {};", n, d));
-            }
+        if let Some((_, d, _)) = bound.iter().find(|(_, _, i)| !*i) {
+            return Err(format!(
+                "a call to `{}`, which a specification cannot make",
+                d.trim_matches(['(', ')'])
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(d)
+                    .trim_start_matches("func_")
+            ));
         }
         Ok(v)
     }
@@ -2893,7 +2944,10 @@ impl<'a> Body<'a> {
         }
 
         let before = self.lines.len();
-        let head = self.inline(cond)?;
+        self.in_guard = true;
+        let head = self.inline(cond);
+        self.in_guard = false;
+        let head = head?;
         if self.lines.len() != before {
             self.lines.truncate(before);
             return Err("a loop whose condition needs a focused access".to_string());
@@ -3567,6 +3621,7 @@ fn emit_body(
         signed_ok: sig.contract,
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
+        in_guard: false,
         arrays,
         requires_ok: sig.contract && !defn.decl.requires.is_empty(),
         owned: &sig.owned,

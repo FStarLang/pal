@@ -950,9 +950,10 @@ new facts about memory.
    global read as a value, and the pointer identity of a mutable global's
    address.
 
-   As of this milestone: **703 specifications, 330 of them with real bodies,
-   373 admitted, 114 functions skipped**, plus **15 `_pure` functions emitted as
-   F\* definitions**. The generated `swap` is line-for-line the
+   As of this milestone: **700 specifications, 334 of them with real bodies,
+   366 admitted, 114 functions skipped**, plus **18 `_pure` functions emitted as
+   F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
+   line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.
 
@@ -988,7 +989,22 @@ new facts about memory.
    function falls back to the Pulse `fn`, so only specifications that mention
    it are lost, not the ability to call it. 15 of 17 `_pure` functions in the
    test suite come out as definitions, including the recursive ones, whose
-   `_decreases` becomes F\*'s.
+   `_decreases` becomes F\*'s. A `_pure` function that is only *declared* here
+   -- `pal_c_assert_enabled` in `pal.h` is the one that matters -- becomes an
+   `assume val` at the same type, which is a term too and so may equally be
+   mentioned in an `_assert`; a caller could rely on nothing but the contract
+   in either case.
+
+   Nothing is ever lifted out of an `_assert`. An `_assert` is a
+   specification: it does not run, and translating it must not make the program
+   do something it would not otherwise do. Turning `_assert(f(x) > 0)` into
+   `let t = f x; assert (t > 0)` adds a call, and a C function may have side
+   effects, so an assertion that calls a function which is not `_pure` is
+   refused rather than rewritten. A loop guard is the opposite case: `while
+   (f(i))` calls `f` on every iteration, so lifting the call out would run it
+   once, and Pulse accepts a computation in the head of a `while`. The guard
+   therefore keeps the call exactly where the source put it, which is what
+   makes the six functions of `test/func_call_guard` translate.
 
    Three narrower fixes came with it, each a case of a wrapper hiding a type.
    `resolve` follows typedefs but deliberately not the annotation wrappers, so
