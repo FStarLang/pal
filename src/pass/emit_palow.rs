@@ -1884,20 +1884,23 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         callees.insert(
             fndecl.name.val.to_string(),
             Callee {
-                simple: fndecl
+                simple: if !fndecl
                     .args
                     .iter()
                     .all(|a| matches!(a.mode, ParamMode::Regular | ParamMode::Const))
-                    && fndecl.ghost_args.is_empty()
-                    && !fndecl
-                        .args
-                        .iter()
-                        .any(|a| extent(&tds, &a.ty) == Some(Extent::Array))
+                {
+                    Err("moves ownership across the call")
+                } else if !fndecl.ghost_args.is_empty() {
+                    Err("takes a ghost argument")
+                } else if fndecl.args.iter().any(|a| refined(&tds, &a.ty)) {
                     // A `_refine` on a parameter is part of the contract on
                     // both sides of the call, and is not translated yet; a
                     // caller that could not see it would be proving against a
                     // specification weaker than the source's.
-                    && !fndecl.args.iter().any(|a| refined(&tds, &a.ty)),
+                    Err("takes a `_refine`d argument")
+                } else {
+                    Ok(())
+                },
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
             },
@@ -2057,7 +2060,10 @@ fn indent(line: &str) -> String {
 /// order to call it: whether every parameter is one the call translation can
 /// pass, and whether the result is a value.
 struct Callee {
-    simple: bool,
+    /// Why a call to this function cannot be emitted, if it cannot. A call may
+    /// only pass ownership it can name: a value, or a pointer to an object the
+    /// caller holds and gets back unchanged.
+    simple: Result<(), &'static str>,
     void: bool,
     /// Whether the callee's own `_requires`/`_ensures` were translated. If they
     /// were not its specification says only what memory comes back, and a
@@ -2753,7 +2759,10 @@ impl<'a> Body<'a> {
                     return self.rvalue(inner);
                 }
                 let v = self.rvalue(inner)?;
-                convert(self.tds.resolve(&from), self.tds.resolve(to), &v)
+                // `peel`, not `resolve`: a `_plain int32_t *` is a pointer as
+                // far as a conversion is concerned, and the annotation
+                // wrappers would otherwise hide that.
+                convert(peel(self.tds, &from), peel(self.tds, to), &v)
             }
             ExprT::BinOp(op, l, r) => {
                 let ty = self.ty_of(l)?;
@@ -2864,11 +2873,8 @@ impl<'a> Body<'a> {
             return Err(format!("`{}`, which is recursive", name.val));
         }
         self.uses.insert(name.val.to_string());
-        if !c.simple {
-            return Err(format!(
-                "`{}` takes ownership the caller cannot pass",
-                name.val
-            ));
+        if let Err(why) = c.simple {
+            return Err(format!("`{}` {}", name.val, why));
         }
         if !c.contract && self.has_contract {
             return Err(format!("`{}`'s contract was dropped", name.val));

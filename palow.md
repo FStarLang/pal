@@ -1006,8 +1006,19 @@ new facts about memory.
    signed arithmetic is: their width obligation comes from the source's
    `_requires`.
 
-   As of this milestone: **703 specifications, 381 of them with real bodies,
-   322 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   Two call-site restrictions came off. The first was a bug: a `_plain int32_t
+   *` used as a truth value was not recognised as a pointer, because the
+   conversion looked through typedefs but not through the annotation wrappers.
+   The second was a guess that turned out to be wrong -- passing an array to a
+   callee was refused on the theory that the sequence and its permission could
+   not be handed over, and in fact Pulse frames the `array_pts_to` and infers
+   the permission implicit without help. The refusals a call can still hit are
+   now named individually rather than lumped together, which is how the
+   remaining ones -- `_out`/`_consumes` parameters, and `_refine`d ones --
+   became visible as separate problems.
+
+   As of this milestone: **703 specifications, 386 of them with real bodies,
+   317 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
