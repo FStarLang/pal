@@ -3776,6 +3776,32 @@ impl<'a> Body<'a> {
                 let b = self.rvalue(r)?;
                 Ok(format!("({} {} {})", a, opstr, b))
             }
+            // `x++` is a read, an add and a write. The old value has to be
+            // bound before the write, because after it there is nowhere left
+            // to read it from -- and that is also what makes the post- forms
+            // work, since they are the ones that return it.
+            ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
+                let post = matches!(&e.val, ExprT::PostIncr(..) | ExprT::PostDecr(..));
+                let op = match &e.val {
+                    ExprT::PreIncr(..) | ExprT::PostIncr(..) => BinOp::Add,
+                    _ => BinOp::Sub,
+                };
+                let ty = self.ty_of(x)?;
+                let one = match &peel(self.tds, &ty).val {
+                    TypeT::Int { signed, width } => format!("1{}", int_suffix(*signed, *width)?),
+                    TypeT::SizeT => "1sz".to_string(),
+                    _ => return Err(format!("an increment of {}", describe(&ty))),
+                };
+                let opstr = binop(self.tds, op, &ty, self.signed_ok)?;
+                let pn = palow_name(self.tds, &ty)
+                    .ok_or_else(|| format!("an increment of {}", describe(&ty)))?;
+                let cur = self.rvalue(x)?;
+                let old = self.fresh("old");
+                self.lines.push(format!("let {} = {};", old, cur));
+                let new = format!("({} {} {})", old, opstr, one);
+                self.store(x, &pn, &new)?;
+                Ok(if post { old } else { new })
+            }
             ExprT::UnOp(UnOp::Not, inner) => {
                 let a = self.rvalue(inner)?;
                 Ok(format!("(not {})", a))
@@ -4640,8 +4666,14 @@ impl<'a> Body<'a> {
                 }
                 ExprT::Free(arg) => self.free(arg),
                 // An indirect call in statement position still produces a
-                // value; binding it and dropping it is what C does.
-                ExprT::FnPtrCall(..) => self.rvalue(e).map(|_| ()),
+                // value; binding it and dropping it is what C does.  So does
+                // an increment, and there discarding the value is the usual
+                // case rather than the odd one.
+                ExprT::FnPtrCall(..)
+                | ExprT::PreIncr(..)
+                | ExprT::PostIncr(..)
+                | ExprT::PreDecr(..)
+                | ExprT::PostDecr(..) => self.rvalue(e).map(|_| ()),
                 _ => Err(format!(
                     "a call in statement position that is not one: {}",
                     expr_kind(e)

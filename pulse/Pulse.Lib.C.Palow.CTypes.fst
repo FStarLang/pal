@@ -858,6 +858,11 @@ let sizet_of_uint64 (x: U64.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.
   assume SZ.fits_u64;
   SZ.uint64_to_sizet x
 
+let size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < pow2 64) (ensures SZ.fits x)
+  [SMTPat (SZ.fits x)] =
+  assume SZ.fits_u64;
+  SZ.fits_u64_implies_fits x
+
 
 
 

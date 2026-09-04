@@ -637,6 +637,15 @@ val sizet_of_uint32 (x: U32.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.
 
 val sizet_of_uint64 (x: U64.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U64.v x)
 
+(* The same assumption once more, in the form arithmetic needs it.  `SZ.add`
+   and friends carry a `fits` precondition, and on an LP64 target every value
+   that fits in sixty-four bits satisfies it.  Stated with an `SMTPat` so a
+   `size_t` addition whose bound the source has already established does not
+   need a hint at every use. *)
+
+val size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < pow2 64) (ensures SZ.fits x)
+  [SMTPat (SZ.fits x)]
+
 
 let size_t_sizeof : SZ.t = 8sz
 let size_t_alignof : SZ.t = 8sz

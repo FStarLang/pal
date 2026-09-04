@@ -1192,11 +1192,35 @@ new facts about memory.
 
    Two smaller gaps fell out of reading the refusals afterwards, both of them
    ordinary work rather than design: an increment or decrement in statement
-   position (12) and `memset` (9) are refused by a catch-all whose message used
-   to hide what it was actually refusing.
+   position and `memset` were being refused by a catch-all whose message hid
+   what it was actually refusing.
 
-   As of this milestone: **725 specifications, 434 of them with real bodies,
-   291 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   An increment is a read, an add and a write, and the only thing worth saying
+   about it is that the old value has to be bound to a name *before* the write,
+   because after the write there is nowhere left to read it from. That is also
+   exactly what makes `x++` and `++x` differ: both emit the same three steps,
+   and they return the bound old value or the new expression respectively. Only
+   an integer increment is translated; on a pointer it is pointer arithmetic
+   and belongs with that cluster. Worth twelve bodies.
+
+   It also turned up a missing assumption rather than a missing feature.
+   `SZ.add` carries a `fits` precondition, `FStar.SizeT.fits` is abstract, and
+   Palow had no way to discharge it -- the existing translator gets this from
+   `Pulse.Lib.C.Assumptions`, which Palow does not open. Since `CTypes` already
+   assumes an LP64 `size_t` twice over, for `size_t_bound` and for the
+   conversions, the honest place for it is beside them: `size_t_fits`, with an
+   `SMTPat`, so a `size_t` addition whose bound the source has established does
+   not need a hint at every use.
+
+   `memset` is the one left, and it is not just work. Zeroing an array wants a
+   fill in the array layer, which does not exist yet. Zeroing a whole object
+   raises the padding question this document has already asked once: a
+   structure write sets the field bytes, but `memset` sets the padding too, so
+   the two are not the same operation at the byte level and the second is the
+   one that needs saying.
+
+   As of this milestone: **725 specifications, 446 of them with real bodies,
+   279 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
