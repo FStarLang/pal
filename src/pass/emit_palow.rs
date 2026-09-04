@@ -441,6 +441,9 @@ struct FnSurface {
     /// the source says, and in particular cannot discharge an overflow
     /// obligation -- see `Body::signed_ok`.
     contract: bool,
+    /// The `__fp` wrapper, when this function can be decayed to a code
+    /// pointer: the flat, explicitly-quantified form `of_fn_div` needs.
+    fp: Option<String>,
     /// The mutable globals the contract hands in and back out. The body treats
     /// each as a slot it did not allocate.
     globals: Vec<Slot>,
@@ -1177,6 +1180,7 @@ fn emit_fn(
     env: &Env,
     decl: &FnDecl,
     globals: &[Slot],
+    decay: bool,
 ) -> Result<FnSurface, String> {
     let name = format!("func_{}", decl.name.val);
 
@@ -1415,10 +1419,106 @@ fn emit_fn(
         );
     }
 
+    // The `__fp` wrapper: the same contract, in the shape `of_fn_div` can
+    // reflect. `valid` relates an address to a *flat* spec `x:a -> y:erased c
+    // -> stt_div b (pre x y) (post x y)`, so the arguments become one tuple
+    // and every binder becomes explicit; `pre_of`/`post_of` then read the
+    // pre/post back off the wrapper's type, which is why the contract has to
+    // be written out here rather than referred to.
+    //
+    // Only a function whose parameters carry no ownership gets one so far. A
+    // pointer parameter's `exists*` is exactly what the witness type `c` is
+    // for, and threading it needs the caller to name the witness at the call;
+    // until an indirect call is translated there is nothing to name it with,
+    // so `c` is `unit` and the wrapper is refused for anything else.
+    let simple = decay
+        && decl.args.iter().all(|a| {
+            pointee(tds, &a.ty).is_none() && matches!(a.mode, ParamMode::Regular | ParamMode::Const)
+        })
+        && decl.ghost_args.is_empty()
+        && globals.is_empty()
+        && contract_ok;
+    let fp = if simple {
+        let tys: Vec<String> = decl
+            .args
+            .iter()
+            .map(|a| fstar_type(tds, &a.ty).unwrap())
+            .collect();
+        let names: Vec<String> = decl
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| match &a.name {
+                Some(n) => format!("var_{}", n.val),
+                None => format!("arg_{}", i),
+            })
+            .collect();
+        let n = tys.len();
+        let domain = match n {
+            0 => "unit".to_string(),
+            1 => tys[0].clone(),
+            _ => format!("({})", tys.join(" & ")),
+        };
+        // The flat n-ary tuple is not nested pairs: arity 2 projects with
+        // `fst`/`snd`, arity 3 and up with the `tupleN` field projectors.
+        let projs: Vec<String> = (0..n)
+            .map(|i| match n {
+                1 => "x_fp".to_string(),
+                2 => format!("({} x_fp)", if i == 0 { "fst" } else { "snd" }),
+                _ => format!("(Mktuple{}?._{} x_fp)", n, i + 1),
+            })
+            .collect();
+        let binds: String = names
+            .iter()
+            .zip(projs.iter())
+            .map(|(nm, pj)| format!("let {} = {} in ", nm, pj))
+            .collect();
+        let conj = |ps: &[String]| -> String {
+            if ps.is_empty() {
+                "emp".to_string()
+            } else {
+                format!(
+                    "({}{})",
+                    binds,
+                    ps.iter()
+                        .map(|p| format!("pure ({})", p))
+                        .collect::<Vec<_>>()
+                        .join(" ** ")
+                )
+            }
+        };
+        let call = if n == 0 {
+            format!("func_{} ()", decl.name.val)
+        } else {
+            format!("func_{} {}", decl.name.val, projs.join(" "))
+        };
+        Some(format!(
+            "divergent\n\
+             fn {name}__fp (x_fp: {domain}) (w_fp: erased unit)\n\
+             \x20 requires prevent_lifting {pre}\n\
+             \x20 returns  {ret_name} : {ret}\n\
+             \x20 ensures  {post}\n\
+             {{\n\
+             \x20 let _ = w_fp;\n\
+             \x20 {call}\n\
+             }}\n\n",
+            name = name,
+            domain = domain,
+            pre = conj(&pre_props),
+            ret_name = ret_name,
+            ret = ret,
+            post = conj(&post_props),
+            call = call,
+        ))
+    } else {
+        None
+    };
+
     Ok(FnSurface {
         decl: out,
         owned,
         contract: contract_ok,
+        fp,
         globals: globals.to_vec(),
     })
 }
@@ -1996,6 +2096,9 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
 struct Touched {
     vars: HashSet<String>,
     calls: HashSet<String>,
+    /// The functions whose address is taken. Only these need a `__fp`
+    /// wrapper, and emitting one for every function would be noise.
+    refs: HashSet<String>,
     /// The objects some body may store into: the base of an assignment's
     /// left-hand side, of an increment, and of any address that escapes. A
     /// global nothing here can write is effectively immutable for the whole
@@ -2034,6 +2137,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         }
         ExprT::FnRef(n) => {
             t.calls.insert(n.val.to_string());
+            t.refs.insert(n.val.to_string());
         }
         ExprT::FnPtrCall(f, args) => {
             touch_expr(f, t);
@@ -2349,6 +2453,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     code += "open Pulse.Lib.C.Palow.Local\n";
     code += "open Pulse.Lib.C.Palow.Nullable\n";
     code += "open Pulse.Lib.C.Palow.Alloc\n";
+    code += "open Pulse.Lib.C.Palow.FnPtr\n";
     code += "module Seq = FStar.Seq\n\n";
     for m in ["Int8", "Int16", "Int32", "Int64"] {
         code += &format!("module {} = FStar.{}\n", m, m);
@@ -2445,6 +2550,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     let mut calls: HashMap<String, HashSet<String>> = HashMap::new();
     let mut touched: Vec<(String, Touched)> = Vec::new();
     let mut written: HashSet<String> = HashSet::new();
+    let mut decayed: HashSet<String> = HashSet::new();
     for decl in &tu.decls {
         let DeclT::FnDefn(d) = &decl.val else {
             continue;
@@ -2454,6 +2560,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         touch_exprs(&d.decl.requires, &mut t);
         touch_exprs(&d.decl.ensures, &mut t);
         written.extend(t.written.iter().cloned());
+        decayed.extend(t.refs.iter().cloned());
         touched.push((d.decl.name.val.to_string(), t));
     }
     // A global nothing in this file can store through is immutable for the
@@ -2512,7 +2619,8 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             .flatten()
             .map(|g| globals[g].clone())
             .collect();
-        let sig = match emit_fn(&tds, &env, fndecl, &granted) {
+        let decay = decayed.contains(&*fndecl.name.val.to_string());
+        let sig = match emit_fn(&tds, &env, fndecl, &granted, decay) {
             Ok(s) => s,
             Err(why) => {
                 items.push(FnItem {
@@ -2553,6 +2661,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                 },
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
+                fp: sig.fp.is_some(),
             },
         );
         items.push(FnItem {
@@ -2601,6 +2710,13 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                 Err(why) => {
                     out += &format!("{{\n  admit() (* body: {} *)\n}}\n\n", why);
                 }
+            }
+            // The wrapper follows the function it wraps, since its body calls
+            // it. It is emitted only for a function whose address is taken:
+            // one per function would be noise, and the contract has to be
+            // written out a second time to produce it.
+            if let Some(fp) = &sig.fp {
+                out += fp;
             }
             it.code = out;
         }
@@ -2772,6 +2888,9 @@ struct Callee {
     /// were not its specification says only what memory comes back, and a
     /// caller that has a contract of its own has nothing to prove it with.
     contract: bool,
+    /// Whether a `__fp` wrapper was emitted, so the function can be decayed
+    /// to a code pointer.
+    fp: bool,
 }
 
 struct Body<'a> {
@@ -3692,6 +3811,29 @@ impl<'a> Body<'a> {
                 let call = self.call(name, args)?;
                 self.lines.push(format!("let {} = {};", t, call));
                 Ok(t)
+            }
+            // A named function used as a value is its code address. Because
+            // a function pointer is just a `ptr`, nothing has to be encoded:
+            // the value is the `of_fn_div` of the wrapper, and what it
+            // satisfies is recovered from the wrapper's type by `pre_of` and
+            // `post_of` rather than named separately.
+            ExprT::FnRef(g) => {
+                let name = g.val.to_string();
+                let c = self
+                    .callees
+                    .get(&name)
+                    .ok_or_else(|| format!("`{}` is not declared in this file", g.val))?;
+                if !c.fp {
+                    return Err(format!("`{}` has no function-pointer wrapper", g.val));
+                }
+                if self.forbidden.contains(&name) {
+                    return Err(format!("`{}`, which is recursive", g.val));
+                }
+                self.uses.insert(name);
+                Ok(format!(
+                    "(of_fn_div (pre_of func_{g}__fp) (post_of func_{g}__fp) func_{g}__fp)",
+                    g = g.val
+                ))
             }
             ExprT::SizeOf(t) => {
                 let n = palow_sizeof(self.tds, t)

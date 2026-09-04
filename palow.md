@@ -1140,8 +1140,30 @@ new facts about memory.
    acceptance-tested here, because the existing translator refuses to write a
    mutable global at all -- which is rather the point.
 
-   As of this milestone: **725 specifications, 419 of them with real bodies,
-   306 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   Decaying a named function to a pointer works, and the wrapper is what makes
+   it work. `valid` relates an address to a *flat* specification -- `x:a ->
+   y:erased c -> stt_div b (pre x y) (post x y)` -- so the arguments become one
+   tuple and every binder becomes explicit, and `pre_of`/`post_of` read the
+   pre and post back off that type. So the function's contract has to be
+   written out a second time, in that shape, as a `func_g__fp` wrapper whose
+   body is a single call to `func_g`; `&g` is then
+   `of_fn_div (pre_of func_g__fp) (post_of func_g__fp) func_g__fp`, and because
+   a function pointer is a `ptr` that value goes into a local, a field or an
+   array with no further ceremony. A wrapper is emitted only for a function
+   whose address is actually taken.
+
+   Only a function whose parameters carry no ownership gets one so far. A
+   pointer parameter's `exists*` is what the witness type `c` exists for, and
+   naming the witness is the caller's job at an indirect call; until that is
+   translated there is nothing to name it with, so `c` is `unit`. The effect on
+   the counts is small and worth being precise about: the fifteen bodies that
+   were refused for a function pointer now get as far as the `_ghost_stmt` that
+   seeds validity, and are refused for inline Pulse instead. That is real
+   progress -- the blocker moved -- but it is progress the histogram records as
+   a transfer rather than a gain.
+
+   As of this milestone: **725 specifications, 421 of them with real bodies,
+   304 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -1152,11 +1174,14 @@ new facts about memory.
    parameter's F\* type is `ptr` regardless of how the pointer is used, so the
    pointer-kind inference in `elab` has nothing left to decide.
 
-   The `admit()` reasons, in order, are what to do next. Inline Pulse (81) has
+   The `admit()` reasons, in order, are what to do next. Inline Pulse (99) has
    to be re-expressed against the new predicates and is a source change, not a
-   translator change. Function pointers (55, split between decaying a named
-   function to a pointer and calling through one) need the `valid` relation
-   ported and a wrapper generated per address-taken function. Signed arithmetic is refused on purpose: its
+   translator change -- and it is now the blocker for almost everything that
+   uses a function pointer, because seeding `is_valid` before an indirect call
+   is written as a `_ghost_stmt` today. An indirect call (22) is the other
+   half: where the emitter knows which function a pointer holds it can seed
+   validity itself, and the `_ghost_stmt` disappears rather than being
+   translated. Signed arithmetic is refused on purpose: its
    overflow obligation is discharged by the `_requires` clause, and emitting it
    where that clause did not translate would produce failures that say nothing
    about the memory model. Seven more are functions this file only *declares*,
