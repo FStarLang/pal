@@ -1085,16 +1085,73 @@ new facts about memory.
    parameter's F\* type is `ptr` regardless of how the pointer is used, so the
    pointer-kind inference in `elab` has nothing left to decide.
 
-   The `admit()` reasons, in order, are what to do next. Inline Pulse (67) has
+   The `admit()` reasons, in order, are what to do next. Inline Pulse (72) has
    to be re-expressed against the new predicates and is a source change, not a
-   translator change. Function pointers (50, split between locals and calls
-   through them) are milestone 4 and need a model decision first, since there
-   is no function-pointer predicate yet. Signed arithmetic (22) is refused on
-   purpose: its overflow
-   obligation is discharged by the `_requires` clause, and emitting it where
-   that clause did not translate would produce failures that say nothing about
-   the memory model. The rest -- address-of, allocation, globals -- are
-   milestones 4 and 5.
+   translator change. Function pointers (52, split between locals and calls
+   through them) need a model decision first, since there is no
+   function-pointer predicate yet. Signed arithmetic is refused on purpose: its
+   overflow obligation is discharged by the `_requires` clause, and emitting it
+   where that clause did not translate would produce failures that say nothing
+   about the memory model. Seven more are functions this file only *declares*,
+   whose `admit()` is the trusted specification and not a gap.
+
+   Three of the remaining clusters have a design in them rather than just work,
+   and it is worth writing them down before starting.
+
+   **An array local.** `int a[10];` needs storage the same way a struct local
+   does, but element by element rather than field by field, and the elements
+   are not initialised together. The neat way to say this is to reuse
+   `array_pts_to` at a different representation:
+
+   ```
+   let maybe_repr (t_repr: t -> bytes -> prop) (esize: nat)
+                  (x: option t) (b: bytes) : prop =
+     match x with
+     | None   -> len b == esize
+     | Some v -> t_repr v b
+   ```
+
+   An array local is then `array_pts_to (maybe_repr t_repr esize) esize a 1.0R
+   xs` for `xs: Seq.seq (option t)`, and *every* existing combinator --
+   `array_split`, `array_join`, `array_focus`, `array_unfocus` -- applies
+   unchanged, because none of them looks at the representation. Allocation is
+   one generic proof and needs no unrolling per length: `mem_stack_alloc
+   (esize * n)` gives `esize * n` bytes and `Seq.create n None` is the
+   sequence they represent. A write to `a[i]` focuses the element, goes down to
+   raw bytes, comes back up through `t_write_uninit`, and unfocuses at
+   `Seq.upd xs i (Some v)`. A read needs `Some? (Seq.index xs i)`, which is
+   exactly C's rule that reading an uninitialised object is undefined -- and
+   note that it becomes a *proof obligation* rather than a translator refusal,
+   which is the right shape: the emitter stops having to track initialisation
+   at all, and the sequence carries it.
+
+   The same predicate is what a partially initialised *struct* local wants, and
+   for the same reason. The `init` flag on a slot is per object; a struct wants
+   it per field, and the honest way to get that is for each field's points-to
+   to say whether it holds a value, not for the translator to remember.
+
+   **A function pointer.** `Pulse.Lib.C.FuncPtr` already models one, and
+   nothing in it is about memory: a `func_ptr a b` is an abstract *value* with
+   a pure `valid f div pre post` relation to a Pulse specification. That part
+   transfers to Palow unchanged. What is missing is the storage: a function
+   pointer held in a local, a field or an array needs a `funcptr_repr` -- an
+   encoding of `func_ptr a b` into `sizeof(void (*)())` bytes -- and that is a
+   genuine addition to the machine layer, not a derived definition. The
+   question to settle is whether it should be one representation per C function
+   type (matching `sizeof`, and matching how every other type is handled here),
+   or a single opaque code-pointer byte pattern that a cast reinterprets. The
+   second is closer to what an implementation does and closer to what
+   provenance already says about `ptr`; the first is what makes a stored
+   callback's spec recoverable without an axiom.
+
+   **A mutable global.** An immutable one is published as an F\* constant and
+   needs no ownership, which is why it works today. A mutable one has storage
+   that outlives every function, so someone has to own it, and C gives no
+   syntax to say who. The two candidates are an invariant -- correct for a
+   global a concurrent program shares, but it forces every access into an
+   atomic block -- and a `pts_to` that the caller passes in, which matches how
+   the rest of Palow works but means the contract of every function that
+   touches a global grows a conjunct the C source never wrote.
 
    `_pure` functions are F\* definitions, not Pulse `fn`s. This was the last
    structural divergence from the existing translator, and it mattered for the
