@@ -1067,8 +1067,14 @@ new facts about memory.
    does not, so the outer field closes with the general unfocus in one case and
    the read-only one in the other.
 
-   As of this milestone: **707 specifications, 399 of them with real bodies,
-   308 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   An assignment used as an expression -- `a = b = v`, or `(y += x)` -- was
+   refused only because nothing had written the arm. C says its value is the
+   value stored after the conversion to the left operand's type, and
+   elaboration has already inserted that conversion, so the emitted store and
+   the emitted value are the same term.
+
+   As of this milestone: **707 specifications, 403 of them with real bodies,
+   304 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

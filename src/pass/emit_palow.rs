@@ -2970,6 +2970,17 @@ impl<'a> Body<'a> {
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         match &e.val {
             ExprT::VAttr(_, inner) => self.rvalue(inner),
+            // C says the value of an assignment is the value stored, after
+            // the conversion to the left operand's type -- which elaboration
+            // has already inserted, so the stored expression is the answer.
+            ExprT::AssignExpr(lhs, rhs) => {
+                let ty = self.ty_of(lhs)?;
+                let pn = palow_name(self.tds, &ty)
+                    .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
+                let v = self.rvalue(rhs)?;
+                self.store(lhs, &pn, &v)?;
+                Ok(v)
+            }
             // A struct literal is an F* record literal. C fills any field the
             // initialiser leaves out with zero, and the emitter has no zero to
             // write for an arbitrary field type, so a partial initialiser is
