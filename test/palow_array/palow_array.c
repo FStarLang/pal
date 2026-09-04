@@ -41,3 +41,28 @@ void add_into(uint32_t a[], const uint32_t b[], size_t i, size_t n)
 {
   a[i] = a[i] + b[i];
 }
+
+// A local array. Its elements are written one at a time, so ownership of one
+// is an `array_pts_to` whose elements are `option`s: `None` represents any
+// bytes of the right width, and every combinator above applies to it
+// unchanged. Reading an element needs it to be a `Some`, which is C's rule
+// that reading an uninitialised object is undefined -- as an obligation on the
+// generated code rather than a restriction on what can be translated.
+uint32_t local_array()
+  _ensures(return == 7)
+{
+  uint32_t buf[4];
+  buf[1] = 7;
+  return buf[1];
+}
+
+// Written and read at two different indices, which is where an unfocus that
+// put the element back at the wrong place would show up.
+uint32_t local_array_two()
+  _ensures(return == 9)
+{
+  uint32_t buf[3];
+  buf[0] = 2;
+  buf[2] = 7;
+  return buf[0] + buf[2];
+}

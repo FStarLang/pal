@@ -371,3 +371,103 @@ ghost fn array_offset_fits (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (es
   SZ.fits_lte (SZ.v esize * SZ.v i) (addr_of a + len b);
   fold array_pts_to t_repr (SZ.v esize) a p xs;
 }
+
+(* ---------------------------------------------------------------------------
+   Storage that is not yet initialised
+
+   A C array local is `esize * n` bytes of automatic storage whose elements are
+   written one at a time, so at any point some hold a value and some do not.
+   The way to say that here is not a new predicate but a different
+   representation relation: an element is an `option t`, and `None` represents
+   any bytes of the right width.
+
+   Everything above then applies unchanged, because none of it looks at the
+   representation. `array_split`, `array_join`, `array_focus` and
+   `array_unfocus` work on a partially initialised array exactly as they do on
+   a fully initialised one, and allocating one is a single proof rather than an
+   unrolling per length.
+
+   The payoff is where the initialisation is tracked. Reading `a[i]` needs
+   `Some? (Seq.index xs i)`, which is C's rule that reading an uninitialised
+   object is undefined -- and it is a proof obligation on the generated code
+   rather than a translator refusal, so the emitter does not have to remember
+   which elements have been written. The sequence remembers.
+   --------------------------------------------------------------------------- *)
+
+let maybe_repr (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat)
+               (x: option t) (b: bytes) : prop =
+  match x with
+  | None -> len b == esize
+  | Some v -> t_repr v b
+
+let create_repr (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat) (n: nat) (b: bytes)
+  : Lemma (requires len b == esize * n)
+          (ensures  array_repr (maybe_repr t_repr esize) esize
+                               (Seq.create n (None #t)) b)
+  = let xs : Seq.seq (option t) = Seq.create n None in
+    let aux (i: nat)
+      : Lemma (i < n ==> maybe_repr t_repr esize (Seq.index xs i) (elem_bytes esize b i))
+      = if i < n then elem_fits esize n i
+    in
+    Classical.forall_intro aux
+
+(* Claim `esize * n` raw bytes as an array of uninitialised elements. This is
+   the only place the two views meet, and it is a fold: the bytes are already
+   the right length, and `None` represents any bytes of that length. *)
+ghost fn array_claim_uninit (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                            (esize: SZ.t) (n: SZ.t) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v esize * SZ.v n)
+  ensures  array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R
+                        (Seq.create (SZ.v n) (None #t))
+{
+  create_repr t_repr (SZ.v esize) (SZ.v n) b;
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R
+                    (Seq.create (SZ.v n) (None #t));
+}
+
+(* And back, at whatever the elements have become. Giving the storage up does
+   not depend on what was last written to it, which is why this asks for no
+   `Some`. *)
+ghost fn array_forget (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                      (#xs: Seq.seq (option t))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs
+  ensures  exists* b. mem_pts_to a 1.0R b
+                      ** pure (len b == SZ.v esize * Seq.length xs)
+{
+  unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs;
+}
+
+(* An element that does hold a value, as an ordinary element of `t`. The
+   `Some?` is stated as a side condition rather than matched on the implicit,
+   because at the point of use what is in context is `Seq.index xs i` and only
+   the solver knows it is a `Some`. *)
+ghost fn elem_maybe_get (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (a: ptr)
+                        (#p: perm) (#x: (x: option t { Some? x }))
+  requires elem_pts_to (maybe_repr t_repr (SZ.v esize)) a p x
+  ensures  elem_pts_to t_repr a p (Some?.v x)
+{
+  unfold elem_pts_to (maybe_repr t_repr (SZ.v esize)) a p x;
+  fold elem_pts_to t_repr a p (Some?.v x);
+}
+
+ghost fn elem_maybe_put (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (a: ptr)
+                        (#p: perm) (#x: t)
+  requires elem_pts_to t_repr a p x
+  ensures  elem_pts_to (maybe_repr t_repr (SZ.v esize)) a p (Some x)
+{
+  unfold elem_pts_to t_repr a p x;
+  fold elem_pts_to (maybe_repr t_repr (SZ.v esize)) a p (Some x);
+}
+
+(* The write-only view of one element, whatever it held before. A write to
+   `a[i]` goes down to this and comes back up through the type's own
+   `t_write_uninit`, which is the same path a scalar local takes. *)
+ghost fn elem_maybe_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (a: ptr)
+                           (#x: option t)
+  requires elem_pts_to (maybe_repr t_repr (SZ.v esize)) a 1.0R x
+  requires pure (forall (v: t) (b: bytes). t_repr v b ==> len b == SZ.v esize)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v esize)
+{
+  unfold elem_pts_to (maybe_repr t_repr (SZ.v esize)) a 1.0R x;
+}

@@ -2015,6 +2015,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     code += "open Pulse.Lib.C.Palow.CTypes\n";
     code += "open Pulse.Lib.C.Palow.Machine\n";
     code += "open Pulse.Lib.C.Palow.Array\n";
+    code += "open Pulse.Lib.C.Palow.Local\n";
     code += "open Pulse.Lib.C.Palow.Nullable\n";
     code += "open Pulse.Lib.C.Palow.Alloc\n";
     code += "module Seq = FStar.Seq\n\n";
@@ -2262,6 +2263,27 @@ struct Slot {
     /// one existential per live slot, and the binder needs a type.
     fstar_ty: String,
     init: bool,
+    /// Set when the slot is a fixed-size array local. Its ownership is an
+    /// `array_pts_to` at the `maybe_repr` representation rather than a
+    /// points-to, because its elements are written one at a time; the string
+    /// is the element size as a `size_t` literal.
+    array: Option<String>,
+}
+
+impl Slot {
+    /// What the slot owns, at a given value.
+    fn pts_to(&self, value: &str) -> String {
+        match &self.array {
+            None => format!("{}_pts_to loc_{} 1.0R {}", self.palow_ty, self.name, value),
+            Some(esize) => format!(
+                "array_pts_to (maybe_repr {pn}_repr (SizeT.v {e})) (SizeT.v {e}) loc_{n} 1.0R {v}",
+                pn = self.palow_ty,
+                e = esize,
+                n = self.name,
+                v = value
+            ),
+        }
+    }
 }
 
 /// One open field focus: where the field is, and how to close it again.
@@ -2474,6 +2496,7 @@ impl<'a> Body<'a> {
                     fstar_ty: fstar_type(self.tds, &ty)
                         .ok_or_else(|| format!("`{}` has no F* type", v.val))?,
                     init: true,
+                    array: None,
                 });
                 Ok(format!("loc_{}", v.val))
             }
@@ -2609,8 +2632,11 @@ impl<'a> Body<'a> {
                 let mut close_write = vec![format!("{}_unfocus_{} {};", ff.sn, f.val, ff.a)];
                 close_write.extend(ff.close_write);
                 Ok(Focus {
+                    write_fn: format!("{}_write", pn),
                     pn,
                     at: ff.at,
+                    open_read: Vec::new(),
+                    open_write: Vec::new(),
                     close_read,
                     close_write,
                 })
@@ -2697,9 +2723,26 @@ impl<'a> Body<'a> {
     /// size, and the lines that give it back. Either a parameter, which owns
     /// its sequence outright, or a fixed-size array field, which has to be
     /// focused out of its struct first.
-    fn array_place(&mut self, e: &Expr) -> Result<(String, String, String, Vec<String>), String> {
+    fn array_place(
+        &mut self,
+        e: &Expr,
+    ) -> Result<(String, String, String, Vec<String>, bool), String> {
         match &strip_vattr(e).val {
             ExprT::Var(v) => {
+                // A local array's elements are `option`s; a parameter's are
+                // not, because the caller has already initialised them.
+                if let Some(s) = self.slots.iter().rev().find(|s| s.name == *v.val) {
+                    let Some(esize) = s.array.clone() else {
+                        return Err(format!("a subscript of local `{}`", v.val));
+                    };
+                    return Ok((
+                        format!("loc_{}", v.val),
+                        s.palow_ty.clone(),
+                        esize,
+                        Vec::new(),
+                        true,
+                    ));
+                }
                 let Some(ap) = self.arrays.get(&*v.val.to_string()) else {
                     return Err(format!(
                         "a subscript of `{}`, which is not an array parameter",
@@ -2723,6 +2766,7 @@ impl<'a> Body<'a> {
                     ap.pn.clone(),
                     ap.esize.clone(),
                     Vec::new(),
+                    false,
                 ))
             }
             ExprT::Member(base, f) => {
@@ -2740,7 +2784,7 @@ impl<'a> Body<'a> {
                 // up to a lemma that is not worth generating per field.
                 let mut close = vec![format!("{}_unfocus_{} {};", ff.sn, f.val, ff.a)];
                 close.extend(ff.close_write);
-                Ok((ff.at, pn, format!("{}sz", esize), close))
+                Ok((ff.at, pn, format!("{}sz", esize), close, false))
             }
             other => Err(format!("a subscript of {}", expr_kind_of(other))),
         }
@@ -2748,36 +2792,78 @@ impl<'a> Body<'a> {
 
     /// Open one element of an array for a single access.
     fn focus_elem(&mut self, base: &Expr, idx: Option<&Expr>) -> Result<Focus, String> {
-        let (arr, pn, esize, close) = self.array_place(base)?;
+        let (arr, pn, esize, close, maybe) = self.array_place(base)?;
         let i = match idx {
             Some(e) => self.index(e)?,
             None => "0sz".to_string(),
         };
         let off = format!("({} `SizeT.mul` {})", esize, i);
         let at = format!("({} +! {})", arr, off);
+        let repr = if maybe {
+            format!("(maybe_repr {}_repr (SizeT.v {}))", pn, esize)
+        } else {
+            format!("{}_repr", pn)
+        };
         self.lines.push(format!(
-            "array_offset_fits {}_repr {} {} {};",
-            pn, arr, esize, i
+            "array_offset_fits {} {} {} {};",
+            repr, arr, esize, i
         ));
         self.lines.push(format!(
-            "array_focus {}_repr {} {} {} {};",
-            pn, arr, esize, i, off
+            "array_focus {} {} {} {} {};",
+            repr, arr, esize, i, off
         ));
-        self.lines.push(format!("{}_of_elem {};", pn, at));
         let common = format!("{} {} {} {}", arr, esize, i, off);
-        let mut close_read = vec![
-            format!("{}_to_elem {};", pn, at),
-            format!("array_unfocus_read {}_repr {};", pn, common),
+        if !maybe {
+            self.lines.push(format!("{}_of_elem {};", pn, at));
+            let mut close_read = vec![
+                format!("{}_to_elem {};", pn, at),
+                format!("array_unfocus_read {} {};", repr, common),
+            ];
+            let mut close_write = vec![
+                format!("{}_to_elem {};", pn, at),
+                format!("array_unfocus {} {};", repr, common),
+            ];
+            close_read.extend(close.iter().cloned());
+            close_write.extend(close);
+            return Ok(Focus {
+                at,
+                write_fn: format!("{}_write", pn),
+                pn,
+                open_read: Vec::new(),
+                open_write: Vec::new(),
+                close_read,
+                close_write,
+            });
+        }
+        // Reading needs the element to hold a value, which is where C's rule
+        // about uninitialised objects turns into an obligation. Writing does
+        // not: it goes down to the raw bytes and comes back up through the
+        // type's own write-only view, exactly as a scalar local does.
+        let open_read = vec![
+            format!("elem_maybe_get {}_repr {} {};", pn, esize, at),
+            format!("{}_of_elem {};", pn, at),
         ];
-        let mut close_write = vec![
-            format!("{}_to_elem {};", pn, at),
-            format!("array_unfocus {}_repr {};", pn, common),
+        let open_write = vec![
+            format!("elem_maybe_reveal {}_repr {} {};", pn, esize, at),
+            format!("{}_claim_uninit {};", pn, at),
         ];
-        close_read.extend(close.iter().cloned());
-        close_write.extend(close);
+        // Both directions close through `array_unfocus`, even the read: what
+        // comes back is `Some` of what was there, which is the same element
+        // only up to a proof, and `array_unfocus_read` matches syntactically.
+        let mut both = vec![
+            format!("{}_to_elem {};", pn, at),
+            format!("elem_maybe_put {}_repr {} {};", pn, esize, at),
+            format!("array_unfocus {} {};", repr, common),
+        ];
+        both.extend(close);
+        let close_read = both.clone();
+        let close_write = both;
         Ok(Focus {
             at,
+            write_fn: format!("{}_write_uninit", pn),
             pn,
+            open_read,
+            open_write,
             close_read,
             close_write,
         })
@@ -3051,6 +3137,7 @@ impl<'a> Body<'a> {
                     // sequence either way, so the access has to be focused.
                     if self.arrays.contains_key(&*v.val.to_string()) {
                         let f = self.focus_elem(inner, None)?;
+                        self.lines.extend(f.open_read.iter().cloned());
                         let t = self.fresh("elem");
                         self.lines
                             .push(format!("let {} = {}_read {};", t, f.pn, f.at));
@@ -3072,6 +3159,7 @@ impl<'a> Body<'a> {
                     _ => "elem".to_string(),
                 };
                 let f = self.place(e)?;
+                self.lines.extend(f.open_read.iter().cloned());
                 let t = self.fresh(&hint);
                 self.lines
                     .push(format!("let {} = {}_read {};", t, f.pn, f.at));
@@ -3230,6 +3318,49 @@ impl<'a> Body<'a> {
     }
 
     fn alloc_slot(&mut self, name: &Ident, ty: &Type) -> Result<String, String> {
+        // A fixed-size array local is `n` elements of storage written one at
+        // a time, so it is owned as an `array_pts_to` whose elements are
+        // `option`s. Nothing tracks which of them have been written: the
+        // sequence does, and a read of one that has not is a proof obligation
+        // the generated code fails rather than something refused here.
+        if let TypeT::FixedArray(elem, n) = &self.tds.resolve(ty).val {
+            let (Some(pn), Some(esize), Some(ety)) = (
+                palow_name(self.tds, elem),
+                palow_sizeof(self.tds, elem),
+                fstar_type(self.tds, elem),
+            ) else {
+                return Err(format!(
+                    "local `{}` is an array of {}",
+                    name.val,
+                    describe(self.tds.resolve(elem))
+                ));
+            };
+            if !has_repr(self.tds, elem) {
+                return Err(format!(
+                    "local `{}` is an array of {}",
+                    name.val,
+                    describe(self.tds.resolve(elem))
+                ));
+            }
+            self.lines.push(format!(
+                "let loc_{} = array_stack_alloc {}_repr {}sz {}sz {}sz;",
+                name.val,
+                pn,
+                esize,
+                n,
+                esize * n
+            ));
+            self.slots.push(Slot {
+                name: name.val.to_string(),
+                palow_ty: pn.clone(),
+                // The length is part of the binder's type so that a loop
+                // invariant does not have to restate it.
+                fstar_ty: format!("(s: Seq.seq (option {}) {{ Seq.length s == {} }})", ety, n),
+                init: true,
+                array: Some(format!("{}sz", esize)),
+            });
+            return Ok(pn);
+        }
         // A slot needs the four automatic-storage operations. Scalars get them
         // from the machine layer; a struct gets them generated, provided every
         // field has an uninitialised view to carve out of the raw bytes.
@@ -3250,6 +3381,7 @@ impl<'a> Body<'a> {
             fstar_ty: fstar_type(self.tds, ty)
                 .ok_or_else(|| format!("local `{}` has no F* type", name.val))?,
             init: false,
+            array: None,
         });
         Ok(pn)
     }
@@ -3479,8 +3611,9 @@ impl<'a> Body<'a> {
             if let ExprT::Var(v) = &inner.val {
                 if self.arrays.contains_key(&*v.val.to_string()) {
                     let f = self.focus_elem(inner, None)?;
+                    self.lines.extend(f.open_write.iter().cloned());
                     self.lines
-                        .push(format!("{}_write {} {};", f.pn, f.at, value));
+                        .push(format!("{} {} {};", f.write_fn, f.at, value));
                     self.lines.extend(f.close_write);
                     return Ok(());
                 }
@@ -3488,8 +3621,9 @@ impl<'a> Body<'a> {
         }
         if matches!(lhs.val, ExprT::Member(..) | ExprT::Index(..)) {
             let f = self.place(lhs)?;
+            self.lines.extend(f.open_write.iter().cloned());
             self.lines
-                .push(format!("{}_write {} {};", f.pn, f.at, value));
+                .push(format!("{} {} {};", f.write_fn, f.at, value));
             self.lines.extend(f.close_write);
             return Ok(());
         }
@@ -3542,7 +3676,7 @@ impl<'a> Body<'a> {
             }
             let b = format!("inv_{}", s.name);
             binders.push(format!("({}: {})", b, s.fstar_ty));
-            owns.push(format!("{}_pts_to loc_{} 1.0R {}", s.palow_ty, s.name, b));
+            owns.push(s.pts_to(&b));
             locals.insert(s.name.clone(), b);
         }
         let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
@@ -4110,10 +4244,19 @@ impl<'a> Body<'a> {
 
     fn release_from(&mut self, mark: usize) {
         for i in (mark..self.slots.len()).rev() {
-            let (name, pn, init) = {
+            let (name, pn, init, array) = {
                 let s = &self.slots[i];
-                (s.name.clone(), s.palow_ty.clone(), s.init)
+                (s.name.clone(), s.palow_ty.clone(), s.init, s.array.clone())
             };
+            // An array's storage view already covers whatever its elements
+            // hold, so there is nothing to forget first.
+            if let Some(esize) = array {
+                self.lines.push(format!(
+                    "array_stack_free {}_repr loc_{} {};",
+                    pn, name, esize
+                ));
+                continue;
+            }
             if init {
                 self.lines.push(format!("{}_forget loc_{};", pn, name));
             }
@@ -4373,6 +4516,11 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
 struct Focus {
     at: String,
     pn: String,
+    /// The store operation. An element of a local array may not hold a value
+    /// yet, so it is written with the write-only operation.
+    write_fn: String,
+    open_read: Vec<String>,
+    open_write: Vec<String>,
     close_read: Vec<String>,
     close_write: Vec<String>,
 }

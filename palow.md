@@ -1073,8 +1073,34 @@ new facts about memory.
    elaboration has already inserted that conversion, so the emitted store and
    the emitted value are the same term.
 
-   As of this milestone: **707 specifications, 403 of them with real bodies,
-   304 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   The array-local design went in as designed, and the pleasing part is how
+   little of it is new. `maybe_repr` makes an element an `option t` -- `None`
+   represents any bytes of the right width -- and `array_pts_to` at that
+   representation *is* the predicate for a local array; `array_split`,
+   `array_join`, `array_focus` and `array_unfocus` all apply to it unchanged,
+   because none of them ever looked at the representation. Allocation is one
+   generic proof and needs no unrolling per length: `mem_stack_alloc` gives
+   `esize * n` bytes and `Seq.create n None` is what they represent. The two
+   wrappers that tie the storage to the array live in a new module, because the
+   machine layer sits downstream of the array layer and cannot be opened from
+   it.
+
+   A write to `a[i]` focuses the element, drops to the raw bytes, and comes
+   back up through the element type's own `_write_uninit` -- the same path a
+   scalar local takes -- so the emitter has no notion of an uninitialised
+   element to track. A read needs `Some? (Seq.index xs i)`, which is C's rule
+   about reading an uninitialised object, and it appears where it belongs: as
+   an obligation on the generated code, not as a case the translator refuses.
+   The sequence in the proof state is the initialisation state.
+
+   The one asymmetry is that both directions close through `array_unfocus`
+   rather than `array_unfocus_read`. What a read puts back is `Some` of what it
+   found, which is the same element only up to a proof, and slprop matching is
+   syntactic; going through the general unfocus leaves a `Seq.upd` that the
+   solver collapses instead.
+
+   As of this milestone: **709 specifications, 407 of them with real bodies,
+   302 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
