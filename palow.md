@@ -1118,8 +1118,30 @@ new facts about memory.
    immediately, because storing and passing a callback never needed to know its
    spec; only calling through it does.
 
-   As of this milestone: **725 specifications, 418 of them with real bodies,
-   307 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   A mutable global is owned by the caller. The ownership arrives as a
+   `requires` conjunct and leaves as an `ensures` one, at whatever value the
+   body left, which makes a global an ordinary slot that happens to have been
+   allocated before the program started and is never released -- the storage
+   layer needed one new field, an address, and nothing else. The part C does
+   not say out loud is *which* globals a function's contract has to name, and
+   the answer is not just the ones its body mentions: calling a function that
+   touches a global means holding that global at the call, so the sets close
+   under the call graph. That is a least fixed point over a finite set, which
+   is why recursion is no obstacle.
+
+   One rule fell out of running it. A global that nothing in the file can store
+   through is immutable for the whole run whatever its declaration says, and
+   handing its ownership around is strictly worse than publishing its value:
+   the caller supplies an arbitrary value, so everything the initialiser said
+   is lost, and contracts that used to hold stop holding. So a global is owned
+   only if some body assigns to it or lets its address escape. The corpus is
+   almost entirely of the other kind, which is the honest reason the body count
+   barely moved: what this buys is a shape, not coverage. It also cannot be
+   acceptance-tested here, because the existing translator refuses to write a
+   mutable global at all -- which is rather the point.
+
+   As of this milestone: **725 specifications, 419 of them with real bodies,
+   306 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -1204,7 +1226,10 @@ new facts about memory.
    express the lifecycle real C programs actually have -- uninitialised, then
    unsynchronised mutable access from the main thread during start-up, then
    synchronised or read-only access from every thread -- which an invariant
-   fixed at one shape cannot say at all.
+   fixed at one shape cannot say at all. The remaining piece is static
+   initialisation: until a global's initialiser can be published at any type,
+   an owned global arrives at an arbitrary value, so only the globals this file
+   actually writes are owned.
 
    `_pure` functions are F\* definitions, not Pulse `fn`s. This was the last
    structural divergence from the existing translator, and it mattered for the

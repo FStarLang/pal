@@ -36,7 +36,7 @@
 //! [`crate::pass::elab`] unnecessary.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ir::*;
@@ -151,6 +151,11 @@ struct Typedefs<'a> {
     /// `_pure` functions that were successfully emitted as F* definitions, and
     /// so may appear in a specification and in a body without being sequenced.
     pure_fns: HashSet<String>,
+    /// The globals this module publishes an `addr_var_<name>` for. A global's
+    /// address is a closed term, so it may appear in another global's
+    /// initialiser -- `uint32_t *const p = &g;` -- and that is the only way a
+    /// pointer global gets a published value.
+    global_addrs: HashSet<String>,
 }
 
 impl<'a> Typedefs<'a> {
@@ -165,6 +170,16 @@ impl<'a> Typedefs<'a> {
             typedefs: m,
             structs: HashMap::new(),
             pure_fns: HashSet::new(),
+            global_addrs: tu
+                .decls
+                .iter()
+                .filter_map(|d| match &d.val {
+                    DeclT::GlobalVar(g) if !g.is_enum_constant && !global_var_is_array(g) => {
+                        Some(g.name.val.to_string())
+                    }
+                    _ => None,
+                })
+                .collect(),
         }
     }
 
@@ -426,6 +441,9 @@ struct FnSurface {
     /// the source says, and in particular cannot discharge an overflow
     /// obligation -- see `Body::signed_ok`.
     contract: bool,
+    /// The mutable globals the contract hands in and back out. The body treats
+    /// each as a slot it did not allocate.
+    globals: Vec<Slot>,
 }
 
 /// One parameter's pointee ownership, in the form a loop invariant needs: the
@@ -1154,7 +1172,12 @@ fn pure_let(
 }
 
 /// Build the Pulse declaration for one C function, or explain why we cannot.
-fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String> {
+fn emit_fn(
+    tds: &Typedefs,
+    env: &Env,
+    decl: &FnDecl,
+    globals: &[Slot],
+) -> Result<FnSurface, String> {
     let name = format!("func_{}", decl.name.val);
 
     let mut params: Vec<String> = Vec::new();
@@ -1283,6 +1306,23 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
         }
     }
 
+    // A mutable global's storage outlives every function, so C gives no
+    // syntax for who owns it. The caller does: the ownership comes in as a
+    // conjunct the source never wrote and goes straight back out, at a value
+    // the body may have changed. That is the awkward part -- `main` has no
+    // caller to get it from -- and the reason it is still the right shape is
+    // that it can say what a global's life actually looks like: uninitialised,
+    // then written by one thread during start-up, then shared read-only.
+    for g in globals {
+        ghosts.push(format!("(#gval_{}: erased ({}))", g.name, g.fstar_ty));
+        req.push(g.pts_to(&format!("gval_{}", g.name)));
+        fresh.push((
+            format!("gval_{}'", g.name),
+            g.fstar_ty.clone(),
+            g.pts_to(""),
+        ));
+    }
+
     let ret = fstar_type(tds, &decl.ret_type)
         .ok_or_else(|| format!("it returns {}", describe(tds.resolve(&decl.ret_type))))?;
     let ret_name = format!("ret_{}", decl.name.val);
@@ -1331,8 +1371,10 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
         out += &format!("(* contract dropped: {} *)\n", why);
     }
     out += &format!("fn {}", name);
-    if params.is_empty() && perms.is_empty() && ghosts.is_empty() {
-        // Pulse has no nullary `fn`; `f(void)` becomes `f ()`.
+    if params.is_empty() {
+        // Pulse has no nullary `fn`; `f(void)` becomes `f ()`. A function whose
+        // only binders are ghost still needs it, which a global grant can
+        // produce.
         out += " ()";
     }
     for p in params.iter().chain(perms.iter()).chain(ghosts.iter()) {
@@ -1377,6 +1419,7 @@ fn emit_fn(tds: &Typedefs, env: &Env, decl: &FnDecl) -> Result<FnSurface, String
         decl: out,
         owned,
         contract: contract_ok,
+        globals: globals.to_vec(),
     })
 }
 
@@ -1852,6 +1895,13 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
             _ => None,
         },
         ExprT::Cast(inner, _) => const_expr(tds, ty, inner),
+        // `&g` is a closed term: a global's address is fixed for the whole run.
+        ExprT::Ref(inner) => match &strip_vattr(inner).val {
+            ExprT::Var(v) if tds.global_addrs.contains(&*v.val.to_string()) => {
+                Some(format!("addr_var_{}", v.val))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1932,6 +1982,284 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
             out
         )
     }
+}
+
+/// What a C name is used for, once ownership has to be threaded through the
+/// call graph: the variables a body mentions and the functions it calls.
+///
+/// A mutable global's ownership arrives in the contract, so a function's
+/// contract has to name every global its body touches -- and every global its
+/// callees touch, transitively, because the callee's own `requires` has to be
+/// satisfied from what the caller holds. C says none of this out loud, so it
+/// is recovered by walking the body.
+#[derive(Default)]
+struct Touched {
+    vars: HashSet<String>,
+    calls: HashSet<String>,
+    /// The objects some body may store into: the base of an assignment's
+    /// left-hand side, of an increment, and of any address that escapes. A
+    /// global nothing here can write is effectively immutable for the whole
+    /// run, and owning it would be worse than publishing its value.
+    written: HashSet<String>,
+}
+
+/// The variable an lvalue ultimately reaches through, if it is a named object.
+fn lvalue_base(e: &Expr) -> Option<String> {
+    match &e.val {
+        ExprT::Var(v) => Some(v.val.to_string()),
+        ExprT::Member(x, _) | ExprT::Index(x, _) | ExprT::VAttr(_, x) | ExprT::Cast(x, _) => {
+            lvalue_base(x)
+        }
+        _ => None,
+    }
+}
+
+fn touch_write(e: &Expr, t: &mut Touched) {
+    if let Some(b) = lvalue_base(e) {
+        t.written.insert(b);
+    }
+}
+
+fn touch_expr(e: &Expr, t: &mut Touched) {
+    let mut go = |x: &Rc<Expr>| touch_expr(x, t);
+    match &e.val {
+        ExprT::Var(v) => {
+            t.vars.insert(v.val.to_string());
+        }
+        ExprT::FnCall(n, args) => {
+            t.calls.insert(n.val.to_string());
+            for a in args.iter() {
+                touch_expr(a, t);
+            }
+        }
+        ExprT::FnRef(n) => {
+            t.calls.insert(n.val.to_string());
+        }
+        ExprT::FnPtrCall(f, args) => {
+            touch_expr(f, t);
+            for a in args.iter() {
+                touch_expr(a, t);
+            }
+        }
+        ExprT::Deref(x)
+        | ExprT::Member(x, _)
+        | ExprT::VAttr(_, x)
+        | ExprT::UnOp(_, x)
+        | ExprT::Cast(x, _)
+        | ExprT::ContainerOf(x, _, _)
+        | ExprT::Live(x)
+        | ExprT::Old(x)
+        | ExprT::Forall(_, _, x)
+        | ExprT::Exists(_, _, x)
+        | ExprT::UnionInit(_, _, x)
+        | ExprT::MallocArray(_, x)
+        | ExprT::CallocArray(_, x)
+        | ExprT::MallocFlex(_, x)
+        | ExprT::CallocFlex(_, x)
+        | ExprT::MemsetZero(_, x)
+        | ExprT::Free(x)
+        | ExprT::PreDecr(x) => go(x),
+        ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PostDecr(x) => {
+            touch_write(x, t);
+            touch_expr(x, t);
+        }
+        // An address that escapes may be stored through, so the object it
+        // names counts as written.
+        ExprT::Ref(x) => {
+            touch_write(x, t);
+            touch_expr(x, t);
+        }
+        ExprT::Index(x, y) | ExprT::BinOp(_, x, y) => {
+            touch_expr(x, t);
+            touch_expr(y, t);
+        }
+        ExprT::AssignExpr(x, y) => {
+            touch_write(x, t);
+            touch_expr(x, t);
+            touch_expr(y, t);
+        }
+        ExprT::Cond(a, b, c) => {
+            touch_expr(a, t);
+            touch_expr(b, t);
+            touch_expr(c, t);
+        }
+        ExprT::Memset(_, a, b, c) => {
+            touch_expr(a, t);
+            touch_expr(b, t);
+            touch_expr(c, t);
+        }
+        ExprT::StructInit(_, fs) => {
+            for (_, x) in fs {
+                touch_expr(x, t);
+            }
+        }
+        ExprT::ArrayInit { elems, .. } => {
+            for x in elems {
+                touch_expr(x, t);
+            }
+        }
+        ExprT::BoolLit(_)
+        | ExprT::IntLit(..)
+        | ExprT::FloatLit(..)
+        | ExprT::InlinePulse(..)
+        | ExprT::Malloc(_)
+        | ExprT::Calloc(_)
+        | ExprT::SizeOf(_)
+        | ExprT::AlignOf(_)
+        | ExprT::Error(_) => {}
+    }
+}
+
+fn touch_exprs(es: &Exprs, t: &mut Touched) {
+    for e in es.iter() {
+        touch_expr(e, t);
+    }
+}
+
+fn touch_stmts(ss: &Stmts, t: &mut Touched) {
+    for s in ss.iter() {
+        match &s.val {
+            StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => touch_expr(e, t),
+            StmtT::Let(_, _, e) => touch_expr(e, t),
+            StmtT::DeclStackArray { size, .. } => touch_expr(size, t),
+            StmtT::Assign(a, b) => {
+                touch_write(a, t);
+                touch_expr(a, t);
+                touch_expr(b, t);
+            }
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                touch_expr(cond, t);
+                touch_stmts(then_branch, t);
+                touch_stmts(else_branch, t);
+                touch_exprs(ensures, t);
+            }
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => {
+                touch_expr(scrutinee, t);
+                for br in branches.iter() {
+                    touch_exprs(&br.patterns, t);
+                    touch_stmts(&br.body, t);
+                }
+                touch_stmts(default_branch, t);
+                touch_exprs(ensures, t);
+            }
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => {
+                touch_expr(cond, t);
+                touch_exprs(inv, t);
+                touch_exprs(requires, t);
+                touch_exprs(ensures, t);
+                touch_stmts(body, t);
+            }
+            StmtT::GotoBlock { body, ensures, .. } => {
+                touch_stmts(body, t);
+                touch_exprs(ensures, t);
+            }
+            StmtT::Label { ensures, .. } => touch_exprs(ensures, t),
+            StmtT::Decl(..)
+            | StmtT::Break
+            | StmtT::Continue
+            | StmtT::Return(None)
+            | StmtT::GhostStmt(_)
+            | StmtT::Goto(_)
+            | StmtT::Error => {}
+        }
+    }
+}
+
+/// The mutable globals a translation unit has storage for, as slot templates.
+///
+/// An immutable global is published as a value and needs no ownership, so it
+/// is not here; an enum constant is not an object at all; an array global has
+/// no `_pts_to` yet. What is left is a global with a fixed address and a
+/// byte-level representation, which is exactly a slot that was allocated
+/// before the program started and is never released.
+fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot> {
+    let mut out = HashMap::new();
+    for decl in &tu.decls {
+        let DeclT::GlobalVar(gv) = &decl.val else {
+            continue;
+        };
+        if gv.is_enum_constant {
+            continue;
+        }
+        // An immutable global this file initialises is a constant; reading it
+        // needs no ownership, and granting some would only be noise.
+        if gv.is_pure
+            && !gv.is_extern
+            && gv
+                .init
+                .as_ref()
+                .is_some_and(|e| const_expr(tds, &gv.ty, e).is_some())
+        {
+            continue;
+        }
+        // A global array's elements are not `option`s: static storage is
+        // zero-initialised before the program starts, so every element already
+        // holds a value, and a read of one needs nothing but the ownership.
+        let slot = match &peel(tds, &gv.ty).val {
+            TypeT::FixedArray(elem, n) => {
+                let (Some(pn), Some(esize), Some(ety)) = (
+                    palow_name(tds, elem),
+                    palow_sizeof(tds, elem),
+                    fstar_type(tds, elem),
+                ) else {
+                    continue;
+                };
+                if !has_repr(tds, elem) {
+                    continue;
+                }
+                Slot {
+                    name: gv.name.val.to_string(),
+                    addr: format!("addr_var_{}", gv.name.val),
+                    palow_ty: pn,
+                    fstar_ty: format!("(s: Seq.seq {} {{ Seq.length s == {} }})", ety, n),
+                    init: true,
+                    array: Some((format!("{}sz", esize), false)),
+                    global: true,
+                }
+            }
+            _ => {
+                let (Some(pn), Some(fty)) = (palow_name(tds, &gv.ty), fstar_type(tds, &gv.ty))
+                else {
+                    continue;
+                };
+                // A struct needs no byte-level `_repr` here: a global is never
+                // allocated or released, so its `_pts_to` is all that is used.
+                let is_struct = pn
+                    .strip_prefix("struct_")
+                    .is_some_and(|n| tds.structs.contains_key(n));
+                if !has_repr(tds, &gv.ty) && !is_struct {
+                    continue;
+                }
+                Slot {
+                    name: gv.name.val.to_string(),
+                    addr: format!("addr_var_{}", gv.name.val),
+                    palow_ty: pn,
+                    fstar_ty: fty,
+                    init: true,
+                    array: None,
+                    global: true,
+                }
+            }
+        };
+        out.insert(gv.name.val.to_string(), slot);
+    }
+    out
 }
 
 /// One function's place in the output: its generated text, and which other
@@ -2106,6 +2434,65 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     // may do depends only on the callee's *signature*, so nothing here needs
     // the callees' code -- and building it up front is what lets a body call a
     // function defined further down the file, which C allows and F* does not.
+    // Which mutable globals each function's contract has to name. A body's own
+    // mentions are only the start: calling a function that touches a global
+    // means holding that global's ownership at the call, so the sets close
+    // under the call graph. The fixpoint is over a finite set and only grows,
+    // so it terminates; recursion is no obstacle because the answer is the
+    // least fixed point.
+    let mut globals = mutable_globals(&tds, tu);
+    let mut grants: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut calls: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut touched: Vec<(String, Touched)> = Vec::new();
+    let mut written: HashSet<String> = HashSet::new();
+    for decl in &tu.decls {
+        let DeclT::FnDefn(d) = &decl.val else {
+            continue;
+        };
+        let mut t = Touched::default();
+        touch_stmts(&d.body, &mut t);
+        touch_exprs(&d.decl.requires, &mut t);
+        touch_exprs(&d.decl.ensures, &mut t);
+        written.extend(t.written.iter().cloned());
+        touched.push((d.decl.name.val.to_string(), t));
+    }
+    // A global nothing in this file can store through is immutable for the
+    // whole run whatever its declaration says, and handing its ownership
+    // around would only lose what its initialiser said. Publishing its value
+    // is the better answer, and is what milestone 5 already does for a `const`
+    // one; until an initialiser of any type can be published, such a global
+    // stays as it was.
+    globals.retain(|n, _| written.contains(n));
+    for (name, t) in touched {
+        grants.insert(
+            name.clone(),
+            t.vars
+                .iter()
+                .filter(|v| globals.contains_key(*v))
+                .cloned()
+                .collect(),
+        );
+        calls.insert(name, t.calls);
+    }
+    loop {
+        let mut changed = false;
+        for (f, cs) in &calls {
+            let mut add: BTreeSet<String> = BTreeSet::new();
+            for c in cs {
+                if let Some(g) = grants.get(c) {
+                    add.extend(g.iter().cloned());
+                }
+            }
+            let own = grants.get_mut(f).unwrap();
+            for g in add {
+                changed |= own.insert(g);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     let mut callees: HashMap<String, Callee> = HashMap::new();
     let mut items: Vec<FnItem> = Vec::new();
     for decl in &tu.decls {
@@ -2119,7 +2506,13 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         }
         let mut env = base.clone();
         env.push_fn_decl_args_for_body(fndecl);
-        let sig = match emit_fn(&tds, &env, fndecl) {
+        let granted: Vec<Slot> = grants
+            .get(&*fndecl.name.val.to_string())
+            .into_iter()
+            .flatten()
+            .map(|g| globals[g].clone())
+            .collect();
+        let sig = match emit_fn(&tds, &env, fndecl, &granted) {
             Ok(s) => s,
             Err(why) => {
                 items.push(FnItem {
@@ -2261,6 +2654,10 @@ use num_bigint::BigInt;
 #[derive(Clone)]
 struct Slot {
     name: String,
+    /// Where the storage is. A local's is a stack allocation bound to
+    /// `loc_<name>`; a mutable global's is the fixed address `addr_var_<name>`
+    /// the module assumes, which is why a global can be an ordinary slot.
+    addr: String,
     palow_ty: String,
     /// The F* type of the value the slot holds. A loop invariant has to bind
     /// one existential per live slot, and the binder needs a type.
@@ -2269,22 +2666,38 @@ struct Slot {
     /// Set when the slot is a fixed-size array local. Its ownership is an
     /// `array_pts_to` at the `maybe_repr` representation rather than a
     /// points-to, because its elements are written one at a time; the string
-    /// is the element size as a `size_t` literal.
-    array: Option<String>,
+    /// is the element size as a `size_t` literal, and the flag says whether
+    /// the elements are `option`s. A local's are: they are written one at a
+    /// time. A global's are not, because static storage is zero-initialised
+    /// before the program starts, so every element already holds a value.
+    array: Option<(String, bool)>,
+    /// Set when the slot is a mutable global. Its storage outlives the
+    /// function, so the ownership arrives in the contract and must not be
+    /// allocated on entry or released on exit.
+    global: bool,
 }
 
 impl Slot {
     /// What the slot owns, at a given value.
     fn pts_to(&self, value: &str) -> String {
         match &self.array {
-            None => format!("{}_pts_to loc_{} 1.0R {}", self.palow_ty, self.name, value),
-            Some(esize) => format!(
-                "array_pts_to (maybe_repr {pn}_repr (SizeT.v {e})) (SizeT.v {e}) loc_{n} 1.0R {v}",
-                pn = self.palow_ty,
+            None => format!("{}_pts_to {} 1.0R {}", self.palow_ty, self.addr, value),
+            Some((esize, maybe)) => format!(
+                "array_pts_to {r} (SizeT.v {e}) {n} 1.0R {v}",
+                r = self.elem_repr(esize, *maybe),
                 e = esize,
-                n = self.name,
+                n = self.addr,
                 v = value
             ),
+        }
+    }
+
+    /// The representation the slot's elements are stored at.
+    fn elem_repr(&self, esize: &str, maybe: bool) -> String {
+        if maybe {
+            format!("(maybe_repr {}_repr (SizeT.v {}))", self.palow_ty, esize)
+        } else {
+            format!("{}_repr", self.palow_ty)
         }
     }
 }
@@ -2458,8 +2871,8 @@ impl<'a> Body<'a> {
     fn addr(&mut self, e: &Expr) -> Result<String, String> {
         match &e.val {
             ExprT::Var(v) => {
-                if self.slots.iter().any(|s| s.name == *v.val) {
-                    return Ok(format!("loc_{}", v.val));
+                if let Some(s) = self.slots.iter().rev().find(|s| s.name == *v.val) {
+                    return Ok(s.addr.clone());
                 }
                 // A C parameter is an ordinary mutable object; Palow passes it
                 // by value, so it only acquires storage if the body asks for
@@ -2495,11 +2908,13 @@ impl<'a> Body<'a> {
                     .push(format!("{}_write_uninit loc_{} var_{};", pn, v.val, v.val));
                 self.slots.push(Slot {
                     name: v.val.to_string(),
+                    addr: format!("loc_{}", v.val),
                     palow_ty: pn,
                     fstar_ty: fstar_type(self.tds, &ty)
                         .ok_or_else(|| format!("`{}` has no F* type", v.val))?,
                     init: true,
                     array: None,
+                    global: false,
                 });
                 Ok(format!("loc_{}", v.val))
             }
@@ -2739,11 +3154,11 @@ impl<'a> Body<'a> {
                         return Err(format!("a subscript of local `{}`", v.val));
                     };
                     return Ok((
-                        format!("loc_{}", v.val),
+                        s.addr.clone(),
                         s.palow_ty.clone(),
-                        esize,
+                        esize.0,
                         Vec::new(),
-                        true,
+                        esize.1,
                     ));
                 }
                 let Some(ap) = self.arrays.get(&*v.val.to_string()) else {
@@ -3111,9 +3526,9 @@ impl<'a> Body<'a> {
                     let ty = self.ty_of(e)?;
                     let pn = palow_name(self.tds, &ty)
                         .ok_or_else(|| format!("`{}` has an unsupported type", v.val))?;
+                    let a = s.addr.clone();
                     let t = self.fresh(&v.val);
-                    self.lines
-                        .push(format!("let {} = {}_read loc_{};", t, pn, v.val));
+                    self.lines.push(format!("let {} = {}_read {};", t, pn, a));
                     Ok(t)
                 } else if self.env.lookup_var(v).is_some() {
                     Ok(format!("var_{}", v.val))
@@ -3355,12 +3770,14 @@ impl<'a> Body<'a> {
             ));
             self.slots.push(Slot {
                 name: name.val.to_string(),
+                addr: format!("loc_{}", name.val),
                 palow_ty: pn.clone(),
                 // The length is part of the binder's type so that a loop
                 // invariant does not have to restate it.
                 fstar_ty: format!("(s: Seq.seq (option {}) {{ Seq.length s == {} }})", ety, n),
                 init: true,
-                array: Some(format!("{}sz", esize)),
+                array: Some((format!("{}sz", esize), true)),
+                global: false,
             });
             return Ok(pn);
         }
@@ -3380,11 +3797,13 @@ impl<'a> Body<'a> {
             .push(format!("let loc_{} = {}_stack_alloc ();", name.val, pn));
         self.slots.push(Slot {
             name: name.val.to_string(),
+            addr: format!("loc_{}", name.val),
             palow_ty: pn.clone(),
             fstar_ty: fstar_type(self.tds, ty)
                 .ok_or_else(|| format!("local `{}` has no F* type", name.val))?,
             init: false,
             array: None,
+            global: false,
         });
         Ok(pn)
     }
@@ -3586,8 +4005,8 @@ impl<'a> Body<'a> {
                     "write_uninit"
                 };
                 self.slots[i].init = true;
-                self.lines
-                    .push(format!("{}_{} loc_{} {};", pn, op, v.val, value));
+                let a = self.slots[i].addr.clone();
+                self.lines.push(format!("{}_{} {} {};", pn, op, a, value));
                 return Ok(());
             }
         }
@@ -4247,23 +4666,32 @@ impl<'a> Body<'a> {
 
     fn release_from(&mut self, mark: usize) {
         for i in (mark..self.slots.len()).rev() {
-            let (name, pn, init, array) = {
+            let (addr, pn, init, array, global) = {
                 let s = &self.slots[i];
-                (s.name.clone(), s.palow_ty.clone(), s.init, s.array.clone())
+                (
+                    s.addr.clone(),
+                    s.palow_ty.clone(),
+                    s.init,
+                    s.array.clone(),
+                    s.global,
+                )
             };
+            // A global's storage outlives the function; the contract hands it
+            // straight back rather than releasing it.
+            if global {
+                continue;
+            }
             // An array's storage view already covers whatever its elements
             // hold, so there is nothing to forget first.
-            if let Some(esize) = array {
-                self.lines.push(format!(
-                    "array_stack_free {}_repr loc_{} {};",
-                    pn, name, esize
-                ));
+            if let Some((esize, _)) = array {
+                self.lines
+                    .push(format!("array_stack_free {}_repr {} {};", pn, addr, esize));
                 continue;
             }
             if init {
-                self.lines.push(format!("{}_forget loc_{};", pn, name));
+                self.lines.push(format!("{}_forget {};", pn, addr));
             }
-            self.lines.push(format!("{}_stack_free loc_{};", pn, name));
+            self.lines.push(format!("{}_stack_free {};", pn, addr));
         }
     }
 }
@@ -4596,7 +5024,11 @@ fn emit_body(
         env,
         callees,
         lines: Vec::new(),
-        slots: Vec::new(),
+        // A granted global is a slot the function did not allocate and must
+        // not release. Seeding them first means a local of the same name
+        // shadows the global, exactly as C says, because every slot lookup
+        // takes the last match.
+        slots: sig.globals.clone(),
         out_params: defn
             .decl
             .args
