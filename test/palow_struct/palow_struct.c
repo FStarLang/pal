@@ -110,3 +110,29 @@ int32_t pick_local(int32_t x)
   struct padded p = {.a = x, .b = 0, .c = 0};
   return p.a;
 }
+
+// A field of a nested struct. Reaching `o->in.v` means focusing `in` out of
+// `outer` and then `v` out of `in`, and closing both again in the opposite
+// order. A write through the inner field changes the outer struct's value, so
+// the outer field closes with the general unfocus and not the read one.
+struct inner {
+  int32_t v;
+  int32_t w;
+};
+
+struct nest {
+  int32_t tag;
+  struct inner in;
+};
+
+int32_t inner_v(const struct nest *o)
+  _ensures(return == o->in.v)
+{
+  return o->in.v;
+}
+
+void set_inner_v(struct nest *o, int32_t x)
+  _ensures(o->in.v == x && o->tag == _old(o->tag) && o->in.w == _old(o->in.w))
+{
+  o->in.v = x;
+}

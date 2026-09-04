@@ -1056,8 +1056,19 @@ new facts about memory.
    initialised as a whole -- the `init` flag is per slot, and a struct wants it
    per field.
 
-   As of this milestone: **705 specifications, 393 of them with real bodies,
-   312 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   A field of a *nested* struct came next, which is the same problem wearing
+   three different hats: an anonymous member, a first-field cast and an
+   explicitly nested struct all arrive as a field access whose base is itself a
+   field access. The focus machinery only knew how to reach a base that had an
+   address, so it opened one level and stopped. It now recurses: reaching
+   `o->in.v` focuses `in` out of `outer` and then `v` out of `in`, and closes
+   both in the opposite order. The two orders have to be kept apart, because a
+   write through the inner field changes the outer struct's value and a read
+   does not, so the outer field closes with the general unfocus in one case and
+   the read-only one in the other.
+
+   As of this milestone: **707 specifications, 399 of them with real bodies,
+   308 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

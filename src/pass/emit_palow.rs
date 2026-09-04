@@ -2264,6 +2264,18 @@ struct Slot {
     init: bool,
 }
 
+/// One open field focus: where the field is, and how to close it again.
+struct FieldFocus {
+    /// The Palow name of the struct the field belongs to.
+    sn: String,
+    /// The address of the struct.
+    a: String,
+    /// The address of the field.
+    at: String,
+    close_read: Vec<String>,
+    close_write: Vec<String>,
+}
+
 /// A block of heap storage held in a local pointer.
 ///
 /// `malloc` may fail, so between the allocation and the null test the block is
@@ -2590,12 +2602,17 @@ impl<'a> Body<'a> {
     fn place(&mut self, e: &Expr) -> Result<Focus, String> {
         match &strip_vattr(e).val {
             ExprT::Member(base, f) => {
-                let (sn, at) = self.focus_field(base, f)?;
+                let pn = self.field_pn(base, f)?;
+                let ff = self.focus_field(base, f)?;
+                let mut close_read = vec![format!("{}_unfocus_read_{} {};", ff.sn, f.val, ff.a)];
+                close_read.extend(ff.close_read);
+                let mut close_write = vec![format!("{}_unfocus_{} {};", ff.sn, f.val, ff.a)];
+                close_write.extend(ff.close_write);
                 Ok(Focus {
-                    pn: self.field_pn(base, f)?,
-                    at,
-                    close_read: vec![format!("{}_unfocus_read_{} {};", sn.0, f.val, sn.1)],
-                    close_write: vec![format!("{}_unfocus_{} {};", sn.0, f.val, sn.1)],
+                    pn,
+                    at: ff.at,
+                    close_read,
+                    close_write,
                 })
             }
             ExprT::Index(base, idx) => self.focus_elem(base, Some(idx)),
@@ -2634,18 +2651,46 @@ impl<'a> Body<'a> {
             .ok_or_else(|| format!("a field of type {}", describe(self.tds.resolve(&fty))))
     }
 
-    /// Emit the focus of one field. Returns the struct's Palow name and base
-    /// address, and the field's address.
-    fn focus_field(
-        &mut self,
-        base: &Expr,
-        f: &Ident,
-    ) -> Result<((String, String), String), String> {
+    /// Emit the focus of one field. Returns the struct's Palow name, the base
+    /// address, the field's address, and the lines that close whatever had to
+    /// be opened to reach the base -- in read and in write form, because a
+    /// write through an inner field changes the outer struct's value and a
+    /// read does not.
+    fn focus_field(&mut self, base: &Expr, f: &Ident) -> Result<FieldFocus, String> {
         let (sn, _) = self.struct_of(base)?;
-        let a = self.addr(base)?;
+        let (a, close_read, close_write) = self.base_addr(base)?;
         let at = format!("({} +! {}_offsetof_{})", a, sn, f.val);
         self.lines.push(format!("{}_focus_{} {};", sn, f.val, a));
-        Ok(((sn, a), at))
+        Ok(FieldFocus {
+            sn,
+            a,
+            at,
+            close_read,
+            close_write,
+        })
+    }
+
+    /// The address of the object a field belongs to. Usually just `addr`, but
+    /// a field of a *nested* struct -- which is what an anonymous member and a
+    /// first-field cast both come out as -- has to focus the outer field first,
+    /// and that focus stays open until the access through it is done.
+    fn base_addr(&mut self, base: &Expr) -> Result<(String, Vec<String>, Vec<String>), String> {
+        if let ExprT::Member(b2, f2) = &strip_vattr(base).val {
+            let fty = self.field_ty(b2, f2)?;
+            if matches!(
+                &peel(self.tds, &fty).val,
+                TypeT::TypeRef(TypeRefKind::Struct(_))
+            ) {
+                let inner = self.focus_field(b2, f2)?;
+                let mut close_read =
+                    vec![format!("{}_unfocus_read_{} {};", inner.sn, f2.val, inner.a)];
+                close_read.extend(inner.close_read);
+                let mut close_write = vec![format!("{}_unfocus_{} {};", inner.sn, f2.val, inner.a)];
+                close_write.extend(inner.close_write);
+                return Ok((inner.at, close_read, close_write));
+            }
+        }
+        Ok((self.addr(base)?, Vec::new(), Vec::new()))
     }
 
     /// The array an element access indexes: its base address, element type and
@@ -2688,17 +2733,14 @@ impl<'a> Body<'a> {
                         describe(self.tds.resolve(&fty))
                     ));
                 };
-                let (sn, at) = self.focus_field(base, f)?;
+                let ff = self.focus_field(base, f)?;
                 // Even a read through an array field goes back with the
                 // general unfocus: what comes out of the element access is a
                 // sequence, and `Seq.upd xs i (Seq.index xs i)` is only `xs`
                 // up to a lemma that is not worth generating per field.
-                Ok((
-                    at,
-                    pn,
-                    format!("{}sz", esize),
-                    vec![format!("{}_unfocus_{} {};", sn.0, f.val, sn.1)],
-                ))
+                let mut close = vec![format!("{}_unfocus_{} {};", ff.sn, f.val, ff.a)];
+                close.extend(ff.close_write);
+                Ok((ff.at, pn, format!("{}sz", esize), close))
             }
             other => Err(format!("a subscript of {}", expr_kind_of(other))),
         }
