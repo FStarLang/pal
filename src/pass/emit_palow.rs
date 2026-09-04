@@ -2335,6 +2335,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     init: true,
                     array: Some((format!("{}sz", esize), false)),
                     global: true,
+                    holds_fn: None,
                 }
             }
             _ => {
@@ -2358,6 +2359,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     init: true,
                     array: None,
                     global: true,
+                    holds_fn: None,
                 }
             }
         };
@@ -2791,6 +2793,12 @@ struct Slot {
     /// function, so the ownership arrives in the contract and must not be
     /// allocated on entry or released on exit.
     global: bool,
+    /// The C function whose address was last stored here, when that is known.
+    /// A code pointer's *value* is an address, but what may be done with it is
+    /// the separate `valid` fact, and nothing in the points-to carries that.
+    /// Remembering the store is what lets an indirect call seed validity
+    /// itself, instead of the source having to write a `_ghost_stmt`.
+    holds_fn: Option<String>,
 }
 
 impl Slot {
@@ -3034,6 +3042,7 @@ impl<'a> Body<'a> {
                     init: true,
                     array: None,
                     global: false,
+                    holds_fn: None,
                 });
                 Ok(format!("loc_{}", v.val))
             }
@@ -3590,6 +3599,37 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// The function a decay names, if the expression is one.
+    fn fn_ref_of(&self, e: &Expr) -> Option<String> {
+        match &strip_vattr(e).val {
+            ExprT::FnRef(g) => Some(g.val.to_string()),
+            ExprT::Ref(inner) | ExprT::Cast(inner, _) => self.fn_ref_of(inner),
+            _ => None,
+        }
+    }
+
+    /// Record that a slot now holds a known function's address.
+    fn note_fn_store(&mut self, lhs: &Expr, rhs: &Expr) {
+        let (ExprT::Var(v), Some(g)) = (&strip_vattr(lhs).val, self.fn_ref_of(rhs)) else {
+            return;
+        };
+        if let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val) {
+            self.slots[i].holds_fn = Some(g);
+        }
+    }
+
+    /// The wrapper projections a call through a known function needs.
+    fn fp_spec(g: &str) -> (String, String, String) {
+        (
+            format!("(pre_of func_{}__fp)", g),
+            format!("(post_of func_{}__fp)", g),
+            format!(
+                "(of_fn_div (pre_of func_{g}__fp) (post_of func_{g}__fp) func_{g}__fp)",
+                g = g
+            ),
+        )
+    }
+
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         match &e.val {
             ExprT::VAttr(_, inner) => self.rvalue(inner),
@@ -3602,6 +3642,7 @@ impl<'a> Body<'a> {
                     .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
                 let v = self.rvalue(rhs)?;
                 self.store(lhs, &pn, &v)?;
+                self.note_fn_store(lhs, rhs);
                 Ok(v)
             }
             // A struct literal is an F* record literal. C fills any field the
@@ -3835,6 +3876,57 @@ impl<'a> Body<'a> {
                     g = g.val
                 ))
             }
+            // An indirect call needs the `valid` fact, which no points-to
+            // carries: the bytes of a code pointer say where the code is, not
+            // what it does. Where the emitter knows which function the pointer
+            // holds it can seed validity itself, from the wrapper, and the
+            // `_ghost_stmt` the existing translator needs disappears. The
+            // address passed is the decay rather than a load of the slot,
+            // which is the same value -- that is what knowing the store means
+            // -- and keeps `is_valid` and the callee syntactically the same
+            // term, since slprop matching will not do the reasoning.
+            ExprT::FnPtrCall(f, args) => {
+                let g = match &strip_vattr(f).val {
+                    ExprT::Var(v) => self
+                        .slots
+                        .iter()
+                        .rev()
+                        .find(|s| s.name == *v.val)
+                        .and_then(|s| s.holds_fn.clone())
+                        .ok_or_else(|| {
+                            format!("a call through `{}`, whose target is not known here", v.val)
+                        })?,
+                    _ => return Err("a call through a function pointer".to_string()),
+                };
+                if !self.callees.get(&g).is_some_and(|c| c.fp) {
+                    return Err(format!("`{}` has no function-pointer wrapper", g));
+                }
+                self.uses.insert(g.clone());
+                let mut vs = Vec::new();
+                for a in args.iter() {
+                    vs.push(self.rvalue(a)?);
+                }
+                let tuple = match vs.len() {
+                    0 => "()".to_string(),
+                    1 => vs[0].clone(),
+                    _ => format!("({})", vs.join(", ")),
+                };
+                let (pre, post, addr) = Self::fp_spec(&g);
+                // `call_div` lives in the divergent effect, so its caller does
+                // too -- which every PAL function that is not `_total` already
+                // is.
+                self.divergent = true;
+                self.lines
+                    .push(format!("of_fn_div_valid {} {} func_{}__fp;", pre, post, g));
+                let t = self.fresh(&g);
+                self.lines.push(format!(
+                    "let {} = call_div {} {} {} {} (hide ());",
+                    t, pre, post, addr, tuple
+                ));
+                self.lines
+                    .push(format!("drop_is_valid {} {} {};", addr, pre, post));
+                Ok(t)
+            }
             ExprT::SizeOf(t) => {
                 let n = palow_sizeof(self.tds, t)
                     .ok_or_else(|| format!("`sizeof` of {}", describe(self.tds.resolve(t))))?;
@@ -3920,6 +4012,7 @@ impl<'a> Body<'a> {
                 init: true,
                 array: Some((format!("{}sz", esize), true)),
                 global: false,
+                holds_fn: None,
             });
             return Ok(pn);
         }
@@ -3946,6 +4039,7 @@ impl<'a> Body<'a> {
             init: false,
             array: None,
             global: false,
+            holds_fn: None,
         });
         Ok(pn)
     }
@@ -4147,6 +4241,9 @@ impl<'a> Body<'a> {
                     "write_uninit"
                 };
                 self.slots[i].init = true;
+                // Whatever was known about the code pointer here is stale now;
+                // the caller re-establishes it if the store was a decay.
+                self.slots[i].holds_fn = None;
                 let a = self.slots[i].addr.clone();
                 self.lines.push(format!("{}_{} {} {};", pn, op, a, value));
                 return Ok(());
@@ -4382,7 +4479,10 @@ impl<'a> Body<'a> {
                 let pn = self.alloc_slot(name, ty)?;
                 self.lines
                     .push(format!("{}_write_uninit loc_{} {};", pn, name.val, v));
-                self.slots.last_mut().unwrap().init = true;
+                let held = self.fn_ref_of(init);
+                let slot = self.slots.last_mut().unwrap();
+                slot.init = true;
+                slot.holds_fn = held;
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
@@ -4396,7 +4496,9 @@ impl<'a> Body<'a> {
                     return self.store(lhs, &pn, &value);
                 }
                 let v = self.rvalue(rhs)?;
-                self.store(lhs, &pn, &v)
+                self.store(lhs, &pn, &v)?;
+                self.note_fn_store(lhs, rhs);
+                Ok(())
             }
             StmtT::While {
                 cond,
@@ -4510,6 +4612,16 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("assert (pure {});", p));
                 Ok(())
             }
+            // A ghost statement is a proof hint, so dropping one can never
+            // make a proof succeed that should not -- only fail one that
+            // should. Palow drops the hints that are about the *old*
+            // function-pointer model, because it establishes those facts
+            // itself at the call: `Pulse.Lib.C.FuncPtr.of_fn_div_valid` before
+            // an indirect call and `drop_is_valid` after it are exactly what
+            // the emitter now writes. Every other ghost statement says
+            // something Palow has no other way to learn, so it is still
+            // refused rather than silently discarded.
+            StmtT::GhostStmt(code) if ghost_is_funcptr(code) => Ok(()),
             StmtT::Return(None) => Ok(()),
             StmtT::Call(e) => match &e.val {
                 ExprT::FnCall(name, args) => {
@@ -4527,7 +4639,13 @@ impl<'a> Body<'a> {
                     Ok(())
                 }
                 ExprT::Free(arg) => self.free(arg),
-                _ => Err("a call through a function pointer".to_string()),
+                // An indirect call in statement position still produces a
+                // value; binding it and dropping it is what C does.
+                ExprT::FnPtrCall(..) => self.rvalue(e).map(|_| ()),
+                _ => Err(format!(
+                    "a call in statement position that is not one: {}",
+                    expr_kind(e)
+                )),
             },
             StmtT::If {
                 cond,
@@ -5219,6 +5337,22 @@ fn returns(stmts: &Stmts) -> bool {
 /// Names for the constructs the subset does not cover. These end up in the
 /// generated file next to each `admit()`, which is what turns it into a list
 /// of what to do next rather than a list of failures.
+/// Whether a ghost statement only seeds or drops a fact about the existing
+/// function-pointer model, which Palow supplies for itself.
+fn ghost_is_funcptr(code: &InlinePulseCode) -> bool {
+    let mut saw = false;
+    for t in &code.tokens {
+        let InlinePulseToken::Verbatim(tok) = t else {
+            return false;
+        };
+        let text = &*tok.text.val;
+        if text.contains("FuncPtr") {
+            saw = true;
+        }
+    }
+    saw
+}
+
 fn stmt_kind(s: &Stmt) -> &'static str {
     match &s.val {
         StmtT::Call(..) => "a function call",

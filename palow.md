@@ -1162,8 +1162,41 @@ new facts about memory.
    progress -- the blocker moved -- but it is progress the histogram records as
    a transfer rather than a gain.
 
-   As of this milestone: **725 specifications, 421 of them with real bodies,
-   304 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   An indirect call is the other half, and it turns out to be the half that
+   makes the first one pay. Where a pointer's target is known -- it was stored
+   into the local from a `&g` a moment ago, and the emitter tracks that -- the
+   call is `call_div (pre_of func_g__fp) (post_of func_g__fp) addr <tuple>`,
+   with `of_fn_div_valid` before it to produce `is_valid` and `drop_is_valid`
+   after it to discard it. The address passed is the decay term itself rather
+   than a load of the slot. That is the same value, and it keeps `is_valid` and
+   the callee syntactically identical, which matters because slprop matching is
+   syntactic; going through a load would leave a `pure (f == g)` that nothing
+   can discharge.
+
+   The point of doing this is that Palow now establishes for itself exactly the
+   facts the existing translator has to be told by hand. In the corpus those
+   facts are seeded by a `_ghost_stmt` mentioning `Pulse.Lib.C.FuncPtr`, and
+   that ghost statement is inline Pulse, which was blocking the whole body. So
+   Palow drops it. Dropping a ghost statement is always sound in the direction
+   that matters: a ghost statement is a proof hint, so removing one can never
+   make a proof succeed that should have failed, only the reverse. Palow drops
+   precisely the hints about the old function-pointer model, because it emits
+   the replacements itself, and still refuses every other ghost statement,
+   which says something it has no other way to learn.
+
+   Together these are worth thirteen bodies -- the transfer described above,
+   reversed and then some. It is not testable in-tree for the same reason the
+   written global is not: a `test/palow_*` file has to verify under the
+   existing translator too, and that translator needs the `_ghost_stmt` that
+   Palow has just made unnecessary. The corpus is the evidence.
+
+   Two smaller gaps fell out of reading the refusals afterwards, both of them
+   ordinary work rather than design: an increment or decrement in statement
+   position (12) and `memset` (9) are refused by a catch-all whose message used
+   to hide what it was actually refusing.
+
+   As of this milestone: **725 specifications, 434 of them with real bodies,
+   291 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -1174,14 +1207,12 @@ new facts about memory.
    parameter's F\* type is `ptr` regardless of how the pointer is used, so the
    pointer-kind inference in `elab` has nothing left to decide.
 
-   The `admit()` reasons, in order, are what to do next. Inline Pulse (99) has
+   The `admit()` reasons, in order, are what to do next. Inline Pulse (70) has
    to be re-expressed against the new predicates and is a source change, not a
-   translator change -- and it is now the blocker for almost everything that
-   uses a function pointer, because seeding `is_valid` before an indirect call
-   is written as a `_ghost_stmt` today. An indirect call (22) is the other
-   half: where the emitter knows which function a pointer holds it can seed
-   validity itself, and the `_ghost_stmt` disappears rather than being
-   translated. Signed arithmetic is refused on purpose: its
+   translator change. An indirect call through a pointer whose target the
+   emitter cannot see (10) needs the target's contract to arrive some other
+   way, which is what a `_refine`d callback parameter (11) is for: those two
+   are one problem. Signed arithmetic is refused on purpose: its
    overflow obligation is discharged by the `_requires` clause, and emitting it
    where that clause did not translate would produce failures that say nothing
    about the memory model. Seven more are functions this file only *declares*,
