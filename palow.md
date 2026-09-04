@@ -1099,8 +1099,27 @@ new facts about memory.
    syntactic; going through the general unfocus leaves a `Seq.upd` that the
    solver collapses instead.
 
-   As of this milestone: **709 specifications, 407 of them with real bodies,
-   302 admitted, 111 functions skipped**, plus **18 `_pure` functions emitted as
+   A function pointer is a `ptr`. This was a two-line change -- `TypeT::FnPtr`
+   joins `TypeT::Pointer` in the two type maps -- and it is the same decision,
+   made again, that gave every data pointer a single type: a code address is an
+   address, so it gets the address type, and the whole storage layer
+   (`ptr_repr`, `ptr_pts_to`, `ptr_read`, `ptr_write`, `ptr_stack_alloc`)
+   applies to it without a line of new model. That is the case for collapsing
+   the type index in miniature. The existing translator has a `func_ptr a b`
+   indexed by the argument and return types, and so would have needed a
+   `funcptr_repr` per C function type, an axiom in the machine layer for each,
+   and a story for what a cast between two of them means; here there is nothing
+   to add, and a cast is the identity because there is only one type to cast
+   between. What the *value* means -- which specification the code at that
+   address satisfies -- stays where `Pulse.Lib.C.FuncPtr` already puts it, in a
+   pure `valid f div pre post` relation that is not about memory at all, and
+   that relation is the next piece to port. Thirty function-pointer locals and
+   every struct with a function-pointer field stopped being skipped
+   immediately, because storing and passing a callback never needed to know its
+   spec; only calling through it does.
+
+   As of this milestone: **725 specifications, 418 of them with real bodies,
+   307 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -1111,11 +1130,11 @@ new facts about memory.
    parameter's F\* type is `ptr` regardless of how the pointer is used, so the
    pointer-kind inference in `elab` has nothing left to decide.
 
-   The `admit()` reasons, in order, are what to do next. Inline Pulse (72) has
+   The `admit()` reasons, in order, are what to do next. Inline Pulse (81) has
    to be re-expressed against the new predicates and is a source change, not a
-   translator change. Function pointers (52, split between locals and calls
-   through them) need a model decision first, since there is no
-   function-pointer predicate yet. Signed arithmetic is refused on purpose: its
+   translator change. Function pointers (55, split between decaying a named
+   function to a pointer and calling through one) need the `valid` relation
+   ported and a wrapper generated per address-taken function. Signed arithmetic is refused on purpose: its
    overflow obligation is discharged by the `_requires` clause, and emitting it
    where that clause did not translate would produce failures that say nothing
    about the memory model. Seven more are functions this file only *declares*,
@@ -1159,25 +1178,33 @@ new facts about memory.
    **A function pointer.** `Pulse.Lib.C.FuncPtr` already models one, and
    nothing in it is about memory: a `func_ptr a b` is an abstract *value* with
    a pure `valid f div pre post` relation to a Pulse specification. That part
-   transfers to Palow unchanged. What is missing is the storage: a function
-   pointer held in a local, a field or an array needs a `funcptr_repr` -- an
-   encoding of `func_ptr a b` into `sizeof(void (*)())` bytes -- and that is a
-   genuine addition to the machine layer, not a derived definition. The
-   question to settle is whether it should be one representation per C function
-   type (matching `sizeof`, and matching how every other type is handled here),
-   or a single opaque code-pointer byte pattern that a cast reinterprets. The
-   second is closer to what an implementation does and closer to what
-   provenance already says about `ptr`; the first is what makes a stored
-   callback's spec recoverable without an axiom.
+   transfers to Palow unchanged. What was missing is the storage: a function
+   pointer held in a local, a field or an array needs a representation in
+   `sizeof(void (*)())` bytes, and the question was whether that should be one
+   representation per C function type -- matching `sizeof`, and matching how
+   every other type is handled here -- or a single opaque code-pointer pattern
+   that a cast reinterprets. *Settled: a single type.* A function pointer is
+   just a `ptr`, by the same argument that collapsed the type-indexed reference
+   type: it is what an implementation does, it is what provenance already says
+   about an address, and it makes storage free rather than a per-function-type
+   axiom. The spec a pointer satisfies is not carried by its representation but
+   by the separate pure `valid` relation, so nothing is lost -- recovering a
+   stored callback's spec was never going to come from its bytes anyway.
 
    **A mutable global.** An immutable one is published as an F\* constant and
    needs no ownership, which is why it works today. A mutable one has storage
    that outlives every function, so someone has to own it, and C gives no
-   syntax to say who. The two candidates are an invariant -- correct for a
+   syntax to say who. The two candidates were an invariant -- correct for a
    global a concurrent program shares, but it forces every access into an
    atomic block -- and a `pts_to` that the caller passes in, which matches how
    the rest of Palow works but means the contract of every function that
-   touches a global grows a conjunct the C source never wrote.
+   touches a global grows a conjunct the C source never wrote. *Settled: pass
+   the `pts_to` in.* The awkwardness is real and lands entirely at `main`,
+   which has no caller to get the ownership from; in exchange the model can
+   express the lifecycle real C programs actually have -- uninitialised, then
+   unsynchronised mutable access from the main thread during start-up, then
+   synchronised or read-only access from every thread -- which an invariant
+   fixed at one shape cannot say at all.
 
    `_pure` functions are F\* definitions, not Pulse `fn`s. This was the last
    structural divergence from the existing translator, and it mattered for the

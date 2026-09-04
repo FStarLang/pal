@@ -264,8 +264,11 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
             Some(format!("{}int{}_t", if *signed { "" } else { "u" }, width))
         }
         TypeT::SizeT => Some("size_t".to_string()),
-        // Every pointer kind is the same type here; that is the point.
-        TypeT::Pointer(..) => Some("ptr".to_string()),
+        // Every pointer kind is the same type here; that is the point, and it
+        // extends to function pointers: a code address is an address, and
+        // making it one reuses the whole storage layer rather than needing a
+        // second one.
+        TypeT::Pointer(..) | TypeT::FnPtr { .. } => Some("ptr".to_string()),
         TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
             Some(format!("struct_{}", n.val))
         }
@@ -292,7 +295,7 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         // state a range condition without first having to prove it.
         TypeT::SpecInt => Some("int".to_string()),
         TypeT::SpecNat => Some("nat".to_string()),
-        TypeT::Pointer(..) => Some("ptr".to_string()),
+        TypeT::Pointer(..) | TypeT::FnPtr { .. } => Some("ptr".to_string()),
         TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
             Some(format!("struct_{}", n.val))
         }
