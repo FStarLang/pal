@@ -4542,6 +4542,27 @@ impl<'a> Emitter<'a> {
         let mut idx = 0;
         while idx < stmts.len() {
             let stmt = &stmts[idx];
+            // Pulse spells a forward jump as a block carrying a postcondition
+            // followed by a label; it has no syntax for a label that is
+            // followed by more code but carries no postcondition. A `goto`
+            // target therefore needs an explicit `_ensures` describing the
+            // state at the join point, unless nothing follows it. Report that
+            // here: emitting the label regardless produces a file that does
+            // not parse, and the resulting syntax error points at the
+            // enclosing function rather than at the label.
+            if let StmtT::GotoBlock { label, ensures, .. } = &stmt.val
+                && ensures.is_empty()
+                && idx + 1 < stmts.len()
+            {
+                self.report(
+                    format!(
+                        "label '{}' is a goto target with code after it, so it needs an \
+                         `_ensures` describing the state that holds when it is reached",
+                        label.val
+                    ),
+                    &label.loc,
+                );
+            }
             // `return e;` immediately followed by ghost statement(s) needs a
             // rewrite: the ghosts must run live, with access to the returned
             // value. Emit `let <ret> = e; <ghosts>; return <ret>;`. Statements
