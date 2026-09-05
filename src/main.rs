@@ -162,6 +162,8 @@ fn main() {
     }
 
     // Run passes
+    pass::builtins::builtins(&mut combined_tu);
+
     let t = Instant::now();
     pass::prune::prune(&mut combined_tu);
     if cli.time_passes {
