@@ -2588,6 +2588,15 @@ public:
                                    trRValue(vd->getInit())));
             }
           }
+        } else if (auto fd = dyn_cast<FunctionDecl>(d); fd && !fd->hasBody()) {
+          // C allows declaring a function in block scope: the K&R-era idiom of
+          // declaring a library function locally instead of including its
+          // header. The declared function is the same entity as one declared
+          // at file scope, and the statement itself has no runtime effect, so
+          // hoist the declaration out of the body. A body here would be a GNU
+          // nested function, which can capture enclosing locals and hence
+          // cannot be hoisted; that falls through to the error below.
+          HandleDecl(fd);
         } else {
           reportUnsupported(d->getSourceRange(), dloc,
                             "unsupported variable declaration ",
