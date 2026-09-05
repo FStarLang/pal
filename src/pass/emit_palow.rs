@@ -2039,23 +2039,14 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
 ///
 /// The initialiser reaches the IR already padded out to the declared length --
 /// a string literal shorter than its array is filled with zeroes by then -- so
-/// this only has to place the elements that are not the zero value, on top of
-/// a `Seq.create`. Doing it that way rather than `Seq.seq_of_list` keeps the
-/// length available definitionally and leaves indexing to the `Seq.upd`
-/// lemmas, which carry SMT patterns.
+/// the value is just the elements, in order, as a list. A list rather than a
+/// chain of `Seq.upd`s because the length then comes from `normalize_term`
+/// instead of one subtyping step per element, which is what makes a large
+/// table affordable at all.
 fn const_array(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<(String, u64, String)> {
     let TypeT::FixedArray(elem, n) = &peel(tds, ty).val else {
         return None;
     };
-    // A long array is not published at all. The cost is not the solver's --
-    // `opaque_to_smt` deals with that -- but F\*'s, in checking a term with one
-    // `Seq.upd` per element against the length refinement, and it grows fast
-    // enough to dominate a whole test run. A table that big is not meant to be
-    // read elementwise by SMT anyway; its properties are what a tactic proves,
-    // which is why the one in the corpus lives behind `_ghost_stmt`.
-    if *n > 64 {
-        return None;
-    }
     let ExprT::ArrayInit { elems, .. } = &strip_vattr(e).val else {
         return None;
     };
@@ -2063,15 +2054,15 @@ fn const_array(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<(String, u64, Stri
         return None;
     }
     let fty = fstar_type(tds, elem)?;
-    let zero = zero_value(tds, elem).ok()?;
-    let mut term = format!("Seq.create {} {}", n, zero);
-    for (i, x) in elems.iter().enumerate() {
-        let v = const_expr(tds, elem, x)?;
-        if v != zero {
-            term = format!("Seq.upd ({}) {} {}", term, i, v);
-        }
+    let mut vals = Vec::with_capacity(elems.len());
+    for x in elems {
+        vals.push(const_expr(tds, elem, x)?);
     }
-    Some((fty, *n, format!("({})", term)))
+    Some((
+        fty,
+        *n,
+        format!("(const_seq_with_len [{}] {})", vals.join("; "), n),
+    ))
 }
 
 /// A subscript's index when it is a constant, after the casts C wraps it in.
@@ -2551,6 +2542,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     code += "open Pulse.Lib.C.Palow.CTypes\n";
     code += "open Pulse.Lib.C.Palow.Machine\n";
     code += "open Pulse.Lib.C.Palow.Array\n";
+    code += "open Pulse.Lib.C.Palow.ConstSeq\n";
     code += "open Pulse.Lib.C.Palow.Local\n";
     code += "open Pulse.Lib.C.Palow.Nullable\n";
     code += "open Pulse.Lib.C.Palow.Alloc\n";
@@ -3091,6 +3083,23 @@ impl<'a> Body<'a> {
             }
             None => false,
         }
+    }
+
+    /// One element of a published array global, as an F\* term.
+    fn global_array_elem(&self, v: &Ident, i: u64) -> Option<String> {
+        let gv = self.env.lookup_global_var(v)?;
+        if !global_var_is_array(gv) || !gv.is_pure || gv.is_extern {
+            return None;
+        }
+        let init = gv.init.as_ref()?;
+        const_array(self.tds, &gv.ty, init)?;
+        let TypeT::FixedArray(elem, _) = &peel(self.tds, &gv.ty).val else {
+            return None;
+        };
+        let ExprT::ArrayInit { elems, .. } = &strip_vattr(init).val else {
+            return None;
+        };
+        const_expr(self.tds, elem, elems.get(usize::try_from(i).ok()?)?)
     }
 
     /// The published length of an array global, if it has one.
@@ -3870,6 +3879,16 @@ impl<'a> Body<'a> {
                 // own bound. Anything else needs the function's `_requires`,
                 // and emitting it without one produces a failure about the
                 // subscript rather than about the memory model.
+                // A constant index into a constant table is just the element.
+                // Emitting it saves the solver from walking a list one cons at
+                // a time, which is what decides whether a large table is
+                // affordable, and it is exactly as true: nothing can write the
+                // global, so the value is settled at compile time.
+                if let Some(k) = const_index(&strip_vattr(idx).val) {
+                    if let Some(x) = self.global_array_elem(v, k) {
+                        return Ok(x);
+                    }
+                }
                 let n = self.global_array_len(v).unwrap_or(0);
                 let literal = const_index(&strip_vattr(idx).val).is_some_and(|k| k < n);
                 if !literal && !self.signed_ok {

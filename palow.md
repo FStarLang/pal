@@ -1248,17 +1248,32 @@ new facts about memory.
    initialiser arrives already padded out to the declared length, so the value
    is a `Seq.create` with one `Seq.upd` per element that is not zero.
 
-   Two limits are worth stating because they are not arbitrary. The length is
-   in the type, so a constant subscript carries its own bound; a computed one
-   still needs the function's `_requires`, and without one it is refused rather
-   than emitted to fail. And a long array is not published at all. The cost
-   there is not the solver's -- `_pulse_opaque_to_smt` on the declaration is
-   honoured, and hides the value from SMT while leaving the length visible --
-   but F\*'s, in checking a term with a thousand `Seq.upd`s against a length
-   refinement, which grew to dominate an entire test run. That is the right
-   answer anyway: a table that large is not meant to be read elementwise by
-   SMT, and the one in the corpus proves its properties with a tactic behind a
-   `_ghost_stmt`, which is the inline-Pulse work rather than this.
+   How the value is written down turned out to matter more than anything else
+   here. The first attempt was a `Seq.create` with one `Seq.upd` per element,
+   and it does not scale: checking that against a length refinement costs a
+   subtyping step per element, and the corpus' thousand-element table took a
+   test run from fifteen minutes to over half an hour without finishing. A flat
+   list fixes it, exactly as `array_spec_of_list` does in the existing model.
+   The value is one application, and the length comes out of `normalize_term`
+   in an implicit rather than from the solver. `const_seq` is abstract, and
+   that part is load-bearing: left transparent it is `Seq.seq_of_list`, which
+   is recursive, and the solver unfolds it instead of using the indexing lemma
+   -- which works for the first few elements and then quietly stops.
+
+   Indexing is settled more directly still. A constant index into a constant
+   table is just the element, so that is what is emitted: nothing can write the
+   global, so the value is known at translation time, and the solver never has
+   to walk the list at all. The thousand-element table now verifies in three
+   and a half seconds. Reducing a symbolic index needs the list lemmas, and
+   those work in isolation but are crowded out by the generated file's other
+   patterns -- which does not bite yet, because a symbolic index needs a
+   `_requires` to be in bounds and the one case in the corpus has none.
+
+   Two limits, then, and neither is arbitrary. The length is in the type, so a
+   constant subscript carries its own bound; a computed one still needs the
+   function's `_requires`, and without one it is refused rather than emitted to
+   fail. And `_pulse_opaque_to_smt` on the declaration is honoured, hiding the
+   value from SMT while leaving the length visible.
 
    As of this milestone: **725 specifications, 459 of them with real bodies,
    266 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
