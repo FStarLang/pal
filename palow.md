@@ -1239,8 +1239,29 @@ new facts about memory.
    array field is refused for the same reason. That is ordinary work and is
    left for next.
 
-   As of this milestone: **725 specifications, 451 of them with real bodies,
-   274 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   Publishing an array global was worth more, and it is the same idea as the
+   immutable scalar global one layer up. `_pure const char padded[16] =
+   "packets";` cannot be written by anything, so it does not need to be an
+   object at all: it is published as a sequence constant, and `padded[0]` is
+   `Seq.index var_padded 0` -- a term, with no ownership, no focus and no
+   sequencing, which is also what lets it appear inside an assertion. The
+   initialiser arrives already padded out to the declared length, so the value
+   is a `Seq.create` with one `Seq.upd` per element that is not zero.
+
+   Two limits are worth stating because they are not arbitrary. The length is
+   in the type, so a constant subscript carries its own bound; a computed one
+   still needs the function's `_requires`, and without one it is refused rather
+   than emitted to fail. And a long array is not published at all. The cost
+   there is not the solver's -- `_pulse_opaque_to_smt` on the declaration is
+   honoured, and hides the value from SMT while leaving the length visible --
+   but F\*'s, in checking a term with a thousand `Seq.upd`s against a length
+   refinement, which grew to dominate an entire test run. That is the right
+   answer anyway: a table that large is not meant to be read elementwise by
+   SMT, and the one in the corpus proves its properties with a tactic behind a
+   `_ghost_stmt`, which is the inline-Pulse work rather than this.
+
+   As of this milestone: **725 specifications, 459 of them with real bodies,
+   266 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

@@ -2034,6 +2034,55 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
 /// The addresses are assumed rather than allocated. C gives a global a single
 /// fixed address for the whole run, which is exactly a constant of type `ptr`,
 /// and pointer identity between two mentions of `&g` then holds definitionally.
+/// A constant array global's value, as an F\* sequence term, together with
+/// its element type and length.
+///
+/// The initialiser reaches the IR already padded out to the declared length --
+/// a string literal shorter than its array is filled with zeroes by then -- so
+/// this only has to place the elements that are not the zero value, on top of
+/// a `Seq.create`. Doing it that way rather than `Seq.seq_of_list` keeps the
+/// length available definitionally and leaves indexing to the `Seq.upd`
+/// lemmas, which carry SMT patterns.
+fn const_array(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<(String, u64, String)> {
+    let TypeT::FixedArray(elem, n) = &peel(tds, ty).val else {
+        return None;
+    };
+    // A long array is not published at all. The cost is not the solver's --
+    // `opaque_to_smt` deals with that -- but F\*'s, in checking a term with one
+    // `Seq.upd` per element against the length refinement, and it grows fast
+    // enough to dominate a whole test run. A table that big is not meant to be
+    // read elementwise by SMT anyway; its properties are what a tactic proves,
+    // which is why the one in the corpus lives behind `_ghost_stmt`.
+    if *n > 64 {
+        return None;
+    }
+    let ExprT::ArrayInit { elems, .. } = &strip_vattr(e).val else {
+        return None;
+    };
+    if elems.len() as u64 != *n {
+        return None;
+    }
+    let fty = fstar_type(tds, elem)?;
+    let zero = zero_value(tds, elem).ok()?;
+    let mut term = format!("Seq.create {} {}", n, zero);
+    for (i, x) in elems.iter().enumerate() {
+        let v = const_expr(tds, elem, x)?;
+        if v != zero {
+            term = format!("Seq.upd ({}) {} {}", term, i, v);
+        }
+    }
+    Some((fty, *n, format!("({})", term)))
+}
+
+/// A subscript's index when it is a constant, after the casts C wraps it in.
+fn const_index(e: &ExprT) -> Option<u64> {
+    match e {
+        ExprT::IntLit(n, _) => u64::try_from(&**n).ok(),
+        ExprT::Cast(inner, _) | ExprT::VAttr(_, inner) => const_index(&inner.val),
+        _ => None,
+    }
+}
+
 fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
     let mut out = String::new();
     for decl in &tu.decls {
@@ -2041,10 +2090,48 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
             DeclT::GlobalVar(g) => g,
             _ => continue,
         };
-        if gv.is_enum_constant || global_var_is_array(gv) {
+        if gv.is_enum_constant {
             continue;
         }
         let name = &gv.name.val;
+        // An array global is published as a sequence constant rather than as
+        // an object. Nothing can write it -- that is what `_pure` says -- so a
+        // subscript of it is `Seq.index`, with no ownership involved at all.
+        if global_var_is_array(gv) {
+            if gv.is_pure && !gv.is_extern {
+                if let Some((fty, n, term)) =
+                    gv.init.as_ref().and_then(|e| const_array(tds, &gv.ty, e))
+                {
+                    out += &format!("assume val addr_var_{} : ptr\n", name);
+                    out += &format!(
+                        "assume val addr_var_{}_not_null : squash (not (is_null addr_var_{}))\n",
+                        name, name
+                    );
+                    // `_pulse_opaque_to_smt` on the source declaration is
+                    // load-bearing here, not decoration: the value of a
+                    // thousand-element array is a chain of a thousand
+                    // `Seq.upd`s, and letting the solver unfold it is what
+                    // that annotation exists to prevent. The length stays in
+                    // the type either way, so a subscript is still bounded --
+                    // only its value becomes something a tactic has to
+                    // establish rather than SMT.
+                    out += &format!(
+                        "{}let var_{} : (s: Seq.seq {} {{ Seq.length s == {} }}) = {}\n\n",
+                        if gv.opaque_to_smt {
+                            "[@@\"opaque_to_smt\"]\n"
+                        } else {
+                            ""
+                        },
+                        name,
+                        fty,
+                        n,
+                        term
+                    );
+                    continue;
+                }
+            }
+            continue;
+        }
         // The address is a `ptr` whatever the global's type is, so it is
         // published for every addressable global; only the value and the
         // permission that goes with it need a type the model covers.
@@ -2989,6 +3076,30 @@ impl<'a> Body<'a> {
 
     /// Whether a global has a value published as an F* constant: it is
     /// immutable, this file initialises it, and the initialiser is a literal.
+    /// Whether `v` names an array global this file published as a sequence
+    /// constant, in which case a subscript of it needs no ownership.
+    fn global_array_value(&self, v: &Ident) -> bool {
+        match self.env.lookup_global_var(v) {
+            Some(gv) => {
+                global_var_is_array(gv)
+                    && gv.is_pure
+                    && !gv.is_extern
+                    && gv
+                        .init
+                        .as_ref()
+                        .is_some_and(|e| const_array(self.tds, &gv.ty, e).is_some())
+            }
+            None => false,
+        }
+    }
+
+    /// The published length of an array global, if it has one.
+    fn global_array_len(&self, v: &Ident) -> Option<u64> {
+        let gv = self.env.lookup_global_var(v)?;
+        let init = gv.init.as_ref()?;
+        const_array(self.tds, &gv.ty, init).map(|(_, n, _)| n)
+    }
+
     fn global_value(&self, v: &Ident) -> bool {
         match self.env.lookup_global_var(v) {
             Some(gv) => {
@@ -3742,6 +3853,34 @@ impl<'a> Body<'a> {
                 let t = self.fresh("deref");
                 self.lines.push(format!("let {} = {}_read {};", t, pn, a));
                 Ok(t)
+            }
+            // A subscript of a published array global is `Seq.index` of a
+            // constant. There is no read to sequence and nothing to own, so it
+            // is a term like any other -- which is also what lets it appear in
+            // an assertion.
+            ExprT::Index(base, idx)
+                if matches!(&strip_vattr(base).val,
+                            ExprT::Var(v) if self.slots.iter().all(|s| s.name != *v.val)
+                                && self.global_array_value(v)) =>
+            {
+                let ExprT::Var(v) = &strip_vattr(base).val else {
+                    unreachable!()
+                };
+                // The length is in the type, so a constant index carries its
+                // own bound. Anything else needs the function's `_requires`,
+                // and emitting it without one produces a failure about the
+                // subscript rather than about the memory model.
+                let n = self.global_array_len(v).unwrap_or(0);
+                let literal = const_index(&strip_vattr(idx).val).is_some_and(|k| k < n);
+                if !literal && !self.signed_ok {
+                    return Err(format!(
+                        "a subscript of `{}`, whose bounds obligation needs the untranslated \
+                         `_requires`",
+                        v.val
+                    ));
+                }
+                let i = self.rvalue(idx)?;
+                Ok(format!("(Seq.index var_{} (SizeT.v {}))", v.val, i))
             }
             ExprT::Member(..) | ExprT::Index(..) => {
                 let hint = match &e.val {
