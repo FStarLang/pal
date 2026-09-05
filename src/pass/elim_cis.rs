@@ -212,6 +212,7 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                         .with_loc(u.name.loc.clone()),
                     fields: vec![info.named_field.clone()],
                     eager_unfold_pred: false,
+                    abi_size: u.abi_size,
                 });
             }
         }

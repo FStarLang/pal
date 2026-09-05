@@ -3079,6 +3079,29 @@ impl<'a> Emitter<'a> {
                             self.emit_type(env, to_pointee),
                             val_doc,
                         ])),
+                        // A *cell* holding a typed pointer, viewed as a cell
+                        // holding a raw one: `(void const **)&typedLocal`, which
+                        // is how a caller hands a callee its own pointer slot to
+                        // write into. Unlike `ref_to_core` this does not erase a
+                        // pointer's type, it retypes the slot that holds it, so
+                        // the ownership is moved across by the ghost shift that
+                        // `core_cell_arg_ghosts` emits around the call. Must be
+                        // matched before the plain `ref T -> core_ref` rule
+                        // below, which would otherwise erase the outer pointer
+                        // and quietly hand the callee an unwritable address.
+                        (
+                            TypeT::Pointer(from_pointee, PointerKind::Ref | PointerKind::Unknown),
+                            TypeT::Pointer(to_pointee, PointerKind::Ref | PointerKind::Unknown),
+                        ) if matches!(
+                            env.vtype_whnf(from_pointee.clone().into()).val,
+                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+                        ) && matches!(
+                            env.vtype_whnf(to_pointee.clone().into()).val,
+                            TypeT::Pointer(_, PointerKind::Core)
+                        ) =>
+                        {
+                            unaryfn(Doc::text("Pulse.Lib.C.CoreRef.core_cell"), val_doc)
+                        }
                         // typed `ref T` → `core_ref`: erase the pointee type.
                         (
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
@@ -3822,11 +3845,15 @@ impl<'a> Emitter<'a> {
                     // `full_array_lspec T N`, so `sizeof(T[N])` becomes
                     // `c_sizeof (full_array_lspec T N)` and its length
                     // participates in the size (see the `c_sizeof_array` axiom).
-                    // Other types size opaquely.
-                    unaryfn(
-                        Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"),
-                        self.emit_type(env, ty),
-                    )
+                    // A record whose ABI size clang reported sizes to that
+                    // constant; every other type sizes opaquely.
+                    match self.record_sizeof_constant(env, ty) {
+                        Some(c) => c,
+                        None => unaryfn(
+                            Doc::text("Pulse.Lib.C.Sizeof.c_sizeof"),
+                            self.emit_type(env, ty),
+                        ),
+                    }
                 }
                 ExprT::AlignOf(ty) => {
                     let ty_doc = match &ty.val {
@@ -3894,6 +3921,100 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Move a caller's pointer slot across the typed/raw view for the duration
+    /// of a call.
+    ///
+    /// `f((void const ** )&typedLocal)` hands the callee the caller's own slot
+    /// at an erased type so it can write a pointer into it without knowing the
+    /// pointee. `core_cell` retypes the slot as a term, but the ownership does
+    /// not follow on its own: `pts_to (core_cell r)` and `pts_to r` are
+    /// different slprops over what is nonetheless one location, so the prover
+    /// has to be walked across and back. Emit `to_core_cell` before the call
+    /// and `of_core_cell` after, which leaves the caller holding its slot at
+    /// the type it declared it with, now containing whatever the callee wrote.
+    ///
+    /// An `_out` parameter takes the uninitialized pair, since a slot the
+    /// callee is about to fill has no value to carry across.
+    fn core_cell_arg_ghosts(
+        &mut self,
+        env: &Env,
+        args: &[Rc<Expr>],
+        fn_decl: &FnDecl,
+        out: &mut NullableGhosts,
+    ) {
+        for (i, arg) in args.iter().enumerate() {
+            let Some(param) = fn_decl.args.get(i) else {
+                continue;
+            };
+            let TypeT::Pointer(param_pointee, PointerKind::Ref | PointerKind::Unknown) =
+                &env.vtype_whnf(param.ty.clone().into()).val
+            else {
+                continue;
+            };
+            if !matches!(
+                env.vtype_whnf(param_pointee.clone().into()).val,
+                TypeT::Pointer(_, PointerKind::Core)
+            ) {
+                continue;
+            }
+            // Only the cell view needs the shift. An argument that is already a
+            // raw cell, or that is not a pointer to a typed pointer, is passed
+            // as it stands.
+            let inner = Self::strip_pointer_casts(arg);
+            let Ok(arg_ty) = env.infer_expr(inner) else {
+                continue;
+            };
+            let TypeT::Pointer(arg_pointee, PointerKind::Ref | PointerKind::Unknown) =
+                &env.vtype_whnf(arg_ty.clone().into()).val
+            else {
+                continue;
+            };
+            if !matches!(
+                env.vtype_whnf(arg_pointee.clone().into()).val,
+                TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+            ) {
+                continue;
+            }
+            let arg_doc = parens(self.emit_rvalue(env, inner));
+            // An out-parameter is uninitialized going in and written by the
+            // time it comes back, so the two halves of the shift are not
+            // symmetric: hand over an empty slot, take back a full one. C
+            // locals passed this way are usually initialized to NULL first, so
+            // the empty slot is reached by forgetting that value rather than by
+            // never having had one; `to_core_cell_out` takes either.
+            let (to_shift, of_shift) = match param.mode {
+                ParamMode::Out => (
+                    "Pulse.Lib.C.CoreRef.to_core_cell_out ",
+                    "Pulse.Lib.C.CoreRef.of_core_cell ",
+                ),
+                _ => (
+                    "Pulse.Lib.C.CoreRef.to_core_cell ",
+                    "Pulse.Lib.C.CoreRef.of_core_cell ",
+                ),
+            };
+            out.before.push(
+                Doc::text(to_shift.to_string())
+                    .append(arg_doc.clone())
+                    .append(Doc::text(";")),
+            );
+            out.after.push(
+                Doc::text(of_shift.to_string())
+                    .append(arg_doc)
+                    .append(Doc::text(";")),
+            );
+        }
+    }
+
+    /// The argument as written, with the pointer casts that got it to the
+    /// callee's type peeled off, so the shift names the caller's own slot.
+    fn strip_pointer_casts(e: &Rc<Expr>) -> &Rc<Expr> {
+        let mut cur = e;
+        while let ExprT::Cast(inner, _) = &cur.val {
+            cur = inner;
+        }
+        cur
+    }
+
     fn nullable_arg_ghosts_expr(&mut self, env: &Env, e: &Expr, out: &mut NullableGhosts) {
         match &e.val {
             ExprT::UnOp(_, a) | ExprT::Cast(a, _) | ExprT::Deref(a) | ExprT::Ref(a) => {
@@ -3910,6 +4031,7 @@ impl<'a> Emitter<'a> {
                 let Some(fn_decl) = env.lookup_fn(f) else {
                     return;
                 };
+                self.core_cell_arg_ghosts(env, args, &fn_decl, out);
                 for (i, arg) in args.iter().enumerate() {
                     let Some(param) = fn_decl.args.get(i) else {
                         continue;
@@ -5536,10 +5658,74 @@ impl<'a> Emitter<'a> {
         )
     }
 
+    /// A constant pinning `c_sizeof` for a translated record type to the size
+    /// clang computed for it under the target ABI.
+    ///
+    /// This is emitted into the record's own generated module, so the size of
+    /// a given type is introduced exactly once, for that one type. Stating it
+    /// at each `sizeof` site instead would be unsound: nothing would stop two
+    /// sites from claiming different sizes for the same type.
+    ///
+    /// It is a refinement-typed constant rather than a lemma with an `SMTPat`
+    /// because the size of a specific type is a ground fact: a trigger for it
+    /// would contain no variable, which Z3 warns about and F* then rejects.
+    fn emit_abi_size_constant(&mut self, type_name: &Doc, abi_size: Option<u64>) -> Option<Doc> {
+        let size = abi_size?;
+        let sizeof = parens(
+            Doc::text("Pulse.Lib.C.Sizeof.c_sizeof")
+                .append(Doc::line())
+                .append(type_name.clone())
+                .group(),
+        );
+        Some(
+            Doc::text("assume")
+                .append(Doc::hardline())
+                .append("val ")
+                .append(type_name.clone())
+                .append("__c_sizeof")
+                .append(Doc::hardline())
+                .append(
+                    Doc::text(": (n: FStar.SizeT.t{")
+                        .append(Doc::text("FStar.SizeT.v n == "))
+                        .append(Doc::text(size.to_string()))
+                        .append(Doc::text(" /\\ n == "))
+                        .append(sizeof)
+                        .append("})")
+                        .nest(2),
+                ),
+        )
+    }
+
+    /// The name of the ABI-size constant for `ty`, when `ty` resolves to a
+    /// record whose size clang reported.
+    fn record_sizeof_constant(&mut self, env: &Env, ty: &Rc<Type>) -> Option<Doc> {
+        let whnf = env.vtype_whnf(ty.clone().into());
+        let k = match &whnf.val {
+            TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                env.lookup_struct(n).filter(|d| d.abi_size.is_some())?;
+                TypeRefKind::Struct(n.clone())
+            }
+            TypeT::TypeRef(TypeRefKind::Union(n)) => {
+                env.lookup_union(n).filter(|d| d.abi_size.is_some())?;
+                TypeRefKind::Union(n.clone())
+            }
+            _ => return None,
+        };
+        Some(
+            self.emit_name(Name::TypeRef((&k).into()))
+                .append("__c_sizeof"),
+        )
+    }
+
     fn emit_structdefn(
         &mut self,
         env: &Env,
-        decl @ StructDefn { name, fields, .. }: &StructDefn,
+        decl @ StructDefn {
+            name,
+            fields,
+            abi_size,
+            ..
+        }: &StructDefn,
     ) -> Doc {
         let env = &mut env.clone();
         env.push_struct(decl.clone());
@@ -5588,6 +5774,10 @@ impl<'a> Emitter<'a> {
                 self.emit_name(Name::TypeRefSizeofPos(k.into())),
                 struct_type_name.clone(),
             ));
+        }
+
+        if let Some(c) = self.emit_abi_size_constant(&struct_type_name, *abi_size) {
+            ses.push(c);
         }
 
         // Generate struct spec type and pred by gathering slprops from fields
@@ -6546,7 +6736,15 @@ impl<'a> Emitter<'a> {
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
     }
 
-    fn emit_uniondefn(&mut self, env: &Env, decl @ UnionDefn { name, fields }: &UnionDefn) -> Doc {
+    fn emit_uniondefn(
+        &mut self,
+        env: &Env,
+        decl @ UnionDefn {
+            name,
+            fields,
+            abi_size,
+        }: &UnionDefn,
+    ) -> Doc {
         let env = &mut env.clone();
         env.push_union(decl.clone());
 
@@ -6590,6 +6788,10 @@ impl<'a> Emitter<'a> {
                 self.emit_name(Name::TypeRefSizeofPos(k.into())),
                 union_type_name.clone(),
             ));
+        }
+
+        if let Some(c) = self.emit_abi_size_constant(&union_type_name, *abi_size) {
+            ses.push(c);
         }
 
         // Emit predicate (emp for MVP)
