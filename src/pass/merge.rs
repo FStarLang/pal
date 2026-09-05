@@ -570,7 +570,10 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         tu.decls.remove(i);
     }
 
-    // === Phase 3: Order type definitions before their dependents ===
+    // === Phase 3: Break declaration cycles through pointer typedefs ===
+    inline_cyclic_typedefs(tu);
+
+    // === Phase 4: Order type definitions before their dependents ===
     reorder_type_deps(tu);
 }
 
@@ -813,6 +816,249 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
         StmtT::Return(None) | StmtT::Break | StmtT::Continue | StmtT::Goto(_) | StmtT::Error => {}
     }
 }
+/// The type references a type-defining declaration makes in its own body,
+/// using the same approximation as the emission-order graph.
+fn collect_type_decl_refs(decl: &Decl, out: &mut Vec<TypeKey>) {
+    match &decl.val {
+        DeclT::Typedef(t) => collect_type_refs(&t.body, out),
+        DeclT::StructDefn(s) => {
+            collect_type_refs(&s.refines, out);
+            for f in &s.fields {
+                collect_type_refs(&f.val.logical_type(&f.loc), out);
+            }
+        }
+        DeclT::UnionDefn(u) => {
+            for f in &u.fields {
+                collect_type_refs(&f.val.logical_type(&f.loc), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The key of a type-defining declaration, or `None` for any other kind.
+fn type_decl_key(decl: &Decl) -> Option<TypeKey> {
+    match &decl.val {
+        DeclT::Typedef(t) => Some((TYPEDEF_NS, t.name.val.clone())),
+        DeclT::StructDefn(s) => Some((STRUCT_NS, s.name.val.clone())),
+        DeclT::UnionDefn(u) => Some((UNION_NS, u.name.val.clone())),
+        _ => None,
+    }
+}
+
+/// Replace every reference to a typedef named in `subst` with what the typedef
+/// stands for, keeping the use site's location. Returns whether anything was
+/// replaced. The substituted body is not descended into: it comes from a
+/// declaration that is itself rewritten if it needs to be.
+fn subst_typedefs_in_place(ty: &mut Type, subst: &HashMap<Rc<str>, Rc<Type>>) -> bool {
+    if let TypeT::TypeRef(TypeRefKind::Typedef(name)) = &ty.val {
+        if let Some(body) = subst.get(&name.val) {
+            let loc = ty.loc.clone();
+            *ty = (**body).clone();
+            ty.loc = loc;
+            return true;
+        }
+    }
+    match &mut ty.val {
+        TypeT::Pointer(inner, _)
+        | TypeT::FixedArray(inner, _)
+        | TypeT::FlexArray(inner)
+        | TypeT::Plain(inner)
+        | TypeT::Nullable(inner)
+        | TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _) => subst_typedefs_in_place(Rc::make_mut(inner), subst),
+        TypeT::FnPtr { args, ret } => {
+            let mut changed = false;
+            for a in args {
+                changed |= subst_typedefs_in_place(Rc::make_mut(a), subst);
+            }
+            changed | subst_typedefs_in_place(Rc::make_mut(ret), subst)
+        }
+        TypeT::Void
+        | TypeT::Bool
+        | TypeT::Int { .. }
+        | TypeT::Float { .. }
+        | TypeT::SizeT
+        | TypeT::PtrdiffT
+        | TypeT::SpecInt
+        | TypeT::SpecNat
+        | TypeT::SLProp
+        | TypeT::TypeRef(_)
+        | TypeT::Unknown
+        | TypeT::Error => false,
+    }
+}
+
+/// Strongly connected components of a directed graph given as adjacency lists,
+/// returned as a component id per node. Tarjan's algorithm, driven by an
+/// explicit stack so that a long chain of type definitions cannot overflow the
+/// real one.
+fn strongly_connected_components(adj: &[Vec<usize>]) -> Vec<usize> {
+    let n = adj.len();
+    let mut index = vec![usize::MAX; n];
+    let mut lowlink = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut comp = vec![usize::MAX; n];
+    let mut stack: Vec<usize> = Vec::new();
+    // (node, index of the next outgoing edge to explore)
+    let mut call: Vec<(usize, usize)> = Vec::new();
+    let mut next_index = 0usize;
+    let mut next_comp = 0usize;
+
+    for root in 0..n {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        index[root] = next_index;
+        lowlink[root] = next_index;
+        next_index += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        call.push((root, 0));
+        while let Some((v, edge)) = call.pop() {
+            if edge < adj[v].len() {
+                call.push((v, edge + 1));
+                let w = adj[v][edge];
+                if index[w] == usize::MAX {
+                    index[w] = next_index;
+                    lowlink[w] = next_index;
+                    next_index += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    call.push((w, 0));
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(index[w]);
+                }
+                continue;
+            }
+            if lowlink[v] == index[v] {
+                while let Some(w) = stack.pop() {
+                    on_stack[w] = false;
+                    comp[w] = next_comp;
+                    if w == v {
+                        break;
+                    }
+                }
+                next_comp += 1;
+            }
+            if let Some(&(parent, _)) = call.last() {
+                lowlink[parent] = lowlink[parent].min(lowlink[v]);
+            }
+        }
+    }
+    comp
+}
+
+/// Break declaration cycles created by a pointer typedef declared *before* the
+/// struct it points to — the standard C idiom for a self-referential type:
+///
+/// ```c
+/// typedef struct b_t *bptr;
+/// typedef struct b_t { int tag; bptr next; } b_t;
+/// ```
+///
+/// Every declaration is emitted as its own F* module, so a struct naming the
+/// typedef while the typedef names the struct back is a module cycle, which F*
+/// rejects. A typedef is only a name for its body, so the cycle is broken by
+/// replacing the typedef inside the struct's own fields with what it stands
+/// for. That is precisely the shape the source would have had with the field
+/// spelled `struct b_t *next`, where the self-reference stays inside the
+/// struct's own module.
+///
+/// Cycles that survive — mutually pointer-referential structs, which no typedef
+/// stands between — are left alone; `_core_ref` is the tool for those.
+fn inline_cyclic_typedefs(tu: &mut TranslationUnit) {
+    // Inlining one typedef can expose another one behind it, so iterate. Each
+    // round strictly shortens the typedef chain from a struct back to itself,
+    // so this terminates; the bound is only a guard against a graph shape that
+    // does not shrink.
+    for _ in 0..=tu.decls.len() {
+        if !inline_cyclic_typedefs_round(tu) {
+            return;
+        }
+    }
+}
+
+/// One round of [`inline_cyclic_typedefs`]. Returns whether it changed anything.
+fn inline_cyclic_typedefs_round(tu: &mut TranslationUnit) -> bool {
+    // Nodes are the type-defining declarations, edges their type references.
+    let mut decl_of_node: Vec<usize> = Vec::new();
+    let mut node_of_key: HashMap<TypeKey, usize> = HashMap::new();
+    for (i, d) in tu.decls.iter().enumerate() {
+        if let Some(key) = type_decl_key(d) {
+            node_of_key.entry(key).or_insert_with(|| {
+                decl_of_node.push(i);
+                decl_of_node.len() - 1
+            });
+        }
+    }
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); decl_of_node.len()];
+    for (v, &i) in decl_of_node.iter().enumerate() {
+        let mut refs: Vec<TypeKey> = Vec::new();
+        collect_type_decl_refs(&tu.decls[i], &mut refs);
+        for r in refs {
+            if let Some(&w) = node_of_key.get(&r) {
+                if w != v {
+                    adj[v].push(w);
+                }
+            }
+        }
+    }
+
+    let comp = strongly_connected_components(&adj);
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (v, &c) in comp.iter().enumerate() {
+        members.entry(c).or_default().push(v);
+    }
+
+    let mut changed = false;
+    for group in members.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        // What the typedefs taking part in this cycle stand for.
+        let mut subst: HashMap<Rc<str>, Rc<Type>> = HashMap::new();
+        for &v in group {
+            if let DeclT::Typedef(t) = &tu.decls[decl_of_node[v]].val {
+                subst.insert(t.name.val.clone(), t.body.clone());
+            }
+        }
+        if subst.is_empty() {
+            continue;
+        }
+        // Inline them in the struct and union definitions of the same cycle,
+        // which is the edge that has to go: the typedef stands for a pointer to
+        // the struct, so the struct is what must be emitted first.
+        for &v in group {
+            match &mut tu.decls[decl_of_node[v]].val {
+                DeclT::StructDefn(s) => {
+                    changed |= subst_typedefs_in_place(Rc::make_mut(&mut s.refines), &subst);
+                    for f in &mut s.fields {
+                        changed |= subst_field_typedefs(&mut f.val, &subst);
+                    }
+                }
+                DeclT::UnionDefn(u) => {
+                    for f in &mut u.fields {
+                        changed |= subst_field_typedefs(&mut f.val, &subst);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    changed
+}
+
+fn subst_field_typedefs(field: &mut FieldT, subst: &HashMap<Rc<str>, Rc<Type>>) -> bool {
+    match field {
+        FieldT::Plain { ty, .. } | FieldT::BitField { ty, .. } => {
+            subst_typedefs_in_place(Rc::make_mut(ty), subst)
+        }
+    }
+}
+
 /// emitted after the type definitions it references by-value or by-pointer.
 ///
 /// This is required because emission populates the spec-parameter tables for a
