@@ -619,6 +619,12 @@ struct ExBinding {
 }
 
 /// A branch condition that tests a `_nullable` pointer against null.
+#[derive(Default)]
+struct NullableGhosts {
+    before: Vec<Doc>,
+    after: Vec<Doc>,
+}
+
 struct NullableGuard {
     /// The pointer being tested.
     pointer: Rc<Expr>,
@@ -650,6 +656,13 @@ enum ValNaming<'a> {
     /// Used for function signatures and old-style preds.
     Standard {
         quote: bool,
+        /// Base identifier for generated val names. `None` derives it from the
+        /// expression being described, which is what a signature clause wants:
+        /// the value is named after the parameter it belongs to. A caller that
+        /// describes a parameter's resource through some *other* expression --
+        /// the local the null test binds, say -- has to say which parameter the
+        /// names belong to, or it invents names no signature ever bound.
+        base: Option<Rc<IdentT>>,
         bindings: &'a mut Vec<ExBinding>,
     },
     /// Spec record: val references become `spec_param.field_name`.
@@ -1493,13 +1506,14 @@ impl<'a> Emitter<'a> {
     /// Returns the Doc to use as the val reference in the slprop.
     fn push_val_binding(&mut self, naming: &mut ValNaming, this: &Rc<Expr>, ty: Doc) -> Doc {
         match naming {
-            ValNaming::Standard { quote, bindings } => {
+            ValNaming::Standard {
+                quote,
+                base,
+                bindings,
+            } => {
                 let idx = bindings.len() as u32;
-                let raw = Doc::text(
-                    self.nm
-                        .mangle(&Name::Val(extract_base_ident(this), idx))
-                        .to_string(),
-                );
+                let base_ident = base.clone().unwrap_or_else(|| extract_base_ident(this));
+                let raw = Doc::text(self.nm.mangle(&Name::Val(base_ident, idx)).to_string());
                 let val_name = if *quote {
                     Doc::text("'").append(raw)
                 } else {
@@ -1544,7 +1558,9 @@ impl<'a> Emitter<'a> {
     /// Returns the Doc to use as the val reference in the slprop.
     fn push_val_binding_explicit(&mut self, naming: &mut ValNaming, raw_name: Doc, ty: Doc) -> Doc {
         match naming {
-            ValNaming::Standard { quote, bindings } => {
+            ValNaming::Standard {
+                quote, bindings, ..
+            } => {
                 let val_name = if *quote {
                     Doc::text("'").append(raw_name)
                 } else {
@@ -1855,6 +1871,7 @@ impl<'a> Emitter<'a> {
                 if existential {
                     let mut local_naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut local_bindings,
                     };
                     self.emit_type_slprop_inner(
@@ -1910,6 +1927,7 @@ impl<'a> Emitter<'a> {
         let mut props = vec![];
         let mut naming = ValNaming::Standard {
             quote: false,
+            base: None,
             bindings: &mut bindings,
         };
         emit_slprops(self, variant, &mut naming, &mut props);
@@ -3823,7 +3841,152 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// Strip casts and parentheses down to the null pointer constant, if that
+    /// is what an argument is.
+    fn is_null_constant(e: &Expr) -> bool {
+        match &e.val {
+            ExprT::Cast(inner, _) => Self::is_null_constant(inner),
+            ExprT::IntLit(n, _) => **n == BigInt::ZERO,
+            _ => false,
+        }
+    }
+
+    /// The ghost steps a statement owes around a call that supplies an
+    /// argument for a `_nullable` parameter, before the call and after it.
+    ///
+    /// A callee that takes an optional pointer states its half of the bargain
+    /// under a guard: it asks for `unless_null p (..)` and gives back
+    /// `unless_null p (..)`. That is right for the callee and wrong for the
+    /// caller, which knows which side of the test its own argument is on and
+    /// wants the resource, or nothing, rather than a guarded maybe. The guard
+    /// is deliberately opaque -- see `Pulse.Lib.C.Nullable` -- so neither end
+    /// of it opens by itself, and the resource the caller handed over stays
+    /// out of reach afterwards. Nothing about that is conditional: it happens
+    /// on every call that supplies or declines an optional parameter, which in
+    /// such code is most calls between conversions.
+    ///
+    /// Declining is the easy half: `p` is `null`, the resource is nothing, and
+    /// the elimination just discards the guard.
+    ///
+    /// Supplying takes a fact rather than a resource. `elim_unless_null_ref`
+    /// needs to know the pointer is not null, and the only way to learn that
+    /// is from the resource itself -- which is exactly what is inside the
+    /// guard. So the fact is established *before* the call, while the resource
+    /// is still unguarded, and carried across the call as a pure proposition.
+    /// Which lemma establishes it depends on what the caller is holding, and
+    /// the callee's parameter mode says: an `_out` parameter is handed
+    /// uninitialized storage, anything else an initialized cell.
+    fn nullable_arg_ghosts(&mut self, env: &Env, stmt: &Stmt) -> (Vec<Doc>, Vec<Doc>) {
+        let mut ghosts = NullableGhosts::default();
+        self.nullable_arg_ghosts_stmt(env, stmt, &mut ghosts);
+        (ghosts.before, ghosts.after)
+    }
+
+    fn nullable_arg_ghosts_stmt(&mut self, env: &Env, stmt: &Stmt, out: &mut NullableGhosts) {
+        match &stmt.val {
+            StmtT::Assign(l, r) => {
+                self.nullable_arg_ghosts_expr(env, l, out);
+                self.nullable_arg_ghosts_expr(env, r, out);
+            }
+            StmtT::Call(e) | StmtT::Return(Some(e)) => self.nullable_arg_ghosts_expr(env, e, out),
+            StmtT::Let(_, _, e) => self.nullable_arg_ghosts_expr(env, e, out),
+            _ => {}
+        }
+    }
+
+    fn nullable_arg_ghosts_expr(&mut self, env: &Env, e: &Expr, out: &mut NullableGhosts) {
+        match &e.val {
+            ExprT::UnOp(_, a) | ExprT::Cast(a, _) | ExprT::Deref(a) | ExprT::Ref(a) => {
+                self.nullable_arg_ghosts_expr(env, a, out)
+            }
+            ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+                self.nullable_arg_ghosts_expr(env, a, out);
+                self.nullable_arg_ghosts_expr(env, b, out);
+            }
+            ExprT::FnCall(f, args) => {
+                for a in args.iter() {
+                    self.nullable_arg_ghosts_expr(env, a, out);
+                }
+                let Some(fn_decl) = env.lookup_fn(f) else {
+                    return;
+                };
+                for (i, arg) in args.iter().enumerate() {
+                    let Some(param) = fn_decl.args.get(i) else {
+                        continue;
+                    };
+                    let TypeT::Nullable(inner) = &param.ty.val else {
+                        continue;
+                    };
+                    let inner: Rc<Type> = inner.clone().into();
+                    // Only a plain pointer round-trips today. An optional
+                    // array argument still has to be opened by hand.
+                    if !matches!(
+                        &env.vtype_whnf(inner.into()).val,
+                        TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+                    ) {
+                        continue;
+                    }
+                    if Self::is_null_constant(arg) {
+                        out.after
+                            .push(Doc::text("Pulse.Lib.C.Nullable.elim_null_ref null;"));
+                        continue;
+                    }
+                    // Only when PAL is the one holding the resource. Two
+                    // arguments look identical here and are not: a pointer
+                    // whose ownership PAL emitted, which it can take back
+                    // afterwards, and one whose ownership was written by hand
+                    // in the enclosing contract, which it cannot.
+                    //
+                    // `_nullable` is the forwarding case -- an optional
+                    // argument passed straight through from an optional
+                    // parameter, where the caller is in no position to say
+                    // which way the test goes, that being the whole point of
+                    // forwarding it. `_plain` is the hand-written case: PAL
+                    // emits no ownership at all for it, so there is nothing
+                    // here to take back and the enclosing contract's own
+                    // `unless_null` would be eliminated out from under it.
+                    let Ok(arg_ty) = env.infer_expr(arg) else {
+                        continue;
+                    };
+                    if matches!(arg_ty.val, TypeT::Nullable(_) | TypeT::Plain(_)) {
+                        continue;
+                    }
+                    let arg_doc = parens(self.emit_rvalue(env, arg));
+                    let not_null = match param.mode {
+                        ParamMode::Out => "Pulse.Lib.Reference.pts_to_uninit_not_null",
+                        _ => "Pulse.Lib.Reference.pts_to_not_null",
+                    };
+                    out.before.push(
+                        Doc::text(not_null.to_string())
+                            .append(Doc::text(" "))
+                            .append(arg_doc.clone())
+                            .append(Doc::text(";")),
+                    );
+                    out.after.push(
+                        Doc::text("Pulse.Lib.C.Nullable.elim_unless_null_ref ".to_string())
+                            .append(arg_doc)
+                            .append(Doc::text(";")),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
+        let (before, after) = self.nullable_arg_ghosts(env, stmt);
+        let mut doc = Doc::nil();
+        for g in before {
+            doc = doc.append(g).append(Doc::hardline());
+        }
+        doc = doc.append(self.emit_stmt_core(env, stmt));
+        for g in after {
+            doc = doc.append(Doc::hardline()).append(g);
+        }
+        doc
+    }
+
+    fn emit_stmt_core(&mut self, env: &Env, stmt: &Stmt) -> Doc {
         annotated(stmt, || {
             match &stmt.val {
                 StmtT::Call(v) => {
@@ -4845,6 +5008,7 @@ impl<'a> Emitter<'a> {
             let mut props = vec![];
             let mut naming = ValNaming::Standard {
                 quote,
+                base: None,
                 bindings: &mut bindings,
             };
             let this = mk_rvar(name);
@@ -4913,11 +5077,24 @@ impl<'a> Emitter<'a> {
         };
         // A `preserves` names the value with a signature-level implicit, which
         // is in scope in the body; the other modes bind it existentially.
+        //
+        // For a preserved (const) pointer that implicit is the *only* value the
+        // signature will accept back: `preserves unless_null p (.. 'val_p_0)`
+        // asks for the value the caller handed in, not for some value. So the
+        // payload has to name it exactly as the signature does -- off the
+        // parameter, not off the local the null test binds -- and must not
+        // re-quantify it, or the branch gives back an `exists*` where the
+        // signature wanted `'val_p_0` and the join fails.
         let quote = matches!(mode, ParamMode::Const);
+        let base = match mode {
+            ParamMode::Const => Some(extract_base_ident(&guard.pointer)),
+            _ => None,
+        };
         let mut bindings = vec![];
         let mut props = vec![];
         let mut naming = ValNaming::Standard {
             quote,
+            base,
             bindings: &mut bindings,
         };
         self.emit_type_slprop(
@@ -4931,6 +5108,9 @@ impl<'a> Emitter<'a> {
         drop(naming);
         if props.is_empty() {
             return None;
+        }
+        if quote {
+            return Some(parens(mk_star(props)));
         }
         Some(parens(wrap_exists(&bindings, props)))
     }
@@ -5733,6 +5913,7 @@ impl<'a> Emitter<'a> {
                 let mut field_bindings = vec![];
                 let mut naming = ValNaming::Standard {
                     quote: false,
+                    base: None,
                     bindings: &mut field_bindings,
                 };
                 self.emit_type_slprop(
@@ -6968,6 +7149,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -6995,6 +7177,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7013,6 +7196,7 @@ impl<'a> Emitter<'a> {
                     let mut uninit_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut uninit_bindings,
                     };
                     self.emit_type_slprop(
@@ -7031,6 +7215,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7148,6 +7333,7 @@ impl<'a> Emitter<'a> {
             let mut ret_props = vec![];
             let mut naming = ValNaming::Standard {
                 quote: false,
+                base: None,
                 bindings: &mut ret_bindings,
             };
             self.emit_type_slprop(
@@ -7360,6 +7546,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7394,6 +7581,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7413,6 +7601,7 @@ impl<'a> Emitter<'a> {
                     let mut uninit_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut uninit_bindings,
                     };
                     self.emit_type_slprop(
@@ -7433,6 +7622,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -7466,6 +7656,7 @@ impl<'a> Emitter<'a> {
         let mut ret_props = vec![];
         let mut naming = ValNaming::Standard {
             quote: false,
+            base: None,
             bindings: &mut ret_bindings,
         };
         self.emit_type_slprop(
@@ -8120,6 +8311,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: true,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
@@ -8138,6 +8330,7 @@ impl<'a> Emitter<'a> {
                     let mut type_props = vec![];
                     let mut naming = ValNaming::Standard {
                         quote: false,
+                        base: None,
                         bindings: &mut type_bindings,
                     };
                     self.emit_type_slprop(
