@@ -1212,15 +1212,35 @@ new facts about memory.
    `SMTPat`, so a `size_t` addition whose bound the source has established does
    not need a hint at every use.
 
-   `memset` is the one left, and it is not just work. Zeroing an array wants a
-   fill in the array layer, which does not exist yet. Zeroing a whole object
+   `memset` came next, and it splits cleanly in two. Zeroing a whole object
    raises the padding question this document has already asked once: a
    structure write sets the field bytes, but `memset` sets the padding too, so
-   the two are not the same operation at the byte level and the second is the
-   one that needs saying.
+   the two are not the same operation at the byte level. It turns out not to
+   matter, and for a reason worth recording. Padding is already its own slprop,
+   `struct_S_padding a p`, which says the bytes are owned and says nothing
+   about their contents; both operations leave that untouched. So translating
+   the `memset` as a write of the type's zero value forgets that the padding
+   became zero, and forgetting is the safe direction -- the result is a weaker
+   postcondition, not a wrong one.
 
-   As of this milestone: **725 specifications, 446 of them with real bodies,
-   279 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   That needed a `struct_S_write` beside the existing `struct_S_write_uninit`,
+   which is `struct_S_forget` followed by the uninitialised write. Composing
+   the two rather than writing the fields in place is not a detour: both need
+   the full permission anyway, and it keeps the padding handled in one place
+   instead of two. The zero value itself is built structurally, and two types
+   are deliberately absent from it. A pointer is absent because an all-zero
+   pointer is the null pointer only on a target that says so, and the byte
+   layer has no such assumption. A union is absent for a better reason: zeroing
+   it is a statement about bytes, and which value that names depends on which
+   member is read afterwards.
+
+   The other half -- `memset(a, 0, n * sizeof(T))` over an array -- wants a
+   fill in the array layer, which does not exist yet, and a structure with an
+   array field is refused for the same reason. That is ordinary work and is
+   left for next.
+
+   As of this milestone: **725 specifications, 451 of them with real bodies,
+   274 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

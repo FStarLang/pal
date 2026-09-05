@@ -1950,6 +1950,18 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         sn = sn,
         write = write
     );
+
+    // Overwriting a whole structure that already holds a value. Going through
+    // `_forget` rather than writing the fields in place is not a detour: both
+    // need the full permission, and this way the padding is handled in exactly
+    // one place instead of two.
+    c += &format!(
+        "fn {sn}_write (a: ptr) (x: {sn}) (#y: erased {sn})\n\
+         \x20 requires {sn}_pts_to a 1.0R y\n\
+         \x20 ensures  {sn}_pts_to a 1.0R x\n\
+         {{\n  {sn}_forget a;\n  {sn}_write_uninit a x;\n}}\n\n",
+        sn = sn
+    );
     c
 }
 
@@ -4674,6 +4686,29 @@ impl<'a> Body<'a> {
                 | ExprT::PostIncr(..)
                 | ExprT::PreDecr(..)
                 | ExprT::PostDecr(..) => self.rvalue(e).map(|_| ()),
+                // Zeroing a whole object is a write of the type's zero value.
+                // That is weaker than what `memset` really does, because it
+                // says nothing about the padding, and weaker is the safe
+                // direction: the padding stays owned and unspecified either
+                // way, which is exactly what `struct_S_padding` already says.
+                ExprT::MemsetZero(ty, p) => {
+                    // A structure is written whole, which needs the generated
+                    // storage operations; a struct with an array field has
+                    // none, because filling the array is the other half of
+                    // `memset` and is not translated yet.
+                    if matches!(
+                        &peel(self.tds, ty).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(..))
+                    ) && !storable_struct(self.tds, ty)
+                    {
+                        return Err(format!("a `memset` of {}", describe(ty)));
+                    }
+                    let z = zero_value(self.tds, ty)?;
+                    let pn = palow_name(self.tds, ty)
+                        .ok_or_else(|| format!("a `memset` of {}", describe(ty)))?;
+                    let place = deref_of(p);
+                    self.store(&place, &pn, &z)
+                }
                 _ => Err(format!(
                     "a call in statement position that is not one: {}",
                     expr_kind(e)
@@ -5131,6 +5166,52 @@ fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
     })
 }
 
+/// The all-zero value of a C type, as an F\* term. This is what `memset(p, 0,
+/// sizeof(T))` leaves behind, and it exists as a separate function from the
+/// initialiser machinery because there is no expression to translate.
+///
+/// A pointer is deliberately absent: an all-zero pointer is the null pointer
+/// only on a target that says so, and Palow does not have that assumption in
+/// the byte layer. A union is absent for a better reason -- zeroing it is a
+/// statement about bytes, and the value it names afterwards depends on which
+/// member is read.
+fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
+    let t = peel(tds, ty);
+    match &t.val {
+        TypeT::Int { signed, width } => Ok(format!("0{}", int_suffix(*signed, *width)?)),
+        TypeT::SizeT => Ok("0sz".to_string()),
+        TypeT::Bool => Ok("false".to_string()),
+        TypeT::TypeRef(TypeRefKind::Struct(name)) => {
+            let Some(si) = tds.structs.get(&*name.val) else {
+                return Err(format!("a zeroed struct {}", name.val));
+            };
+            let mut vals = Vec::new();
+            for f in &si.fields {
+                vals.push(match &f.shape {
+                    FieldShape::One { .. } => {
+                        format!("fld_{} = {}", f.name, zero_value(tds, &f.ty)?)
+                    }
+                    // An array field's own type is the array, so the zero has
+                    // to be built at the element type and then replicated.
+                    FieldShape::Array { len, .. } => {
+                        let TypeT::FixedArray(elem, _) = &peel(tds, &f.ty).val else {
+                            return Err(format!("a zeroed field `{}`", f.name));
+                        };
+                        format!(
+                            "fld_{} = Seq.create {} {}",
+                            f.name,
+                            len,
+                            zero_value(tds, elem)?
+                        )
+                    }
+                });
+            }
+            Ok(format!("({{ {} }})", vals.join("; ")))
+        }
+        _ => Err(format!("a zeroed {}", describe(t))),
+    }
+}
+
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {
     let t = peel(tds, ty);
     let m = match &t.val {
@@ -5246,6 +5327,16 @@ struct Focus {
     open_write: Vec<String>,
     close_read: Vec<String>,
     close_write: Vec<String>,
+}
+
+/// The lvalue a pointer expression denotes. `&x` names `x` directly, and
+/// saying so keeps the ordinary variable path in `store` rather than sending
+/// `*(&x)` down the general-pointer one.
+fn deref_of(p: &Rc<Expr>) -> Rc<Expr> {
+    if let ExprT::Ref(inner) = &strip_vattr(p).val {
+        return inner.clone();
+    }
+    ExprT::Deref(p.clone()).with_loc(p.loc.clone())
 }
 
 /// Peel the virtual attributes `elab` wraps around an expression.
