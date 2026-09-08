@@ -692,6 +692,13 @@ impl<'a> Spec<'a> {
                 ));
             }
         }
+        // Negation is subtraction from zero, so it is undefined on overflow
+        // for the same reason and reads mathematically for the same reason.
+        if let ExprT::UnOp(UnOp::Neg, inner) = &strip_vattr(e).val
+            && matches!(self.tds.resolve(&ty).val, TypeT::Int { signed: true, .. })
+        {
+            return Ok(format!("(0 - {})", self.num(inner, w)?));
+        }
         match self.int_module(&ty) {
             Some(m) => Ok(format!("({}.v {})", m, self.value(e, w)?)),
             None => self.value(e, w),
@@ -769,14 +776,22 @@ impl<'a> Spec<'a> {
                             }
                         }
                         if fstar_type(self.tds, &from) == fstar_type(self.tds, to) {
-                            self.value(inner, w)
-                        } else {
-                            Err(format!(
+                            return self.value(inner, w);
+                        }
+                        // Otherwise it is a real conversion, and it is the
+                        // same one the body would emit -- there is no reason
+                        // for a contract to describe a narrowing or a change
+                        // of signedness differently from the code it
+                        // constrains, and using one function for both is what
+                        // keeps the two provably about the same value.
+                        let v = self.value(inner, w)?;
+                        convert(peel(self.tds, &from), peel(self.tds, to), &v).map_err(|_| {
+                            format!(
                                 "a contract converting {} to {}",
                                 describe(self.tds.resolve(&from)),
                                 describe(to)
-                            ))
-                        }
+                            )
+                        })
                     }
                 }
             }
@@ -843,6 +858,20 @@ impl<'a> Spec<'a> {
                         Ok(format!("(0 - {})", self.value(inner, w)?))
                     }
                     (UnOp::Not, TypeT::Bool) => Ok(format!("(not {})", self.value(inner, w)?)),
+                    // Unsigned negation wraps and is defined, so a contract
+                    // can say it and means the same thing a body would.
+                    (
+                        UnOp::Neg,
+                        TypeT::Int {
+                            signed: false,
+                            width,
+                        },
+                    ) => Ok(format!(
+                        "(0{} `Pulse.Lib.C.UInt{}.sub_wrap` {})",
+                        int_suffix(false, *width)?,
+                        width,
+                        self.value(inner, w)?
+                    )),
                     _ => Err(format!(
                         "`{}` on {} in a contract",
                         op.to_str(),
@@ -2820,6 +2849,21 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         decayed.extend(t.refs.iter().cloned());
         touched.push((d.decl.name.val.to_string(), t));
     }
+    // A function's address can also be written down in a global's initialiser,
+    // where no body mentions it. That is in fact the interesting case -- a
+    // dispatch table is a constant, and the whole point of a constant one is
+    // that nothing has to store into it -- so a wrapper has to be emitted for
+    // everything the initialisers name, not just for what the code decays.
+    for decl in &tu.decls {
+        let DeclT::GlobalVar(gv) = &decl.val else {
+            continue;
+        };
+        if let Some(init) = &gv.init {
+            let mut t = Touched::default();
+            touch_expr(init, &mut t);
+            decayed.extend(t.refs.iter().cloned());
+        }
+    }
     // A global nothing in this file can store through is immutable for the
     // whole run whatever its declaration says, and handing its ownership
     // around would only lose what its initialiser said. Publishing its value
@@ -3276,6 +3320,28 @@ impl<'a> Body<'a> {
             }
             ExprT::Member(base, f) => {
                 let (ty, init) = self.const_path(base)?;
+                // A union initialiser names exactly one member, and reading
+                // any other one is not a constant read: the bytes are there,
+                // but what they mean at that type is a reinterpretation the
+                // initialiser did not decide.
+                if let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(self.tds, &ty).val {
+                    let fty =
+                        self.env
+                            .lookup_union(n)?
+                            .fields
+                            .iter()
+                            .find_map(|x| match &x.val {
+                                FieldT::Plain { name, ty } if *name.val == *f.val => {
+                                    Some(ty.clone())
+                                }
+                                _ => None,
+                            })?;
+                    let at = match init.as_ref().map(|x| &strip_vattr(x).val) {
+                        Some(ExprT::UnionInit(_, m, x)) if *m.val == *f.val => Some(x.clone()),
+                        _ => return None,
+                    };
+                    return Some((fty, at));
+                }
                 let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
                     return None;
                 };
@@ -3987,13 +4053,49 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// The function an expression must evaluate to, when that is decidable
+    /// here.
+    ///
+    /// A code address is the one pointer value whose *identity* the caller
+    /// needs, not just its bytes: `is_valid` says what the code at an address
+    /// does, and no points-to carries that. So an indirect call is translated
+    /// exactly when the emitter can say which function is being called --
+    /// either because a local slot was seen to be set to it, or because the
+    /// address was written down in something immutable, where a constant path
+    /// reaches it the same way a constant read of any other global does.
+    fn target_of(&self, e: &Expr) -> Option<String> {
+        if let Some(p) = self.unalias(e) {
+            return self.target_of(&p);
+        }
+        let e = strip_vattr(e);
+        if let Some(g) = self.fn_ref_of(e) {
+            return Some(g);
+        }
+        match &e.val {
+            ExprT::Var(v) if self.slots.iter().any(|s| s.name == *v.val) => self
+                .slots
+                .iter()
+                .rev()
+                .find(|s| s.name == *v.val)
+                .and_then(|s| s.holds_fn.clone()),
+            ExprT::Deref(inner) => self.target_of(inner),
+            _ => self.fn_ref_of(self.const_path(e)?.1?.as_ref()),
+        }
+    }
+
     /// Record that a slot now holds a known function's address.
     fn note_fn_store(&mut self, lhs: &Expr, rhs: &Expr) {
-        let (ExprT::Var(v), Some(g)) = (&strip_vattr(lhs).val, self.fn_ref_of(rhs)) else {
+        let ExprT::Var(v) = &strip_vattr(lhs).val else {
             return;
         };
+        // Whatever the slot held before, it holds this now. Copying one
+        // pointer into another carries the target across, and a store whose
+        // target is not known has to *clear* the note rather than leave the
+        // old one standing -- keeping it would be the one way this could go
+        // wrong.
+        let g = self.target_of(rhs);
         if let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val) {
-            self.slots[i].holds_fn = Some(g);
+            self.slots[i].holds_fn = g;
         }
     }
 
@@ -4438,18 +4540,12 @@ impl<'a> Body<'a> {
             // -- and keeps `is_valid` and the callee syntactically the same
             // term, since slprop matching will not do the reasoning.
             ExprT::FnPtrCall(f, args) => {
-                let g = match &strip_vattr(f).val {
-                    ExprT::Var(v) => self
-                        .slots
-                        .iter()
-                        .rev()
-                        .find(|s| s.name == *v.val)
-                        .and_then(|s| s.holds_fn.clone())
-                        .ok_or_else(|| {
-                            format!("a call through `{}`, whose target is not known here", v.val)
-                        })?,
-                    _ => return Err("a call through a function pointer".to_string()),
-                };
+                let g = self.target_of(f).ok_or_else(|| match &strip_vattr(f).val {
+                    ExprT::Var(v) => {
+                        format!("a call through `{}`, whose target is not known here", v.val)
+                    }
+                    _ => "a call through a function pointer".to_string(),
+                })?;
                 if !self.callees.get(&g).is_some_and(|c| c.fp) {
                     return Err(format!("`{}` has no function-pointer wrapper", g));
                 }

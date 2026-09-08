@@ -1382,8 +1382,56 @@ new facts about memory.
    machinery does not carry. Neither drops the function -- the contract is
    marked dropped, which is what already stops a caller from trusting it.
 
-   As of this milestone: **725 specifications, 504 of them with real bodies,
-   221 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   Which function an indirect call reaches is the one thing about a pointer
+   that no points-to can say. `is_valid` relates an *address* to what the code
+   there does, and the bytes of a code pointer say only where the code is, so
+   an indirect call translates exactly when the emitter can name the target.
+   It could previously do that only for a local slot it had watched being set.
+   Three more ways of knowing were missing, and each is the same observation
+   from a different angle.
+
+   The first is that a copy carries the target with it: `fp2 = fp1` makes
+   `fp2` reach whatever `fp1` reached. The rule that was there did not
+   propagate, and -- more importantly -- did not *clear*, so a slot reassigned
+   from something unknown kept its old note. Resolving the right-hand side
+   with the same function that resolves a call site fixes both at once, and
+   the clearing half is the one that matters, because keeping a stale note is
+   the only way this could go wrong.
+
+   The second is that the address is often not in a slot at all but written
+   down in something immutable, which is the interesting case: a dispatch
+   table is a constant, and the point of a constant one is that nothing ever
+   stores into it. That is a constant path into an immutable global, which
+   Palow already reads for any other type, so a call through `g_ops.op`
+   resolves the same way `g_ops.n` does. A union member is included, but only
+   the one the initialiser named: the bytes of the others are there, and what
+   they mean at another type is a reinterpretation the initialiser did not
+   decide.
+
+   The third is that a wrapper has to exist for what those initialisers name.
+   The decay analysis scanned function bodies only, so a table whose entries
+   are mentioned nowhere else got a call to a wrapper that was never emitted.
+
+   Two contract gaps were holding wrappers back for an unrelated reason, since
+   a wrapper reflects the contract and so is refused when the contract is. A
+   negation is a subtraction from zero, so it is undefined on overflow for the
+   same reason and reads mathematically for the same reason; and an integer
+   conversion in a contract is the conversion the body would emit, there being
+   no reason for a contract to describe a narrowing differently from the code
+   it constrains.
+
+   What is left in this cluster is genuinely harder and splits cleanly. A
+   callback parameter carries its target's contract in a `_refine`, which now
+   reaches the emitted specification -- but the ones in the corpus are written
+   as inline Pulse against the old model's module names, so they move with the
+   inline-Pulse work rather than before it. A field of a *local* struct needs
+   the note to be kept per path rather than per slot. And a function with a
+   pointer parameter still has no wrapper at all: the witness type `c` in
+   `valid` is `unit`, and threading a real one needs the caller to name the
+   witness at the call.
+
+   As of this milestone: **725 specifications, 515 of them with real bodies,
+   210 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -1397,10 +1445,11 @@ new facts about memory.
    The `admit()` reasons, in order, are what to do next. Inline Pulse (35) has
    to be re-expressed against the new predicates and is a source change, not a
    translator change. An indirect call through a pointer whose target the
-   emitter cannot see (10), a call through a function pointer (10) and a
-   missing `__fp` wrapper (5) are one problem: the target's contract has to
-   arrive some other way, and now that a `_refine` reaches the contract the
-   parameter can carry it. Signed arithmetic is refused on purpose: its
+   emitter cannot see (6), a call through a function pointer (4) and a missing
+   `__fp` wrapper (2) are three problems rather than one: a callback
+   parameter's contract arrives in a `_refine` written as inline Pulse, a
+   local struct's field needs the target noted per path, and a function with a
+   pointer parameter needs a witness type in its wrapper. Signed arithmetic is refused on purpose: its
    overflow obligation is discharged by the `_requires` clause, and emitting it
    where that clause did not translate would produce failures that say nothing
    about the memory model. Seven more are functions this file only *declares*,
