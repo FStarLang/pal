@@ -151,12 +151,8 @@ fn main() {
             std::process::exit(1);
         }
 
-        let (tu, file_diags) = clang::parse_file(
-            &file_name,
-            &cli.include_paths,
-            &cli.defines,
-            &mut *vfs,
-        );
+        let (tu, file_diags) =
+            clang::parse_file(&file_name, &cli.include_paths, &cli.defines, &mut *vfs);
         combined_tu
             .main_file_names
             .push(tu.main_file_names[0].clone());

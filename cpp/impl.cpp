@@ -1461,11 +1461,13 @@ public:
         // of which reflect anything about the C program's behaviour.
         //
         //   __builtin_expect(e, c)     is exactly `e`; the second argument is a
-        //                              branch-prediction hint with no semantics.
+        //                              branch-prediction hint with no
+        //                              semantics.
         //   __builtin_constant_p(e)    folds to 0. This is the conservative
         //                              answer -- it selects the general,
         //                              non-constant code path, which is the one
-        //                              that must be correct for arbitrary input.
+        //                              that must be correct for arbitrary
+        //                              input.
         StringRef bname = fd->getName();
         if (bname == "__builtin_expect" && c->getNumArgs() == 2) {
           return trRValue(c->getArg(0));
@@ -3287,8 +3289,8 @@ static void parse_file(RefMut<Ctx> ctx) {
   size_t defineCount = ctx.get_define_count();
   for (size_t i = defineCount; i-- > 0;) {
     std::string def = "-D" + toString(ctx.get_define(i));
-    Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
-        def.c_str(), ArgumentInsertPosition::BEGIN));
+    Tool.appendArgumentsAdjuster(
+        getInsertArgumentAdjuster(def.c_str(), ArgumentInsertPosition::BEGIN));
   }
 
   size_t includePathCount = ctx.get_include_path_count();
