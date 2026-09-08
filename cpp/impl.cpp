@@ -1454,6 +1454,30 @@ public:
       }
     } else if (auto *c = dyn_cast<CallExpr>(e)) {
       if (auto fd = c->getDirectCallee()) {
+        // GCC/Clang builtins that carry no program meaning.
+        //
+        // FunOS reaches these through likely()/unlikely() and assert(); left
+        // alone they account for ~15% of all translation errors in coco/, none
+        // of which reflect anything about the C program's behaviour.
+        //
+        //   __builtin_expect(e, c)     is exactly `e`; the second argument is a
+        //                              branch-prediction hint with no semantics.
+        //   __builtin_constant_p(e)    folds to 0. This is the conservative
+        //                              answer -- it selects the general,
+        //                              non-constant code path, which is the one
+        //                              that must be correct for arbitrary input.
+        StringRef bname = fd->getName();
+        if (bname == "__builtin_expect" && c->getNumArgs() == 2) {
+          return trRValue(c->getArg(0));
+        }
+        if (bname == "__builtin_expect_with_probability" &&
+            c->getNumArgs() == 3) {
+          return trRValue(c->getArg(0));
+        }
+        if (bname == "__builtin_constant_p" && c->getNumArgs() == 1) {
+          return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
+                            trQualType(e->getType(), e->getSourceRange()));
+        }
         // Detect free(ptr)
         if (fd->getName() == "free" && c->getNumArgs() == 1) {
           auto arg = c->getArg(0);
@@ -3250,9 +3274,25 @@ static void parse_file(RefMut<Ctx> ctx) {
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
-  // Add user-specified include paths
+  // Add user-specified include paths and preprocessor definitions.
+  //
+  // Each adjuster inserts at BEGIN, so applying them in forward order would
+  // reverse the user's ordering and make the *last* -I win. Include path order
+  // is significant -- it is what lets a caller shadow a project header -- so we
+  // walk backwards, leaving the final argv in the order the user gave.
+  //
+  // Defines are inserted before the include paths are prepended, so they end up
+  // after them in argv; -D and -I do not interact, so relative order is
+  // immaterial. What matters is that both precede the source file.
+  size_t defineCount = ctx.get_define_count();
+  for (size_t i = defineCount; i-- > 0;) {
+    std::string def = "-D" + toString(ctx.get_define(i));
+    Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+        def.c_str(), ArgumentInsertPosition::BEGIN));
+  }
+
   size_t includePathCount = ctx.get_include_path_count();
-  for (size_t i = 0; i < includePathCount; i++) {
+  for (size_t i = includePathCount; i-- > 0;) {
     std::string incPath = "-I" + toString(ctx.get_include_path(i));
     Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
         incPath.c_str(), ArgumentInsertPosition::BEGIN));
