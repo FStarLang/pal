@@ -1354,8 +1354,36 @@ new facts about memory.
    with nowhere to put the shared constant. The old model links them with a
    generated per-global module; doing the same here is a known gap.
 
-   As of this milestone: **725 specifications, 498 of them with real bodies,
-   227 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   A `_refine` on a parameter is a conjunct of that parameter's points-to, so
+   the place to put it is wherever that points-to is stated: on entry, where
+   the caller supplies the ownership, and on exit, where the callee hands it
+   back. Which of the two apply is decided by the parameter mode and not by the
+   refinement -- an `_out` parameter has no incoming value, so only the exit
+   side fires; a `_consumes` parameter is never handed back, so only the entry
+   side does. The pointee map that already drives contract translation records
+   exactly that distinction, one term per side with `None` where there is no
+   value, so the rule reads straight off it.
+
+   Translating the clause needs no substitution. `this` is bound in the pointee
+   map to the same pair of terms as the parameter it refines, and `*this` then
+   resolves through the map like any other dereference. What it does need is a
+   type: the clause is never elaborated, because `this` is free in it and
+   nothing could have typed it, so `this` is also bound in a copy of the
+   environment to the parameter's own type -- which is not a workaround but the
+   definition of what `this` is.
+
+   Until now the refinement was simply dropped and every *caller* refused, on
+   the grounds that a caller which could not see the refinement would be
+   proving against a specification weaker than the source's. That reasoning was
+   right, and it is why the refusal now keys off whether the contract
+   translated rather than off the presence of a `_refine` at all. Two kinds
+   stay untranslated: `_refine_uninit`, which talks about a points-to that has
+   no value here, and `_refine_value`, which binds a name the contract
+   machinery does not carry. Neither drops the function -- the contract is
+   marked dropped, which is what already stops a caller from trusting it.
+
+   As of this milestone: **725 specifications, 504 of them with real bodies,
+   221 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -1366,12 +1394,13 @@ new facts about memory.
    parameter's F\* type is `ptr` regardless of how the pointer is used, so the
    pointer-kind inference in `elab` has nothing left to decide.
 
-   The `admit()` reasons, in order, are what to do next. Inline Pulse (70) has
+   The `admit()` reasons, in order, are what to do next. Inline Pulse (35) has
    to be re-expressed against the new predicates and is a source change, not a
    translator change. An indirect call through a pointer whose target the
-   emitter cannot see (10) needs the target's contract to arrive some other
-   way, which is what a `_refine`d callback parameter (11) is for: those two
-   are one problem. Signed arithmetic is refused on purpose: its
+   emitter cannot see (10), a call through a function pointer (10) and a
+   missing `__fp` wrapper (5) are one problem: the target's contract has to
+   arrive some other way, and now that a `_refine` reaches the contract the
+   parameter can carry it. Signed arithmetic is refused on purpose: its
    overflow obligation is discharged by the `_requires` clause, and emitting it
    where that clause did not translate would produce failures that say nothing
    about the memory model. Seven more are functions this file only *declares*,

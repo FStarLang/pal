@@ -397,6 +397,31 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
 
 /// Whether a parameter type carries a `_refine`, anywhere under the wrappers
 /// or through the pointer.
+/// The propositions a `_refine` attaches to a parameter's pointee, and whether
+/// any of them is of a kind Palow does not translate.
+///
+/// A `_refine` is a conjunct of the parameter's points-to, so it says
+/// something wherever that points-to is stated: on entry where the caller
+/// supplies the ownership, and on exit where the callee hands it back. Which
+/// of those apply is decided by the parameter's mode, not here.
+///
+/// `_refine_uninit` and `_refine_value` are refused. The first talks about a
+/// points-to that has no value in Palow, and the second binds a name the
+/// contract machinery does not carry.
+fn refinements(tds: &Typedefs, ty: &Type) -> Result<Vec<Rc<Expr>>, String> {
+    match &tds.resolve(ty).val {
+        TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
+            let mut v = refinements(tds, t)?;
+            v.push(p.clone());
+            Ok(v)
+        }
+        TypeT::RefineUninit(..) => Err("a `_refine_uninit`".to_string()),
+        TypeT::RefineValue(..) => Err("a `_refine_value`".to_string()),
+        TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => refinements(tds, t),
+        _ => Ok(Vec::new()),
+    }
+}
+
 fn refined(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Refine(..) | TypeT::RefineAlways(..) | TypeT::RefineUninit(..) => true,
@@ -1199,6 +1224,10 @@ fn emit_fn(
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut owned: Vec<OwnedParam> = Vec::new();
     let mut arrays: HashSet<String> = HashSet::new();
+    // The `_refine`s on each parameter's pointee, to be translated once the
+    // pointee terms for the whole signature are known.
+    let mut refines: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
+    let mut refine_err: Option<String> = None;
 
     for (i, arg) in decl.args.iter().enumerate() {
         let pname = match &arg.name {
@@ -1222,6 +1251,16 @@ fn emit_fn(
         let vty = fstar_type(tds, pt).unwrap();
         let base = pname.trim_start_matches("var_").to_string();
         let vname = format!("val_{}", base);
+        // A kind of refinement Palow cannot state is not a reason to drop the
+        // function -- it is a reason to say its contract is incomplete, which
+        // is what the dropped-contract path already does, and which is what
+        // stops a caller from proving against the weaker version.
+        match refinements(tds, &arg.ty) {
+            Ok(ps) => refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p))),
+            Err(why) => {
+                refine_err.get_or_insert(format!("parameter {} carries {}", pname, why));
+            }
+        }
 
         // `T *p` owns one `T`; `T p[]` owns a sequence of them. Same F* type,
         // different contract.
@@ -1360,8 +1399,67 @@ fn emit_fn(
             })
             .collect()
     };
+    // A `_refine` is stated wherever the parameter's points-to is, and the
+    // pointee map already records exactly that: an entry term where the caller
+    // supplies ownership, an exit term where the callee hands it back. So the
+    // clause is translated against `this` bound to that same parameter -- no
+    // substitution needed, because the contract machinery resolves `*this`
+    // through the map like any other dereference.
+    let refine_clause =
+        |base: &str, ty: &Rc<Type>, p: &Rc<Expr>, w: When| -> Result<String, String> {
+            let mut pointees = spec.pointees.clone();
+            let Some(entry) = pointees.get(base).cloned() else {
+                return Err(format!("a `_refine` on `{}`, which owns nothing", base));
+            };
+            pointees.insert("this".to_string(), entry);
+            let mut arrays = spec.arrays.clone();
+            if arrays.contains(base) {
+                arrays.insert("this".to_string());
+            }
+            // The clause is never elaborated -- `this` is free in it, so nothing
+            // could have typed it -- and the specification translator asks for
+            // types. Binding `this` to the parameter's own type is what makes the
+            // clause typeable, and is also exactly what it means.
+            let mut env = env.clone();
+            env.push_var_decl(
+                &Rc::<str>::from("this").with_loc(p.loc.clone()),
+                ty.clone(),
+                crate::env::LocalDeclKind::LValue,
+            );
+            let inner = Spec {
+                tds,
+                env: &env,
+                pointees,
+                arrays,
+                guards: RefCell::new(Vec::new()),
+                ret: ret_name.clone(),
+                locals: HashMap::new(),
+            };
+            inner.prop(p, w)
+        };
+    let refine_props = |w: When| -> Result<Vec<String>, String> {
+        if let Some(why) = &refine_err {
+            return Err(why.clone());
+        }
+        let mut out = Vec::new();
+        for (base, ty, p) in &refines {
+            let stated = match w {
+                When::Post => spec.pointees.get(base).is_some_and(|(_, x)| x.is_some()),
+                _ => spec.pointees.get(base).is_some_and(|(x, _)| x.is_some()),
+            };
+            if stated {
+                out.push(refine_clause(base, ty, p, w)?);
+            }
+        }
+        Ok(out)
+    };
     let contract = translate(&decl.requires, When::Pre)
-        .and_then(|pre| translate(&decl.ensures, When::Post).map(|post| (pre, post)));
+        .and_then(|pre| translate(&decl.ensures, When::Post).map(|post| (pre, post)))
+        .and_then(|(mut pre, mut post)| {
+            pre.extend(refine_props(When::Pre)?);
+            post.extend(refine_props(When::Post)?);
+            Ok((pre, post))
+        });
     let (pre_props, post_props, contract_ok, dropped) = match contract {
         Ok((pre, post)) => (pre, post, true, None),
         Err(why) => (
@@ -2809,12 +2907,13 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                     Err("moves ownership across the call")
                 } else if !fndecl.ghost_args.is_empty() {
                     Err("takes a ghost argument")
-                } else if fndecl.args.iter().any(|a| refined(&tds, &a.ty)) {
+                } else if fndecl.args.iter().any(|a| refined(&tds, &a.ty)) && !sig.contract {
                     // A `_refine` on a parameter is part of the contract on
-                    // both sides of the call, and is not translated yet; a
-                    // caller that could not see it would be proving against a
+                    // both sides of the call. When the contract translated it
+                    // is in the emitted specification like any other clause;
+                    // when it did not, a caller would be proving against a
                     // specification weaker than the source's.
-                    Err("takes a `_refine`d argument")
+                    Err("takes a `_refine`d argument whose contract did not translate")
                 } else {
                     Ok(())
                 },
