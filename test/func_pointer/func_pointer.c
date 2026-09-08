@@ -799,9 +799,7 @@ int32_t malloc_fp(void)
     return r;
 }
 
-/* Pointer/ownership callee, exercising a relational `_old` contract. Its
-   address is taken by ptr_arg_cb below, so a Funcptr_inc wrapper IS
-   generated -- and that wrapper is where #279 bites. */
+/* Owned-pointer callee with a relational _old contract (#279). */
 void inc(int32_t *p)
     _requires(*p < 100)
     _ensures(*p == _old(*p) + 1)
@@ -809,29 +807,9 @@ void inc(int32_t *p)
     *p = *p + 1;
 }
 
-/* Relational `_old` on an ownership pointer through an indirect
-   (function-pointer) call. EXPECTED TO FAIL -- see
-   https://github.com/FStarLang/pal/issues/279, and test/fnptr_pointee_post
-   for the full case analysis.
-
-   The contract is true of the body: `Func_inc` verifies, and calling `inc`
-   directly propagates it. Only the wrapper loses it. `_old(*p)` emits a bare
-   `old`, which Pulse resolves against an `exists*` binder in the requires;
-   the wrapper has none, since its requires binds the witness by pattern-`let`
-   and its ensures introduces a fresh existential. Measured:
-
-     * Error 228 at out/Funcptr_inc.fsti(23,40-23,48)
-         Cannot prove:   pts_to x_fp (*?u380*)_
-         In the context: let val_p_0, _ = y_fp in
-                         pts_to x_fp val_p_0 ** pure (v val_p_0 < 100)
-
-   The pre-state value is right there in the witness -- the post just never
-   binds it. `Func_ptr_arg_cb` is then dependency-blocked and never runs.
-
-   This block was previously commented out with the note "Disabled until
-   FuncPtr contracts support `_old` again". It is live again so that the
-   defect is visible where a reader would look for it; it will go green when
-   #279 is fixed. */
+/* Regression: the indirect caller must learn the relational pointee post,
+   with PRE and _old resolved from the wrapper's initial-state witness.
+   See test/fnptr_pointee_post for compound and mixed-witness cases. */
 void ptr_arg_cb(int32_t *p)
     _requires(*p < 100)
     _ensures(*p == _old(*p) + 1)
