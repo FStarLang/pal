@@ -1285,8 +1285,21 @@ new facts about memory.
    partial initialiser, so that is what is emitted. Only scalars fold; an
    aggregate path falls back to the ordinary read.
 
-   As of this milestone: **725 specifications, 468 of them with real bodies,
-   257 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   A local pointer set once to the address of a place is the other case where
+   nothing needs to be modelled. `int32_t *q = &p->first; *q = v;` -- which is
+   what a first-field cast comes out as -- gives `q` no storage in C either,
+   and modelling it as an object would mean holding a focus on `p->first` open
+   from the declaration to the last use, with arbitrary statements in between.
+   Substituting the place at each use avoids the question and is what the C
+   means. It is only the same C if the place denotes the same object
+   throughout, so the alias is taken only when nothing rebinds the pointer
+   again and nothing rebinds any name the place is built from; writing
+   *through* those names is fine, and is the point. Handing the pointer itself
+   to something else is still refused, because that hands out ownership of the
+   place, which is the focus-across-statements problem again.
+
+   As of this milestone: **725 specifications, 474 of them with real bodies,
+   251 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

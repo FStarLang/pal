@@ -2194,6 +2194,11 @@ struct Touched {
     /// global nothing here can write is effectively immutable for the whole
     /// run, and owning it would be worse than publishing its value.
     written: HashSet<String>,
+    /// How many times each name is *rebound*: assigned straight to the name,
+    /// incremented, or has its own address taken. Writing *through* a name
+    /// does not count. A place built only from names that are never rebound
+    /// denotes the same object everywhere in the body.
+    rebound: HashMap<String, usize>,
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -2207,9 +2212,21 @@ fn lvalue_base(e: &Expr) -> Option<String> {
     }
 }
 
+/// The name an lvalue *is*, as opposed to the name it reaches through.
+fn lvalue_name(e: &Expr) -> Option<String> {
+    match &e.val {
+        ExprT::Var(v) => Some(v.val.to_string()),
+        ExprT::VAttr(_, x) => lvalue_name(x),
+        _ => None,
+    }
+}
+
 fn touch_write(e: &Expr, t: &mut Touched) {
     if let Some(b) = lvalue_base(e) {
         t.written.insert(b);
+    }
+    if let Some(n) = lvalue_name(e) {
+        *t.rebound.entry(n).or_insert(0) += 1;
     }
 }
 
@@ -3044,6 +3061,9 @@ struct Body<'a> {
     divergent: bool,
     /// Heap blocks held in locals, in allocation order.
     blocks: Vec<Block>,
+    /// Local pointers that stand for a place rather than for storage. See
+    /// `alias_map`.
+    aliases: HashMap<String, Rc<Expr>>,
 }
 
 /// What a subscript through an array parameter needs: the element's Palow type
@@ -3189,8 +3209,28 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// The place an aliased pointer stands for, when `e` dereferences one.
+    fn unalias(&self, e: &Expr) -> Option<Rc<Expr>> {
+        let ExprT::Deref(inner) = &strip_vattr(e).val else {
+            return None;
+        };
+        let v = lvalue_name(inner)?;
+        self.aliases.get(&v).cloned()
+    }
+
     /// The address of an lvalue, as an F* expression of type `ptr`.
     fn addr(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(p) = self.unalias(e) {
+            return self.addr(&p);
+        }
+        // The pointer itself, rather than what it points at. Its address is
+        // the place's, but handing it out means handing out ownership of the
+        // place, which is a focus that has to stay open past this statement.
+        if let Some(v) = lvalue_name(e) {
+            if self.aliases.contains_key(&v) {
+                return Err(format!("`{}`, whose place would have to escape", v));
+            }
+        }
         match &e.val {
             ExprT::Var(v) => {
                 if let Some(s) = self.slots.iter().rev().find(|s| s.name == *v.val) {
@@ -3364,6 +3404,9 @@ impl<'a> Body<'a> {
     /// The caller emits the closing lines immediately after the read or write,
     /// with nothing in between: the object is in pieces until then.
     fn place(&mut self, e: &Expr) -> Result<Focus, String> {
+        if let Some(p) = self.unalias(e) {
+            return self.place(&p);
+        }
         match &strip_vattr(e).val {
             ExprT::Member(base, f) => {
                 let pn = self.field_pn(base, f)?;
@@ -3442,6 +3485,9 @@ impl<'a> Body<'a> {
     /// first-field cast both come out as -- has to focus the outer field first,
     /// and that focus stays open until the access through it is done.
     fn base_addr(&mut self, base: &Expr) -> Result<(String, Vec<String>, Vec<String>), String> {
+        if let Some(p) = self.unalias(base) {
+            return self.base_addr(&p);
+        }
         if let ExprT::Member(b2, f2) = &strip_vattr(base).val {
             let fty = self.field_ty(b2, f2)?;
             if matches!(
@@ -3826,6 +3872,14 @@ impl<'a> Body<'a> {
     }
 
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(p) = self.unalias(e) {
+            return self.rvalue(&p);
+        }
+        if let Some(v) = lvalue_name(e) {
+            if self.aliases.contains_key(&v) {
+                return Err(format!("`{}`, whose place would have to escape", v));
+            }
+        }
         match &e.val {
             ExprT::VAttr(_, inner) => self.rvalue(inner),
             // C says the value of an assignment is the value stored, after
@@ -4485,6 +4539,9 @@ impl<'a> Body<'a> {
     /// Store into an lvalue, choosing the initialising store when the target
     /// is a slot that has not been written yet.
     fn store(&mut self, lhs: &Expr, pn: &str, value: &str) -> Result<(), String> {
+        if let Some(p) = self.unalias(lhs) {
+            return self.store(&p, pn, value);
+        }
         if let ExprT::Deref(inner) = &lhs.val {
             if let ExprT::Var(v) = &inner.val {
                 if let Some(i) = self.out_params.iter().position(|n| *n == *v.val) {
@@ -4730,6 +4787,9 @@ impl<'a> Body<'a> {
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
         match &s.val {
             StmtT::Decl(name, ty) => {
+                if self.aliases.contains_key(&*name.val.to_string()) {
+                    return Ok(());
+                }
                 self.alloc_slot(name, ty)?;
                 Ok(())
             }
@@ -4748,6 +4808,13 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
+                // The alias itself: nothing is stored, because the pointer is
+                // a name and not an object.
+                if let Some(v) = lvalue_name(lhs) {
+                    if self.aliases.contains_key(&v) {
+                        return Ok(());
+                    }
+                }
                 let ty = self.ty_of(lhs)?;
                 let pn = palow_name(self.tds, &ty)
                     .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
@@ -5590,6 +5657,66 @@ struct TranslatedBody {
     uses: HashSet<String>,
 }
 
+/// The local pointers that are really just another name for a place.
+///
+/// `int32_t *q = &p->first; *q = v;` gives `q` no storage of its own in C
+/// either -- a compiler keeps it in a register, and the object written is
+/// `p->first`. Palow cannot model it as an object anyway: doing so would mean
+/// holding a focus on `p->first` open from the declaration to the last use,
+/// with arbitrary statements in between. Substituting the place at each use
+/// avoids the question entirely, and it is what the C means.
+///
+/// It is only the same C if the place denotes the same object throughout, so
+/// the alias is taken only when nothing rebinds the pointer again and nothing
+/// rebinds any name the place is built from. Writing *through* those names is
+/// fine, and is the whole point.
+fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
+    let mut t = Touched::default();
+    touch_stmts(body, &mut t);
+
+    let locals: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    let mut out: HashMap<String, Rc<Expr>> = HashMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for st in body.iter() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let (Some(q), ExprT::Ref(place)) = (lvalue_name(lhs), &strip_vattr(rhs).val) else {
+            continue;
+        };
+        if !locals.contains(&q) || !seen.insert(q.clone()) {
+            out.remove(&q);
+            continue;
+        }
+        if !matches!(
+            &strip_vattr(place).val,
+            ExprT::Member(..) | ExprT::Index(..)
+        ) {
+            continue;
+        }
+        // The alias assignment is itself a rebinding of `q`, and taking the
+        // address of the place is not a rebinding of anything, so a place
+        // whose names survive is one whose names are never assigned.
+        if t.rebound.get(&q) != Some(&1) {
+            continue;
+        }
+        let mut used = Touched::default();
+        touch_expr(place, &mut used);
+        if used.vars.iter().any(|v| t.rebound.contains_key(v)) {
+            continue;
+        }
+        out.insert(q, place.clone());
+    }
+    out
+}
+
 /// Translate a function body, or say why not. `env` must already have the
 /// function's parameters pushed.
 fn emit_body(
@@ -5654,6 +5781,7 @@ fn emit_body(
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
         blocks: Vec::new(),
+        aliases: alias_map(&defn.body),
         uses: HashSet::new(),
         forbidden,
         params: defn
