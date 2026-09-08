@@ -513,6 +513,9 @@ impl Env {
             ExprT::BinOp(BinOp::Add, lhs, rhs) => {
                 let lhs_ty = self.vtype_whnf(self.infer_expr(lhs)?);
                 let rhs_ty = self.vtype_whnf(self.infer_expr(rhs)?);
+                if self.is_gnu_void_offset(BinOp::Add, lhs_ty.clone(), rhs_ty.clone()) {
+                    return Ok(lhs_ty);
+                }
                 // pointer + int → arrayptr
                 match (&lhs_ty.val, &rhs_ty.val) {
                     (TypeT::Pointer(elem, PointerKind::Array | PointerKind::ArrayPtr), _) => {
@@ -531,6 +534,9 @@ impl Env {
             ExprT::BinOp(BinOp::Sub, lhs, rhs) => {
                 let lhs_ty = self.vtype_whnf(self.infer_expr(lhs)?);
                 let rhs_ty = self.vtype_whnf(self.infer_expr(rhs)?);
+                if self.is_gnu_void_offset(BinOp::Sub, lhs_ty.clone(), rhs_ty.clone()) {
+                    return Ok(lhs_ty);
+                }
                 // pointer - pointer → PtrdiffT
                 match (&lhs_ty.val, &rhs_ty.val) {
                     (
@@ -767,6 +773,28 @@ impl Env {
             (TypeT::Error | TypeT::Unknown, _) | (_, TypeT::Error | TypeT::Unknown) => true,
             _ => false,
         }
+    }
+
+    /// Raw void pointers only, including typedefs. Unknown is the pre-elaboration
+    /// kind; explicit array/ref annotations and typed Core pointers do not qualify.
+    pub fn is_raw_void_pointer(&self, ty: MaybeRc<Type>) -> bool {
+        matches!(
+            &self.vtype_whnf(ty).val,
+            TypeT::Pointer(to, PointerKind::Unknown | PointerKind::Core)
+                if matches!(self.vtype_whnf(to.clone().into()).val, TypeT::Void)
+        )
+    }
+
+    /// GNU byte offsets, deliberately only with the pointer on the left.
+    /// Keep the integer in its source type until emission: arithmetic inside
+    /// the offset must happen before conversion to mathematical int.
+    pub fn is_gnu_void_offset(&self, op: BinOp, lhs: MaybeRc<Type>, rhs: MaybeRc<Type>) -> bool {
+        matches!(op, BinOp::Add | BinOp::Sub)
+            && self.is_raw_void_pointer(lhs)
+            && matches!(
+                self.vtype_whnf(rhs).val,
+                TypeT::Bool | TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT
+            )
     }
 
     pub fn is_bool(&self, a: MaybeRc<Type>) -> bool {
