@@ -1326,8 +1326,36 @@ new facts about memory.
    `ptrdiff_t` gets no layer of its own: on the LP64 target Palow fixes, it
    *is* `int64_t`, so it shares its storage.
 
-   As of this milestone: **725 specifications, 482 of them with real bodies,
-   243 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   Reading a global through its address is the case that makes the alias pay
+   for itself. `const uint32_t *p = &g; return *p;` is what most of the corpus
+   writes, and it was the single largest remaining refusal once pointer
+   arithmetic landed. The alias turns `*p` back into `g`, which is a published
+   constant, so nothing is owned and nothing is read. Allowing a bare variable
+   as the aliased place needed one correction elsewhere: taking a name's
+   address normally counts as a write, since something may store through it,
+   but an address that goes to an alias does not escape. Each accepted alias
+   therefore pays back the write its own `&` charged -- and, since an alias
+   that is *rejected* did let the address escape after all, that discount has
+   to be withdrawn and the rest reconsidered, which is why the analysis is a
+   fixpoint rather than one pass. The effect on the model is direct: globals
+   that looked mutable only because their address was taken are immutable
+   again, and go back to being constants.
+
+   A global with no initialiser is not a gap either. A tentative definition is
+   initialised as if by zero (C17 6.9.2p2), so its value is as settled as an
+   explicit one. That zero is *not* the `memset` zero: C11 6.7.9p10 says an
+   arithmetic member starts at zero and a pointer member starts at a null
+   pointer, which is a statement about values rather than about bytes, so
+   unlike the `memset` case it has an answer for a pointer and that answer is
+   `null` on every target.
+
+   `extern const T g;` stays refused. It is immutable, but which value it is
+   was decided in another translation unit, and Palow emits one module per unit
+   with nowhere to put the shared constant. The old model links them with a
+   generated per-global module; doing the same here is a known gap.
+
+   As of this milestone: **725 specifications, 498 of them with real bodies,
+   227 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

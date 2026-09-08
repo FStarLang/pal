@@ -2078,6 +2078,30 @@ fn const_index(e: &ExprT) -> Option<u64> {
     }
 }
 
+/// The value of an immutable global, as an F* type and a term, when this file
+/// can name it.
+///
+/// A global with no initialiser is not a gap: a tentative definition is
+/// initialised as if by zero (C17 6.9.2p2), so its value is as settled as an
+/// explicit one. `extern const T g;` is a different matter -- it is immutable,
+/// but which value it is was decided in another translation unit, and Palow
+/// emits one module per unit with nowhere to put the shared constant. Reading
+/// one is refused rather than assumed.
+fn global_const(tds: &Typedefs, gv: &GlobalVar) -> Option<(String, String)> {
+    if gv.is_enum_constant || global_var_is_array(gv) || !gv.is_pure || gv.is_extern {
+        return None;
+    }
+    if !has_repr(tds, &gv.ty) {
+        return None;
+    }
+    let fty = fstar_type(tds, &gv.ty)?;
+    let v = match &gv.init {
+        Some(e) => const_expr(tds, &gv.ty, e)?,
+        None => static_zero(tds, &gv.ty).ok()?,
+    };
+    Some((fty, v))
+}
+
 fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
     let mut out = String::new();
     for decl in &tu.decls {
@@ -2133,15 +2157,7 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
         let typed = palow_name(tds, &gv.ty)
             .filter(|_| has_repr(tds, &gv.ty))
             .and_then(|pn| fstar_type(tds, &gv.ty).map(|fty| (pn, fty)));
-        // The value is known only for an immutable global that this file
-        // initialises. `extern const T g;` is immutable but its value lives in
-        // another translation unit; a tentative `const T g;` is zero, but
-        // spelling that out per type is the aggregate work milestone 5 left.
-        let value = if gv.is_pure && !gv.is_extern {
-            gv.init.as_ref().and_then(|e| const_expr(tds, &gv.ty, e))
-        } else {
-            None
-        };
+        let value = global_const(tds, gv);
         out += &format!(
             "assume val addr_var_{} : ptr
 ",
@@ -2152,12 +2168,8 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> String {
 ",
             name, name
         );
-        if let (Some(v), Some((pn, fty))) = (value, typed) {
-            out += &format!(
-                "let var_{} : {} = {}
-",
-                name, fty, v
-            );
+        if let (Some((_, v)), Some((pn, fty))) = (value, typed) {
+            out += &format!("let var_{} : {} = {}\n", name, fty, v);
             // The permission is existentially quantified, so a client can read
             // through the address but can never gather a full one and write.
             out += &format!(
@@ -2203,6 +2215,10 @@ struct Touched {
     /// does not count. A place built only from names that are never rebound
     /// denotes the same object everywhere in the body.
     rebound: HashMap<String, usize>,
+    /// The pointers that stand for a place rather than for storage, so that
+    /// what a body does to `*q` is recorded against the place instead. Empty
+    /// while `alias_map` is deciding what belongs here.
+    aliases: HashMap<String, Rc<Expr>>,
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -2226,6 +2242,10 @@ fn lvalue_name(e: &Expr) -> Option<String> {
 }
 
 fn touch_write(e: &Expr, t: &mut Touched) {
+    if let Some(p) = alias_of(e, t) {
+        touch_write(&p, t);
+        return;
+    }
     if let Some(b) = lvalue_base(e) {
         t.written.insert(b);
     }
@@ -2234,7 +2254,24 @@ fn touch_write(e: &Expr, t: &mut Touched) {
     }
 }
 
+/// The place an expression denotes through an alias: `*q`, and also `q` on its
+/// own, whose value may be stored through wherever it ends up.
+fn alias_of(e: &Expr, t: &Touched) -> Option<Rc<Expr>> {
+    if t.aliases.is_empty() {
+        return None;
+    }
+    let inner = match &strip_vattr(e).val {
+        ExprT::Deref(x) => x,
+        _ => e,
+    };
+    t.aliases.get(&lvalue_name(inner)?).cloned()
+}
+
 fn touch_expr(e: &Expr, t: &mut Touched) {
+    if let Some(p) = alias_of(e, t) {
+        touch_expr(&p, t);
+        return;
+    }
     let mut go = |x: &Rc<Expr>| touch_expr(x, t);
     match &e.val {
         ExprT::Var(v) => {
@@ -2337,6 +2374,11 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
             StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => touch_expr(e, t),
             StmtT::Let(_, _, e) => touch_expr(e, t),
             StmtT::DeclStackArray { size, .. } => touch_expr(size, t),
+            // The alias assignment itself stores nothing: the pointer is a
+            // name, not an object, and the address it takes does not escape.
+            StmtT::Assign(a, b)
+                if lvalue_name(a).is_some_and(|n| t.aliases.contains_key(&n))
+                    && matches!(&strip_vattr(b).val, ExprT::Ref(..)) => {}
             StmtT::Assign(a, b) => {
                 touch_write(a, t);
                 touch_expr(a, t);
@@ -2669,7 +2711,10 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         let DeclT::FnDefn(d) = &decl.val else {
             continue;
         };
-        let mut t = Touched::default();
+        let mut t = Touched {
+            aliases: alias_map(&d.body),
+            ..Touched::default()
+        };
         touch_stmts(&d.body, &mut t);
         touch_exprs(&d.decl.requires, &mut t);
         touch_exprs(&d.decl.ensures, &mut t);
@@ -3197,20 +3242,10 @@ impl<'a> Body<'a> {
     }
 
     fn global_value(&self, v: &Ident) -> bool {
-        match self.env.lookup_global_var(v) {
-            Some(gv) => {
-                !gv.is_enum_constant
-                    && !global_var_is_array(gv)
-                    && gv.is_pure
-                    && !gv.is_extern
-                    && has_repr(self.tds, &gv.ty)
-                    && gv
-                        .init
-                        .as_ref()
-                        .is_some_and(|e| const_expr(self.tds, &gv.ty, e).is_some())
-            }
-            None => false,
-        }
+        self.env
+            .lookup_global_var(v)
+            .and_then(|gv| global_const(self.tds, gv))
+            .is_some()
     }
 
     /// The place an aliased pointer stands for, when `e` dereferences one.
@@ -5560,6 +5595,33 @@ fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
 /// the byte layer. A union is absent for a better reason -- zeroing it is a
 /// statement about bytes, and the value it names afterwards depends on which
 /// member is read.
+/// The value a static object with no initialiser starts at.
+///
+/// This is *not* `memset` to zero. C11 6.7.9p10 says an arithmetic member
+/// starts at zero and a pointer member starts at a null pointer -- a statement
+/// about values, not about bytes -- so unlike `zero_value` it has an answer
+/// for a pointer, and that answer is `null` on every target.
+fn static_zero(tds: &Typedefs, ty: &Type) -> Result<String, String> {
+    let t = peel(tds, ty);
+    if matches!(&t.val, TypeT::Pointer(..) | TypeT::FnPtr { .. }) {
+        return Ok("null".to_string());
+    }
+    if let TypeT::TypeRef(TypeRefKind::Struct(name)) = &t.val {
+        let Some(si) = tds.structs.get(&*name.val) else {
+            return Err(format!("a zeroed struct {}", name.val));
+        };
+        let mut vals = Vec::new();
+        for f in &si.fields {
+            let FieldShape::One { .. } = &f.shape else {
+                return zero_value(tds, ty);
+            };
+            vals.push(format!("fld_{} = {}", f.name, static_zero(tds, &f.ty)?));
+        }
+        return Ok(format!("({{ {} }})", vals.join("; ")));
+    }
+    zero_value(tds, ty)
+}
+
 fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     let t = peel(tds, ty);
     match &t.val {
@@ -5777,7 +5839,9 @@ fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
         })
         .collect();
 
-    let mut out: HashMap<String, Rc<Expr>> = HashMap::new();
+    // Every `q = &place` in the body, in order, with a repeated `q` dropped:
+    // a pointer assigned twice is an object after all.
+    let mut cand: Vec<(String, Rc<Expr>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for st in body.iter() {
         let StmtT::Assign(lhs, rhs) = &st.val else {
@@ -5786,30 +5850,54 @@ fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
         let (Some(q), ExprT::Ref(place)) = (lvalue_name(lhs), &strip_vattr(rhs).val) else {
             continue;
         };
-        if !locals.contains(&q) || !seen.insert(q.clone()) {
-            out.remove(&q);
+        if !locals.contains(&q) {
+            continue;
+        }
+        if !seen.insert(q.clone()) {
+            cand.retain(|(n, _)| *n != q);
+            continue;
+        }
+        // The alias assignment is itself the one rebinding of `q`.
+        if t.rebound.get(&q) != Some(&1) {
             continue;
         }
         if !matches!(
             &strip_vattr(place).val,
-            ExprT::Member(..) | ExprT::Index(..)
+            ExprT::Var(..) | ExprT::Member(..) | ExprT::Index(..)
         ) {
             continue;
         }
-        // The alias assignment is itself a rebinding of `q`, and taking the
-        // address of the place is not a rebinding of anything, so a place
-        // whose names survive is one whose names are never assigned.
-        if t.rebound.get(&q) != Some(&1) {
-            continue;
-        }
-        let mut used = Touched::default();
-        touch_expr(place, &mut used);
-        if used.vars.iter().any(|v| t.rebound.contains_key(v)) {
-            continue;
-        }
-        out.insert(q, place.clone());
+        cand.push((q, place.clone()));
     }
-    out
+
+    // Taking the address of a *named* object counts as rebinding it, because
+    // in general something may store through the address. Here it does not:
+    // the address goes to an alias, which is the thing being decided. So each
+    // accepted alias pays back the rebinding its own `&` charged. An alias
+    // that is then rejected did let the address escape after all, so the
+    // discount has to be withdrawn and the rest reconsidered -- hence the
+    // fixpoint rather than a single pass.
+    loop {
+        let mut discount: HashMap<String, usize> = HashMap::new();
+        for (_, place) in &cand {
+            if let Some(n) = lvalue_name(place) {
+                *discount.entry(n).or_insert(0) += 1;
+            }
+        }
+        let before = cand.len();
+        cand.retain(|(_, place)| {
+            let mut used = Touched::default();
+            touch_expr(place, &mut used);
+            // A name the place is built from must denote the same object
+            // throughout. Writing *through* it is fine, and is the point.
+            used.vars.iter().all(|v| {
+                t.rebound.get(v).copied().unwrap_or(0) == discount.get(v).copied().unwrap_or(0)
+            })
+        });
+        if cand.len() == before {
+            return cand.into_iter().collect();
+        }
+    }
 }
 
 /// Translate a function body, or say why not. `env` must already have the
@@ -5937,8 +6025,9 @@ fn ghost_head(code: &InlinePulseCode) -> String {
 ///     borrowed cell, only `array_focus`/`array_unfocus` around each access;
 ///   * the maybe-uninitialised discipline -- Palow writes `write_uninit` and
 ///     `forget` where the initialisation state changes;
-///   * acquiring a global's storage -- in Palow a global's ownership arrives
-///     in the contract, so there is nothing to acquire.
+///   * acquiring a global's storage, and the `drop_` that releases it again --
+///     in Palow a global's ownership arrives in the contract, so there is
+///     nothing to acquire and nothing to give back.
 ///
 /// Every other ghost statement says something Palow has no other way to learn,
 /// and is still refused rather than silently discarded.
@@ -5952,8 +6041,19 @@ fn ghost_replaced(code: &InlinePulseCode) -> bool {
         "array_return_cell",
         "Pulse.Lib.C.MaybeUninit.",
     ];
-    REPLACED.iter().any(|p| head.starts_with(p))
-        || (head.starts_with("Global_") && head.contains(".acquire_var_"))
+    if REPLACED.iter().any(|p| head.starts_with(p)) {
+        return true;
+    }
+    if head.starts_with("Global_") && head.contains(".acquire_var_") {
+        return true;
+    }
+    // The matching release. `drop_` on its own says nothing about which model
+    // it belongs to, so the global's address has to appear in it.
+    head.starts_with("drop_")
+        && code.tokens.iter().any(|t| match t {
+            InlinePulseToken::Verbatim(tok) => tok.text.val.contains("addr_var_"),
+            _ => false,
+        })
 }
 
 fn stmt_kind(s: &Stmt) -> &'static str {
