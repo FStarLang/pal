@@ -3,28 +3,28 @@
 
 #define MAX_ERROR 4095L
 
-void *integer_to_pointer(long x)
+_pure void *integer_to_pointer(long x)
 {
     return (void *)x;
 }
 
-long pointer_to_integer(void *p)
+_pure long pointer_to_integer(void *p)
 {
     return (long)p;
 }
 
-unsigned long pointer_to_unsigned(void *p)
+_pure unsigned long pointer_to_unsigned(void *p)
 {
     return (unsigned long)p;
 }
 
-bool is_error_pointer(void *p)
+_pure bool is_error_pointer(void *p)
 {
     unsigned long address = pointer_to_unsigned(p);
     return address >= (unsigned long)(-MAX_ERROR);
 }
 
-long error_or_zero(void *p)
+_pure long error_or_zero(void *p)
 {
     if (is_error_pointer(p))
         return pointer_to_integer(p);

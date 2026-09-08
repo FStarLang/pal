@@ -5,6 +5,7 @@ include FStar.SizeT // before Int32 to not shadow fits there
 include Pulse.Lib.C.Int32
 include Pulse.Lib.C.Ref
 include Pulse.Lib.C.CoreRef
+include Pulse.Lib.C.Pointer
 include Pulse.Lib.C.Array
 include Pulse.Class.PtsTo
 include FStar.Int.Cast

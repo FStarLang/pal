@@ -2660,6 +2660,39 @@ impl<'a> Emitter<'a> {
 
                     let default_msg = format!("unsupported cast from {} to {}", from_ty, to_ty);
                     match (&from_ty.val, &to_ty.val) {
+                        (TypeT::Int { signed, width }, TypeT::Pointer(_, PointerKind::Core)) => {
+                            if let Some(m) = get_int_mod(signed, width) {
+                                unaryfn(
+                                    Doc::text("Pulse.Lib.C.CoreRef.integer_to_core"),
+                                    unaryfn(Doc::text(format!("{}.v", m)), val_doc),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
+                        (TypeT::Pointer(_, PointerKind::Core), TypeT::Int { signed, width }) => {
+                            if let Some(m) = get_int_mod(signed, width) {
+                                unaryfn(
+                                    Doc::text(format!(
+                                        "{}.{}",
+                                        m,
+                                        if *signed { "int_to_t" } else { "uint_to_t" }
+                                    )),
+                                    parens(naryfn([
+                                        Doc::text(format!(
+                                            "Pulse.Lib.C.Pointer.{}_view",
+                                            if *signed { "signed" } else { "unsigned" }
+                                        )),
+                                        Doc::text(width.to_string()),
+                                        val_doc,
+                                    ])),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
                         (TypeT::Bool, TypeT::Int { signed, width }) => {
                             fn abbrev(s: &bool, w: &u32) -> String {
                                 format!("{}int{}", if *s { "" } else { "u" }, w)
@@ -7376,7 +7409,8 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Check that a parameter type is valid for a pure function (no pointers, arrays, etc.)
+    /// Pure parameters carry values, not ownership. Raw core pointers are
+    /// values too; typed references and arrays still require stateful handling.
     fn check_pure_type(&mut self, ty: &Type) {
         match &ty.val {
             TypeT::Void
@@ -7390,6 +7424,7 @@ impl<'a> Emitter<'a> {
             | TypeT::SLProp
             | TypeT::Unknown
             | TypeT::Error
+            | TypeT::Pointer(_, PointerKind::Core)
             | TypeT::TypeRef(_) => {}
             TypeT::Pointer(_, _) => {
                 self.report(
@@ -7430,8 +7465,10 @@ impl<'a> Emitter<'a> {
         }
 
         match &stmts[0].val {
-            StmtT::Return(Some(e)) if stmts.len() == 1 => self.emit_rvalue(env, e),
-            StmtT::Return(None) if stmts.len() == 1 => Doc::text("()"),
+            // A return terminates this path, including any continuation
+            // appended by the enclosing conditional.
+            StmtT::Return(Some(e)) => self.emit_rvalue(env, e),
+            StmtT::Return(None) => Doc::text("()"),
 
             StmtT::If {
                 cond,

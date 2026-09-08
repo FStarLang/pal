@@ -46,6 +46,29 @@ val ref_to_core_null (a: Type u#a)
 (* Decidable pointer equality, with no preconditions. *)
 val core_ref_eq (x y: core_ref) : (b: bool { b == true <==> x == y })
 
+(* Abstract integer-origin pointers, NOT a physical address-space/ABI model.
+
+   These are the only additional trusted laws: integer-origin pointers retain
+   their unbounded mathematical integer, and integer zero denotes core_null.
+   In particular, core_address is NOT assumed injective and integer_to_core is NOT
+   assumed surjective. No pointer -> integer -> pointer identity law is given.
+   These pure operations do not produce pts_to or any other ownership.
+
+   A relative consistency witness: extend an existing CoreRef model with fresh
+   points for every nonzero integer; use the existing null for zero. Assign
+   address zero to the old points, and n to fresh point n. Leave ref_to_core
+   unchanged and send fresh points through core_to_ref to the typed null.
+   All existing typed-reference roundtrips and nullness laws remain valid.
+
+   Bounded machine views are derived separately in Pointer casts. In this
+   model -1 and an unsigned maximum denote distinct integer-origin
+   pointers, even though their same-width integer projections coincide.
+   These are explicit abstract semantics, not guarantees of all C platforms. *)
+val core_address (r: core_ref) : int
+
+val integer_to_core (n: int)
+  : r:core_ref{core_address r == n /\ (n == 0 ==> r == core_null)}
+
 instance has_zero_default_core_ref : has_zero_default core_ref = {
   zero_default = core_null
 }

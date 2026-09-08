@@ -901,12 +901,23 @@ public:
         return mk_rvalue_lvalue(std::move(loc), trLValue(ic->getSubExpr()));
       }
       case CK_IntegralCast:
+      case CK_PointerToIntegral:
       case CK_IntegralToBoolean:
       case CK_PointerToBoolean:
       case CK_FloatingCast:
       case CK_IntegralToFloating:
       case CK_FloatingToIntegral:
       case CK_FloatingToBoolean:
+        return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                              trQualType(ic->getType(), ic->getSourceRange()));
+
+      case CK_IntegralToPointer:
+        // Preserve the existing recursive null-constant recognition, but do
+        // not mistake a pointer-to-integer conversion for a null pointer.
+        if (isNull(ic)) {
+          return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
+                            trQualType(ic->getType(), ic->getSourceRange()));
+        }
         return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
                               trQualType(ic->getType(), ic->getSourceRange()));
 
