@@ -279,6 +279,9 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
             Some(format!("{}int{}_t", if *signed { "" } else { "u" }, width))
         }
         TypeT::SizeT => Some("size_t".to_string()),
+        // On the LP64 target Palow fixes, `ptrdiff_t` *is* `int64_t`, so it
+        // shares its storage rather than getting a layer of its own.
+        TypeT::PtrdiffT => Some("int64_t".to_string()),
         // Every pointer kind is the same type here; that is the point, and it
         // extends to function pointers: a code address is an address, and
         // making it one reuses the whole storage layer rather than needing a
@@ -306,6 +309,7 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
             Some(format!("{}Int{}.t", if *signed { "" } else { "U" }, width))
         }
         TypeT::SizeT => Some("SizeT.t".to_string()),
+        TypeT::PtrdiffT => Some("Int64.t".to_string()),
         // A specification integer is unbounded, which is what `_let` needs to
         // state a range condition without first having to prove it.
         TypeT::SpecInt => Some("int".to_string()),
@@ -3871,6 +3875,88 @@ impl<'a> Body<'a> {
         )
     }
 
+    /// The size of what a pointer type points at, when arithmetic on it means
+    /// anything: C measures a pointer offset in elements, and the model in
+    /// bytes.
+    fn elem_size(&self, ty: &Type) -> Option<u64> {
+        let pt = pointee(self.tds, ty)?;
+        palow_sizeof(self.tds, pt).filter(|n| *n > 0)
+    }
+
+    /// An offset in bytes, as a `size_t`, for a subscript-like operand.
+    fn byte_offset(&mut self, esize: u64, e: &Expr) -> Result<String, String> {
+        // A literal index is settled here, which is both shorter and one less
+        // multiplication for the solver to reason about.
+        if let Some(k) = const_index(&strip_vattr(e).val) {
+            return Ok(format!("{}sz", k * esize));
+        }
+        let i = self.index(e)?;
+        Ok(format!("({}sz `SizeT.mul` {})", esize, i))
+    }
+
+    /// Arithmetic and ordering on pointers, which is arithmetic and ordering
+    /// on addresses.
+    ///
+    /// ISO C defines `<`, `<=` and `-` only within a single object, and leaves
+    /// an out-of-bounds pointer undefined even if it is never dereferenced.
+    /// Palow is more permissive on both counts, for the same reason `( +! )`
+    /// is total: forming a pointer is not an access, and it is the access that
+    /// the ownership discipline governs.
+    ///
+    /// Returns `None` when neither operand is a pointer, which leaves the
+    /// ordinary integer path alone.
+    fn ptr_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) -> Result<Option<String>, String> {
+        let (lt, rt) = (self.ty_of(l)?, self.ty_of(r)?);
+        let lp = self.elem_size(&lt);
+        let rp = self.elem_size(&rt);
+        if lp.is_none() && rp.is_none() {
+            return Ok(None);
+        }
+        match (op, lp, rp) {
+            (BinOp::Add, Some(n), None) => {
+                let a = self.rvalue(l)?;
+                let off = self.byte_offset(n, r)?;
+                Ok(Some(format!("({} +! {})", a, off)))
+            }
+            // `n + p` is `p + n`; C says so, and neither side has an effect
+            // the other can observe.
+            (BinOp::Add, None, Some(n)) => {
+                let b = self.rvalue(r)?;
+                let off = self.byte_offset(n, l)?;
+                Ok(Some(format!("({} +! {})", b, off)))
+            }
+            (BinOp::Sub, Some(n), None) => {
+                let a = self.rvalue(l)?;
+                let off = self.byte_offset(n, r)?;
+                Ok(Some(format!("({} -! {})", a, off)))
+            }
+            // The difference of two pointers is in elements, and the model
+            // works in bytes, so it is a byte difference divided by the
+            // element size -- exactly the identity C states.
+            (BinOp::Sub, Some(n), Some(_)) => {
+                let a = self.rvalue(l)?;
+                let b = self.rvalue(r)?;
+                Ok(Some(format!(
+                    "(FStar.Int64.div (ptr_diff {} {}) {}L)",
+                    a, b, n
+                )))
+            }
+            (BinOp::Lt, Some(_), Some(_)) => {
+                let a = self.rvalue(l)?;
+                let b = self.rvalue(r)?;
+                Ok(Some(format!("({} `ptr_lt` {})", a, b)))
+            }
+            (BinOp::LEq, Some(_), Some(_)) => {
+                let a = self.rvalue(l)?;
+                let b = self.rvalue(r)?;
+                Ok(Some(format!("({} `ptr_le` {})", a, b)))
+            }
+            // `==` is the model's own decidable equality, which is
+            // provenance-sensitive; `binop` already has it.
+            _ => Ok(None),
+        }
+    }
+
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
             return self.rvalue(&p);
@@ -4060,6 +4146,9 @@ impl<'a> Body<'a> {
                 convert(peel(self.tds, &from), peel(self.tds, to), &v)
             }
             ExprT::BinOp(op, l, r) => {
+                if let Some(x) = self.ptr_binop(*op, l, r)? {
+                    return Ok(x);
+                }
                 let ty = self.ty_of(l)?;
                 let opstr = binop(self.tds, *op, &ty, self.signed_ok)?;
                 let a = self.rvalue(l)?;
@@ -4077,6 +4166,19 @@ impl<'a> Body<'a> {
                     _ => BinOp::Sub,
                 };
                 let ty = self.ty_of(x)?;
+                // Incrementing a pointer moves it by one *element*, so the
+                // step is the element's size rather than one.
+                if let Some(esize) = self.elem_size(&ty) {
+                    let cur = self.rvalue(x)?;
+                    let old = self.fresh("old");
+                    self.lines.push(format!("let {} = {};", old, cur));
+                    let new = match op {
+                        BinOp::Add => format!("({} +! {}sz)", old, esize),
+                        _ => format!("({} -! {}sz)", old, esize),
+                    };
+                    self.store(x, "ptr", &new)?;
+                    return Ok(if post { old } else { new });
+                }
                 let one = match &peel(self.tds, &ty).val {
                     TypeT::Int { signed, width } => format!("1{}", int_suffix(*signed, *width)?),
                     TypeT::SizeT => "1sz".to_string(),
@@ -4941,16 +5043,8 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("assert (pure {});", p));
                 Ok(())
             }
-            // A ghost statement is a proof hint, so dropping one can never
-            // make a proof succeed that should not -- only fail one that
-            // should. Palow drops the hints that are about the *old*
-            // function-pointer model, because it establishes those facts
-            // itself at the call: `Pulse.Lib.C.FuncPtr.of_fn_div_valid` before
-            // an indirect call and `drop_is_valid` after it are exactly what
-            // the emitter now writes. Every other ghost statement says
-            // something Palow has no other way to learn, so it is still
-            // refused rather than silently discarded.
-            StmtT::GhostStmt(code) if ghost_is_funcptr(code) => Ok(()),
+            // See `ghost_replaced`.
+            StmtT::GhostStmt(code) if ghost_replaced(code) => Ok(()),
             StmtT::Return(None) => Ok(()),
             StmtT::Call(e) => match &e.val {
                 ExprT::FnCall(name, args) => {
@@ -5510,6 +5604,7 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
             format!("{}Int{}", if *signed { "" } else { "U" }, width)
         }
         TypeT::SizeT => "SizeT".to_string(),
+        TypeT::PtrdiffT => "Int64".to_string(),
         TypeT::Bool => {
             return match op {
                 BinOp::Eq => Ok("=".to_string()),
@@ -5814,18 +5909,51 @@ fn returns(stmts: &Stmts) -> bool {
 /// of what to do next rather than a list of failures.
 /// Whether a ghost statement only seeds or drops a fact about the existing
 /// function-pointer model, which Palow supplies for itself.
-fn ghost_is_funcptr(code: &InlinePulseCode) -> bool {
-    let mut saw = false;
+/// The head of a ghost statement: the dotted name it applies, which is
+/// everything up to the first antiquotation.
+fn ghost_head(code: &InlinePulseCode) -> String {
+    let mut head = String::new();
     for t in &code.tokens {
         let InlinePulseToken::Verbatim(tok) = t else {
-            return false;
+            break;
         };
-        let text = &*tok.text.val;
-        if text.contains("FuncPtr") {
-            saw = true;
-        }
+        head.push_str(&tok.text.val);
     }
-    saw
+    head
+}
+
+/// Whether a ghost statement is about a part of the *old* memory model that
+/// Palow replaces with something the emitter writes itself.
+///
+/// Dropping a proof hint is sound in one direction only, and it is the safe
+/// one: a hint can make a proof succeed that would otherwise fail, so removing
+/// one can only cause a failure, never let a wrong proof through. What makes
+/// it right rather than merely safe is that for each of these the emitter
+/// already writes the replacement:
+///
+///   * the old function-pointer model -- Palow emits `of_fn_div_valid` before
+///     an indirect call and `drop_is_valid` after it;
+///   * the array-cell borrow discipline -- Palow has no `_arrayptr` and no
+///     borrowed cell, only `array_focus`/`array_unfocus` around each access;
+///   * the maybe-uninitialised discipline -- Palow writes `write_uninit` and
+///     `forget` where the initialisation state changes;
+///   * acquiring a global's storage -- in Palow a global's ownership arrives
+///     in the contract, so there is nothing to acquire.
+///
+/// Every other ghost statement says something Palow has no other way to learn,
+/// and is still refused rather than silently discarded.
+fn ghost_replaced(code: &InlinePulseCode) -> bool {
+    let head = ghost_head(code);
+    const REPLACED: &[&str] = &[
+        "Pulse.Lib.C.FuncPtr.",
+        "arrayptr_drop",
+        "array_borrow_cell",
+        "array_cell_read",
+        "array_return_cell",
+        "Pulse.Lib.C.MaybeUninit.",
+    ];
+    REPLACED.iter().any(|p| head.starts_with(p))
+        || (head.starts_with("Global_") && head.contains(".acquire_var_"))
 }
 
 fn stmt_kind(s: &Stmt) -> &'static str {

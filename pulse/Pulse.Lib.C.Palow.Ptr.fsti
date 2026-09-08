@@ -79,6 +79,31 @@ val add_add (a: ptr) (m n: SZ.t)
           (ensures  (a +! m) +! n == a +! SZ.add m n)
           [SMTPat ((a +! m) +! n)]
 
+(* Comparison, difference, and negative offset.
+
+   ISO C defines `<`, `<=` and `-` on pointers only when both operands point
+   into the same object (C11 6.5.6p9, 6.5.8p5). Palow compares and subtracts
+   addresses instead, which is total and agrees with C wherever C says
+   anything. This is the same known deviation as `( +! )`: forming a pointer is
+   never an error here, only accessing through one. *)
+val ptr_lt (a1 a2: ptr) : (b:bool { b <==> addr_of a1 < addr_of a2 })
+
+val ptr_le (a1 a2: ptr) : (b:bool { b <==> addr_of a1 <= addr_of a2 })
+
+(* The difference has to be representable, which is the caller's obligation in
+   C too (C11 6.5.6p9). *)
+val ptr_diff (a1: ptr) (a2: ptr { FStar.Int.size (addr_of a1 - addr_of a2) 64 })
+  : (d: FStar.Int64.t { FStar.Int64.v d == addr_of a1 - addr_of a2 })
+
+(* Total on the offsets that name an address at all: there is nothing below
+   zero to point at. *)
+val ( -! ) (a: ptr) (n: SZ.t { SZ.v n <= addr_of a }) : ptr
+
+val addr_of_sub (a: ptr) (n: SZ.t { SZ.v n <= addr_of a })
+  : Lemma (addr_of (a -! n) == addr_of a - SZ.v n /\
+           prov_of (a -! n) == prov_of a)
+          [SMTPat (addr_of (a -! n))]
+
 (* Ranges of addresses. `disjoint_ranges` is what `mem_pts_to_disjoint` returns:
    it is stated on addresses rather than on allocations because it is also what
    client code needs in order to conclude that two objects do not overlap. *)

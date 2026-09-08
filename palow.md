@@ -1298,8 +1298,36 @@ new facts about memory.
    to something else is still refused, because that hands out ownership of the
    place, which is the focus-across-statements problem again.
 
-   As of this milestone: **725 specifications, 474 of them with real bodies,
-   251 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   Pointer arithmetic is where the low-level model is *simpler* than the one
+   it replaces. `p + 3` is `p +! 3 * sizeof elem`, `p < q` compares addresses,
+   and `p - q` is a byte difference divided by the element size -- exactly the
+   identity C states, and nothing has to be tracked to say it. The old model
+   carried a separate `_arrayptr` pointer kind whose comparison and difference
+   needed a `base_of x == base_of z` precondition, because a pointer there was
+   an array plus an offset and there was no other way to say two of them were
+   comparable. Here they are addresses, so they always are. ISO C disagrees:
+   `<`, `<=` and `-` are defined only within a single object (C11 6.5.6p9,
+   6.5.8p5), and forming an out-of-bounds pointer is undefined even if it is
+   never dereferenced. Palow is more permissive on both counts, which is the
+   same deviation `( +! )` already had -- forming a pointer is not an access,
+   and it is the access the ownership discipline governs.
+
+   With arithmetic in place the ghost hints that went with it can go. Palow
+   already dropped the hints about the old function-pointer model because it
+   emits the replacements itself; the same is now true of the array-cell borrow
+   discipline, the maybe-uninitialised discipline, and acquiring a global's
+   storage. None of those exist here: an array access is a focus the emitter
+   writes, initialisation state is `write_uninit` and `forget`, and a global's
+   ownership arrives in the contract. Dropping a hint is sound in one direction
+   only, and it is the safe one -- a hint can make a proof succeed that would
+   otherwise fail, so removing one can only cause a failure. Every other ghost
+   statement is still refused rather than silently discarded.
+
+   `ptrdiff_t` gets no layer of its own: on the LP64 target Palow fixes, it
+   *is* `int64_t`, so it shares its storage.
+
+   As of this milestone: **725 specifications, 482 of them with real bodies,
+   243 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
