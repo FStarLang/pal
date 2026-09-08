@@ -1275,8 +1275,18 @@ new facts about memory.
    fail. And `_pulse_opaque_to_smt` on the declaration is honoured, hiding the
    value from SMT while leaving the length visible.
 
-   As of this milestone: **725 specifications, 459 of them with real bodies,
-   266 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   The same reasoning generalises past arrays. Any path into an immutable
+   global -- a field, an element, a field of an element -- reads a value that
+   nothing in the program can change, so it is settled at translation time and
+   needs no ownership, no focus and no sequencing. Palow now walks such a path
+   through the initialiser and emits the constant it arrives at, which is also
+   what lets it appear inside an `_assert`. A path the initialiser does not
+   mention is not a gap but the zero-fill C guarantees for the rest of a
+   partial initialiser, so that is what is emitted. Only scalars fold; an
+   aggregate path falls back to the ordinary read.
+
+   As of this milestone: **725 specifications, 468 of them with real bodies,
+   257 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

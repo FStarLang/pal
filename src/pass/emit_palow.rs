@@ -3085,21 +3085,84 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// One element of a published array global, as an F\* term.
-    fn global_array_elem(&self, v: &Ident, i: u64) -> Option<String> {
-        let gv = self.env.lookup_global_var(v)?;
-        if !global_var_is_array(gv) || !gv.is_pure || gv.is_extern {
-            return None;
+    /// The constant an lvalue reads, when it is rooted at a global nothing in
+    /// the program can write. Returns the type at that path together with the
+    /// initialiser that reached it; `None` means the path is covered by
+    /// zero-initialisation, which is what a partial initialiser leaves behind
+    /// and what a tentative definition is made of.
+    ///
+    /// This is the general form of the array case: `entry_packets.desc[0]` and
+    /// `global_partial.initialized` are settled at translation time for the
+    /// same reason `padded[0]` is, and walking the path is all it takes.
+    fn const_path(&self, e: &Expr) -> Option<(Rc<Type>, Option<Rc<Expr>>)> {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) => {
+                if self.slots.iter().any(|s| s.name == *v.val) {
+                    return None;
+                }
+                let gv = self.env.lookup_global_var(v)?;
+                if gv.is_enum_constant || !gv.is_pure || gv.is_extern {
+                    return None;
+                }
+                Some((gv.ty.clone(), gv.init.clone()))
+            }
+            ExprT::Member(base, f) => {
+                let (ty, init) = self.const_path(base)?;
+                let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
+                    return None;
+                };
+                let fty = self
+                    .tds
+                    .structs
+                    .get(&*n.val)?
+                    .fields
+                    .iter()
+                    .find(|x| *x.name == *f.val.to_string())?
+                    .ty
+                    .clone();
+                let at = match init.as_ref().map(|x| &strip_vattr(x).val) {
+                    Some(ExprT::StructInit(_, inits)) => inits
+                        .iter()
+                        .find(|(n, _)| *n.val == *f.val)
+                        .map(|(_, x)| x.clone()),
+                    // A field the initialiser does not name is zero, and so is
+                    // every field of a global with no initialiser at all.
+                    None => None,
+                    _ => return None,
+                };
+                Some((fty, at))
+            }
+            ExprT::Index(base, idx) => {
+                let (ty, init) = self.const_path(base)?;
+                let TypeT::FixedArray(elem, n) = &peel(self.tds, &ty).val else {
+                    return None;
+                };
+                let k = const_index(&strip_vattr(idx).val)?;
+                if k >= *n {
+                    return None;
+                }
+                let at = match init.as_ref().map(|x| &strip_vattr(x).val) {
+                    Some(ExprT::ArrayInit { elems, .. }) => {
+                        Some(elems.get(usize::try_from(k).ok()?)?.clone())
+                    }
+                    None => None,
+                    _ => return None,
+                };
+                Some((elem.clone(), at))
+            }
+            _ => None,
         }
-        let init = gv.init.as_ref()?;
-        const_array(self.tds, &gv.ty, init)?;
-        let TypeT::FixedArray(elem, _) = &peel(self.tds, &gv.ty).val else {
-            return None;
-        };
-        let ExprT::ArrayInit { elems, .. } = &strip_vattr(init).val else {
-            return None;
-        };
-        const_expr(self.tds, elem, elems.get(usize::try_from(i).ok()?)?)
+    }
+
+    /// The constant an lvalue reads, as an F\* term, when there is one. Only a
+    /// scalar qualifies: an aggregate has no literal to fold to, and falls
+    /// through to the ordinary access.
+    fn const_read(&self, e: &Expr) -> Option<String> {
+        let (ty, init) = self.const_path(e)?;
+        match init {
+            Some(x) => const_expr(self.tds, &ty, &x),
+            None => zero_value(self.tds, &ty).ok(),
+        }
     }
 
     /// The published length of an array global, if it has one.
@@ -3875,20 +3938,17 @@ impl<'a> Body<'a> {
                 let ExprT::Var(v) = &strip_vattr(base).val else {
                     unreachable!()
                 };
+                // A constant index is settled at translation time, and folding
+                // it saves the solver from walking the list one cons at a
+                // time, which is what decides whether a large table is
+                // affordable.
+                if let Some(x) = self.const_read(e) {
+                    return Ok(x);
+                }
                 // The length is in the type, so a constant index carries its
                 // own bound. Anything else needs the function's `_requires`,
                 // and emitting it without one produces a failure about the
                 // subscript rather than about the memory model.
-                // A constant index into a constant table is just the element.
-                // Emitting it saves the solver from walking a list one cons at
-                // a time, which is what decides whether a large table is
-                // affordable, and it is exactly as true: nothing can write the
-                // global, so the value is settled at compile time.
-                if let Some(k) = const_index(&strip_vattr(idx).val) {
-                    if let Some(x) = self.global_array_elem(v, k) {
-                        return Ok(x);
-                    }
-                }
                 let n = self.global_array_len(v).unwrap_or(0);
                 let literal = const_index(&strip_vattr(idx).val).is_some_and(|k| k < n);
                 if !literal && !self.signed_ok {
@@ -3902,6 +3962,12 @@ impl<'a> Body<'a> {
                 Ok(format!("(Seq.index var_{} (SizeT.v {}))", v.val, i))
             }
             ExprT::Member(..) | ExprT::Index(..) => {
+                // A path into a global nothing can write is settled at
+                // translation time, so it is a term rather than a read: no
+                // ownership, no sequencing, and usable inside an assertion.
+                if let Some(x) = self.const_read(e) {
+                    return Ok(x);
+                }
                 let hint = match &e.val {
                     ExprT::Member(_, f) => f.val.to_string(),
                     _ => "elem".to_string(),
