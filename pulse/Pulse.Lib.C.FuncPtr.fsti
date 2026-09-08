@@ -117,6 +117,51 @@ unfold let post_of_tot (#a #b #c: Type0) (#pre: a -> erased c -> slprop) (#post:
 (* The null function pointer. *)
 val null (a b: Type0) : func_ptr a b
 
+(* ============================================================================
+   Eta-expansion of the witness
+
+   `eta_expanded x` is a no-op slprop (`emp`). Its only purpose is to be carried
+   in `call`/`call_div`'s precondition so that the eager-intro rules below fire
+   on it. Discharging `eta_expanded ?w` at a tuple type forces `?w` to be
+   expanded into a real tuple spine of fresh *leaf* uvars, which Pulse can then
+   solve normally.
+
+   This matters because Pulse only ever solves a hole standing for a tuple
+   LEAF, never one standing for a whole tuple: `snd (reveal ?u)` is inert, as
+   projection simplification needs a real `Mktuple2`. Without these rules a
+   caller has to write the tuple spine out by hand.
+
+   There is deliberately only a *binary* product rule. `a & b & c` in F* is a
+   FLAT `tuple3`, not nested `tuple2`s, so `eta_expanded_pair` would not fire on
+   it -- every producer of a witness type must therefore fold it to the right,
+   `(a & (b & c))`. That keeps one rule sufficient at every arity; adding
+   `tuple3`/`tuple4` rules instead would only move the cap.
+   --------------------------------------------------------------------------- *)
+let eta_expanded (#[@@@mkey] t: Type0) (x: t) : slprop = emp
+
+[@@pulse_eager_intro]
+ghost fn eta_expanded_leaf (#t: Type0) (x: t)
+  ensures eta_expanded x
+{ fold eta_expanded x }
+
+[@@pulse_eager_intro]
+ghost fn eta_expanded_unit ()
+  ensures eta_expanded ()
+{ fold eta_expanded () }
+
+[@@pulse_eager_intro]
+ghost fn eta_expanded_erased (#t: Type0) (x: erased t)
+  requires eta_expanded (reveal x)
+  ensures eta_expanded x
+{ unfold eta_expanded (reveal x); fold eta_expanded x }
+
+[@@pulse_eager_intro]
+ghost fn eta_expanded_pair (#t #s: Type0) (x: t) (y: s)
+  requires eta_expanded x
+  requires eta_expanded y
+  ensures eta_expanded (x, y)
+{ unfold eta_expanded x; unfold eta_expanded y; fold eta_expanded (x, y) }
+
 (* Reflect a concrete TOTAL Pulse function as a pointer. pre/post are explicit to
    avoid higher-order-unification failures. *)
 val of_fn (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
@@ -163,14 +208,14 @@ val weaken (#a #b #c: Type0) (f: func_ptr a b)
    usable from any (total or divergent) context. *)
 val call (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: func_ptr a b)  (x: a) (w: erased c)
-  : stt b (is_valid f false pre post  ** pre x w) (fun r -> is_valid f false pre post ** post x w r)
+  : stt b (is_valid f false pre post ** eta_expanded w ** pre x w) (fun r -> is_valid f false pre post ** post x w r)
 
 (* Indirect call of a POSSIBLY-DIVERGENT pointer: as `call`, but keyed on
    `is_valid f true ..` and returning `stt_div`, so it lives in the divergent
    effect (and can only be used from a `divergent` body). *)
 val call_div (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: func_ptr a b)  (x: a) (w: erased c)
-  : stt_div b (is_valid f true pre post  ** pre x w) (fun r -> is_valid f true pre post ** post x w r)
+  : stt_div b (is_valid f true pre post ** eta_expanded w ** pre x w) (fun r -> is_valid f true pre post ** post x w r)
 
 (* Decidable null test, for C `if (fp)` / `fp == NULL`. *)
 val is_null (#a #b: Type0) (f: func_ptr a b) : (r: bool { r <==> f == null a b })

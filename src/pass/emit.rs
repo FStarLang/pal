@@ -223,6 +223,10 @@ struct FnPtrSpecCore {
     /// parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc);
     /// `unit` when no parameter needs one.
     witness_domain: Doc,
+    /// A `rewrite each` statement for the top of the wrapper body, unsticking
+    /// the `match` the `requires`' witness pattern-`let` introduces; `nil` when
+    /// there is no witness to bind.
+    witness_rewrite: Doc,
     ret_name: Doc,
     ret_ty_doc: Doc,
     projs: Vec<Doc>,
@@ -791,22 +795,75 @@ fn nary_tuple_proj(base: Doc, i: usize, n: usize) -> Doc {
     parens(Doc::text(format!("Mktuple{n}?._{} ", i + 1)).append(base))
 }
 
-/// If `ty` is a bare (non-`_plain`, non-`_core_ref`, non-`_nullable`) pointer
-/// type, return its pointee type -- this is exactly the pointer shape whose
-/// ownership `emit_fnptr_spec_core` witnesses via an explicit `erased c`
-/// wrapper parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter
-/// doc). Used at `FnPtrCall` call sites (from the callee's static `FnPtr`
-/// argument types alone) to determine, in argument order, which call
-/// arguments contribute a witness component.
-fn fnptr_witness_pointee(ty: &Rc<Type>) -> Option<Rc<Type>> {
-    match &ty.val {
-        TypeT::Refine(inner, _)
-        | TypeT::RefineAlways(inner, _)
-        | TypeT::RefineUninit(inner, _)
-        | TypeT::RefineValue(inner, ..) => fnptr_witness_pointee(inner),
-        TypeT::Pointer(pointee, PointerKind::Ref | PointerKind::Unknown) => Some(pointee.clone()),
-        _ => None,
+/// A right-nested tuple of *binary* pairs: `unit` for arity 0, the bare type
+/// for arity 1, and `(a & (b & c))` for arity >= 2.
+///
+/// Deliberately NOT `fnptr_domain_doc`. That builds F*'s flat `tupleN` (`a & b
+/// & c` is `tuple3`, not nested `tuple2`s), which is right for the argument
+/// domain but wrong for the witness: `Pulse.Lib.C.FuncPtr.eta_expanded_pair` is
+/// binary, so it can only walk a spine that is binary the whole way down. The
+/// explicit parens are what force that.
+fn nested_pair_doc(docs: Vec<Doc>) -> Doc {
+    let mut it = docs.into_iter().rev();
+    match it.next() {
+        None => Doc::text("unit"),
+        Some(last) => it.fold(last, |acc, d| parens(d.append(" & ").append(acc))),
     }
+}
+
+/// The irrefutable pattern that destructures a `nested_pair_doc` value, binding
+/// `names` left to right: `_` for arity 0 (the value is `unit`, and naming it
+/// would only draw an unused-binder warning), the bare name for arity 1, and
+/// `(a, (b, c))` for arity >= 2.
+fn nested_pair_pat(names: Vec<Doc>) -> Doc {
+    let mut it = names.into_iter().rev();
+    match it.next() {
+        None => Doc::text("_"),
+        Some(last) => it.fold(last, |acc, d| parens(d.append(", ").append(acc))),
+    }
+}
+
+/// The projection for component `i` of `n` out of a `nested_pair_doc`-shaped
+/// value: `fst p`, `fst (snd p)`, `snd (snd p)`, ... (`base` itself for
+/// arity <= 1). The nesting is binary, so this is `snd` applied `i` times and
+/// then `fst` unless `i` is the last component -- NOT `nary_tuple_proj`, whose
+/// `MktupleN?._i` projectors are for the flat argument tuple.
+fn nested_pair_proj(base: Doc, i: usize, n: usize) -> Doc {
+    if n <= 1 {
+        return base;
+    }
+    let mut e = base;
+    for _ in 0..i {
+        e = parens(Doc::text("snd ").append(e));
+    }
+    if i < n - 1 {
+        e = parens(Doc::text("fst ").append(e));
+    }
+    e
+}
+
+/// The eta-expanded form of the `nested_pair_doc`-shaped value at `path`,
+/// written as an explicit `Mktuple2` spine: `(Mktuple2 (fst p) (Mktuple2 (fst
+/// (snd p)) (snd (snd p))))` and so on, `path` itself for arity <= 1.
+///
+/// Rewriting the witness to this in the wrapper body is what unsticks the
+/// `match` that the `requires`' pattern-`let` introduces. FStarLang/FStar#4512
+/// lets Pulse *purify* a spec under that match, but the prover still cannot
+/// unify a goal against a context that is itself a stuck match; once the
+/// scrutinee is a literal constructor application, iota reduces it away.
+fn eta_expand_doc(path: Doc, n: usize) -> Doc {
+    if n <= 1 {
+        return path;
+    }
+    parens(
+        Doc::text("Mktuple2 ")
+            .append(parens(Doc::text("fst ").append(path.clone())))
+            .append(" ")
+            .append(eta_expand_doc(
+                parens(Doc::text("snd ").append(path)),
+                n - 1,
+            )),
+    )
 }
 
 /// Visit every sub-expression of `e`, outermost first.
@@ -3288,35 +3345,23 @@ impl<'a> Emitter<'a> {
                     // `self`, the field getter's own unfold and this witness
                     // read open two independent existentials for the same
                     // value that Pulse can't unify.
-                    let param_tys: Option<Vec<Rc<Type>>> = env
-                        .infer_expr(f)
-                        .ok()
-                        .map(|t| env.vtype_whnf(t))
-                        .and_then(|t| match &t.val {
-                            TypeT::FnPtr { args, .. } => Some(args.clone()),
-                            _ => None,
-                        });
-                    let witness_vals: Vec<Doc> = param_tys
-                        .iter()
-                        .flatten()
-                        .zip(args.iter())
-                        .filter(|(ty, _)| fnptr_witness_pointee(ty).is_some())
-                        .map(|(_, a)| {
-                            let derefed = ExprT::Deref(a.clone()).with_loc(a.loc.clone());
-                            self.emit_rvalue(env, &derefed)
-                        })
-                        .collect();
-                    let witness_arg = match witness_vals.len() {
-                        0 => Doc::text("(hide ())"),
-                        1 => parens(
-                            Doc::text("hide ")
-                                .append(parens(witness_vals.into_iter().next().unwrap())),
-                        ),
-                        _ => parens(
-                            Doc::text("hide ")
-                                .append(parens(Doc::intersperse(witness_vals, Doc::text(", ")))),
-                        ),
-                    };
+                    // The explicit `w: erased c` witness argument is left as an
+                    // inference hole. `c` is the pair `(ELIMS & GHOSTS)` that
+                    // `emit_fnptr_spec_core` builds, and its leaves are solved
+                    // by unification against the caller's context: the
+                    // `eta_expanded w` conjunct in `call`/`call_div`'s
+                    // precondition (see `Pulse.Lib.C.FuncPtr.fsti`) forces `?w`
+                    // to be eta-expanded down the binary spine, so each leaf
+                    // becomes its own solvable hole.
+                    //
+                    // Deriving the witness here instead — reading the callee's
+                    // declared `FnPtr` argument types and emitting one `hide
+                    // !arg` component per bare pointer — is what used to make
+                    // caller and callee disagree about the witness shape
+                    // (issue #277), and it could never see a callee's
+                    // `_ghost_arg`s at all, since a function-pointer type does
+                    // not record them.
+                    let witness_arg = Doc::text("_");
                     parens(naryfn([
                         Doc::text(call_prim),
                         Doc::text("_"),
@@ -6502,6 +6547,24 @@ impl<'a> Emitter<'a> {
             arg_names.push(n.clone());
             env.push_arg(arg, LocalDeclKind::RValue);
         }
+        // The GHOSTS half of the witness `c`, in declaration order. A direct
+        // call takes its `_ghost_arg`s as implicit `#(v: erased t)` parameters,
+        // but a function pointer has a fixed arity, so here they travel inside
+        // the single `y_fp` witness instead and are bound by its pattern-`let`.
+        // The component type is the bare `t`: the whole witness is already
+        // `erased`.
+        //
+        // Each is pushed into the local env so that a `$(v)` inside an
+        // `_inline_pulse` spec resolves to the pattern-bound name. This has to
+        // happen before any spec is lowered below, or the name is free -- which
+        // is what made the wrapper emit a read of a nonexistent C variable.
+        let mut ghost_ty_docs: Vec<Doc> = vec![];
+        let mut ghost_name_docs: Vec<Doc> = vec![];
+        for ga in &decl.ghost_args {
+            ghost_ty_docs.push(self.emit_type(env, &ga.ty));
+            ghost_name_docs.push(self.emit_name(Name::Var(ga.name.val.clone())));
+            env.push_var_decl(&ga.name, ga.ty.clone(), LocalDeclKind::RValue);
+        }
         // Domain: one component per C argument, in argument order. Pointer
         // arguments contribute their pointer type; the pointee ownership
         // (`pts_to`) is carried by the general type-slprop lowering below.
@@ -6653,42 +6716,110 @@ impl<'a> Emitter<'a> {
             }
         }
         // Combine every requires-side existential group's bindings (in arg
-        // order) into a single flat witness type tuple `c`, and bind them all
-        // with `let`s projecting out of ONE explicit `y_fp: erased c` wrapper
-        // parameter (see comment above).
-        let witness_count: usize = req_witness_groups.iter().map(|(b, _)| b.len()).sum();
-        let witness_ty_docs: Vec<Doc> = req_witness_groups
+        // order) into the ELIMS half of the witness `c`, and bind them all by
+        // ONE pattern-`let` off the explicit `y_fp: erased c` wrapper parameter
+        // (see comment above).
+        //
+        // `c` is the pair `(ELIMS & GHOSTS)`: the existentials eliminated from
+        // the pointer arguments, paired with the `_ghost_arg`s. Both halves are
+        // right-nested binary pairs, and either may be `unit`.
+        let elim_ty_docs: Vec<Doc> = req_witness_groups
             .iter()
             .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
             .collect();
-        let witness_domain = fnptr_domain_doc(witness_ty_docs);
-        // Every group's `let`s are hoisted into ONE prefix placed in front of
-        // the whole `requires` conjunction, rather than each group carrying
-        // its own. A `let` is a term-level binder, so it cannot appear as the
-        // right operand of `**`: emitting it per group parses only while
-        // there is a single group, and is a syntax error from two groups on.
-        // Hoisting also keeps every witness binding in scope for the trailing
-        // `pure` conjunct below.
+        let elim_name_docs: Vec<Doc> = req_witness_groups
+            .iter()
+            .flat_map(|(b, _)| b.iter().map(|eb| eb.name.clone()))
+            .collect();
+        let witness_domain = parens(
+            nested_pair_doc(elim_ty_docs)
+                .append(" & ")
+                .append(nested_pair_doc(ghost_ty_docs)),
+        );
+        // ONE prefix in front of the whole `requires` conjunction, rather than
+        // each group carrying its own. A `let` is a term-level binder, so it
+        // cannot appear as the right operand of `**`: emitting it per group
+        // parses only while there is a single group, and is a syntax error from
+        // two groups on. Hoisting also keeps every binding in scope for the
+        // trailing `pure` conjunct below.
+        //
+        // Destructured by PATTERN, not by `fst`/`snd`. Pulse solves a caller's
+        // witness by unification, and it recovers the individual leaves only
+        // through a pattern match; `pts_to x (fst ?w)` is inert, because F*
+        // does not reduce projectors. A pattern-`let` desugars to a single-
+        // branch match, which Pulse purifies into since FStarLang/FStar#4512.
+        let has_witness_bindings = !elim_name_docs.is_empty() || !ghost_name_docs.is_empty();
+        let elim_arity = elim_name_docs.len();
+        let ghost_arity = ghost_name_docs.len();
+        // The post needs the ghosts too: a `_preserves` conjunct mentioning one
+        // appears in both the pre and the post. It does NOT re-bind the elims,
+        // which the post quantifies existentially instead (their value may have
+        // changed).
+        //
+        // Bound by PROJECTION here, unlike the `requires`. The pattern form is
+        // needed only where a caller solves the witness by unification, which
+        // is the precondition; in the postcondition it would just put a stuck
+        // `match` in the goal, which the body's `witness_rewrite` -- acting on
+        // the context -- cannot reach.
+        let witness_post_prefix = if ghost_arity > 0 {
+            let ghost_base = parens(Doc::text("snd ").append(parens(Doc::text("reveal y_fp"))));
+            Doc::concat(ghost_name_docs.iter().enumerate().map(|(i, name)| {
+                Doc::text("let ")
+                    .append(name.clone())
+                    .append(" = ")
+                    .append(nested_pair_proj(ghost_base.clone(), i, ghost_arity))
+                    .append(" in")
+                    .append(Doc::hardline())
+            }))
+        } else {
+            Doc::nil()
+        };
         let witness_let_prefix = {
-            let witness_base = parens(Doc::text("reveal y_fp"));
-            let mut widx = 0usize;
-            let mut lets: Vec<Doc> = vec![];
-            for (bindings, props) in req_witness_groups {
-                for b in &bindings {
-                    let proj = nary_tuple_proj(witness_base.clone(), widx, witness_count);
-                    widx += 1;
-                    lets.push(
-                        Doc::text("let ")
-                            .append(b.name.clone())
-                            .append(" = ")
-                            .append(proj)
-                            .append(" in")
-                            .append(Doc::hardline()),
-                    );
-                }
+            let pat = parens(
+                nested_pair_pat(elim_name_docs)
+                    .append(", ")
+                    .append(nested_pair_pat(ghost_name_docs)),
+            );
+            for (_, props) in req_witness_groups {
                 requires_props.push(mk_star(props));
             }
-            Doc::concat(lets)
+            // With nothing to bind, emit no prefix at all. The `match` a
+            // pattern-`let` desugars to is not free: it would wrap the whole
+            // `requires` for no gain, and the pure conjuncts inside it (which
+            // here speak only of `x_fp`) would have to be dug back out of it.
+            if has_witness_bindings {
+                Doc::text("let ")
+                    .append(pat)
+                    .append(" = reveal y_fp in")
+                    .append(Doc::hardline())
+            } else {
+                Doc::nil()
+            }
+        };
+        // Its counterpart for the body. Both halves are eta-expanded in ONE
+        // rewrite of the whole witness, so a single equality obligation covers
+        // the entire spine.
+        let witness_rewrite = if has_witness_bindings {
+            let base = parens(Doc::text("reveal y_fp"));
+            Doc::text("rewrite each ")
+                .append(base.clone())
+                .append(" as ")
+                .append(parens(
+                    Doc::text("Mktuple2 ")
+                        .append(eta_expand_doc(
+                            parens(Doc::text("fst ").append(base.clone())),
+                            elim_arity,
+                        ))
+                        .append(" ")
+                        .append(eta_expand_doc(
+                            parens(Doc::text("snd ").append(base)),
+                            ghost_arity,
+                        )),
+                ))
+                .append(";")
+                .append(Doc::hardline())
+        } else {
+            Doc::nil()
         };
         // `preserves` (const params) hold across the call, so they belong in
         // both the pre and the post.
@@ -6809,7 +6940,11 @@ impl<'a> Emitter<'a> {
                     .append(pre_body),
             ),
         ));
-        let post_expr = parens(bind_prefix(&name_docs).append(post_body));
+        let post_expr = parens(
+            bind_prefix(&name_docs)
+                .append(witness_post_prefix)
+                .append(post_body),
+        );
 
         FnPtrSpecCore {
             pre_expr,
@@ -6818,6 +6953,7 @@ impl<'a> Emitter<'a> {
             callee,
             domain,
             witness_domain,
+            witness_rewrite,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6835,6 +6971,7 @@ impl<'a> Emitter<'a> {
             callee,
             domain,
             witness_domain,
+            witness_rewrite,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6892,7 +7029,12 @@ impl<'a> Emitter<'a> {
             .append(Doc::hardline())
             .append(Doc::text("{"))
             .append(Doc::hardline())
-            .append(Doc::text("  ").append(call_body).nest(2))
+            .append(
+                Doc::text("  ")
+                    .append(witness_rewrite)
+                    .append(call_body)
+                    .nest(2),
+            )
             .append(Doc::hardline())
             .append(Doc::text("}"));
 
