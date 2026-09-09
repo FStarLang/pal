@@ -142,8 +142,8 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::GlobalAddr(v) | Name::GlobalAddrNotNull(v) | Name::GlobalAcquire(v) => {
             Some(format!("Global_{}", v))
         }
-        // Local names (Var, Val, Perm) are not cross-module references
-        Name::Var(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
+        // Local names are not cross-module references.
+        Name::Var(_) | Name::Label(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
     }
 }
 
@@ -407,6 +407,8 @@ impl From<&TypeRefKind> for TypeRef {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Name {
     Var(Rc<IdentT>),
+    /// C labels occupy a separate namespace from ordinary identifiers.
+    Label(Rc<IdentT>),
     /// The address of a `_pure` global: an assumed `ref` naming its storage,
     /// one per global, so distinct globals get distinct addresses.
     GlobalAddr(Rc<IdentT>),
@@ -478,6 +480,7 @@ impl Name {
                     _ => format!("var_{}", v),
                 }
             }
+            Name::Label(v) => format!("label_{}", v),
             Name::GlobalAddr(v) => format!("addr_var_{}", v),
             Name::GlobalAddrNotNull(v) => format!("addr_var_{}_not_null", v),
             Name::GlobalAcquire(v) => format!("acquire_var_{}", v),
@@ -4546,7 +4549,7 @@ impl<'a> Emitter<'a> {
                     self.emit_inline_pulse_tokens(env, code).append(";")
                 }
                 StmtT::Goto(label) => Doc::text("goto ")
-                    .append(self.emit_name(Name::Var(label.val.clone())))
+                    .append(self.emit_name(Name::Label(label.val.clone())))
                     .append(";"),
                 StmtT::Label { .. } => Doc::text("(* unrestructured label *)"),
                 StmtT::GotoBlock {
@@ -4563,7 +4566,7 @@ impl<'a> Emitter<'a> {
                     }
                     doc.append(Doc::hardline())
                         .append("label ")
-                        .append(self.emit_name(Name::Var(label.val.clone())))
+                        .append(self.emit_name(Name::Label(label.val.clone())))
                         .append(":;")
                 }
                 StmtT::Error => Doc::text("(admit());"),

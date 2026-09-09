@@ -49,6 +49,9 @@ statements. The pass scans for label/goto pairs from the bottom of each
 statement list and wraps the intermediate code in `GotoBlock` nodes --
 structured loops with break semantics that Pulse can express. Labels
 that no goto references are left as-is and removed later.
+The emitter gives labels their own `label_` naming category, separate from
+`var_` locals, so a C label and variable can share a name. Both label
+declarations and `goto` targets use the same name mangler.
 
 - **Decay.** [`src/pass/decay.rs`](../src/pass/decay.rs) handles C's array-to-pointer decay
 rule for function parameters. A parameter declared as `T x[]` or
