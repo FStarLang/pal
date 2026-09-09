@@ -5106,6 +5106,27 @@ impl<'a> Emitter<'a> {
 
         let mut ses = vec![];
 
+        // F* has no empty-record syntax, so a C struct with no members would
+        // emit `noeq type t = { }` and fail to parse. Empty structs are a
+        // GNU extension and do occur in
+        // generated headers. Give the record a unit-typed placeholder, and
+        // supply it at the two literal sites below so they stay consistent
+        // with the declaration.
+        let empty_placeholder_decl = || {
+            if fields.is_empty() {
+                Doc::hardline().append(Doc::text("pal_empty_struct_placeholder: unit;"))
+            } else {
+                Doc::nil()
+            }
+        };
+        let empty_placeholder_lit = || {
+            if fields.is_empty() {
+                Doc::line().append(Doc::text("pal_empty_struct_placeholder = ();"))
+            } else {
+                Doc::nil()
+            }
+        };
+
         ses.push(
             Doc::text("noeq type")
                 .append(Doc::line())
@@ -5127,6 +5148,7 @@ impl<'a> Emitter<'a> {
                             .nest(2),
                     )
                 })))
+                .append(empty_placeholder_decl())
                 .nest(2)
                 .append(Doc::line())
                 .append("}")
@@ -5853,6 +5875,7 @@ impl<'a> Emitter<'a> {
                                 .append(fold_arg_name(fld))
                                 .append(";")
                         })))
+                        .append(empty_placeholder_lit())
                         .nest(2)
                         .append(Doc::line())
                         .append("}")
@@ -6082,6 +6105,7 @@ impl<'a> Emitter<'a> {
                         .group()
                         .nest(2)
                 })))
+                .append(empty_placeholder_lit())
                 .nest(2)
                 .append(Doc::line())
                 .append("}")
