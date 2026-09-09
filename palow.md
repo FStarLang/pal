@@ -1443,8 +1443,25 @@ new facts about memory.
    constant -- the only case where a symbolic index reads as a value, and the
    common one, since a static aggregate with no initialiser is exactly that.
 
-   As of this milestone: **725 specifications, 521 of them with real bodies,
-   204 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   An `_out` argument is the one place where a call is handed a place rather
+   than a value, so it is the one argument that is not evaluated: `&x` is
+   storage. What the callee asks for is the write-only points-to, and the two
+   things that can supply one -- a local that has not been written, and the
+   caller's own `_out` parameter -- are both already tracked, because the
+   emitter needs them to choose between an initialising and an ordinary store.
+   So the call site does nothing new: it spends one and records that it is now
+   initialised.
+
+   The interesting case is passing storage that *has* been written, which C
+   allows: `_out` says the callee writes the object, not that nobody wrote it
+   before. There the value has to be given up first, which is the same step a
+   local takes on its way to `_stack_free` and is a loss of knowledge rather
+   than of ownership. `_consumes` at a call site is still refused, because
+   ownership that does not come back is not something the caller's slot
+   bookkeeping can currently spend.
+
+   As of this milestone: **725 specifications, 524 of them with real bodies,
+   201 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

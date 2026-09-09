@@ -2943,11 +2943,12 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         callees.insert(
             fndecl.name.val.to_string(),
             Callee {
-                simple: if !fndecl
-                    .args
-                    .iter()
-                    .all(|a| matches!(a.mode, ParamMode::Regular | ParamMode::Const))
-                {
+                simple: if !fndecl.args.iter().all(|a| {
+                    matches!(
+                        a.mode,
+                        ParamMode::Regular | ParamMode::Const | ParamMode::Out
+                    )
+                }) {
                     Err("moves ownership across the call")
                 } else if !fndecl.ghost_args.is_empty() {
                     Err("takes a ghost argument")
@@ -2964,6 +2965,11 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
                 fp: sig.fp.is_some(),
+                outs: fndecl
+                    .args
+                    .iter()
+                    .map(|a| a.mode == ParamMode::Out)
+                    .collect(),
             },
         );
         items.push(FnItem {
@@ -3199,6 +3205,9 @@ struct Callee {
     /// Whether a `__fp` wrapper was emitted, so the function can be decayed
     /// to a code pointer.
     fp: bool,
+    /// Which parameters are `_out`, by position. Those arguments are not
+    /// evaluated: what is passed is storage, not a value.
+    outs: Vec<bool>,
 }
 
 struct Body<'a> {
@@ -4623,15 +4632,57 @@ impl<'a> Body<'a> {
         if !c.contract && self.has_contract {
             return Err(format!("`{}`'s contract was dropped", name.val));
         }
+        let outs = c.outs.clone();
         let mut out = format!("func_{}", name.val);
-        for a in args.iter() {
-            let v = self.rvalue(a)?;
+        for (i, a) in args.iter().enumerate() {
+            let v = if outs.get(i) == Some(&true) {
+                self.out_arg(a)?
+            } else {
+                self.rvalue(a)?
+            };
             out += &format!(" {}", v);
         }
         if args.is_empty() {
             out += " ()";
         }
         Ok(format!("({})", out))
+    }
+
+    /// The storage passed for an `_out` parameter.
+    ///
+    /// An `_out` argument is the one place where a call is handed a place
+    /// rather than a value, so it is not evaluated: `&x` is storage, and what
+    /// the callee wants is the uninitialised points-to. The two things that
+    /// can supply one are a local that has not been written and the caller's
+    /// own `_out` parameter, and the emitter already tracks both -- so all
+    /// this does is spend one and record that it is now initialised.
+    fn out_arg(&mut self, a: &Expr) -> Result<String, String> {
+        if let ExprT::Ref(inner) = &strip_vattr(a).val
+            && let ExprT::Var(v) = &strip_vattr(inner).val
+            && let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val)
+        {
+            // C's `_out` says the callee writes the object, not that the
+            // object was never written before. Palow's contract asks for the
+            // write-only view, so one that already holds a value gives that
+            // value up first -- the same step a local takes on its way to
+            // `_stack_free`, and a loss of knowledge rather than of ownership.
+            if self.slots[i].init {
+                if self.slots[i].array.is_some() {
+                    return Err(format!("`&{}`, an array, for an `_out` parameter", v.val));
+                }
+                let (pn, at) = (self.slots[i].palow_ty.clone(), self.slots[i].addr.clone());
+                self.lines.push(format!("{}_forget {};", pn, at));
+            }
+            self.slots[i].init = true;
+            return Ok(self.slots[i].addr.clone());
+        }
+        if let ExprT::Var(v) = &strip_vattr(a).val
+            && let Some(i) = self.out_params.iter().position(|n| *n == *v.val)
+        {
+            self.out_params.remove(i);
+            return Ok(format!("var_{}", v.val));
+        }
+        Err("an `_out` argument that is not unwritten storage here".to_string())
     }
 
     fn alloc_slot(&mut self, name: &Ident, ty: &Type) -> Result<String, String> {
