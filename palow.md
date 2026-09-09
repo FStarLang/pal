@@ -1430,8 +1430,21 @@ new facts about memory.
    `valid` is `unit`, and threading a real one needs the caller to name the
    witness at the call.
 
-   As of this milestone: **725 specifications, 515 of them with real bodies,
-   210 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   Three small things then finished the constant-global story, and all three
+   are cases where the general rule was already right and only its reach was
+   short. Reading a global *through its address* -- `const struct point *p =
+   &g; return p->y;` -- is how C code normally gets at one, and the constant
+   path did not follow the alias, so it saw a dereference of a pointer instead
+   of a field of `g`. What an initialiser did not reach was being filled with
+   the `memset` zero rather than the static one, which has no answer for a
+   pointer: C11 6.7.9p10 says the member is a *null pointer*, and saying so is
+   what lets `if (g.callback == 0)` translate. And an array the initialiser
+   never reached is zero at every index, so the subscript need not be a
+   constant -- the only case where a symbolic index reads as a value, and the
+   common one, since a static aggregate with no initialiser is exactly that.
+
+   As of this milestone: **725 specifications, 521 of them with real bodies,
+   204 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

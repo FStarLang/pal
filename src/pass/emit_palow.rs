@@ -3307,6 +3307,12 @@ impl<'a> Body<'a> {
     /// `global_partial.initialized` are settled at translation time for the
     /// same reason `padded[0]` is, and walking the path is all it takes.
     fn const_path(&self, e: &Expr) -> Option<(Rc<Type>, Option<Rc<Expr>>)> {
+        // A pointer that is another name for a place reaches the same
+        // constant, and reading a global through its address is the usual way
+        // C code reaches one.
+        if let Some(q) = self.unalias(e) {
+            return self.const_path(&q);
+        }
         match &strip_vattr(e).val {
             ExprT::Var(v) => {
                 if self.slots.iter().any(|s| s.name == *v.val) {
@@ -3371,6 +3377,14 @@ impl<'a> Body<'a> {
                 let TypeT::FixedArray(elem, n) = &peel(self.tds, &ty).val else {
                     return None;
                 };
+                // An array the initialiser never reached is zero at every
+                // index, so which index it is does not have to be known. That
+                // is the only case where a symbolic subscript reads as a
+                // constant, and it is the common one: a static aggregate with
+                // no initialiser at all.
+                if init.is_none() {
+                    return Some((elem.clone(), None));
+                }
                 let k = const_index(&strip_vattr(idx).val)?;
                 if k >= *n {
                     return None;
@@ -3395,7 +3409,10 @@ impl<'a> Body<'a> {
         let (ty, init) = self.const_path(e)?;
         match init {
             Some(x) => const_expr(self.tds, &ty, &x),
-            None => zero_value(self.tds, &ty).ok(),
+            // What an initialiser did not reach is not all-bits-zero but the
+            // static initialisation of C11 6.7.9p10: an arithmetic member is
+            // zero and a pointer member is a null pointer.
+            None => static_zero(self.tds, &ty).ok(),
         }
     }
 
