@@ -16,6 +16,9 @@ use crate::{
 
 use super::normalize_casts::normalize_unsigned;
 
+mod module_names;
+use module_names::ModuleNames;
+
 pub type SourceRangeMap = Vec<(Location, Range)>;
 
 /// The module holding a function's fnptr wrapper (`func_<g>__fp`), whose type
@@ -61,8 +64,8 @@ fn emit_machine_int_literal(val: &BigInt, signed: bool, width: u32) -> Doc {
     }
 }
 
-/// Determines the output module name for a given top-level declaration.
-pub fn module_name_for_decl(decl: &Decl) -> String {
+/// Determines the candidate module name, before case-insensitive allocation.
+fn module_name_for_decl(decl: &Decl) -> String {
     match &decl.val {
         DeclT::FnDefn(fn_defn) => format!("Func_{}", fn_defn.decl.name.val),
         DeclT::FnDecl(fn_decl) => format!("Func_{}", fn_decl.name.val),
@@ -150,12 +153,12 @@ fn module_for_name(name: &Name) -> Option<String> {
 /// Builds a map from function/let/global/opaque-type identifiers to their owning module name.
 /// This is needed because Name::Fn is used for all function-like references (FnDefn, LetDecl, etc.)
 /// but they live in different module prefixes.
-fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
+fn build_fn_module_map(decls: &[Decl], modules: &ModuleNames) -> HashMap<Rc<str>, String> {
     let mut map = HashMap::new();
     for decl in decls {
         match &decl.val {
             DeclT::FnDefn(fn_defn) => {
-                let m = format!("Func_{}", fn_defn.decl.name.val);
+                let m = modules.for_decl(decl);
                 let n = &fn_defn.decl.name.val;
                 // Register the synthetic fnptr wrapper name so indirect calls in
                 // other modules qualify it to its defining module. The wrapper
@@ -163,30 +166,29 @@ fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
                 // function's address is taken), not in `Func_<g>`. The pre/post
                 // are no longer named declarations (they are inlined into the
                 // wrapper's type and recovered via `pre_of`/`post_of`).
-                let fp = funcptr_module_name(n);
-                map.insert(Rc::from(format!("{}__fp", n)), fp);
+                if let Some(fp) = modules.get(&funcptr_module_name(n)) {
+                    map.insert(Rc::from(format!("{}__fp", n)), fp.clone());
+                }
                 map.insert(fn_defn.decl.name.val.clone(), m);
             }
             DeclT::FnDecl(fn_decl) => {
-                let m = format!("Func_{}", fn_decl.name.val);
+                let m = modules.for_decl(decl);
                 let n = &fn_decl.name.val;
                 // A declaration can be address-taken too, and its wrapper lives
                 // in `Funcptr_<g>` just as above.
-                let fp = funcptr_module_name(n);
-                map.insert(Rc::from(format!("{}__fp", n)), fp);
+                if let Some(fp) = modules.get(&funcptr_module_name(n)) {
+                    map.insert(Rc::from(format!("{}__fp", n)), fp.clone());
+                }
                 map.insert(fn_decl.name.val.clone(), m);
             }
             DeclT::LetDecl(let_decl) => {
-                map.insert(
-                    let_decl.name.val.clone(),
-                    format!("Let_{}", let_decl.name.val),
-                );
+                map.insert(let_decl.name.val.clone(), modules.for_decl(decl));
             }
-            DeclT::OpaqueTypeDecl(decl) => {
-                map.insert(decl.name.val.clone(), format!("Type_{}", decl.name.val));
+            DeclT::OpaqueTypeDecl(opaque) => {
+                map.insert(opaque.name.val.clone(), modules.for_decl(decl));
             }
             DeclT::GlobalVar(gv) => {
-                map.insert(gv.name.val.clone(), format!("Global_{}", gv.name.val));
+                map.insert(gv.name.val.clone(), modules.for_decl(decl));
             }
             _ => {}
         }
@@ -196,11 +198,11 @@ fn build_fn_module_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
 
 /// Builds a map from typedef names that are actually OpaqueTypeDecls to their `Type_*` module.
 /// This overrides the default `Typedef_*` mapping from module_for_name for TypeRef lookups.
-fn build_typedef_override_map(decls: &[Decl]) -> HashMap<Rc<str>, String> {
+fn build_typedef_override_map(decls: &[Decl], modules: &ModuleNames) -> HashMap<Rc<str>, String> {
     let mut map = HashMap::new();
     for decl in decls {
         if let DeclT::OpaqueTypeDecl(d) = &decl.val {
-            map.insert(d.name.val.clone(), format!("Type_{}", d.name.val));
+            map.insert(d.name.val.clone(), modules.for_decl(decl));
         }
     }
     map
@@ -678,6 +680,7 @@ struct Emitter<'a> {
     defining_struct: Option<Rc<str>>,
     /// The module currently being emitted (for qualified name resolution).
     current_module: String,
+    module_names: ModuleNames,
     /// Maps function/let/global/opaque identifiers to their owning module.
     fn_module_map: HashMap<Rc<str>, String>,
     /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
@@ -712,7 +715,7 @@ impl<'a> Emitter<'a> {
             self.fn_module_map.get(v).cloned()
         } else {
             // Check typedef_override_map for TypeRef::Typedef names (OpaqueTypeDecl)
-            let base_module = module_for_name(&name);
+            let base_module = self.module_for_name(&name);
             match &name {
                 Name::TypeRef(TypeRef::Typedef(t))
                 | Name::TypeRefPred(TypeRef::Typedef(t))
@@ -732,6 +735,10 @@ impl<'a> Emitter<'a> {
         } else {
             Doc::text(mangled)
         }
+    }
+
+    fn module_for_name(&self, name: &Name) -> Option<String> {
+        module_for_name(name).map(|candidate| self.module_names.for_reference(candidate))
     }
 }
 
@@ -5131,7 +5138,7 @@ impl<'a> Emitter<'a> {
             Doc::text(self.nm.mangle(&Name::TypeRefSpec(k.into())).to_string());
         let spec_mangled = self.nm.mangle(&Name::TypeRefSpec(k.into())).to_string();
         let spec_type_name_qualified =
-            if let Some(owner) = module_for_name(&Name::TypeRefSpec(k.into())) {
+            if let Some(owner) = self.module_for_name(&Name::TypeRefSpec(k.into())) {
                 Doc::text(format!("{}.{}", owner, spec_mangled))
             } else {
                 Doc::text(spec_mangled)
@@ -8171,10 +8178,15 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         full_env.push_decl(decl);
     }
 
+    let addr_taken = collect_addr_taken(&tu.decls);
+    let Some(module_names) = ModuleNames::new(diags, &tu.decls, &addr_taken) else {
+        return Vec::new();
+    };
+
     // Build the map from function/let/global identifiers to their owning modules
-    let fn_module_map = build_fn_module_map(&tu.decls);
+    let fn_module_map = build_fn_module_map(&tu.decls, &module_names);
     // Build the override map for OpaqueTypeDecl typedef names
-    let typedef_override_map = build_typedef_override_map(&tu.decls);
+    let typedef_override_map = build_typedef_override_map(&tu.decls, &module_names);
 
     let mut results = Vec::new();
 
@@ -8204,16 +8216,15 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         type_uninit_val_params: HashMap::new(),
         defining_struct: None,
         current_module: String::new(),
+        module_names,
         fn_module_map,
         typedef_override_map,
         current_fn_total: false,
         tmp_counter: 0,
     };
 
-    let addr_taken = collect_addr_taken(&tu.decls);
-
     for decl in &tu.decls {
-        let mod_name = module_name_for_decl(decl);
+        let mod_name = emitter.module_names.for_decl(decl);
         emitter.current_module = mod_name.clone();
 
         // Emit just the body (decl code)
@@ -8270,7 +8281,11 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         };
         if let Some(fn_decl) = wrapper_decl {
             if !fn_decl.is_pure && addr_taken.contains(&fn_decl.name.val) {
-                let fp_mod = funcptr_module_name(&fn_decl.name.val);
+                let fp_mod = emitter
+                    .module_names
+                    .get(&funcptr_module_name(&fn_decl.name.val))
+                    .expect("address-taken function module was allocated")
+                    .clone();
                 emitter.current_module = fp_mod.clone();
                 let (fst_extra, fsti_extra) = emitter.emit_fnptr_triple(&env, fn_decl);
 
