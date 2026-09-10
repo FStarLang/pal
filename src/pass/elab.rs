@@ -1274,11 +1274,7 @@ impl<'a> Elaborator<'a> {
                 }
             }
             DeclT::StructDecl(_) => {}
-            DeclT::UnionDefn(UnionDefn {
-                name: _,
-                fields,
-                abi_size: _,
-            }) => {
+            DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
                 let siblings = fields.clone();
                 for f in fields {
                     self.elab_field(env, f, &siblings);

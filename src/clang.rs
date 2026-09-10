@@ -163,7 +163,6 @@ impl<'a> Ctx<'a> {
                 refines: builder.refines.unwrap(),
                 fields: builder.fields,
                 eager_unfold_pred: builder.eager_unfold_pred,
-                abi_size: builder.abi_size,
             }),
         })
     }
@@ -181,7 +180,6 @@ impl<'a> Ctx<'a> {
             val: DeclT::UnionDefn(UnionDefn {
                 name: builder.name,
                 fields: builder.fields,
-                abi_size: builder.abi_size,
             }),
         })
     }
@@ -456,7 +454,6 @@ struct DeclBuilder {
     is_total: bool,
     decreases: Option<Rc<Expr>>,
     eager_unfold_pred: bool,
-    abi_size: Option<u64>,
 }
 
 impl DeclBuilder {
@@ -476,7 +473,6 @@ impl DeclBuilder {
             is_total: false,
             decreases: None,
             eager_unfold_pred: false,
-            abi_size: None,
         }
     }
 
@@ -543,10 +539,6 @@ impl DeclBuilder {
     }
     fn set_eager_unfold_pred(&mut self) {
         self.eager_unfold_pred = true;
-    }
-
-    fn set_abi_size(&mut self, size: u64) {
-        self.abi_size = Some(size);
     }
     fn decreases(&mut self, p: Rc<Expr>) {
         self.decreases = Some(p);
