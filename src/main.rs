@@ -55,6 +55,32 @@ struct Cli {
     files: Vec<String>,
 }
 
+/// On macOS, system headers live in an SDK. Looking up the SDK path using
+/// `xcrun` and setting SDKROOT.
+#[cfg(target_os = "macos")]
+fn set_default_sdkroot() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    if std::env::var_os("SDKROOT").is_some() {
+        return;
+    }
+    let Ok(out) = std::process::Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let path = OsStr::from_bytes(out.stdout.trim_ascii());
+    if !path.is_empty() {
+        // SAFETY: called at the top of main, before any threads exist.
+        unsafe { std::env::set_var("SDKROOT", path) };
+    }
+}
+
 /// Write `contents` to `path` only if the file doesn't already exist with
 /// identical contents. This avoids bumping the timestamp and triggering
 /// unnecessary F* reverification.
@@ -96,6 +122,9 @@ fn serialize_diags(diags: &Diagnostics) -> String {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    set_default_sdkroot();
+
     let cli = Cli::parse();
 
     if cli.files.is_empty() {

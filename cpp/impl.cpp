@@ -3245,8 +3245,11 @@ static void parse_file(RefMut<Ctx> ctx) {
 
   // Tool.appendArgumentsAdjuster(OptionsParser->getArgumentsAdjuster());
 
+  // On macOS, _FORTIFY_SOURCE is set to 2 by default, hence all libc functions
+  // will be rewritten into calls the translator does not model.
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
-      {"-DC2PULSE", "-fno-builtin"}, ArgumentInsertPosition::BEGIN));
+      {"-DC2PULSE", "-fno-builtin", "-D_FORTIFY_SOURCE=0"},
+      ArgumentInsertPosition::BEGIN));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
