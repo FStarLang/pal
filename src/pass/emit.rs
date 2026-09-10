@@ -623,6 +623,24 @@ impl NameMangling {
 struct ExBinding {
     name: Doc,
     ty: Doc,
+    /// The initialized read represented by this witness, if any. Array specs,
+    /// predicate companions and refinement witnesses are NOT pointee values.
+    /// Keep the full place and its PAL type, not just the argument identifier.
+    read: Option<(Rc<Expr>, Rc<Type>)>,
+}
+
+/// Local to construction of a function-pointer postcondition. Replacements
+/// are typed rvalues in that contract's environment, never post-state reads.
+type FnPtrSnapshots = Vec<(Rc<Expr>, Rc<Expr>)>;
+
+/// Like Pulse.Checker.ImpureSpec's `ctxt`/`in_old`: expression emission stays
+/// shared, only the source of a stateful read changes under `_old`.
+/// Installed by `with_spec_context` only while emitting a wrapper post.
+#[derive(Clone)]
+struct SpecContext {
+    snapshots: Rc<FnPtrSnapshots>,
+    initial: bool,
+    bound: Vec<Rc<IdentT>>,
 }
 
 /// Info about a single spec record field for a struct.
@@ -686,6 +704,7 @@ struct Emitter<'a> {
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
+    spec_context: Option<SpecContext>,
     tmp_counter: usize,
 }
 
@@ -702,6 +721,32 @@ impl<'a> Emitter<'a> {
         let tmp = Doc::text(format!("__pal_{}_{}", prefix, self.tmp_counter));
         self.tmp_counter += 1;
         tmp
+    }
+
+    /// Dynamic scope for the shared recursive emitter, never a persistent
+    /// change to direct-function or body emission. Nested `_old` and binders
+    /// restore the enclosing context on every normal/diagnostic return path.
+    fn with_spec_context(
+        &mut self,
+        context: Option<SpecContext>,
+        emit: impl FnOnce(&mut Self) -> Doc,
+    ) -> Doc {
+        let previous = std::mem::replace(&mut self.spec_context, context);
+        let result = emit(self);
+        self.spec_context = previous;
+        result
+    }
+
+    fn initial_spec(&self) -> bool {
+        self.spec_context.as_ref().is_some_and(|c| c.initial)
+    }
+
+    fn unsupported_initial_read(&mut self, v: &Expr) -> Doc {
+        self.report(
+            format!("no initial-state witness for function-pointer specification read {v}"),
+            &v.loc,
+        );
+        Doc::text("__pal_unsupported_initial_state")
     }
 
     /// Emit a Name with full module qualification when it refers to a different module.
@@ -1525,7 +1570,13 @@ impl<'a> Emitter<'a> {
 
     /// Push a val binding using the naming strategy, with an auto-generated name based on `this`.
     /// Returns the Doc to use as the val reference in the slprop.
-    fn push_val_binding(&mut self, naming: &mut ValNaming, this: &Rc<Expr>, ty: Doc) -> Doc {
+    fn push_val_binding(
+        &mut self,
+        naming: &mut ValNaming,
+        this: &Rc<Expr>,
+        ty: Doc,
+        read: Option<(Rc<Expr>, Rc<Type>)>,
+    ) -> Doc {
         match naming {
             ValNaming::Standard { quote, bindings } => {
                 let idx = bindings.len() as u32;
@@ -1542,6 +1593,7 @@ impl<'a> Emitter<'a> {
                 bindings.push(ExBinding {
                     name: val_name.clone(),
                     ty,
+                    read,
                 });
                 val_name
             }
@@ -1587,6 +1639,7 @@ impl<'a> Emitter<'a> {
                 bindings.push(ExBinding {
                     name: val_name.clone(),
                     ty,
+                    read: None,
                 });
                 val_name
             }
@@ -1660,7 +1713,13 @@ impl<'a> Emitter<'a> {
                     PointerKind::Ref | PointerKind::Unknown => match variant {
                         SLPropVariant::Init { perm } => {
                             let pointee_type_doc = self.emit_type(env, pointee_ty);
-                            let val_name = self.push_val_binding(naming, this, pointee_type_doc);
+                            let derefed = ExprT::Deref(this.clone()).with_loc(this.loc.clone());
+                            let val_name = self.push_val_binding(
+                                naming,
+                                this,
+                                pointee_type_doc,
+                                Some((derefed.clone(), pointee_ty.clone())),
+                            );
                             let slprop = annotated(ty, || {
                                 naryfn([
                                     Doc::text("Pulse.Lib.Reference.pts_to"),
@@ -1678,7 +1737,6 @@ impl<'a> Emitter<'a> {
                                 _ => false,
                             };
                             if !is_self_ref {
-                                let derefed = ExprT::Deref(this.clone()).with_loc(this.loc.clone());
                                 self.emit_type_slprop_inner(
                                     env,
                                     pointee_ty,
@@ -1709,7 +1767,7 @@ impl<'a> Emitter<'a> {
                                 unaryfn(Doc::text("array_spec"), pointee_type_doc)
                             }
                         };
-                        let val_name = self.push_val_binding(naming, this, val_type_doc);
+                        let val_name = self.push_val_binding(naming, this, val_type_doc, None);
                         match variant {
                             SLPropVariant::Init { perm } => props.push(annotated(ty, || {
                                 naryfn([
@@ -1775,7 +1833,7 @@ impl<'a> Emitter<'a> {
                 };
                 let mut val_args: Vec<Doc> = vec![];
                 for vp_type in &val_param_types {
-                    let val_name = self.push_val_binding(naming, this, vp_type.clone());
+                    let val_name = self.push_val_binding(naming, this, vp_type.clone(), None);
                     val_args.push(val_name);
                 }
                 let mut args: Vec<Doc> = vec![pred_name, this_doc];
@@ -1954,6 +2012,27 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_expr(&mut self, env: &Env, v: &Expr) -> ExprKind {
+        if let Some(context) = &self.spec_context
+            && context.initial
+        {
+            let value = context.snapshots.iter().find_map(|(read, value)| {
+                if read.as_ref() != v {
+                    return None;
+                }
+                // Locations are not identity, but a quantifier with the same
+                // spelling as an argument must not reuse its ownership.
+                let mut shadowed = false;
+                walk_expr_tree(read, &mut |e| {
+                    if let ExprT::Var(id) = &e.val {
+                        shadowed |= context.bound.contains(&id.val);
+                    }
+                });
+                (!shadowed).then(|| value.clone())
+            });
+            if let Some(value) = value {
+                return ExprKind::RValue(self.emit_rvalue(env, &value));
+            }
+        }
         match &v.val {
             ExprT::Var(x) => {
                 if let Some(gv) = env.lookup_global_var(x) {
@@ -2000,6 +2079,9 @@ impl<'a> Emitter<'a> {
                 }
             }
             ExprT::Deref(inner) => {
+                if self.initial_spec() {
+                    return ExprKind::RValue(self.unsupported_initial_read(v));
+                }
                 // *array     → array_read at index 0
                 // *arrayptr  → arrayptr_read at index 0
                 let inner_kind = env.infer_expr(inner).map(|ty| {
@@ -2236,6 +2318,9 @@ impl<'a> Emitter<'a> {
                         ]))
                     }))
                 } else {
+                    if self.initial_spec() {
+                        return ExprKind::RValue(self.unsupported_initial_read(v));
+                    }
                     let fn_name = if is_arrayptr {
                         "arrayptr_read"
                     } else {
@@ -2632,6 +2717,14 @@ impl<'a> Emitter<'a> {
                     unreachable!("lvalue/vattr variants should be handled by emit_expr")
                 }
                 ExprT::Ref(v) => {
+                    if self.initial_spec() {
+                        // Taking an address is not a read: cancel &* rather
+                        // than taking the address of an initial-value binder.
+                        if let ExprT::Deref(pointer) = &v.val {
+                            return self.emit_rvalue(env, pointer);
+                        }
+                        return self.unsupported_initial_read(v);
+                    }
                     // `&g` for a `_pure` global: the global is a plain F* value
                     // with no lvalue, so use its assumed address. Ownership is
                     // acquired by the caller with `acquire_var_g` and released
@@ -3110,6 +3203,17 @@ impl<'a> Emitter<'a> {
                 }
                 ExprT::Error(_ty) => Doc::text("(admit())"),
                 ExprT::InlinePulse(val, _) => {
+                    if self.initial_spec()
+                        && !matches!(&val.tokens[..], [InlinePulseToken::RValueAntiquot { .. }])
+                    {
+                        self.report(
+                            "cannot snapshot opaque inline Pulse in a function-pointer specification; \
+                             put _old on the PAL expression inside an rvalue antiquotation"
+                                .into(),
+                            &v.loc,
+                        );
+                        return Doc::text("__pal_unsupported_initial_state");
+                    }
                     let env = &mut env.clone();
                     parens(self.emit_inline_pulse_tokens(env, val))
                 }
@@ -3291,6 +3395,9 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 ExprT::FnCall(f, args) => {
+                    if self.initial_spec() && env.lookup_fn(f).is_some_and(|f| !f.is_pure) {
+                        return self.unsupported_initial_read(v);
+                    }
                     let args = if args.is_empty() {
                         Doc::text("()")
                     } else {
@@ -3315,6 +3422,9 @@ impl<'a> Emitter<'a> {
                     self.emit_of_fn(env, g)
                 }
                 ExprT::FnPtrCall(f, args) => {
+                    if self.initial_spec() {
+                        return self.unsupported_initial_read(v);
+                    }
                     // Indirect call `fp(args)`. We evaluate the callee to a
                     // `func_ptr` *value* (an `!r` read for a mutable local, or the
                     // bare value for a parameter/temporary) and hand it to the
@@ -3334,14 +3444,6 @@ impl<'a> Emitter<'a> {
                     } else {
                         "Pulse.Lib.C.FuncPtr.call_div"
                     };
-                    // The explicit `w: erased c` witness argument (see
-                    // `Pulse.Lib.C.FuncPtr.fsti`): one component per bare
-                    // (non-`_plain`/non-`_core_ref`) pointer argument, holding
-                    // that pointee's CURRENT value (`hide !arg`), matching the
-                    // same argument-order convention `emit_fnptr_spec_core`
-                    // uses to build the callee wrapper's own witness tuple.
-                    // Ordinary (non-witnessing) call sites pass `hide ()`.
-                    //
                     // NOTE: self-dispatch (`self->field(self, ..)`) verifies
                     // when `self` is `_consumes` -- see `destroy_via_field` in
                     // test/func_pointer/func_pointer.c. With a borrowed
@@ -3375,6 +3477,9 @@ impl<'a> Emitter<'a> {
                     ]))
                 }
                 ExprT::Live(v) => {
+                    if self.initial_spec() {
+                        return self.unsupported_initial_read(v);
+                    }
                     // Check if the dereferenced expression is an array type
                     let is_array = if let ExprT::Deref(inner) = &v.val {
                         env.infer_expr(inner)
@@ -3419,7 +3524,16 @@ impl<'a> Emitter<'a> {
                         unaryfn(Doc::text("live"), self.emit_lvalue(env, v))
                     }
                 }
-                ExprT::Old(v) => unaryfn(Doc::text("old"), self.emit_rvalue(env, v)),
+                ExprT::Old(v) => {
+                    if let Some(mut context) = self.spec_context.clone() {
+                        context.initial = true;
+                        self.with_spec_context(Some(context), |this| this.emit_rvalue(env, v))
+                    } else {
+                        // Normal functions leave binding and purification to
+                        // Pulse, exactly as before.
+                        unaryfn(Doc::text("old"), self.emit_rvalue(env, v))
+                    }
+                }
                 ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
                     let mut env = env.clone();
                     env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
@@ -3444,18 +3558,25 @@ impl<'a> Emitter<'a> {
                             }
                         }
                     };
+                    let binder_doc = parens(
+                        self.emit_name(Name::Var(var.val.clone()))
+                            .append(":")
+                            .append(Doc::space())
+                            .append(self.emit_type(&env, ty)),
+                    );
+                    let mut context = self.spec_context.clone();
+                    if let Some(context) = &mut context {
+                        context.bound.push(var.val.clone());
+                    }
+                    let body_doc =
+                        self.with_spec_context(context, |this| this.emit_rvalue(&env, body));
                     parens(
                         Doc::text(keyword)
                             .append(Doc::line())
-                            .append(parens(
-                                self.emit_name(Name::Var(var.val.clone()))
-                                    .append(":")
-                                    .append(Doc::space())
-                                    .append(self.emit_type(&env, ty)),
-                            ))
+                            .append(binder_doc)
                             .append(".")
                             .append(Doc::line())
-                            .append(self.emit_rvalue(&env, body)),
+                            .append(body_doc),
                     )
                 }
                 ExprT::StructInit(name, fields) => {
@@ -6389,6 +6510,7 @@ impl<'a> Emitter<'a> {
                     &[ExBinding {
                         name: v_name.clone(),
                         ty: self.emit_field_record_type(env, f),
+                        read: None,
                     }],
                     vec![naryfn([
                         Doc::text("array_pts_to"),
@@ -6534,9 +6656,9 @@ impl<'a> Emitter<'a> {
     /// The pre/post are built from the decl's `requires`/`ensures` via the same
     /// general lowering as `emit_fn_sig_inner`: each parameter's ownership
     /// (`pts_to`/`__pred`) conjunct plus the pure requires/ensures. Pointer
-    /// parameters get their default `pts_to` permission this way. `_old(*p)`
-    /// across an indirect call is NOT supported (the FuncPtr contract
-    /// `pre: a->slprop`, `post: a->b->slprop` is non-relational).
+    /// parameters get their default `pts_to` permission this way. The witness
+    /// retains initial pointee values for the post's requires guard and `_old`;
+    /// ordinary postcondition reads still use fresh post-state ownership.
     fn emit_fnptr_spec_core(&mut self, env: &Env, decl: &FnDecl) -> FnPtrSpecCore {
         let env = &mut env.clone();
 
@@ -6754,10 +6876,33 @@ impl<'a> Emitter<'a> {
         let has_witness_bindings = !elim_name_docs.is_empty() || !ghost_name_docs.is_empty();
         let elim_arity = elim_name_docs.len();
         let ghost_arity = ghost_name_docs.len();
+        let mut snapshots = FnPtrSnapshots::new();
+        let mut initial_prefix = Doc::nil();
+        let initial_base = parens(Doc::text("fst (reveal y_fp)"));
+        for (i, binding) in req_witness_groups.iter().flat_map(|(b, _)| b).enumerate() {
+            if let Some((read, ty)) = &binding.read {
+                // The apostrophe is legal in F* but not in a C identifier:
+                // substitution cannot capture an argument or quantifier.
+                let fresh = self.nm.pick_new("__pal_initial'".to_string());
+                self.nm.used.insert(fresh.clone());
+                let id = fresh.with_loc(read.loc.clone());
+                let name = self.emit_name(Name::Var(id.val.clone()));
+                env.push_var_decl(&id, ty.clone(), LocalDeclKind::RValue);
+                snapshots.push((read.clone(), mk_rvar(&id)));
+                initial_prefix = initial_prefix
+                    .append("let ")
+                    .append(name)
+                    .append(": ")
+                    .append(binding.ty.clone())
+                    .append(" = ")
+                    .append(nested_pair_proj(initial_base.clone(), i, elim_arity))
+                    .append(" in")
+                    .append(Doc::hardline());
+            }
+        }
         // The post needs the ghosts too: a `_preserves` conjunct mentioning one
-        // appears in both the pre and the post. It does NOT re-bind the elims,
-        // which the post quantifies existentially instead (their value may have
-        // changed).
+        // appears in both the pre and the post. Initial pointees use distinct
+        // names above: the post's ownership existentials must not shadow them.
         //
         // Bound by PROJECTION here, unlike the `requires`. The pattern form is
         // needed only where a caller solves the witness by unification, which
@@ -6901,21 +7046,28 @@ impl<'a> Emitter<'a> {
                 ensures_props.push(wrap_exists(&ret_bindings, ret_props));
             }
         }
-        // Pure ensures reference the pointee value via the normal lowering.
+        // Lower only `_old` in ensures against the snapshot. The requires
+        // guard, on the other hand, must be entirely about the initial state.
         let (ens_pure, ens_slprop): (Vec<_>, Vec<_>) =
             decl.ensures.iter().partition(|r| is_pure_prop(r));
         for r in &ens_slprop {
-            let d = self.emit_rvalue(env, r);
+            let d = self.emit_fnptr_post_prop(env, &snapshots, r, false, false);
             ensures_props.push(d);
         }
         let ens_props_pure: Vec<Doc> = ens_pure
             .iter()
-            .map(|r| self.emit_pure_prop(env, r))
+            .map(|r| self.emit_fnptr_post_prop(env, &snapshots, r, false, true))
             .collect();
         if !ens_props_pure.is_empty() {
             let ens_conj = conj(ens_props_pure);
             let implied = if has_req {
-                parens(req_conj.append(" ==> ").append(ens_conj))
+                let initial_req = conj(
+                    req_pure
+                        .iter()
+                        .map(|r| self.emit_fnptr_post_prop(env, &snapshots, r, true, true))
+                        .collect(),
+                );
+                parens(initial_req.append(" ==> ").append(ens_conj))
             } else {
                 ens_conj
             };
@@ -6946,6 +7098,7 @@ impl<'a> Emitter<'a> {
         let post_expr = parens(
             bind_prefix(&name_docs)
                 .append(witness_post_prefix)
+                .append(initial_prefix)
                 .append(post_body),
         );
 
@@ -6961,6 +7114,34 @@ impl<'a> Emitter<'a> {
             ret_ty_doc,
             projs,
         }
+    }
+
+    /// Normal specs use `emit_rvalue` and let Pulse purify `old` against the
+    /// precondition after `exists_as_binders` exposes its ownership witnesses.
+    /// Doing that in an explicit-witness wrapper would change the arity needed
+    /// by `pre_of`/`post_of`. Its pattern remains opaque to Pulse's
+    /// `run_elim_ctxt`, so supply only the initialized read bindings here.
+    /// Expression/type lowering still uses exactly the normal emitter.
+    fn emit_fnptr_post_prop(
+        &mut self,
+        env: &Env,
+        snapshots: &FnPtrSnapshots,
+        expr: &Rc<Expr>,
+        initial: bool,
+        pure: bool,
+    ) -> Doc {
+        let context = SpecContext {
+            snapshots: Rc::new(snapshots.clone()),
+            initial,
+            bound: vec![],
+        };
+        self.with_spec_context(Some(context), |this| {
+            if pure {
+                this.emit_pure_prop(env, expr)
+            } else {
+                this.emit_rvalue(env, expr)
+            }
+        })
     }
 
     /// Emit the fnptr triple for an address-taken function `g` in its own module.
@@ -8102,6 +8283,7 @@ impl<'a> Emitter<'a> {
                     &[ExBinding {
                         name: perm,
                         ty: Doc::text("perm"),
+                        read: None,
                     }],
                     vec![pts_to],
                 )),
@@ -8207,6 +8389,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         fn_module_map,
         typedef_override_map,
         current_fn_total: false,
+        spec_context: None,
         tmp_counter: 0,
     };
 
