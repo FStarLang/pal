@@ -532,6 +532,7 @@ _include_pulse(Apply_weaker_spec,
     Pulse.Lib.C.FuncPtr.weaken f true true
       (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp)
       (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) aw_post
+      (fun _ y -> y)
       wpre_id
       wpost_weak
   }
@@ -685,11 +686,11 @@ int32_t reassign_join(int32_t use_sub)
     {
         fp = subtract;
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -708,11 +709,11 @@ int32_t reassign_join_call(int32_t use_sub)
     {
         fp = subtract;
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -728,11 +729,11 @@ binop select_op(int32_t use_sub)
     _ghost_stmt(let g_use_sub = Pulse.Lib.C.Ref.ghost_read $&(use_sub));
     if (use_sub) {
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
         return subtract;
     } else {
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
         return add;
     }
 }
@@ -1022,6 +1023,7 @@ _include_pulse(Total_to_div_spec,
     Pulse.Lib.C.FuncPtr.weaken f false true
       (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp)
       (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp)
+      (fun _ y -> y)
       wpre_id
       wpost_id
   }

@@ -186,14 +186,18 @@ val of_fn_div_valid (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a ->
 (* Transfer validity across a spec weakening and/or a divergence relaxation: given
    ghost coercions from the new pre to the old pre and from the old post to the new
    post, `is_valid` moves from `(div, pre, post)` to `(div', pre', post')`. The
-   refinement `div ==> div'` permits total->divergent (a total pointer is trivially
-   a valid divergent one) but forbids the unsound divergent->total. *)
-val weaken (#a #b #c: Type0) (f: func_ptr a b)
+   target witness may have a different type: `mapw` maps it, together with the
+   argument, to the same source witness in both coercions. For unchanged witness
+   types, use `fun _ y -> y`. The refinement `div ==> div'` permits
+   total->divergent (a total pointer is trivially a valid divergent one) but
+   forbids the unsound divergent->total. *)
+val weaken (#a #b #c #c': Type0) (f: func_ptr a b)
   (div: bool) (div': bool { div ==> div' })
   (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
-  (pre': a -> erased c -> slprop) (post': a -> erased c -> b -> slprop)
-  (wpre:  (x:a -> y:erased c -> stt_ghost unit emp_inames (pre' x y) (fun _ -> pre x y)))
-  (wpost: (x:a -> y:erased c -> r:b -> stt_ghost unit emp_inames (post x y r) (fun _ -> post' x y r)))
+  (pre': a -> erased c' -> slprop) (post': a -> erased c' -> b -> slprop)
+  (mapw: a -> erased c' -> erased c)
+  (wpre:  (x:a -> y':erased c' -> stt_ghost unit emp_inames (pre' x y') (fun _ -> pre x (mapw x y'))))
+  (wpost: (x:a -> y':erased c' -> r:b -> stt_ghost unit emp_inames (post x (mapw x y') r) (fun _ -> post' x y' r)))
   : stt_ghost unit emp_inames
       (is_valid f div pre post)
       (fun _ -> (is_valid f div' pre' post'))
