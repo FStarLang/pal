@@ -349,6 +349,7 @@ impl<'a> Checker<'a> {
                     };
                     match bin_op {
                         BinOp::Eq => check_eq(self),
+                        BinOp::Elvis => check_eq(self),
                         BinOp::LogAnd | BinOp::LogOr | BinOp::Implies => {
                             check_eq(self);
                             match &env.vtype_whnf(lhs_ty.clone().into()).val {

@@ -2435,6 +2435,24 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
             Doc::text(format!("`{}.rem`", get_int_mod(signed, width)?))
         }
         (BinOp::Mod, TypeT::SizeT) => Doc::text("`SizeT.rem`"),
+        (BinOp::Elvis, TypeT::Int { signed, width }) => Doc::text(format!(
+            "`Pulse.Lib.C.GNU.Elvis.elvis_{}int{}`",
+            if *signed { "" } else { "u" },
+            width
+        )),
+        (BinOp::Elvis, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_size_t`"),
+        (BinOp::Elvis, TypeT::PtrdiffT) => Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_ptrdiff_t`"),
+        (BinOp::Elvis, TypeT::Bool) => Doc::text("||"),
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_ref`")
+        }
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Core)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_core`")
+        }
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_array`")
+        }
+        (BinOp::Elvis, _) => return None,
         (BinOp::Add, TypeT::Int { signed, width }) => {
             Doc::text(format!("`{}.add`", get_int_mod(signed, width)?))
         }

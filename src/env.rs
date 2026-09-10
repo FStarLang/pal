@@ -506,7 +506,8 @@ impl Env {
                 | BinOp::BitOr
                 | BinOp::BitXor
                 | BinOp::Shl
-                | BinOp::Shr,
+                | BinOp::Shr
+                | BinOp::Elvis,
                 lhs,
                 _,
             ) => self.infer_expr(lhs),
