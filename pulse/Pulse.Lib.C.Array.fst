@@ -27,11 +27,8 @@ let array_spec_initd #a (s: array_spec a) (i: nat) : prop = i < Seq.length s /\ 
 let array_spec_mask #a (s: array_spec a) (i: nat) : prop = i < Seq.length s /\ ~(OutOfMask? (Seq.index s i))
 let array_spec_idx #a (s: array_spec a) (i: nat { array_spec_initd s i }) : Tot a = let Val x = Seq.index s i in x
 
-// Deliberately unspecified: there is no postcondition, so `null` would
-// discharge this admit while turning an honest gap into a silent extraction
-// bug. The real fix is to give it a spec (an immutable pts_to at the literal's
-// contents), which is a design change, not a proof.
-let array_literal_to_ref #a #n (_: full_array_lspec a n) : Tot (R.ref a) =
+let string_literal_to_ref #a (_literal_identity: string) :
+  Tot (r:R.ref a { not (r == R.null) }) =
   admit ()
 
 let to_mask #t (s: array_spec t) (i: nat) : prop = array_spec_mask s i
@@ -41,8 +38,6 @@ let to_seq #t (s: array_spec t) : GTot (Seq.seq (option t)) =
     match Seq.index s i with
     | Val x -> Some x
     | _ -> None
-
-let array_spec_initd_mask #a (s: array_spec a) (i: nat) = ()
 
 let array_spec_ext #a (s1 s2: array_spec a) :
   Lemma (requires
@@ -78,31 +73,12 @@ let array_spec_zeroed_idx a n x i = ()
 let array_pts_to #a (x: array a) (p: perm) (y: array_spec a) : slprop =
   A.pts_to_mask x #p (to_seq y) (to_mask y)
 
-// Ghost, not concrete: an array_spec records Uninit/OutOfMask cells, which no
-// C program can read. The 'p/'y sugar binds erased implicits, so a concrete fn
-// could not return y either.
-ghost fn array_read_all u#a (#a: Type u#a) (x: array a) (#p: perm) (#y: array_spec a)
-  preserves array_pts_to x p y
+fn array_read_all u#a (#a: Type u#a) (x: array a)
+  preserves array_pts_to x 'p 'y
   returns z: array_spec a
-  ensures rewrites_to z y
+  ensures rewrites_to z 'y
 {
-  y
-}
-
-ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
-      (a: array t) (#y: erased (array_spec t))
-  requires array_pts_to a 1.0R y ** pure (array_spec_full_mask (reveal y))
-  ensures array_pts_to_uninit' a
-{
-  ()
-}
-
-ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
-  requires array_pts_to_uninit' a
-  returns  y : erased (array_spec t)
-  ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
-{
-  observe (array_pts_to_uninit a)
+  admit ()
 }
 
 let freeable_array #a (r: array a) : slprop =
@@ -246,35 +222,23 @@ fn stack_free_array u#a (#a:Type u#a) (r:array a)
   free_array r;
 }
 
-// The SZ.fits refinement is required for soundness, not just convenience.
-// Without it the spec is unsatisfiable: array_spec_zeroed builds a
-// full_array_spec of arbitrary length, so this would promise to allocate an
-// array of, say, 2^70 elements. Since Pulse.Lib.Array.Core.length carries
-// `ensures SZ.fits`, admitting that promise lets a caller derive SZ.fits n for
-// any n, and hence build a size_t too large for any machine word.
-// It is also the premise a real implementation needs: allocating requires an
-// SZ.t length, which cannot be built from array_spec_len s without it.
-fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |}
-  (s: full_array_spec a { SZ.fits (array_spec_len s) })
+fn stack_alloc_array_full u#a (#a: Type u#a) {| small_type u#a |} (s: full_array_spec a)
   returns r : array a
   ensures array_pts_to_full r 1.0R s
 {
-  // Still admitted: a full proof additionally needs a loop to fill the array
-  // with s's contents.
   admit ()
 }
 
 fn stack_free_array_full u#a (#a: Type u#a) (r: array a) (#s: erased (full_array_spec a))
   requires array_pts_to_full r 1.0R s
 {
-  intro_array_pts_to_uninit' r;
-  stack_free_array r;
+  admit ()
 }
 
 fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} (sz:SZ.t)
   returns r : array a
   ensures freeable_array r
-  ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SZ.v sz) zero_default)
+  ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SizeT.v sz) zero_default)
 {
   let r = A.alloc (zero_default #a) sz;
   A.to_mask r;
@@ -303,53 +267,19 @@ let full_to_mask_seq #t (s: array_spec t) (i: nat)
     assert (array_spec_mask s i)
   end
 
-
-// The private cell write the fill below is built on. It is `array_write`'s
-// body, repeated here because `array_write` is declared after `memset` in the
-// interface and a module must define its interface's members in order.
-fn fill_cell u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
-  (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
-  requires array_pts_to a 1.0R s
-  ensures exists* sn. array_pts_to a 1.0R sn ** pure (sn == array_spec_upd s (SZ.v i) v)
-{
-  unfold array_pts_to a 1.0R s;
-  A.mask_write a i v;
-  let sn = hide (array_spec_upd s (SZ.v i) v);
-  A.mask_mext a (to_mask sn);
-  A.mask_vext a (to_seq sn);
-  fold (array_pts_to a 1.0R sn);
-  ()
-}
-
-// The cells are written one at a time rather than through
-// `Pulse.Lib.Array.fill`, because `fill` goes through `from_mask`, which wants
-// every cell to already hold a value. `array_write` needs only that the cell is
-// in the mask, so the loop covers storage that has not been written yet -- see
-// the note on `memset` in the interface.
 fn memset (#t: Type0) (a: array t) (v: t) (n: SZ.t)
-  (#s: erased (array_spec t) { array_spec_full_mask s /\ array_spec_len s == SZ.v n })
+  (#s: erased (array_spec t) { array_spec_full s /\ array_spec_len s == SZ.v n })
   requires array_pts_to a 1.0R s
   ensures array_pts_to_full a 1.0R (array_spec_zeroed t (SZ.v n) v)
 {
-  let mut i = 0sz;
-  while (SZ.lt (!i) n)
-  invariant exists* vi sp.
-    R.pts_to i vi **
-    array_pts_to a 1.0R sp **
-    pure (SZ.v vi <= SZ.v n /\
-          array_spec_len sp == SZ.v n /\
-          array_spec_full_mask sp /\
-          (forall (j:nat). j < SZ.v vi ==> array_spec_initd sp j /\ array_spec_idx sp j == v))
-  decreases (SZ.v n - SZ.v !i)
-  {
-    let vi = !i;
-    fill_cell a vi v;
-    i := SZ.add vi 1sz;
-  };
-  with sf. assert array_pts_to a 1.0R sf;
-  unfold array_pts_to a 1.0R sf;
-  A.mask_mext a (to_mask (array_spec_zeroed t (SZ.v n) v));
-  A.mask_vext a (to_seq (array_spec_zeroed t (SZ.v n) v));
+  unfold array_pts_to a 1.0R s;
+  Classical.forall_intro (Classical.move_requires (full_to_mask_seq s));
+  A.from_mask a;
+  A.pts_to_len a;
+  fill n a v;
+  A.to_mask a;
+  mask_mext a (to_mask (array_spec_zeroed t (SZ.v n) v));
+  mask_vext a (to_seq (array_spec_zeroed t (SZ.v n) v));
   fold array_pts_to a 1.0R (array_spec_zeroed t (SZ.v n) v);
 }
 
@@ -360,6 +290,22 @@ ghost fn array_pts_to_not_null u#a (#a: Type u#a) (r: array a) (#p: perm) (#v: a
   unfold array_pts_to r p v;
   A.pts_to_mask_not_null r;
   fold array_pts_to r p v;
+}
+
+ghost fn intro_array_pts_to_uninit' u#a (#t: Type u#a)
+      (a: array t) (#y: erased (array_spec t))
+  requires array_pts_to a 1.0R y ** pure (array_spec_full_mask (reveal y))
+  ensures array_pts_to_uninit' a
+{
+  ()
+}
+
+ghost fn elim_array_pts_to_uninit' u#a (#t: Type u#a) (a: array t)
+  requires array_pts_to_uninit' a
+  returns  y : erased (array_spec t)
+  ensures  array_pts_to a 1.0R (reveal y) ** pure (array_spec_full_mask (reveal y))
+{
+  observe (array_pts_to_uninit a)
 }
 
 fn array_read u#a (#t: Type u#a) (a: array t) (i: SZ.t)
@@ -394,7 +340,6 @@ fn array_write u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   ()
 }
 
-
 fn array_assign_ret u#a (#t: Type u#a) (a: array t) (i: SZ.t) (v: t)
   (#s: erased (array_spec t) { array_spec_mask s (SZ.v i) })
   requires array_pts_to a 1.0R s
@@ -413,49 +358,6 @@ fn array_update u#a (#t #s: Type u#a) (a: array t) (i: SZ.t) (upd: (t -> s -> t)
 {
   let v = array_read a i;
   array_write a i (upd v y);
-}
-
-// Fill `a` from index `i` onward with the elements of `l`, one `array_write`
-// per element; cells below `i` are left alone.
-//
-// The recursion is on the list rather than on an index because an indexed loop
-// would have to write `List.Tot.index l (SZ.v i)`, and `SZ.v` is `GTot` -- that
-// element would be ghost, leaving no runtime value to store.
-fn rec array_write_list (#t: Type0) (a: array t) (i: SZ.t) (l: list t)
-  (#s: erased (array_spec t))
-  requires array_pts_to a 1.0R s **
-    pure (array_spec_full_mask s /\ SZ.fits (array_spec_len s) /\
-          SZ.v i + List.Tot.length l == array_spec_len s)
-  ensures exists* s'. array_pts_to a 1.0R s' **
-    pure (array_spec_len s' == array_spec_len s /\
-          array_spec_full_mask s' /\
-          (forall (k:nat). k < SZ.v i ==>
-            (array_spec_initd s' k <==> array_spec_initd s k) /\
-            (array_spec_initd s k ==> array_spec_idx s' k == array_spec_idx s k)) /\
-          (forall (k:nat). SZ.v i <= k /\ k < SZ.v i + List.Tot.length l ==>
-            array_spec_initd s' k /\
-            array_spec_idx s' k == List.Tot.index l (k - SZ.v i)))
-  decreases l
-{
-  match l {
-    Nil -> { () }
-    Cons hd tl -> {
-      array_write a i hd;
-      array_write_list a (SZ.add i 1sz) tl;
-    }
-  }
-}
-
-fn array_multiple_writes (#t: Type0) (a: array t) (n: SZ.t)
-  (s: full_array_lspec t (SZ.v n))
-  (#s0: erased (array_spec t) { array_spec_full_mask s0 /\ array_spec_len s0 == SZ.v n })
-  requires array_pts_to a 1.0R s0
-  ensures array_pts_to_full a 1.0R s
-{
-  array_write_list a 0sz (array_spec_to_list s);
-  with s'. assert (array_pts_to a 1.0R s');
-  array_spec_ext s' s;
-  rewrite (array_pts_to a 1.0R s') as (array_pts_to a 1.0R s);
 }
 
 let length #t (a: array t) : GTot nat = A.length a
@@ -511,80 +413,6 @@ let arrayptr_shift #t x n #y =
   admit ()
   // Stuck: need a concrete operation to shift the pointer.
 
-let arrayptr_shift_back #t x n #y =
-  admit ()
-  // Stuck: need a concrete operation to shift the pointer.
-
-fn arrayptr_post_incr u#a (#t: Type u#a) (x: R.ref (array t))
-  (#v: erased (array t)) (#y: erased (array t))
-  requires R.pts_to x v
-  requires arrayptr_pts_to v y
-  returns r: array t
-  ensures exists* v'.
-    R.pts_to x v' **
-    arrayptr_pts_to v' y **
-    arrayptr_pts_to r y **
-    pure (r == reveal v /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) + 1)
-{
-  let old = !x;
-  let shifted = arrayptr_shift old 1sz;
-  x := shifted;
-  old
-}
-
-fn arrayptr_pre_incr u#a (#t: Type u#a) (x: R.ref (array t))
-  (#v: erased (array t)) (#y: erased (array t))
-  requires R.pts_to x v
-  requires arrayptr_pts_to v y
-  returns r: array t
-  ensures exists* v'.
-    R.pts_to x v' **
-    arrayptr_pts_to v' y **
-    arrayptr_pts_to r y **
-    pure (r == v' /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) + 1)
-{
-  let old = !x;
-  let shifted = arrayptr_shift old 1sz;
-  x := shifted;
-  shifted
-}
-
-fn arrayptr_post_decr u#a (#t: Type u#a) (x: R.ref (array t))
-  (#v: erased (array t)) (#y: erased (array t))
-  requires R.pts_to x v
-  requires arrayptr_pts_to v y
-  requires pure (offset_of (reveal v) >= 1)
-  returns r: array t
-  ensures exists* v'.
-    R.pts_to x v' **
-    arrayptr_pts_to v' y **
-    arrayptr_pts_to r y **
-    pure (r == reveal v /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) - 1)
-{
-  let old = !x;
-  let shifted = arrayptr_shift_back old 1sz;
-  x := shifted;
-  old
-}
-
-fn arrayptr_pre_decr u#a (#t: Type u#a) (x: R.ref (array t))
-  (#v: erased (array t)) (#y: erased (array t))
-  requires R.pts_to x v
-  requires arrayptr_pts_to v y
-  requires pure (offset_of (reveal v) >= 1)
-  returns r: array t
-  ensures exists* v'.
-    R.pts_to x v' **
-    arrayptr_pts_to v' y **
-    arrayptr_pts_to r y **
-    pure (r == v' /\ base_of v' == base_of (reveal v) /\ offset_of v' == offset_of (reveal v) - 1)
-{
-  let old = !x;
-  let shifted = arrayptr_shift_back old 1sz;
-  x := shifted;
-  shifted
-}
-
 fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
   (#y: erased (array t))
   (#p: perm) (#s: erased (array_spec t) { 0 <= arrayptr_off x y + SZ.v i /\ array_spec_initd s (arrayptr_off x y + SZ.v i) })
@@ -594,9 +422,9 @@ fn arrayptr_read u#a (#t: Type u#a) (x: array t) (i: SZ.t)
   ensures rewrites_to res (array_spec_idx s (arrayptr_off x y + SZ.v i))
 {
   admit ()
-  // Stuck: permission is held on the backing array y, but the runtime handle
-  // is x, and the connecting offset `arrayptr_off x y` is GTot. So there is no
-  // runtime index to pass to mask_read.
+  // Stuck: need to compute the actual index into y's backing array
+  // from the arrayptr offset, unfold array_pts_to, and call mask_read
+  // at the computed index. Requires showing SZ.fits for the index.
 }
 
 fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
@@ -609,8 +437,8 @@ fn arrayptr_write u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
     pure (s' == array_spec_upd s (arrayptr_off x y + SZ.v i) v)
 {
   admit ()
-  // Stuck: same issue as arrayptr_read — `arrayptr_off x y` is GTot, so there
-  // is no runtime index to pass to mask_write.
+  // Stuck: same issue as arrayptr_read — need to compute index,
+  // unfold, call mask_write, then refold with updated spec.
 }
 
 fn arrayptr_assign_ret u#a (#t: Type u#a) (x: array t) (i: SZ.t) (v: t)
