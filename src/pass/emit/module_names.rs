@@ -190,6 +190,14 @@ mod tests {
     }
 
     #[test]
+    fn case_collisions_skip_uppercase_suffix_candidate() {
+        let names = allocate(&["Func_foo", "Func_Foo", "Func_Foo_1"], &[]);
+        assert_eq!(names.generated["Func_Foo"], "Func_Foo");
+        assert_eq!(names.generated["Func_Foo_1"], "Func_Foo_1");
+        assert_eq!(names.generated["Func_foo"], "Func_foo_2");
+    }
+
+    #[test]
     fn fixed_names_take_precedence_even_for_exact_collisions() {
         let names = allocate(
             &["Func_Foo", "Func_foo", "Func_foo_1"],
