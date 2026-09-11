@@ -43,11 +43,9 @@
 //                                        specs and one bare (no defn)
 //        => SUCCEEDS: no diagnostic, and the specs-bearing version is
 //           kept regardless of which one appears first in the source
-//           (see below, compiled). This is most likely not merge.rs's own
-//           doing, but Clang's own attribute-merging across a function's
-//           redeclaration chain: by the time PAL's frontend walks the
-//           AST, both FunctionDecl nodes it sees already carry the same
-//           (merged) specs.
+//           (see below, compiled). Clang can inherit attributes within
+//           one translation unit; PAL also preserves the spec-bearing
+//           declaration across files (see merge_specs_multifile).
 //
 //   7. decl_decl_same_specs           — two forward decls only (no defn),
 //                                        IDENTICAL specs
