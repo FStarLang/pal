@@ -789,7 +789,7 @@ impl Env {
         matches!(&expr.val, ExprT::Var(x) if self.addressable_global(x).is_some())
     }
 
-    /// The global named by `ident`, if `&ident` is supported.
+    /// The global named by `ident`, if not shadowed locally and `&ident` is supported.
     ///
     /// Every non-array global that denotes an object qualifies, whether or not
     /// it is `_pure`, because an address is not ownership. The two shapes reach
@@ -815,6 +815,9 @@ impl Env {
     /// * An enumerator is a constant, not an object: it has no storage, and
     ///   `&Color_Red` cannot be written in C.
     pub fn addressable_global(&self, ident: &Ident) -> Option<&GlobalVar> {
+        if self.lookup_var(ident).is_some() {
+            return None;
+        }
         let gv = self.lookup_global_var(ident)?;
         if global_var_is_array(gv) || gv.is_enum_constant {
             return None;

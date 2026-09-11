@@ -1956,7 +1956,13 @@ impl<'a> Emitter<'a> {
     fn emit_expr(&mut self, env: &Env, v: &Expr) -> ExprKind {
         match &v.val {
             ExprT::Var(x) => {
-                if let Some(gv) = env.lookup_global_var(x) {
+                if let Some(decl) = env.lookup_var(x) {
+                    let x2 = annotated(v, || self.emit_var(x));
+                    match decl.kind {
+                        LocalDeclKind::RValue => ExprKind::RValue(x2),
+                        LocalDeclKind::LValue => ExprKind::LValue(x2),
+                    }
+                } else if let Some(gv) = env.lookup_global_var(x) {
                     // A mutable global emits no `var_g`, so there is no name to
                     // refer to here. Reject the read rather than emit a dangling
                     // reference that F* would report as an unbound identifier.
@@ -1987,16 +1993,7 @@ impl<'a> Emitter<'a> {
                     });
                     ExprKind::RValue(x2)
                 } else {
-                    let x2 = annotated(v, || self.emit_var(x));
-                    if let Some(LocalDecl {
-                        kind: LocalDeclKind::RValue,
-                        ..
-                    }) = env.lookup_var(x)
-                    {
-                        ExprKind::RValue(x2)
-                    } else {
-                        ExprKind::LValue(x2)
-                    }
+                    ExprKind::LValue(annotated(v, || self.emit_var(x)))
                 }
             }
             ExprT::Deref(inner) => {
