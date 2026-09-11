@@ -71,6 +71,10 @@ source code. Each top-level declaration produces its own `.fst` module
 (and optionally a `.fsti` interface). The emitter uses the `pretty`
 crate for layout and tracks source range mappings so that positions
 in the generated Pulse can be traced back to the original C.
+Variable emission resolves parameters and locals before globals, matching
+the environment's type lookup in both contracts and function bodies.
+Address-taking follows the same rule: a shadowing local uses its own storage,
+not the same-named global's address.
 
 ---
 
