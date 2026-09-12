@@ -4,44 +4,49 @@ open Pulse
 open Pulse.Lib.C.Ref
 open Pulse.Lib.C.Array
 
-let unless_null (#t:Type0) {| has_is_null t |} (x:t) (p:slprop) : slprop =
-  if test_null x then emp else p
+(* A typeclass for pointer-like types that have a notion of being null. *)
+class has_is_null (t:Type0) = {
+  test_null : t -> bool;
+}
+
+instance has_is_null_ref (a:Type0) : has_is_null (ref a) = {
+  test_null = (fun r -> is_null r);
+}
+
+instance has_is_null_array (a:Type0) : has_is_null (array a) = {
+  test_null = (fun r -> array_is_null r);
+}
+
+(* [unless_null x p] holds [p] unless [x] is null, in which case it is [emp].
+
+   The definition is deliberately hidden. It is a conditional on a runtime
+   test, so wherever it is left to unfold the prover ends up staring at a
+   `match` on the null test instead of at a slprop it can match structurally,
+   and the [pulse_intro] rules below stop firing. That happens in exactly the
+   place it hurts most: the join point of a null test that is not the last
+   statement of its function, where the postcondition is inferred rather than
+   written down. Keeping the abbreviation opaque outside this module means the
+   only ways in and out are the introductions and eliminations here. *)
+val unless_null (#t:Type0) {| has_is_null t |} (x:t) (p:slprop) : slprop
 
 [@@pulse_intro]
 ghost fn intro_unless_null_null (#t:Type0) {| has_is_null t |} (x:t) (p:slprop)
   requires pure (test_null x)
   ensures unless_null x p
-{
-  rewrite emp as (unless_null x p);
-}
 
 [@@pulse_intro]
 ghost fn intro_unless_null_nonnull (#t:Type0) {| has_is_null t |} (x:t) (p:slprop)
   requires p
   ensures unless_null x p
-{
-  if (test_null x) {
-    drop_ p;
-    rewrite emp as (unless_null x p);
-  } else {
-    rewrite p as (unless_null x p);
-  }
-}
 
 ghost fn elim_unless_null_null (#t:Type0) {| has_is_null t |} (x:t) (p:slprop)
   requires unless_null x p
   requires pure (test_null x)
-{
-  rewrite (unless_null x p) as emp;
-}
 
 ghost fn elim_unless_null_nonnull (#t:Type0) {| has_is_null t |} (x:t) (p:slprop)
   requires unless_null x p
   requires pure (not (test_null x))
   ensures p
-{
-  rewrite (unless_null x p) as p;
-}
 
 (* The same, for the branch in which the pointer *is* null. There the resource
    is unavailable, so the only way to reach `unless_null` is from the nullness
@@ -51,17 +56,11 @@ ghost fn elim_unless_null_nonnull (#t:Type0) {| has_is_null t |} (x:t) (p:slprop
 ghost fn intro_unless_null_null_ref (#a:Type0) (x:ref a) (p:slprop)
   requires pure (test_null #(ref a) x)
   ensures unless_null x p
-{
-  intro_unless_null_null #(ref a) x p;
-}
 
 [@@pulse_intro]
 ghost fn intro_unless_null_null_array (#a:Type0) (x:array a) (p:slprop)
   requires pure (test_null #(array a) x)
   ensures unless_null x p
-{
-  intro_unless_null_null #(array a) x p;
-}
 
 (* The generic introduction above leaves `t` and its `has_is_null` instance to
    be recovered by unification. When the prover reaches for it while proving a
@@ -75,17 +74,11 @@ ghost fn intro_unless_null_null_array (#a:Type0) (x:array a) (p:slprop)
 ghost fn intro_unless_null_ref (#a:Type0) (x:ref a) (p:slprop)
   requires p
   ensures unless_null x p
-{
-  intro_unless_null_nonnull #(ref a) x p;
-}
 
 [@@pulse_intro]
 ghost fn intro_unless_null_array (#a:Type0) (x:array a) (p:slprop)
   requires p
   ensures unless_null x p
-{
-  intro_unless_null_nonnull #(array a) x p;
-}
 
 (* Elimination with the guarded resource left implicit. PAL emits these on
    entry to a branch that has just tested a nullable pointer, where it knows
@@ -99,28 +92,16 @@ ghost fn elim_unless_null_ref (#a:Type0) (x:ref a) (#p:slprop)
   requires unless_null #(ref a) x p
   requires pure (not (test_null #(ref a) x))
   ensures p
-{
-  elim_unless_null_nonnull #(ref a) x p;
-}
 
 ghost fn elim_null_ref (#a:Type0) (x:ref a) (#p:slprop)
   requires unless_null #(ref a) x p
   requires pure (test_null #(ref a) x)
-{
-  elim_unless_null_null #(ref a) x p;
-}
 
 ghost fn elim_unless_null_arr (#a:Type0) (x:array a) (#p:slprop)
   requires unless_null #(array a) x p
   requires pure (not (test_null #(array a) x))
   ensures p
-{
-  elim_unless_null_nonnull #(array a) x p;
-}
 
 ghost fn elim_null_arr (#a:Type0) (x:array a) (#p:slprop)
   requires unless_null #(array a) x p
   requires pure (test_null #(array a) x)
-{
-  elim_unless_null_null #(array a) x p;
-}
