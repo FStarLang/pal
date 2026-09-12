@@ -46,6 +46,92 @@ int32_t classify(int32_t x)
     return r;
 }
 
+/* A default sharing an arm with explicit cases. C nests consecutive labels, so
+   `case 2: case 3: default:` reaches the translator as a chain rather than as
+   siblings; the arm is the default one and its explicit values add nothing. */
+int32_t default_after_cases(int32_t x)
+    _ensures(x == 0 ==> return == 10)
+    _ensures(x == 1 ==> return == 20)
+    _ensures((x != 0 && x != 1) ==> return == 30)
+{
+    int32_t r = 0;
+    switch (x) {
+    case 0:
+        r = 10;
+        break;
+    case 1:
+        r = 20;
+        break;
+    case 2:
+    case 3:
+    default:
+        r = 30;
+        break;
+    }
+    return r;
+}
+
+/* The same shape without a terminal break on the default arm, which takes the
+   general fall-through encoding rather than the match one. */
+int32_t default_after_cases_no_break(int32_t x)
+    _ensures(x == 0 ==> return == 10)
+    _ensures((x != 0) ==> return == 30)
+{
+    int32_t r = 0;
+    switch (x) {
+    case 0:
+        r = 10;
+        break;
+    case 2:
+    default:
+        r = 30;
+    }
+    return r;
+}
+
+/* A default written before the cases it shares an arm with. */
+int32_t default_before_cases(int32_t x)
+    _ensures(x == 1 ==> return == 20)
+    _ensures(x != 1 ==> return == 30)
+{
+    int32_t r = 0;
+    switch (x) {
+    case 1:
+        r = 20;
+        break;
+    default:
+    case 2:
+        r = 30;
+        break;
+    }
+    return r;
+}
+
+/* The annotated form of the same shape, which takes the terminal-break match
+   encoding, so the shared default must become the match's wildcard arm. The
+   postcondition is disjunctive because a wildcard arm carries no hypothesis
+   that the earlier patterns did not match, which is so for a lone `default`
+   too and is not particular to a default sharing an arm with cases. */
+int32_t default_after_cases_annotated(int32_t x)
+    _ensures(return == 10 || return == 30)
+{
+    int32_t r = 0;
+    switch (x)
+        _ensures(_live(x) && _live(r))
+        _ensures(r == 10 || r == 30)
+    {
+    case 0:
+        r = 10;
+        break;
+    case 2:
+    case 3:
+    default:
+        r = 30;
+        break;
+    }
+    return r;
+}
+
 /* A genuine fall-through switch retains the general switch encoding. */
 int32_t accumulate_with_fallthrough(int32_t x)
     _requires(x == 0 || x == 1)
