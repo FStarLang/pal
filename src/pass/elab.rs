@@ -223,7 +223,9 @@ impl<'a> Elaborator<'a> {
                     // rather than in the frontend keeps the explicit `_array`,
                     // `_arrayptr` and `_core_ref` annotations winning, since
                     // they set a non-`Unknown` kind earlier.
-                    PointerKind::Unknown if matches!(to.val, TypeT::Void) => {
+                    PointerKind::Unknown
+                        if matches!(env.vtype_whnf(to.clone().into()).val, TypeT::Void) =>
+                    {
                         *kind = PointerKind::Core
                     }
                     PointerKind::Unknown => *kind = PointerKind::Ref,
@@ -740,6 +742,11 @@ impl<'a> Elaborator<'a> {
                     | BinOp::BitAnd
                     | BinOp::BitOr
                     | BinOp::BitXor => {
+                        if env.is_gnu_void_offset(*bin_op, lhs_ty.clone(), rhs_ty.clone()) {
+                            // No SizeT cast or common-type coercion: preserve the
+                            // computed offset's signedness and bounded arithmetic.
+                            return;
+                        }
                         // Pointer arithmetic: array/arrayptr ± integer → cast integer to SizeT
                         let lhs_w = env.vtype_whnf(lhs_ty.clone());
                         let rhs_w = env.vtype_whnf(rhs_ty.clone());
@@ -1077,9 +1084,7 @@ impl<'a> Elaborator<'a> {
         // from: it has no pointee type to be refined to. Without this guard the
         // initializer's kind wins here, before `elab_type` runs, and the local
         // is pinned to `Ref` — i.e. `ref unit`.
-        if let TypeT::Pointer(to, _) = &decl_ty.val
-            && matches!(to.val, TypeT::Void)
-        {
+        if env.is_raw_void_pointer(decl_ty.clone().into()) {
             return;
         }
         let var_name = &decl_name.val;

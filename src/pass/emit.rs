@@ -2824,6 +2824,9 @@ impl<'a> Emitter<'a> {
                         (TypeT::SizeT, TypeT::SpecInt | TypeT::SpecNat) => {
                             unaryfn(Doc::text("SizeT.v"), val_doc)
                         }
+                        (TypeT::PtrdiffT, TypeT::SpecInt | TypeT::SpecNat) => {
+                            unaryfn(Doc::text("Pulse.Lib.C.PtrdiffT.v"), val_doc)
+                        }
                         // C converts an integer to an unsigned type by
                         // reducing it modulo the target width, which is what
                         // `sizet_to_uint32`/`sizet_to_uint64` and the
@@ -3208,6 +3211,28 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 ExprT::BinOp(op, lhs, rhs) => {
+                    if let (Ok(lhs_ty), Ok(rhs_ty)) = (env.infer_expr(lhs), env.infer_expr(rhs))
+                        && env.is_gnu_void_offset(*op, lhs_ty, rhs_ty)
+                    {
+                        // Widen the *computed* source integer, not its operands.
+                        // Negate only the mathematical value for subtraction,
+                        // so even a minimum signed machine offset is accepted.
+                        let widened = rhs.reuse_loc(ExprT::Cast(
+                            rhs.clone(),
+                            TypeT::SpecInt.with_loc(rhs.loc.clone()),
+                        ));
+                        let offset = self.emit_rvalue(env, &widened);
+                        let offset = if *op == BinOp::Sub {
+                            unaryfn(Doc::text("op_Tilde_Minus"), offset)
+                        } else {
+                            offset
+                        };
+                        return parens(naryfn([
+                            Doc::text("Pulse.Lib.C.GNU.VoidPointer.core_offset"),
+                            self.emit_rvalue(env, lhs),
+                            offset,
+                        ]));
+                    }
                     // Pointer arithmetic: ptr + int → arrayptr_shift / array_to_arrayptr
                     if *op == BinOp::Add {
                         let lhs_ty = env.infer_expr(lhs).ok().map(|t| env.vtype_whnf(t));

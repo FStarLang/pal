@@ -383,7 +383,7 @@ impl<'a> Checker<'a> {
                                     &rhs_w.val,
                                     TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
                                 ));
-                            if !is_ptr_arith {
+                            if !is_ptr_arith && !env.is_gnu_void_offset(*bin_op, lhs_w, rhs_w) {
                                 check_eq(self)
                             }
                         }

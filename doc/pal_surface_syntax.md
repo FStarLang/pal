@@ -15,6 +15,37 @@ In the following, we differentiate between two kinds of annotations:
 
 To suppress the default ownership for one parameter, prefix it with `_plain`. -->
 
+## GNU void-pointer byte offsets
+
+PAL supports the GNU C extension `void * + integer` and `void * - integer`,
+**with the pointer on the left only**, including typedefs and qualified
+`void *`. GNU treats the element size as one byte
+([GCC documentation](https://gcc.gnu.org/onlinedocs/gcc/Pointer-Arith.html)).
+This does not extend to integer-plus-pointer, arithmetic on typed `_core_ref`
+or function pointers, or raw pointer differences. Ordinary array-pointer
+support is unchanged.
+
+The translation calls the abstract pure operation
+`Pulse.Lib.C.GNU.VoidPointer.core_offset : core_ref -> int -> core_ref`.
+The offset expression is evaluated with its existing C integer semantics,
+then widened to mathematical `int` with its original signedness. For example,
+`base + slot * slot_size` with `uint32_t` operands computes the wrapping
+32-bit product **before** widening. Subtraction negates the mathematical
+value, not a machine integer, so it adds no machine-negation overflow.
+
+This is translation support under an abstract raw-value model, **not ISO C
+portability or memory/address safety**. The operation has no numeric-address,
+injectivity, non-nullness, composition, or ownership laws. Its totality does
+not show that every concrete pointer computation is defined, in bounds,
+dereferenceable, or valid for MMIO.
+
+The supplied `test/void_pointer_arith` deliberately has no bounds contracts
+and leaves `access_io` declaration-only. Its generated external stub uses the
+existing `assume False` convention; verifying the caller neither verifies the
+external implementation nor proves an IO access safe. The separate
+`test/gnu_void_pointer_offsets` checks offset terms with explicit
+postconditions and no external calls.
+
 ## Syntax for specifications
 
 ### Annotating function arguments
