@@ -478,6 +478,9 @@ pub struct StructDefn {
     pub refines: Rc<Type>,
     pub fields: Vec<Field>,
     pub eager_unfold_pred: bool,
+    /// The size, in bytes, that the target ABI gives this type, as reported by
+    /// clang. `None` when the size is not a compile-time constant.
+    pub abi_size: Option<u64>,
 }
 
 impl StructDefn {
@@ -502,6 +505,8 @@ impl StructDefn {
 pub struct UnionDefn {
     pub name: Rc<Ident>,
     pub fields: Vec<Field>,
+    /// See `StructDefn::abi_size`.
+    pub abi_size: Option<u64>,
 }
 
 impl UnionDefn {
