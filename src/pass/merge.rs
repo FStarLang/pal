@@ -570,7 +570,10 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         tu.decls.remove(i);
     }
 
-    // === Phase 3: Order type definitions before their dependents ===
+    // === Phase 3: Break definitional cycles between type declarations ===
+    break_type_cycles(diags, tu);
+
+    // === Phase 4: Order type definitions before their dependents ===
     reorder_type_deps(tu);
 }
 
@@ -821,6 +824,318 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
 /// position of an earlier forward declaration (e.g. introduced by a forward
 /// `typedef`), which would otherwise place a struct before an anonymous struct
 /// lifted out of one of its fields.
+/// Collect the type references a type expression contributes to the *definitional*
+/// dependency graph used by cycle breaking.
+///
+/// This is the same traversal as [`collect_type_refs`] except that it also
+/// descends into function-pointer signatures. Emission turns a `FnPtr` into a
+/// `Pulse.Lib.C.FuncPtr.func_ptr ARG RET` whose argument and result types name
+/// the referenced modules, so a function-pointer field really does make its
+/// enclosing type depend on every type mentioned in the signature.
+///
+/// As in [`collect_type_refs`], `core_ref` pointers contribute no edge: they
+/// erase their pointee on emission.
+fn collect_defn_refs(ty: &Type, out: &mut Vec<TypeKey>) {
+    match &ty.val {
+        TypeT::Pointer(_, PointerKind::Core) => {}
+        TypeT::Pointer(inner, _)
+        | TypeT::FixedArray(inner, _)
+        | TypeT::FlexArray(inner)
+        | TypeT::Plain(inner)
+        | TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _)
+        | TypeT::Nullable(inner) => collect_defn_refs(inner, out),
+        TypeT::FnPtr { args, ret } => {
+            for a in args {
+                collect_defn_refs(a, out);
+            }
+            collect_defn_refs(ret, out);
+        }
+        TypeT::TypeRef(k) => out.push(type_key_of(k)),
+        _ => {}
+    }
+}
+
+fn type_key_of(k: &TypeRefKind) -> TypeKey {
+    match k {
+        TypeRefKind::Typedef(n) => (TYPEDEF_NS, n.val.clone()),
+        TypeRefKind::Struct(n) => (STRUCT_NS, n.val.clone()),
+        TypeRefKind::Union(n) => (UNION_NS, n.val.clone()),
+    }
+}
+
+fn defn_key(decl: &Decl) -> Option<TypeKey> {
+    match &decl.val {
+        DeclT::Typedef(t) => Some((TYPEDEF_NS, t.name.val.clone())),
+        DeclT::StructDefn(s) => Some((STRUCT_NS, s.name.val.clone())),
+        DeclT::UnionDefn(u) => Some((UNION_NS, u.name.val.clone())),
+        _ => None,
+    }
+}
+
+/// The type references contributed by a type-defining declaration's own body.
+fn defn_refs(decl: &Decl) -> Vec<TypeKey> {
+    let mut refs = Vec::new();
+    match &decl.val {
+        DeclT::Typedef(t) => collect_defn_refs(&t.body, &mut refs),
+        DeclT::StructDefn(s) => {
+            for f in &s.fields {
+                collect_defn_refs(&f.val.logical_type(&f.loc), &mut refs);
+            }
+        }
+        DeclT::UnionDefn(u) => {
+            for f in &u.fields {
+                collect_defn_refs(&f.val.logical_type(&f.loc), &mut refs);
+            }
+        }
+        _ => {}
+    }
+    refs
+}
+
+/// Does `ty` mention any of `targets` along a non-`core_ref` path?
+fn mentions_any(ty: &Type, targets: &std::collections::HashSet<TypeKey>) -> bool {
+    let mut refs = Vec::new();
+    collect_defn_refs(ty, &mut refs);
+    refs.iter().any(|r| targets.contains(r))
+}
+
+/// Rewrite the outermost pointers in `ty` that reach `targets` into `core_ref`
+/// pointers. Returns the rewritten type and reports whether anything changed.
+fn corify_ptrs(
+    ty: &Rc<Type>,
+    targets: &std::collections::HashSet<TypeKey>,
+    changed: &mut bool,
+) -> Rc<Type> {
+    let rebuild = |v: TypeT| -> Rc<Type> {
+        Rc::new(Ast {
+            val: v,
+            loc: ty.loc.clone(),
+        })
+    };
+    match &ty.val {
+        TypeT::Pointer(_, PointerKind::Core) => ty.clone(),
+        TypeT::Pointer(inner, kind) => {
+            if mentions_any(inner, targets) {
+                *changed = true;
+                rebuild(TypeT::Pointer(inner.clone(), PointerKind::Core))
+            } else {
+                let new_inner = corify_ptrs(inner, targets, changed);
+                rebuild(TypeT::Pointer(new_inner, kind.clone()))
+            }
+        }
+        TypeT::FixedArray(inner, n) => {
+            rebuild(TypeT::FixedArray(corify_ptrs(inner, targets, changed), *n))
+        }
+        TypeT::FlexArray(inner) => rebuild(TypeT::FlexArray(corify_ptrs(inner, targets, changed))),
+        TypeT::Plain(inner) => rebuild(TypeT::Plain(corify_ptrs(inner, targets, changed))),
+        TypeT::Nullable(inner) => rebuild(TypeT::Nullable(corify_ptrs(inner, targets, changed))),
+        TypeT::Refine(inner, e) => rebuild(TypeT::Refine(
+            corify_ptrs(inner, targets, changed),
+            e.clone(),
+        )),
+        TypeT::RefineAlways(inner, e) => rebuild(TypeT::RefineAlways(
+            corify_ptrs(inner, targets, changed),
+            e.clone(),
+        )),
+        TypeT::RefineUninit(inner, e) => rebuild(TypeT::RefineUninit(
+            corify_ptrs(inner, targets, changed),
+            e.clone(),
+        )),
+        TypeT::RefineValue(inner, n, bty, e) => rebuild(TypeT::RefineValue(
+            corify_ptrs(inner, targets, changed),
+            n.clone(),
+            bty.clone(),
+            e.clone(),
+        )),
+        TypeT::FnPtr { args, ret } => rebuild(TypeT::FnPtr {
+            args: args
+                .iter()
+                .map(|a| corify_ptrs(a, targets, changed))
+                .collect(),
+            ret: corify_ptrs(ret, targets, changed),
+        }),
+        _ => ty.clone(),
+    }
+}
+
+fn corify_decl(decl: &mut Decl, targets: &std::collections::HashSet<TypeKey>, changed: &mut bool) {
+    match &mut decl.val {
+        DeclT::Typedef(t) => t.body = corify_ptrs(&t.body, targets, changed),
+        DeclT::StructDefn(s) => {
+            for f in &mut s.fields {
+                match &mut f.val {
+                    FieldT::Plain { ty, .. } | FieldT::BitField { ty, .. } => {
+                        *ty = corify_ptrs(ty, targets, changed)
+                    }
+                }
+            }
+        }
+        DeclT::UnionDefn(u) => {
+            for f in &mut u.fields {
+                match &mut f.val {
+                    FieldT::Plain { ty, .. } | FieldT::BitField { ty, .. } => {
+                        *ty = corify_ptrs(ty, targets, changed)
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Break definitional cycles between type declarations by demoting the pointers
+/// that close them to `core_ref`.
+///
+/// A C type may refer to itself, directly or mutually, through a pointer: C only
+/// needs a forward declaration there. The generated F* has no such escape hatch.
+/// Each type becomes its own module, and a struct's ownership predicate recurses
+/// through its pointer fields into the pointee's predicate, so a cycle in the C
+/// types becomes both a module cycle and an ill-founded predicate. F* rejects the
+/// former with `Error 308: Recursive dependency`, which aborts dependency
+/// analysis for the whole translation unit.
+///
+/// `core_ref` is the existing answer to this: an axiomatized non-parametric raw
+/// pointer that drops its pointee type and carries no ownership. It was so far
+/// only reachable by annotating the source with `_core_ref`, which is not an
+/// option for types coming from third-party headers. This pass applies it
+/// automatically, and only where it is needed: a pointer is demoted exactly when
+/// its pointee can reach the declaration that contains it.
+///
+/// Demotion is a loss of information, so it is reported. Code that needs the
+/// pointee type back can cast a `core_ref` to a typed reference, which is the
+/// same discipline an explicit `_core_ref` already requires.
+fn break_type_cycles(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
+    use std::collections::HashSet;
+
+    // Iterate: demoting pointers removes edges, which can split one strongly
+    // connected component into several, so recompute after each round. Each
+    // round strictly decreases the number of non-`core_ref` pointer edges, so
+    // this terminates.
+    loop {
+        let mut node_of_key: HashMap<TypeKey, usize> = HashMap::new();
+        let mut nodes: Vec<usize> = Vec::new();
+        for (i, d) in tu.decls.iter().enumerate() {
+            if let Some(key) = defn_key(d) {
+                node_of_key.insert(key, nodes.len());
+                nodes.push(i);
+            }
+        }
+        let n = nodes.len();
+        if n == 0 {
+            return;
+        }
+
+        let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (v, &i) in nodes.iter().enumerate() {
+            for r in defn_refs(&tu.decls[i]) {
+                if let Some(&w) = node_of_key.get(&r) {
+                    succ[v].push(w);
+                }
+            }
+            succ[v].sort_unstable();
+            succ[v].dedup();
+        }
+
+        // Reachability closure (the type graphs here are small; a transitive
+        // closure keeps the cycle test obvious).
+        let mut reach: Vec<HashSet<usize>> =
+            succ.iter().map(|s| s.iter().copied().collect()).collect();
+        loop {
+            let mut grew = false;
+            for v in 0..n {
+                let cur: Vec<usize> = reach[v].iter().copied().collect();
+                for w in cur {
+                    let add: Vec<usize> = reach[w].difference(&reach[v]).copied().collect();
+                    if !add.is_empty() {
+                        grew = true;
+                        reach[v].extend(add);
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+
+        // A declaration is on a cycle when it can reach itself. A self-loop is
+        // harmless: a struct whose pointer field names its own type stays
+        // inside one F* module, which F* accepts and which PAL already models
+        // (a `_plain` self-pointer is the usual linked-list node). Only cycles
+        // spanning two or more declarations become module cycles.
+        let cyclic: Vec<usize> = (0..n)
+            .filter(|&v| {
+                reach[v].contains(&v)
+                    && (0..n).any(|w| w != v && reach[v].contains(&w) && reach[w].contains(&v))
+            })
+            .collect();
+        if cyclic.is_empty() {
+            return;
+        }
+
+        let mut any_change = false;
+        for &v in &cyclic {
+            // Break only the edges that leave this declaration for another
+            // member of its strongly connected component; a self-reference is
+            // left alone.
+            let scc: HashSet<TypeKey> = node_of_key
+                .iter()
+                .filter(|&(_, w)| *w != v && reach[v].contains(w) && reach[*w].contains(&v))
+                .map(|(k, _)| k.clone())
+                .collect();
+            let i = nodes[v];
+            let mut changed = false;
+            corify_decl(&mut tu.decls[i], &scc, &mut changed);
+            if changed {
+                any_change = true;
+                let name = decl_display_name(&tu.decls[i]);
+                let loc = tu.decls[i].loc.clone();
+                diags.report(Diagnostic {
+                    loc: loc.location().clone(),
+                    level: DiagnosticLevel::Warning,
+                    msg: format!(
+                        "'{}' is part of a recursive type definition; the pointers that close \
+                         the cycle are modeled as untyped 'core_ref' addresses and carry no \
+                         ownership. Cast such a pointer to a typed reference to use it.",
+                        name
+                    ),
+                });
+            }
+        }
+
+        if !any_change {
+            // Every remaining cycle runs through by-value fields, which no
+            // amount of pointer demotion can break, and which C would reject
+            // too. Report it rather than handing F* an unusable module graph.
+            let names: Vec<String> = cyclic
+                .iter()
+                .map(|&v| decl_display_name(&tu.decls[nodes[v]]))
+                .collect();
+            let loc = tu.decls[nodes[cyclic[0]]].loc.clone();
+            report(
+                diags,
+                format!(
+                    "recursive type definition with no pointer to break it: {}",
+                    names.join(", ")
+                ),
+                &loc,
+            );
+            return;
+        }
+    }
+}
+
+fn decl_display_name(decl: &Decl) -> String {
+    match &decl.val {
+        DeclT::Typedef(t) => format!("typedef {}", t.name.val),
+        DeclT::StructDefn(s) => format!("struct {}", s.name.val),
+        DeclT::UnionDefn(u) => format!("union {}", u.name.val),
+        _ => "<declaration>".to_string(),
+    }
+}
+
 fn reorder_type_deps(tu: &mut TranslationUnit) {
     let n = tu.decls.len();
     if n == 0 {
