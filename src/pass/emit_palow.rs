@@ -3728,6 +3728,15 @@ struct Body<'a> {
     /// Local pointers that stand for a place rather than for storage. See
     /// `alias_map`.
     aliases: HashMap<String, Rc<Expr>>,
+    /// Which member of a union at a given address is live, where the emitter
+    /// knows. C's rule is that reading a member other than the one last
+    /// written is not reading what you wrote, and Palow says the same thing by
+    /// construction: the value of a union is tagged, and `union_X_focus_m`
+    /// only applies when the tag is `m`. So a read is translatable exactly
+    /// when a write to that member came first and nothing since could have
+    /// changed it. Keyed by the address expression, which is the emitter's own
+    /// name for the object.
+    active: HashMap<String, String>,
 }
 
 /// What a subscript through an array parameter needs: the element's Palow type
@@ -4096,11 +4105,14 @@ impl<'a> Body<'a> {
     /// they compose: `s->f[i]` focuses the field, then the element inside it.
     /// The caller emits the closing lines immediately after the read or write,
     /// with nothing in between: the object is in pieces until then.
-    fn place(&mut self, e: &Expr) -> Result<Focus, String> {
+    fn place(&mut self, e: &Expr, writing: bool) -> Result<Focus, String> {
         if let Some(p) = self.unalias(e) {
-            return self.place(&p);
+            return self.place(&p, writing);
         }
         match &strip_vattr(e).val {
+            ExprT::Member(base, f) if self.union_of(base).is_some() => {
+                self.union_member(base, f, writing)
+            }
             ExprT::Member(base, f) => {
                 let pn = self.field_pn(base, f)?;
                 let ff = self.focus_field(base, f)?;
@@ -4133,6 +4145,64 @@ impl<'a> Body<'a> {
             return Err(format!("a field of {}", describe(self.tds.resolve(&bty))));
         }
         Ok((format!("struct_{}", sname.val), bty.clone()))
+    }
+
+    /// The union a member belongs to, if the emitter generated a type for it.
+    fn union_of(&self, base: &Expr) -> Option<String> {
+        let bty = self.ty_of(base).ok()?;
+        let TypeT::TypeRef(TypeRefKind::Union(uname)) = &peel(self.tds, &bty).val else {
+            return None;
+        };
+        self.tds
+            .unions
+            .get(&*uname.val.to_string())
+            .map(|_| format!("union_{}", uname.val))
+    }
+
+    /// A member access on a union. Unlike a struct field this is not a focus
+    /// into a disjoint part of the object: every member starts at the same
+    /// address and covers the same bytes, so reading one means claiming the
+    /// object *is* that member, and writing one means making it so.
+    ///
+    /// The two directions are therefore not symmetric. A write works from any
+    /// starting value -- `union_X_switch_m` gives up whatever was there and
+    /// hands back storage -- while a read needs the live member to be the one
+    /// being read, which is a fact about the program and not about the type.
+    /// C says the same thing, and says that getting it wrong is not reading
+    /// what you wrote; the emitter allows the read exactly where it put the
+    /// value there itself.
+    fn union_member(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<Focus, String> {
+        let un = self
+            .union_of(base)
+            .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
+        let fty = self.field_ty(base, f)?;
+        let pn = palow_name(self.tds, &fty).ok_or_else(|| {
+            format!(
+                "a union member of type {}",
+                describe(self.tds.resolve(&fty))
+            )
+        })?;
+        let (a, _, _) = self.base_addr(base)?;
+        if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
+            return Err(format!(
+                "a read of union member `{}`, which is not known to be the live one here",
+                f.val
+            ));
+        }
+        if writing {
+            self.active.insert(a.clone(), f.val.to_string());
+        }
+        let focus = vec![format!("{}_focus_{} {};", un, f.val, a)];
+        let close = vec![format!("{}_unfocus_{} {};", un, f.val, a)];
+        Ok(Focus {
+            pn: pn.clone(),
+            write_fn: format!("{}_write_uninit", pn),
+            at: a.clone(),
+            open_read: focus,
+            open_write: vec![format!("{}_switch_{} {};", un, f.val, a)],
+            close_read: close.clone(),
+            close_write: close,
+        })
     }
 
     fn field_ty(&self, base: &Expr, f: &Ident) -> Result<Rc<Type>, String> {
@@ -4837,7 +4907,7 @@ impl<'a> Body<'a> {
                     ExprT::Member(_, f) => f.val.to_string(),
                     _ => "elem".to_string(),
                 };
-                let f = self.place(e)?;
+                let f = self.place(e, false)?;
                 self.lines.extend(f.open_read.iter().cloned());
                 let t = self.fresh(&hint);
                 self.lines
@@ -5081,6 +5151,11 @@ impl<'a> Body<'a> {
     /// The F* application for a call to an already-emitted function. Every
     /// argument is translated first, since translating one may emit reads.
     fn call(&mut self, name: &Ident, args: &Exprs) -> Result<String, String> {
+        // A callee that was handed a pointer may have made a different member
+        // live, and nothing in the signature says otherwise. The emitter's
+        // record of which member is live is knowledge it put there itself, so
+        // it gives it up whenever control leaves.
+        self.active.clear();
         let c = self
             .callees
             .get(&*name.val.to_string())
@@ -5463,7 +5538,7 @@ impl<'a> Body<'a> {
             }
         }
         if matches!(lhs.val, ExprT::Member(..) | ExprT::Index(..)) {
-            let f = self.place(lhs)?;
+            let f = self.place(lhs, true)?;
             self.lines.extend(f.open_write.iter().cloned());
             self.lines
                 .push(format!("{} {} {};", f.write_fn, f.at, value));
@@ -5471,6 +5546,9 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let a = self.addr(lhs)?;
+        // A store of a whole union value picks the live member from the value
+        // itself, which the emitter does not read back.
+        self.active.remove(&a);
         self.lines.push(format!("{}_write {} {};", pn, a, value));
         Ok(())
     }
@@ -5699,7 +5777,11 @@ impl<'a> Body<'a> {
                 ensures,
                 body,
             } => {
+                // The body runs an unknown number of times, so what was live
+                // before it says nothing about what is live after.
+                self.active.clear();
                 self.loop_(cond, inv, requires, ensures, body)?;
+                self.active.clear();
                 Ok(())
             }
             // A `switch` whose cases all end in `break` reaches the IR as a
@@ -5721,6 +5803,9 @@ impl<'a> Body<'a> {
             } => {
                 let scrut = self.rvalue(scrutinee)?;
                 let sty = self.ty_of(scrutinee)?;
+                // As with an `if`: the arms need not agree on which union
+                // member they leave live, so none is known afterwards.
+                self.active.clear();
 
                 let entry_out = self.out_params.clone();
                 let entry_inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
@@ -5866,6 +5951,9 @@ impl<'a> Body<'a> {
                 else_branch,
                 ..
             } => {
+                // Either arm may make a different member live, and the two
+                // arms need not agree, so nothing survives the join.
+                self.active.clear();
                 // The `_ensures` PAL requires on an `if` today is not
                 // translated, and does not need to be: Pulse computes the join
                 // itself from the two branches, so the annotation exists only
@@ -5981,6 +6069,7 @@ impl<'a> Body<'a> {
                     else_branch,
                     ..
                 } if returns(then_branch) || returns(else_branch) => {
+                    self.active.clear();
                     // A test of a freshly allocated pointer is the one
                     // condition that is not just a value: it decides which arm
                     // owns the block, so each arm opens by eliminating the
@@ -6691,6 +6780,7 @@ fn emit_body(
         divergent: false,
         blocks: Vec::new(),
         aliases: alias_map(&defn.body),
+        active: HashMap::new(),
         uses: HashSet::new(),
         forbidden,
         params: defn

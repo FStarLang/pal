@@ -1509,8 +1509,45 @@ new facts about memory.
    quarter of what the single-file number suggested, and anyone quoting the
    old figure should stop.
 
-   As of this milestone: **725 specifications, 524 of them with real bodies,
-   201 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as
+   **Unions are the first generated type with a byte-level representation.**
+   A generated struct still has none: its points-to is the conjunction of its
+   fields', which says nothing about the padding between them, and that is
+   enough for most uses. A union has no such conjunction to write, because its
+   members overlap by definition, so `union_X_pts_to` has to go through
+   `mem_pts_to` and a `union_X_repr` over the bytes. That is more work, and it
+   pays for itself: having a byte-level representation is exactly the
+   condition for being an array element or a member of another union, so a
+   union can already be both where a generated struct cannot.
+
+   `union_X_repr` is deliberately not injective. The bytes that encode one
+   member also encode whatever the other members would read them as -- that
+   *is* type punning, which is the reason C programs use unions -- so there is
+   nothing to be injective about. Palow never relies on injectivity anywhere.
+
+   The asymmetry between `union_X_focus_m` and `union_X_switch_m` carries the
+   C rule. Focus needs to know that `m` is the member the value is tagged
+   with, and hands out that member's value. Switch cannot know it -- the union
+   may hold anything -- so it hands out uninitialised *storage*, and needs
+   full permission for the same reason a write does. Reading a member is
+   therefore translatable exactly when a write to that member came first,
+   which is C's rule stated as a proof obligation rather than as prose. A
+   write needs no such history and is never refused.
+
+   The emitter tracks which member is live per address, and gives that
+   knowledge up the moment control leaves: at a call, at either arm of an
+   `if`, at a `switch`, around a loop, and at a whole-union write. Over-
+   clearing costs an `admit()`; under-clearing would emit a read F\* rejects,
+   so the bias is the safe one.
+
+   Two smaller decisions. Every member gets a `union_X_rest_m` predicate for
+   the bytes past it, including a full-width member whose rest has length
+   zero: `mem_split` returns a suffix either way, a resource cannot be
+   dropped, and telling the two cases apart is longer than not doing so. And a
+   whole-union write matches on the *value*, not on memory, because nothing
+   reads a tag that C does not store.
+
+   As of this milestone: **734 specifications, 526 of them with real bodies,
+   208 admitted, 76 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
