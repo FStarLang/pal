@@ -203,6 +203,26 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     for decl in tu.decls.iter_mut() {
         rewrite_types_decl(&mut decl.val, &elim);
     }
+    // The layout table is keyed by how a type is spelled, so a union that
+    // becomes a struct needs its entry moved across or nothing downstream can
+    // size it. The size and alignment carry over unchanged -- the collapse
+    // does not move any storage -- and the one surviving field sits at offset
+    // zero, where every union member sat.
+    let mut moved = Vec::new();
+    for (name, info) in &elim {
+        if let Some(l) = tu.layouts.get(&LayoutKey::Union(name.clone())) {
+            moved.push((
+                LayoutKey::Struct(name.clone()),
+                TypeLayout {
+                    size: l.size,
+                    align: l.align,
+                    field_offsets: vec![(info.named_field.val.name().val.clone(), 0)],
+                },
+            ));
+        }
+    }
+    tu.layouts.extend(moved);
+
     for decl in tu.decls.iter_mut() {
         if let DeclT::UnionDefn(u) = &decl.val {
             if let Some(info) = elim.get(&u.name.val) {

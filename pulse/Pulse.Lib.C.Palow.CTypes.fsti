@@ -883,3 +883,48 @@ ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
   ensures  elem_pts_to size_t_repr a p x
 
 
+
+
+(* ---------------------------------------------------------------------------
+   Uniform length lemmas
+
+   Every scalar already says how long its representation is, but it says so in
+   whichever lemma happened to be convenient: some carry it alongside a
+   provenance fact, `uint8_t`/`uint32_t`/`ptr` have a dedicated one, and a
+   generated aggregate states it as the first conjunct of its `_repr`. A
+   generated struct has to join its fields' byte ranges in offset order, and
+   `mem_join` wants each length as a side condition, so the generator needs one
+   name that works for every field type. These supply the missing ones.
+   --------------------------------------------------------------------------- *)
+
+let bool_t_repr_len (x: bool) (b: bytes)
+  : Lemma (requires bool_t_repr x b) (ensures len b == SZ.v bool_t_sizeof)
+  = bool_t_repr_no_prov x b
+
+let int8_t_repr_len (x: I8.t) (b: bytes)
+  : Lemma (requires int8_t_repr x b) (ensures len b == SZ.v int8_t_sizeof)
+  = int8_t_repr_no_prov x b
+
+let int16_t_repr_len (x: I16.t) (b: bytes)
+  : Lemma (requires int16_t_repr x b) (ensures len b == SZ.v int16_t_sizeof)
+  = int16_t_repr_no_prov x b
+
+let int32_t_repr_len (x: I32.t) (b: bytes)
+  : Lemma (requires int32_t_repr x b) (ensures len b == SZ.v int32_t_sizeof)
+  = int32_t_repr_no_prov x b
+
+let int64_t_repr_len (x: I64.t) (b: bytes)
+  : Lemma (requires int64_t_repr x b) (ensures len b == SZ.v int64_t_sizeof)
+  = int64_t_repr_no_prov x b
+
+let uint16_t_repr_len (x: U16.t) (b: bytes)
+  : Lemma (requires uint16_t_repr x b) (ensures len b == SZ.v uint16_t_sizeof)
+  = uint16_t_repr_no_prov x b
+
+let uint64_t_repr_len (x: U64.t) (b: bytes)
+  : Lemma (requires uint64_t_repr x b) (ensures len b == SZ.v uint64_t_sizeof)
+  = uint64_t_repr_no_prov x b
+
+let size_t_repr_len (x: SZ.t) (b: bytes)
+  : Lemma (requires size_t_repr x b) (ensures len b == SZ.v size_t_sizeof)
+  = size_t_repr_no_prov x b

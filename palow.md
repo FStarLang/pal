@@ -1546,8 +1546,64 @@ new facts about memory.
    whole-union write matches on the *value*, not on memory, because nothing
    reads a tag that C does not store.
 
-   As of this milestone: **734 specifications, 526 of them with real bodies,
-   208 admitted, 76 functions skipped**, plus **18 `_pure` functions emitted as
+   **A struct gets a byte-level representation too, up to a size.** The
+   earlier claim that a generated struct cannot have one was too strong: it
+   was the *definition* of ownership that was field-wise, not the object. A
+   struct now carries both views. `struct_X_pts_to` stays the conjunction of
+   its fields' points-to, which is what a field access needs and what lets two
+   fields hold different fractional permissions; `struct_X_repr` relates a
+   value to the object's bytes, which is what an array element or a union
+   member has to be. Neither is defined from the other. They are related by a
+   generated proof, `struct_X_reveal` and `struct_X_conceal`.
+
+   That proof is a partition argument run in both directions, and the
+   directions are not symmetric. `_reveal` reveals each field's bytes and
+   joins the pieces left to right; `_conceal` splits the object right to left
+   and conceals each piece back into its field. Both orders are forced: joining
+   right to left, or splitting left to right, nests the address arithmetic into
+   `((a +! 4) +! 4) +! 1`, and the solver does not see through that. Going the
+   other way every intermediate address stays `a +! <absolute offset>`. The
+   automatic-storage carve had already discovered the splitting half of this;
+   the joining half is its mirror.
+
+   The representation pins the fields and says nothing about the padding, which
+   is what C guarantees: the gaps hold unspecified values and two objects with
+   equal fields may differ there. Ownership of the gaps is still part of the
+   struct -- it always was, in `struct_X_padding` -- because an object that
+   lost them on the way through `_pts_to` could never go back into storage.
+
+   There is a size limit, and it is about the proof rather than the model.
+   `_reveal` has to recognise each field's slice of the finished object
+   through the appends stacked above it, which is one lemma call per field per
+   region above it. For the handful of fields a struct used as an array
+   element or a union member actually has, that is nothing. For the
+   two-hundred-field configuration records that appear in real headers --
+   `_profile_descriptor_t` in the DPE test is one -- it is forty thousand, and
+   F\* will not finish. Those keep the field-wise view, which is linear, and
+   which is the only one they are ever used through. The cutoff is sixteen
+   fields.
+
+   Four things fell out of having it. A struct can be an array element, so
+   `struct point pts[]` is a contract rather than a skip. A struct can be a
+   union member, which is what `test/dpe`'s `_u_context_t` needed. A struct can
+   be claimed from raw storage without that storage having come from a stack
+   allocation, because `_claim_uninit` is now separate from `_stack_alloc`. And
+   a struct can be read as a whole value, which a by-value parameter needs --
+   except when it contains a union, which has no `_read` and never will,
+   because reading one would mean branching on a ghost tag inside a real
+   function.
+
+   Two smaller fixes came with it. A common-initial-sequence union that PAL
+   collapses into a struct was losing its layout: the table is keyed by how a
+   type is spelled, and nothing moved the entry from the union key to the
+   struct key, so every struct containing one was skipped for having a field
+   of unknown size. And a struct carrying a `_refine` passed *by value* now
+   reports a dropped contract instead of producing a body that cannot be
+   proved -- the refinement is not part of the generated `_pts_to` yet, which
+   costs nothing behind a pointer and is the whole contract for a value.
+
+   As of this milestone: **760 specifications, 548 of them with real bodies,
+   212 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

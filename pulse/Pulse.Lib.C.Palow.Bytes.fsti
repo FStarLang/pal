@@ -102,6 +102,25 @@ let append_slice_left (b1 b2: bytes)
   : Lemma (slice (append b1 b2) 0 (len b1) == b1)
   = Seq.lemma_eq_intro (slice (append b1 b2) 0 (len b1)) b1
 
+(* The two directions a generated aggregate needs. A struct's `_repr` names
+   its fields by absolute slice of the whole object, but the proof that builds
+   the object splits and joins one region at a time, so every step has to say
+   that an absolute slice survives being taken through an outer one. *)
+
+let slice_append_left_at (b1 b2: bytes) (i: nat) (j: nat { i <= j /\ j <= len b1 })
+  : Lemma (slice (append b1 b2) i j == slice b1 i j)
+  = append_slice_left b1 b2;
+    Seq.slice_slice (append b1 b2) 0 (len b1) i j
+
+let slice_prefix (b: bytes) (k: nat { k <= len b }) (i: nat) (j: nat { i <= j /\ j <= k })
+  : Lemma (slice (slice b 0 k) i j == slice b i j)
+  = Seq.slice_slice b 0 k i j
+
+let slice_suffix (b: bytes) (k: nat { k <= len b })
+                 (i: nat) (j: nat { i <= j /\ j + k <= len b })
+  : Lemma (slice (slice b k (len b)) i j == slice b (k + i) (k + j))
+  = Seq.slice_slice b k (len b) i j
+
 let append_slice_right (b1 b2: bytes)
   : Lemma (slice (append b1 b2) (len b1) (len b1 + len b2) == b2)
   = Seq.lemma_eq_intro (slice (append b1 b2) (len b1) (len b1 + len b2)) b2

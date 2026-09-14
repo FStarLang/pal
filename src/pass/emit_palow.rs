@@ -59,6 +59,21 @@ struct StructField {
     shape: FieldShape,
 }
 
+/// Whether a value of this type can be read out of memory in one step, which
+/// is what a whole-struct `_read` needs of every field.
+fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            tds.structs.get(&*n.val).is_some_and(|si| si.has_read)
+        }
+        TypeT::TypeRef(TypeRefKind::Union(_)) => false,
+        _ => palow_name(tds, ty).is_some(),
+    }
+}
+
+/// The largest struct that gets a byte-level view. See `has_bytes`.
+const MAX_BYTE_LEVEL_FIELDS: usize = 16;
+
 /// How a struct field is owned. A scalar or nested struct field is one
 /// points-to; a fixed-size array field is a whole `array_pts_to`, because in C
 /// `T f[N]` inside a struct is N elements of storage and not a pointer.
@@ -143,6 +158,17 @@ struct StructInfo {
     fields: Vec<StructField>,
     size: u64,
     align: u64,
+    /// Whether the struct got a whole-object `_read`, which needs every field
+    /// to have one. A union has none -- reading one would mean branching on a
+    /// ghost tag in a real function -- so a struct containing one cannot be
+    /// read as a value either, only field by field.
+    has_read: bool,
+    /// Whether the struct also got a byte-level `_repr`, and with it the
+    /// `_reveal`/`_conceal` pair that makes it usable as an array element or a
+    /// union member. A struct earns one when every field has one and sits at a
+    /// byte offset, which is what lets the proof carve the object into its
+    /// fields and the padding between them and put it back together.
+    has_bytes: bool,
 }
 
 /// One member of a union the emitter generated a Palow type for.
@@ -171,6 +197,14 @@ struct Typedefs<'a> {
     typedefs: HashMap<&'a str, &'a Rc<Type>>,
     structs: HashMap<String, StructInfo>,
     unions: HashMap<String, UnionInfo>,
+    /// Structs carrying a `_refine`. The refinement is not part of the
+    /// generated `_pts_to` yet, which costs nothing while the object is behind
+    /// a pointer -- no body so far has needed it -- but is fatal for a
+    /// by-value parameter, where the refinement is the only thing that makes
+    /// the value's contract say anything. Those are reported as a dropped
+    /// contract rather than silently translated into a body that cannot be
+    /// proved.
+    refined_structs: HashSet<String>,
     /// `_pure` functions that were successfully emitted as F* definitions, and
     /// so may appear in a specification and in a body without being sequenced.
     pure_fns: HashSet<String>,
@@ -193,6 +227,21 @@ impl<'a> Typedefs<'a> {
             typedefs: m,
             structs: HashMap::new(),
             unions: HashMap::new(),
+            refined_structs: tu
+                .decls
+                .iter()
+                .filter_map(|d| match &d.val {
+                    DeclT::StructDefn(sd)
+                        if matches!(
+                            sd.refines.val,
+                            TypeT::Refine(..) | TypeT::RefineAlways(..) | TypeT::RefineUninit(..)
+                        ) =>
+                    {
+                        Some(sd.name.val.to_string())
+                    }
+                    _ => None,
+                })
+                .collect(),
             pure_fns: HashSet::new(),
             global_addrs: tu
                 .decls
@@ -378,14 +427,22 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
 /// conjunction of its fields' rather than over its bytes. Arrays are indexed by
 /// `_repr`, so this is what an array's element type has to satisfy.
 fn has_repr(tds: &Typedefs, ty: &Type) -> bool {
-    // A generated union does have one: its points-to is defined over its
+    // A generated union always has one: its points-to is defined over its
     // bytes, because overlapping members leave no other choice. A generated
-    // struct does not, because its points-to is the conjunction of its
-    // fields' and says nothing about the padding between them.
+    // struct has one when every one of its fields does -- its points-to stays
+    // the conjunction of its fields', and the `_repr` is a second view of the
+    // same object, related to the first by a generated proof.
     // `peel` rather than `resolve`: a `_plain struct s` is still a struct, and
     // asking only about typedefs would have said it has a representation.
-    palow_name(tds, ty).is_some()
-        && !matches!(peel(tds, ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)))
+    if palow_name(tds, ty).is_none() {
+        return false;
+    }
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            tds.structs.get(&*n.val).is_some_and(|si| si.has_bytes)
+        }
+        _ => true,
+    }
 }
 
 /// How much memory a pointer parameter owns. Palow makes every C pointer the
@@ -1318,6 +1375,14 @@ fn emit_fn(
         params.push(format!("({}: {})", pname, fty));
 
         let Some(pt) = pointee(tds, &arg.ty) else {
+            if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &arg.ty).val
+                && tds.refined_structs.contains(&*n.val)
+            {
+                refine_err.get_or_insert(format!(
+                    "parameter {} is a struct whose `_refine` is not part of its value",
+                    pname
+                ));
+            }
             continue;
         };
         let pn = palow_name(tds, pt).ok_or_else(|| {
@@ -1811,12 +1876,33 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
             });
             continue;
         }
+        // The byte-level view needs every field to have one and to sit at a
+        // byte offset of its own, so that the object splits into fields and
+        // padding with nothing left over. An array field is excluded for now
+        // only because the storage operations it would need are not generated
+        // yet, not because anything about it resists the representation.
+        //
+        // The size limit is about the proof, not the model. `_reveal` has to
+        // recognise each field's slice of the finished object through the
+        // appends stacked above it, which is one lemma call per field per
+        // region -- fine for the handful of fields a struct used as an array
+        // element or a union member has, and hopeless for the 200-field
+        // configuration records that appear in real headers. Those keep the
+        // field-wise view, which is linear and which is all they are ever
+        // used through.
+        let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
+            && fields
+                .iter()
+                .all(|f| matches!(f.shape, FieldShape::One { .. }) && has_repr(tds, &f.ty));
+        let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
         tds.structs.insert(
             name.clone(),
             StructInfo {
                 fields,
                 size,
                 align,
+                has_read,
+                has_bytes,
             },
         );
         code.push(Chunk {
@@ -1944,6 +2030,17 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         );
     }
     c += "    ))\n\n";
+
+    // A generated struct joins its fields' byte ranges in offset order and
+    // needs each length as a side condition, so every field type has to offer
+    // the length under one name. For a union it is the first conjunct of the
+    // representation; this gives it that name.
+    c += &format!(
+        "let {un}_repr_len (u: {un}) (b: bytes)\n  \
+         : Lemma (requires {un}_repr u b) (ensures len b == SizeT.v {un}_sizeof)\n  \
+         = ()\n\n",
+        un = un
+    );
 
     c += &format!(
         "let {un}_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop =\n  \
@@ -2257,6 +2354,244 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         );
     }
     c += &emit_struct_storage(tds, name, &gaps);
+    c += &emit_struct_bytes(tds, name, &gaps);
+    c
+}
+
+/// One contiguous piece of a struct object: either a field or the padding
+/// between two of them. Ordering the pieces by offset turns the object into a
+/// partition, which is what both directions of the byte-level view walk.
+enum Region<'a> {
+    Field(&'a StructField),
+    Gap(u64, u64),
+}
+
+impl Region<'_> {
+    fn offset(&self) -> u64 {
+        match self {
+            Region::Field(f) => f.offset,
+            Region::Gap(off, _) => *off,
+        }
+    }
+    fn size(&self) -> u64 {
+        match self {
+            Region::Field(f) => f.size,
+            Region::Gap(_, len) => *len,
+        }
+    }
+}
+
+/// The byte-level view of a struct: a `_repr` relating a value to the object's
+/// bytes, and the two ghost functions that move between it and the field-wise
+/// `_pts_to`.
+///
+/// Both views are kept, rather than one being defined from the other, because
+/// they answer different questions. Field-wise ownership is what a field
+/// access needs and what lets two fields carry different fractional
+/// permissions; the byte-level one is what an array element or a union member
+/// has to be, and it is the only one that says anything about the padding.
+///
+/// The proof is a partition argument in two directions. `_reveal` reveals each
+/// field's bytes and joins the pieces left to right; `_conceal` splits the
+/// object right to left and conceals each piece back into its field. Both
+/// orders are chosen so that every intermediate address stays `a +! <absolute
+/// offset>`: joining right to left, or splitting left to right, would nest the
+/// arithmetic into `((a +! 4) +! 4) +! 1` and the solver does not see through
+/// that.
+fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
+    let si = &tds.structs[name];
+    if !si.has_bytes {
+        return String::new();
+    }
+    let sn = format!("struct_{}", name);
+
+    let mut regions: Vec<Region> = si
+        .fields
+        .iter()
+        .map(Region::Field)
+        .chain(gaps.iter().map(|(off, n)| Region::Gap(*off, *n)))
+        .collect();
+    regions.sort_by_key(|r| r.offset());
+
+    let at = |off: u64| {
+        if off == 0 {
+            "a".to_string()
+        } else {
+            format!("(a +! {}sz)", off)
+        }
+    };
+    let pn_of = |f: &StructField| match &f.shape {
+        FieldShape::One { pn } => pn.clone(),
+        _ => unreachable!(),
+    };
+
+    // The representation pins the fields and says nothing about the padding,
+    // which is exactly what C guarantees: the gaps hold unspecified values,
+    // and two objects with equal fields may differ there.
+    let mut c = format!(
+        "let {sn}_repr (x: {sn}) (b: bytes) : prop =\n  \
+         len b == SizeT.v {sn}_sizeof /\\\n  \
+         (len b == SizeT.v {sn}_sizeof ==>\n",
+        sn = sn
+    );
+    let conj: Vec<String> = si
+        .fields
+        .iter()
+        .map(|f| {
+            format!(
+                "    {}_repr x.fld_{} (slice b {} {})",
+                pn_of(f),
+                f.name,
+                f.offset,
+                f.offset + f.size
+            )
+        })
+        .collect();
+    c += &format!("{})\n\n", conj.join(" /\\\n"));
+
+    c += &format!(
+        "let {sn}_repr_len (x: {sn}) (b: bytes)\n  \
+         : Lemma (requires {sn}_repr x b) (ensures len b == SizeT.v {sn}_sizeof)\n  \
+         = ()\n\n",
+        sn = sn
+    );
+
+    // ---- reveal: fields to bytes ----
+    let mut r = format!(
+        "  unfold {sn}_pts_to a p x;\n  unfold {sn}_padding a p;\n",
+        sn = sn
+    );
+    let mut accs: Vec<String> = Vec::new();
+    for (k, reg) in regions.iter().enumerate() {
+        let v = format!("r{}", k);
+        match reg {
+            Region::Field(f) => {
+                let pn = pn_of(f);
+                let val = format!("x.fld_{}", f.name);
+                r += &format!(
+                    "  rewrite ({pn}_pts_to (a +! {sn}_offsetof_{f}) p {val})\n    \
+                     as ({pn}_pts_to {at} p {val});\n",
+                    pn = pn,
+                    sn = sn,
+                    f = f.name,
+                    val = val,
+                    at = at(f.offset)
+                );
+                r += &format!("  {}_reveal {};\n", pn, at(f.offset));
+                r += &format!(
+                    "  with {v}. assert (mem_pts_to {at} p {v} ** pure ({pn}_repr {val} {v}));\n",
+                    v = v,
+                    at = at(f.offset),
+                    pn = pn,
+                    val = val
+                );
+                r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+            }
+            Region::Gap(off, n) => {
+                r += &format!(
+                    "  with {v}. assert (mem_pts_to {at} p {v} ** pure (len {v} == {n}));\n",
+                    v = v,
+                    at = at(*off),
+                    n = n
+                );
+            }
+        }
+        accs.push(if k == 0 {
+            v
+        } else {
+            format!("(append {} {})", accs[k - 1], v)
+        });
+    }
+    for reg in regions.iter().skip(1) {
+        r += &format!("  mem_join a {}sz;\n", reg.offset());
+    }
+    // Every field's slice of the finished object has to be recognised as the
+    // bytes that field was revealed to. Peeling the appends off from the
+    // outside is what does it, one step per region above the field.
+    for (j, reg) in regions.iter().enumerate() {
+        let Region::Field(f) = reg else { continue };
+        let (lo, hi) = (f.offset, f.offset + f.size);
+        for k in (j + 1..regions.len()).rev() {
+            r += &format!(
+                "  slice_append_left_at {} r{} {} {};\n",
+                accs[k - 1],
+                k,
+                lo,
+                hi
+            );
+        }
+        if j > 0 {
+            r += &format!("  append_slice_right {} r{};\n", accs[j - 1], j);
+        }
+    }
+    r += &format!(
+        "  assert (pure ({sn}_repr x {acc}));\n",
+        sn = sn,
+        acc = accs[regions.len() - 1]
+    );
+    c += &format!(
+        "ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
+         \x20 requires {sn}_pts_to a p x\n\
+         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({sn}_repr x b)\n\
+         {{\n{r}}}\n\n",
+        sn = sn,
+        r = r
+    );
+
+    // ---- conceal: bytes to fields ----
+    let mut w = String::new();
+    let mut hi = si.size;
+    for reg in regions.iter().skip(1).rev() {
+        let off = reg.offset();
+        w += &format!("  mem_split a {}sz;\n", off);
+        w += &format!("  slice_prefix b {hi} 0 {off};\n", hi = hi, off = off);
+        w += &format!("  slice_prefix b {hi} {off} {hi};\n", hi = hi, off = off);
+        hi = off;
+    }
+    for f in &si.fields {
+        let pn = pn_of(f);
+        w += &format!(
+            "  {pn}_conceal {at} #p #(slice b {lo} {hi}) #(x.fld_{f});\n",
+            pn = pn,
+            at = at(f.offset),
+            lo = f.offset,
+            hi = f.offset + f.size,
+            f = f.name
+        );
+        w += &format!(
+            "  rewrite ({pn}_pts_to {at} p x.fld_{f})\n    \
+             as ({pn}_pts_to (a +! {sn}_offsetof_{f}) p x.fld_{f});\n",
+            pn = pn,
+            at = at(f.offset),
+            sn = sn,
+            f = f.name
+        );
+    }
+    c += &format!(
+        "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: {sn})\n\
+         \x20 requires mem_pts_to a p b\n\
+         \x20 requires pure ({sn}_repr x b)\n\
+         \x20 ensures  {sn}_pts_to a p x\n\
+         {{\n{w}  fold {sn}_padding a p;\n  fold {sn}_pts_to a p x;\n}}\n\n",
+        sn = sn,
+        w = w
+    );
+
+    // The adapters that make the struct an array element. `elem_pts_to` is
+    // the generic array layer's view of one slot, stated over the element's
+    // representation, so these are the byte-level view read in the other
+    // direction and nothing more.
+    c += &format!(
+        "ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn})\n\
+         \x20 requires elem_pts_to {sn}_repr a p x\n\
+         \x20 ensures  {sn}_pts_to a p x\n\
+         {{\n  elem_reveal {sn}_repr a;\n  {sn}_conceal a #p #_ #x;\n}}\n\n\
+         ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n\
+         \x20 requires {sn}_pts_to a p x\n\
+         \x20 ensures  elem_pts_to {sn}_repr a p x\n\
+         {{\n  {sn}_reveal a;\n  elem_conceal {sn}_repr a #p #_ #x;\n}}\n\n",
+        sn = sn
+    );
     c
 }
 
@@ -2341,18 +2676,31 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             f = f.name
         );
     }
+    // Claiming raw storage at this type is the carve on its own; a stack
+    // allocation is that plus the allocation. Separating them is what lets a
+    // struct be an array element or a union member, where the storage comes
+    // from somewhere else entirely.
+    c += &format!(
+        "ghost fn {sn}_claim_uninit (a: ptr) (#b: bytes)\n\
+         \x20 requires mem_pts_to a 1.0R b\n\
+         \x20 requires pure (len b == SizeT.v {sn}_sizeof)\n\
+         \x20 ensures  {sn}_pts_to_uninit a\n\
+         {{\n\
+         {alloc}\
+         \x20 fold {sn}_padding a 1.0R;\n\
+         \x20 fold {sn}_pts_to_uninit a;\n}}\n\n",
+        sn = sn,
+        alloc = alloc
+    );
     c += &format!(
         "fn {sn}_stack_alloc ()\n\
          \x20 returns a : ptr\n\
          \x20 ensures {sn}_pts_to_uninit a\n\
          {{\n\
          \x20 let a = mem_stack_alloc {sn}_sizeof;\n\
-         {alloc}\
-         \x20 fold {sn}_padding a 1.0R;\n\
-         \x20 fold {sn}_pts_to_uninit a;\n\
+         \x20 {sn}_claim_uninit a;\n\
          \x20 a\n}}\n\n",
-        sn = sn,
-        alloc = alloc
+        sn = sn
     );
 
     // Freeing runs the carve backwards. `mem_join a n` needs the two halves
@@ -2378,11 +2726,18 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         free += &format!("  mem_join a {}sz;\n", off);
     }
     c += &format!(
-        "fn {sn}_stack_free (a: ptr)\n\
+        "ghost fn {sn}_reveal_uninit (a: ptr)\n\
          \x20 requires {sn}_pts_to_uninit a\n\
-         {{\n{free}  mem_stack_free a;\n}}\n\n",
+         \x20 ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {sn}_sizeof)\n\
+         {{\n{free}}}\n\n",
         sn = sn,
         free = free
+    );
+    c += &format!(
+        "fn {sn}_stack_free (a: ptr)\n\
+         \x20 requires {sn}_pts_to_uninit a\n\
+         {{\n  {sn}_reveal_uninit a;\n  mem_stack_free a;\n}}\n\n",
+        sn = sn
     );
 
     // Going from a live struct back to storage is per field: the padding is
@@ -2428,6 +2783,41 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // `_forget` rather than writing the fields in place is not a detour: both
     // need the full permission, and this way the padding is handled in exactly
     // one place instead of two.
+    // Reading a whole structure is reading every field and packing the
+    // record. It exists because a structure passed or returned by value is a
+    // value in F* and an object in C, and the two have to meet somewhere.
+    let mut read = String::new();
+    for f in &si.fields {
+        let FieldShape::One { pn } = &f.shape else {
+            unreachable!()
+        };
+        read += &format!("  {}_focus_{} a;\n", sn, f.name);
+        read += &format!(
+            "  let v_{f} = {pn}_read (a +! {sn}_offsetof_{f});\n",
+            f = f.name,
+            pn = pn,
+            sn = sn
+        );
+        read += &format!("  {}_unfocus_read_{} a;\n", sn, f.name);
+    }
+    if si.has_read {
+        c += &format!(
+            "fn {sn}_read (a: ptr) (#p: perm) (#x: erased {sn})\n\
+         \x20 preserves {sn}_pts_to a p x\n\
+         \x20 returns  y : {sn}\n\
+         \x20 ensures  pure (y == reveal x)\n\
+         {{\n{read}  {{ {fields} }}\n}}\n\n",
+            sn = sn,
+            read = read,
+            fields = si
+                .fields
+                .iter()
+                .map(|f| format!("fld_{} = v_{}", f.name, f.name))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+
     c += &format!(
         "fn {sn}_write (a: ptr) (x: {sn}) (#y: erased {sn})\n\
          \x20 requires {sn}_pts_to a 1.0R y\n\
@@ -4266,6 +4656,24 @@ impl<'a> Body<'a> {
                 return Ok((inner.at, close_read, close_write));
             }
         }
+        // `p->f` where `p` is an array parameter is `p[0].f`: the ownership
+        // is a sequence, so the element has to be focused out of it before
+        // the field can be focused out of the element. Without this the field
+        // focus would be applied to the array itself.
+        if let ExprT::Deref(inner) = &strip_vattr(base).val
+            && let ExprT::Var(v) = &strip_vattr(inner).val
+            && self.arrays.contains_key(&v.val.to_string())
+        {
+            let f = self.focus_elem(base, None)?;
+            return Ok((f.at, f.close_read, f.close_write));
+        }
+        if let ExprT::Index(arr, idx) = &strip_vattr(base).val
+            && let ExprT::Var(v) = &strip_vattr(arr).val
+            && self.arrays.contains_key(&v.val.to_string())
+        {
+            let f = self.focus_elem(arr, Some(idx))?;
+            return Ok((f.at, f.close_read, f.close_write));
+        }
         Ok((self.addr(base)?, Vec::new(), Vec::new()))
     }
 
@@ -4814,6 +5222,13 @@ impl<'a> Body<'a> {
                         return Err(format!("`{}` is read before it is written", v.val));
                     }
                     let ty = self.ty_of(e)?;
+                    if !readable_field(self.tds, &ty) {
+                        return Err(format!(
+                            "a whole-value read of `{}`, which is {}",
+                            v.val,
+                            describe(self.tds.resolve(&ty))
+                        ));
+                    }
                     let pn = palow_name(self.tds, &ty)
                         .ok_or_else(|| format!("`{}` has an unsupported type", v.val))?;
                     let a = s.addr.clone();
@@ -4854,6 +5269,12 @@ impl<'a> Body<'a> {
                     }
                 }
                 let ty = self.ty_of(e)?;
+                if !readable_field(self.tds, &ty) {
+                    return Err(format!(
+                        "a whole-value read of {}",
+                        describe(self.tds.resolve(&ty))
+                    ));
+                }
                 let pn = palow_name(self.tds, &ty)
                     .ok_or_else(|| format!("a dereference yields {}", describe(&ty)))?;
                 let a = self.addr(e)?;
