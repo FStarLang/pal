@@ -260,9 +260,42 @@ fn main() {
         if let Some(outdir) = &cli.outdir {
             let outdir = Path::new(&outdir).to_path_buf();
             std::fs::create_dir_all(&outdir).unwrap();
+            let mut generated_files: HashSet<PathBuf> = HashSet::new();
             for module in &modules {
                 let path = outdir.join(format!("{}.fst", module.module_name));
                 write_if_changed(&path, module.code.as_bytes());
+                generated_files.insert(path);
+            }
+            // The same three files the old translator writes, for the same
+            // reason: an IDE pointed at the output directory expects to find
+            // them, and `TranslationErrors` is what makes a translation
+            // failure a *verification* failure rather than a silent gap.
+            let errors_path = outdir.join("TranslationErrors.fst");
+            write_if_changed(
+                &errors_path,
+                {
+                    let mut errors_code = "module TranslationErrors\n".to_string();
+                    if diags.has_errors() {
+                        errors_code += "let _ = assert False\n";
+                    }
+                    errors_code
+                }
+                .as_bytes(),
+            );
+            generated_files.insert(errors_path);
+            std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
+            // A module that is no longer generated has to go, or the next
+            // verification run picks up a stale one and succeeds on code that
+            // no longer exists.
+            if let Ok(entries) = std::fs::read_dir(&outdir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(ext) = path.extension() {
+                        if (ext == "fst" || ext == "fsti") && !generated_files.contains(&path) {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
             }
         } else {
             for module in &modules {

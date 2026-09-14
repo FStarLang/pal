@@ -28,10 +28,12 @@ all: $(ALL_CHECKED_FILES)
 
 $(shell mkdir -p $(CACHE_DIR))
 
-.depend: $(FST_FILES) $(FSTI_FILES)
+DEPEND ?= .depend
+
+$(DEPEND): $(FST_FILES) $(FSTI_FILES)
 	$(FSTAR) --dep full $(FST_FILES) $(FSTI_FILES) --output_deps_to $@
 
-include .depend
+include $(DEPEND)
 
 $(CACHE_DIR)/%.fst.checked:
 	@echo "Verifying $*.fst"
@@ -45,4 +47,4 @@ $(CACHE_DIR)/%.fsti.checked:
 
 .PHONY: clean
 clean:
-	rm -rf $(CACHE_DIR) .depend
+	rm -rf $(CACHE_DIR) $(DEPEND)

@@ -580,9 +580,15 @@ verifies as part of the ordinary build.
 
 **Generated code is smaller per function**, though not by as much as the table
 suggests. `issue51_test` is 29 lines per function today against about 8 for
-Palow (513 lines less a 36-line module header, over 60 functions). Some of that
-is real — no per-declaration module preamble, no pointer-kind-specific
-predicate — and some is the untranslated contracts.
+Palow. Some of that is real — no pointer-kind-specific predicate, one `ptr`
+type instead of a family — and some is the untranslated contracts. Now that
+Palow also emits one module per declaration it pays the same module preamble
+the old translator does, so that part of the saving is gone.
+
+**Verification time is about 2.5x better, not thirtyfold.** `issue51_test`:
+1m30 old against 35s Palow, over the same 60 functions and the same 60
+modules. An earlier measurement of 1.2s was comparing 139 F\* invocations
+against one, and measured startup rather than proof.
 
 ### Still to measure
 
@@ -1459,6 +1465,49 @@ new facts about memory.
    than of ownership. `_consumes` at a call site is still refused, because
    ownership that does not come back is not something the caller's slot
    bookkeeping can currently spend.
+
+   Everything above went into a single `PalowSpecs.fst` per translation unit,
+   which was the right shape while the question was only whether the model
+   typechecks. It is the wrong shape for a translator. A helper a user writes
+   by hand has to be able to sit *between* two generated declarations --
+   naming the first and being named by the second -- and a single module
+   leaves nowhere for it to go; that is exactly why every `_include_pulse` is
+   still untranslated, and it is the same reason an `extern` global cannot be
+   linked to the translation unit that defines it. So Palow now emits one
+   module per declaration, named as the old translator names them:
+   `Struct_s`, `Global_g`, `Let_l`, `Func_f`.
+
+   The split needed no reordering. The single-module output typechecked, and
+   F\* requires a definition to precede its use within a module, so the order
+   the chunks were already produced in *is* a valid definition order. All that
+   is left to decide is which earlier modules each one opens, and that is read
+   off the generated text: a chunk's top-level names are the identifiers at
+   column zero after the modifier keywords, and a chunk opens every earlier
+   module one of whose names it mentions. The edges only ever point backwards,
+   so the graph cannot have a cycle -- which is not a detail, because F\*
+   modules may not be mutually recursive while C declarations routinely refer
+   to each other in an order the file does not fix.
+
+   Reading dependencies out of generated text would be unforgivable for a
+   general F\* input and is safe here for one reason: the text is generated.
+   Every definition starts at column zero and every continuation line is
+   indented, which the emitter maintains regardless because Pulse is
+   indentation-sensitive. A false edge would only cost a redundant `open`; a
+   missed one fails loudly at F\*.
+
+   The output directory now also carries `TranslationErrors.fst` and
+   `diagnostics.json`, so an IDE pointed at it finds what it finds for the old
+   translator. `source_range_info.json` does not exist yet, because Palow
+   emits strings rather than `pretty` documents and so has no source ranges to
+   report.
+
+   This also corrects a measurement. Before the split, `issue51_test` took
+   1.2s under Palow against 1m30 under the old translator, which looked like a
+   thirtyfold win and was mostly an artefact: the old side paid F\* startup 139
+   times and Palow paid it once. One module per declaration now costs Palow 35
+   seconds for the same 60 functions. The remaining 2.5x is real, but it is a
+   quarter of what the single-file number suggested, and anyone quoting the
+   old figure should stop.
 
    As of this milestone: **725 specifications, 524 of them with real bodies,
    201 admitted, 81 functions skipped**, plus **18 `_pure` functions emitted as

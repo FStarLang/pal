@@ -3,8 +3,7 @@
 # 1) typechecks for every test in the suite.
 #
 # This is deliberately not part of the per-test Makefiles: those are symlinks to
-# a shared template, so they cannot carry per-test flags, and the Palow output
-# is a single module per translation unit rather than one per declaration.
+# a shared template, so they cannot carry the `--palow` flag.
 #
 # The point of the check is narrow but load-bearing: the generated `fn`
 # declarations mention the Palow points-to predicates, so F* accepting them is
@@ -41,12 +40,14 @@ check_one() {
     return 1
   fi
 
+  # One module per declaration means the dependency order between the
+  # generated files is no longer the order they were written in, so F* has to
+  # be asked for it. `verify.mk` already does exactly that for the old
+  # translator's output, and it is generic over the directory.
   local out
-  if ! out=$(OTHERFLAGS="" "$ROOT/opt/run-fstar.sh" \
-      --cache_checked_modules --cache_dir "$dir/_cache" \
-      --already_cached 'Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' \
-      --include "$ROOT/pulse/_cache" --include "$dir" \
-      "$dir/PalowSpecs.fst" 2>&1); then
+  if ! out=$(OTHERFLAGS="" make -s -f "$ROOT/test/verify.mk" \
+      OUT_DIR="$dir" CACHE_DIR="$dir/_cache" DEPEND="$dir/.depend" \
+      FSTAR_EXE="$ROOT/opt/run-fstar.sh --include $ROOT/pulse/_cache" 2>&1); then
     echo "FAIL $name"
     echo "$out"
     return 1
@@ -70,7 +71,7 @@ fi
 
 # The generated per-struct storage operations and the `__fp` wrappers are
 # model code, not translated C, so they do not count towards coverage.
-emitted=$(cat "$WORK"/*/*/PalowSpecs.fst | grep '^fn ' | grep -cvE '^fn (struct|union)_|__fp ')
-skipped=$(cat "$WORK"/*/*/PalowSpecs.fst | grep -c '^(\* skipped')
-admitted=$(cat "$WORK"/*/*/PalowSpecs.fst | grep -c 'admit() (\* body')
+emitted=$(cat "$WORK"/*/*/*.fst | grep '^fn ' | grep -cvE '^fn (struct|union)_|__fp ')
+skipped=$(cat "$WORK"/*/*/*.fst | grep -c '^(\* skipped')
+admitted=$(cat "$WORK"/*/*/*.fst | grep -c 'admit() (\* body')
 echo "palow-check: ok; $emitted specifications, $((emitted - admitted)) with bodies, $admitted admitted, $skipped skipped"
