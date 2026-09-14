@@ -5050,6 +5050,21 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// Record which union member a whole-union store makes live.
+    ///
+    /// C says the member you last wrote is the one you may read, and a brace
+    /// initialiser names exactly one. Storing the value is what tags it, so
+    /// the emitter can see the tag in the source expression and does not have
+    /// to read it back out of a value it just erased.
+    fn note_union_store(&mut self, lhs: &Expr, rhs: &Expr) {
+        let ExprT::UnionInit(_, m, _) = &strip_vattr(rhs).val else {
+            return;
+        };
+        if let Ok(a) = self.addr(lhs) {
+            self.active.insert(a, m.val.to_string());
+        }
+    }
+
     /// Record that a slot now holds a known function's address.
     fn note_fn_store(&mut self, lhs: &Expr, rhs: &Expr) {
         let ExprT::Var(v) = &strip_vattr(lhs).val else {
@@ -5183,39 +5198,6 @@ impl<'a> Body<'a> {
                 self.note_fn_store(lhs, rhs);
                 Ok(v)
             }
-            // A struct literal is an F* record literal. C fills any field the
-            // initialiser leaves out with zero, and the emitter has no zero to
-            // write for an arbitrary field type, so a partial initialiser is
-            // refused rather than guessed at.
-            ExprT::StructInit(sname, inits) => {
-                let Some(si) = self.tds.structs.get(&*sname.val) else {
-                    return Err(format!("an initialiser for struct {}", sname.val));
-                };
-                let order: Vec<String> = si.fields.iter().map(|f| f.name.clone()).collect();
-                if order.len() != inits.len() {
-                    return Err(format!(
-                        "a partial initialiser for struct {}, which leaves fields at zero",
-                        sname.val
-                    ));
-                }
-                let mut vals = Vec::new();
-                for fname in &order {
-                    let Some((_, fe)) = inits.iter().find(|(n, _)| *n.val == **fname) else {
-                        return Err(format!(
-                            "an initialiser for struct {} that does not name `{}`",
-                            sname.val, fname
-                        ));
-                    };
-                    vals.push((fname.clone(), self.rvalue(fe)?));
-                }
-                Ok(format!(
-                    "({{ {} }})",
-                    vals.iter()
-                        .map(|(n, v)| format!("fld_{} = {}", n, v))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ))
-            }
             ExprT::Var(v) => {
                 if let Some(s) = self.slots.iter().rev().find(|s| s.name == *v.val) {
                     if !s.init {
@@ -5337,6 +5319,43 @@ impl<'a> Body<'a> {
                 Ok(t)
             }
             ExprT::BoolLit(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+            // A brace initialiser is a value, not a sequence of writes: the
+            // generated type is a record, so `{ .x = 1 }` is that record with
+            // the named fields given and the rest zeroed, which is what C says
+            // an incomplete initialiser means. Zeroing is a real translation
+            // rather than a guess -- `zero_value` builds the zero of the
+            // field's type, which for a nested struct is its own zeroed
+            // record -- so a partial initialiser needs no special case.
+            ExprT::StructInit(n, inits) => {
+                let Some(si) = self.tds.structs.get(&*n.val) else {
+                    return Err(format!("an initialiser for struct {}", n.val));
+                };
+                let names: Vec<(String, Rc<Type>)> = si
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect();
+                let mut vals = Vec::new();
+                for (fname, fty) in names {
+                    let given = inits.iter().find(|(i, _)| *i.val == *fname);
+                    let v = match given {
+                        Some((_, e)) => self.rvalue(e)?,
+                        None => zero_value(self.tds, &fty)?,
+                    };
+                    vals.push(format!("fld_{} = {}", fname, v));
+                }
+                Ok(format!("({{ {} }})", vals.join("; ")))
+            }
+            // A union initialiser names exactly one member, and that is the
+            // member the value is tagged with -- which is the same thing C
+            // means by it becoming the live one.
+            ExprT::UnionInit(n, m, e) => {
+                if !self.tds.unions.contains_key(&*n.val) {
+                    return Err(format!("an initialiser for union {}", n.val));
+                }
+                let v = self.rvalue(e)?;
+                Ok(format!("(Union_{}_{} {})", n.val, m.val, v))
+            }
             ExprT::IntLit(n, ty) => int_literal(self.tds, n, ty),
             ExprT::Cast(inner, to) => {
                 let from = self.ty_of(inner)?;
@@ -6189,6 +6208,7 @@ impl<'a> Body<'a> {
                 let v = self.rvalue(rhs)?;
                 self.store(lhs, &pn, &v)?;
                 self.note_fn_store(lhs, rhs);
+                self.note_union_store(lhs, rhs);
                 Ok(())
             }
             StmtT::While {

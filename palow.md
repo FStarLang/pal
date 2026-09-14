@@ -1602,8 +1602,24 @@ new facts about memory.
    proved -- the refinement is not part of the generated `_pts_to` yet, which
    costs nothing behind a pointer and is the whole contract for a value.
 
-   As of this milestone: **760 specifications, 548 of them with real bodies,
-   212 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   **Brace initialisers.** Once a struct is a record and a union is a tagged
+   value, `struct point p = { .x = 1, .y = 2 }` needs no writes at all: it is
+   an F\* record literal, and `union foo f = { .x = 67 }` is `Union_foo_x 67l`.
+   The earlier emitter refused a *partial* initialiser rather than guess at the
+   missing fields, which was the right caution but not necessary: C says the
+   fields you leave out are zeroed, and `zero_value` already builds the zero of
+   any translatable type, recursively through nested structs and arrays. So a
+   partial initialiser is now a full translation rather than a skip.
+
+   A union initialiser also carries the one piece of information a union write
+   has to record. The member it names is the member it makes live, and the
+   emitter can read that off the source expression instead of trying to recover
+   it from a value it has just erased -- so initialising a union and then
+   reading the member back now works, which is the shape most union code in the
+   test suite starts with.
+
+   As of this milestone: **760 specifications, 552 of them with real bodies,
+   208 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
