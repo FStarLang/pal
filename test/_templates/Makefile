@@ -16,7 +16,16 @@ INCLUDES += -I include
 endif
 PAL_OPTS += $(INCLUDES)
 
+# A test whose annotations are written against the Palow memory model cannot be
+# translated by the old emitter, and carries a `palow-only` marker file. Such a
+# test is still compiled by a real C compiler -- the annotations must stay
+# no-ops outside translation, which is the whole point of `pal.h` -- and is
+# still checked by `test/palow-check.sh`. Only the old translator skips it.
+ifneq ($(wildcard palow-only),)
+all: compile
+else
 all: verify compile
+endif
 
 translate: $(OUT_DIR)/.stamp
 

@@ -256,7 +256,23 @@ fn main() {
     }
 
     if cli.palow {
-        let modules = pass::emit_palow::emit_palow(&combined_tu);
+        // A test whose hand-written Pulse is written against the *old* memory
+        // model marks itself, and Palow leaves those fragments alone rather
+        // than splicing text that names predicates it does not have. The
+        // marker is a backlog, not a design: it names exactly the tests whose
+        // annotations still have to be ported, and it shrinks as they are.
+        let splice_inline = !cli
+            .files
+            .first()
+            .map(|f| {
+                Path::new(f)
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("palow-old-annotations")
+                    .exists()
+            })
+            .unwrap_or(false);
+        let modules = pass::emit_palow::emit_palow(&combined_tu, splice_inline);
         if let Some(outdir) = &cli.outdir {
             let outdir = Path::new(&outdir).to_path_buf();
             std::fs::create_dir_all(&outdir).unwrap();

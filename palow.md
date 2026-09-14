@@ -1618,8 +1618,35 @@ new facts about memory.
    reading the member back now works, which is the shape most union code in the
    test suite starts with.
 
-   As of this milestone: **760 specifications, 552 of them with real bodies,
-   208 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   **Hand-written Pulse is spliced in as written.** `_ghost_stmt`,
+   `_inline_pulse` and `_include_pulse` are escape hatches: the text is the
+   author's, so the only thing to translate is the antiquotations, which are
+   exactly the places where a fragment has to name something only the emitter
+   knows. `$(e)` becomes whatever the C value `e` reads as, `$&(e)` its
+   address, `$type` and `$field` the generated names. An `_include_pulse` block
+   becomes a module of its own, ahead of everything that may name it, with its
+   `open`s computed the same way as any other module's.
+
+   `$unfold` and its relatives are the exception, and are refused rather than
+   guessed at: they name helpers the old emitter generated around its own
+   representation of a struct, and Palow's representation is a different thing,
+   so there is nothing honest to point them at.
+
+   This is where the two models stop being interchangeable at the source level.
+   A fragment names the predicates of whichever model it was written for, and
+   Palow's are not the old model's -- `int32_t_pts_to a 1.0R x` where the old
+   model writes `a |-> x`. The decision was to let Palow's vocabulary be the
+   default and to port the fragments; a test whose annotations then no longer
+   make sense to the old translator carries a `palow-only` marker and is
+   compiled but not translated by it. Eleven tests whose fragments are
+   substantial proofs against the old model -- `container_of`, `core_ref`,
+   arrayptr and nullable idioms, `dpe`, `func_pointer` -- carry the opposite
+   marker, `palow-old-annotations`, and Palow drops their fragments for now.
+   That marker is a backlog rather than a design: it names exactly the
+   annotations still to be ported, and the count is meant to go to zero.
+
+   As of this milestone: **760 specifications, 557 of them with real bodies,
+   203 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
