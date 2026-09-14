@@ -145,9 +145,32 @@ struct StructInfo {
     align: u64,
 }
 
+/// One member of a union the emitter generated a Palow type for.
+struct UnionMember {
+    name: String,
+    ty: Rc<Type>,
+    /// The member's own size, which is where the bytes it does not cover
+    /// begin. C says a union is as large as its largest member, so every
+    /// shorter member leaves a tail that ownership still has to account for.
+    size: u64,
+}
+
+/// A union the emitter generated a Palow type for. Unlike a struct, a union
+/// gets a byte-level `_repr`: its members overlap, so there is no field-wise
+/// conjunction to define it as, and going through the bytes is the only
+/// definition that makes storing through one member observable through
+/// another. That is the whole reason Palow exists, and it is why a union --
+/// unlike a generated struct -- can be an array element.
+struct UnionInfo {
+    members: Vec<UnionMember>,
+    size: u64,
+    align: u64,
+}
+
 struct Typedefs<'a> {
     typedefs: HashMap<&'a str, &'a Rc<Type>>,
     structs: HashMap<String, StructInfo>,
+    unions: HashMap<String, UnionInfo>,
     /// `_pure` functions that were successfully emitted as F* definitions, and
     /// so may appear in a specification and in a body without being sequenced.
     pure_fns: HashSet<String>,
@@ -169,6 +192,7 @@ impl<'a> Typedefs<'a> {
         Typedefs {
             typedefs: m,
             structs: HashMap::new(),
+            unions: HashMap::new(),
             pure_fns: HashSet::new(),
             global_addrs: tu
                 .decls
@@ -305,6 +329,9 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
         TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
             Some(format!("struct_{}", n.val))
         }
+        TypeT::TypeRef(TypeRefKind::Union(n)) if tds.unions.contains_key(&*n.val) => {
+            Some(format!("union_{}", n.val))
+        }
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -333,6 +360,9 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
             Some(format!("struct_{}", n.val))
         }
+        TypeT::TypeRef(TypeRefKind::Union(n)) if tds.unions.contains_key(&*n.val) => {
+            Some(format!("union_{}", n.val))
+        }
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -348,11 +378,14 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
 /// conjunction of its fields' rather than over its bytes. Arrays are indexed by
 /// `_repr`, so this is what an array's element type has to satisfy.
 fn has_repr(tds: &Typedefs, ty: &Type) -> bool {
+    // A generated union does have one: its points-to is defined over its
+    // bytes, because overlapping members leave no other choice. A generated
+    // struct does not, because its points-to is the conjunction of its
+    // fields' and says nothing about the padding between them.
+    // `peel` rather than `resolve`: a `_plain struct s` is still a struct, and
+    // asking only about typedefs would have said it has a representation.
     palow_name(tds, ty).is_some()
-        && !matches!(
-            tds.resolve(ty).val,
-            TypeT::TypeRef(TypeRefKind::Struct(_)) | TypeT::TypeRef(TypeRefKind::Union(_))
-        )
+        && !matches!(peel(tds, ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)))
 }
 
 /// How much memory a pointer parameter owns. Palow makes every C pointer the
@@ -390,6 +423,7 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
         TypeT::SizeT | TypeT::PtrdiffT | TypeT::Pointer(..) | TypeT::FnPtr { .. } => Some(8),
         TypeT::FixedArray(t, n) => palow_sizeof(tds, t).map(|s| s * n),
         TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).map(|s| s.size),
+        TypeT::TypeRef(TypeRefKind::Union(n)) => tds.unions.get(&*n.val).map(|u| u.size),
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -406,6 +440,7 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     match &tds.resolve(ty).val {
         TypeT::FixedArray(t, _) => palow_alignof(tds, t),
         TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).map(|s| s.align),
+        TypeT::TypeRef(TypeRefKind::Union(n)) => tds.unions.get(&*n.val).map(|u| u.align),
         _ => palow_sizeof(tds, ty),
     }
 }
@@ -1709,6 +1744,10 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
     let layouts = crate::layout::LayoutCtx::of_tu(tu);
     let mut code: Vec<Chunk> = Vec::new();
     for decl in &tu.decls {
+        if let DeclT::UnionDefn(ud) = &decl.val {
+            code.push(collect_union(tds, &layouts, ud));
+            continue;
+        }
         let DeclT::StructDefn(sd) = &decl.val else {
             continue;
         };
@@ -1786,6 +1825,289 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
         });
     }
     code
+}
+
+/// Generate the Palow type for one union. Every member has to have a
+/// byte-level `_repr`, which is a stronger condition than a struct field's:
+/// the union's own representation is defined by cases over the members'
+/// representations of the same bytes, so a member whose ownership is defined
+/// field-wise rather than over bytes -- a generated struct -- has nothing to
+/// contribute to it.
+fn collect_union(
+    tds: &mut Typedefs,
+    layouts: &crate::layout::LayoutCtx,
+    ud: &crate::ir::UnionDefn,
+) -> Chunk {
+    let name = ud.name.val.to_string();
+    let key = TypeRefKind::Union(ud.name.clone());
+    let skip = |why: String| Chunk {
+        module: format!("Union_{}", name),
+        code: format!("(* skipped union {}: {} *)\n\n", name, why),
+    };
+    let (Some(size), Some(align)) = (
+        layouts
+            .table
+            .get(&LayoutKey::of_type_ref(&key))
+            .map(|l| l.size),
+        layouts
+            .table
+            .get(&LayoutKey::of_type_ref(&key))
+            .map(|l| l.align),
+    ) else {
+        return skip("it has no layout".to_string());
+    };
+    let mut members = Vec::new();
+    for f in &ud.fields {
+        let mname = f.val.name().val.to_string();
+        let mty = f.val.logical_type(&f.loc);
+        if !has_repr(tds, &mty) {
+            return skip(format!(
+                "member `{}` is {}, which has no byte-level `_repr`",
+                mname,
+                describe(tds.resolve(&mty))
+            ));
+        }
+        let (Some(msize), Some(_)) = (palow_sizeof(tds, &mty), fstar_type(tds, &mty)) else {
+            return skip(format!("member `{}` has no size", mname));
+        };
+        if msize > size {
+            return skip(format!("member `{}` is larger than the union", mname));
+        }
+        members.push(UnionMember {
+            name: mname,
+            ty: mty,
+            size: msize,
+        });
+    }
+    if members.is_empty() {
+        return skip("it has no members".to_string());
+    }
+    tds.unions.insert(
+        name.clone(),
+        UnionInfo {
+            members,
+            size,
+            align,
+        },
+    );
+    Chunk {
+        module: format!("Union_{}", name),
+        code: emit_union(tds, &name),
+    }
+}
+
+/// The generated code for one union: the tagged value type, its layout
+/// constants, the byte-level representation, and per member the focus/unfocus
+/// pair plus the `switch` that makes it the active one.
+///
+/// The value type is tagged even though the storage is not, which is how the
+/// model says which member is live without putting a tag in memory. The
+/// representation is deliberately *not* injective: bytes that represent one
+/// member also represent any other member they happen to encode, and that
+/// non-injectivity is exactly what makes type punning expressible rather than
+/// a thing to be ruled out.
+fn emit_union(tds: &Typedefs, name: &str) -> String {
+    let ui = &tds.unions[name];
+    let un = format!("union_{}", name);
+    let mut c = String::new();
+
+    // F* constructors have to be capitalised, so the tag is `Union_foo_x`
+    // where the type is `union_foo`. C identifiers are unique within a
+    // translation unit, so the pair of names cannot collide.
+    let ctor = |m: &UnionMember| format!("Union_{}_{}", name, m.name);
+
+    c += &format!("noeq type {} =\n", un);
+    for m in &ui.members {
+        c += &format!(
+            "  | {} : {} -> {}\n",
+            ctor(m),
+            fstar_type(tds, &m.ty).unwrap(),
+            un
+        );
+    }
+    c += "\n";
+    c += &format!("let {}_sizeof : SizeT.t = {}sz\n", un, ui.size);
+    c += &format!("let {}_alignof : SizeT.t = {}sz\n\n", un, ui.align);
+
+    c += &format!(
+        "let {un}_repr (u: {un}) (b: bytes) : prop =\n  \
+         len b == SizeT.v {un}_sizeof /\\\n  \
+         (len b == SizeT.v {un}_sizeof ==>\n    (match u with\n",
+        un = un
+    );
+    for m in &ui.members {
+        c += &format!(
+            "     | {} v -> {}_repr v (slice b 0 {})\n",
+            ctor(m),
+            palow_name(tds, &m.ty).unwrap(),
+            m.size
+        );
+    }
+    c += "    ))\n\n";
+
+    c += &format!(
+        "let {un}_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop =\n  \
+         exists* b. mem_pts_to a p b ** pure ({un}_repr u b)\n\n\
+         let {un}_pts_to_uninit ([@@@mkey] a: ptr) : slprop =\n  \
+         exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof)\n\n",
+        un = un
+    );
+
+    for m in &ui.members {
+        let pn = palow_name(tds, &m.ty).unwrap();
+        let mty = fstar_type(tds, &m.ty).unwrap();
+        let k = ctor(m);
+        let f = &m.name;
+        // The bytes past the member. A member as wide as the union still gets
+        // one, of length zero: `mem_split` hands back a suffix either way and
+        // a resource cannot simply be dropped, so treating the two cases alike
+        // is shorter than telling them apart.
+        c += &format!(
+            "let {un}_rest_{f} (a: ptr) (p: perm) : slprop =\n  \
+             exists* r. mem_pts_to (a +! {msz}sz) p r ** pure (len r == {rest})\n\n",
+            un = un,
+            f = f,
+            msz = m.size,
+            rest = ui.size - m.size
+        );
+        c += &format!(
+            "ghost fn {un}_focus_{f} (a: ptr) (#p: perm) (#v: {mty})\n\
+             \x20 requires {un}_pts_to a p ({k} v)\n\
+             \x20 ensures  {pn}_pts_to a p v\n\
+             \x20 ensures  {un}_rest_{f} a p\n\
+             {{\n  \
+             unfold {un}_pts_to a p ({k} v);\n  \
+             with b. assert (mem_pts_to a p b ** pure ({un}_repr ({k} v) b));\n  \
+             mem_split a {msz}sz;\n  \
+             {pn}_conceal a #p #(slice b 0 {msz}) #v;\n  \
+             fold {un}_rest_{f} a p;\n}}\n\n",
+            un = un,
+            f = f,
+            k = k,
+            pn = pn,
+            mty = mty,
+            msz = m.size
+        );
+        c += &format!(
+            "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#v: {mty})\n\
+             \x20 requires {pn}_pts_to a p v\n\
+             \x20 requires {un}_rest_{f} a p\n\
+             \x20 ensures  {un}_pts_to a p ({k} v)\n\
+             {{\n  \
+             {pn}_reveal a #p #v;\n  \
+             with bx. assert (mem_pts_to a p bx ** pure ({pn}_repr v bx));\n  \
+             unfold {un}_rest_{f} a p;\n  \
+             with r. assert (mem_pts_to (a +! {msz}sz) p r);\n  \
+             mem_join a #p #bx #r {msz}sz;\n  \
+             append_slice_left bx r;\n  \
+             fold {un}_pts_to a p ({k} v);\n}}\n\n",
+            un = un,
+            f = f,
+            k = k,
+            pn = pn,
+            mty = mty,
+            msz = m.size
+        );
+        // Making a member active is not a focus: the union may currently hold
+        // any member at all, so there is no value to hand out, only storage.
+        // It needs full permission for the same reason a write does.
+        c += &format!(
+            "ghost fn {un}_switch_{f} (a: ptr) (#u: {un})\n\
+             \x20 requires {un}_pts_to a 1.0R u\n\
+             \x20 ensures  {pn}_pts_to_uninit a\n\
+             \x20 ensures  {un}_rest_{f} a 1.0R\n\
+             {{\n  \
+             unfold {un}_pts_to a 1.0R u;\n  \
+             with b. assert (mem_pts_to a 1.0R b ** pure ({un}_repr u b));\n  \
+             mem_split a {msz}sz;\n  \
+             {pn}_claim_uninit a #(slice b 0 {msz});\n  \
+             fold {un}_rest_{f} a 1.0R;\n}}\n\n",
+            un = un,
+            f = f,
+            pn = pn,
+            msz = m.size
+        );
+    }
+
+    // The same three names the scalar layer publishes, so that a union can be
+    // a struct field or an array element without anything downstream having to
+    // know it is a union: storage in, storage out, and the loss of knowledge
+    // in between.
+    c += &format!(
+        "ghost fn {un}_claim_uninit (a: ptr) (#b: bytes)\n\
+         \x20 requires mem_pts_to a 1.0R b\n\
+         \x20 requires pure (len b == SizeT.v {un}_sizeof)\n\
+         \x20 ensures  {un}_pts_to_uninit a\n\
+         {{\n  fold {un}_pts_to_uninit a;\n}}\n\n\
+         ghost fn {un}_reveal_uninit (a: ptr)\n\
+         \x20 requires {un}_pts_to_uninit a\n\
+         \x20 ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof)\n\
+         {{\n  unfold {un}_pts_to_uninit a;\n}}\n\n\
+         ghost fn {un}_conceal (a: ptr) (#p: perm) (#b: bytes) (#u: {un})\n\
+         \x20 requires mem_pts_to a p b\n\
+         \x20 requires pure ({un}_repr u b)\n\
+         \x20 ensures  {un}_pts_to a p u\n\
+         {{\n  fold {un}_pts_to a p u;\n}}\n\n\
+         ghost fn {un}_reveal (a: ptr) (#p: perm) (#u: {un})\n\
+         \x20 requires {un}_pts_to a p u\n\
+         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({un}_repr u b)\n\
+         {{\n  unfold {un}_pts_to a p u;\n}}\n\n",
+        un = un
+    );
+    c += &format!(
+        "ghost fn {un}_forget (a: ptr) (#u: {un})\n\
+         \x20 requires {un}_pts_to a 1.0R u\n\
+         \x20 ensures  {un}_pts_to_uninit a\n\
+         {{\n  unfold {un}_pts_to a 1.0R u;\n  fold {un}_pts_to_uninit a;\n}}\n\n\
+         fn {un}_stack_alloc ()\n\
+         \x20 requires emp\n\
+         \x20 returns  a: ptr\n\
+         \x20 ensures  {un}_pts_to_uninit a\n\
+         {{\n  let a = mem_stack_alloc {un}_sizeof;\n  fold {un}_pts_to_uninit a;\n  a\n}}\n\n\
+         fn {un}_stack_free (a: ptr)\n\
+         \x20 requires {un}_pts_to_uninit a\n\
+         \x20 ensures  emp\n\
+         {{\n  unfold {un}_pts_to_uninit a;\n  mem_stack_free a;\n}}\n\n",
+        un = un
+    );
+    // Storing a whole union value is the one operation that has to know which
+    // member is live, and the value is where that is written down. The match
+    // is on the *value*, not on memory, so nothing here reads a tag that C
+    // does not store.
+    c += &format!(
+        "fn {un}_write_uninit (a: ptr) (x: {un})\n\
+         \x20 requires {un}_pts_to_uninit a\n\
+         \x20 ensures  {un}_pts_to a 1.0R x\n\
+         {{\n  unfold {un}_pts_to_uninit a;\n  match x {{\n",
+        un = un
+    );
+    for m in &ui.members {
+        let pn = palow_name(tds, &m.ty).unwrap();
+        c += &format!(
+            "    {k} v -> {{\n      \
+             with b. assert (mem_pts_to a 1.0R b);\n      \
+             mem_split a {msz}sz;\n      \
+             {pn}_claim_uninit a #(slice b 0 {msz});\n      \
+             {pn}_write_uninit a v;\n      \
+             fold {un}_rest_{f} a 1.0R;\n      \
+             {un}_unfocus_{f} a;\n      \
+             rewrite ({un}_pts_to a 1.0R ({k} v)) as ({un}_pts_to a 1.0R x);\n    }}\n",
+            k = ctor(m),
+            f = m.name,
+            pn = pn,
+            un = un,
+            msz = m.size
+        );
+    }
+    c += "  }\n}\n\n";
+    c += &format!(
+        "fn {un}_write (a: ptr) (x: {un}) (#u: erased {un})\n\
+         \x20 requires {un}_pts_to a 1.0R u\n\
+         \x20 ensures  {un}_pts_to a 1.0R x\n\
+         {{\n  {un}_forget a;\n  {un}_write_uninit a x;\n}}\n\n",
+        un = un
+    );
+    c
 }
 
 /// The generated code for one struct: the record, its layout constants, its
