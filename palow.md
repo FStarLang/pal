@@ -1944,8 +1944,19 @@ new facts about memory.
    tuple and one not, each called both abstractly and with a concrete function
    passed in, all verifying with no admits.
 
-   As of this milestone: **771 specifications, 581 of them with real bodies,
-   190 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   A smaller thing fell out of the same area. `const uint32_t *p = &g;` makes
+   `p` an *alias* -- a name for the place `g` rather than an object of its own
+   -- and using an alias as a value was refused outright, because handing out
+   the value means handing out the focus that reaches the place, and a focus
+   cannot outlive the statement that opened it. A global is the exception, and
+   it is the exception for the same reason its address can appear in another
+   global's initialiser: the address is a constant of type `ptr`, fixed for the
+   whole run, so there is no focus to hand out and nothing escapes. Reading
+   such an alias is now just the address. Seven of the eight admits in that
+   cluster were globals; the one that remains genuinely is a local's.
+
+   As of this milestone: **771 specifications, 588 of them with real bodies,
+   183 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

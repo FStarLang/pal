@@ -6095,11 +6095,33 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// The closed address an alias stands for, if it stands for one. An alias
+    /// is normally a name for a *place*, and using it as a value would mean
+    /// handing out the focus that reaches the place -- which cannot outlive
+    /// the statement. A global is the exception: its address is a constant of
+    /// type `ptr`, fixed for the whole run, so there is no focus to hand out
+    /// and nothing escapes.
+    fn alias_addr(&self, v: &str) -> Option<String> {
+        let place = self.aliases.get(v)?;
+        let ExprT::Var(g) = &strip_vattr(place).val else {
+            return None;
+        };
+        if self.env.lookup_var(g).is_some() {
+            return None;
+        }
+        self.env.addressable_global(g)?;
+        Some(format!("addr_var_{}", g.val))
+    }
+
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
             return self.rvalue(&p);
         }
         if let Some(v) = lvalue_name(e) {
+            if let Some(a) = self.alias_addr(&v) {
+                self.uses.insert(v.clone());
+                return Ok(a);
+            }
             if self.aliases.contains_key(&v) {
                 return Err(format!("`{}`, whose place would have to escape", v));
             }
