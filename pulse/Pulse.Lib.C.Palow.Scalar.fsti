@@ -37,6 +37,17 @@ module U8 = FStar.UInt8
 module U32 = FStar.UInt32
 module M = FStar.Math.Lemmas
 
+(* An all-zero range is the encoding of the value zero, at any width. This is
+   what makes `calloc` different from `malloc`: the storage arrives already
+   representing a value, so it may be read before it is written.
+
+   It carries no `SMTPat`. The fact is wanted at `encode n None (I32.v 0l)` and
+   the like, which is not syntactically `encode n None 0`, so a pattern would
+   not fire where it matters; the caller names it instead. *)
+let encode_zero (n: nat)
+  : Lemma (encode n None 0 == zeroed n)
+  = Seq.lemma_eq_elim (encode n None 0) (zeroed n)
+
 (* ---------------------------------------------------------------------------
    uint8_t
    --------------------------------------------------------------------------- *)

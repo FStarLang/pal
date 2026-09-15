@@ -4646,6 +4646,24 @@ struct Block {
     init: bool,
     /// Whether `free` has already taken the block back.
     freed: bool,
+    /// For `malloc(sizeof(T) * n)`, what makes the block an array: the element
+    /// count, the element size, and -- for `calloc` -- the value the zero bytes
+    /// stand for at the element type.
+    array: Option<ArrayBlock>,
+}
+
+/// The array shape of an allocated block.
+#[derive(Clone)]
+struct ArrayBlock {
+    /// The element count, as a `SizeT.t` term.
+    n: String,
+    /// The element size, as a `SizeT.t` literal.
+    esize: String,
+    /// The whole block's size in bytes, as a `SizeT.t` term.
+    nbytes: String,
+    /// The element value an all-zero range represents, when the allocator
+    /// promised zeros and the element type has such a value.
+    zero: Option<String>,
 }
 
 /// What one arm of an `if` produced: its statements, and the state it leaves
@@ -4763,6 +4781,17 @@ struct Body<'a> {
 struct ArrayParam {
     pn: String,
     esize: String,
+    /// The term for the array's base address.
+    addr: String,
+    /// Whether the elements are `option`s. A parameter's are not -- the caller
+    /// has already initialised them -- but a heap block's initialisation is
+    /// tracked element by element, so its are.
+    maybe: bool,
+    /// Whether the length is settled here. An array *parameter*'s is whatever
+    /// the caller passed, so a subscript's bounds obligation can only come from
+    /// the function's own `_requires`; a block allocated in this body has the
+    /// length written into the sequence it was claimed at.
+    known_len: bool,
 }
 
 impl<'a> Body<'a> {
@@ -5321,6 +5350,18 @@ impl<'a> Body<'a> {
     ) -> Result<(String, String, String, Vec<String>, bool), String> {
         match &strip_vattr(e).val {
             ExprT::Var(v) => {
+                // An allocated block is looked at before the pointer local is,
+                // because the local holds the same address and going through it
+                // would mean a load whose result the frame would then have to
+                // be restated in terms of.
+                if let Some(b) = self
+                    .blocks
+                    .iter()
+                    .find(|b| b.var == *v.val && b.checked && !b.freed && b.array.is_some())
+                {
+                    let a = b.array.clone().unwrap();
+                    return Ok((b.tmp.clone(), b.pn.clone(), a.esize, Vec::new(), true));
+                }
                 // A local array's elements are `option`s; a parameter's are
                 // not, because the caller has already initialised them.
                 if let Some(s) = self.slots.iter().rev().find(|s| s.name == *v.val) {
@@ -5346,7 +5387,7 @@ impl<'a> Body<'a> {
                 // `_requires`. An array *field*'s length is part of its type,
                 // so it needs no such help -- hence the gate is here and not in
                 // `focus_elem`.
-                if !self.requires_ok {
+                if !ap.known_len && !self.requires_ok {
                     return Err(
                         "a subscript, whose bounds obligation needs a `_requires` that is not \
                          translated"
@@ -5354,11 +5395,11 @@ impl<'a> Body<'a> {
                     );
                 }
                 Ok((
-                    format!("var_{}", v.val),
+                    ap.addr.clone(),
                     ap.pn.clone(),
                     ap.esize.clone(),
                     Vec::new(),
-                    false,
+                    ap.maybe,
                 ))
             }
             ExprT::Member(base, f) => {
@@ -5656,6 +5697,20 @@ impl<'a> Body<'a> {
 
     /// A specification expression inside a body, as a mathematical integer.
     fn num(&mut self, e: &Expr) -> Result<String, String> {
+        // `p._length` is how the source asks how long an array is. For a block
+        // this body allocated the answer is the count it asked for -- the
+        // sequence it was claimed at has exactly that length -- so the question
+        // is settled here rather than being a fact about a ghost binder that
+        // would have to be brought into scope to state.
+        if let ExprT::VAttr(VAttr::Length, inner) = &e.val {
+            if let ExprT::Var(v) = &strip_vattr(inner).val {
+                if let Some(b) = self.blocks.iter().find(|b| b.var == *v.val && !b.freed) {
+                    if let Some(a) = &b.array {
+                        return Ok(format!("(SizeT.v {})", a.n));
+                    }
+                }
+            }
+        }
         if let ExprT::Cast(inner, to) = &e.val {
             if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) {
                 return self.num(inner);
@@ -6490,11 +6545,15 @@ impl<'a> Body<'a> {
     /// elimination is by `rewrite`, which cannot see through the `if` inside
     /// `unless_null` on its own.
     fn block_slprop(b: &Block) -> String {
+        let n = match &b.array {
+            Some(a) => a.nbytes.clone(),
+            None => format!("{}_sizeof", b.pn),
+        };
         format!(
-            "(mem_pts_to {t} 1.0R ({f} (SizeT.v {pn}_sizeof)) ** freeable {t} {pn}_sizeof)",
+            "(mem_pts_to {t} 1.0R ({f} (SizeT.v {n})) ** freeable {t} {n})",
             t = b.tmp,
             f = b.fill,
-            pn = b.pn
+            n = n
         )
     }
 
@@ -6512,6 +6571,110 @@ impl<'a> Body<'a> {
             ExprT::Calloc(ty) => palow_name(self.tds, ty).map(|pn| ("calloc", pn)),
             _ => None,
         }
+    }
+
+    /// `malloc(sizeof(T) * n)`, with the element type and the count.
+    fn array_alloc_of(&self, e: &Expr) -> Option<(&'static str, Rc<Type>, Rc<Expr>)> {
+        let e = strip_vattr(e);
+        let e = match &e.val {
+            ExprT::Cast(inner, _) => strip_vattr(inner),
+            _ => e,
+        };
+        match &e.val {
+            ExprT::MallocArray(ty, n) => Some(("malloc", ty.clone(), n.clone())),
+            ExprT::CallocArray(ty, n) => Some(("calloc", ty.clone(), n.clone())),
+            _ => None,
+        }
+    }
+
+    /// `p = malloc(sizeof(T) * n)` for a local pointer `p`.
+    ///
+    /// The block is the same object a single-object allocation produces -- raw
+    /// bytes under a nullness guard -- but it is claimed at the array view, so
+    /// the elements carry their own initialisation state and a subscript needs
+    /// no help from the contract to know the length.
+    fn allocate_array(
+        &mut self,
+        var: &Ident,
+        which: &str,
+        ty: &Type,
+        count: &Expr,
+    ) -> Result<String, String> {
+        if self.in_branch {
+            return Err("an allocation inside a branch".to_string());
+        }
+        let (Some(pn), Some(esize)) = (palow_name(self.tds, ty), palow_sizeof(self.tds, ty)) else {
+            return Err(format!(
+                "an array allocation of {}",
+                describe(self.tds.resolve(ty))
+            ));
+        };
+        if !has_repr(self.tds, ty) {
+            return Err(format!(
+                "an array allocation of {}",
+                describe(self.tds.resolve(ty))
+            ));
+        }
+        // `n * sizeof(T)` is computed in `size_t`, so it may overflow -- and C
+        // gives the result no meaning when it does. The obligation is real
+        // code, discharged by the function's own `_requires`, so without one
+        // there is nothing to discharge it with unless the count is written
+        // down, in which case the product is too.
+        fn lit(e: &Expr) -> Option<u64> {
+            match &strip_vattr(e).val {
+                ExprT::IntLit(k, _) => u64::try_from(&**k).ok(),
+                ExprT::Cast(inner, _) => lit(inner),
+                _ => None,
+            }
+        }
+        let literal = lit(count);
+        let (n, nbytes) = match literal {
+            Some(k) => (format!("{}sz", k), format!("{}sz", esize * k)),
+            None => {
+                if !self.requires_ok {
+                    return Err(
+                        "an array allocation, whose size obligation needs a `_requires` that is \
+                         not translated"
+                            .to_string(),
+                    );
+                }
+                let n = self.index(count)?;
+                let nbytes = format!("({}sz `SizeT.mul` {})", esize, n);
+                (n, nbytes)
+            }
+        };
+        // `calloc` hands back storage that already holds a value, so its
+        // elements arrive readable. Which value depends on what the element
+        // type makes of an all-zero range, and only a type that has such a
+        // value can say.
+        let zero = match which {
+            "calloc" => zero_value(self.tds, ty).ok(),
+            _ => None,
+        };
+        let tmp = self.fresh(&var.val);
+        self.lines
+            .push(format!("let {} = {} {};", tmp, which, nbytes));
+        self.blocks.retain(|b| b.var != *var.val);
+        self.blocks.push(Block {
+            var: var.val.to_string(),
+            tmp: tmp.clone(),
+            pn,
+            fill: if which == "calloc" {
+                "zeroed"
+            } else {
+                "uninit"
+            },
+            checked: false,
+            init: false,
+            freed: false,
+            array: Some(ArrayBlock {
+                n,
+                esize: format!("{}sz", esize),
+                nbytes,
+                zero,
+            }),
+        });
+        Ok(tmp)
     }
 
     /// `p = malloc(sizeof(T))` for a local pointer `p`.
@@ -6539,6 +6702,7 @@ impl<'a> Body<'a> {
             checked: false,
             init: false,
             freed: false,
+            array: None,
         });
         Ok(tmp)
     }
@@ -6619,10 +6783,29 @@ impl<'a> Body<'a> {
         let sl = Self::block_slprop(b);
         (
             vec![format!("elim_unless_null_null {} {};", b.tmp, sl)],
-            vec![
-                format!("elim_unless_null {} {};", b.tmp, sl),
-                format!("{}_claim_uninit {};", b.pn, b.tmp),
-            ],
+            match &b.array {
+                None => vec![
+                    format!("elim_unless_null {} {};", b.tmp, sl),
+                    format!("{}_claim_uninit {};", b.pn, b.tmp),
+                ],
+                Some(a) => vec![
+                    format!("elim_unless_null {} {};", b.tmp, sl),
+                    match &a.zero {
+                        // `calloc`'s zeros only mean a value once something
+                        // says that an all-zero range *is* the encoding of
+                        // zero. Nothing else in the generated code needs that,
+                        // so it is named here rather than left to a pattern.
+                        Some(z) => format!(
+                            "encode_zero (SizeT.v {}); array_claim_zeroed {}_repr {} {} {} #{};",
+                            a.esize, b.pn, b.tmp, a.esize, a.n, z
+                        ),
+                        None => format!(
+                            "array_claim_uninit {}_repr {} {} {};",
+                            b.pn, b.tmp, a.esize, a.n
+                        ),
+                    },
+                ],
+            },
         )
     }
 
@@ -6652,10 +6835,17 @@ impl<'a> Body<'a> {
             let b = &self.blocks[i];
             (b.tmp.clone(), b.pn.clone(), b.init)
         };
-        if init {
-            self.lines.push(format!("{}_forget {};", pn, tmp));
+        match &self.blocks[i].array.clone() {
+            Some(a) => self
+                .lines
+                .push(format!("array_forget {}_repr {} {};", pn, tmp, a.esize)),
+            None => {
+                if init {
+                    self.lines.push(format!("{}_forget {};", pn, tmp));
+                }
+                self.lines.push(format!("{}_reveal_uninit {};", pn, tmp));
+            }
         }
-        self.lines.push(format!("{}_reveal_uninit {};", pn, tmp));
         self.lines.push(format!("free {};", tmp));
         self.blocks[i].freed = true;
         Ok(())
@@ -6925,9 +7115,10 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Let(name, ty, init) => {
-                let v = match self.alloc_of(init) {
-                    Some((which, pointee)) => self.allocate(name, which, &pointee)?,
-                    None => self.rvalue(init)?,
+                let v = match (self.alloc_of(init), self.array_alloc_of(init)) {
+                    (Some((which, pointee)), _) => self.allocate(name, which, &pointee)?,
+                    (_, Some((which, ty, n))) => self.allocate_array(name, which, &ty, &n)?,
+                    _ => self.rvalue(init)?,
                 };
                 let pn = self.alloc_slot(name, ty)?;
                 self.lines
@@ -6949,11 +7140,15 @@ impl<'a> Body<'a> {
                 let ty = self.ty_of(lhs)?;
                 let pn = palow_name(self.tds, &ty)
                     .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
-                if let (ExprT::Var(v), Some((which, pointee))) =
-                    (&strip_vattr(lhs).val, self.alloc_of(rhs))
-                {
-                    let value = self.allocate(v, which, &pointee)?;
-                    return self.store(lhs, &pn, &value);
+                if let ExprT::Var(v) = &strip_vattr(lhs).val {
+                    if let Some((which, pointee)) = self.alloc_of(rhs) {
+                        let value = self.allocate(v, which, &pointee)?;
+                        return self.store(lhs, &pn, &value);
+                    }
+                    if let Some((which, ty, n)) = self.array_alloc_of(rhs) {
+                        let value = self.allocate_array(v, which, &ty, &n)?;
+                        return self.store(lhs, &pn, &value);
+                    }
                 }
                 let v = self.rvalue(rhs)?;
                 self.store(lhs, &pn, &v)?;
@@ -7991,6 +8186,9 @@ fn emit_body(
             ArrayParam {
                 pn,
                 esize: format!("{}sz", esize),
+                addr: format!("var_{}", name.val),
+                maybe: false,
+                known_len: false,
             },
         );
     }

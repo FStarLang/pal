@@ -1850,7 +1850,32 @@ new facts about memory.
    the contract by the same split `_allocated` uses: the author gave a piece of
    ownership a word, and a contract that uses the word means the ownership.
 
-   As of this milestone: **758 specifications, 574 of them with real bodies,
+   An allocation of an *array* is now translated. The model needs nothing new
+   for it: `malloc` and `calloc` take a byte count, so `T *a = malloc(n *
+   sizeof(T))` is a sized allocation followed by a claim that the range is an
+   array of `T`, and after the claim the state is exactly what a fixed local
+   array already leaves behind. The only genuinely new obligation is `calloc`'s
+   promise that the storage arrives readable: that needs an all-zero range to
+   *be* the encoding of the value zero, which is now a lemma (`encode_zero`)
+   and is named explicitly at the claim, since the fact is wanted at `encode 4
+   None (I32.v 0l)` and an `SMTPat` keyed on a literal `0` would not fire
+   there. Overflow in `n * sizeof(T)` is the translator's problem, not the
+   model's: a literal count is folded at translation time, and a variable count
+   emits a `size_t` multiplication and is reported unless a translated
+   `_requires` is there to discharge it.
+
+   This gained almost no bodies on the existing suite, and the reason is worth
+   recording: not one existing test checks the result of an array allocation
+   against null. They all land instead on the pre-existing, honest refusal to
+   dereference storage whose allocation was never checked -- so the cluster
+   "an allocation is not translated yet" fell from ten to five, but five of
+   those simply moved one wall further along. `test/array_alloc` exists to
+   exercise the feature properly, with four functions that do check: a `malloc`
+   written then read, a `calloc` read *before* it is written, a `calloc`
+   written over its zeros, and `_length` of a heap array. All four verify with
+   no admits.
+
+   As of this milestone: **762 specifications, 578 of them with real bodies,
    184 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the

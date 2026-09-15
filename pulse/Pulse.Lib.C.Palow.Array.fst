@@ -426,6 +426,36 @@ ghost fn array_claim_uninit (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
                     (Seq.create (SZ.v n) (None #t));
 }
 
+(* Every element of a zeroed block is itself zeroed: slicing a constant
+   sequence anywhere gives the same constant sequence. *)
+let elem_bytes_zeroed (esize: nat) (n: nat) (i: nat)
+  : Lemma (requires i < n)
+          (ensures  elem_bytes esize (zeroed (esize * n)) i == zeroed esize)
+  = elem_fits esize n i;
+    Seq.lemma_eq_elim (elem_bytes esize (zeroed (esize * n)) i) (zeroed esize)
+
+(* Claim `esize * n` zeroed bytes as an array of *initialised* elements.
+   `calloc` differs from `malloc` in exactly this: the storage arrives holding
+   a value, so the caller is handed `Some z` rather than `None` and may read
+   before writing.
+
+   Which value `z` is cannot be decided here -- it is whatever the element
+   type's representation relation makes of an all-zero range -- so it is an
+   implicit the caller fixes, with `t_repr z (zeroed esize)` as the obligation
+   that it really is the one. *)
+ghost fn array_claim_zeroed (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                            (esize: SZ.t) (n: SZ.t) (#z: t) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (b == zeroed (SZ.v esize * SZ.v n))
+  requires pure (t_repr z (zeroed (SZ.v esize)))
+  ensures  array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R
+                        (Seq.create (SZ.v n) (Some z))
+{
+  Classical.forall_intro (Classical.move_requires (elem_bytes_zeroed (SZ.v esize) (SZ.v n)));
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R
+                    (Seq.create (SZ.v n) (Some z));
+}
+
 (* And back, at whatever the elements have become. Giving the storage up does
    not depend on what was last written to it, which is why this asks for no
    `Some`. *)
