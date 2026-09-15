@@ -225,6 +225,14 @@ struct Typedefs<'a> {
     /// initialiser -- `uint32_t *const p = &g;` -- and that is the only way a
     /// pointer global gets a published value.
     global_addrs: HashSet<String>,
+    /// Types declared with `_type`: their definition is a hand-written F* type
+    /// expression, so the model has nothing to say about them beyond passing
+    /// them through.
+    opaque_types: HashSet<String>,
+    /// `_let` definitions whose result is an slprop. A call to one is
+    /// ownership rather than a fact, so it belongs beside the points-to
+    /// predicates rather than inside a `pure`.
+    slprop_lets: HashSet<String>,
 }
 
 impl<'a> Typedefs<'a> {
@@ -267,6 +275,15 @@ impl<'a> Typedefs<'a> {
                 })
                 .collect(),
             pure_fns: HashSet::new(),
+            opaque_types: tu
+                .decls
+                .iter()
+                .filter_map(|d| match &d.val {
+                    DeclT::OpaqueTypeDecl(t) => Some(t.name.val.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            slprop_lets: HashSet::new(),
             global_addrs: tu
                 .decls
                 .iter()
@@ -442,6 +459,11 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
 
 /// The F* type of a C value.
 fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
+    if let TypeT::TypeRef(TypeRefKind::Typedef(n)) = &ty.val {
+        if tds.opaque_types.contains(&*n.val.to_string()) {
+            return Some(format!("Type_{}.ty_{}", n.val, n.val));
+        }
+    }
     match &tds.resolve(ty).val {
         TypeT::Void => Some("unit".to_string()),
         TypeT::Bool => Some("bool".to_string()),
@@ -1394,9 +1416,6 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
     if ld.is_rec {
         return Err("it is recursive".to_string());
     }
-    if matches!(tds.resolve(&ld.ret_type).val, TypeT::SLProp) {
-        return Err("it defines an slprop".to_string());
-    }
     let mut params: Vec<String> = Vec::new();
     for (i, arg) in ld.params.iter().enumerate() {
         let pname = match &arg.name {
@@ -1410,8 +1429,16 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
     if params.is_empty() {
         params.push("()".to_string());
     }
-    let ret = fstar_type(tds, &ld.ret_type)
-        .ok_or_else(|| format!("it returns {}", describe(tds.resolve(&ld.ret_type))))?;
+    // An slprop-valued `_let` is a name for a piece of ownership. Its body is
+    // hand-written Pulse -- the model has no other way to spell one -- so this
+    // is a pass-through, exactly like a `_type`.
+    let slprop = matches!(tds.resolve(&ld.ret_type).val, TypeT::SLProp);
+    let ret = if slprop {
+        "slprop".to_string()
+    } else {
+        fstar_type(tds, &ld.ret_type)
+            .ok_or_else(|| format!("it returns {}", describe(tds.resolve(&ld.ret_type))))?
+    };
 
     let sp = Spec {
         tds,
@@ -1887,6 +1914,21 @@ fn emit_fn(
         }
     }
 
+    // A `_ghost_arg` is a value the caller supplies purely so that the
+    // contract can talk about it: it has no representation, no storage and no
+    // runtime existence. An erased implicit is exactly that, and the model has
+    // nothing to add.
+    for ga in &decl.ghost_args {
+        let vty = fstar_type(tds, &ga.ty).ok_or_else(|| {
+            format!(
+                "ghost argument {} is {}",
+                ga.name.val,
+                describe(tds.resolve(&ga.ty))
+            )
+        })?;
+        ghosts.push(format!("(#var_{}: erased ({}))", ga.name.val, vty));
+    }
+
     // A mutable global's storage outlives every function, so C gives no
     // syntax for who owns it. The caller does: the ownership comes in as a
     // conjunct the source never wrote and goes straight back out, at a value
@@ -2021,7 +2063,17 @@ fn emit_fn(
     // proposition: it belongs beside the generated points-to in `requires` and
     // `ensures`, not under a `pure`. Everything else stays a prop, so the two
     // are separated before translation rather than after.
-    let is_slprop = |e: &Rc<Expr>| matches!(&e.val, ExprT::InlinePulse(_, t) if matches!(tds.resolve(t).val, TypeT::SLProp));
+    // A call to an slprop-valued `_let` is the same thing under a name: the
+    // author has given a piece of ownership a word, and a contract that uses
+    // the word means the ownership.
+    let is_slprop = |e: &Rc<Expr>| match &strip_vattr(e).val {
+        ExprT::InlinePulse(_, t) => matches!(tds.resolve(t).val, TypeT::SLProp),
+        ExprT::FnCall(n, _) => tds.slprop_lets.contains(&*n.val.to_string()),
+        ExprT::Cast(inner, t) if matches!(tds.resolve(t).val, TypeT::SLProp) => {
+            matches!(&strip_vattr(inner).val, ExprT::FnCall(n, _) if tds.slprop_lets.contains(&*n.val.to_string()))
+        }
+        _ => false,
+    };
     let split = |es: &Exprs| -> (Exprs, Exprs) { es.iter().cloned().partition(|e| is_slprop(e)) };
     let (req_slprops, req_props) = split(&decl.requires);
     let (ens_slprops, ens_props) = split(&decl.ensures);
@@ -2032,10 +2084,11 @@ fn emit_fn(
         (&ens_slprops, When::Post, &mut owned_post),
     ] {
         for e in es {
-            let ExprT::InlinePulse(code, _) = &e.val else {
-                continue;
+            let r = match &strip_vattr(e).val {
+                ExprT::InlinePulse(code, _) => spec.inline_pulse(code, w),
+                _ => spec.value(e, w),
             };
-            match spec.inline_pulse(code, w) {
+            match r {
                 Ok(t) => into.push(t),
                 Err(why) => {
                     slprop_err.get_or_insert(why);
@@ -3985,6 +4038,35 @@ pub fn emit_palow(
         });
     }
 
+    // A `_type` is a hand-written F* type expression with a C name attached.
+    // Nothing about it is the memory model's business -- it never describes
+    // storage, only a value a specification talks about -- so it is passed
+    // through, and its C name resolves to it wherever a type is wanted.
+    for decl in &tu.decls {
+        let DeclT::OpaqueTypeDecl(td) = &decl.val else {
+            continue;
+        };
+        let text = match include_pulse(&tds, &td.code) {
+            Ok(t) if splice_inline => {
+                format!("unfold\nlet ty_{} : Type = {}\n\n", td.name.val, t.trim())
+            }
+            Ok(_) => format!(
+                "(* `{}` is not an F* type: {} *)\n\n",
+                td.name.val,
+                tds.no_splice()
+            ),
+            Err(why) => format!("(* `{}` is not an F* type: {} *)\n\n", td.name.val, why),
+        };
+        chunks.push(Chunk {
+            module: format!("Type_{}", td.name.val),
+            code: text,
+            origin: origin_of(decl),
+        });
+    }
+    if !splice_inline {
+        tds.opaque_types.clear();
+    }
+
     // `_let` definitions first: they are the vocabulary the `_pure` functions
     // and the contracts are written in.
     for decl in &tu.decls {
@@ -3996,10 +4078,15 @@ pub fn emit_palow(
             env.push_arg(a, crate::env::LocalDeclKind::RValue);
         }
         tds.pure_fns.insert(ld.name.val.to_string());
+        let slprop = matches!(tds.resolve(&ld.ret_type).val, TypeT::SLProp);
+        if slprop {
+            tds.slprop_lets.insert(ld.name.val.to_string());
+        }
         let text = match emit_let_decl(&tds, &env, ld) {
             Ok(t) => t,
             Err(why) => {
                 tds.pure_fns.remove(&*ld.name.val.to_string());
+                tds.slprop_lets.remove(&*ld.name.val.to_string());
                 format!(
                     "(* `{}` is not an F* definition: {} *)\n\n",
                     ld.name.val, why

@@ -1836,6 +1836,20 @@ new facts about memory.
    slightly smaller one, since a function declared in a shared header used to
    be counted once per file that saw it.
 
+   The last thing a contract can name that this emitter had no answer for was a
+   word the *author* coined. Three annotations exist for that -- `_type` names
+   an F\* type, a `_let` returning `_slprop` names a piece of ownership, and
+   `_ghost_arg` adds a value that exists only so the contract can talk about it
+   -- and none of them is the memory model's business. A `_type` never
+   describes storage; an slprop-valued `_let` is hand-written Pulse by
+   construction, since the model has no other way to spell one; a `_ghost_arg`
+   has no representation at all, which is precisely what an erased implicit is.
+   So all three are passed through, and `ghost_arg`'s `tank_owns(t, n)` now
+   reads in `requires` and `ensures` exactly as it does in the old translator's
+   output. A call to an slprop-valued `_let` is routed to the ownership side of
+   the contract by the same split `_allocated` uses: the author gave a piece of
+   ownership a word, and a contract that uses the word means the ownership.
+
    As of this milestone: **758 specifications, 574 of them with real bodies,
    184 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
