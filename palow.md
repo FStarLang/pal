@@ -1906,7 +1906,45 @@ new facts about memory.
    are load bearing -- without them no body can be shown not to overflow -- all
    verifying with no admits.
 
-   As of this milestone: **765 specifications, 575 of them with real bodies,
+   With refinements on a value parameter working, a callback parameter follows
+   directly, and this is the first place Palow says something the old
+   translator has to be told. A function pointer's *value* -- which
+   specification the code at that address meets -- is not carried by its bytes,
+   so no points-to can grant it; it is the pure fact `is_valid f div pre post`,
+   and the only way a body can call through a pointer whose target it does not
+   know is for the contract to have handed one over. So a `_refine` granting
+   `is_valid` on a function-pointer parameter is now taken at its word -- what
+   else could it be granting? -- and licenses exactly that call. The pre and
+   post are left to slprop matching rather than named: the fact in context is
+   the author's, written in the author's words, and naming them here would mean
+   reading those words.
+
+   Such a refinement is stated at *both* ends of the contract, unlike a pure
+   one. A pure refinement on a value parameter need not be restated on the way
+   out, since the caller can derive it; but a resource is not a fact, and a
+   body handed one and never asked to give it back would be left holding
+   something it has no way to put down -- and a body that calls through the
+   pointer twice needs it for the second call as much as the first.
+
+   The other half is decay. Taking a function's address now *also* establishes
+   what the code there does, as a ghost step beside the decay itself: it costs
+   nothing, it cannot be wrong, and it means a concrete function can be passed
+   straight to a callback parameter with none of the `_ghost_stmt` the old
+   translator needs. What it does need is bookkeeping, because `is_valid` is
+   `pure` behind a definition and Pulse will not absorb it unaided: a validity
+   seeded while evaluating a call's arguments is put down after that call, and
+   anything still held is put down when the function returns.
+
+   One consequence had to be chased. `call_div` is in the divergent effect, so
+   a body that calls through a pointer is divergent, and so is *its* caller --
+   which is not known until that callee's body has been translated. The
+   translation pass therefore repeats until the divergent set settles, in the
+   same loop that already repeats until the call graph is acyclic.
+   `test/fnptr_callback` covers the round trip: two callbacks, one taking a
+   tuple and one not, each called both abstractly and with a concrete function
+   passed in, all verifying with no admits.
+
+   As of this milestone: **771 specifications, 581 of them with real bodies,
    190 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the

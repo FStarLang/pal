@@ -731,6 +731,11 @@ struct FnSurface {
     globals: Vec<Slot>,
     /// Modules the contract names, which the body's own uses need not include.
     uses: HashSet<String>,
+    /// Parameters whose contract hands in an `is_valid` for the code they
+    /// address. Nothing else grants one -- a points-to says where code is, not
+    /// what it does -- so this is exactly the set of pointers the body may call
+    /// through without knowing which function it is calling.
+    valid_fps: HashSet<String>,
 }
 
 /// One parameter's pointee ownership, in the form a loop invariant needs: the
@@ -2104,13 +2109,21 @@ fn emit_fn(
     // carries, not a fact about its value: `_allocated` is the one PAL itself
     // writes, and it says the caller hands over the right to free the block.
     // It goes where the points-to goes.
+    let valid_fps: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     let refine_own = |w: When| -> Result<Vec<String>, String> {
         let mut out = Vec::new();
         for (base, ty, p) in &refines {
             let Some(code) = slprop_refine(tds, p) else {
                 continue;
             };
-            if !stated(base, w) {
+            // Ownership a parameter with no storage carries is stated at both
+            // ends. A pure refinement need not be -- it is derivable from the
+            // precondition -- but a resource is not a fact: handing it in and
+            // never handing it back would leave the body holding something it
+            // has no way to put down, and a body that calls through the
+            // pointer twice needs it for the second call as much as the first.
+            let both = spec.pointees.get(base).is_none();
+            if !both && !stated(base, w) {
                 continue;
             }
             // `_allocated` is the one ownership refinement PAL writes itself,
@@ -2121,7 +2134,17 @@ fn emit_fn(
             out.push(
                 match allocated_own(tds, ty, &format!("var_{}", base), code)? {
                     Some(t) => t,
-                    None => with_this(base, ty, p, w, &|sp: &Spec, w| sp.inline_pulse(code, w))?,
+                    None => {
+                        let t =
+                            with_this(base, ty, p, w, &|sp: &Spec, w| sp.inline_pulse(code, w))?;
+                        // A spliced ownership refinement on a function pointer
+                        // is taken at its word: nothing else could be granting
+                        // the validity an indirect call needs.
+                        if matches!(peel(tds, ty).val, TypeT::FnPtr { .. }) {
+                            valid_fps.borrow_mut().insert(base.clone());
+                        }
+                        t
+                    }
                 },
             );
         }
@@ -2354,6 +2377,13 @@ fn emit_fn(
         fp,
         globals: globals.to_vec(),
         uses: spec.uses.take(),
+        // A contract that was dropped granted nothing, so nothing may be
+        // called through.
+        valid_fps: if contract_ok {
+            valid_fps.take()
+        } else {
+            HashSet::new()
+        },
     })
 }
 
@@ -4390,15 +4420,23 @@ pub fn emit_palow(
     // call graph is acyclic, which it must reach because each round removes at
     // least one edge.
     let mut forbidden: HashMap<String, HashSet<String>> = HashMap::new();
+    // Which functions are divergent is not known until their bodies are
+    // translated, and a caller of a divergent function is divergent in turn,
+    // so the set is reached by repeating the whole pass until it settles.
+    let mut divergent_fns: HashSet<String> = HashSet::new();
     let order = loop {
+        let mut found: HashSet<String> = HashSet::new();
         for it in &mut items {
             let Some(sig) = &it.sig else { continue };
             let empty = HashSet::new();
             let no = forbidden.get(&it.name).unwrap_or(&empty);
             let body = match it.defn {
                 None => Err("it has no definition here".to_string()),
-                Some(d) => emit_body(&tds, it.env.clone(), d, sig, &callees, no),
+                Some(d) => emit_body(&tds, it.env.clone(), d, sig, &callees, no, &divergent_fns),
             };
+            if matches!(&body, Ok(b) if b.divergent) {
+                found.insert(it.name.clone());
+            }
             it.uses = sig.uses.clone();
             if let Ok(b) = &body {
                 it.uses.extend(b.uses.iter().cloned());
@@ -4430,8 +4468,11 @@ pub fn emit_palow(
             }
             it.code = out;
         }
+        let settled = found.is_subset(&divergent_fns);
+        divergent_fns.extend(found);
         match toposort(&items) {
-            Ok(o) => break o,
+            Ok(o) if settled => break o,
+            Ok(_) => {}
             Err(back) => {
                 for (from, to) in back {
                     forbidden.entry(from).or_default().insert(to);
@@ -4821,6 +4862,15 @@ struct Body<'a> {
     /// Parameters whose ownership sits behind a nullness guard, so a loop
     /// invariant claiming their storage is claiming the guard is discharged.
     guarded: &'a HashSet<String>,
+    /// Parameters the contract hands an `is_valid` for, and so the only
+    /// pointers this body may call through without knowing the target.
+    valid_fps: &'a HashSet<String>,
+    /// Addresses whose validity this body has seeded and not yet put down.
+    seeded: Vec<String>,
+    /// Functions already known to be divergent. Calling one makes this body
+    /// divergent too, which is why the whole set is reached by a fixpoint
+    /// rather than in one pass.
+    divergent_fns: &'a HashSet<String>,
     /// Whether any parameter is `_out`. Such a parameter's storage is
     /// uninitialised on entry and initialised by the body, so it is not a
     /// fixed part of the frame a loop invariant can restate.
@@ -6372,8 +6422,14 @@ impl<'a> Body<'a> {
             }
             ExprT::FnCall(name, args) => {
                 let t = self.fresh(&name.val);
+                let mark = self.seeded.len();
                 let call = self.call(name, args)?;
                 self.lines.push(format!("let {} = {};", t, call));
+                // A validity seeded while evaluating the arguments was seeded
+                // for this call. The callee hands it back -- it is a fact, not
+                // a resource anyone consumes -- so it has to be put down here
+                // or it is left over at the end of the body.
+                self.drop_seeded(mark);
                 Ok(t)
             }
             // A named function used as a value is its code address. Because
@@ -6394,10 +6450,18 @@ impl<'a> Body<'a> {
                     return Err(format!("`{}`, which is recursive", g.val));
                 }
                 self.uses.insert(name);
-                Ok(format!(
-                    "(of_fn_div (pre_of func_{g}__fp) (post_of func_{g}__fp) func_{g}__fp)",
-                    g = g.val
-                ))
+                // Seed the validity here rather than leaving it to the caller.
+                // It is a ghost step producing a `pure` fact, so it costs
+                // nothing and cannot be wrong, and it is what lets a decayed
+                // function be passed straight to a callback parameter without
+                // the `_ghost_stmt` the old translator needs.
+                let (pre, post, addr) = Self::fp_spec(&g.val);
+                self.lines.push(format!(
+                    "of_fn_div_valid {} {} func_{}__fp;",
+                    pre, post, g.val
+                ));
+                self.seeded.push(addr.clone());
+                Ok(addr)
             }
             // An indirect call needs the `valid` fact, which no points-to
             // carries: the bytes of a code pointer say where the code is, not
@@ -6409,6 +6473,33 @@ impl<'a> Body<'a> {
             // -- and keeps `is_valid` and the callee syntactically the same
             // term, since slprop matching will not do the reasoning.
             ExprT::FnPtrCall(f, args) => {
+                // A pointer whose target the emitter does not know is still
+                // callable if the contract said what the code at it does.
+                // `is_valid` is the only thing that can say so, and the
+                // pre/post are left to slprop matching: the fact in context is
+                // the author's, written in their own words, and naming them
+                // here would mean parsing those words.
+                if let ExprT::Var(v) = &strip_vattr(f).val
+                    && self.target_of(f).is_none()
+                    && self.valid_fps.contains(&*v.val.to_string())
+                {
+                    let mut vs = Vec::new();
+                    for a in args.iter() {
+                        vs.push(self.rvalue(a)?);
+                    }
+                    let tuple = match vs.len() {
+                        0 => "()".to_string(),
+                        1 => vs[0].clone(),
+                        _ => format!("({})", vs.join(", ")),
+                    };
+                    self.divergent = true;
+                    let t = self.fresh(&v.val);
+                    self.lines.push(format!(
+                        "let {} = call_div _ _ var_{} {} (hide ());",
+                        t, v.val, tuple
+                    ));
+                    return Ok(t);
+                }
                 let g = self.target_of(f).ok_or_else(|| match &strip_vattr(f).val {
                     ExprT::Var(v) => {
                         format!("a call through `{}`, whose target is not known here", v.val)
@@ -6474,6 +6565,11 @@ impl<'a> Body<'a> {
             return Err(format!("`{}`, which is recursive", name.val));
         }
         self.uses.insert(name.val.to_string());
+        // Divergence is contagious: calling a function that may not terminate
+        // makes this one a function that may not terminate.
+        if self.divergent_fns.contains(&*name.val.to_string()) {
+            self.divergent = true;
+        }
         if let Err(why) = c.simple {
             return Err(format!("`{}` {}", name.val, why));
         }
@@ -7733,7 +7829,24 @@ impl<'a> Body<'a> {
         self.release_from(0);
     }
 
+    /// Put down every validity seeded since `mark`. `is_valid` is a `pure`
+    /// fact, but it is `pure` behind a definition, so Pulse will not absorb it
+    /// on its own.
+    fn drop_seeded(&mut self, mark: usize) {
+        for addr in self.seeded.split_off(mark) {
+            self.lines.push(format!("drop_is_valid {} _ _;", addr));
+        }
+    }
+
     fn release_from(&mut self, mark: usize) {
+        // Leaving the function: anything still held has to go, including a
+        // validity seeded for a use that did not consume it -- storing a
+        // decayed function in a slot, say.
+        if mark == 0 {
+            for addr in self.seeded.clone() {
+                self.lines.push(format!("drop_is_valid {} _ _;", addr));
+            }
+        }
         for i in (mark..self.slots.len()).rev() {
             let (addr, pn, init, array, global) = {
                 let s = &self.slots[i];
@@ -8231,6 +8344,7 @@ fn emit_body(
     sig: &FnSurface,
     callees: &HashMap<String, Callee>,
     forbidden: &HashSet<String>,
+    divergent_fns: &HashSet<String>,
 ) -> Result<TranslatedBody, String> {
     // An array parameter's ownership is a sequence, so every access through it
     // goes through `array_focus` rather than a plain read. Record what each one
@@ -8289,8 +8403,11 @@ fn emit_body(
         requires_ok: sig.contract && !defn.decl.requires.is_empty(),
         owned: &sig.owned,
         guarded: &sig.guarded,
+        valid_fps: &sig.valid_fps,
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
+        seeded: Vec::new(),
+        divergent_fns,
         blocks: Vec::new(),
         aliases: alias_map(&defn.body),
         active: HashMap::new(),
