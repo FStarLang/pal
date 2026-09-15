@@ -1739,8 +1739,39 @@ new facts about memory.
    and an empty list is the honest way to say so: a wrong position inside a
    module would be worse than none.
 
-   As of this milestone: **759 specifications, 560 of them with real bodies,
-   199 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   Splitting the marker was the next thing, because the count it feeds was
+   quietly dishonest. `palow-old-annotations` is a backlog and is meant to
+   reach zero. But four of the twenty tests carrying it exist *to* exercise
+   what the old model has and this one deliberately does not: `antiquot` is a
+   test of the `$fold`/`$unfold` antiquotations, which name generated struct
+   helpers Palow has no counterpart for, and `core_ref_use`, `core_ref_struct`
+   and `packet_space_connection` are tests of `_core_ref`, a concept this model
+   removes outright. Those now carry `palow-model-specific` instead, and the
+   note in the generated file says which kind it is, so a census separates
+   them: **21 admits from the backlog and 6 from the floor**. Counting the two
+   together would have made a permanent floor look like unfinished work.
+
+   The split immediately paid for itself by exposing something neither bucket
+   covered. `_allocated` is not a user annotation at all -- it is PAL's own
+   macro, and it expands to a refinement whose predicate is an `_slprop`:
+   `_refine((_slprop) _inline_pulse(freeable $(this)))`. A refinement that is
+   ownership rather than a fact about a value had nowhere to go, so it fell
+   through to the proposition translator and took five contracts down with it.
+   Such refinements now go where the points-to goes, at whichever ends of the
+   contract the parameter's ownership is stated.
+
+   The fragment itself needed one more decision. This model's `freeable`
+   carries the size of the block, because the right to free something is
+   meaningless without saying how much, and a nullary macro has nowhere to put
+   a `sizeof`. Rather than change `pal.h` -- shared with the old emitter, whose
+   `freeable` takes one argument -- Palow recognises the shape `_allocated`
+   expands to and rebuilds the term with the pointee's size, which is exactly
+   what `_allocated` on a `T *` typedef means. Any *other* `_slprop` refinement
+   is hand-written and is spliced as written. `sum_point` now verifies with
+   `freeable var_p 8sz` in both directions.
+
+   As of this milestone: **759 specifications, 561 of them with real bodies,
+   198 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

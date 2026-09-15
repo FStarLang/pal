@@ -207,10 +207,16 @@ struct Typedefs<'a> {
     refined_structs: HashSet<String>,
     /// Whether hand-written Pulse from `_ghost_stmt`, `_inline_pulse` and
     /// `_include_pulse` is spliced into the output. A test whose fragments are
-    /// written against the old memory model sets a `palow-old-annotations`
-    /// marker beside its source, and they are dropped instead -- the same
-    /// weakening the emitter already reports for anything it cannot translate.
+    /// written against the old memory model marks itself beside its source,
+    /// and they are dropped instead -- the same weakening the emitter already
+    /// reports for anything it cannot translate.
     splice_inline: bool,
+    /// Whether that marker was `palow-model-specific` rather than
+    /// `palow-old-annotations`: the fragment names something this model does
+    /// not have *by design*, so the resulting admit is a floor and not a
+    /// backlog item. The two say so differently in the generated file, because
+    /// otherwise the census counts them as one thing.
+    model_specific: bool,
     /// `_pure` functions that were successfully emitted as F* definitions, and
     /// so may appear in a specification and in a body without being sequenced.
     pure_fns: HashSet<String>,
@@ -222,7 +228,17 @@ struct Typedefs<'a> {
 }
 
 impl<'a> Typedefs<'a> {
-    fn new(tu: &'a TranslationUnit, splice_inline: bool) -> Self {
+    /// Why a fragment was not spliced, phrased so the two markers stay
+    /// distinguishable in a census of the generated files.
+    fn no_splice(&self) -> String {
+        if self.model_specific {
+            "inline Pulse for a model this one deliberately does not have".to_string()
+        } else {
+            "inline Pulse written for the old memory model".to_string()
+        }
+    }
+
+    fn new(tu: &'a TranslationUnit, splice_inline: bool, model_specific: bool) -> Self {
         let mut m = HashMap::new();
         for decl in &tu.decls {
             if let DeclT::Typedef(td) = &decl.val {
@@ -232,6 +248,7 @@ impl<'a> Typedefs<'a> {
         Typedefs {
             typedefs: m,
             splice_inline,
+            model_specific,
             structs: HashMap::new(),
             unions: HashMap::new(),
             refined_structs: tu
@@ -559,6 +576,60 @@ fn refinements(tds: &Typedefs, ty: &Type) -> Result<Vec<Rc<Expr>>, String> {
         TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => refinements(tds, t),
         _ => Ok(Vec::new()),
     }
+}
+
+/// A refinement predicate that is an `_slprop`-typed fragment of hand-written
+/// Pulse, rather than a proposition about the value.
+fn slprop_refine<'e>(tds: &Typedefs, p: &'e Expr) -> Option<&'e InlinePulseCode> {
+    match &strip_vattr(p).val {
+        ExprT::Cast(inner, to) if matches!(tds.resolve(to).val, TypeT::SLProp) => {
+            slprop_refine(tds, inner)
+        }
+        ExprT::InlinePulse(code, t) if matches!(tds.resolve(t).val, TypeT::SLProp) => Some(code),
+        _ => None,
+    }
+}
+
+/// The ownership an `_slprop` refinement states.
+///
+/// The only one PAL writes itself is `_allocated`, which expands to
+/// `freeable $(this)`. Matching that shape and rebuilding the term is not a
+/// shortcut around splicing: this model's `freeable` carries the size of the
+/// block, because "the right to free this" is meaningless without saying how
+/// much, and a nullary macro has nowhere to put a `sizeof`. The size is the
+/// pointee's, which is exactly what `_allocated` on a `T *` typedef means.
+/// Anything else is hand-written and is spliced as written.
+fn allocated_own(
+    tds: &Typedefs,
+    ty: &Type,
+    ptr: &str,
+    code: &InlinePulseCode,
+) -> Result<String, String> {
+    let verbatim: Vec<&str> = code
+        .tokens
+        .iter()
+        .filter_map(|t| match t {
+            InlinePulseToken::Verbatim(ct) => Some(ct.text.val.trim()),
+            _ => None,
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    let antiquots = code
+        .tokens
+        .iter()
+        .filter(|t| matches!(t, InlinePulseToken::RValueAntiquot { .. }))
+        .count();
+    if verbatim != ["freeable"] || antiquots != 1 {
+        return Err("an `_slprop` refinement this model has no reading of".to_string());
+    }
+    let pt = pointee(tds, ty).ok_or("`_allocated` on something that is not a pointer")?;
+    let n = palow_sizeof(tds, pt).ok_or_else(|| {
+        format!(
+            "`_allocated` on a pointer to {}, whose size is not known",
+            describe(tds.resolve(pt))
+        )
+    })?;
+    Ok(format!("freeable {} {}sz", ptr, n))
 }
 
 fn refined(tds: &Typedefs, ty: &Type) -> bool {
@@ -903,7 +974,7 @@ impl<'a> Spec<'a> {
     /// something it was handed directly.
     fn inline_pulse(&self, code: &InlinePulseCode, w: When) -> Result<String, String> {
         if !self.tds.splice_inline {
-            return Err("inline Pulse written for the old memory model".to_string());
+            return Err(self.tds.no_splice());
         }
         let mut out = String::new();
         for tok in &code.tokens {
@@ -1209,7 +1280,7 @@ impl<'a> Spec<'a> {
             // `pure`.
             ExprT::InlinePulse(code, _) => {
                 if !self.tds.splice_inline {
-                    return Err("inline Pulse written for the old memory model".to_string());
+                    return Err(self.tds.no_splice());
                 }
                 self.inline_pulse(code, w)
             }
@@ -1818,19 +1889,41 @@ fn emit_fn(
             };
             inner.prop(p, w)
         };
+    // Whether a parameter's ownership is stated at this end of the contract,
+    // which is also where its refinements belong.
+    let stated = |base: &str, w: When| match w {
+        When::Post => spec.pointees.get(base).is_some_and(|(_, x)| x.is_some()),
+        _ => spec.pointees.get(base).is_some_and(|(x, _)| x.is_some()),
+    };
     let refine_props = |w: When| -> Result<Vec<String>, String> {
         if let Some(why) = &refine_err {
             return Err(why.clone());
         }
         let mut out = Vec::new();
         for (base, ty, p) in &refines {
-            let stated = match w {
-                When::Post => spec.pointees.get(base).is_some_and(|(_, x)| x.is_some()),
-                _ => spec.pointees.get(base).is_some_and(|(x, _)| x.is_some()),
-            };
-            if stated {
+            if slprop_refine(tds, p).is_some() {
+                continue;
+            }
+            if stated(base, w) {
                 out.push(refine_clause(base, ty, p, w)?);
             }
+        }
+        Ok(out)
+    };
+    // A refinement whose predicate is an `_slprop` is ownership the parameter
+    // carries, not a fact about its value: `_allocated` is the one PAL itself
+    // writes, and it says the caller hands over the right to free the block.
+    // It goes where the points-to goes.
+    let refine_own = |w: When| -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for (base, ty, p) in &refines {
+            let Some(code) = slprop_refine(tds, p) else {
+                continue;
+            };
+            if !stated(base, w) {
+                continue;
+            }
+            out.push(allocated_own(tds, ty, &format!("var_{}", base), code)?);
         }
         Ok(out)
     };
@@ -1861,15 +1954,23 @@ fn emit_fn(
         }
     }
 
+    let mut own_pre: Vec<String> = Vec::new();
+    let mut own_post: Vec<String> = Vec::new();
     let contract = translate(&req_props, When::Pre)
         .and_then(|pre| translate(&ens_props, When::Post).map(|post| (pre, post)))
         .and_then(|(mut pre, mut post)| {
             pre.extend(refine_props(When::Pre)?);
             post.extend(refine_props(When::Post)?);
+            own_pre = refine_own(When::Pre)?;
+            own_post = refine_own(When::Post)?;
             Ok((pre, post))
         });
     let (pre_props, post_props, contract_ok, dropped) = match contract {
-        Ok((pre, post)) if slprop_err.is_none() => (pre, post, true, None),
+        Ok((pre, post)) if slprop_err.is_none() => {
+            req.extend(own_pre.iter().cloned());
+            owned_post.extend(own_post.iter().cloned());
+            (pre, post, true, None)
+        }
         contract => {
             // A half-translated contract is worse than none: the parts that
             // did translate would look like the whole thing. So a failure
@@ -3734,8 +3835,12 @@ fn toposort(items: &[FnItem]) -> Result<Vec<usize>, Vec<(String, String)>> {
     }
 }
 
-pub fn emit_palow(tu: &TranslationUnit, splice_inline: bool) -> Vec<PalowModule> {
-    let mut tds = Typedefs::new(tu, splice_inline);
+pub fn emit_palow(
+    tu: &TranslationUnit,
+    splice_inline: bool,
+    model_specific: bool,
+) -> Vec<PalowModule> {
+    let mut tds = Typedefs::new(tu, splice_inline, model_specific);
     let structs = collect_structs(tu, &mut tds);
     let mut base = Env::new();
     for decl in &tu.decls {
@@ -5242,7 +5347,7 @@ impl<'a> Body<'a> {
             ExprT::Old(_) => Err("an assertion about the state on entry".to_string()),
             ExprT::InlinePulse(code, _) => {
                 if !self.tds.splice_inline {
-                    return Err("inline Pulse written for the old memory model".to_string());
+                    return Err(self.tds.no_splice());
                 }
                 flatten_fragment(&self.inline_pulse(code)?)
             }
@@ -6723,7 +6828,7 @@ impl<'a> Body<'a> {
                     ExprT::InlinePulse(_, t) if matches!(self.tds.resolve(t).val, TypeT::SLProp)) =>
             {
                 if !self.tds.splice_inline {
-                    return Err("inline Pulse written for the old memory model".to_string());
+                    return Err(self.tds.no_splice());
                 }
                 let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
                     unreachable!()
@@ -6739,9 +6844,7 @@ impl<'a> Body<'a> {
             }
             // See `ghost_replaced`.
             StmtT::GhostStmt(code) if ghost_replaced(code) => Ok(()),
-            StmtT::GhostStmt(_) if !self.tds.splice_inline => {
-                Err("inline Pulse written for the old memory model".to_string())
-            }
+            StmtT::GhostStmt(_) if !self.tds.splice_inline => Err(self.tds.no_splice()),
             StmtT::GhostStmt(code) => {
                 let t = self.inline_pulse(code)?;
                 self.lines.push(format!("{};", t.trim()));

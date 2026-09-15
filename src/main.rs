@@ -258,21 +258,32 @@ fn main() {
     if cli.palow {
         // A test whose hand-written Pulse is written against the *old* memory
         // model marks itself, and Palow leaves those fragments alone rather
-        // than splicing text that names predicates it does not have. The
-        // marker is a backlog, not a design: it names exactly the tests whose
-        // annotations still have to be ported, and it shrinks as they are.
-        let splice_inline = !cli
-            .files
-            .first()
-            .map(|f| {
-                Path::new(f)
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join("palow-old-annotations")
-                    .exists()
-            })
-            .unwrap_or(false);
-        let modules = pass::emit_palow::emit_palow(&combined_tu, splice_inline);
+        // than splicing text that names predicates it does not have.
+        //
+        // There are two such markers and the difference between them is the
+        // whole point. `palow-old-annotations` is a backlog: the fragment
+        // could be written in this model and has not been yet, so the count is
+        // meant to reach zero. `palow-model-specific` is not: the test exists
+        // to exercise something the old model has and this one deliberately
+        // does not -- `_core_ref`, the `$fold`/`$unfold` antiquotations that
+        // name generated struct helpers -- so it will carry its marker for as
+        // long as the old emitter is around. Counting the two together would
+        // make a permanent floor look like unfinished work.
+        let marked = |name: &str| {
+            cli.files
+                .first()
+                .map(|f| {
+                    Path::new(f)
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join(name)
+                        .exists()
+                })
+                .unwrap_or(false)
+        };
+        let model_specific = marked("palow-model-specific");
+        let splice_inline = !marked("palow-old-annotations") && !model_specific;
+        let modules = pass::emit_palow::emit_palow(&combined_tu, splice_inline, model_specific);
         if let Some(outdir) = &cli.outdir {
             let outdir = Path::new(&outdir).to_path_buf();
             std::fs::create_dir_all(&outdir).unwrap();
