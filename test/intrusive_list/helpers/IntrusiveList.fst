@@ -260,3 +260,173 @@ divergent fn move (#p: erased payload)
   ring_from_indexed (reveal p) destination 1.0R
     (reveal destination_nodes @ reveal source_nodes);
 }
+
+(* Proof-only selection of the payload for initialization through C. *)
+let init_pre (p: payload) (head: lref) : slprop = R.pts_to_uninit head
+
+ghost
+fn prepare_init (p: payload) (head: lref)
+  requires R.pts_to_uninit head
+  ensures init_pre p head
+{
+  fold (init_pre p head);
+}
+
+ghost
+fn init_open (p: payload) (head: lref)
+  requires init_pre p head
+  ensures C.init_pre (model p []) head
+{
+  unfold (init_pre p head);
+  C.prepare_init (model p []) head;
+}
+
+ghost
+fn init_close (p: payload) (head: lref)
+  requires C.ring (model p []) head
+  ensures is_list_ring_with p head 1.0R []
+{
+  C.finish_ring (model p []) head;
+  ring_from_indexed p head 1.0R [];
+}
+
+ghost
+fn empty_open (p: payload) (head: lref) (nodes: list lref)
+  requires is_list_ring_with p head 1.0R nodes
+  ensures C.ring (model p nodes) head
+{
+  ring_to_indexed p head 1.0R nodes;
+  C.prepare_ring (model p nodes) head;
+}
+
+ghost
+fn empty_close (p: payload) (head: lref) (nodes: list lref) (#result: bool)
+  requires C.empty_post (model p nodes) head result
+  ensures is_list_ring_with p head 1.0R nodes ** pure (result <==> nodes == [])
+{
+  unfold (C.empty_post (model p nodes) head result);
+  C.finish_ring (model p nodes) head;
+  entries_nodes nodes;
+  ring_from_indexed p head 1.0R nodes;
+}
+
+ghost
+fn validate_head_open (p: payload) (head: lref) (nodes: list lref)
+  requires is_list_ring_with p head 1.0R nodes
+  ensures C.validation_pre (C.validation_of p head [] (entries nodes)) head
+{
+  ring_to_indexed p head 1.0R nodes;
+  C.prepare_validation p head head [] (entries nodes);
+}
+
+ghost
+fn validate_head_close (p: payload) (head: lref) (nodes: list lref)
+  requires C.validation_pre (C.validation_of p head [] (entries nodes)) head
+  ensures is_list_ring_with p head 1.0R nodes
+{
+  C.finish_validation p head head [] (entries nodes);
+  ring_from_indexed p head 1.0R nodes;
+}
+
+let tail_pre (p: payload) (head entry: lref) (nodes: list lref) : slprop =
+  is_list_ring_with p head 1.0R nodes ** R.pts_to_uninit entry ** p entry ()
+
+ghost
+fn prepare_tail (p: payload) (head entry: lref) (nodes: list lref)
+  requires is_list_ring_with p head 1.0R nodes ** R.pts_to_uninit entry ** p entry ()
+  ensures tail_pre p head entry nodes
+{
+  fold (tail_pre p head entry nodes);
+}
+
+ghost
+fn tail_open (p: payload) (head entry: lref) (nodes: list lref)
+  requires tail_pre p head entry nodes
+  ensures C.insert_pre (insertion p nodes) head entry
+{
+  unfold (tail_pre p head entry nodes);
+  ring_to_indexed p head 1.0R nodes;
+  C.prepare_ring (model p nodes) head;
+  fold (C.insert_pre (insertion p nodes) head entry);
+}
+
+ghost
+fn tail_close (p: payload) (head entry: lref) (nodes: list lref)
+  requires C.insert_tail_post (insertion p nodes) head entry
+  ensures is_list_ring_with p head 1.0R (nodes @ [entry])
+{
+  unfold (C.insert_tail_post (insertion p nodes) head entry);
+  entries_append nodes [entry];
+  ring_from_indexed p head 1.0R (nodes @ [entry]);
+}
+
+let pop_post (p: payload) (head: lref) (nodes: list lref) (result: lref) : slprop =
+  match nodes with
+  | [] -> pure False
+  | node :: rest ->
+    is_list_ring_with p head 1.0R rest **
+    (exists* (next: lref). R.pts_to result (B.mklink next head)) **
+    p result () ** pure (result == node)
+
+ghost
+fn pop_open (p: payload) (head: lref) (nodes: list lref)
+  requires is_list_ring_with p head 1.0R nodes ** pure (nodes =!= [])
+  ensures C.remove_head_pre (model p nodes) head
+{
+  ring_to_indexed p head 1.0R nodes;
+  entries_nodes nodes;
+  C.prepare_pop p head (entries nodes);
+}
+
+ghost
+fn pop_close (p: payload) (head result: lref) (nodes: list lref)
+  requires C.remove_head_post (model p nodes) head result ** pure (nodes =!= [])
+  ensures pop_post p head nodes result
+{
+  match nodes {
+    Nil -> { unreachable (); }
+    Cons node rest -> {
+      rewrite (C.remove_head_post (model p nodes) head result)
+        as (C.remove_head_post (C.make p ((node, ()) :: entries rest)) head result);
+      unfold (C.remove_head_post (C.make p ((node, ()) :: entries rest)) head result);
+      ring_from_indexed p head 1.0R rest;
+      fold (pop_post p head nodes result);
+    }
+  }
+}
+
+ghost
+fn move_open (p: payload) (source destination: lref)
+             (source_nodes destination_nodes: list lref)
+  requires is_list_ring_with p source 1.0R source_nodes **
+    is_list_ring_with p destination 1.0R destination_nodes
+  ensures C.move_pre (C.movement_of p (entries source_nodes) (entries destination_nodes))
+    source destination
+{
+  ring_to_indexed p source 1.0R source_nodes;
+  ring_to_indexed p destination 1.0R destination_nodes;
+  C.prepare_move p source destination (entries source_nodes) (entries destination_nodes);
+}
+
+ghost
+fn move_close (p: payload) (source destination: lref)
+              (source_nodes destination_nodes: list lref)
+  requires C.move_post (C.movement_of p (entries source_nodes) (entries destination_nodes))
+    source destination
+  ensures is_list_ring_with p source 1.0R [] **
+    is_list_ring_with p destination 1.0R (destination_nodes @ source_nodes)
+{
+  C.finish_move p source destination (entries source_nodes) (entries destination_nodes);
+  entries_append destination_nodes source_nodes;
+  ring_from_indexed p source 1.0R [];
+  ring_from_indexed p destination 1.0R (destination_nodes @ source_nodes);
+}
+
+ghost
+fn release_empty (p: payload) (head: lref)
+  requires is_list_ring_with p head 1.0R []
+  ensures exists* (v: Struct_list_node.struct_list_node). R.pts_to head v
+{
+  ring_to_indexed p head 1.0R [];
+  I.ring_elim_empty p head;
+}
