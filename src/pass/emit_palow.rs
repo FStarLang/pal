@@ -626,7 +626,7 @@ fn allocated_own(
     ty: &Type,
     ptr: &str,
     code: &InlinePulseCode,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let verbatim: Vec<&str> = code
         .tokens
         .iter()
@@ -641,8 +641,9 @@ fn allocated_own(
         .iter()
         .filter(|t| matches!(t, InlinePulseToken::RValueAntiquot { .. }))
         .count();
+    // Not `_allocated` at all: the caller decides what else it could be.
     if verbatim != ["freeable"] || antiquots != 1 {
-        return Err("an `_slprop` refinement this model has no reading of".to_string());
+        return Ok(None);
     }
     let pt = pointee(tds, ty).ok_or("`_allocated` on something that is not a pointer")?;
     let n = palow_sizeof(tds, pt).ok_or_else(|| {
@@ -651,7 +652,7 @@ fn allocated_own(
             describe(tds.resolve(pt))
         )
     })?;
-    Ok(format!("freeable {} {}sz", ptr, n))
+    Ok(Some(format!("freeable {} {}sz", ptr, n)))
 }
 
 fn refined(tds: &Typedefs, ty: &Type) -> bool {
@@ -1728,6 +1729,18 @@ fn emit_fn(
             refine_err.get_or_insert(format!("parameter {} carries {}", pname, why));
         }
 
+        // A refinement on a parameter with no storage is still a refinement.
+        // Collecting it here rather than only in the pointer branch below is
+        // what stops it from vanishing: a `_refine` on a scalar is a claim
+        // about the value, and one on a function pointer is a claim about the
+        // code, and neither has a pointee to hang from.
+        if pointee(tds, &arg.ty).is_none()
+            && let Ok(ps) = refinements(tds, &arg.ty)
+        {
+            let base = pname.trim_start_matches("var_").to_string();
+            refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+        }
+
         let Some(pt) = pointee(tds, &arg.ty) else {
             if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &arg.ty).val
                 && tds.refined_structs.contains(&*n.val)
@@ -1983,49 +1996,94 @@ fn emit_fn(
     // clause is translated against `this` bound to that same parameter -- no
     // substitution needed, because the contract machinery resolves `*this`
     // through the map like any other dereference.
-    let refine_clause =
-        |base: &str, ty: &Rc<Type>, p: &Rc<Expr>, w: When| -> Result<String, String> {
-            let mut pointees = spec.pointees.clone();
-            let Some(entry) = pointees.get(base).cloned() else {
-                return Err(format!("a `_refine` on `{}`, which owns nothing", base));
-            };
-            pointees.insert("this".to_string(), entry);
-            let mut arrays = spec.arrays.clone();
-            if arrays.contains(base) {
-                arrays.insert("this".to_string());
+    // Translate something written in terms of `$(this)` against one parameter.
+    // The caller says what to do with the specification translator once `this`
+    // is bound, because the two things a refinement can be -- a proposition and
+    // a piece of ownership -- take different routes out of it.
+    let with_this = |base: &str,
+                     ty: &Rc<Type>,
+                     p: &Rc<Expr>,
+                     w: When,
+                     how: &dyn Fn(&Spec, When) -> Result<String, String>|
+     -> Result<String, String> {
+        let mut pointees = spec.pointees.clone();
+        let mut arrays = spec.arrays.clone();
+        let mut locals = HashMap::new();
+        // `$(this)` means the parameter. Which parameter it is decides what
+        // that means: for a pointer it is the storage the contract grants,
+        // so `this` inherits the pointee entry and `$(this)` reads through
+        // it; for anything else -- a scalar, a function pointer -- there is
+        // no storage and `this` is simply the value, so it is bound as a
+        // local instead. Without the second case a `_refine` on such a
+        // parameter had nowhere to go and was dropped in silence.
+        let by_value = match pointees.get(base).cloned() {
+            Some(entry) => {
+                pointees.insert("this".to_string(), entry);
+                if arrays.contains(base) {
+                    arrays.insert("this".to_string());
+                }
+                false
             }
-            // The clause is never elaborated -- `this` is free in it, so nothing
-            // could have typed it -- and the specification translator asks for
-            // types. Binding `this` to the parameter's own type is what makes the
-            // clause typeable, and is also exactly what it means.
-            let mut env = env.clone();
-            env.push_var_decl(
-                &Rc::<str>::from("this").with_loc(p.loc.clone()),
-                ty.clone(),
-                crate::env::LocalDeclKind::LValue,
-            );
-            let inner = Spec {
-                tds,
-                env: &env,
-                pointees,
-                arrays,
-                guarded: spec.guarded.clone(),
-                guards: RefCell::new(Vec::new()),
-                ret: ret_name.clone(),
-                locals: HashMap::new(),
-                uses: RefCell::new(HashSet::new()),
-            };
-            let r = inner.prop(p, w);
-            spec.uses
-                .borrow_mut()
-                .extend(inner.uses.borrow().iter().cloned());
-            r
+            None => {
+                locals.insert("this".to_string(), format!("var_{}", base));
+                true
+            }
         };
+        // The clause is never elaborated -- `this` is free in it, so nothing
+        // could have typed it -- and the specification translator asks for
+        // types. Binding `this` to the parameter's own type is what makes the
+        // clause typeable, and is also exactly what it means.
+        let mut env = env.clone();
+        // A by-value `this` is bound at the *peeled* type. Leaving the
+        // refinement on would make the binder's type the very thing being
+        // refined, and everything that asks what kind of integer `this` is --
+        // an overflow bound, a `_specint` cast -- would stop at the refinement
+        // and find no answer.
+        env.push_var_decl(
+            &Rc::<str>::from("this").with_loc(p.loc.clone()),
+            if by_value {
+                Rc::new(peel(tds, ty).clone())
+            } else {
+                ty.clone()
+            },
+            if by_value {
+                crate::env::LocalDeclKind::RValue
+            } else {
+                crate::env::LocalDeclKind::LValue
+            },
+        );
+        let inner = Spec {
+            tds,
+            env: &env,
+            pointees,
+            arrays,
+            guarded: spec.guarded.clone(),
+            guards: RefCell::new(Vec::new()),
+            ret: ret_name.clone(),
+            locals,
+            uses: RefCell::new(HashSet::new()),
+        };
+        let r = how(&inner, w);
+        spec.uses
+            .borrow_mut()
+            .extend(inner.uses.borrow().iter().cloned());
+        r
+    };
+    let refine_clause = |base: &str, ty: &Rc<Type>, p: &Rc<Expr>, w: When| {
+        with_this(base, ty, p, w, &|sp: &Spec, w| sp.prop(p, w))
+    };
     // Whether a parameter's ownership is stated at this end of the contract,
     // which is also where its refinements belong.
-    let stated = |base: &str, w: When| match w {
-        When::Post => spec.pointees.get(base).is_some_and(|(_, x)| x.is_some()),
-        _ => spec.pointees.get(base).is_some_and(|(x, _)| x.is_some()),
+    // A parameter that owns nothing is a value, and a value parameter is
+    // immutable, so its refinement is a precondition and nothing more: stating
+    // it again on the way out would add nothing the caller could not already
+    // derive.
+    let stated = |base: &str, w: When| match spec.pointees.get(base) {
+        None => matches!(w, When::Pre),
+        Some((pre, post)) => match w {
+            When::Post => post.is_some(),
+            _ => pre.is_some(),
+        },
     };
     let refine_props = |w: When| -> Result<Vec<String>, String> {
         if let Some(why) = &refine_err {
@@ -2055,7 +2113,17 @@ fn emit_fn(
             if !stated(base, w) {
                 continue;
             }
-            out.push(allocated_own(tds, ty, &format!("var_{}", base), code)?);
+            // `_allocated` is the one ownership refinement PAL writes itself,
+            // and the model reads it natively. Anything else is the author's
+            // own Pulse -- a function pointer's `is_valid`, say -- so it is
+            // spliced under the same rule as an `_inline_pulse` contract
+            // clause, and refused with the same words when that rule says no.
+            out.push(
+                match allocated_own(tds, ty, &format!("var_{}", base), code)? {
+                    Some(t) => t,
+                    None => with_this(base, ty, p, w, &|sp: &Spec, w| sp.inline_pulse(code, w))?,
+                },
+            );
         }
         Ok(out)
     };

@@ -1875,8 +1875,39 @@ new facts about memory.
    written over its zeros, and `_length` of a heap array. All four verify with
    no admits.
 
-   As of this milestone: **762 specifications, 578 of them with real bodies,
-   184 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   A sixth silent weakening turned up, and this one had been there from the
+   beginning: a `_refine` on a parameter that is not a pointer was dropped
+   without a word. Refinements were collected only while walking a parameter's
+   *pointee*, so a parameter with no pointee -- a scalar, a function pointer --
+   never reached the collection at all. Every callback parameter in
+   `func_pointer` was in that position: its `_refine` supplies the `is_valid`
+   fact the indirect call needs, and the emitted contract simply did not have
+   it. Nine contracts across the suite were weaker than they looked.
+
+   The fix has two halves. A refinement now says which of the two things it is
+   by where `this` can be bound. For a pointer, `this` inherits the pointee
+   entry and `$(this)` reads through it, as before. For anything else there is
+   no storage, so `this` is bound as a local standing for the value, at the
+   *peeled* type -- leaving the refinement on would make the binder's type the
+   very thing being refined, and every question about what kind of integer
+   `this` is would stop at the refinement and find no answer. And an ownership
+   refinement that is not `_allocated` -- the only one PAL writes itself and
+   the only one the model reads natively -- is now spliced under exactly the
+   rule an `_inline_pulse` contract clause follows, and refused with exactly
+   the same words when that rule says no.
+
+   The net effect on the counts is a regression, and an honest one: dropped
+   contracts went from 75 to 84 and six more bodies became untranslatable,
+   because a contract that was never really there stopped pretending. All nine
+   land in the `palow-old-annotations` backlog, since they are written against
+   `Pulse.Lib.C.FuncPtr` and the old emitter's module names. `refine_fnptr`
+   joined that backlog for the same reason. `test/refine_scalar_param` covers
+   the half that is now genuinely supported: three functions whose refinements
+   are load bearing -- without them no body can be shown not to overflow -- all
+   verifying with no admits.
+
+   As of this milestone: **765 specifications, 575 of them with real bodies,
+   190 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
