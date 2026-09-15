@@ -597,6 +597,8 @@ struct FnSurface {
     /// A function body never has to restate this -- Pulse carries it -- except
     /// at a loop, whose invariant Pulse cannot invent.
     owned: Vec<OwnedParam>,
+    /// Parameters whose ownership sits behind a nullness guard.
+    guarded: HashSet<String>,
     /// Whether the C function's own `_requires`/`_ensures` made it into the
     /// specification. When they did not, the contract we emit is weaker than
     /// the source says, and in particular cannot discharge an overflow
@@ -641,6 +643,10 @@ struct Spec<'a> {
     pointees: HashMap<String, (Option<String>, Option<String>)>,
     /// Parameters whose `pointees` entry is a sequence rather than a value.
     arrays: HashSet<String>,
+    /// Parameters whose storage the contract grants only behind a nullness
+    /// guard. `_live` on one of these is the claim that the guard is
+    /// discharged, which is exactly the claim this model cannot yet make.
+    guarded: HashSet<String>,
     /// Well-definedness side conditions raised while translating the clause
     /// currently in flight. `Seq.index` is partial, and a postcondition cannot
     /// appeal to the precondition for its own typing, so the bound has to be
@@ -666,6 +672,16 @@ impl<'a> Spec<'a> {
             .map_err(|_| "a subexpression whose type could not be inferred".to_string())
     }
 
+    /// The name whose storage a `_live` clause is talking about: `_live(s.x)`
+    /// and `_live(*p)` are both claims about the slot `s` or `p` names.
+    fn live_base(&self, e: &Expr) -> Option<String> {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) => Some(v.val.to_string()),
+            ExprT::Member(b, _) | ExprT::Deref(b) | ExprT::Index(b, _) => self.live_base(b),
+            _ => None,
+        }
+    }
+
     /// A specification expression in proposition position.
     fn prop(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
@@ -676,7 +692,22 @@ impl<'a> Spec<'a> {
             // `_live(x)` says the storage exists. A loop invariant restates the
             // whole ownership frame anyway, so by the time this is read the
             // claim has already been made and there is nothing left to say.
-            ExprT::Live(_) => Ok("True".to_string()),
+            ExprT::Live(x) => {
+                // `_live(x)` says the storage exists. Where the frame already
+                // carries it -- a parameter whose points-to the contract
+                // states, or a local a loop invariant binds -- the claim has
+                // been made and there is nothing left to say. Where it does
+                // not, `True` would be an outright weakening: a `_nullable`
+                // parameter's storage is behind a guard, and `_live` is
+                // precisely the claim that the guard is discharged.
+                match self.live_base(x) {
+                    Some(b) if self.guarded.contains(&b) => Err(format!(
+                        "`_live({})`, whose storage is behind a nullness guard",
+                        b
+                    )),
+                    _ => Ok("True".to_string()),
+                }
+            }
             ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner, w)?)),
             ExprT::BoolLit(b) => Ok(if *b { "True" } else { "False" }.to_string()),
             ExprT::BinOp(op, l, r) => {
@@ -1209,6 +1240,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         env,
         pointees: HashMap::new(),
         arrays: HashSet::new(),
+        guarded: HashSet::new(),
         guards: RefCell::new(Vec::new()),
         ret: "ret".to_string(),
         locals: HashMap::new(),
@@ -1293,6 +1325,7 @@ fn emit_pure_fn(
         env,
         pointees: HashMap::new(),
         arrays: HashSet::new(),
+        guarded: HashSet::new(),
         guards: RefCell::new(Vec::new()),
         ret: "ret".to_string(),
         locals: HashMap::new(),
@@ -1466,6 +1499,8 @@ fn emit_fn(
     // pointee terms for the whole signature are known.
     let mut refines: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
     let mut refine_err: Option<String> = None;
+    // Parameters whose ownership the contract puts behind `unless_null`.
+    let mut guarded: HashSet<String> = HashSet::new();
 
     for (i, arg) in decl.args.iter().enumerate() {
         let pname = match &arg.name {
@@ -1523,6 +1558,9 @@ fn emit_fn(
         // it is erased, and when the pointer is null it is simply arbitrary,
         // which is how the guard is introduced in the first place.
         let null_guard = is_nullable(tds, &arg.ty);
+        if null_guard {
+            guarded.insert(base.clone());
+        }
 
         // `T *p` owns one `T`; `T p[]` owns a sequence of them. Same F* type,
         // different contract.
@@ -1697,6 +1735,7 @@ fn emit_fn(
         env,
         pointees,
         arrays,
+        guarded: guarded.clone(),
         guards: RefCell::new(Vec::new()),
         ret: ret_name.clone(),
         locals: HashMap::new(),
@@ -1747,6 +1786,7 @@ fn emit_fn(
                 env: &env,
                 pointees,
                 arrays,
+                guarded: spec.guarded.clone(),
                 guards: RefCell::new(Vec::new()),
                 ret: ret_name.clone(),
                 locals: HashMap::new(),
@@ -1972,6 +2012,7 @@ fn emit_fn(
     Ok(FnSurface {
         decl: out,
         owned,
+        guarded,
         contract: contract_ok,
         fp,
         globals: globals.to_vec(),
@@ -4339,6 +4380,9 @@ struct Body<'a> {
     /// The ownership the contract grants over the parameters' pointees, which
     /// a loop invariant has to restate.
     owned: &'a [OwnedParam],
+    /// Parameters whose ownership sits behind a nullness guard, so a loop
+    /// invariant claiming their storage is claiming the guard is discharged.
+    guarded: &'a HashSet<String>,
     /// Whether any parameter is `_out`. Such a parameter's storage is
     /// uninitialised on entry and initialised by the body, so it is not a
     /// fixed part of the frame a loop invariant can restate.
@@ -6357,6 +6401,7 @@ impl<'a> Body<'a> {
             env: &self.env,
             pointees,
             arrays: self.arrays.keys().cloned().collect(),
+            guarded: self.guarded.clone(),
             guards: RefCell::new(Vec::new()),
             ret: String::new(),
             locals,
@@ -7577,6 +7622,7 @@ fn emit_body(
         arrays,
         requires_ok: sig.contract && !defn.decl.requires.is_empty(),
         owned: &sig.owned,
+        guarded: &sig.guarded,
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
         blocks: Vec::new(),

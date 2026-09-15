@@ -1709,6 +1709,21 @@ new facts about memory.
    test failing, which suggests the remaining early-outs in the parameter loop
    deserve the same audit.
 
+   Auditing the rest of the parameter loop for the same pattern turned up one
+   more, though this one no test exercises yet. `_live(x)` was translating to
+   `True` unconditionally, on the reasoning that the frame has already claimed
+   the storage -- true for an owned parameter and for a local a loop invariant
+   binds, and the reason `_live` clauses are dropped from invariants rather
+   than conjoined. It is not true for a `_nullable` parameter, whose storage is
+   exactly what the guard withholds: there, `_live(p)` *is* the claim that the
+   guard is discharged, and answering `True` would grant it for free. Those
+   parameters are now tracked separately and `_live` on one reports instead.
+   The first attempt at this was stricter -- report unless the name is in the
+   pointee map or the invariant's local bindings -- and it cost eight bodies,
+   because a by-value scalar parameter is in neither map and is trivially live
+   all the same. Being exactly as strict as the model requires, and no
+   stricter, is the whole discipline in miniature.
+
    As of this milestone: **759 specifications, 560 of them with real bodies,
    199 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
