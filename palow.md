@@ -1645,6 +1645,31 @@ new facts about memory.
    That marker is a backlog rather than a design: it names exactly the
    annotations still to be ported, and the count is meant to go to zero.
 
+   **`_nullable` says the ownership is conditional.** A nullable pointer may be
+   null, so what the contract owns is not the pointee but `unless_null p (...)`
+   -- the ownership, unless there is nothing to own. Until now Palow dropped it
+   entirely and emitted `requires emp`, and did so *silently*, which is worse
+   than the gap itself: the whole measurement rests on every weakening being
+   counted, and this one was not. It is now the guarded points-to, in all four
+   parameter modes, with the erased value binder kept -- when the pointer is
+   null the binder is simply arbitrary, which is exactly how the guard gets
+   introduced.
+
+   What the guard does *not* do is put the pointee back in scope. A contract
+   that mentions `*p`, or a body that reads it, is talking about something the
+   caller has not unconditionally granted, so a nullable parameter stays out of
+   the pointee map and those cases report a dropped contract rather than
+   quietly proving against a precondition nobody supplied. A refinement behind
+   the guard is reported for the same reason: the refinement is a pure fact and
+   the guard is an slprop, so there is no honest place to put it yet.
+
+   Fixing this exposed a second thing worth recording. The exit ownership was
+   being built by appending the existential binder to a points-to with its last
+   argument left off, which works only while the value is the last thing in the
+   term. Inside `unless_null` it is not, and the emitted postcondition came out
+   with the binder outside the guard. The binder is now substituted where it
+   belongs, which is what it should always have been.
+
    As of this milestone: **760 specifications, 557 of them with real bodies,
    203 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is

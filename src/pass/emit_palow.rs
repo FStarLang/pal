@@ -551,18 +551,36 @@ fn refined(tds: &Typedefs, ty: &Type) -> bool {
 ///
 /// `_plain` is not one of them. It is exactly the annotation that says the
 /// parameter is a bare address and the function owns nothing behind it, which
-/// is what lets a caller pass `NULL`. `_nullable` is not one either: what it
-/// owns is `unless_null p (...)`, which is not translated yet, and pretending
-/// it were an unconditional points-to would be a contract no caller could
-/// satisfy.
+/// is what lets a caller pass `NULL`. `_nullable` is: it says the pointer may
+/// be null, which changes *whether* the ownership is there, not what it is of.
+/// See `is_nullable`.
 fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
     match &tds.resolve(ty).val {
         TypeT::Pointer(to, _) => Some(to),
-        TypeT::Refine(t, _)
+        TypeT::Nullable(t)
+        | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..) => pointee(tds, t),
         _ => None,
+    }
+}
+
+/// Whether a parameter is `_nullable`, so that what its contract owns is
+/// `unless_null p (...)` rather than the points-to itself.
+///
+/// The wrapper can sit under a refinement, which is why this is a walk rather
+/// than a single match. It deliberately does not look through `_plain`: that
+/// annotation already says the function owns nothing, so there is nothing for
+/// a nullness test to guard.
+fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
+    match &tds.resolve(ty).val {
+        TypeT::Nullable(_) => true,
+        TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..) => is_nullable(tds, t),
+        _ => false,
     }
 }
 
@@ -1363,6 +1381,10 @@ fn emit_fn(
     let mut preserved: Vec<String> = Vec::new();
     // Ownership handed back with a value the contract may constrain: the
     // existential binder, its type, and the points-to less its value argument.
+    // The ownership handed back at exit, as a complete slprop: the binder is
+    // substituted here rather than appended later, because a nullable
+    // parameter's points-to sits *inside* `unless_null` and so has no hole at
+    // the end to append to.
     let mut fresh: Vec<(String, String, String)> = Vec::new();
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut owned: Vec<OwnedParam> = Vec::new();
@@ -1413,6 +1435,12 @@ fn emit_fn(
             }
         }
 
+        // `_nullable` says the pointer may be null, so the ownership is there
+        // only when it is not: `unless_null p (...)`. The value binder stays --
+        // it is erased, and when the pointer is null it is simply arbitrary,
+        // which is how the guard is introduced in the first place.
+        let null_guard = is_nullable(tds, &arg.ty);
+
         // `T *p` owns one `T`; `T p[]` owns a sequence of them. Same F* type,
         // different contract.
         let (vty, pts_to): (String, Box<dyn Fn(&str, &str) -> String>) =
@@ -1449,6 +1477,52 @@ fn emit_fn(
                     )
                 }
             };
+        let pts_to: Box<dyn Fn(&str, &str) -> String> = if null_guard {
+            let p = pname.clone();
+            Box::new(move |perm: &str, v: &str| format!("unless_null {} ({})", p, pts_to(perm, v)))
+        } else {
+            pts_to
+        };
+
+        // A nullable parameter's pointee is behind the guard, so a contract
+        // that mentions it -- or a body that reads it -- is talking about
+        // something it does not unconditionally have. Leaving it out of the
+        // pointee map is what makes those say so rather than quietly succeed
+        // against a precondition the caller never granted.
+        if null_guard {
+            if refinements(tds, &arg.ty)
+                .map(|ps| !ps.is_empty())
+                .unwrap_or(true)
+            {
+                refine_err.get_or_insert(format!(
+                    "parameter {} carries a refinement behind a nullness guard",
+                    pname
+                ));
+            }
+            match arg.mode {
+                ParamMode::Out => return Err(format!("parameter {} is a nullable `_out`", pname)),
+                ParamMode::Const => {
+                    let perm = format!("perm_{}", base);
+                    perms.push(format!("(#{}: perm)", perm));
+                    ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                    preserved.push(pts_to(&perm, &vname));
+                }
+                ParamMode::Consumed => {
+                    ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                    req.push(pts_to("1.0R", &vname));
+                }
+                ParamMode::Regular => {
+                    ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                    req.push(pts_to("1.0R", &vname));
+                    fresh.push((
+                        format!("{}'", vname),
+                        vty,
+                        pts_to("1.0R", &format!("{}'", vname)),
+                    ));
+                }
+            }
+            continue;
+        }
 
         match arg.mode {
             // `_out`: the callee is handed storage, not a value. This is the
@@ -1457,7 +1531,11 @@ fn emit_fn(
             // uninitialised points-to.
             ParamMode::Out if extent(tds, &arg.ty) == Some(Extent::One) => {
                 req.push(format!("{}_pts_to_uninit {}", pn, pname));
-                fresh.push((format!("{}'", vname), vty, pts_to("1.0R", "")));
+                fresh.push((
+                    format!("{}'", vname),
+                    vty,
+                    pts_to("1.0R", &format!("{}'", vname)),
+                ));
                 pointees.insert(base, (None, Some(format!("{}'", vname))));
             }
             ParamMode::Out => return Err(format!("parameter {} is an `_out` array", pname)),
@@ -1492,7 +1570,11 @@ fn emit_fn(
                     vty: vty.clone(),
                     pre: pts_to("1.0R", ""),
                 });
-                fresh.push((format!("{}'", vname), vty, pts_to("1.0R", "")));
+                fresh.push((
+                    format!("{}'", vname),
+                    vty,
+                    pts_to("1.0R", &format!("{}'", vname)),
+                ));
                 pointees.insert(
                     base,
                     (
@@ -1517,7 +1599,7 @@ fn emit_fn(
         fresh.push((
             format!("gval_{}'", g.name),
             g.fstar_ty.clone(),
-            g.pts_to(""),
+            g.pts_to(&format!("gval_{}'", g.name)),
         ));
     }
 
@@ -1651,10 +1733,7 @@ fn emit_fn(
     }
     out += &format!("  returns  {} : {}\n", ret_name, ret);
 
-    let mut bodies: Vec<String> = fresh
-        .iter()
-        .map(|(b, _, s)| format!("{} {}", s.trim_end(), b))
-        .collect();
+    let mut bodies: Vec<String> = fresh.iter().map(|(_, _, s)| s.clone()).collect();
     bodies.extend(post_props.iter().map(|p| format!("pure ({})", p)));
     if bodies.is_empty() {
         out += "  ensures  emp\n";
