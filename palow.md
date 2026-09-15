@@ -1670,8 +1670,47 @@ new facts about memory.
    with the binder outside the guard. The binder is now substituted where it
    belongs, which is what it should always have been.
 
-   As of this milestone: **760 specifications, 557 of them with real bodies,
-   203 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   Inline Pulse in a *contract* was the largest single cluster of dropped
+   clauses -- 35 of the 91 -- and it is now spliced in as written, on the same
+   terms as a ghost statement. A clause whose type is `_slprop` is ownership,
+   not a proposition, so it goes into `requires`/`ensures` directly rather than
+   under `pure`; the rest keep their `pure` wrapper. Both kinds are subject to
+   the usual rule that a clause which cannot be translated takes the whole
+   contract down with it, so a partially-understood specification is never
+   proved. `_assert` of a hand-written slprop follows the same split, and its
+   antiquotations are folded into the term rather than lifted into preceding
+   statements -- a fragment is a single term, and a call spliced out of one
+   would run.
+
+   Two smaller things fell out of this. A fragment written across several lines
+   was being dropped into a `requires` at column zero, which Pulse reads as the
+   end of the clause, so a fragment is now flattened to one line (and one
+   carrying a line comment is refused rather than mangled). And ghost
+   statements following a `return` are no longer discarded: the returned value
+   is bound to a name, `$(return)` resolves to it, and the statements run
+   before the frame is released. That is the only way to establish a
+   postcondition that talks about the result, and it is what `return_ghost`
+   exists to test -- that test now verifies with no admits at all.
+
+   The honest accounting is that the *dropped-contract* count went up, from 91
+   to 99, because ten more tests were marked `palow-old-annotations`. Their
+   fragments name things the old model has and this one does not -- `core_to_ref`,
+   `arrayptr_pts_to`, the generated `__aux_raw_unfolded` helpers, `|->`, even
+   the old emitter's mangled `return_1`. Before contract splicing existed those
+   clauses were dropped anyway and the marker was unnecessary; now that
+   splicing works, refusing them explicitly is what keeps the number meaning
+   what it says.
+
+   A second silent weakening turned up while doing this, with the same shape as
+   the `_nullable` one: a `_plain` parameter carrying a `_refine_value` was
+   skipped by an early-out that ran before the refinement check, so a
+   user-supplied ownership predicate vanished without a note. The check now
+   runs first. Both holes were found by reading the code rather than by any
+   test failing, which suggests the remaining early-outs in the parameter loop
+   deserve the same audit.
+
+   As of this milestone: **759 specifications, 560 of them with real bodies,
+   199 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

@@ -15,7 +15,7 @@ void takes_nullable_arrayptr(_nullable _arrayptr int *p) {}
 
 _include_pulse(Nullable_include1,
   // A user-defined predicate over a pointer, as in pred(this).
-  let nonneg_offset #a (x: array a) : slprop = pure (offset_of x >= 0)
+  let nonneg_offset (x: ptr) : slprop = pure (addr_of x >= 0)
 )
 
 // A nullable arrayptr carrying a refinement: unless_null wraps the whole prop
@@ -32,46 +32,38 @@ void takes_nullable_struct(_nullable const struct ops *p) {}
 typedef int (*binop)(int, int);
 void takes_nullable_fnptr(_nullable binop f) {}
 
-// Passing NULL to a _nullable parameter needs two ghost steps: the precondition
-// is `unless_null p (...)`, and Pulse cannot introduce it on its own because
-// `has_is_null` is still a uvar at match time. Naming the pointer type fixes it.
+// Passing NULL to a _nullable parameter needs two ghost steps: the
+// precondition is `unless_null p (...)`, and the intro is what turns `emp` into
+// it -- Pulse cannot do that on its own, because which branch of the guard
+// applies is decided by a pure fact rather than by the slprop's shape.
 //
 // Both arguments of the intro must be explicit, and the trailing elim is needed
-// to release what the callee hands back. `p` is the callee's precondition as
-// printed in the generated .fsti, minus any [@@pulse_eager_unfold] predicate
-// that reduces to emp (writing those out breaks the match).
+// to release what the callee hands back. The second argument is the callee's
+// precondition as printed in the generated module, with the guard stripped off.
 
 void call_ref(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (null #Int32.t) (Pulse.Lib.Reference.pts_to (null #Int32.t) #1.0R 0l));
+    _ghost_stmt(intro_unless_null_null null (int32_t_pts_to null 1.0R 0l));
     takes_nullable_ref(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (null #Int32.t) _);
+    _ghost_stmt(elim_unless_null_null null _);
 }
-// _array needs array_pts_to_full and a concrete full_array_spec.
+// _array owns a sequence of elements, so the guarded predicate is array_pts_to.
 void call_array(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (array_null #Int32.t) (array_pts_to_full (array_null #Int32.t) 1.0R (array_spec_zeroed Int32.t 0 0l)));
+    _ghost_stmt(intro_unless_null_null null (array_pts_to int32_t_repr 4 null 1.0R (Seq.empty #Int32.t)));
     takes_nullable_array(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (array_null #Int32.t) _);
+    _ghost_stmt(elim_unless_null_null null _);
 }
-// _arrayptr emits no pts_to of its own, so p is emp.
+// Palow has no separate _arrayptr, so this is the same shape as _array.
 void call_arrayptr(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (array_null #Int32.t) emp);
+    _ghost_stmt(intro_unless_null_null null (array_pts_to int32_t_repr 4 null 1.0R (Seq.empty #Int32.t)));
     takes_nullable_arrayptr(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (array_null #Int32.t) _);
-}
-// A refinement rides inside the same unless_null, so p is the refinement.
-void call_refined(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (array_null #Int32.t) (Nullable_include1.nonneg_offset (array_null #Int32.t)));
-    takes_nullable_refined(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (array_null #Int32.t) _);
+    _ghost_stmt(elim_unless_null_null null _);
 }
 void call_struct(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (null #Struct_ops.struct_ops) (Pulse.Lib.Reference.pts_to (null #Struct_ops.struct_ops) #1.0R (Struct_ops.Mkstruct_ops 0l)));
+    _ghost_stmt(intro_unless_null_null null (struct_ops_pts_to null 1.0R ({ fld_a = 0l })));
     takes_nullable_struct(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (null #Struct_ops.struct_ops) _);
+    _ghost_stmt(elim_unless_null_null null _);
 }
-// A function pointer uses FuncPtr.null, and its pred is emp.
+// A nullable function pointer owns nothing, so there is no guard to introduce.
 void call_fnptr(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (Pulse.Lib.C.FuncPtr.null (Int32.t & Int32.t) Int32.t) emp);
     takes_nullable_fnptr(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (Pulse.Lib.C.FuncPtr.null (Int32.t & Int32.t) Int32.t) _);
 }

@@ -838,6 +838,64 @@ impl<'a> Spec<'a> {
     }
 
     /// A specification expression in value position.
+    /// A fragment of hand-written Pulse in a contract.
+    ///
+    /// The same splice as in a body, against the contract's view of the world:
+    /// `$(e)` is what the specification says `e` is at this point -- which for
+    /// an `_old` or an `_ensures` is not what the body would read -- and `$&(e)`
+    /// is the parameter's own address, which a contract can only name for
+    /// something it was handed directly.
+    fn inline_pulse(&self, code: &InlinePulseCode, w: When) -> Result<String, String> {
+        if !self.tds.splice_inline {
+            return Err("inline Pulse written for the old memory model".to_string());
+        }
+        let mut out = String::new();
+        for tok in &code.tokens {
+            match tok {
+                InlinePulseToken::Verbatim(ct) => {
+                    out.push_str(ct.before);
+                    out.push_str(&ct.text.val);
+                }
+                InlinePulseToken::RValueAntiquot { before, expr } => {
+                    let v = self.value(expr, w)?;
+                    out.push_str(before);
+                    out.push_str(&format!("({})", v));
+                }
+                InlinePulseToken::LValueAntiquot { before, expr } => {
+                    let ExprT::Var(v) = &strip_vattr(expr).val else {
+                        return Err("`$&` of something a contract cannot address".to_string());
+                    };
+                    out.push_str(before);
+                    out.push_str(&format!("(var_{})", v.val));
+                }
+                InlinePulseToken::TypeAntiquot { before, ty } => {
+                    let t = fstar_type(self.tds, ty)
+                        .ok_or_else(|| format!("`$type` of {}", describe(ty)))?;
+                    out.push_str(before);
+                    out.push_str(&format!("({})", t));
+                }
+                InlinePulseToken::FieldAntiquot {
+                    before,
+                    ty,
+                    field_name,
+                } => {
+                    out.push_str(before);
+                    out.push_str(&field_antiquot(self.tds, ty, field_name)?);
+                }
+                InlinePulseToken::AuxFnAntiquot { kind, .. } => {
+                    return Err(format!(
+                        "`${}`, which names a helper of the old memory model",
+                        kind.keyword()
+                    ));
+                }
+                InlinePulseToken::Declare { .. } => {
+                    return Err("`$declare` in a contract".to_string());
+                }
+            }
+        }
+        flatten_fragment(&out)
+    }
+
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
@@ -1088,6 +1146,17 @@ impl<'a> Spec<'a> {
                 self.value(t, w)?,
                 self.value(f, w)?
             )),
+            // Hand-written Pulse as a contract *term*: a pure fact the author
+            // states themselves. The slprop-valued case is not here -- an
+            // slprop is ownership, not a proposition, and it goes into the
+            // `requires` and `ensures` clauses directly rather than under a
+            // `pure`.
+            ExprT::InlinePulse(code, _) => {
+                if !self.tds.splice_inline {
+                    return Err("inline Pulse written for the old memory model".to_string());
+                }
+                self.inline_pulse(code, w)
+            }
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
                 let mut out = format!("func_{}", name.val);
                 for a in args.iter() {
@@ -1378,6 +1447,10 @@ fn emit_fn(
     let mut ghosts: Vec<String> = Vec::new();
     let mut perms: Vec<String> = Vec::new();
     let mut req: Vec<String> = Vec::new();
+    // Hand-written ownership the contract hands back, which unlike the
+    // generated kind binds no existential of its own -- the author names
+    // whatever they need inside the fragment.
+    let mut owned_post: Vec<String> = Vec::new();
     let mut preserved: Vec<String> = Vec::new();
     // Ownership handed back with a value the contract may constrain: the
     // existential binder, its type, and the points-to less its value argument.
@@ -1402,6 +1475,16 @@ fn emit_fn(
         let fty = fstar_type(tds, &arg.ty)
             .ok_or_else(|| format!("parameter {} is {}", pname, describe(tds.resolve(&arg.ty))))?;
         params.push(format!("({}: {})", pname, fty));
+
+        // A user-supplied ownership predicate is a contract even when the
+        // parameter is `_plain` and so has no points-to of its own -- `_plain`
+        // is there precisely to make room for one. Checking before the
+        // `pointee` early-out is what stops such a contract from being dropped
+        // without a word, which is the failure mode that matters: a weaker
+        // specification nothing downstream can see is weaker.
+        if let Err(why) = refinements(tds, &arg.ty) {
+            refine_err.get_or_insert(format!("parameter {} carries {}", pname, why));
+        }
 
         let Some(pt) = pointee(tds, &arg.ty) else {
             if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &arg.ty).val
@@ -1686,21 +1769,60 @@ fn emit_fn(
         }
         Ok(out)
     };
-    let contract = translate(&decl.requires, When::Pre)
-        .and_then(|pre| translate(&decl.ensures, When::Post).map(|post| (pre, post)))
+    // An `_inline_pulse` clause whose type is `_slprop` is ownership, not a
+    // proposition: it belongs beside the generated points-to in `requires` and
+    // `ensures`, not under a `pure`. Everything else stays a prop, so the two
+    // are separated before translation rather than after.
+    let is_slprop = |e: &Rc<Expr>| matches!(&e.val, ExprT::InlinePulse(_, t) if matches!(tds.resolve(t).val, TypeT::SLProp));
+    let split = |es: &Exprs| -> (Exprs, Exprs) { es.iter().cloned().partition(|e| is_slprop(e)) };
+    let (req_slprops, req_props) = split(&decl.requires);
+    let (ens_slprops, ens_props) = split(&decl.ensures);
+    let mut slprop_err: Option<String> = None;
+    let generated_req = req.len();
+    for (es, w, into) in [
+        (&req_slprops, When::Pre, &mut req),
+        (&ens_slprops, When::Post, &mut owned_post),
+    ] {
+        for e in es {
+            let ExprT::InlinePulse(code, _) = &e.val else {
+                continue;
+            };
+            match spec.inline_pulse(code, w) {
+                Ok(t) => into.push(t),
+                Err(why) => {
+                    slprop_err.get_or_insert(why);
+                }
+            }
+        }
+    }
+
+    let contract = translate(&req_props, When::Pre)
+        .and_then(|pre| translate(&ens_props, When::Post).map(|post| (pre, post)))
         .and_then(|(mut pre, mut post)| {
             pre.extend(refine_props(When::Pre)?);
             post.extend(refine_props(When::Post)?);
             Ok((pre, post))
         });
     let (pre_props, post_props, contract_ok, dropped) = match contract {
-        Ok((pre, post)) => (pre, post, true, None),
-        Err(why) => (
-            Vec::new(),
-            Vec::new(),
-            decl.requires.is_empty() && decl.ensures.is_empty(),
-            Some(why),
-        ),
+        Ok((pre, post)) if slprop_err.is_none() => (pre, post, true, None),
+        contract => {
+            // A half-translated contract is worse than none: the parts that
+            // did translate would look like the whole thing. So a failure
+            // anywhere drops all of it, including the hand-written ownership
+            // gathered above.
+            req.truncate(generated_req);
+            owned_post.clear();
+            let why = match contract {
+                Err(why) => why,
+                _ => slprop_err.unwrap_or_default(),
+            };
+            (
+                Vec::new(),
+                Vec::new(),
+                decl.requires.is_empty() && decl.ensures.is_empty(),
+                Some(why),
+            )
+        }
     };
 
     let mut out = String::new();
@@ -1734,6 +1856,7 @@ fn emit_fn(
     out += &format!("  returns  {} : {}\n", ret_name, ret);
 
     let mut bodies: Vec<String> = fresh.iter().map(|(_, _, s)| s.clone()).collect();
+    bodies.extend(owned_post.iter().cloned());
     bodies.extend(post_props.iter().map(|p| format!("pure ({})", p)));
     if bodies.is_empty() {
         out += "  ensures  emp\n";
@@ -4199,6 +4322,11 @@ struct Body<'a> {
     /// Whether the expression being translated is a loop guard rather than a
     /// specification. A guard is real code, so a call may stay in it.
     in_guard: bool,
+    /// The name the returned value is bound to while the ghost statements that
+    /// follow a `return` are translated. `$(return)` is how such a statement
+    /// names the value it is there to say something about, and it only has a
+    /// name at all because those statements exist.
+    ret_binding: Option<String>,
     /// Array-kind pointer parameters, by C name.
     arrays: HashMap<String, ArrayParam>,
     /// The function's parameters, by C name. Ownership of what a pointer points
@@ -5027,6 +5155,12 @@ impl<'a> Body<'a> {
                 self.prop(inner)
             }
             ExprT::Old(_) => Err("an assertion about the state on entry".to_string()),
+            ExprT::InlinePulse(code, _) => {
+                if !self.tds.splice_inline {
+                    return Err("inline Pulse written for the old memory model".to_string());
+                }
+                flatten_fragment(&self.inline_pulse(code)?)
+            }
             ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner)?)),
             ExprT::BoolLit(b) => Ok(if *b { "True" } else { "False" }.to_string()),
             ExprT::BinOp(op, l, r) => {
@@ -5176,7 +5310,13 @@ impl<'a> Body<'a> {
                     out.push_str(&ct.text.val);
                 }
                 InlinePulseToken::RValueAntiquot { before, expr } => {
-                    let v = self.rvalue(expr)?;
+                    // `inline` rather than `rvalue`: a fragment is a single
+                    // term, so the loads it needs belong inside it, and a call
+                    // is refused because splicing one would run it.
+                    let v = match (&strip_vattr(expr).val, &self.ret_binding) {
+                        (ExprT::Var(n), Some(r)) if &*n.val == "return" => r.clone(),
+                        _ => self.inline(expr)?,
+                    };
                     out.push_str(before);
                     out.push_str(&format!("({})", v));
                 }
@@ -6489,6 +6629,23 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("label {}:;", label));
                 Ok(())
             }
+            // `_assert` of a hand-written slprop is an ownership assertion,
+            // not a proposition, so it is checked as written rather than
+            // wrapped in `pure`.
+            StmtT::Assert(e)
+                if matches!(&strip_vattr(e).val,
+                    ExprT::InlinePulse(_, t) if matches!(self.tds.resolve(t).val, TypeT::SLProp)) =>
+            {
+                if !self.tds.splice_inline {
+                    return Err("inline Pulse written for the old memory model".to_string());
+                }
+                let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
+                    unreachable!()
+                };
+                let t = flatten_fragment(&self.inline_pulse(code)?)?;
+                self.lines.push(format!("assert ({});", t));
+                Ok(())
+            }
             StmtT::Assert(e) => {
                 let p = self.prop(e)?;
                 self.lines.push(format!("assert (pure {});", p));
@@ -6669,10 +6826,40 @@ impl<'a> Body<'a> {
         for (i, s) in stmts.iter().enumerate() {
             match &s.val {
                 StmtT::Return(e) => {
-                    let v = match e {
+                    let mut v = match e {
                         Some(e) => Some(self.rvalue(e)?),
                         None => None,
                     };
+                    // Ghost statements after a `return` are the only way to
+                    // establish a postcondition that talks about the returned
+                    // value, so the value is given a name and they are run
+                    // against it before the frame is released.
+                    // Only the run of ghost statements directly after the
+                    // `return`: anything past it is unreachable code, which is
+                    // dropped here as it always has been.
+                    let after: Vec<Rc<Stmt>> = stmts[i + 1..]
+                        .iter()
+                        .take_while(|s| matches!(s.val, StmtT::GhostStmt(_)))
+                        .cloned()
+                        .collect();
+                    if !after.is_empty() {
+                        if let Some(val) = &v {
+                            let name = format!("ret_val{}", self.tmp);
+                            self.tmp += 1;
+                            self.lines.push(format!("let {} = {};", name, val));
+                            v = Some(name.clone());
+                            self.ret_binding = Some(name);
+                        }
+                        let r = (|| -> Result<(), String> {
+                            for s in &after {
+                                self.env.push_stmt(s);
+                                self.stmt(s)?;
+                            }
+                            Ok(())
+                        })();
+                        self.ret_binding = None;
+                        r?;
+                    }
                     self.release_from(0);
                     return Ok(v);
                 }
@@ -7386,6 +7573,7 @@ fn emit_body(
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
         in_guard: false,
+        ret_binding: None,
         arrays,
         requires_ok: sig.contract && !defn.decl.requires.is_empty(),
         owned: &sig.owned,
@@ -7479,6 +7667,30 @@ fn include_pulse(tds: &Typedefs, code: &InlinePulseCode) -> Result<String, Strin
 
 /// The generated name a `$field` stands for: a record field of a struct, or
 /// the constructor of a union member.
+/// A spliced fragment is dropped into a `requires`/`ensures` clause or into
+/// the middle of a statement, and Pulse reads indentation, so a fragment that
+/// was written across several lines has to become one line before it lands
+/// somewhere its original column no longer means anything. A line comment
+/// would swallow the rest of the term, so a fragment carrying one is refused
+/// rather than silently mangled.
+fn flatten_fragment(s: &str) -> Result<String, String> {
+    if s.contains("//") {
+        return Err("inline Pulse containing a line comment".to_string());
+    }
+    let mut out = String::new();
+    for (i, line) in s.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if i > 0 && !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(line);
+    }
+    Ok(out)
+}
+
 fn field_antiquot(tds: &Typedefs, ty: &Type, field_name: &Ident) -> Result<String, String> {
     match &peel(tds, ty).val {
         TypeT::TypeRef(TypeRefKind::Struct(_)) => Ok(format!("fld_{}", field_name)),
