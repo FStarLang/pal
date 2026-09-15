@@ -1770,8 +1770,38 @@ new facts about memory.
    is hand-written and is spliced as written. `sum_point` now verifies with
    `freeable var_p 8sz` in both directions.
 
-   As of this milestone: **759 specifications, 561 of them with real bodies,
-   198 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   Quantifiers in contracts came next, and were the largest cluster left that
+   needed no model work at all: `_forall` and `_exists` were simply absent from
+   the proposition translator, which cost eight contracts across
+   `compare_elements`, `implies`, `rec_fn`, `recursive_functions`,
+   `reverse_test` and `with_pure_quantifier` -- every specification that says
+   something about a whole array rather than about one element. The bound
+   variable is bound at its C type, not at `nat`: `_forall(size_t i, ...)` is a
+   claim about every `size_t`, and binding it that way is what lets every other
+   translation path -- `a[i]`, `i < len` -- work unchanged underneath.
+
+   The one real decision was where the partiality side conditions go. `Seq.index`
+   is total only in range, and this emitter already collects the bounds
+   obligations an indexing contract raises and conjoins them to the clause. A
+   bound raised *inside* a quantifier must stay inside it: hoisting it out would
+   be ill-typed, since the fact that makes the access total is usually the
+   quantifier's own antecedent. So a quantified body is translated in a nested
+   scope with its own obligation list, and the result is `forall x. G ==> p`
+   (or `exists x. G /\ p`). That is weaker than `forall x. p`, and deliberately
+   so: for an out-of-range `i`, `a[i]` is undefined in C, so "whenever the
+   access is defined" is the faithful reading rather than a concession.
+
+   Quantifiers inside an `_assert` needed a second, narrower answer. An
+   assertion in a body translates by *emitting* the loads its operands need,
+   and a load underneath a binder would have to run once per witness -- there
+   is no such thing. A quantified assertion is therefore translated only when
+   its body turns out to need no memory at all, and rather than predict that,
+   the emitter translates the body and then checks whether anything was
+   emitted, discarding it if so. That covers the pure quantifiers
+   `with_pure_quantifier` exists to test and reports honestly on the rest.
+
+   As of this milestone: **759 specifications, 564 of them with real bodies,
+   195 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

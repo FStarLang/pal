@@ -805,6 +805,55 @@ impl<'a> Spec<'a> {
                 }
             }
             ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner, w)?)),
+            // A quantified variable is bound at its C type, not at `nat`:
+            // `_forall(size_t i, ...)` is a claim about every `size_t`, and
+            // binding it that way is what lets every other translation path --
+            // `a[i]`, `i < len` -- work unchanged inside the body.
+            //
+            // The body's well-definedness side conditions stay *inside* the
+            // quantifier. `Seq.index` is partial, and the bound that makes it
+            // total is normally the quantifier's own antecedent, so hoisting
+            // the condition out would both be ill-typed and claim something
+            // much stronger than the source does.
+            ExprT::Forall(v, ty, body) | ExprT::Exists(v, ty, body) => {
+                let all = matches!(&e.val, ExprT::Forall(..));
+                let fty = fstar_type(self.tds, ty).ok_or_else(|| {
+                    format!("a quantifier over {}", describe(self.tds.resolve(ty)))
+                })?;
+                let bound = format!("var_{}", v.val);
+                let mut env = self.env.clone();
+                env.push_var_decl(v, ty.clone(), crate::env::LocalDeclKind::RValue);
+                let mut locals = self.locals.clone();
+                locals.insert(v.val.to_string(), bound.clone());
+                let body = {
+                    let inner = Spec {
+                        tds: self.tds,
+                        env: &env,
+                        pointees: self.pointees.clone(),
+                        arrays: self.arrays.clone(),
+                        guarded: self.guarded.clone(),
+                        guards: RefCell::new(Vec::new()),
+                        ret: self.ret.clone(),
+                        locals,
+                    };
+                    let p = inner.prop(body, w)?;
+                    let g = inner.guards.borrow().join(r" /\ ");
+                    if g.is_empty() {
+                        p
+                    } else if all {
+                        format!(r"({} ==> {})", g, p)
+                    } else {
+                        format!(r"({} /\ {})", g, p)
+                    }
+                };
+                Ok(format!(
+                    "({} ({}: {}). {})",
+                    if all { "forall" } else { "exists" },
+                    bound,
+                    fty,
+                    body
+                ))
+            }
             ExprT::BoolLit(b) => Ok(if *b { "True" } else { "False" }.to_string()),
             ExprT::BinOp(op, l, r) => {
                 let logical = match op {
@@ -4509,6 +4558,9 @@ struct Body<'a> {
     /// Whether the expression being translated is a loop guard rather than a
     /// specification. A guard is real code, so a call may stay in it.
     in_guard: bool,
+    /// Variables bound by a quantifier in an assertion. They have no storage,
+    /// so they resolve to their own name rather than through a slot.
+    spec_binders: HashMap<String, String>,
     /// The name the returned value is bound to while the ghost statements that
     /// follow a `return` are translated. `$(return)` is how such a statement
     /// names the value it is there to say something about, and it only has a
@@ -5284,6 +5336,11 @@ impl<'a> Body<'a> {
     /// once -- and Pulse accepts a computation in the head of a `while`. So a
     /// guard keeps the call where the source put it, and nothing is refused.
     fn inline(&mut self, e: &Expr) -> Result<String, String> {
+        if let ExprT::Var(v) = &strip_vattr(e).val {
+            if let Some(b) = self.spec_binders.get(v.val.as_ref()) {
+                return Ok(b.clone());
+            }
+        }
         let before = self.lines.len();
         let mut v = self.rvalue(e)?;
         let added: Vec<String> = self.lines[before..].to_vec();
@@ -5352,6 +5409,43 @@ impl<'a> Body<'a> {
                 flatten_fragment(&self.inline_pulse(code)?)
             }
             ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner)?)),
+            // An assertion translates by *emitting* the loads its operands
+            // need, which is exactly what a quantifier body cannot do: a load
+            // under a binder would have to run once per witness. So a
+            // quantified assertion is translated only when its body turns out
+            // to need no memory at all, and the check is made after the fact by
+            // seeing whether anything was emitted.
+            ExprT::Forall(v, ty, body) | ExprT::Exists(v, ty, body) => {
+                let all = matches!(&e.val, ExprT::Forall(..));
+                let fty = fstar_type(self.tds, ty).ok_or_else(|| {
+                    format!("a quantifier over {}", describe(self.tds.resolve(ty)))
+                })?;
+                let bound = format!("var_{}", v.val);
+                let saved_env = self.env.clone();
+                self.env
+                    .push_var_decl(v, ty.clone(), crate::env::LocalDeclKind::RValue);
+                let shadowed = self.spec_binders.insert(v.val.to_string(), bound.clone());
+                let before = self.lines.len();
+                let r = self.prop(body);
+                let emitted = self.lines.len() != before;
+                self.lines.truncate(before);
+                self.env = saved_env;
+                match shadowed {
+                    Some(old) => self.spec_binders.insert(v.val.to_string(), old),
+                    None => self.spec_binders.remove(v.val.as_ref()),
+                };
+                let p = r?;
+                if emitted {
+                    return Err("a quantified assertion whose body reads memory".to_string());
+                }
+                Ok(format!(
+                    "({} ({}: {}). {})",
+                    if all { "forall" } else { "exists" },
+                    bound,
+                    fty,
+                    p
+                ))
+            }
             ExprT::BoolLit(b) => Ok(if *b { "True" } else { "False" }.to_string()),
             ExprT::BinOp(op, l, r) => {
                 let logical = match op {
@@ -7762,6 +7856,7 @@ fn emit_body(
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
         in_guard: false,
+        spec_binders: HashMap::new(),
         ret_binding: None,
         arrays,
         requires_ok: sig.contract && !defn.decl.requires.is_empty(),
