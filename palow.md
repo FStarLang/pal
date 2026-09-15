@@ -1977,8 +1977,35 @@ new facts about memory.
    a local allocated inside the loop body is still refused, because neither
    statement runs the releases between it and the end of the body.
 
-   As of this milestone: **771 specifications, 593 of them with real bodies,
-   178 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   Early `return` was the next thing, and it was already half done: a Pulse
+   block is an expression, so leaving a function early means *being* the tail
+   of what encloses you, and the translation already folded the statements
+   after a returning `if` into the arm that falls through. What it did not do
+   was believe its own construction. It asked whether a block leaves the
+   function by looking at its last statement, which is wrong twice over: a
+   `return` followed by the ghost statements that establish the
+   postcondition is still a `return`, and an `if` both of whose arms leave is
+   a block that leaves. And having built an `if` that is a value, it handed
+   back no value for it, so a chain of early returns -- `if (d == NORTH)
+   return SOUTH; if (d == SOUTH) return NORTH; ...` -- reported one arm
+   producing a value and the other not.
+
+   Both are now fixed, and the value is appended to the block rather than
+   handed back, which is what makes a returning `if` a value in its own
+   right. A `switch` in which every case returns follows for free. What is
+   still refused is a `return` out of a loop, which needs a different shape
+   than this one -- a flag, a `break`, and a test after -- and the message
+   says so rather than blaming the `if`.
+
+   A bug came out with it, of the kind only the second user of a mechanism
+   finds. The validity of a function pointer, once seeded, is tracked so it
+   can be put down again; but the tracking was not saved and restored across
+   the arms of an `if`, so a validity seeded in the first arm was still
+   believed to be held in the second, and the second arm tried to put down a
+   fact about a function it had never mentioned.
+
+   As of this milestone: **771 specifications, 598 of them with real bodies,
+   173 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

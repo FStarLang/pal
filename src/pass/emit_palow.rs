@@ -7729,7 +7729,12 @@ impl<'a> Body<'a> {
     /// `return` inside an `if` is what makes this recursive rather than a
     /// loop -- the statements after such an `if` are the arm the `return` did
     /// not take, so they become the other branch.
-    fn rest(&mut self, stmts: &[Rc<Stmt>]) -> Result<Option<String>, String> {
+    ///
+    /// A Pulse block's value is its last expression, so the value is appended
+    /// here rather than handed back; what comes back is only whether there is
+    /// one. That is what lets a returning `if` be a value in its own right,
+    /// which is what a chain of early returns needs.
+    fn rest(&mut self, stmts: &[Rc<Stmt>]) -> Result<bool, String> {
         for (i, s) in stmts.iter().enumerate() {
             match &s.val {
                 StmtT::Return(e) => {
@@ -7768,7 +7773,11 @@ impl<'a> Body<'a> {
                         r?;
                     }
                     self.release_from(0);
-                    return Ok(v);
+                    let has = v.is_some();
+                    if let Some(v) = v {
+                        self.lines.push(v);
+                    }
+                    return Ok(has);
                 }
                 StmtT::If {
                     cond,
@@ -7835,22 +7844,16 @@ impl<'a> Body<'a> {
                     self.blocks = entry_blocks;
                     let then_lines: Vec<String> = then_pre.into_iter().chain(then_lines).collect();
                     let else_lines: Vec<String> = else_pre.into_iter().chain(else_lines).collect();
-                    if then_val.is_some() != else_val.is_some() {
+                    if then_val != else_val {
                         return Err("an `if` where only one arm returns a value".to_string());
                     }
                     self.lines.push(format!("if ({})", c));
                     self.lines.push("{".to_string());
                     self.lines.extend(then_lines.iter().map(|l| indent(l)));
-                    if let Some(v) = then_val {
-                        self.lines.push(indent(&v));
-                    }
                     self.lines.push("} else {".to_string());
                     self.lines.extend(else_lines.iter().map(|l| indent(l)));
-                    if let Some(v) = else_val {
-                        self.lines.push(indent(&v));
-                    }
                     self.lines.push("}".to_string());
-                    return Ok(None);
+                    return Ok(then_val);
                 }
                 _ => {
                     self.env.push_stmt(s);
@@ -7859,16 +7862,17 @@ impl<'a> Body<'a> {
             }
         }
         self.release_from(0);
-        Ok(None)
+        Ok(false)
     }
 
     /// One arm of a returning `if`, translated into its own line buffer
     /// against a copy of the state at the `if`.
-    fn tail_arm(&mut self, stmts: &[Rc<Stmt>]) -> Result<(Vec<String>, Option<String>), String> {
+    fn tail_arm(&mut self, stmts: &[Rc<Stmt>]) -> Result<(Vec<String>, bool), String> {
         let outer_env = self.env.clone();
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
         let outer_slots = self.slots.clone();
+        let outer_seeded = self.seeded.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
 
         let out = self
@@ -7876,6 +7880,7 @@ impl<'a> Body<'a> {
             .map(|v| (std::mem::take(&mut self.lines), v));
 
         self.in_branch = outer_in_branch;
+        self.seeded = outer_seeded;
         self.slots = outer_slots;
         self.out_params = outer_out;
         self.env = outer_env;
@@ -7893,12 +7898,23 @@ impl<'a> Body<'a> {
         let outer_env = self.env.clone();
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
+        let outer_seeded = self.seeded.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
 
         let result = (|| -> Result<(), String> {
             for s in stmts.iter() {
                 if matches!(s.val, StmtT::Return(_)) {
-                    return Err("a `return` inside an `if`".to_string());
+                    // A Pulse block is an expression: leaving early means
+                    // being the tail of what encloses you, which `rest`
+                    // arranges by folding the statements after an `if` into
+                    // the arm that falls through. A loop body has no tail to
+                    // be, so a `return` out of one needs a different shape
+                    // than this -- a flag, a `break`, and a test after.
+                    return Err(if self.in_loop {
+                        "a `return` inside a loop".to_string()
+                    } else {
+                        "a `return` that is not in tail position".to_string()
+                    });
                 }
                 self.env.push_stmt(s);
                 self.stmt(s)?;
@@ -7910,6 +7926,7 @@ impl<'a> Body<'a> {
         let out = (|| {
             result?;
             self.release_from(mark);
+            self.seeded = outer_seeded;
             Ok(BranchResult {
                 lines: std::mem::take(&mut self.lines),
                 inits: self.slots[..mark].iter().map(|s| s.init).collect(),
@@ -8527,10 +8544,7 @@ fn emit_body(
             .collect(),
     };
 
-    let tail = b.rest(&defn.body)?;
-    if let Some(t) = tail {
-        b.lines.push(t);
-    }
+    b.rest(&defn.body)?;
     Ok(TranslatedBody {
         lines: b.lines,
         divergent: b.divergent,
@@ -8538,10 +8552,21 @@ fn emit_body(
     })
 }
 
-/// Whether a C block always leaves the function. Only the shape the
-/// translation needs: a trailing `return`.
+/// Whether a C block always leaves the function, so that whatever follows it
+/// is reached only on the other path. Statements after a `return` are
+/// unreachable, so their shape does not matter.
 fn returns(stmts: &Stmts) -> bool {
-    matches!(stmts.last().map(|s| &s.val), Some(StmtT::Return(_)))
+    stmts.iter().any(|s| match &s.val {
+        StmtT::Return(_) => true,
+        // An `if` both of whose arms leave is a block that leaves, and that
+        // is how a chain of early returns ends up being one.
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        } => returns(then_branch) && returns(else_branch),
+        _ => false,
+    })
 }
 
 /// Names for the constructs the subset does not cover. These end up in the
