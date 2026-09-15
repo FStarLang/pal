@@ -1955,8 +1955,30 @@ new facts about memory.
    such an alias is now just the address. Seven of the eight admits in that
    cluster were globals; the one that remains genuinely is a local's.
 
-   As of this milestone: **771 specifications, 588 of them with real bodies,
-   183 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   `break` and `continue` came next, and they turned out to be a question
+   about a promise rather than about control flow: Pulse has both statements
+   and they mean what C means. What Pulse also does, silently, is carry out of
+   a `while` the fact that its condition is now false -- which is exactly the
+   thing a `break` makes untrue, since it leaves from the middle, while the
+   condition still holds. Pulse's own way of withdrawing that promise is an
+   `ensures` clause on the loop, and a loop containing a `break` now carries
+   `ensures true`. Nothing the source promised is lost by that: C makes no
+   claim about a loop it jumped out of.
+
+   What the author *does* claim at the exit arrives as `_ensures` on the loop,
+   and here the two models part company. The old translator can put it
+   straight into Pulse's `ensures`, because its locals are Pulse references
+   and a specification may read one. Palow's locals are addresses, and every
+   value a loop invariant talks about is bound existentially inside the
+   invariant, so at the `ensures` there is no name for it. The claim is
+   asserted just after the loop instead -- what holds at the exit is what
+   holds immediately after it -- which costs the reads it names and means
+   exactly what the source says. A `break` or `continue` that would jump past
+   a local allocated inside the loop body is still refused, because neither
+   statement runs the releases between it and the end of the body.
+
+   As of this milestone: **771 specifications, 593 of them with real bodies,
+   178 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

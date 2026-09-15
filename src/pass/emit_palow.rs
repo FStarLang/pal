@@ -4867,6 +4867,12 @@ struct Body<'a> {
     valid_fps: &'a HashSet<String>,
     /// Addresses whose validity this body has seeded and not yet put down.
     seeded: Vec<String>,
+    /// Whether a loop encloses the statement being translated, so `break` and
+    /// `continue` have something to leave.
+    in_loop: bool,
+    /// How many slots existed when the enclosing loop's body began. A `break`
+    /// or `continue` past a slot allocated since then would skip its release.
+    loop_mark: Option<usize>,
     /// Functions already known to be divergent. Calling one makes this body
     /// divergent too, which is why the whole set is reached by a fixpoint
     /// rather than in one pass.
@@ -4910,6 +4916,30 @@ struct ArrayParam {
     /// the function's own `_requires`; a block allocated in this body has the
     /// length written into the sequence it was claimed at.
     known_len: bool,
+}
+
+/// Whether a `break` in this statement list leaves *this* loop. A nested
+/// loop catches its own, so the search stops there.
+fn has_break(body: &Stmts) -> bool {
+    fn in_stmt(s: &Stmt) -> bool {
+        match &s.val {
+            StmtT::Break => true,
+            StmtT::While { .. } => false,
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => has_break(then_branch) || has_break(else_branch),
+            StmtT::Match {
+                branches,
+                default_branch,
+                ..
+            } => branches.iter().any(|b| has_break(&b.body)) || has_break(default_branch),
+            StmtT::GotoBlock { body, .. } => has_break(body),
+            _ => false,
+        }
+    }
+    body.iter().any(|s| in_stmt(s))
 }
 
 impl<'a> Body<'a> {
@@ -7230,9 +7260,10 @@ impl<'a> Body<'a> {
         ensures: &Exprs,
         body: &Stmts,
     ) -> Result<(), String> {
-        if !requires.is_empty() || !ensures.is_empty() {
-            return Err("a loop with its own `requires` or `ensures`".to_string());
+        if !requires.is_empty() {
+            return Err("a loop with its own `requires`".to_string());
         }
+        let breaks = has_break(body);
         if self.has_out {
             return Err("a loop in a function with an `_out` parameter".to_string());
         }
@@ -7252,6 +7283,9 @@ impl<'a> Body<'a> {
         let outer = std::mem::take(&mut self.lines);
         let was_branch = self.in_branch;
         self.in_branch = true;
+        let was_loop = self.in_loop;
+        self.in_loop = true;
+        let was_mark = self.loop_mark.replace(self.slots.len());
         let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
         let r = (|| -> Result<(), String> {
             for s in body.iter() {
@@ -7260,6 +7294,8 @@ impl<'a> Body<'a> {
             Ok(())
         })();
         self.in_branch = was_branch;
+        self.in_loop = was_loop;
+        self.loop_mark = was_mark;
         let body_lines = std::mem::replace(&mut self.lines, outer);
         r?;
         if self.slots.iter().map(|s| s.init).ne(inits) {
@@ -7284,10 +7320,37 @@ impl<'a> Body<'a> {
             body = format!("{} **\n      pure ({})", body, props.join(" /\\ "));
         }
         self.lines.push(format!("  invariant {}{}", quant, body));
+        // Pulse's `while` carries, implicitly, that the condition is false on
+        // the way out. A `break` leaves from the middle, where the condition
+        // still holds, so that promise has to be given up -- `ensures true`
+        // is how Pulse is told to stop making it. Nothing is lost that the
+        // source promised: C makes no claim about a loop it jumped out of,
+        // and what the author does claim arrives as `_ensures`, asserted
+        // below. A loop without a `break` keeps the negated condition.
+        if breaks {
+            self.lines.push("  ensures true".to_string());
+        }
         self.divergent = true;
         self.lines.push("{".to_string());
         self.lines.extend(body_lines.iter().map(|l| indent(l)));
         self.lines.push("};".to_string());
+        // A loop's `_ensures` is what holds when it exits, and a `break` is
+        // the reason it needs saying: the ordinary exit is covered by the
+        // invariant and the negated condition, but a `break` leaves from the
+        // middle, where the condition still holds.
+        //
+        // Pulse's `while` takes an `ensures` too, but it is a *prop* over the
+        // enclosing scope, and every local a loop invariant talks about is
+        // existentially bound inside the invariant, so there is no name for it
+        // there. Here the same claim is an assertion after the loop instead,
+        // which costs the reads it names and means exactly what the source
+        // says. What holds at the exit is what holds just after it.
+        for e in ensures.iter() {
+            let p = self.prop(e)?;
+            if p != "True" {
+                self.lines.push(format!("assert (pure {});", p));
+            }
+        }
         Ok(())
     }
 
@@ -7479,6 +7542,25 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             // See `ghost_replaced`.
+            // Pulse has `break` and `continue`, and they mean what C means.
+            // What they do not have is a way to leave a *slot* behind: a local
+            // allocated inside the loop body would have to be released on the
+            // way out, and neither statement runs the releases between it and
+            // the end of the body.
+            StmtT::Break | StmtT::Continue if self.loop_mark != Some(self.slots.len()) => Err(
+                format!("{} past a local allocated in the loop", stmt_kind(s)),
+            ),
+            StmtT::Break | StmtT::Continue if !self.in_loop => {
+                Err(format!("{} outside a loop", stmt_kind(s)))
+            }
+            StmtT::Break => {
+                self.lines.push("break;".to_string());
+                Ok(())
+            }
+            StmtT::Continue => {
+                self.lines.push("continue;".to_string());
+                Ok(())
+            }
             StmtT::GhostStmt(code) if ghost_replaced(code) => Ok(()),
             StmtT::GhostStmt(_) if !self.tds.splice_inline => Err(self.tds.no_splice()),
             StmtT::GhostStmt(code) => {
@@ -8429,6 +8511,8 @@ fn emit_body(
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
         seeded: Vec::new(),
+        in_loop: false,
+        loop_mark: None,
         divergent_fns,
         blocks: Vec::new(),
         aliases: alias_map(&defn.body),
