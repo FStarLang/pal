@@ -299,6 +299,11 @@ fn main() {
                 .as_bytes(),
             );
             generated_files.insert(errors_path);
+            std::fs::write(
+                outdir.join("source_range_info.json"),
+                source_range_info::serialize_palow(&modules),
+            )
+            .unwrap();
             std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
             // A module that is no longer generated has to go, or the next
             // verification run picks up a stale one and succeeds on code that

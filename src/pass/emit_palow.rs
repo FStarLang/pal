@@ -337,6 +337,30 @@ fn describe(ty: &Type) -> String {
 pub struct PalowModule {
     pub module_name: String,
     pub code: String,
+    /// Where in the C source this module came from. An IDE pointed at the
+    /// output needs to get from a generated file back to the declaration that
+    /// produced it; the mapping is per declaration rather than per token,
+    /// which is all a one-module-per-declaration layout can offer and enough
+    /// to navigate by.
+    pub origin: Option<Origin>,
+}
+
+/// The C declaration a generated module stands for.
+fn origin_of(decl: &Decl) -> Option<Origin> {
+    let loc = decl.loc.location();
+    Some(Origin {
+        file: loc.file_name.clone(),
+        range: loc.range,
+        name: crate::pass::emit::decl_name(decl),
+    })
+}
+
+/// The C declaration a generated module stands for.
+#[derive(Clone)]
+pub struct Origin {
+    pub file: Rc<str>,
+    pub range: crate::ir::Range,
+    pub name: String,
 }
 
 /// One declaration's worth of generated code, before it is wrapped in a
@@ -352,6 +376,7 @@ pub struct PalowModule {
 struct Chunk {
     module: String,
     code: String,
+    origin: Option<Origin>,
 }
 
 /// The Palow name of a C type: the prefix of its `_pts_to`, `_repr`, `_read`
@@ -2060,7 +2085,9 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
     let mut code: Vec<Chunk> = Vec::new();
     for decl in &tu.decls {
         if let DeclT::UnionDefn(ud) = &decl.val {
-            code.push(collect_union(tds, &layouts, ud));
+            let mut c = collect_union(tds, &layouts, ud);
+            c.origin = origin_of(decl);
+            code.push(c);
             continue;
         }
         let DeclT::StructDefn(sd) = &decl.val else {
@@ -2123,6 +2150,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
             code.push(Chunk {
                 module: format!("Struct_{}", name),
                 code: format!("(* skipped struct {}: {} *)\n\n", name, bad),
+                origin: origin_of(decl),
             });
             continue;
         }
@@ -2158,6 +2186,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
         code.push(Chunk {
             module: format!("Struct_{}", name),
             code: emit_struct(tds, &name),
+            origin: origin_of(decl),
         });
     }
     code
@@ -2179,6 +2208,7 @@ fn collect_union(
     let skip = |why: String| Chunk {
         module: format!("Union_{}", name),
         code: format!("(* skipped union {}: {} *)\n\n", name, why),
+        origin: None,
     };
     let (Some(size), Some(align)) = (
         layouts
@@ -2229,6 +2259,7 @@ fn collect_union(
     Chunk {
         module: format!("Union_{}", name),
         code: emit_union(tds, &name),
+        origin: None,
     }
 }
 
@@ -3259,6 +3290,7 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
                     chunks.push(Chunk {
                         module: format!("Global_{}", name),
                         code: out,
+                        origin: origin_of(decl),
                     });
                 }
             }
@@ -3298,6 +3330,7 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
                 "(* An immutable global is an F* constant plus an address; a mutable one\n   is an address and nothing else, which is inert because no permission for\n   it can ever be derived. *)\n\n{}",
                 out
             ),
+            origin: origin_of(decl),
         });
     }
     chunks
@@ -3638,6 +3671,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
 /// functions in this file that text names.
 struct FnItem<'a> {
     name: String,
+    origin: Option<Origin>,
     code: String,
     uses: HashSet<String>,
     defn: Option<&'a FnDefn>,
@@ -3726,6 +3760,7 @@ pub fn emit_palow(tu: &TranslationUnit, splice_inline: bool) -> Vec<PalowModule>
         chunks.push(Chunk {
             module: id.module_name.to_string(),
             code: text,
+            origin: origin_of(decl),
         });
     }
 
@@ -3753,6 +3788,7 @@ pub fn emit_palow(tu: &TranslationUnit, splice_inline: bool) -> Vec<PalowModule>
         chunks.push(Chunk {
             module: format!("Let_{}", ld.name.val),
             code: text,
+            origin: origin_of(decl),
         });
     }
 
@@ -3801,6 +3837,7 @@ pub fn emit_palow(tu: &TranslationUnit, splice_inline: bool) -> Vec<PalowModule>
         chunks.push(Chunk {
             module: format!("Func_{}", fndecl.name.val),
             code: text,
+            origin: origin_of(decl),
         });
     }
     let tds = tds;
@@ -3912,6 +3949,7 @@ pub fn emit_palow(tu: &TranslationUnit, splice_inline: bool) -> Vec<PalowModule>
             Ok(s) => s,
             Err(why) => {
                 items.push(FnItem {
+                    origin: origin_of(decl),
                     name: fndecl.name.val.to_string(),
                     code: format!("(* skipped {}: {} *)\n\n", fndecl.name.val, why),
                     uses: HashSet::new(),
@@ -3960,6 +3998,7 @@ pub fn emit_palow(tu: &TranslationUnit, splice_inline: bool) -> Vec<PalowModule>
             },
         );
         items.push(FnItem {
+            origin: origin_of(decl),
             name: fndecl.name.val.to_string(),
             code: String::new(),
             uses: HashSet::new(),
@@ -4028,6 +4067,7 @@ pub fn emit_palow(tu: &TranslationUnit, splice_inline: bool) -> Vec<PalowModule>
         chunks.push(Chunk {
             module: format!("Func_{}", items[i].name),
             code: std::mem::take(&mut items[i].code),
+            origin: items[i].origin.clone(),
         });
     }
 
@@ -4164,6 +4204,7 @@ fn into_modules(chunks: Vec<Chunk>) -> Vec<PalowModule> {
         out.push(PalowModule {
             module_name: ch.module,
             code,
+            origin: ch.origin,
         });
     }
     out

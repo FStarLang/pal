@@ -110,3 +110,40 @@ pub fn serialize(modules: &[EmittedModule]) -> String {
 
     serde_json::to_string_pretty(&doc).unwrap()
 }
+
+/// The same document for the Palow emitter, which produces one module per C
+/// declaration and no token-level range map. The declaration's own range is
+/// all there is to report, and it is what an IDE needs to get from a generated
+/// file back to the code that produced it; `mappings` is empty rather than
+/// approximate, because a wrong position inside a module is worse than none.
+pub fn serialize_palow(modules: &[crate::pass::emit_palow::PalowModule]) -> String {
+    let mut by_file: BTreeMap<Rc<str>, Vec<&crate::pass::emit_palow::PalowModule>> =
+        BTreeMap::new();
+    for module in modules {
+        let Some(o) = &module.origin else { continue };
+        by_file.entry(o.file.clone()).or_default().push(module);
+    }
+
+    let doc = SourceRangeInfoDoc {
+        source_files: by_file
+            .into_iter()
+            .map(|(file, mods)| SourceFileInfo {
+                uri: path_to_uri(&file),
+                modules: mods
+                    .iter()
+                    .map(|m| {
+                        let o = m.origin.as_ref().unwrap();
+                        ModuleInfo {
+                            fst_file: format!("{}.fst", m.module_name),
+                            decl_name: o.name.clone(),
+                            source_range: o.range.to_lsp(),
+                            mappings: Vec::new(),
+                        }
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+
+    serde_json::to_string_pretty(&doc).unwrap()
+}

@@ -1724,6 +1724,21 @@ new facts about memory.
    all the same. Being exactly as strict as the model requires, and no
    stricter, is the whole discipline in miniature.
 
+   One structural prerequisite for underpinning `emit` turned out to be nearly
+   free. The two emitters already write the same layout -- one flat output
+   directory, one file per module, plus `TranslationErrors.fst` and
+   `diagnostics.json` -- but Palow wrote no `source_range_info.json`, which is
+   what an IDE uses to get from a generated file back to the code that made it.
+   The old emitter builds that from a token-level range map its pretty-printer
+   maintains; Palow has no such map and building one would mean rewriting every
+   `format!` in the emitter. It does not need one. One module per declaration
+   means the declaration's own range is the answer for the whole file, so each
+   chunk now carries the source file, range and C name of the declaration it
+   came from, and the document is emitted with an empty `mappings` list. That
+   is navigation at declaration granularity rather than at token granularity,
+   and an empty list is the honest way to say so: a wrong position inside a
+   module would be worse than none.
+
    As of this milestone: **759 specifications, 560 of them with real bodies,
    199 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
