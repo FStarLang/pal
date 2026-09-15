@@ -760,6 +760,24 @@ fn indexed_init (#a: Type0) (p: X.ipayload a) (head: B.lref)
 }
 
 ghost
+fn indexed_normalize (#a: Type0) (p: X.ipayload a) (head: B.lref)
+                     (es: X.entries a) (#old_es: X.entries a)
+  requires X.is_list_ring_ix p head 1.0R old_es ** pure (old_es == es)
+  ensures X.is_list_ring_ix p head 1.0R es
+{
+  rewrite (X.is_list_ring_ix p head 1.0R old_es)
+    as (X.is_list_ring_ix p head 1.0R es);
+}
+
+ghost
+fn indexed_release_empty (#a: Type0) (p: X.ipayload a) (head: B.lref)
+  requires X.is_list_ring_ix p head 1.0R []
+  ensures exists* (v: N.struct_list_node). R.pts_to head v
+{
+  X.ring_elim_empty p head;
+}
+
+ghost
 fn move_empty (#a: Type0) (p: X.ipayload a) (source destination: B.lref) (src dst: X.entries a)
   requires X.is_list_ring_ix p source 1.0R src ** X.is_list_ring_ix p destination 1.0R dst **
     pure (src == [])
