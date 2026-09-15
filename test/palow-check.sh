@@ -20,21 +20,25 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 
 check_one() {
-  local cfile=$1
-  # One output directory per .c file, not per test directory: several tests
-  # have more than one translation unit and they all produce a module of the
-  # same name.
+  local tdir=$1
+  # One output directory per *test*, translated in a single invocation with all
+  # of the test's files, which is how the per-test Makefile drives PAL. A file
+  # is not a translation unit here: PAL combines them, and several tests rely on
+  # that -- `extern_globals` states a contract about a `const` whose value is
+  # written down in a sibling file, and reading them apart would say only that
+  # the value is fixed, not which one it is.
   local name
-  name=$(basename "$(dirname "$cfile")")/$(basename "$cfile" .c)
+  name=$(basename "$tdir")
   local dir="$WORK/$name"
   mkdir -p "$dir"
 
   local inc=()
-  if [[ -d $(dirname "$cfile")/include ]]; then
-    inc=(-I "$(dirname "$cfile")/include")
+  if [[ -d $tdir/include ]]; then
+    inc=(-I "$tdir/include")
   fi
 
-  if ! "$PAL" --quiet "${inc[@]}" --palow --outdir "$dir" "$cfile" 2>"$dir/pal.err"; then
+  local cfiles=("$tdir"/*.c)
+  if ! "$PAL" --quiet "${inc[@]}" --palow --outdir "$dir" "${cfiles[@]}" 2>"$dir/pal.err"; then
     echo "FAIL $name (translation)"
     cat "$dir/pal.err"
     return 1
@@ -58,8 +62,8 @@ check_one() {
 export -f check_one
 export ROOT PAL WORK
 
-if ! find test -mindepth 2 -maxdepth 2 -name '*.c' -print0 |
-     xargs -0 -P "$(nproc)" -I{} bash -c 'check_one "$@"' _ {} |
+if ! find test -mindepth 1 -maxdepth 1 -type d -exec test -n '{}' \; -print0 |
+     xargs -0 -P "$(nproc)" -I{} bash -c 'ls "$1"/*.c >/dev/null 2>&1 && check_one "$1"' _ {} |
      tee "$WORK/log"; then
   :
 fi
@@ -71,7 +75,7 @@ fi
 
 # The generated per-struct storage operations and the `__fp` wrappers are
 # model code, not translated C, so they do not count towards coverage.
-emitted=$(cat "$WORK"/*/*/*.fst | grep '^fn ' | grep -cvE '^fn (struct|union)_|__fp ')
-skipped=$(cat "$WORK"/*/*/*.fst | grep -c '^(\* skipped')
-admitted=$(cat "$WORK"/*/*/*.fst | grep -c 'admit() (\* body')
+emitted=$(cat "$WORK"/*/*.fst | grep '^fn ' | grep -cvE '^fn (struct|union)_|__fp ')
+skipped=$(cat "$WORK"/*/*.fst | grep -c '^(\* skipped')
+admitted=$(cat "$WORK"/*/*.fst | grep -c 'admit() (\* body')
 echo "palow-check: ok; $emitted specifications, $((emitted - admitted)) with bodies, $admitted admitted, $skipped skipped"

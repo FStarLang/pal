@@ -706,6 +706,8 @@ struct FnSurface {
     /// The mutable globals the contract hands in and back out. The body treats
     /// each as a slot it did not allocate.
     globals: Vec<Slot>,
+    /// Modules the contract names, which the body's own uses need not include.
+    uses: HashSet<String>,
 }
 
 /// One parameter's pointee ownership, in the form a loop invariant needs: the
@@ -754,11 +756,36 @@ struct Spec<'a> {
     /// local is not in scope at the boundary -- but a loop invariant does:
     /// every live slot is bound existentially and named here.
     locals: HashMap<String, String>,
+    /// Modules the contract names. A body's uses drive its module's `open`s,
+    /// but a contract can name a constant the body never reads -- and does,
+    /// whenever the body is admitted.
+    uses: RefCell<HashSet<String>>,
 }
 
 impl<'a> Spec<'a> {
     fn int_module(&self, ty: &Type) -> Option<String> {
         int_module(self.tds, ty)
+    }
+
+    /// The term for a global this file publishes as a constant, when the name
+    /// is one.
+    ///
+    /// A contract may name a constant for the same reason a body may: nothing
+    /// can write it, so there is no state to own and no moment at which to
+    /// read it. An enumerator is the extreme case -- it has no storage at all,
+    /// so its value is the only thing there is to say about it, and it is
+    /// inlined rather than referred to.
+    fn global_const(&self, v: &Ident) -> Option<String> {
+        let gv = self.env.lookup_global_var(v)?;
+        if gv.is_enum_constant {
+            let init = gv.init.as_ref()?;
+            return const_expr(self.tds, &gv.ty, init);
+        }
+        if !global_has_value(self.tds, gv) {
+            return None;
+        }
+        self.uses.borrow_mut().insert(format!("Global_{}", v.val));
+        Some(format!("var_{}", v.val))
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
@@ -835,8 +862,12 @@ impl<'a> Spec<'a> {
                         guards: RefCell::new(Vec::new()),
                         ret: self.ret.clone(),
                         locals,
+                        uses: RefCell::new(HashSet::new()),
                     };
                     let p = inner.prop(body, w)?;
+                    self.uses
+                        .borrow_mut()
+                        .extend(inner.uses.borrow().iter().cloned());
                     let g = inner.guards.borrow().join(r" /\ ");
                     if g.is_empty() {
                         p
@@ -1168,6 +1199,8 @@ impl<'a> Spec<'a> {
                     Ok(self.ret.clone())
                 } else if self.env.lookup_var(v).is_some() {
                     Ok(format!("var_{}", v.val))
+                } else if let Some(t) = self.global_const(v) {
+                    Ok(t)
                 } else {
                     Err(format!("`{}` in a contract", v.val))
                 }
@@ -1389,6 +1422,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         guards: RefCell::new(Vec::new()),
         ret: "ret".to_string(),
         locals: HashMap::new(),
+        uses: RefCell::new(HashSet::new()),
     };
     let clause = |es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -1474,6 +1508,7 @@ fn emit_pure_fn(
         guards: RefCell::new(Vec::new()),
         ret: "ret".to_string(),
         locals: HashMap::new(),
+        uses: RefCell::new(HashSet::new()),
     };
     let clause = |sp: &Spec, es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -1884,6 +1919,7 @@ fn emit_fn(
         guards: RefCell::new(Vec::new()),
         ret: ret_name.clone(),
         locals: HashMap::new(),
+        uses: RefCell::new(HashSet::new()),
     };
     let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
         es.iter()
@@ -1935,8 +1971,13 @@ fn emit_fn(
                 guards: RefCell::new(Vec::new()),
                 ret: ret_name.clone(),
                 locals: HashMap::new(),
+                uses: RefCell::new(HashSet::new()),
             };
-            inner.prop(p, w)
+            let r = inner.prop(p, w);
+            spec.uses
+                .borrow_mut()
+                .extend(inner.uses.borrow().iter().cloned());
+            r
         };
     // Whether a parameter's ownership is stated at this end of the contract,
     // which is also where its refinements belong.
@@ -2191,6 +2232,7 @@ fn emit_fn(
         contract: contract_ok,
         fp,
         globals: globals.to_vec(),
+        uses: spec.uses.take(),
     })
 }
 
@@ -3368,6 +3410,20 @@ fn const_index(e: &ExprT) -> Option<u64> {
     }
 }
 
+/// Whether a global is published with a value -- possibly an abstract one --
+/// by its own module, so that naming it needs no ownership.
+///
+/// An enumerator is excluded: it has no storage and no module, and its value is
+/// inlined wherever it appears.
+fn global_has_value(tds: &Typedefs, gv: &GlobalVar) -> bool {
+    gv.is_pure
+        && !gv.is_enum_constant
+        && !global_var_is_array(gv)
+        && has_repr(tds, &gv.ty)
+        && palow_name(tds, &gv.ty).is_some()
+        && fstar_type(tds, &gv.ty).is_some()
+}
+
 /// The value of an immutable global, as an F* type and a term, when this file
 /// can name it.
 ///
@@ -3463,8 +3519,19 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
 ",
             name, name
         );
-        if let (Some((_, v)), Some((pn, fty))) = (value, typed) {
-            out += &format!("let var_{} : {} = {}\n", name, fty, v);
+        if let Some((pn, fty)) = typed.filter(|_| global_has_value(tds, gv)) {
+            // An immutable global whose initialiser is in this file has a value
+            // this file can write down. One declared `extern` does not: which
+            // value it is was decided in another translation unit. That is a
+            // gap in knowledge, not in ownership -- the object is still
+            // immutable, and still readable -- so the value is named and left
+            // abstract rather than refused. A reader learns that every read
+            // yields *the same* value, which is the whole content of `const`
+            // at an unknown initialiser.
+            match value {
+                Some((_, v)) => out += &format!("let var_{} : {} = {}\n", name, fty, v),
+                None => out += &format!("assume val var_{} : {}\n", name, fty),
+            }
             // The permission is existentially quantified, so a client can read
             // through the address but can never gather a full one and write.
             out += &format!(
@@ -4177,10 +4244,10 @@ pub fn emit_palow(
                 None => Err("it has no definition here".to_string()),
                 Some(d) => emit_body(&tds, it.env.clone(), d, sig, &callees, no),
             };
-            it.uses = match &body {
-                Ok(b) => b.uses.clone(),
-                Err(_) => HashSet::new(),
-            };
+            it.uses = sig.uses.clone();
+            if let Ok(b) = &body {
+                it.uses.extend(b.uses.iter().cloned());
+            }
             let mut out = String::new();
             match &body {
                 Ok(b) if b.divergent => out += "divergent\n",
@@ -4770,10 +4837,15 @@ impl<'a> Body<'a> {
     }
 
     fn global_value(&self, v: &Ident) -> bool {
-        self.env
-            .lookup_global_var(v)
-            .and_then(|gv| global_const(self.tds, gv))
-            .is_some()
+        let Some(gv) = self.env.lookup_global_var(v) else {
+            return false;
+        };
+        // An `extern const` has a value this file cannot write down, but it
+        // still has *a* value, published abstractly by the global's own
+        // module. Reading it needs no ownership for the same reason reading a
+        // known constant does not: nothing in the program can write it, so
+        // there is no moment at which the read happens.
+        global_has_value(self.tds, gv)
     }
 
     /// The place an aliased pointer stands for, when `e` dereferences one.
@@ -6608,7 +6680,7 @@ impl<'a> Body<'a> {
     /// thing: nothing here tracks values, so every live slot has to be bound
     /// existentially and the annotation written in terms of those binders.
     fn frame(
-        &self,
+        &mut self,
         clause: &Exprs,
         what: &str,
     ) -> Result<(Vec<String>, Vec<String>, Vec<String>), String> {
@@ -6645,6 +6717,7 @@ impl<'a> Body<'a> {
             guards: RefCell::new(Vec::new()),
             ret: String::new(),
             locals,
+            uses: RefCell::new(HashSet::new()),
         };
         let mut props: Vec<String> = Vec::new();
         for e in clause.iter() {
@@ -6662,11 +6735,12 @@ impl<'a> Body<'a> {
                 format!(r"({} /\ {})", guards.join(r" /\ "), p)
             });
         }
+        self.uses.extend(spec.uses.borrow().iter().cloned());
         Ok((binders, owns, props))
     }
 
     /// The same frame, written out as one slprop.
-    fn frame_slprop(&self, clause: &Exprs, what: &str, indent: &str) -> Result<String, String> {
+    fn frame_slprop(&mut self, clause: &Exprs, what: &str, indent: &str) -> Result<String, String> {
         let (binders, owns, props) = self.frame(clause, what)?;
         let sep = format!("\n{}", indent);
         let quant = if binders.is_empty() {

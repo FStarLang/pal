@@ -1800,8 +1800,44 @@ new facts about memory.
    emitted, discarding it if so. That covers the pure quantifiers
    `with_pure_quantifier` exists to test and reports honestly on the rest.
 
-   As of this milestone: **759 specifications, 564 of them with real bodies,
-   195 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   Naming a constant in a contract came next: `_forall` had made array
+   contracts translatable, and the names a contract most often wants after an
+   array are the ones C already treats as constants. Three shapes were dropped
+   whole. An enumerator has no storage at all, so its value is the only thing
+   there is to say about it and it is now inlined where it appears. A `const`
+   this file initialises is already published by its own module as an F\*
+   `let`, so a contract can simply name it.
+
+   The third shape needed a decision rather than a lookup. `extern const T g;`
+   is immutable, but which value it is was decided in another translation unit,
+   and this emitter used to refuse it -- the reasoning being that there was
+   nowhere to put a constant shared between units. One module per declaration
+   has since made that false: `Global_g` is exactly that place, so an `extern`
+   `const` is now published as `assume val var_g : T`, abstract but fixed. A
+   reader learns that every read yields *the same* value, which is the whole
+   content of `const` at an unknown initialiser, and that is enough for
+   `_ensures(return == g)`. Reading one needs no ownership, for the same reason
+   reading a known constant does not: nothing in the program can write it, so
+   there is no moment at which the read happens.
+
+   Making a contract name a global also exposed a gap in how modules are
+   opened. A module's `open`s were derived from what its *body* uses, which is
+   silently wrong whenever the body is admitted and the contract is not -- and
+   that is now a common case rather than a corner. Contracts collect their own
+   uses and both sets are unioned.
+
+   The same work showed that the coverage harness had been reading the suite
+   one file at a time, while the per-test Makefile hands PAL every file at
+   once. A file is not a translation unit to PAL: it combines them, and
+   `extern_globals` depends on exactly that, stating a contract about a `const`
+   whose value is written down in a sibling file. Read apart, the two halves
+   can only say that the value is fixed, not which one it is. The harness now
+   translates each test in one invocation, which is both the honest scope and a
+   slightly smaller one, since a function declared in a shared header used to
+   be counted once per file that saw it.
+
+   As of this milestone: **758 specifications, 574 of them with real bodies,
+   184 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
