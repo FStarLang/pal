@@ -4867,6 +4867,11 @@ struct Body<'a> {
     valid_fps: &'a HashSet<String>,
     /// Addresses whose validity this body has seeded and not yet put down.
     seeded: Vec<String>,
+    /// The labels in scope, innermost last, each with the statements that run
+    /// when control reaches it. A `goto` is translated by translating its
+    /// label's continuation there and then: Pulse has no jump, and every path
+    /// to a label has to be typed on its own anyway.
+    gotos: Vec<(String, Vec<Rc<Stmt>>, Rc<Exprs>)>,
     /// Whether a loop encloses the statement being translated, so `break` and
     /// `continue` have something to leave.
     in_loop: bool,
@@ -7855,6 +7860,60 @@ impl<'a> Body<'a> {
                     self.lines.push("}".to_string());
                     return Ok(then_val);
                 }
+                // A labelled block carries its own label: the statements that
+                // follow the block are what a `goto` jumps *to*, so they are
+                // recorded as that label's continuation and the block is
+                // translated with a jump to it appended -- falling off the end
+                // of a labelled block reaches the label exactly as a `goto`
+                // does.
+                StmtT::GotoBlock {
+                    body,
+                    label,
+                    ensures,
+                } => {
+                    let cont: Vec<Rc<Stmt>> = stmts[i + 1..].to_vec();
+                    self.gotos
+                        .push((label.val.to_string(), cont, ensures.clone()));
+                    let mut seq = body.to_vec();
+                    seq.push(StmtT::Goto(label.clone()).with_loc(s.loc.clone()));
+                    let r = self.rest(&seq);
+                    self.gotos.pop();
+                    return r;
+                }
+                StmtT::Goto(label) => {
+                    let Some(at) = self
+                        .gotos
+                        .iter()
+                        .rposition(|(n, _, _)| *n == label.val.to_string())
+                    else {
+                        return Err(format!(
+                            "a `goto {}`, whose label is not in scope",
+                            label.val
+                        ));
+                    };
+                    let (_, cont, ensures) = self.gotos[at].clone();
+                    // A label's `_ensures` is what the old translator needs to
+                    // join the paths that reach it. Here there is no join --
+                    // each path carries the continuation with it -- so what is
+                    // left to do is check it, which is what the author asked
+                    // for. `_live` says the storage exists, and the slots say
+                    // that already.
+                    for e in ensures.iter() {
+                        if live_only(e) {
+                            continue;
+                        }
+                        let p = self.prop(e)?;
+                        self.lines.push(format!("assert (pure {});", p));
+                    }
+                    // Labels inside the one being jumped to are out of scope
+                    // at its continuation, and so is the label itself: a
+                    // `goto` backwards would be a loop, which this is not.
+                    let inner = self.gotos[..at].to_vec();
+                    let outer = std::mem::replace(&mut self.gotos, inner);
+                    let r = self.rest(&cont);
+                    self.gotos = outer;
+                    return r;
+                }
                 _ => {
                     self.env.push_stmt(s);
                     self.stmt(s)?;
@@ -8528,6 +8587,7 @@ fn emit_body(
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
         seeded: Vec::new(),
+        gotos: Vec::new(),
         in_loop: false,
         loop_mark: None,
         divergent_fns,
@@ -8555,9 +8615,23 @@ fn emit_body(
 /// Whether a C block always leaves the function, so that whatever follows it
 /// is reached only on the other path. Statements after a `return` are
 /// unreachable, so their shape does not matter.
+/// Whether a proposition says nothing but that some storage exists. A label's
+/// `_ensures` is usually exactly that, and the slots carry it already.
+fn live_only(e: &Expr) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::Live(_) => true,
+        ExprT::Cast(inner, _) => live_only(inner),
+        ExprT::BinOp(BinOp::LogAnd, a, b) => live_only(a) && live_only(b),
+        _ => false,
+    }
+}
+
 fn returns(stmts: &Stmts) -> bool {
     stmts.iter().any(|s| match &s.val {
-        StmtT::Return(_) => true,
+        // A `goto` leaves this block too: what follows it in the block is
+        // reached only on the path that did not jump, which is the same thing
+        // an early `return` means one level further out.
+        StmtT::Return(_) | StmtT::Goto(_) => true,
         // An `if` both of whose arms leave is a block that leaves, and that
         // is how a chain of early returns ends up being one.
         StmtT::If {

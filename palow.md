@@ -2004,8 +2004,29 @@ new facts about memory.
    believed to be held in the second, and the second arm tried to put down a
    fact about a function it had never mentioned.
 
-   As of this milestone: **771 specifications, 598 of them with real bodies,
-   173 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   `goto` came next, and it turned out to be the same construction again.
+   PAL's frontend has already recovered the structure -- a `goto` out of a
+   block reaches the statements after that block, and the block knows its own
+   label -- so what is left is that Pulse has no jump. It does not need one.
+   The statements after a labelled block are recorded as that label's
+   continuation, and a `goto` is translated by translating the continuation
+   *there*, on the path that jumped. Falling off the end of a labelled block
+   reaches the label exactly as a `goto` does, so the block is translated with
+   a jump appended and the two cases become one. The `if` fold that carries
+   early returns needed only to be told that a `goto` also leaves a block.
+
+   The continuation is duplicated once per path that reaches the label, which
+   is the price of not having a jump; the C this pattern comes from --
+   `goto fail` and the unwinding ladder of `out_unlock: ... out_free: ... out:`
+   -- has few enough of them that the generated code stays readable, and
+   `test/multiple_goto`'s three-deep ladder verifies with no admits. Each path
+   is typed on its own, which is why a label's `_ensures` -- the join
+   condition the old translator needs to bring the paths back together -- has
+   nothing to do here beyond being checked, and `_live` clauses have not even
+   that, since the slots carry the storage already.
+
+   As of this milestone: **771 specifications, 603 of them with real bodies,
+   168 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
