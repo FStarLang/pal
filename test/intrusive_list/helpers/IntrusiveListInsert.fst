@@ -6,18 +6,10 @@ open FStar.List.Tot
 
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
-module L = IntrusiveList
+module L = IntrusiveListIndexed
 module X = IntrusiveListIndexed
+module C = IntrusiveListContext
 module T = Pulse.Lib.Trade
-
-[@@pulse_intro]
-ghost
-fn singleton_out (#pl: erased L.payload) (node: L.lref)
-  requires L.payload_of (reveal pl) [node]
-  ensures (reveal pl) node
-{
-  L.payload_of_single_out (reveal pl) node;
-}
 
 let inv (#a: Type0) (p: L.ipayload a) (le: X.order a)
         (head pos entry: L.lref) (description: a) (es: X.entries a)
@@ -42,7 +34,7 @@ let ready (#a: Type0) (p: L.ipayload a) (le: X.order a)
   exists* (front back: X.entries a).
     L.is_list_ring_ix p head 1.0R (front @ back) **
     pure (front @ back == es) **
-    pure (pos == L.first_or head (L.cells_of back)) **
+    pure (pos == L.first_or head back) **
     pure ((pos == head) <==> (back == [])) **
     pure (X.insert le entry description es == front @ ((entry, description) :: back))
 
@@ -196,60 +188,77 @@ fn post_elim (#a: Type0) (p: L.ipayload a) (le: X.order a)
 let pending (#a: Type0) (p: L.ipayload a) (le: X.order a)
             (head entry: L.lref) (description: a) (es: X.entries a)
             (front back: X.entries a) : slprop =
-  L.ipayload_of p (front @ ((entry, description) :: back)) **
   pure (X.insert le entry description es == front @ ((entry, description) :: back))
+
+unfold let insertion_context (#a: Type0) (p: L.ipayload a)
+                      (description: a) (es: X.entries a) : C.insertion = {
+  model = {
+    description_type = a;
+    resource = p;
+    entries = es;
+  };
+  description = description;
+}
+
+unfold let cut_context (#a: Type0) (p: L.ipayload a) (head: L.lref)
+                (description: a) (front back: X.entries a) : C.cut = {
+  model = {
+    description_type = a;
+    resource = p;
+    entries = front @ back;
+  };
+  head = head;
+  front = front;
+  back = back;
+  description = description;
+}
 
 ghost
 fn prepare_cut (#a: Type0) (p: L.ipayload a) (le: X.order a)
                (head entry: L.lref) (description: a) (es: X.entries a)
                (front back: X.entries a)
-  requires L.is_list_ring_ix p head 1.0R (front @ back) ** p entry description **
+  requires L.is_list_ring_ix p head 1.0R (front @ back) **
+    R.pts_to_uninit entry ** p entry description **
     pure (X.insert le entry description es == front @ ((entry, description) :: back))
-  ensures L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of front @ L.cells_of back) **
-    L.payload_of L.emp_pl [entry] **
+  ensures C.insert_after_pre (cut_context p head description front back)
+    (L.last_or head front) entry **
     pending p le head entry description es front back
 {
-  X.ops_open p head (front @ back);
-  L.cells_of_append front back;
-  rewrite (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of (front @ back)))
-    as (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of front @ L.cells_of back));
-  L.ipayload_of_insert p front back entry description;
-  L.epl_single_in entry;
+  C.prepare_ring (cut_context p head description front back).model head;
+  fold (C.insert_after_pre (cut_context p head description front back)
+    (L.last_or head front) entry);
   fold (pending p le head entry description es front back);
 }
 
 ghost
 fn prepare_tail (#a: Type0) (p: L.ipayload a) (le: X.order a)
                 (head pos entry: L.lref) (description: a) (es: X.entries a)
-  requires ready p le head pos entry description es ** p entry description **
+  requires ready p le head pos entry description es **
+    R.pts_to_uninit entry ** p entry description **
     pure (pos == head)
-  ensures L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es) **
-    L.payload_of L.emp_pl [entry] **
+  ensures C.insert_pre (insertion_context p description es) head entry **
     pending p le head entry description es es []
 {
   unfold (ready p le head pos entry description es);
   with front back. assert (L.is_list_ring_ix p head 1.0R (front @ back));
   FStar.List.Tot.Properties.append_l_nil front;
   rewrite (L.is_list_ring_ix p head 1.0R (front @ back))
-    as (L.is_list_ring_ix p head 1.0R (es @ []));
-  prepare_cut p le head entry description es es [];
-  FStar.List.Tot.Properties.append_l_nil (L.cells_of es);
-  rewrite (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es @ L.cells_of #a []))
-    as (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es));
+    as (L.is_list_ring_ix p head 1.0R es);
+  C.prepare_ring (insertion_context p description es).model head;
+  fold (C.insert_pre (insertion_context p description es) head entry);
+  fold (pending p le head entry description es es []);
 }
 
 ghost
-fn finish (#a: Type0) (p: L.ipayload a) (le: X.order a)
-          (head entry: L.lref) (description: a) (es: X.entries a)
-          (#front #back: X.entries a)
-  requires L.is_list_ring_with L.emp_pl head 1.0R
-      (L.cells_of front @ (entry :: L.cells_of back)) **
+fn finish_indexed (#a: Type0) (p: L.ipayload a) (le: X.order a)
+                  (head entry: L.lref) (description: a) (es: X.entries a)
+                  (#front #back: X.entries a)
+  requires L.is_list_ring_ix p head 1.0R (front @ ((entry, description) :: back)) **
     pending p le head entry description es front back **
     pure (X.total_preorder le /\ X.sorted le es)
   ensures post p le head entry description es
 {
   unfold (pending p le head entry description es front back);
-  X.ops_close_insert p head front back entry description;
   rewrite (L.is_list_ring_ix p head 1.0R (front @ ((entry, description) :: back)))
     as (L.is_list_ring_ix p head 1.0R (X.insert le entry description es));
   X.insert_preserves_sorted le entry description es;
@@ -257,16 +266,28 @@ fn finish (#a: Type0) (p: L.ipayload a) (le: X.order a)
 }
 
 ghost
+fn finish (#a: Type0) (p: L.ipayload a) (le: X.order a)
+          (head entry: L.lref) (description: a) (es: X.entries a)
+          (#front #back: X.entries a)
+  requires C.insert_after_post (cut_context p head description front back) entry **
+    pending p le head entry description es front back **
+    pure (X.total_preorder le /\ X.sorted le es)
+  ensures post p le head entry description es
+{
+  unfold (C.insert_after_post (cut_context p head description front back) entry);
+  finish_indexed p le head entry description es;
+}
+
+ghost
 fn finish_tail (#a: Type0) (p: L.ipayload a) (le: X.order a)
                (head entry: L.lref) (description: a) (es: X.entries a)
-  requires L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es @ [entry]) **
+  requires C.insert_tail_post (insertion_context p description es) head entry **
     pending p le head entry description es es [] **
     pure (X.total_preorder le /\ X.sorted le es)
   ensures post p le head entry description es
 {
-  rewrite (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es @ [entry]))
-    as (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es @ (entry :: L.cells_of #a [])));
-  finish p le head entry description es;
+  unfold (C.insert_tail_post (insertion_context p description es) head entry);
+  finish_indexed p le head entry description es;
 }
 
 ghost
@@ -274,7 +295,7 @@ fn head_open (#a: Type0) (p: L.ipayload a) (le: X.order a)
              (head pos entry: L.lref) (description: a) (es: X.entries a)
   requires ready p le head pos entry description es
   ensures exists* (hv: N.struct_list_node).
-    R.pts_to head hv ** pure (L.lnext hv == L.first_or head (L.cells_of es)) **
+    R.pts_to head hv ** pure (L.lnext hv == L.first_or head es) **
     T.trade (R.pts_to head hv) (ready p le head pos entry description es)
 {
   unfold (ready p le head pos entry description es);
@@ -301,71 +322,41 @@ fn head_close (#a: Type0) (p: L.ipayload a) (le: X.order a)
 }
 
 ghost
-fn empty_cut (pl: L.payload) (prev start cut sent: L.lref) (cells: list L.lref)
-  requires L.is_list_seg_s_with pl prev start cut sent 1.0R cells ** pure (start == cut)
-  ensures L.is_list_seg_s_with pl prev start cut sent 1.0R cells ** pure (cells == [])
-{
-  match cells {
-    Nil -> {}
-    Cons x xs -> {
-      unfold (L.is_list_seg_s_with pl prev start cut sent 1.0R cells);
-      unreachable ();
-    }
-  }
-}
-
-ghost
 fn prepare_head (#a: Type0) (p: L.ipayload a) (le: X.order a)
                 (head pos entry: L.lref) (description: a) (es: X.entries a)
-  requires ready p le head pos entry description es ** p entry description **
-    pure (pos == L.first_or head (L.cells_of es)) ** pure (pos =!= head)
-  ensures L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es) **
-    L.payload_of L.emp_pl [entry] ** pending p le head entry description es [] es
+  requires ready p le head pos entry description es **
+    R.pts_to_uninit entry ** p entry description **
+    pure (pos == L.first_or head es) ** pure (pos =!= head)
+  ensures C.insert_pre (insertion_context p description es) head entry **
+    pending p le head entry description es [] es
 {
   unfold (ready p le head pos entry description es);
   with front back. assert (L.is_list_ring_ix p head 1.0R (front @ back));
-  L.ring_ix_out p head 1.0R (front @ back);
-  L.cells_of_append front back;
-  rewrite (L.is_list_ring head 1.0R (L.cells_of (front @ back)))
-    as (L.is_list_ring head 1.0R (L.cells_of front @ L.cells_of back));
-  L.ring_open_full L.no_payload head;
-  with hv. assert (R.pts_to head hv);
-  L.seg_split L.no_payload head (L.lnext hv) head (L.cells_of front) (L.cells_of back);
-  with cur. assert (L.is_list_seg_with L.no_payload
-    (L.last_or head (L.cells_of front)) cur head 1.0R (L.cells_of back));
-  L.seg_first L.no_payload (L.last_or head (L.cells_of front)) cur head;
-  empty_cut L.no_payload head (L.lnext hv) cur head (L.cells_of front);
-  L.cells_of_nil_iff front;
-  L.seg_merge L.no_payload head (L.lnext hv) cur head (L.cells_of front) (L.cells_of back);
-  L.ring_close L.no_payload head;
-  rewrite (L.is_list_ring head 1.0R (L.cells_of front @ L.cells_of back))
-    as (L.is_list_ring head 1.0R (L.cells_of (front @ back)));
-  L.ring_ix_in p head 1.0R (front @ back);
+  X.ring_front_empty p head front back;
   rewrite (L.is_list_ring_ix p head 1.0R (front @ back))
-    as (L.is_list_ring_ix p head 1.0R ([] @ es));
-  prepare_cut p le head entry description es [] es;
-  rewrite (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of #a [] @ L.cells_of es))
-    as (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es));
+    as (L.is_list_ring_ix p head 1.0R es);
+  C.prepare_ring (insertion_context p description es).model head;
+  fold (C.insert_pre (insertion_context p description es) head entry);
+  fold (pending p le head entry description es [] es);
 }
 
 ghost
 fn finish_head (#a: Type0) (p: L.ipayload a) (le: X.order a)
                (head entry: L.lref) (description: a) (es: X.entries a)
-  requires L.is_list_ring_with L.emp_pl head 1.0R (entry :: L.cells_of es) **
+  requires C.insert_head_post (insertion_context p description es) head entry **
     pending p le head entry description es [] es **
     pure (X.total_preorder le /\ X.sorted le es)
   ensures post p le head entry description es
 {
-  rewrite (L.is_list_ring_with L.emp_pl head 1.0R (entry :: L.cells_of es))
-    as (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of #a [] @ (entry :: L.cells_of es)));
-  finish p le head entry description es;
+  unfold (C.insert_head_post (insertion_context p description es) head entry);
+  finish_indexed p le head entry description es;
 }
 
 let after (#a: Type0) (p: L.ipayload a) (le: X.order a)
           (head prev entry: L.lref) (description: a) (es: X.entries a) : slprop =
   exists* (front back: X.entries a).
     L.is_list_ring_ix p head 1.0R (front @ back) **
-    pure (prev == L.last_or head (L.cells_of front)) **
+    pure (prev == L.last_or head front) **
     pure (X.insert le entry description es == front @ ((entry, description) :: back))
 
 ghost
@@ -413,13 +404,16 @@ fn position_close (#a: Type0) (p: L.ipayload a) (le: X.order a)
 ghost
 fn prepare_after (#a: Type0) (p: L.ipayload a) (le: X.order a)
                  (head prev entry: L.lref) (description: a) (es: X.entries a)
-  requires after p le head prev entry description es ** p entry description
+  requires after p le head prev entry description es **
+    R.pts_to_uninit entry ** p entry description
   ensures exists* (front back: X.entries a).
-    L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of front @ L.cells_of back) **
-    L.payload_of L.emp_pl [entry] ** pending p le head entry description es front back **
-    pure (prev == L.last_or head (L.cells_of front))
+    C.insert_after_pre (cut_context p head description front back) prev entry **
+    pending p le head entry description es front back
 {
   unfold (after p le head prev entry description es);
   with front back. assert (L.is_list_ring_ix p head 1.0R (front @ back));
   prepare_cut p le head entry description es front back;
+  rewrite (C.insert_after_pre (cut_context p head description front back)
+    (L.last_or head front) entry)
+    as (C.insert_after_pre (cut_context p head description front back) prev entry);
 }

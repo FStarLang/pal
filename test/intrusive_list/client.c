@@ -22,10 +22,10 @@ _type(item_entries, IntrusiveListExample.entries)
 _plain struct item *items_find(_plain struct list_node *head, int value)
     _ghost_arg(item_entries entries)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_ix IntrusiveListExample.item_ipl
+        IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R (reveal $(entries))))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_ix IntrusiveListExample.item_ipl
+        IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R (reveal $(entries)) **
         pure ($(return) == IntrusiveListExample.first_match $(value) (reveal $(entries)))))
 {
@@ -71,21 +71,24 @@ _plain struct item *items_find(_plain struct list_node *head, int value)
 _plain struct item *items_pop_front(_plain struct list_node *head)
     _ghost_arg(item_entries entries)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_ix IntrusiveListExample.item_ipl
+        IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R (reveal $(entries))))
     _ensures(_inline_pulse(
         IntrusiveListExample.pop_post $(head) (reveal $(entries)) $(return)))
 {
-    _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.prepare_empty IntrusiveListExample.item_ipl
         $(head) (reveal $(entries)));
     bool empty = list_empty(head);
-    _ghost_stmt(IntrusiveList.cells_of_nil_iff (reveal $(entries)));
+    _ghost_stmt(IntrusiveListContext.finish_empty IntrusiveListExample.item_ipl
+        $(head) (reveal $(entries)));
     if (empty) {
         _ghost_stmt(IntrusiveListItems.pop_empty IntrusiveListExample.item_ipl
             $(head) (reveal $(entries)));
         _ghost_stmt(IntrusiveListExample.close_pop_empty $(head) (reveal $(entries)));
         return NULL;
     } else {
+        _ghost_stmt(IntrusiveListContext.prepare_pop IntrusiveListExample.item_ipl
+            $(head) (reveal $(entries)));
         _plain struct list_node *node = list_remove_head(head);
         _ghost_stmt(IntrusiveListItems.pop_finish IntrusiveListExample.item_ipl
             $(head) $(node) (reveal $(entries)));
@@ -99,14 +102,14 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
     _ghost_arg(item_entries entries)
     _ghost_arg(int description)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_ix IntrusiveListExample.item_ipl
+        IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R (reveal $(entries)) **
         (exists* (link: Struct_list_node.struct_list_node).
             Pulse.Lib.Reference.pts_to $(item)
                 (IntrusiveListExample.item_record (reveal $(description)) link)) **
         pure (IntrusiveListIndexed.sorted IntrusiveListExample.value_le (reveal $(entries)))))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_ix IntrusiveListExample.item_ipl
+        IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R
             (IntrusiveListIndexed.insert IntrusiveListExample.value_le
                 (Struct_item.struct_item__link_1 $(item))
@@ -229,10 +232,10 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
 void items_remove_value(_plain struct list_node *head, int value)
     _ghost_arg(item_entries entries)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_ix IntrusiveListExample.item_ipl
+        IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R (reveal $(entries))))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_ix IntrusiveListExample.item_ipl
+        IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R
             (IntrusiveListIndexed.without (IntrusiveListExample.matches_value $(value))
                 (reveal $(entries))) **
@@ -308,24 +311,32 @@ void list_example(void)
     _ghost_stmt(Struct_item.struct_item__aux_raw_unfold $(&fourth) $(fourth));
     _plain struct list_node *fourth_link = &fourth.link;
     _ghost_stmt(IntrusiveListExample.fold_item $(&fourth));
+    _ghost_stmt(IntrusiveListContext.prepare_init
+        (IntrusiveListContext.make IntrusiveListExample.item_ipl []) $(&source));
     list_init(&source);
+    _ghost_stmt(IntrusiveListContext.finish_ring
+        (IntrusiveListContext.make IntrusiveListExample.item_ipl []) $(&source));
+    _ghost_stmt(IntrusiveListContext.prepare_init
+        (IntrusiveListContext.make IntrusiveListExample.item_ipl []) $(&destination));
     list_init(&destination);
-    _ghost_stmt(IntrusiveListOps.indexed_init IntrusiveListExample.item_ipl $(&source));
-    _ghost_stmt(IntrusiveListOps.indexed_init IntrusiveListExample.item_ipl $(&destination));
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.finish_ring
+        (IntrusiveListContext.make IntrusiveListExample.item_ipl []) $(&destination));
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&source) $(&source) [] []);
     list_validate(&source);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&source) $(&source) []);
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&source) $(&source) [] []);
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&destination) $(&destination) [] []);
     list_validate(&destination);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&destination) $(&destination) []);
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&destination) $(&destination) [] []);
+    _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl $(&source) []);
+    _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl $(&destination) []);
     if (ITEMS_ASSERT_ENABLED) {
-        _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&source) []);
+        _ghost_stmt(IntrusiveListContext.prepare_empty IntrusiveListExample.item_ipl $(&source) []);
         assertion_empty = list_empty(&source);
-        _ghost_stmt(IntrusiveListIndexed.ops_close IntrusiveListExample.item_ipl $(&source) []);
+        _ghost_stmt(IntrusiveListContext.finish_empty IntrusiveListExample.item_ipl $(&source) []);
         assert(assertion_empty);
         assertion_empty = false;
     }
@@ -342,20 +353,20 @@ void list_example(void)
     items_insert_sorted(&source, &third);
     _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl
         $(&source) [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&source) $(&source) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
     list_validate(&source);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&source) $(&source)
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&source) $(&source) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&source) $(third_link) [($(second_link), 1l); ($(third_link), 2l)]
         [($(first_link), 3l)]);
     list_validate(third_link);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&source) $(third_link)
-        [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&source) $(third_link) [($(second_link), 1l); ($(third_link), 2l)]
+        [($(first_link), 3l)]);
     if (ITEMS_ASSERT_ENABLED) {
         assertion_item = items_find(&source, 2);
         assert(assertion_item == &third);
@@ -367,70 +378,69 @@ void list_example(void)
         assertion_item = NULL;
     }
 
-    _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&source)
-        [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
-    _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&destination) []);
-    list_move(&source, &destination);
-    _ghost_stmt(IntrusiveListOps.indexed_move_finish IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.prepare_move IntrusiveListExample.item_ipl
         $(&source) $(&destination)
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)] []);
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    list_move(&source, &destination);
+    _ghost_stmt(IntrusiveListContext.finish_move IntrusiveListExample.item_ipl
+        $(&source) $(&destination)
+        [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)] []);
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&source) $(&source) [] []);
     list_validate(&source);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&source) $(&source) []);
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&source) $(&source) [] []);
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&destination) $(&destination) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
     list_validate(&destination);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&destination) $(&destination)
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&destination) $(&destination) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
     if (ITEMS_ASSERT_ENABLED) {
-        _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&source) []);
+        _ghost_stmt(IntrusiveListContext.prepare_empty IntrusiveListExample.item_ipl $(&source) []);
         assertion_empty = list_empty(&source);
-        _ghost_stmt(IntrusiveListIndexed.ops_close IntrusiveListExample.item_ipl $(&source) []);
+        _ghost_stmt(IntrusiveListContext.finish_empty IntrusiveListExample.item_ipl $(&source) []);
         assert(assertion_empty);
         assertion_empty = false;
     }
     items_insert_sorted(&source, &fourth);
     _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl
         $(&source) [($(fourth_link), 4l)]);
-    _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl
-        $(&source) [($(fourth_link), 4l)]);
-    _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&destination)
-        [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
-    list_move(&source, &destination);
-    _ghost_stmt(IntrusiveListOps.indexed_move_finish IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.prepare_move IntrusiveListExample.item_ipl
         $(&source) $(&destination) [($(fourth_link), 4l)]
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    list_move(&source, &destination);
+    _ghost_stmt(IntrusiveListContext.finish_move IntrusiveListExample.item_ipl
+        $(&source) $(&destination) [($(fourth_link), 4l)]
+        [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&source) $(&source) [] []);
     list_validate(&source);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&source) $(&source) []);
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&source) $(&source) [] []);
     _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl
         $(&destination)
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&destination) $(&destination) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
     list_validate(&destination);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&destination) $(&destination)
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&destination) $(&destination) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
     if (ITEMS_ASSERT_ENABLED) {
-        _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&source) []);
+        _ghost_stmt(IntrusiveListContext.prepare_empty IntrusiveListExample.item_ipl $(&source) []);
         assertion_empty = list_empty(&source);
-        _ghost_stmt(IntrusiveListIndexed.ops_close IntrusiveListExample.item_ipl $(&source) []);
+        _ghost_stmt(IntrusiveListContext.finish_empty IntrusiveListExample.item_ipl $(&source) []);
         assert(assertion_empty);
         assertion_empty = false;
     }
-    _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&source) []);
-    _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&destination)
+    _ghost_stmt(IntrusiveListContext.prepare_move IntrusiveListExample.item_ipl
+        $(&source) $(&destination) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
     list_move(&source, &destination);
-    _ghost_stmt(IntrusiveListOps.indexed_move_finish IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.finish_move IntrusiveListExample.item_ipl
         $(&source) $(&destination) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
     _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl $(&destination)
@@ -457,17 +467,17 @@ void list_example(void)
     _ghost_stmt(IntrusiveListExample.pop_one $(&destination) $(&fourth) $(removed) 4l []);
     assert(removed == &fourth);
     if (ITEMS_ASSERT_ENABLED) {
-        _ghost_stmt(IntrusiveListIndexed.ops_open IntrusiveListExample.item_ipl $(&destination) []);
+        _ghost_stmt(IntrusiveListContext.prepare_empty IntrusiveListExample.item_ipl $(&destination) []);
         assertion_empty = list_empty(&destination);
-        _ghost_stmt(IntrusiveListIndexed.ops_close IntrusiveListExample.item_ipl $(&destination) []);
+        _ghost_stmt(IntrusiveListContext.finish_empty IntrusiveListExample.item_ipl $(&destination) []);
         assert(assertion_empty);
         assertion_empty = false;
     }
-    _ghost_stmt(IntrusiveListValidate.indexed_view IntrusiveListExample.item_ipl
+    _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&destination) $(&destination) [] []);
     list_validate(&destination);
-    _ghost_stmt(IntrusiveListValidate.restore_indexed IntrusiveListExample.item_ipl
-        $(&destination) $(&destination) []);
+    _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
+        $(&destination) $(&destination) [] []);
     _ghost_stmt(IntrusiveListOps.indexed_release_empty IntrusiveListExample.item_ipl $(&source));
     _ghost_stmt(IntrusiveListOps.indexed_release_empty IntrusiveListExample.item_ipl $(&destination));
 }

@@ -6,8 +6,9 @@ open FStar.List.Tot
 
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
-module L = IntrusiveList
+module L = IntrusiveListIndexed
 module X = IntrusiveListIndexed
+module C = IntrusiveListContext
 
 let inv (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
         (es: X.entries a) : slprop =
@@ -21,18 +22,31 @@ let mid (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
   exists* (seen back: X.entries a).
     X.cursor_rest p head pos (X.without m seen) description back v **
     X.detached p (X.matching m seen) **
-    pure (L.lnext v == L.first_or head (L.cells_of back)) **
+    pure (L.lnext v == L.first_or head back) **
     pure (seen @ ((pos, description) :: back) == es)
 
-(* The saved successor is fixed before deletion; payloads are merely framed. *)
+(* Deletion consumes the ring; previously detached entries remain framed. *)
 let pending (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
             (head pos next: L.lref) (es: X.entries a) (description: a)
             (seen back: X.entries a) : slprop =
-  L.ipayload_of p (X.without m seen @ ((pos, description) :: back)) **
   X.detached p (X.matching m seen) **
   pure (seen @ ((pos, description) :: back) == es) **
-  pure (next == L.first_or head (L.cells_of back)) **
+  pure (next == L.first_or head back) **
   pure (m pos description)
+
+unfold let removal_context (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
+                    (head pos: L.lref) (description: a)
+                    (seen back: X.entries a) : GTot C.cut = {
+  model = {
+    description_type = a;
+    resource = p;
+    entries = X.without m seen @ ((pos, description) :: back);
+  };
+  head = head;
+  front = X.without m seen;
+  back = back;
+  description = description;
+}
 
 ghost
 fn start (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
@@ -95,8 +109,7 @@ fn drop_prepare (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
   requires R.pts_to pos v ** p pos description ** mid p m head pos es description v **
     pure (next == L.lnext v) ** pure (m pos description)
   ensures exists* (seen back: X.entries a).
-    L.is_list_ring_with L.emp_pl head 1.0R
-      (L.cells_of (X.without m seen) @ (pos :: L.cells_of back)) **
+    C.remove_pre (removal_context p m head pos description seen back) pos **
     pending p m head pos next es description seen back
 {
   unfold (mid p m head pos es description v);
@@ -104,24 +117,21 @@ fn drop_prepare (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
     assert (X.cursor_rest p head pos (X.without m seen) description back v);
   X.cursor_restore p head pos (X.without m seen) description back;
   X.split_close p head pos (X.without m seen) ((pos, description) :: back);
-  X.ops_open_at p head (X.without m seen) (pos, description) back;
+  C.prepare_ring (removal_context p m head pos description seen back).model head;
+  fold (C.remove_pre (removal_context p m head pos description seen back) pos);
   fold (pending p m head pos next es description seen back);
 }
 
 ghost
 fn drop_finish (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
                (head pos next: L.lref) (es: X.entries a)
-               (#description: a) (#seen #back: X.entries a) (#link: N.struct_list_node)
-  requires L.is_list_ring_with L.emp_pl head 1.0R
-      (L.cells_of (X.without m seen) @ L.cells_of back) **
-    R.pts_to pos link ** L.emp_pl pos **
+               (#description: a) (#seen #back: X.entries a) (#empty: bool)
+  requires C.remove_post (removal_context p m head pos description seen back) pos empty **
     pending p m head pos next es description seen back
   ensures inv p m head next es
 {
   unfold (pending p m head pos next es description seen back);
-  rewrite (L.emp_pl pos) as emp;
-  L.ipayload_of_remove p (X.without m seen) back pos description;
-  X.ops_close_remove p head (X.without m seen) back;
+  unfold (C.remove_post (removal_context p m head pos description seen back) pos empty);
   X.detached_snoc p (X.matching m seen) pos description;
   X.without_append m seen [(pos, description)];
   X.matching_append m seen [(pos, description)];

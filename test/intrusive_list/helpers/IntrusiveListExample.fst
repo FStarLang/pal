@@ -7,9 +7,10 @@ open FStar.List.Tot
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
 module I = Struct_item
-module L = IntrusiveList
+module L = IntrusiveListIndexed
 module Q = IntrusiveListItems
 module X = IntrusiveListIndexed
+module C = IntrusiveListContext
 
 (* Concrete payload ownership belongs here; reusable list helpers do not import this module. *)
 unfold let entries = X.entries Int32.t
@@ -276,18 +277,17 @@ fn check_list_payload_queries (storage: L.lref -> ref (list Int32.t))
   Q.find_end (list_ipl storage) never_list head head [(node, description)];
 }
 
-ghost
+divergent
 fn check_list_payload_pop (storage: L.lref -> ref (list Int32.t))
                          (head node: L.lref) (description: list Int32.t)
-                         (#v: N.struct_list_node)
-  requires L.is_list_ring_with L.emp_pl head 1.0R [] **
-    R.pts_to node v ** R.pts_to (storage node) description
+  requires L.is_list_ring_ix (list_ipl storage) head 1.0R [(node, description)]
   ensures Q.pop_post (list_ipl storage) head [(node, description)] node
 {
-  fold (list_ipl storage node description);
-  L.ipayload_of_single_in (list_ipl storage) node description;
-  rewrite emp as (L.emp_pl node);
-  Q.pop_finish (list_ipl storage) head node [(node, description)];
+  C.prepare_pop (list_ipl storage) head [(node, description)];
+  let result = Func_list_remove_head.func_list_remove_head head;
+  Q.pop_finish (list_ipl storage) head result [(node, description)];
+  unfold (Q.pop_post (list_ipl storage) head [(node, description)] result);
+  fold (Q.pop_post (list_ipl storage) head [(node, description)] node);
 }
 
 let length_le (x y: list Int32.t) : GTot bool = length x <= length y

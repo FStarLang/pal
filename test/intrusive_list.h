@@ -11,116 +11,76 @@ struct list_node {
 
 #define containing_record(ptr, type, field) _container_of(ptr, type, field)
 
-_type(list_cells, list (ref Struct_list_node.struct_list_node))
-_type(list_payload, IntrusiveList.payload)
-_type(list_ref, ref Struct_list_node.struct_list_node)
-_type(list_validation, IntrusiveListValidate.witness)
+_type(list_context, IntrusiveListContext.context)
+_type(list_insertion, IntrusiveListContext.insertion)
+_type(list_cut, IntrusiveListContext.cut)
+_type(list_validation, IntrusiveListContext.validation)
+_type(list_movement, IntrusiveListContext.movement)
 
 void list_init(_plain struct list_node *head)
-    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to_uninit $(head)))
-    _ensures(_inline_pulse(IntrusiveList.is_list_ring $(head) 1.0R []));
+    _ghost_arg(list_context ctx)
+    _requires(_inline_pulse(IntrusiveListContext.init_pre (reveal $(ctx)) $(head)))
+    _ensures(_inline_pulse(IntrusiveListContext.ring (reveal $(ctx)) $(head)));
 
 bool list_empty(_plain const struct list_node *head)
-    _ghost_arg(list_payload pl)
-    _ghost_arg(list_cells cells)
+    _ghost_arg(list_context ctx)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(head) 1.0R (reveal $(cells))))
+        IntrusiveListContext.ring (reveal $(ctx)) $(head)))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(head) 1.0R (reveal $(cells))
-        ** pure ($(return) <==> (reveal $(cells) == []))));
+        IntrusiveListContext.empty_post (reveal $(ctx)) $(head) $(return)));
 
 /* Check neighboring links of an initialized sentinel or linked entry. */
 void list_validate(_plain const struct list_node *node)
-    _ghost_arg(list_validation witness)
+    _ghost_arg(list_validation ctx)
     _requires(_inline_pulse(
-        IntrusiveListValidate.view $(node) (reveal $(witness))))
+        IntrusiveListContext.validation_pre (reveal $(ctx)) $(node)))
     _ensures(_inline_pulse(
-        IntrusiveListValidate.view $(node) (reveal $(witness))));
+        IntrusiveListContext.validation_pre (reveal $(ctx)) $(node)));
 
 /* Insertions require an entry that is not already linked into a list. */
 void list_insert_head(_plain struct list_node *head, _plain struct list_node *entry)
-    _ghost_arg(list_payload pl)
-    _ghost_arg(list_cells cells)
+    _ghost_arg(list_insertion ctx)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(head) 1.0R (reveal $(cells))
-        ** Pulse.Lib.Reference.pts_to_uninit $(entry) ** (reveal $(pl)) $(entry)))
+        IntrusiveListContext.insert_pre (reveal $(ctx)) $(head) $(entry)))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(head) 1.0R
-            ($(entry) :: (reveal $(cells)))));
+        IntrusiveListContext.insert_head_post (reveal $(ctx)) $(head) $(entry)));
 void list_insert_tail(_plain struct list_node *head, _plain struct list_node *entry)
-    _ghost_arg(list_payload pl)
-    _ghost_arg(list_cells cells)
+    _ghost_arg(list_insertion ctx)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(head) 1.0R (reveal $(cells))
-        ** Pulse.Lib.Reference.pts_to_uninit $(entry) ** (reveal $(pl)) $(entry)))
+        IntrusiveListContext.insert_pre (reveal $(ctx)) $(head) $(entry)))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(head) 1.0R
-            (FStar.List.Tot.append (reveal $(cells)) [$(entry)])));
+        IntrusiveListContext.insert_tail_post (reveal $(ctx)) $(head) $(entry)));
 void list_insert_after(_plain struct list_node *position, _plain struct list_node *entry)
-    _ghost_arg(list_payload pl)
-    _ghost_arg(list_ref head)
-    _ghost_arg(list_cells front)
-    _ghost_arg(list_cells back)
+    _ghost_arg(list_cut ctx)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) (reveal $(head)) 1.0R
-            (FStar.List.Tot.append (reveal $(front)) (reveal $(back)))
-        ** pure ($(position) == IntrusiveList.last_or (reveal $(head)) (reveal $(front)))
-        ** Pulse.Lib.Reference.pts_to_uninit $(entry) ** (reveal $(pl)) $(entry)))
+        IntrusiveListContext.insert_after_pre (reveal $(ctx)) $(position) $(entry)))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) (reveal $(head)) 1.0R
-            (FStar.List.Tot.append (reveal $(front)) ($(entry) :: (reveal $(back))))));
+        IntrusiveListContext.insert_after_post (reveal $(ctx)) $(entry)));
 
 /* The list must be nonempty. */
 _plain struct list_node *list_remove_head(_plain struct list_node *head)
-    _ghost_arg(list_payload pl)
-    _ghost_arg(list_cells cells)
+    _ghost_arg(list_context ctx)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(head) 1.0R (reveal $(cells))
-        ** pure ((reveal $(cells)) =!= [])))
+        IntrusiveListContext.remove_head_pre (reveal $(ctx)) $(head)))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(head) 1.0R
-            (match (reveal $(cells)) with | [] -> [] | _::rest -> rest)
-        ** (exists* (next: IntrusiveList.lref).
-            Pulse.Lib.Reference.pts_to $(return) (IntrusiveList.mklink next $(head)))
-        ** (reveal $(pl)) $(return)
-        ** pure ($(return) == IntrusiveList.first_or $(head) (reveal $(cells)))));
+        IntrusiveListContext.remove_head_post (reveal $(ctx)) $(head) $(return)));
 
 /* Entry must be linked and must not be the sentinel.
    Returns whether the list becomes empty. Does not clear entry's old links. */
 bool list_remove(_plain struct list_node *entry)
-    _ghost_arg(list_payload pl)
-    _ghost_arg(list_ref head)
-    _ghost_arg(list_cells front)
-    _ghost_arg(list_cells back)
+    _ghost_arg(list_cut ctx)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) (reveal $(head)) 1.0R
-            (FStar.List.Tot.append (reveal $(front)) ($(entry) :: (reveal $(back))))))
+        IntrusiveListContext.remove_pre (reveal $(ctx)) $(entry)))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) (reveal $(head)) 1.0R
-            (FStar.List.Tot.append (reveal $(front)) (reveal $(back)))
-        ** Pulse.Lib.Reference.pts_to $(entry)
-            (IntrusiveList.mklink
-                (match (reveal $(back)) with | [] -> (reveal $(head)) | x::_ -> x)
-                (IntrusiveList.last_or (reveal $(head)) (reveal $(front))))
-        ** (reveal $(pl)) $(entry)
-        ** pure ($(return) <==>
-            (FStar.List.Tot.append (reveal $(front)) (reveal $(back)) == []))));
+        IntrusiveListContext.remove_post (reveal $(ctx)) $(entry) $(return)));
 
 /* Append source to destination and empty source.
    The heads must belong to distinct, disjoint lists. */
 void list_move(_plain struct list_node *source, _plain struct list_node *destination)
-    _ghost_arg(list_payload pl)
-    _ghost_arg(list_cells source_cells)
-    _ghost_arg(list_cells destination_cells)
+    _ghost_arg(list_movement ctx)
     _requires(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(source) 1.0R
-            (reveal $(source_cells))
-        ** IntrusiveList.is_list_ring_with (reveal $(pl)) $(destination) 1.0R
-            (reveal $(destination_cells))))
+        IntrusiveListContext.move_pre (reveal $(ctx)) $(source) $(destination)))
     _ensures(_inline_pulse(
-        IntrusiveList.is_list_ring_with (reveal $(pl)) $(source) 1.0R []
-        ** IntrusiveList.is_list_ring_with (reveal $(pl)) $(destination) 1.0R
-            (FStar.List.Tot.append (reveal $(destination_cells))
-                (reveal $(source_cells)))));
+        IntrusiveListContext.move_post (reveal $(ctx)) $(source) $(destination)));
 
 #endif

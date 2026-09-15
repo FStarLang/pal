@@ -15,6 +15,7 @@
 #define LIST_ENTRIES (LIST_MODEL.IntrusiveListContext.entries)
 #define LIST_RING_PAYLOAD (LIST_CTX.IntrusiveListContext.resource)
 #define LIST_RING_ENTRIES (LIST_CTX.IntrusiveListContext.entries)
+#define LIST_APPEND(front_, back_) (FStar.List.Tot.append (front_) (back_))
 #define LIST_CUT(model_, head_, front_, back_, description_) \
     { IntrusiveListContext.model = model_; IntrusiveListContext.head = head_; \
       IntrusiveListContext.front = front_; IntrusiveListContext.back = back_; \
@@ -55,14 +56,14 @@ void list_validate(_plain const struct list_node *node)
     _ghost_stmt(unfold (IntrusiveListContext.validation_pre LIST_CTX $(node)));
     _ghost_stmt(IntrusiveListContext.finish_ring LIST_MODEL LIST_HEAD);
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R LIST_ENTRIES)
-        as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R (LIST_FRONT @ LIST_BACK)));
+        as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R LIST_APPEND(LIST_FRONT, LIST_BACK)));
     _ghost_stmt(IntrusiveListValidate.ring_view LIST_PAYLOAD LIST_HEAD $(node) LIST_FRONT LIST_BACK);
     _ghost_stmt(IntrusiveListValidate.view_open_all $(node));
     assert(node->next->prev == node);
     assert(node->prev->next == node);
     _ghost_stmt(IntrusiveListValidate.view_close_all $(node));
-    _ghost_stmt(IntrusiveListValidate.restore_ring LIST_PAYLOAD LIST_HEAD $(node) (LIST_FRONT @ LIST_BACK));
-    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R (LIST_FRONT @ LIST_BACK))
+    _ghost_stmt(IntrusiveListValidate.restore_ring LIST_PAYLOAD LIST_HEAD $(node) LIST_APPEND(LIST_FRONT, LIST_BACK));
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R LIST_APPEND(LIST_FRONT, LIST_BACK))
         as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R LIST_ENTRIES));
     _ghost_stmt(IntrusiveListContext.prepare_ring LIST_MODEL LIST_HEAD);
     _ghost_stmt(fold (IntrusiveListContext.validation_pre LIST_CTX $(node)));
@@ -73,7 +74,7 @@ void list_insert_after(_plain struct list_node *position, _plain struct list_nod
     _ghost_stmt(unfold (IntrusiveListContext.insert_after_pre LIST_CTX $(position) $(entry)));
     _ghost_stmt(IntrusiveListContext.finish_ring LIST_MODEL LIST_HEAD);
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R LIST_ENTRIES)
-        as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R (LIST_FRONT @ LIST_BACK)));
+        as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R LIST_APPEND(LIST_FRONT, LIST_BACK)));
     _ghost_stmt(IntrusiveListContext.prepare_validation LIST_PAYLOAD LIST_HEAD $(position) LIST_FRONT LIST_BACK);
     list_validate(position);
     _ghost_stmt(IntrusiveListContext.finish_validation LIST_PAYLOAD LIST_HEAD $(position) LIST_FRONT LIST_BACK);
@@ -116,11 +117,11 @@ void list_insert_tail(_plain struct list_node *head, _plain struct list_node *en
     _ghost_stmt(unfold (IntrusiveListContext.insert_pre LIST_CTX $(head) $(entry)));
     _ghost_stmt(IntrusiveListContext.finish_ring LIST_MODEL $(head));
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD $(head) 1.0R LIST_ENTRIES)
-        as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD $(head) 1.0R ([] @ LIST_ENTRIES)));
+        as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD $(head) 1.0R LIST_APPEND([], LIST_ENTRIES)));
     _ghost_stmt(IntrusiveListContext.prepare_validation LIST_PAYLOAD $(head) $(head) [] LIST_ENTRIES);
     list_validate(head);
     _ghost_stmt(IntrusiveListContext.finish_validation LIST_PAYLOAD $(head) $(head) [] LIST_ENTRIES);
-    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD $(head) 1.0R ([] @ LIST_ENTRIES))
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD $(head) 1.0R LIST_APPEND([], LIST_ENTRIES))
         as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD $(head) 1.0R LIST_ENTRIES));
     _ghost_stmt(IntrusiveListIndexed.ring_open LIST_PAYLOAD $(head));
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
@@ -145,16 +146,16 @@ bool list_remove(_plain struct list_node *entry)
     _ghost_stmt(IntrusiveListIndexed.last_or_snoc LIST_HEAD LIST_FRONT ($(entry),LIST_DESCRIPTION));
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R LIST_ENTRIES)
         as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R
-            ((LIST_FRONT @ [($(entry),LIST_DESCRIPTION)]) @ LIST_BACK)));
+            LIST_APPEND(LIST_APPEND(LIST_FRONT, [($(entry), LIST_DESCRIPTION)]), LIST_BACK)));
     _ghost_stmt(IntrusiveListContext.prepare_validation LIST_PAYLOAD LIST_HEAD $(entry)
-        (LIST_FRONT @ [($(entry),LIST_DESCRIPTION)]) LIST_BACK);
+        LIST_APPEND(LIST_FRONT, [($(entry), LIST_DESCRIPTION)]) LIST_BACK);
     list_validate(entry);
     _ghost_stmt(IntrusiveListContext.finish_validation LIST_PAYLOAD LIST_HEAD $(entry)
-        (LIST_FRONT @ [($(entry),LIST_DESCRIPTION)]) LIST_BACK);
+        LIST_APPEND(LIST_FRONT, [($(entry), LIST_DESCRIPTION)]) LIST_BACK);
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R
-        ((LIST_FRONT @ [($(entry),LIST_DESCRIPTION)]) @ LIST_BACK))
+        LIST_APPEND(LIST_APPEND(LIST_FRONT, [($(entry), LIST_DESCRIPTION)]), LIST_BACK))
         as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD LIST_HEAD 1.0R
-            (LIST_FRONT @ (($(entry),LIST_DESCRIPTION)::LIST_BACK))));
+            LIST_APPEND(LIST_FRONT, (($(entry), LIST_DESCRIPTION) :: LIST_BACK))));
     _ghost_stmt(IntrusiveListOps.del_open LIST_PAYLOAD LIST_HEAD $(entry)
         LIST_DESCRIPTION LIST_FRONT LIST_BACK);
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(entry));
@@ -184,11 +185,11 @@ _plain struct list_node *list_remove_head(_plain struct list_node *head)
     _ghost_stmt(unfold (IntrusiveListContext.remove_head_pre LIST_CTX $(head)));
     _ghost_stmt(IntrusiveListContext.finish_ring LIST_CTX $(head));
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R LIST_RING_ENTRIES)
-        as (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R ([] @ LIST_RING_ENTRIES)));
+        as (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R LIST_APPEND([], LIST_RING_ENTRIES)));
     _ghost_stmt(IntrusiveListContext.prepare_validation LIST_RING_PAYLOAD $(head) $(head) [] LIST_RING_ENTRIES);
     list_validate(head);
     _ghost_stmt(IntrusiveListContext.finish_validation LIST_RING_PAYLOAD $(head) $(head) [] LIST_RING_ENTRIES);
-    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R ([] @ LIST_RING_ENTRIES))
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R LIST_APPEND([], LIST_RING_ENTRIES))
         as (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R LIST_RING_ENTRIES));
     _ghost_stmt(IntrusiveListIndexed.ring_open LIST_RING_PAYLOAD $(head));
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
@@ -205,16 +206,16 @@ _plain struct list_node *list_remove_head(_plain struct list_node *head)
             (snd (FStar.List.Tot.hd LIST_RING_ENTRIES)))) $(first) _));
     _ghost_stmt(rewrite
         (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R
-            ([] @ FStar.List.Tot.tl LIST_RING_ENTRIES))
+            LIST_APPEND([], FStar.List.Tot.tl LIST_RING_ENTRIES))
         as (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R
             (FStar.List.Tot.tl LIST_RING_ENTRIES)));
-    _ghost_stmt(assert exists* (next: IntrusiveListBase.lref).
-        Pulse.Lib.Reference.pts_to $(first) (IntrusiveListBase.mklink next $(head)));
+    _ghost_stmt(assert exists* (next: IntrusiveListIndexed.lref).
+        Pulse.Lib.Reference.pts_to $(first) (IntrusiveListIndexed.mklink next $(head)));
     _ghost_stmt(rewrite
         (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R
             (FStar.List.Tot.tl LIST_RING_ENTRIES) **
-        (exists* (next: IntrusiveListBase.lref).
-            Pulse.Lib.Reference.pts_to $(first) (IntrusiveListBase.mklink next $(head))) **
+        (exists* (next: IntrusiveListIndexed.lref).
+            Pulse.Lib.Reference.pts_to $(first) (IntrusiveListIndexed.mklink next $(head))) **
         LIST_RING_PAYLOAD $(first) (snd (FStar.List.Tot.hd LIST_RING_ENTRIES)) **
         pure ($(first) == fst (FStar.List.Tot.hd LIST_RING_ENTRIES)))
         as (IntrusiveListContext.remove_head_post LIST_CTX $(head) $(first)));

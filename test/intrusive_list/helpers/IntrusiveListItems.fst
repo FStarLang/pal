@@ -6,8 +6,9 @@ open FStar.List.Tot
 
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
-module L = IntrusiveList
+module L = IntrusiveListIndexed
 module X = IntrusiveListIndexed
+module C = IntrusiveListContext
 
 let find_post (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
               (head: L.lref) (es: X.entries a) (result: L.lref) : slprop =
@@ -117,17 +118,11 @@ let pop_post (#a: Type0) (p: L.ipayload a) (head: L.lref)
     (exists* (v: N.struct_list_node). R.pts_to (fst e) v) **
     p (fst e) (snd e) ** pure (result == fst e)
 
-unfold let rest_cells (cells: list L.lref) : list L.lref =
-  match cells with | [] -> [] | _ :: rest -> rest
-
 ghost
 fn pop_empty (#a: Type0) (p: L.ipayload a) (head: L.lref) (es: X.entries a)
-  requires L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es) **
-    L.ipayload_of p es ** pure (L.cells_of es == [])
+  requires L.is_list_ring_ix p head 1.0R es ** pure (es == [])
   ensures pop_post p head es null
 {
-  X.ops_close p head es;
-  L.cells_of_nil_iff es;
   rewrite (L.is_list_ring_ix p head 1.0R es) as (L.is_list_ring_ix p head 1.0R []);
   fold (pop_post p head [] null);
   rewrite (pop_post p head [] null) as (pop_post p head es null);
@@ -135,22 +130,23 @@ fn pop_empty (#a: Type0) (p: L.ipayload a) (head: L.lref) (es: X.entries a)
 
 ghost
 fn pop_finish (#a: Type0) (p: L.ipayload a) (head result: L.lref) (es: X.entries a)
-              (#v: N.struct_list_node)
-  requires L.is_list_ring_with L.emp_pl head 1.0R (rest_cells (L.cells_of es)) **
-    R.pts_to result v ** L.emp_pl result ** L.ipayload_of p es **
-    pure (Cons? es /\ result == L.first_or head (L.cells_of es))
+  requires C.remove_head_post (C.make p es) head result
   ensures pop_post p head es result
 {
   match es {
-    Nil -> { unreachable (); }
+    Nil -> {
+      rewrite (C.remove_head_post (C.make p es) head result) as (pure False);
+      unreachable ();
+    }
     Cons e rest -> {
-      rewrite (L.is_list_ring_with L.emp_pl head 1.0R (rest_cells (L.cells_of es)))
-        as (L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of rest));
-      unfold (L.ipayload_of p es);
-      rewrite (L.emp_pl result) as emp;
-      L.epl_out head 1.0R (L.cells_of rest);
-      L.ring_ix_in p head 1.0R rest;
-      rewrite (R.pts_to result v) as (R.pts_to (fst e) v);
+      rewrite (C.remove_head_post (C.make p es) head result)
+        as (L.is_list_ring_ix p head 1.0R rest **
+          (exists* (next: L.lref). R.pts_to result (L.mklink next head)) **
+          p result (snd e) ** pure (result == fst e));
+      with next. assert (R.pts_to result (L.mklink next head));
+      rewrite (R.pts_to result (L.mklink next head))
+        as (R.pts_to (fst e) (L.mklink next head));
+      rewrite (p result (snd e)) as (p (fst e) (snd e));
       fold (pop_post p head es result);
     }
   }

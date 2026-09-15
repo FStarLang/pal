@@ -6,12 +6,23 @@ open FStar.List.Tot
 
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
-module L = IntrusiveList
+
+unfold let lref = ref N.struct_list_node
+unfold let lnext (v: N.struct_list_node) : lref = v.N.struct_list_node__next
+unfold let lprev (v: N.struct_list_node) : lref = v.N.struct_list_node__prev
+unfold let mklink (next prev: lref) : N.struct_list_node = {
+  N.struct_list_node__next = next;
+  N.struct_list_node__prev = prev;
+}
+
+unfold let ipayload (a: Type0) = lref -> a -> slprop
+unfold let no_payload (#a: Type0) : ipayload a = fun _ _ -> emp
+unfold let emp_pl (#a: Type0) : ipayload a = no_payload
 
 (* Cursors preserve ordered descriptions without interpreting their payloads. *)
-unfold let entry (a: Type0) = L.lref & a
+unfold let entry (a: Type0) = lref & a
 unfold let entries (a: Type0) = list (entry a)
-unfold let matcher (a: Type0) = L.lref -> a -> GTot bool
+unfold let matcher (a: Type0) = lref -> a -> GTot bool
 unfold let order (a: Type0) = a -> a -> GTot bool
 
 let total_preorder (#a: Type0) (le: order a) : prop =
@@ -25,7 +36,7 @@ let rec first_match_entry (#a: Type0) (m: matcher a) (es: entries a)
     | [] -> None
     | e :: rest -> if m (fst e) (snd e) then Some e else first_match_entry m rest
 
-let first_match (#a: Type0) (m: matcher a) (es: entries a) : GTot L.lref =
+let first_match (#a: Type0) (m: matcher a) (es: entries a) : GTot lref =
   match first_match_entry m es with | None -> null | Some e -> fst e
 
 let rec no_match (#a: Type0) (m: matcher a) (es: entries a)
@@ -54,7 +65,7 @@ let rec sorted (#a: Type0) (le: order a) (es: entries a)
     | e :: f :: rest -> le (snd e) (snd f) /\ sorted le (f :: rest)
 
 (* Existing equivalent descriptions precede the inserted entry. *)
-let rec insert (#a: Type0) (le: order a) (node: L.lref) (description: a)
+let rec insert (#a: Type0) (le: order a) (node: lref) (description: a)
                (es: entries a)
   : GTot (entries a) (decreases es)
   = match es with
@@ -73,7 +84,7 @@ let rec first_match_skip (#a: Type0) (m: matcher a) (front back: entries a)
   = match front with | [] -> () | _ :: rest -> first_match_skip m rest back
 
 let rec no_match_snoc (#a: Type0) (m: matcher a) (front: entries a)
-                     (node: L.lref) (description: a)
+                     (node: lref) (description: a)
   : Lemma
     (requires no_match m front /\ not (m node description))
     (ensures no_match m (front @ [(node, description)]))
@@ -97,7 +108,7 @@ let rec filtered_no_match (#a: Type0) (m: matcher a) (es: entries a)
   = match es with | [] -> () | _ :: rest -> filtered_no_match m rest
 
 let rec insert_preserves_sorted (#a: Type0) (le: order a)
-                                (node: L.lref) (description: a) (es: entries a)
+                                (node: lref) (description: a) (es: entries a)
   : Lemma
     (requires total_preorder le /\ sorted le es)
     (ensures sorted le (insert le node description es))
@@ -107,7 +118,7 @@ let rec insert_preserves_sorted (#a: Type0) (le: order a)
     | [_] -> ()
     | _ :: rest -> insert_preserves_sorted le node description rest
 
-let rec detached (#a: Type0) (p: L.ipayload a) (es: entries a)
+let rec detached (#a: Type0) (p: ipayload a) (es: entries a)
   : Tot slprop (decreases es)
   = match es with
     | [] -> emp
@@ -116,8 +127,8 @@ let rec detached (#a: Type0) (p: L.ipayload a) (es: entries a)
       p (fst e) (snd e) ** detached p rest
 
 ghost
-fn rec detached_snoc (#a: Type0) (p: L.ipayload a) (es: entries a)
-                     (node: L.lref) (description: a) (#v: N.struct_list_node)
+fn rec detached_snoc (#a: Type0) (p: ipayload a) (es: entries a)
+                     (node: lref) (description: a) (#v: N.struct_list_node)
   requires detached p es ** R.pts_to node v ** p node description
   ensures detached p (es @ [(node, description)])
   decreases es
@@ -128,6 +139,7 @@ fn rec detached_snoc (#a: Type0) (p: L.ipayload a) (es: entries a)
       fold (detached p []);
       fold (detached p [(node, description)]);
     }
+
     Cons e rest -> {
       unfold (detached p es);
       detached_snoc p rest node description;
@@ -138,260 +150,647 @@ fn rec detached_snoc (#a: Type0) (p: L.ipayload a) (es: entries a)
   }
 }
 
+let first_or (#a: Type0) (d: lref) (es: entries a) : lref =
+  match es with | [] -> d | e :: _ -> fst e
+
+let rec last_or (#a: Type0) (d: lref) (es: entries a)
+  : Tot lref (decreases es) =
+  match es with | [] -> d | e :: rest -> last_or (fst e) rest
+
+let rec cells_of (#a: Type0) (es: entries a) : Tot (list lref) (decreases es) =
+  match es with | [] -> [] | e :: rest -> fst e :: cells_of rest
+
+let rec cells_of_append (#a: Type0) (front back: entries a)
+  : Lemma (cells_of (front @ back) == cells_of front @ cells_of back)
+    (decreases front) =
+  match front with | [] -> () | _ :: rest -> cells_of_append rest back
+
+let cells_of_nil_iff (#a: Type0) (es: entries a)
+  : Lemma ((cells_of es == []) <==> (es == [])) =
+  match es with | [] -> () | _ :: _ -> ()
+
+let rec last_or_append (#a: Type0) (d: lref) (front back: entries a)
+  : Lemma (last_or d (front @ back) == last_or (last_or d front) back)
+    (decreases front) =
+  match front with | [] -> () | e :: rest -> last_or_append (fst e) rest back
+
+let last_or_cons (#a: Type0) (d: lref) (e: entry a) (es: entries a)
+  : Lemma (last_or d (e :: es) == last_or (fst e) es) = ()
+
+let last_or_snoc (#a: Type0) (d: lref) (es: entries a) (e: entry a)
+  : Lemma (last_or d (es @ [e]) == fst e) =
+  last_or_append d es [e]
+
+(* The endpoint is excluded. Descriptions travel with their node ownership. *)
+let rec is_list_seg_ix (#a: Type0) (pl: ipayload a)
+    (prev cur endl: lref) (p: perm) (es: entries a)
+  : Tot slprop (decreases es) =
+  match es with
+  | [] -> pure (cur == endl)
+  | e :: rest ->
+    pure (cur == fst e) ** pure (cur =!= endl) **
+    (exists* (v: N.struct_list_node).
+      R.pts_to cur #p v ** pl cur (snd e) **
+      pure (lprev v == prev) **
+      is_list_seg_ix pl cur (lnext v) endl p rest)
+
+(* The sentinel has links but no member description or payload. *)
+let is_list_ring_ix (#a: Type0) (pl: ipayload a)
+    ([@@@mkey] head: lref) (p: perm) (es: entries a) : slprop =
+  exists* (hv: N.struct_list_node).
+    R.pts_to head #p hv **
+    is_list_seg_ix pl head (lnext hv) head p es **
+    pure (lprev hv == last_or head es)
+
 ghost
-fn ops_open (#a: Type0) (p: L.ipayload a) (head: L.lref) (es: entries a)
-  requires L.is_list_ring_ix p head 1.0R es
-  ensures L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es) **
-    L.ipayload_of p es
+fn seg_nil_intro (#a: Type0) (pl: ipayload a) (prev cur endl: lref) (p: perm)
+  requires pure (cur == endl)
+  ensures is_list_seg_ix pl prev cur endl p []
 {
-  L.ring_ix_open p head 1.0R es;
+  fold (is_list_seg_ix pl prev cur endl p []);
 }
 
 ghost
-fn ops_close (#a: Type0) (p: L.ipayload a) (head: L.lref) (es: entries a)
-  requires L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of es) **
-    L.ipayload_of p es
-  ensures L.is_list_ring_ix p head 1.0R es
+fn seg_nil_elim (#a: Type0) (pl: ipayload a) (prev cur endl: lref) (p: perm)
+  requires is_list_seg_ix pl prev cur endl p []
+  ensures pure (cur == endl)
 {
-  L.ring_ix_close p head 1.0R es;
+  unfold (is_list_seg_ix pl prev cur endl p []);
 }
 
 ghost
-fn ops_open_at (#a: Type0) (p: L.ipayload a) (head: L.lref)
-               (front: entries a) (e: entry a) (back: entries a)
-  requires L.is_list_ring_ix p head 1.0R (front @ (e :: back))
-  ensures L.is_list_ring_with L.emp_pl head 1.0R
-      (L.cells_of front @ (fst e :: L.cells_of back)) **
-    L.ipayload_of p (front @ (e :: back))
+fn seg_cons_intro (#a: Type0) (pl: ipayload a) (prev cur endl: lref)
+                  (p: perm) (e: entry a) (rest: entries a) (#v: N.struct_list_node)
+  requires R.pts_to cur #p v ** pl cur (snd e) **
+    pure (cur == fst e /\ cur =!= endl /\ lprev v == prev) **
+    is_list_seg_ix pl cur (lnext v) endl p rest
+  ensures is_list_seg_ix pl prev cur endl p (e :: rest)
 {
-  rewrite (L.is_list_ring_ix p head 1.0R (front @ (e :: back)))
-    as (L.is_list_ring_ix p head 1.0R (front @ ((fst e, snd e) :: back)));
-  L.ring_ix_open_at p head 1.0R front back (fst e) (snd e);
-  rewrite (L.ipayload_of p (front @ ((fst e, snd e) :: back)))
-    as (L.ipayload_of p (front @ (e :: back)));
+  fold (is_list_seg_ix pl prev cur endl p (e :: rest));
 }
 
 ghost
-fn ops_close_insert (#a: Type0) (p: L.ipayload a) (head: L.lref)
-                    (front back: entries a) (node: L.lref) (description: a)
-  requires L.is_list_ring_with L.emp_pl head 1.0R
-      (L.cells_of front @ (node :: L.cells_of back)) **
-    L.ipayload_of p (front @ ((node, description) :: back))
-  ensures L.is_list_ring_ix p head 1.0R (front @ ((node, description) :: back))
+fn seg_cons_elim (#a: Type0) (pl: ipayload a) (prev cur endl: lref)
+                 (p: perm) (e: entry a) (rest: entries a)
+  requires is_list_seg_ix pl prev cur endl p (e :: rest)
+  ensures exists* (v: N.struct_list_node).
+    R.pts_to cur #p v ** pl cur (snd e) **
+    pure (cur == fst e /\ cur =!= endl /\ lprev v == prev) **
+    is_list_seg_ix pl cur (lnext v) endl p rest
 {
-  L.ring_ix_close_at p head 1.0R front back node description;
+  unfold (is_list_seg_ix pl prev cur endl p (e :: rest));
 }
 
 ghost
-fn ops_close_remove (#a: Type0) (p: L.ipayload a) (head: L.lref)
-                    (front back: entries a)
-  requires L.is_list_ring_with L.emp_pl head 1.0R (L.cells_of front @ L.cells_of back) **
-    L.ipayload_of p (front @ back)
-  ensures L.is_list_ring_ix p head 1.0R (front @ back)
+fn seg_first (#a: Type0) (pl: ipayload a) (prev cur endl: lref)
+             (#p: perm) (#es: entries a)
+  requires is_list_seg_ix pl prev cur endl p es
+  ensures is_list_seg_ix pl prev cur endl p es **
+    pure (cur == first_or endl es) ** pure ((cur == endl) <==> (es == []))
 {
-  L.ring_ix_close_cat p head 1.0R front back;
+  if (Nil? es) {
+    rewrite (is_list_seg_ix pl prev cur endl p es) as (is_list_seg_ix pl prev cur endl p []);
+    unfold (is_list_seg_ix pl prev cur endl p []);
+    fold (is_list_seg_ix pl prev cur endl p []);
+    rewrite (is_list_seg_ix pl prev cur endl p []) as (is_list_seg_ix pl prev cur endl p es);
+  } else {
+    let e = Cons?.hd es;
+    let rest = Cons?.tl es;
+    rewrite (is_list_seg_ix pl prev cur endl p es)
+      as (is_list_seg_ix pl prev cur endl p (e :: rest));
+    unfold (is_list_seg_ix pl prev cur endl p (e :: rest));
+    fold (is_list_seg_ix pl prev cur endl p (e :: rest));
+    rewrite (is_list_seg_ix pl prev cur endl p (e :: rest))
+      as (is_list_seg_ix pl prev cur endl p es);
+  }
 }
 
-let head_rest (#a: Type0) (p: L.ipayload a) (head: L.lref) (es: entries a)
-              (hv: N.struct_list_node) : slprop =
-  L.is_list_seg head (L.lnext hv) head 1.0R (L.cells_of es) **
-  L.ipayload_of p es **
-  pure (L.lprev hv == L.last_or head (L.cells_of es))
+ghost
+fn rec seg_last_ne (#a: Type0) (pl: ipayload a) (prev cur endl: lref)
+                   (#p: perm) (es: entries a)
+  requires is_list_seg_ix pl prev cur endl p es
+  ensures is_list_seg_ix pl prev cur endl p es **
+    pure ((last_or endl es == endl) <==> (es == []))
+  decreases es
+{
+  match es {
+    Nil -> {
+      unfold (is_list_seg_ix pl prev cur endl p []);
+      fold (is_list_seg_ix pl prev cur endl p []);
+    }
+    Cons e rest -> {
+      seg_cons_elim pl prev cur endl p e rest;
+      with v. assert (R.pts_to cur #p v);
+      seg_last_ne pl cur (lnext v) endl rest;
+      seg_cons_intro pl prev cur endl p e rest;
+    }
+  }
+}
 
 ghost
-fn head_open (#a: Type0) (p: L.ipayload a) (head: L.lref) (es: entries a)
-  requires L.is_list_ring_ix p head 1.0R es
+fn ring_open (#a: Type0) (pl: ipayload a) (head: lref)
+             (#p: perm) (#es: entries a)
+  requires is_list_ring_ix pl head p es
   ensures exists* (hv: N.struct_list_node).
-    R.pts_to head hv ** head_rest p head es hv **
-    pure (L.lnext hv == L.first_or head (L.cells_of es)) **
-    pure (L.lprev hv == L.last_or head (L.cells_of es)) **
-    pure ((L.lnext hv == head) <==> (es == []))
+    R.pts_to head #p hv ** is_list_seg_ix pl head (lnext hv) head p es **
+    pure (lprev hv == last_or head es /\ lnext hv == first_or head es) **
+    pure ((lnext hv == head) <==> (es == [])) **
+    pure ((lprev hv == head) <==> (es == []))
 {
-  L.ring_ix_out p head 1.0R es;
-  L.ring_open_full L.no_payload head;
+  unfold (is_list_ring_ix pl head p es);
+  with hv. assert (R.pts_to head #p hv);
+  seg_first pl head (lnext hv) head;
+  seg_last_ne pl head (lnext hv) head es;
+}
+
+ghost
+fn ring_close (#a: Type0) (pl: ipayload a) (head: lref)
+              (#p: perm) (#es: entries a) (#hv: N.struct_list_node)
+  requires R.pts_to head #p hv ** is_list_seg_ix pl head (lnext hv) head p es **
+    pure (lprev hv == last_or head es)
+  ensures is_list_ring_ix pl head p es
+{
+  fold (is_list_ring_ix pl head p es);
+}
+
+ghost
+fn ring_intro_empty (#a: Type0) (pl: ipayload a) (head: lref)
+                    (#p: perm) (#hv: N.struct_list_node)
+  requires R.pts_to head #p hv ** pure (lnext hv == head /\ lprev hv == head)
+  ensures is_list_ring_ix pl head p []
+{
+  seg_nil_intro pl head (lnext hv) head p;
+  ring_close pl head;
+}
+
+ghost
+fn ring_elim_empty (#a: Type0) (pl: ipayload a) (head: lref) (#p: perm)
+  requires is_list_ring_ix pl head p []
+  ensures exists* (hv: N.struct_list_node).
+    R.pts_to head #p hv ** pure (lnext hv == head /\ lprev hv == head)
+{
+  ring_open pl head;
+  with hv. assert (R.pts_to head #p hv);
+  seg_nil_elim pl head (lnext hv) head p;
+}
+
+let rec ipayload_of (#a: Type0) (pl: ipayload a) (es: entries a)
+  : Tot slprop (decreases es) =
+  match es with
+  | [] -> emp
+  | e :: rest -> pl (fst e) (snd e) ** ipayload_of pl rest
+
+ghost
+fn rec ipayload_of_split (#a: Type0) (pl: ipayload a) (front back: entries a)
+  requires ipayload_of pl (front @ back)
+  ensures ipayload_of pl front ** ipayload_of pl back
+  decreases front
+{
+  match front {
+    Nil -> { fold (ipayload_of pl []); }
+    Cons e rest -> {
+      rewrite (ipayload_of pl (front @ back)) as (ipayload_of pl (e :: (rest @ back)));
+      unfold (ipayload_of pl (e :: (rest @ back)));
+      ipayload_of_split pl rest back;
+      fold (ipayload_of pl (e :: rest));
+    }
+  }
+}
+
+ghost
+fn rec ipayload_of_join (#a: Type0) (pl: ipayload a) (front back: entries a)
+  requires ipayload_of pl front ** ipayload_of pl back
+  ensures ipayload_of pl (front @ back)
+  decreases front
+{
+  match front {
+    Nil -> { unfold (ipayload_of pl []); }
+    Cons e rest -> {
+      unfold (ipayload_of pl (e :: rest));
+      ipayload_of_join pl rest back;
+      fold (ipayload_of pl (e :: (rest @ back)));
+      rewrite (ipayload_of pl (e :: (rest @ back))) as (ipayload_of pl (front @ back));
+    }
+  }
+}
+
+ghost
+fn rec seg_pl_out (#a: Type0) (pl: ipayload a) (prev cur endl: lref)
+                  (p: perm) (es: entries a)
+  requires is_list_seg_ix pl prev cur endl p es
+  ensures is_list_seg_ix no_payload prev cur endl p es ** ipayload_of pl es
+  decreases es
+{
+  match es {
+    Nil -> {
+      seg_nil_elim pl prev cur endl p;
+      seg_nil_intro #a no_payload prev cur endl p;
+      fold (ipayload_of pl []);
+    }
+    Cons e rest -> {
+      seg_cons_elim pl prev cur endl p e rest;
+      with v. assert (R.pts_to cur #p v);
+      seg_pl_out pl cur (lnext v) endl p rest;
+      seg_cons_intro no_payload prev cur endl p e rest;
+      rewrite (pl cur (snd e)) as (pl (fst e) (snd e));
+      fold (ipayload_of pl (e :: rest));
+    }
+  }
+}
+
+ghost
+fn rec seg_pl_in (#a: Type0) (pl: ipayload a) (prev cur endl: lref)
+                 (p: perm) (es: entries a)
+  requires is_list_seg_ix no_payload prev cur endl p es ** ipayload_of pl es
+  ensures is_list_seg_ix pl prev cur endl p es
+  decreases es
+{
+  match es {
+    Nil -> {
+      seg_nil_elim no_payload prev cur endl p;
+      unfold (ipayload_of pl []);
+      seg_nil_intro pl prev cur endl p;
+    }
+    Cons e rest -> {
+      seg_cons_elim no_payload prev cur endl p e rest;
+      with v. assert (R.pts_to cur #p v);
+      unfold (ipayload_of pl (e :: rest));
+      seg_pl_in pl cur (lnext v) endl p rest;
+      rewrite (pl (fst e) (snd e)) as (pl cur (snd e));
+      seg_cons_intro pl prev cur endl p e rest;
+    }
+  }
+}
+
+ghost
+fn ring_pl_out (#a: Type0) (pl: ipayload a) (head: lref) (p: perm) (es: entries a)
+  requires is_list_ring_ix pl head p es
+  ensures is_list_ring_ix no_payload head p es ** ipayload_of pl es
+{
+  ring_open pl head;
+  with hv. assert (R.pts_to head #p hv);
+  seg_pl_out pl head (lnext hv) head p es;
+  ring_close no_payload head;
+}
+
+ghost
+fn ring_pl_in (#a: Type0) (pl: ipayload a) (head: lref) (p: perm) (es: entries a)
+  requires is_list_ring_ix no_payload head p es ** ipayload_of pl es
+  ensures is_list_ring_ix pl head p es
+{
+  ring_open no_payload head;
+  with hv. assert (R.pts_to head #p hv);
+  seg_pl_in pl head (lnext hv) head p es;
+  ring_close pl head;
+}
+
+(* A split prefix excludes both the cut and the original sentinel. *)
+let rec is_list_seg_s_ix (#a: Type0) (pl: ipayload a)
+    (prev cur endl sent: lref) (p: perm) (es: entries a)
+  : Tot slprop (decreases es) =
+  match es with
+  | [] -> pure (cur == endl)
+  | e :: rest ->
+    pure (cur == fst e /\ cur =!= endl /\ cur =!= sent) **
+    (exists* (v: N.struct_list_node).
+      R.pts_to cur #p v ** pl cur (snd e) **
+      pure (lprev v == prev) **
+      is_list_seg_s_ix pl cur (lnext v) endl sent p rest)
+
+ghost
+fn refs_distinct (#a: Type0) (r1 r2: R.ref a) (#v1 #v2: a)
+  requires R.pts_to r1 v1 ** R.pts_to r2 v2
+  ensures R.pts_to r1 v1 ** R.pts_to r2 v2 ** pure (r1 =!= r2)
+{
+  let equal = FStar.IndefiniteDescription.strong_excluded_middle (r1 == r2);
+  if equal {
+    rewrite (R.pts_to r2 v2) as (R.pts_to r1 v2);
+    R.gather r1;
+    R.pts_to_perm_bound r1;
+    unreachable ();
+  }
+}
+
+ghost
+fn seg_head_distinct (#a: Type0) (pl: ipayload a)
+                     (start sent prev cur: lref) (es: entries a)
+                     (#v: N.struct_list_node)
+  requires R.pts_to start v ** is_list_seg_ix pl prev cur sent 1.0R es **
+    pure (start =!= sent)
+  ensures R.pts_to start v ** is_list_seg_ix pl prev cur sent 1.0R es **
+    pure (start =!= cur)
+{
+  match es {
+    Nil -> {
+      seg_nil_elim pl prev cur sent 1.0R;
+      seg_nil_intro pl prev cur sent 1.0R;
+    }
+    Cons e rest -> {
+      seg_cons_elim pl prev cur sent 1.0R e rest;
+      refs_distinct start cur;
+      seg_cons_intro pl prev cur sent 1.0R e rest;
+    }
+  }
+}
+
+ghost
+fn rec seg_split (#a: Type0) (pl: ipayload a) (prev start sent: lref)
+                 (front back: entries a)
+  requires is_list_seg_ix pl prev start sent 1.0R (front @ back)
+  ensures exists* (cut: lref).
+    is_list_seg_s_ix pl prev start cut sent 1.0R front **
+    is_list_seg_ix pl (last_or prev front) cut sent 1.0R back
+  decreases front
+{
+  match front {
+    Nil -> {
+      fold (is_list_seg_s_ix pl prev start start sent 1.0R []);
+    }
+    Cons e rest -> {
+      rewrite (is_list_seg_ix pl prev start sent 1.0R (front @ back))
+        as (is_list_seg_ix pl prev start sent 1.0R (e :: (rest @ back)));
+      seg_cons_elim pl prev start sent 1.0R e (rest @ back);
+      with v. assert (R.pts_to start v);
+      seg_split pl start (lnext v) sent rest back;
+      with cut. assert (is_list_seg_s_ix pl start (lnext v) cut sent 1.0R rest);
+      seg_head_distinct pl start sent (last_or start rest) cut back;
+      fold (is_list_seg_s_ix pl prev start cut sent 1.0R (e :: rest));
+      rewrite (is_list_seg_ix pl (last_or start rest) cut sent 1.0R back)
+        as (is_list_seg_ix pl (last_or prev front) cut sent 1.0R back);
+    }
+  }
+}
+
+ghost
+fn rec seg_merge (#a: Type0) (pl: ipayload a) (prev start cut sent: lref)
+                 (front back: entries a) (#p: perm)
+  requires is_list_seg_s_ix pl prev start cut sent p front **
+    is_list_seg_ix pl (last_or prev front) cut sent p back
+  ensures is_list_seg_ix pl prev start sent p (front @ back)
+  decreases front
+{
+  match front {
+    Nil -> {
+      unfold (is_list_seg_s_ix pl prev start cut sent p []);
+      rewrite (is_list_seg_ix pl (last_or prev front) cut sent p back)
+        as (is_list_seg_ix pl prev start sent p (front @ back));
+    }
+    Cons e rest -> {
+      unfold (is_list_seg_s_ix pl prev start cut sent p (e :: rest));
+      with v. assert (R.pts_to start #p v);
+      rewrite (is_list_seg_ix pl (last_or prev front) cut sent p back)
+        as (is_list_seg_ix pl (last_or start rest) cut sent p back);
+      seg_merge pl start (lnext v) cut sent rest back;
+      seg_cons_intro pl prev start sent p e (rest @ back);
+      rewrite (is_list_seg_ix pl prev start sent p (e :: (rest @ back)))
+        as (is_list_seg_ix pl prev start sent p (front @ back));
+    }
+  }
+}
+
+let is_list_split_ix (#a: Type0) (pl: ipayload a) (head: lref) (p: perm)
+                     (prev pos: lref) (front back: entries a) : slprop =
+  exists* (hv: N.struct_list_node).
+    R.pts_to head #p hv **
+    is_list_seg_s_ix pl head (lnext hv) pos head p front **
+    is_list_seg_ix pl prev pos head p back **
+    pure (prev == last_or head front /\ lprev hv == last_or head (front @ back))
+
+unfold let split (#a: Type0) (pl: ipayload a) (head pos: lref)
+                 (front back: entries a) : slprop =
+  is_list_split_ix pl head 1.0R (last_or head front) pos front back
+
+ghost
+fn split_open (#a: Type0) (pl: ipayload a) (head: lref) (front back: entries a)
+  requires is_list_ring_ix pl head 1.0R (front @ back)
+  ensures exists* (pos: lref). split pl head pos front back **
+    pure (pos == first_or head back) ** pure ((pos == head) <==> (back == []))
+{
+  ring_open pl head;
   with hv. assert (R.pts_to head hv);
-  L.cells_of_nil_iff es;
-  fold (head_rest p head es hv);
+  seg_split pl head (lnext hv) head front back;
+  with pos. assert (is_list_seg_s_ix pl head (lnext hv) pos head 1.0R front);
+  seg_first pl (last_or head front) pos head;
+  fold (is_list_split_ix pl head 1.0R (last_or head front) pos front back);
 }
 
 ghost
-fn head_close (#a: Type0) (p: L.ipayload a) (head: L.lref) (es: entries a)
+fn split_close (#a: Type0) (pl: ipayload a) (head pos: lref) (front back: entries a)
+  requires split pl head pos front back
+  ensures is_list_ring_ix pl head 1.0R (front @ back)
+{
+  unfold (is_list_split_ix pl head 1.0R (last_or head front) pos front back);
+  with hv. assert (R.pts_to head hv);
+  seg_merge pl head (lnext hv) pos head front back;
+  ring_close pl head;
+}
+
+ghost
+fn split_facts (#a: Type0) (pl: ipayload a) (head pos: lref) (front back: entries a)
+  requires split pl head pos front back
+  ensures split pl head pos front back **
+    pure (pos == first_or head back) ** pure ((pos == head) <==> (back == []))
+{
+  unfold (is_list_split_ix pl head 1.0R (last_or head front) pos front back);
+  seg_first pl (last_or head front) pos head;
+  fold (is_list_split_ix pl head 1.0R (last_or head front) pos front back);
+}
+
+let head_rest (#a: Type0) (pl: ipayload a) (head: lref) (es: entries a)
+              (hv: N.struct_list_node) : slprop =
+  is_list_seg_ix pl head (lnext hv) head 1.0R es **
+  pure (lprev hv == last_or head es)
+
+ghost
+fn head_open (#a: Type0) (pl: ipayload a) (head: lref) (es: entries a)
+  requires is_list_ring_ix pl head 1.0R es
+  ensures exists* (hv: N.struct_list_node).
+    R.pts_to head hv ** head_rest pl head es hv **
+    pure (lnext hv == first_or head es /\ lprev hv == last_or head es) **
+    pure ((lnext hv == head) <==> (es == []))
+{
+  ring_open pl head;
+  with hv. assert (R.pts_to head hv);
+  fold (head_rest pl head es hv);
+}
+
+ghost
+fn head_close (#a: Type0) (pl: ipayload a) (head: lref) (es: entries a)
               (#hv: N.struct_list_node)
-  requires R.pts_to head hv ** head_rest p head es hv
-  ensures L.is_list_ring_ix p head 1.0R es
+  requires R.pts_to head hv ** head_rest pl head es hv
+  ensures is_list_ring_ix pl head 1.0R es
 {
-  unfold (head_rest p head es hv);
-  L.ring_close L.no_payload head;
-  L.ring_ix_in p head 1.0R es;
-}
-
-let split (#a: Type0) (p: L.ipayload a) (head pos: L.lref)
-          (front back: entries a) : slprop =
-  L.is_list_split head 1.0R (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) (L.cells_of back) **
-  L.ipayload_of p (front @ back)
-
-ghost
-fn split_open (#a: Type0) (p: L.ipayload a) (head: L.lref) (front back: entries a)
-  requires L.is_list_ring_ix p head 1.0R (front @ back)
-  ensures exists* (pos: L.lref).
-    split p head pos front back **
-    pure (pos == L.first_or head (L.cells_of back)) **
-    pure ((pos == head) <==> (back == []))
-{
-  L.ring_ix_out p head 1.0R (front @ back);
-  L.cells_of_append front back;
-  rewrite (L.is_list_ring head 1.0R (L.cells_of (front @ back)))
-    as (L.is_list_ring head 1.0R (L.cells_of front @ L.cells_of back));
-  L.split_open L.no_payload head (L.cells_of front) (L.cells_of back);
-  with pos. assert (L.is_list_split head 1.0R (L.last_or head (L.cells_of front))
-    pos (L.cells_of front) (L.cells_of back));
-  L.split_cur_ne L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) (L.cells_of back);
-  unfold (L.is_list_split_with L.no_payload head 1.0R
-    (L.last_or head (L.cells_of front)) pos (L.cells_of front) (L.cells_of back));
-  L.seg_first L.no_payload (L.last_or head (L.cells_of front)) pos head;
-  fold (L.is_list_split_with L.no_payload head 1.0R
-    (L.last_or head (L.cells_of front)) pos (L.cells_of front) (L.cells_of back));
-  L.cells_of_nil_iff back;
-  fold (split p head pos front back);
+  unfold (head_rest pl head es hv);
+  ring_close pl head;
 }
 
 ghost
-fn split_close (#a: Type0) (p: L.ipayload a) (head pos: L.lref)
-               (front back: entries a)
-  requires split p head pos front back
-  ensures L.is_list_ring_ix p head 1.0R (front @ back)
-{
-  unfold (split p head pos front back);
-  L.split_close L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) (L.cells_of back);
-  L.cells_of_append front back;
-  rewrite (L.is_list_ring head 1.0R (L.cells_of front @ L.cells_of back))
-    as (L.is_list_ring head 1.0R (L.cells_of (front @ back)));
-  L.ring_ix_in p head 1.0R (front @ back);
-}
-
-ghost
-fn split_facts (#a: Type0) (p: L.ipayload a) (head pos: L.lref)
-               (front back: entries a)
-  requires split p head pos front back
-  ensures split p head pos front back **
-    pure (pos == L.first_or head (L.cells_of back)) **
-    pure ((pos == head) <==> (back == []))
-{
-  unfold (split p head pos front back);
-  L.split_cur_ne L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) (L.cells_of back);
-  unfold (L.is_list_split_with L.no_payload head 1.0R
-    (L.last_or head (L.cells_of front)) pos (L.cells_of front) (L.cells_of back));
-  L.seg_first L.no_payload (L.last_or head (L.cells_of front)) pos head;
-  fold (L.is_list_split_with L.no_payload head 1.0R
-    (L.last_or head (L.cells_of front)) pos (L.cells_of front) (L.cells_of back));
-  L.cells_of_nil_iff back;
-  fold (split p head pos front back);
-}
-
-ghost
-fn cursor_start (#a: Type0) (p: L.ipayload a) (head pos: L.lref) (es: entries a)
+fn cursor_start (#a: Type0) (pl: ipayload a) (head pos: lref) (es: entries a)
                 (#hv: N.struct_list_node)
-  requires R.pts_to head hv ** head_rest p head es hv ** pure (pos == L.lnext hv)
-  ensures split p head pos [] es
+  requires R.pts_to head hv ** head_rest pl head es hv ** pure (pos == lnext hv)
+  ensures split pl head pos [] es
 {
-  unfold (head_rest p head es hv);
-  L.split_open_front_nil L.no_payload head (L.cells_of es) pos;
-  rewrite (L.is_list_split head 1.0R head pos [] (L.cells_of es))
-    as (L.is_list_split head 1.0R (L.last_or head (L.cells_of #a [])) pos
-      (L.cells_of #a []) (L.cells_of es));
-  rewrite (L.ipayload_of p es) as (L.ipayload_of p ([] @ es));
-  fold (split p head pos [] es);
+  unfold (head_rest pl head es hv);
+  fold (is_list_seg_s_ix pl head (lnext hv) pos head 1.0R []);
+  rewrite (is_list_seg_ix pl head (lnext hv) head 1.0R es)
+    as (is_list_seg_ix pl head pos head 1.0R es);
+  fold (is_list_split_ix pl head 1.0R (last_or #a head []) pos [] es);
 }
 
-(* The exposed entry's payload is outside this predicate; all others remain owned. *)
-let cursor_rest (#a: Type0) (p: L.ipayload a) (head pos: L.lref)
+let cursor_rest (#a: Type0) (pl: ipayload a) (head pos: lref)
                 (front: entries a) (description: a) (back: entries a)
                 (v: N.struct_list_node) : slprop =
-  L.iter_rest L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) pos (L.cells_of back) (L.lnext v) **
-  L.ipayload_of p front ** L.ipayload_of p back **
-  pure (L.lprev v == L.last_or head (L.cells_of front))
+  exists* (hv: N.struct_list_node).
+    R.pts_to head hv **
+    is_list_seg_s_ix pl head (lnext hv) pos head 1.0R front **
+    is_list_seg_ix pl pos (lnext v) head 1.0R back **
+    pure (pos =!= head /\ lprev v == last_or head front /\
+      lprev hv == last_or head (front @ ((pos, description) :: back)))
 
 ghost
-fn cursor_expose (#a: Type0) (p: L.ipayload a) (head pos: L.lref)
+fn cursor_expose (#a: Type0) (pl: ipayload a) (head pos: lref)
                  (front: entries a) (e: entry a) (back: entries a)
-  requires split p head pos front (e :: back)
+  requires split pl head pos front (e :: back)
   ensures exists* (v: N.struct_list_node).
-    R.pts_to pos v ** p pos (snd e) **
-    cursor_rest p head pos front (snd e) back v **
-    pure (pos == fst e) ** pure (pos =!= head) **
-    pure (L.lnext v == L.first_or head (L.cells_of back)) **
-    pure ((L.lnext v == head) <==> (back == []))
+    R.pts_to pos v ** pl pos (snd e) **
+    cursor_rest pl head pos front (snd e) back v **
+    pure (pos == fst e /\ pos =!= head /\ lnext v == first_or head back) **
+    pure ((lnext v == head) <==> (back == []))
 {
-  unfold (split p head pos front (e :: back));
-  rewrite (L.is_list_split head 1.0R (L.last_or head (L.cells_of front)) pos
-      (L.cells_of front) (L.cells_of (e :: back)))
-    as (L.is_list_split head 1.0R (L.last_or head (L.cells_of front)) pos
-      (L.cells_of front) (fst e :: L.cells_of back));
-  L.iter_expose L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) (fst e) (L.cells_of back);
+  unfold (is_list_split_ix pl head 1.0R (last_or head front) pos front (e :: back));
+  seg_cons_elim pl (last_or head front) pos head 1.0R e back;
   with v. assert (R.pts_to pos v);
-  L.ipayload_of_split p front (e :: back);
-  unfold (L.ipayload_of p (e :: back));
-  rewrite (p (fst e) (snd e)) as (p pos (snd e));
-  rewrite (L.iter_rest L.no_payload head (L.last_or head (L.cells_of front)) pos
-      (L.cells_of front) (fst e) (L.cells_of back) (L.lnext v))
-    as (L.iter_rest L.no_payload head (L.last_or head (L.cells_of front)) pos
-      (L.cells_of front) pos (L.cells_of back) (L.lnext v));
-  unfold (L.iter_rest L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) pos (L.cells_of back) (L.lnext v));
-  L.seg_first L.no_payload pos (L.lnext v) head;
-  L.seg_cur_ne L.no_payload pos (L.lnext v) head;
-  L.cells_of_nil_iff back;
-  fold (L.iter_rest L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) pos (L.cells_of back) (L.lnext v));
-  fold (cursor_rest p head pos front (snd e) back v);
+  seg_first pl pos (lnext v) head;
+  fold (cursor_rest pl head pos front (snd e) back v);
 }
 
 ghost
-fn cursor_restore (#a: Type0) (p: L.ipayload a) (head pos: L.lref)
+fn cursor_restore (#a: Type0) (pl: ipayload a) (head pos: lref)
                   (front: entries a) (description: a) (back: entries a)
                   (#v: N.struct_list_node)
-  requires R.pts_to pos v ** p pos description **
-    cursor_rest p head pos front description back v
-  ensures split p head pos front ((pos, description) :: back)
+  requires R.pts_to pos v ** pl pos description **
+    cursor_rest pl head pos front description back v
+  ensures split pl head pos front ((pos, description) :: back)
 {
-  unfold (cursor_rest p head pos front description back v);
-  L.iter_unexpose L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) pos (L.cells_of back);
-  L.ipayload_of_cons_in p pos description back;
-  L.ipayload_of_join p front ((pos, description) :: back);
-  rewrite (L.is_list_split head 1.0R (L.last_or head (L.cells_of front)) pos
-      (L.cells_of front) (pos :: L.cells_of back))
-    as (L.is_list_split head 1.0R (L.last_or head (L.cells_of front)) pos
-      (L.cells_of front) (L.cells_of ((pos, description) :: back)));
-  fold (split p head pos front ((pos, description) :: back));
+  unfold (cursor_rest pl head pos front description back v);
+  seg_cons_intro pl (last_or head front) pos head 1.0R (pos, description) back;
+  fold (is_list_split_ix pl head 1.0R (last_or head front) pos front
+    ((pos, description) :: back));
 }
 
 ghost
-fn cursor_advance (#a: Type0) (p: L.ipayload a) (head pos: L.lref)
+fn cursor_advance (#a: Type0) (pl: ipayload a) (head pos: lref)
                   (front: entries a) (description: a) (back: entries a)
                   (#v: N.struct_list_node)
-  requires R.pts_to pos v ** p pos description **
-    cursor_rest p head pos front description back v
-  ensures split p head (L.lnext v) (front @ [(pos, description)]) back
+  requires R.pts_to pos v ** pl pos description **
+    cursor_rest pl head pos front description back v
+  ensures split pl head (lnext v) (front @ [(pos, description)]) back
 {
-  unfold (cursor_rest p head pos front description back v);
-  L.iter_advance L.no_payload head (L.last_or head (L.cells_of front)) pos
-    (L.cells_of front) pos (L.cells_of back);
-  L.ipayload_of_single_in p pos description;
-  L.ipayload_of_join p front [(pos, description)];
-  L.ipayload_of_join p (front @ [(pos, description)]) back;
-  L.cells_of_append front [(pos, description)];
-  L.last_or_snoc head (L.cells_of front) pos;
-  rewrite (L.is_list_split head 1.0R pos (L.lnext v) (L.cells_of front @ [pos])
-      (L.cells_of back))
-    as (L.is_list_split head 1.0R
-      (L.last_or head (L.cells_of (front @ [(pos, description)]))) (L.lnext v)
-      (L.cells_of (front @ [(pos, description)])) (L.cells_of back));
-  fold (split p head (L.lnext v) (front @ [(pos, description)]) back);
+  unfold (cursor_rest pl head pos front description back v);
+  seg_first pl pos (lnext v) head;
+  fold (cursor_rest pl head pos front description back v);
+  cursor_restore pl head pos front description back;
+  split_close pl head pos front ((pos, description) :: back);
+  FStar.List.Tot.Properties.append_assoc front [(pos, description)] back;
+  rewrite (is_list_ring_ix pl head 1.0R (front @ ((pos, description) :: back)))
+    as (is_list_ring_ix pl head 1.0R ((front @ [(pos, description)]) @ back));
+  split_open pl head (front @ [(pos, description)]) back;
+  with next. assert (split pl head next (front @ [(pos, description)]) back);
+  rewrite (split pl head next (front @ [(pos, description)]) back)
+    as (split pl head (lnext v) (front @ [(pos, description)]) back);
+}
+
+ghost
+fn ops_open (#a: Type0) (pl: ipayload a) (head: lref) (es: entries a)
+  requires is_list_ring_ix pl head 1.0R es
+  ensures is_list_ring_ix no_payload head 1.0R es ** ipayload_of pl es
+{
+  ring_pl_out pl head 1.0R es;
+}
+
+ghost
+fn ops_close (#a: Type0) (pl: ipayload a) (head: lref) (es: entries a)
+  requires is_list_ring_ix no_payload head 1.0R es ** ipayload_of pl es
+  ensures is_list_ring_ix pl head 1.0R es
+{
+  ring_pl_in pl head 1.0R es;
+}
+
+ghost
+fn ipayload_of_cons_in (#a: Type0) (pl: ipayload a)
+                      (node: lref) (description: a) (rest: entries a)
+  requires pl node description ** ipayload_of pl rest
+  ensures ipayload_of pl ((node, description) :: rest)
+{
+  fold (ipayload_of pl ((node, description) :: rest));
+}
+
+ghost
+fn ipayload_of_cons_out (#a: Type0) (pl: ipayload a)
+                       (node: lref) (description: a) (rest: entries a)
+  requires ipayload_of pl ((node, description) :: rest)
+  ensures pl node description ** ipayload_of pl rest
+{
+  unfold (ipayload_of pl ((node, description) :: rest));
+}
+
+ghost
+fn ipayload_of_single_in (#a: Type0) (pl: ipayload a) (node: lref) (description: a)
+  requires pl node description
+  ensures ipayload_of pl [(node, description)]
+{
+  fold (ipayload_of pl []);
+  ipayload_of_cons_in pl node description [];
+}
+
+ghost
+fn ipayload_of_single_out (#a: Type0) (pl: ipayload a) (node: lref) (description: a)
+  requires ipayload_of pl [(node, description)]
+  ensures pl node description
+{
+  ipayload_of_cons_out pl node description [];
+  unfold (ipayload_of pl []);
+}
+
+ghost
+fn seg_s_cur_ne (#a: Type0) (pl: ipayload a) (prev cur endl sent: lref)
+                (#p: perm) (#es: entries a)
+  requires is_list_seg_s_ix pl prev cur endl sent p es
+  ensures is_list_seg_s_ix pl prev cur endl sent p es **
+    pure ((cur == endl) <==> (es == []))
+{
+  if (Nil? es) {
+    rewrite (is_list_seg_s_ix pl prev cur endl sent p es)
+      as (is_list_seg_s_ix pl prev cur endl sent p []);
+    unfold (is_list_seg_s_ix pl prev cur endl sent p []);
+    fold (is_list_seg_s_ix pl prev cur endl sent p []);
+    rewrite (is_list_seg_s_ix pl prev cur endl sent p [])
+      as (is_list_seg_s_ix pl prev cur endl sent p es);
+  } else {
+    let e = Cons?.hd es;
+    let rest = Cons?.tl es;
+    rewrite (is_list_seg_s_ix pl prev cur endl sent p es)
+      as (is_list_seg_s_ix pl prev cur endl sent p (e :: rest));
+    unfold (is_list_seg_s_ix pl prev cur endl sent p (e :: rest));
+    fold (is_list_seg_s_ix pl prev cur endl sent p (e :: rest));
+    rewrite (is_list_seg_s_ix pl prev cur endl sent p (e :: rest))
+      as (is_list_seg_s_ix pl prev cur endl sent p es);
+  }
+}
+
+ghost
+fn ring_front_empty (#a: Type0) (pl: ipayload a) (head: lref)
+                    (front back: entries a)
+  requires is_list_ring_ix pl head 1.0R (front @ back) **
+    pure (first_or head (front @ back) == first_or head back)
+  ensures is_list_ring_ix pl head 1.0R (front @ back) ** pure (front == [])
+{
+  ring_open pl head;
+  with hv. assert (R.pts_to head hv);
+  seg_split pl head (lnext hv) head front back;
+  with cut. assert (is_list_seg_s_ix pl head (lnext hv) cut head 1.0R front);
+  seg_first pl (last_or head front) cut head;
+  seg_s_cur_ne pl head (lnext hv) cut head;
+  seg_merge pl head (lnext hv) cut head front back;
+  ring_close pl head;
 }

@@ -6,7 +6,7 @@ open FStar.List.Tot
 
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
-module B = IntrusiveListBase
+module B = IntrusiveListIndexed
 module X = IntrusiveListIndexed
 module T = Pulse.Lib.Trade
 
@@ -761,12 +761,11 @@ fn indexed_init (#a: Type0) (p: X.ipayload a) (head: B.lref)
 
 ghost
 fn indexed_normalize (#a: Type0) (p: X.ipayload a) (head: B.lref)
-                     (es: X.entries a) (#old_head: B.lref) (#old_es: X.entries a)
-  requires X.is_list_ring_ix p old_head 1.0R old_es **
-    pure (old_head == head /\ old_es == es)
+                     (es: X.entries a) (#old_es: X.entries a)
+  requires X.is_list_ring_ix p head 1.0R old_es ** pure (old_es == es)
   ensures X.is_list_ring_ix p head 1.0R es
 {
-  rewrite (X.is_list_ring_ix p old_head 1.0R old_es)
+  rewrite (X.is_list_ring_ix p head 1.0R old_es)
     as (X.is_list_ring_ix p head 1.0R es);
 }
 
