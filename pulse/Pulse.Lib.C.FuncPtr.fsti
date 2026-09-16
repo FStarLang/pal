@@ -23,6 +23,7 @@ open Pulse.Lib.C.Inhabited
      - of_fn_div       : reflect a concrete DIVERGENT Pulse function as a pointer
      - of_fn_div_valid : `of_fn_div` is valid at its own spec, `div = true`
      - weaken          : move validity across a spec weakening and/or total->div
+     - frame           : add the same resource to a pointer's pre and post
      - call            : indirect call of a TOTAL pointer (returns `stt`)
      - call_div        : indirect call of a DIVERGENT pointer (returns `stt_div`)
      - is_null         : decidable null test
@@ -201,6 +202,21 @@ val weaken (#a #b #c #c': Type0) (f: func_ptr a b)
   : stt_ghost unit emp_inames
       (is_valid f div pre post)
       (fun _ -> (is_valid f div' pre' post'))
+
+(* Frame a resource into a pointer's contract without changing the pointer,
+   witness type, or divergence flag. The resource may depend on arguments and
+   the witness, but not the result, and is identical in pre and post.
+   Unlike weaken's independent coercions, this rule carries the resource
+   across the call. It transfers validity only: actual ownership of the frame
+   is required when calling the pointer, not when applying this ghost axiom. *)
+val frame (#a #b #c: Type0) (f: func_ptr a b) (div: bool)
+  (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+  (resource: a -> erased c -> slprop)
+  : stt_ghost unit emp_inames
+      (is_valid f div pre post)
+      (fun _ -> is_valid f div
+        (fun x w -> pre x w ** resource x w)
+        (fun x w r -> post x w r ** resource x w))
 
 (* Indirect call of a TOTAL pointer: consume `is_valid f false pre post ** pre x
    w`. pre/post are explicit (SMT will not solve the higher-order

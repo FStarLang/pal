@@ -1193,6 +1193,31 @@ _include_pulse(Fp_frame_spec,
     Pulse.Lib.Reference.pts_to p 42l
   unfold let framed_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop =
     Pulse.Lib.Reference.pts_to p 42l
+
+  ghost fn frame_wpre (p: ref Int32.t) (w: erased unit)
+    requires framed_pre p w
+    ensures plain_pre p w ** framed_pre p w
+  { () }
+
+  ghost fn frame_wpost (p: ref Int32.t) (w: erased unit) (r: unit)
+    requires plain_post p w r ** framed_pre p w
+    ensures framed_post p w r
+  { () }
+
+  ghost fn frame_plain (f: Pulse.Lib.C.FuncPtr.func_ptr (ref Int32.t) unit)
+    requires Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post
+    ensures Pulse.Lib.C.FuncPtr.is_valid f true framed_pre framed_post **
+            Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post
+  {
+    unfold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+    fold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+    Pulse.Lib.C.FuncPtr.frame f true plain_pre plain_post framed_pre;
+    Pulse.Lib.C.FuncPtr.weaken f true true
+      (fun p w -> plain_pre p w ** framed_pre p w)
+      (fun p w r -> plain_post p w r ** framed_pre p w)
+      framed_pre framed_post (fun _ w -> w) frame_wpre frame_wpost;
+    fold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+  }
 )
 
 /* Control: ordinary call-site framing preserves the pointee. */
@@ -1219,12 +1244,9 @@ void fp_frame_consumer(
     f(p);
 }
 
-/* FAILS (Error 19): same arbitrary pointer, but the consumer expects validity
-   at the framed contract. No concrete implementation is available to rewrap.
-   Unfold/fold leaves an unproved `valid` fact. FuncPtr.weaken's post coercion
-   would need to prove `pts_to p 42l` from emp: its separate pre/post coercions
-   do not carry a frame between them. The direct-call control above needs no
-   such validity conversion. */
+/* Adapt the same arbitrary pointer's validity using the frame axiom.
+   Without this ghost step the consumer call fails with Error 19.
+   FuncPtr.weaken alone cannot carry a resource between its two coercions. */
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
 void fp_frame_adapt(
     void (*f)(_plain int *p)
@@ -1233,7 +1255,10 @@ void fp_frame_adapt(
                 Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
     _plain int *p)
 {
+    _ghost_stmt(Fp_frame_spec.frame_plain $(f));
     fp_frame_consumer(f, p);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid $(f)
+      Fp_frame_spec.framed_pre Fp_frame_spec.framed_post);
 }
 
 #if 0
