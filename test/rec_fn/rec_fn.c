@@ -22,7 +22,7 @@ _rec void fill(_array uint32_t *a, size_t len, size_t lo, size_t hi, uint32_t va
   _preserves_value(a._length)
   _ensures(_forall(size_t k, lo <= k && k < hi ==> a[k] == val))
   _ensures(_forall(size_t k, k < len && (k < lo || k >= hi) ==> a[k] == _old(a[k])))
-  _decreases(hi - lo)
+  _decreases((_specint) hi - (_specint) lo)
 {
   if (lo >= hi) {
     return;
@@ -38,7 +38,7 @@ _rec void zero_from(_array uint32_t *a, size_t len, size_t i)
   _preserves_value(a._length)
   _ensures(_forall(size_t k, i <= k && k < len ==> a[k] == 0))
   _ensures(_forall(size_t k, k < i ==> a[k] == _old(a[k])))
-  _decreases(len - i)
+  _decreases((_specint) len - (_specint) i)
 {
   if (i >= len) return;
   a[i] = 0;

@@ -818,6 +818,12 @@ struct FnSurface {
     /// what it does -- so this is exactly the set of pointers the body may call
     /// through without knowing which function it is calling.
     valid_fps: HashSet<String>,
+    /// Set when the signature came out as `fn rec` with a `decreases`, so the
+    /// body may call itself. Direct recursion is the only kind: a cycle
+    /// through two functions would need them emitted as one mutually
+    /// recursive definition, which the per-declaration module layout has
+    /// nowhere to put.
+    self_rec: bool,
 }
 
 /// One parameter's pointee ownership, in the form a loop invariant needs: the
@@ -2484,7 +2490,26 @@ fn emit_fn(
         // say so in the generated file.
         out += &format!("(* contract dropped: {} *)\n", why);
     }
-    out += &format!("fn {}", name);
+    // `_rec` with a `_decreases` is a total recursive function, and Pulse
+    // spells one `fn rec ... decreases (...)`. Without a measure there is
+    // nothing to prove termination with, and C supplies none, so the call is
+    // refused in the body instead -- the same treatment a cycle through two
+    // functions gets.
+    let decreases = match (decl.is_rec, &decl.decreases) {
+        (true, Some(d)) => {
+            spec.guards.borrow_mut().clear();
+            match spec.num(d, When::Pre) {
+                Ok(t) if spec.guards.borrow().is_empty() && contract_ok => Some(t),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    out += &format!(
+        "fn {}{}",
+        if decreases.is_some() { "rec " } else { "" },
+        name
+    );
     if params.is_empty() {
         // Pulse has no nullary `fn`; `f(void)` becomes `f ()`. A function whose
         // only binders are ghost still needs it, which a global grant can
@@ -2525,6 +2550,9 @@ fn emit_fn(
             binders.join(" "),
             bodies.join(" **\n             ")
         );
+    }
+    if let Some(d) = &decreases {
+        out += &format!("  decreases ({})\n", d);
     }
 
     // The `__fp` wrapper: the same contract, in the shape `of_fn_div` can
@@ -2682,6 +2710,7 @@ fn emit_fn(
         } else {
             HashSet::new()
         },
+        self_rec: decreases.is_some(),
     })
 }
 
@@ -4913,6 +4942,13 @@ pub fn emit_palow(
             if let Ok(b) = &body {
                 it.uses.extend(b.uses.iter().cloned());
             }
+            // A module never opens itself, and a self-edge is not a cycle to
+            // break where the `_decreases` has already broken it. Leaving it
+            // in would make the sort report the same back edge every round
+            // and forbid the very call the measure justifies.
+            if sig.self_rec {
+                it.uses.remove(&it.name);
+            }
             let mut out = String::new();
             match &body {
                 Ok(b) if b.divergent => out += "divergent\n",
@@ -5347,6 +5383,9 @@ struct Body<'a> {
     /// Functions this body must not call, because doing so would close a cycle
     /// in the call graph.
     forbidden: &'a HashSet<String>,
+    /// This function's own name, when the signature is `fn rec`. A call to it
+    /// is not a cycle to break but the recursion the `_decreases` justifies.
+    self_rec: Option<String>,
     uses: HashSet<String>,
     lines: Vec<String>,
     /// C locals with a stack slot, in allocation order.
@@ -7400,7 +7439,9 @@ impl<'a> Body<'a> {
             .callees
             .get(&*name.val.to_string())
             .ok_or_else(|| format!("`{}` is not declared in this file", name.val))?;
-        if self.forbidden.contains(&*name.val.to_string()) {
+        if self.forbidden.contains(&*name.val.to_string())
+            && self.self_rec.as_deref() != Some(&*name.val.to_string())
+        {
             return Err(format!("`{}`, which is recursive", name.val));
         }
         self.uses.insert(name.val.to_string());
@@ -9611,6 +9652,11 @@ fn emit_body(
         },
         uses: HashSet::new(),
         forbidden,
+        self_rec: if sig.self_rec {
+            Some(defn.decl.name.val.to_string())
+        } else {
+            None
+        },
         params: defn
             .decl
             .args

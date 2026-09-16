@@ -2403,8 +2403,32 @@ new facts about memory.
    pointer, a nested struct, and an alias to the nested union -- translates
    and verifies with no admits.
 
-   As of this milestone: **788 specifications, 673 of them with real bodies,
-   109 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   Recursion works. A `_rec` function carrying a `_decreases` measure now
+   comes out as Pulse's `fn rec ... decreases (...)`, and its own body may
+   call it. Everything needed was already there -- Pulse has total recursive
+   functions, the IR carries `is_rec` and the measure -- and all that was
+   missing was to stop the cycle-breaking machinery from treating the
+   self-edge as a cycle. That machinery exists for the real problem, mutual
+   recursion, which the per-declaration module layout has nowhere to put: two
+   functions that call each other would have to be emitted as one definition
+   in one module. Direct recursion needs none of that, so a function whose
+   measure translates is excused from it, its self-edge is dropped before the
+   sort sees it (a module never opens itself), and a call to itself is no
+   longer refused. Recursion without a measure still is, which is the honest
+   answer: C gives nothing to prove termination with.
+
+   The measure has to be written in specification arithmetic --
+   `(_specint) hi - (_specint) lo`, not `hi - lo`. This is the same rule
+   Palow applies to every contract: machine arithmetic in a specification is
+   refused because `Int32.v (a + b)` is not `Int32.v a + Int32.v b`, and a
+   measure is a specification. It is a rule worth keeping here even though a
+   `decreases` clause carries no meaning of its own, because a measure read
+   with wrapping arithmetic can decrease when the real quantity does not. The
+   existing emitter accepts the same spelling, so `rec_fn` and
+   `recursive_functions` say it once for both models.
+
+   As of this milestone: **788 specifications, 677 of them with real bodies,
+   105 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
