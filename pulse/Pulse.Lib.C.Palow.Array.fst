@@ -501,3 +501,71 @@ ghost fn elem_maybe_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t
 {
   unfold elem_pts_to (maybe_repr t_repr (SZ.v esize)) a 1.0R x;
 }
+
+(* ---------------------------------------------------------------------------
+   An array's storage, as one predicate
+
+   `T f[N]` inside a structure is N elements of storage, and a structure's
+   write-only view has to name that storage without naming what is in it --
+   there is nothing in it. Hiding the sequence is what makes the view a
+   *predicate on the address alone*, which is what every other field's
+   `_pts_to_uninit` already is, and it is what lets the struct-level fold that
+   assembles them stay a fold.
+
+   The length stays visible because it is the one thing the storage does
+   determine: `N` is part of the field's type. *)
+let array_pts_to_uninit (#t: Type0) (t_repr: t -> bytes -> prop)
+                        (esize: nat) (n: nat) ([@@@mkey] a: ptr) : slprop =
+  exists* (xs: Seq.seq (option t)).
+    array_pts_to (maybe_repr t_repr esize) esize a 1.0R xs ** pure (Seq.length xs == n)
+
+ghost fn array_claim_all_uninit (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                                (esize: SZ.t) (n: SZ.t) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v esize * SZ.v n)
+  ensures  array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a
+{
+  array_claim_uninit t_repr a esize n;
+  fold array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a;
+}
+
+ghost fn array_reveal_all_uninit (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                                 (esize: SZ.t) (n: SZ.t)
+  requires array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v esize * SZ.v n)
+{
+  unfold array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a;
+  array_forget t_repr a esize;
+}
+
+(* Every element of a live array does hold a value, so a live array is storage
+   that happens to be full. The `Some`s are added by hand rather than by a
+   lemma with a pattern: `somes` appears nowhere else, and this is the only
+   direction anything needs it. *)
+let somes (#t: Type0) (xs: Seq.seq t) : Seq.seq (option t) =
+  Seq.init (Seq.length xs) (fun i -> Some (Seq.index xs i))
+
+ghost fn array_forget_all (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                          (esize: SZ.t) (n: SZ.t) (#xs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a 1.0R xs
+  requires pure (Seq.length xs == SZ.v n)
+  ensures  array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a
+{
+  unfold array_pts_to t_repr (SZ.v esize) a 1.0R xs;
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R (somes xs);
+  fold array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a;
+}
+
+(* And the other way, once every element has been written. This is what the
+   loop that fills an array field ends with. *)
+ghost fn array_claim_all (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                         (esize: SZ.t) (vs: Seq.seq t)
+                         (#xs: (xs: Seq.seq (option t) { Seq.length xs == Seq.length vs }))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs
+  requires pure (forall (i: nat). i < Seq.length vs ==>
+                                 Seq.index xs i == Some (Seq.index vs i))
+  ensures  array_pts_to t_repr (SZ.v esize) a 1.0R vs
+{
+  unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs;
+  fold array_pts_to t_repr (SZ.v esize) a 1.0R vs;
+}

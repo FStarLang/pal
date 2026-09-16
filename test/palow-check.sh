@@ -73,9 +73,10 @@ if grep -q '^FAIL' "$WORK/log"; then
   exit 1
 fi
 
-# The generated per-struct storage operations and the `__fp` wrappers are
-# model code, not translated C, so they do not count towards coverage.
-emitted=$(cat "$WORK"/*/*.fst | grep '^fn ' | grep -cvE '^fn (struct|union)_|__fp ')
+# The generated per-struct storage operations, the per-shape array fill and
+# read recursions, and the `__fp` wrappers are model code, not translated C,
+# so they do not count towards coverage.
+emitted=$(cat "$WORK"/*/*.fst | grep '^fn ' | grep -cvE '^fn (rec )?(struct|union|array)_|__fp ')
 skipped=$(cat "$WORK"/*/*.fst | grep -c '^(\* skipped')
 admitted=$(cat "$WORK"/*/*.fst | grep -c 'admit() (\* body')
 echo "palow-check: ok; $emitted specifications, $((emitted - admitted)) with bodies, $admitted admitted, $skipped skipped"

@@ -67,6 +67,9 @@ fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
             tds.structs.get(&*n.val).is_some_and(|si| si.has_read)
         }
         TypeT::TypeRef(TypeRefKind::Union(_)) => false,
+        // An array field is read element by element, by the recursion the
+        // struct's own module generates beside the one that fills it.
+        TypeT::FixedArray(t, _) => palow_name(tds, t).is_some(),
         _ => palow_name(tds, ty).is_some(),
     }
 }
@@ -112,13 +115,17 @@ impl FieldShape {
         }
     }
 
-    /// The write-only view of the field's storage. An array has no such view
-    /// in the model, which is what keeps a struct with an array field out of
-    /// automatic storage for now.
+    /// The write-only view of the field's storage. An array's is the whole
+    /// array as storage: `array_pts_to_uninit` hides the element sequence, so
+    /// that like every other field's view it is a predicate on the address
+    /// and the length alone.
     fn uninit(&self, at: &str) -> Option<String> {
         match self {
             FieldShape::One { pn } => Some(format!("{}_pts_to_uninit {}", pn, at)),
-            FieldShape::Array { .. } => None,
+            FieldShape::Array { pn, esize, len } => Some(format!(
+                "array_pts_to_uninit {}_repr {} {} {}",
+                pn, esize, len, at
+            )),
         }
     }
 }
@@ -3229,6 +3236,96 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
 /// suffix pointer literally `a +! <absolute offset>`. Splitting the other way
 /// round nests the arithmetic -- `((a +! 4) +! 4) +! 1` -- and the solver does
 /// not see through it.
+/// The name of the pair of functions that fills an array field of `len`
+/// elements of type `pn`. One per shape rather than one per field: two fields
+/// of the same element type and length need the same code.
+fn fill_name(pn: &str, esize: u64, len: u64) -> String {
+    format!("array_{}_{}_{}", pn, esize, len)
+}
+
+/// Filling an array field from a value, which is the one part of a structure's
+/// write-only view that is not a fold: going from storage to holding `vs`
+/// genuinely writes bytes, and there are `len` of them to write.
+///
+/// It is a recursion on the index rather than a `while` loop because a `while`
+/// in Pulse is divergent, and divergence here would spread to every function
+/// that declares such a structure. The index is a real argument, and the
+/// measure is how much of the array is left.
+fn emit_fill(pn: &str, elem: &str, esize: u64, len: u64) -> String {
+    let f = fill_name(pn, esize, len);
+    let at = format!("(a +! ({}sz `SizeT.mul` k))", esize);
+    let tmpl = "\
+fn rec {f}_from (a: ptr) (vs: (s: Seq.seq {t} {{ Seq.length s == {n} }})) (k: SizeT.t)
+                (#xs: erased (xs: Seq.seq (option {t}) {{ Seq.length xs == {n} }}))
+  requires array_pts_to (maybe_repr {pn}_repr {es}) {es} a 1.0R xs
+  requires pure (SizeT.v k <= {n} /\\
+                 (forall (j: nat). j < SizeT.v k ==> Seq.index xs j == Some (Seq.index vs j)))
+  ensures  array_pts_to {pn}_repr {es} a 1.0R vs
+  decreases ({n} - SizeT.v k)
+{{
+  if (SizeT.lt k {n}sz) {{
+    array_focus (maybe_repr {pn}_repr {es}) a {es}sz k ({es}sz `SizeT.mul` k);
+    elem_maybe_reveal {pn}_repr {es}sz {at};
+    {pn}_claim_uninit {at};
+    {pn}_write_uninit {at} (Seq.index vs (SizeT.v k));
+    {pn}_to_elem {at};
+    elem_maybe_put {pn}_repr {es}sz {at};
+    array_unfocus (maybe_repr {pn}_repr {es}) a {es}sz k ({es}sz `SizeT.mul` k);
+    {f}_from a vs (k `SizeT.add` 1sz);
+  }} else {{
+    array_claim_all {pn}_repr a {es}sz vs;
+  }}
+}}
+
+fn {f}_fill (a: ptr) (vs: (s: Seq.seq {t} {{ Seq.length s == {n} }}))
+  requires array_pts_to_uninit {pn}_repr {es} {n} a
+  ensures  array_pts_to {pn}_repr {es} a 1.0R vs
+{{
+  unfold array_pts_to_uninit {pn}_repr {es} {n} a;
+  {f}_from a vs 0sz;
+}}
+
+fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == SizeT.v k }}))
+                (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs == {n} }}))
+  preserves array_pts_to {pn}_repr {es} a p xs
+  requires pure (SizeT.v k <= {n} /\\
+                 (forall (j: nat). j < SizeT.v k ==> Seq.index acc j == Seq.index xs j))
+  returns  r : (s: Seq.seq {t} {{ Seq.length s == {n} }})
+  ensures  pure (r == reveal xs)
+  decreases ({n} - SizeT.v k)
+{{
+  if (SizeT.lt k {n}sz) {{
+    array_focus {pn}_repr a {es}sz k ({es}sz `SizeT.mul` k);
+    {pn}_of_elem {at};
+    let v = {pn}_read {at};
+    {pn}_to_elem {at};
+    array_unfocus_read {pn}_repr a {es}sz k ({es}sz `SizeT.mul` k);
+    {f}_upto a (k `SizeT.add` 1sz) (Seq.snoc acc v)
+  }} else {{
+    Seq.lemma_eq_intro acc (reveal xs);
+    acc
+  }}
+}}
+
+fn {f}_read (a: ptr) (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs == {n} }}))
+  preserves array_pts_to {pn}_repr {es} a p xs
+  returns  r : (s: Seq.seq {t} {{ Seq.length s == {n} }})
+  ensures  pure (r == reveal xs)
+{{
+  {f}_upto a 0sz Seq.empty
+}}
+
+";
+    tmpl.replace("{f}", &f)
+        .replace("{pn}", pn)
+        .replace("{t}", elem)
+        .replace("{es}", &esize.to_string())
+        .replace("{n}", &len.to_string())
+        .replace("{at}", &at)
+        .replace("{{", "{")
+        .replace("}}", "}")
+}
+
 fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
     let si = &tds.structs[name];
     let sn = format!("struct_{}", name);
@@ -3238,7 +3335,14 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     for f in &si.fields {
         // A nested struct field would need its own `_claim_uninit`, which the
         // generated layer does not have yet: the carve stops at the scalars.
-        let u = if has_repr(tds, &f.ty) {
+        // An array field's element type was already checked for a
+        // representation when the shape was worked out; it is the field's own
+        // type, which is not a scalar, that `has_repr` rejects.
+        let ok = match &f.shape {
+            FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::Array { .. } => true,
+        };
+        let u = if ok {
             f.shape
                 .uninit(&format!("(a +! {}_offsetof_{})", sn, f.name))
         } else {
@@ -3265,6 +3369,20 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     };
 
     let mut c = String::new();
+    let mut fills: Vec<String> = Vec::new();
+    for f in &si.fields {
+        if let FieldShape::Array { pn, esize, len } = &f.shape {
+            let name = fill_name(pn, *esize, *len);
+            if !fills.contains(&name) {
+                fills.push(name);
+                let elem = match &tds.resolve(&f.ty).val {
+                    TypeT::FixedArray(t, _) => fstar_type(tds, t).unwrap(),
+                    _ => unreachable!(),
+                };
+                c += &emit_fill(pn, &elem, *esize, *len);
+            }
+        }
+    }
     c += &format!(
         "let {}_pts_to_uninit (a: ptr) : slprop =\n  {} **\n  {}_padding a 1.0R\n\n",
         sn,
@@ -3288,17 +3406,36 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         alloc += &format!("  mem_split a {}sz;\n", off);
     }
     for f in &si.fields {
-        let FieldShape::One { pn } = &f.shape else {
-            unreachable!()
-        };
-        alloc += &format!("  {}_claim_uninit {};\n", pn, at(f.offset));
-        alloc += &format!(
-            "  rewrite ({pn}_pts_to_uninit {off})\n    as ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}));\n",
-            pn = pn,
-            off = at(f.offset),
-            sn = sn,
-            f = f.name
-        );
+        match &f.shape {
+            FieldShape::One { pn } => {
+                alloc += &format!("  {}_claim_uninit {};\n", pn, at(f.offset));
+                alloc += &format!(
+                    "  rewrite ({pn}_pts_to_uninit {off})\n    as ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}));\n",
+                    pn = pn,
+                    off = at(f.offset),
+                    sn = sn,
+                    f = f.name
+                );
+            }
+            FieldShape::Array { pn, esize, len } => {
+                alloc += &format!(
+                    "  array_claim_all_uninit {}_repr {} {}sz {}sz;\n",
+                    pn,
+                    at(f.offset),
+                    esize,
+                    len
+                );
+                alloc += &format!(
+                    "  rewrite (array_pts_to_uninit {pn}_repr {es} {n} {off})\n    as (array_pts_to_uninit {pn}_repr {es} {n} (a +! {sn}_offsetof_{f}));\n",
+                    pn = pn,
+                    es = esize,
+                    n = len,
+                    off = at(f.offset),
+                    sn = sn,
+                    f = f.name
+                );
+            }
+        }
     }
     // Claiming raw storage at this type is the carve on its own; a stack
     // allocation is that plus the allocation. Separating them is what lets a
@@ -3334,17 +3471,36 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     free += &format!("  unfold {}_pts_to_uninit a;\n", sn);
     free += &format!("  unfold {}_padding a 1.0R;\n", sn);
     for f in &si.fields {
-        let FieldShape::One { pn } = &f.shape else {
-            unreachable!()
-        };
-        free += &format!(
-            "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n",
-            pn = pn,
-            sn = sn,
-            f = f.name,
-            off = at(f.offset)
-        );
-        free += &format!("  {}_reveal_uninit {};\n", pn, at(f.offset));
+        match &f.shape {
+            FieldShape::One { pn } => {
+                free += &format!(
+                    "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n",
+                    pn = pn,
+                    sn = sn,
+                    f = f.name,
+                    off = at(f.offset)
+                );
+                free += &format!("  {}_reveal_uninit {};\n", pn, at(f.offset));
+            }
+            FieldShape::Array { pn, esize, len } => {
+                free += &format!(
+                    "  rewrite (array_pts_to_uninit {pn}_repr {es} {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {es} {n} {off});\n",
+                    pn = pn,
+                    es = esize,
+                    n = len,
+                    sn = sn,
+                    f = f.name,
+                    off = at(f.offset)
+                );
+                free += &format!(
+                    "  array_reveal_all_uninit {}_repr {} {}sz {}sz;\n",
+                    pn,
+                    at(f.offset),
+                    esize,
+                    len
+                );
+            }
+        }
     }
     for off in bounds.iter() {
         free += &format!("  mem_join a {}sz;\n", off);
@@ -3369,10 +3525,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     let mut forget = String::new();
     forget += &format!("  unfold {}_pts_to a 1.0R x;\n", sn);
     for f in &si.fields {
-        let FieldShape::One { pn } = &f.shape else {
-            unreachable!()
-        };
-        forget += &format!("  {}_forget (a +! {}_offsetof_{});\n", pn, sn, f.name);
+        match &f.shape {
+            FieldShape::One { pn } => {
+                forget += &format!("  {}_forget (a +! {}_offsetof_{});\n", pn, sn, f.name);
+            }
+            FieldShape::Array { pn, esize, len } => {
+                forget += &format!(
+                    "  array_forget_all {}_repr (a +! {}_offsetof_{}) {}sz {}sz;\n",
+                    pn, sn, f.name, esize, len
+                );
+            }
+        }
     }
     c += &format!(
         "ghost fn {sn}_forget (a: ptr) (#x: {sn})\n\
@@ -3386,13 +3549,23 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     let mut write = String::new();
     write += &format!("  unfold {}_pts_to_uninit a;\n", sn);
     for f in &si.fields {
-        let FieldShape::One { pn } = &f.shape else {
-            unreachable!()
-        };
-        write += &format!(
-            "  {}_write_uninit (a +! {}_offsetof_{}) x.fld_{};\n",
-            pn, sn, f.name, f.name
-        );
+        match &f.shape {
+            FieldShape::One { pn } => {
+                write += &format!(
+                    "  {}_write_uninit (a +! {}_offsetof_{}) x.fld_{};\n",
+                    pn, sn, f.name, f.name
+                );
+            }
+            FieldShape::Array { pn, esize, len } => {
+                write += &format!(
+                    "  {}_fill (a +! {}_offsetof_{}) x.fld_{};\n",
+                    fill_name(pn, *esize, *len),
+                    sn,
+                    f.name,
+                    f.name
+                );
+            }
+        }
     }
     c += &format!(
         "fn {sn}_write_uninit (a: ptr) (x: {sn})\n\
@@ -3412,14 +3585,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // value in F* and an object in C, and the two have to meet somewhere.
     let mut read = String::new();
     for f in &si.fields {
-        let FieldShape::One { pn } = &f.shape else {
-            unreachable!()
+        let reader = match &f.shape {
+            FieldShape::One { pn } => format!("{}_read", pn),
+            FieldShape::Array { pn, esize, len } => {
+                format!("{}_read", fill_name(pn, *esize, *len))
+            }
         };
         read += &format!("  {}_focus_{} a;\n", sn, f.name);
         read += &format!(
-            "  let v_{f} = {pn}_read (a +! {sn}_offsetof_{f});\n",
+            "  let v_{f} = {rd} (a +! {sn}_offsetof_{f});\n",
             f = f.name,
-            pn = pn,
+            rd = reader,
             sn = sn
         );
         read += &format!("  {}_unfocus_read_{} a;\n", sn, f.name);
@@ -3454,16 +3630,16 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
 
 /// Whether a struct has the generated automatic-storage operations, which is
 /// the same condition `emit_struct_storage` checks: every field needs an
-/// uninitialised view, and an array field has none.
+/// uninitialised view.
 fn storable_struct(tds: &Typedefs, ty: &Type) -> bool {
     let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
         return false;
     };
     match tds.structs.get(&*n.val) {
-        Some(si) => si
-            .fields
-            .iter()
-            .all(|f| matches!(f.shape, FieldShape::One { .. }) && has_repr(tds, &f.ty)),
+        Some(si) => si.fields.iter().all(|f| match &f.shape {
+            FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::Array { .. } => true,
+        }),
         None => false,
     }
 }
@@ -4587,6 +4763,12 @@ fn into_modules(chunks: Vec<Chunk>) -> Vec<PalowModule> {
     let chunks = merged;
 
     let mut owner: HashMap<String, String> = HashMap::new();
+    // What each module already opens, so that opening it brings those along.
+    // F* `open` is not transitive, and a record literal names its labels
+    // without naming its type: `{ fld_lo = 1ul }` for a `struct pair` nested
+    // inside a `struct pairs` mentions nothing the scan below can see. Taking
+    // the closure is sound because these modules are one generated namespace.
+    let mut deps: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut out: Vec<PalowModule> = Vec::new();
     for ch in chunks {
         let mut opens: BTreeSet<String> = BTreeSet::new();
@@ -4605,6 +4787,16 @@ fn into_modules(chunks: Vec<Chunk>) -> Vec<PalowModule> {
                 word.clear();
             }
         }
+        let mut queue: Vec<String> = opens.iter().cloned().collect();
+        while let Some(m) = queue.pop() {
+            for d in deps.get(&m).into_iter().flatten() {
+                if *d != ch.module && opens.insert(d.clone()) {
+                    queue.push(d.clone());
+                }
+            }
+        }
+        deps.insert(ch.module.clone(), opens.clone());
+
         let mut code = format!("module {}\n", ch.module);
         code += HEADER;
         code += PREAMBLE;
@@ -6173,6 +6365,31 @@ impl<'a> Body<'a> {
         Some(format!("addr_var_{}", g.val))
     }
 
+    /// An initialiser read as a value *at a known type*, which is the one
+    /// thing `rvalue` cannot do on its own: `{ 1, 2 }` for `int f[4]` means a
+    /// four-element sequence, and only the target type says four. C's rule
+    /// that the elements not given are zeroed is applied here, by padding.
+    fn init_value(&mut self, ty: &Type, e: &Expr) -> Result<String, String> {
+        let TypeT::FixedArray(elem, n) = &peel(self.tds, ty).val else {
+            return self.rvalue(e);
+        };
+        let ExprT::ArrayInit { elems, .. } = &strip_vattr(e).val else {
+            return self.rvalue(e);
+        };
+        let n = usize::try_from(*n).map_err(|_| "an array too long to initialise".to_string())?;
+        if elems.len() > n {
+            return Err("an initialiser with more elements than the array".to_string());
+        }
+        let mut vs = Vec::new();
+        for x in elems {
+            vs.push(self.init_value(elem, x)?);
+        }
+        while vs.len() < n {
+            vs.push(zero_value(self.tds, elem)?);
+        }
+        Ok(format!("(Seq.seq_of_list [{}])", vs.join("; ")))
+    }
+
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
             return self.rvalue(&p);
@@ -6341,7 +6558,7 @@ impl<'a> Body<'a> {
                 for (fname, fty) in names {
                     let given = inits.iter().find(|(i, _)| *i.val == *fname);
                     let v = match given {
-                        Some((_, e)) => self.rvalue(e)?,
+                        Some((_, e)) => self.init_value(&fty, e)?,
                         None => zero_value(self.tds, &fty)?,
                     };
                     vals.push(format!("fld_{} = {}", fname, v));

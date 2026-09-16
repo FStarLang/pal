@@ -2051,8 +2051,47 @@ new facts about memory.
    was not marked `erased`. This is the second time that diagnostic has meant
    something other than what it says.
 
-   As of this milestone: **771 specifications, 606 of them with real bodies,
-   165 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   The largest gap left in aggregates was storage for a structure with an
+   array field. `struct guid { uint8_t bytes[16]; }` is the ordinary way C
+   spells a fixed inline buffer, and until now such a structure had no
+   automatic storage at all: every field shape but this one had a write-only
+   view and an array had none,
+   so declaring one as a local was refused outright. The missing view is
+   `array_pts_to_uninit`, which hides the element sequence and keeps only the
+   address and the length -- the length being the one thing the storage does
+   determine, since `N` is part of the field's type. With that, four of the
+   five generated storage operations stay what they were: claiming, revealing
+   and forgetting an array field are folds, exactly as they are for a scalar.
+
+   The fifth is not. Going from storage to holding a value genuinely writes
+   bytes, and there are `N` of them to write, so filling an array field is the
+   first piece of generated Pulse in this model that is a real computation
+   rather than a rearrangement of what is already held. It is emitted once per
+   *shape* -- element type, element size, length -- beside the structure that
+   needs it, because the per-element write is per-type and there is no way to
+   pass it as an argument.
+
+   It is written as a recursion on the index rather than as a `while` loop,
+   and that choice is the interesting one. A `while` in Pulse is divergent,
+   and a divergent fill would make every function that declares such a
+   structure divergent too -- a property of the memory model leaking into the
+   specification of ordinary C code that merely has a buffer in it. A
+   recursion with `decreases (N - k)` terminates, so nothing leaks. Reading a
+   whole such structure is the mirror image, a second recursion accumulating
+   the elements it has already read, ending in `Seq.lemma_eq_intro`.
+
+   Two smaller things fell out. A brace initialiser for an array field is now
+   a value: `{ 7, 9 }` for `uint8_t[16]` is a sixteen-element sequence with
+   the tail zeroed, which needs the *target type* to say sixteen and so is
+   read at the type rather than by `rvalue` alone. And a record literal names
+   its labels without naming its type, so `{ fld_lo = 1 }` for a `struct pair`
+   nested inside a `struct pairs` mentioned nothing that the scan deciding
+   which modules to open could see. Modules now open what the modules they
+   open need, which is the honest statement that F\* `open` is not transitive
+   and these generated modules are one namespace.
+
+   As of this milestone: **771 specifications, 612 of them with real bodies,
+   159 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
