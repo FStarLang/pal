@@ -5391,6 +5391,10 @@ impl<'a> Body<'a> {
             // memory -- `*s->next`, `**p` -- does not, and the caller would
             // have had to grant it in a `_requires` that is not translated.
             ExprT::Deref(inner) => match &strip_vattr(inner).val {
+                // `*(&e)` is `e`. Clang leaves the pair in the AST, and
+                // nothing is loaded by it: the address of a named object is
+                // that object's address.
+                ExprT::Ref(place) => self.addr(place),
                 // A checked block's pointee is owned just like a parameter's,
                 // and naming the allocation directly rather than loading the
                 // local keeps the frame stated in terms of the same pointer.
@@ -8863,6 +8867,13 @@ fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
         }
         let before = cand.len();
         cand.retain(|(_, place)| {
+            // `&x` for a named object is a fixed address whatever is stored
+            // in `x`, so an assignment to `x` is a write to the object the
+            // alias already stands for and not a change of which object that
+            // is. Only a place computed *through* a name has to ask.
+            if matches!(&strip_vattr(place).val, ExprT::Var(..)) {
+                return true;
+            }
             let mut used = Touched::default();
             touch_expr(place, &mut used);
             // A name the place is built from must denote the same object

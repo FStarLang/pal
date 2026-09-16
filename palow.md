@@ -744,6 +744,13 @@ new facts about memory.
   `make palow-check` therefore says that the translation typechecks, not that
   every function could be implemented against its real contract -- for a
   dropped contract the function has no obligations left to fail.
+- `malloc` may return null here, and the old model's allocator cannot: PAL
+  emits `Pulse.Lib.C.Ref.alloc_ref`, which always succeeds. So C that
+  allocates and then dereferences or frees without testing the result
+  translates today and is refused by `--palow`, which accounts for eleven of
+  the admitted bodies. This is the deviation being in the honest direction --
+  the refused programs have a real bug -- but it is a deviation, and the
+  count it costs is real.
 - An `if`'s two arms must agree on which locals and `_out` parameters hold a
   value and which still hold uninitialised storage; those are different
   slprops and there is nothing to join them to. This is a real restriction on
@@ -2112,8 +2119,17 @@ new facts about memory.
    owed until the end of the statement, because it cannot be emitted until the
    call has been.
 
-   As of this milestone: **771 specifications, 615 of them with real bodies,
-   156 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   Two addresses were being asked for that need not have been. `*(&x)` is `x`
+   -- clang leaves the pair in the tree and nothing is loaded by it, so the
+   address of a dereference of a reference is just the address underneath.
+   And `&x` for a *named* object is a fixed address whatever happens to be
+   stored in `x`: an assignment to `x` writes the object the alias already
+   stands for, it does not change which object that is. Only a place computed
+   *through* a name has to ask whether an intervening assignment moved it.
+   Both were refusals where nothing was in doubt.
+
+   As of this milestone: **771 specifications, 618 of them with real bodies,
+   153 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
