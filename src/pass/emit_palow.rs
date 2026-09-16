@@ -5493,6 +5493,31 @@ impl<'a> Body<'a> {
         Ok((self.addr(base)?, Vec::new(), Vec::new()))
     }
 
+    /// Whether the number of elements at this array is settled here rather
+    /// than being whatever the caller passed.
+    fn array_len_known(&self, e: &Expr) -> bool {
+        let ExprT::Var(v) = &strip_vattr(e).val else {
+            return false;
+        };
+        if self
+            .blocks
+            .iter()
+            .any(|b| b.var == *v.val && b.checked && !b.freed && b.array.is_some())
+        {
+            return true;
+        }
+        if self
+            .slots
+            .iter()
+            .any(|s| s.name == *v.val && s.array.is_some())
+        {
+            return true;
+        }
+        self.arrays
+            .get(&v.val.to_string())
+            .is_some_and(|a| a.known_len)
+    }
+
     /// The array an element access indexes: its base address, element type and
     /// size, and the lines that give it back. Either a parameter, which owns
     /// its sequence outright, or a fixed-size array field, which has to be
@@ -7604,6 +7629,55 @@ impl<'a> Body<'a> {
                 // says nothing about the padding, and weaker is the safe
                 // direction: the padding stays owned and unspecified either
                 // way, which is exactly what `struct_S_padding` already says.
+                // Filling an array with zeros. What Palow has to say here it
+                // already had to say for `calloc`: an all-zero byte range is
+                // the encoding of 0 for the element type, which is
+                // `encode_zero`, and the rest is the machine layer making the
+                // range all-zero.
+                //
+                // Only a fill of zero is covered, which is the fill C code
+                // reliably means -- `memset` with any other value is well
+                // defined only for byte-sized types.
+                ExprT::Memset(ty, p, value, count) => {
+                    if !is_zero(value) {
+                        return Err("a `memset` with a fill other than zero".to_string());
+                    }
+                    let Some(esize) = palow_sizeof(self.tds, ty) else {
+                        return Err(format!("a `memset` of {}", describe(self.tds.resolve(ty))));
+                    };
+                    let (arr, pn, _, close, maybe) = self.array_place(p)?;
+                    let z = zero_value(self.tds, ty)?;
+                    // `Seq.length xs == n` is what says the fill stays inside
+                    // the array, and for a parameter that can only come from
+                    // the function's own `_requires`.
+                    if !self.array_len_known(p) && !self.requires_ok {
+                        return Err(
+                            "a `memset`, whose length obligation needs a `_requires` that is not \
+                             translated"
+                                .to_string(),
+                        );
+                    }
+                    let (n, nbytes) = match int_lit(count) {
+                        Some(k) => (format!("{}sz", k), format!("{}sz", esize * k)),
+                        None => {
+                            let n = self.index(count)?;
+                            (n.clone(), format!("({}sz `SizeT.mul` {})", esize, n))
+                        }
+                    };
+                    let repr = if maybe {
+                        format!("(maybe_repr {}_repr {})", pn, esize)
+                    } else {
+                        format!("{}_repr", pn)
+                    };
+                    let z = if maybe { format!("(Some {})", z) } else { z };
+                    self.lines.push(format!("encode_zero {};", esize));
+                    self.lines.push(format!(
+                        "array_memset_zero {} {} {}sz {} {} {};",
+                        repr, arr, esize, n, nbytes, z
+                    ));
+                    self.lines.extend(close);
+                    Ok(())
+                }
                 ExprT::MemsetZero(ty, p) => {
                     // A structure is written whole, which needs the generated
                     // storage operations; a struct with an array field has
@@ -8624,6 +8698,19 @@ fn live_only(e: &Expr) -> bool {
         ExprT::BinOp(BinOp::LogAnd, a, b) => live_only(a) && live_only(b),
         _ => false,
     }
+}
+
+/// A literal integer, through the casts a C literal arrives wrapped in.
+fn int_lit(e: &Expr) -> Option<u64> {
+    match &strip_vattr(e).val {
+        ExprT::IntLit(k, _) => u64::try_from(&**k).ok(),
+        ExprT::Cast(inner, _) => int_lit(inner),
+        _ => None,
+    }
+}
+
+fn is_zero(e: &Expr) -> bool {
+    int_lit(e) == Some(0)
 }
 
 fn returns(stmts: &Stmts) -> bool {

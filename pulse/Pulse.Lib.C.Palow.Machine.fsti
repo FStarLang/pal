@@ -100,6 +100,17 @@ fn memcpy (dst src: ptr) (n: SZ.t) (#p: perm) (#bs #bd: erased bytes)
   requires  pure (len bs == SZ.v n /\ len bd == SZ.v n)
   ensures   mem_pts_to dst 1.0R bs
 
+(* `memset` to zero, which is the only fill C code reliably means: filling with
+   anything else is only well defined for byte-sized types, and the C that does
+   it is rare enough not to pay for here. Like `memcpy` this says what the
+   destination ends up holding rather than anything about types, and what it
+   ends up holding is `zeroed`, which is a representation of 0 for every
+   arithmetic type -- see `encode_zero`. *)
+fn memset_zero (dst: ptr) (n: SZ.t) (#bd: erased bytes)
+  requires mem_pts_to dst 1.0R bd
+  requires pure (len bd == SZ.v n)
+  ensures  mem_pts_to dst 1.0R (zeroed (SZ.v n))
+
 (* ---------------------------------------------------------------------------
    Automatic storage
 

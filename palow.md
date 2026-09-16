@@ -2025,8 +2025,34 @@ new facts about memory.
    nothing to do here beyond being checked, and `_live` clauses have not even
    that, since the slots carry the storage already.
 
-   As of this milestone: **771 specifications, 603 of them with real bodies,
-   168 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   `memset` was next, and it is the construct the byte-level model was
+   supposed to make easy, so it is worth saying how easy it turned out to be.
+   Zeroing an array needed one new axiom -- the machine layer can make a byte
+   range all-zero, beside `memcpy`, which is the other place C admits that
+   objects are sequences of bytes -- and one wrapper joining it to what the
+   array layer already knew. That the elements then hold 0 is `encode_zero`,
+   the lemma `calloc` already needed, and that every element's slice of an
+   all-zero range is itself all-zero is `elem_bytes_zeroed`, which `calloc`
+   also already needed. Nothing about `memset` is array-specific beyond those
+   two, and nothing is per-element-type: the wrapper is generic in the
+   element's representation relation, as everything about arrays in this model
+   is.
+
+   Only a fill of zero is covered, which is the fill C code reliably means --
+   `memset` with any other value is well defined only for byte-sized types --
+   and the fill is refused rather than guessed when the array's length is the
+   caller's rather than settled here and the function has no translated
+   `_requires` to settle it.
+
+   Finding it cost more than writing it. A call to the new wrapper failed with
+   "Application of a stateful computation cannot have a ghost effect", which
+   says nothing about the cause: an implicit argument of a *non-ghost* Pulse
+   function has to be one Pulse can erase, and the sequence the array holds
+   was not marked `erased`. This is the second time that diagnostic has meant
+   something other than what it says.
+
+   As of this milestone: **771 specifications, 606 of them with real bodies,
+   165 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

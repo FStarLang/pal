@@ -43,3 +43,35 @@ fn array_stack_free (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ
   mem_stack_free a;
 }
 
+
+(* ---------------------------------------------------------------------------
+   Zeroing an array
+
+   `memset(a, 0, n * sizeof(t))` is the same join: the machine layer knows how
+   to make a byte range all-zero, and the array layer knows what an all-zero
+   byte range means element by element. Neither half is new -- `elem_bytes_zeroed`
+   is the lemma `calloc` already needed -- so this is a wrapper rather than an
+   axiom, and it reads through `array_claim_zeroed`'s obligation: which value
+   the elements end up holding is whatever the element type's representation
+   makes of an all-zero range, which the caller names with `encode_zero`.
+
+   Only the fill value 0 is covered, which is the fill C code reliably means:
+   `memset` with anything else is well defined only for byte-sized types. *)
+fn array_memset_zero (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                     (esize: SZ.t) (n: SZ.t) (nbytes: SZ.t)
+                     (z: t)
+                     (* `xs` is `erased` because this is not a ghost function:
+                        an implicit Pulse cannot erase has to be instantiated
+                        at every call, and failing to gives a misleading
+                        "cannot have a ghost effect". *)
+                     (#xs: erased (Seq.seq t))
+  requires array_pts_to t_repr (SZ.v esize) a 1.0R xs
+  requires pure (Seq.length xs == SZ.v n /\ SZ.v nbytes == SZ.v esize * SZ.v n)
+  requires pure (t_repr z (zeroed (SZ.v esize)))
+  ensures  array_pts_to t_repr (SZ.v esize) a 1.0R (Seq.create (SZ.v n) z)
+{
+  unfold array_pts_to t_repr (SZ.v esize) a 1.0R xs;
+  memset_zero a nbytes;
+  Classical.forall_intro (Classical.move_requires (elem_bytes_zeroed (SZ.v esize) (SZ.v n)));
+  fold array_pts_to t_repr (SZ.v esize) a 1.0R (Seq.create (SZ.v n) z);
+}
