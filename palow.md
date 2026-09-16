@@ -2450,8 +2450,40 @@ new facts about memory.
    requires(int_fits((_specint) x + x))` is an F\* definition rather than a
    function nobody may mention.
 
-   As of this milestone: **787 specifications, 679 of them with real bodies,
-   102 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   Calls through a function pointer held in a struct or union field work
+   now, which is to say dispatch tables work. There are two ways to know what
+   the code at an address does, and both were only being looked for one level
+   up. The first is that the emitter watched the store: it already remembered
+   which function a *local* held, and a vtable is a struct whose fields are
+   code pointers, so the record became per-field -- keyed by the path within
+   the slot, the empty path for the slot itself. A brace initialiser is read
+   out the same way, since `struct ops o = { .op = add };` is a dispatch
+   table written in one statement. Nothing is loaded at such a call: knowing
+   the store means the address is the decay, and passing the decay rather
+   than a load keeps `is_valid` and the callee the same term, which is what
+   slprop matching needs.
+
+   The second is that the contract said so. A spliced ownership `_refine` on
+   a function-pointer parameter was already taken at its word; a spliced
+   `_refine_value` on a pointer is now taken at its word too, and that is
+   exactly the shape a vtable's invariant has -- the struct's value is
+   quantified over and the clause says what the code in its fields does. Here
+   the field *is* loaded, and the load is what makes it work: it is the
+   identity on the state and carries a `rewrites_to`, so the address handed
+   to `call_div` is the term the `is_valid` in context is stated at.
+
+   Two smaller things fell out. `union u; u.m = x;` needed a way to make a
+   member active starting from storage that has never held anything, so
+   unions now generate a `switch_uninit_<m>` beside `switch_<m>`; the proof
+   is the same one, since only the length of the storage is used. And
+   ownership stated at a `_plain` `_consumes` parameter was being restated on
+   the way out, which is wrong -- the caller handed it over for good. There
+   is no points-to to read that off, so the mode is now consulted directly,
+   and validity gathered at an indirect call through such a parameter is put
+   down rather than left over.
+
+   As of this milestone: **787 specifications, 684 of them with real bodies,
+   97 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

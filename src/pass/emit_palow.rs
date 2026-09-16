@@ -36,7 +36,7 @@
 //! [`crate::pass::elab`] unnecessary.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ir::*;
@@ -818,6 +818,11 @@ struct FnSurface {
     /// what it does -- so this is exactly the set of pointers the body may call
     /// through without knowing which function it is calling.
     valid_fps: HashSet<String>,
+    /// Parameters whose ownership the caller hands over for good. Whatever
+    /// the contract granted at one of these is not wanted back, which is what
+    /// decides whether validity gathered at an indirect call has to be put
+    /// down again.
+    consumed: HashSet<String>,
     /// Set when the signature came out as `fn rec` with a `decreases`, so the
     /// body may call itself. Direct recursion is the only kind: a cycle
     /// through two functions would need them emitted as one mutually
@@ -1877,6 +1882,10 @@ fn emit_fn(
     // parameter's type, the name of the binder the contract quantifies over,
     // the F* type of that binder, and the clause itself.
     let mut refines_value: Vec<RefineValueOn> = Vec::new();
+    // Parameters the caller hands over for good. Ownership stated at a
+    // `_plain` parameter has no points-to to follow, so whether it comes back
+    // has to be read off the mode directly.
+    let mut consumed: HashSet<String> = HashSet::new();
     let mut refine_err: Option<String> = None;
     // Parameters whose ownership the contract puts behind `unless_null`.
     let mut guarded: HashSet<String> = HashSet::new();
@@ -1917,6 +1926,9 @@ fn emit_fn(
         // what stops it from vanishing: a `_refine` on a scalar is a claim
         // about the value, and one on a function pointer is a claim about the
         // code, and neither has a pointee to hang from.
+        if matches!(arg.mode, ParamMode::Consumed) {
+            consumed.insert(pname.trim_start_matches("var_").to_string());
+        }
         if pointee(tds, &arg.ty).is_none()
             && let Ok((ps, _, bs)) = refinements(tds, &arg.ty)
         {
@@ -2341,7 +2353,7 @@ fn emit_fn(
             // never handing it back would leave the body holding something it
             // has no way to put down, and a body that calls through the
             // pointer twice needs it for the second call as much as the first.
-            let both = spec.pointees.get(base).is_none();
+            let both = spec.pointees.get(base).is_none() && !consumed.contains(base);
             if !both && !stated(base, w) {
                 continue;
             }
@@ -2419,7 +2431,7 @@ fn emit_fn(
     let mut value_fresh: Vec<(String, String, String)> = Vec::new();
     let mut value_err: Option<String> = None;
     for (base, ty, ident, vty, binder, fty, p) in &refines_value {
-        let both = spec.pointees.get(base).is_none();
+        let both = spec.pointees.get(base).is_none() && !consumed.contains(base);
         let wrap = |t: String| match slprop_refine(tds, p) {
             Some(_) => t,
             None => format!("pure ({})", t),
@@ -2440,6 +2452,15 @@ fn emit_fn(
             Ok(t) => {
                 ghosts.push(format!("(#{}: erased ({}))", binder, fty));
                 value_req.push(wrap(t));
+                // A spliced ownership refinement quantified over the value at
+                // a pointer is taken at its word in the same way one written
+                // on a function pointer is. What it is usually for is a
+                // dispatch table: the struct's fields include code pointers,
+                // and nothing but the author's own clause can say what the
+                // code at them does.
+                if slprop_refine(tds, p).is_some() {
+                    valid_fps.borrow_mut().insert(base.clone());
+                }
             }
             Err(why) => {
                 value_err.get_or_insert(why);
@@ -2730,6 +2751,7 @@ fn emit_fn(
         } else {
             HashSet::new()
         },
+        consumed,
         self_rec: decreases.is_some(),
     })
 }
@@ -3087,6 +3109,28 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              {{\n  \
              unfold {un}_pts_to a 1.0R u;\n  \
              with b. assert (mem_pts_to a 1.0R b ** pure ({un}_repr u b));\n  \
+             mem_split a {msz}sz;\n  \
+             {pn}_claim_uninit a #(slice b 0 {msz});\n  \
+             fold {un}_rest_{f} a 1.0R;\n}}\n\n",
+            un = un,
+            f = f,
+            pn = pn,
+            msz = m.size
+        );
+        // The same step from storage that has never held anything. A local
+        // union starts out as bytes with nothing said about them, and `union
+        // u; u.m = x;` is ordinary C, so making a member active has to be
+        // reachable from there as well as from a union that already holds
+        // something. The proof is the same one: only the length of the
+        // storage is used.
+        c += &format!(
+            "ghost fn {un}_switch_uninit_{f} (a: ptr)\n\
+             \x20 requires {un}_pts_to_uninit a\n\
+             \x20 ensures  {pn}_pts_to_uninit a\n\
+             \x20 ensures  {un}_rest_{f} a 1.0R\n\
+             {{\n  \
+             unfold {un}_pts_to_uninit a;\n  \
+             with b. assert (mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof));\n  \
              mem_split a {msz}sz;\n  \
              {pn}_claim_uninit a #(slice b 0 {msz});\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
@@ -4263,6 +4307,27 @@ fn lvalue_base(e: &Expr) -> Option<String> {
 }
 
 /// The name an lvalue *is*, as opposed to the name it reaches through.
+/// Two steps of a path within a slot, joined. Either may be empty, which is
+/// how the slot itself is named.
+fn join_path(a: &str, b: &str) -> String {
+    match (a.is_empty(), b.is_empty()) {
+        (true, _) => b.to_string(),
+        (_, true) => a.to_string(),
+        _ => format!("{}.{}", a, b),
+    }
+}
+
+/// The variable a code pointer is reached from: itself, or the object whose
+/// field holds it. A contract grants validity by naming a parameter, and a
+/// dispatch table is that parameter's fields, so both lead back to one name.
+fn fp_base(e: &Expr) -> Option<String> {
+    match &strip_vattr(e).val {
+        ExprT::Var(v) => Some(v.val.to_string()),
+        ExprT::Member(b, _) | ExprT::Deref(b) => fp_base(b),
+        _ => None,
+    }
+}
+
 fn lvalue_name(e: &Expr) -> Option<String> {
     match &e.val {
         ExprT::Var(v) => Some(v.val.to_string()),
@@ -4518,7 +4583,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     init: true,
                     array: Some((format!("{}sz", esize), false)),
                     global: true,
-                    holds_fn: None,
+                    holds_fn: BTreeMap::new(),
                 }
             }
             _ => {
@@ -4542,7 +4607,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     init: true,
                     array: None,
                     global: true,
-                    holds_fn: None,
+                    holds_fn: BTreeMap::new(),
                 }
             }
         };
@@ -5260,12 +5325,16 @@ struct Slot {
     /// function, so the ownership arrives in the contract and must not be
     /// allocated on entry or released on exit.
     global: bool,
-    /// The C function whose address was last stored here, when that is known.
-    /// A code pointer's *value* is an address, but what may be done with it is
-    /// the separate `valid` fact, and nothing in the points-to carries that.
+    /// The C functions whose addresses were last stored in this slot, keyed
+    /// by the path within it: the empty string for the slot itself, `op` for
+    /// the field of that name, `inner.op` for a field of a field. A code
+    /// pointer's *value* is an address, but what may be done with it is the
+    /// separate `valid` fact, and nothing in the points-to carries that.
     /// Remembering the store is what lets an indirect call seed validity
-    /// itself, instead of the source having to write a `_ghost_stmt`.
-    holds_fn: Option<String>,
+    /// itself, instead of the source having to write a `_ghost_stmt` -- and a
+    /// dispatch table is exactly a struct whose fields are code pointers, so
+    /// the record has to be per-field rather than per-slot.
+    holds_fn: BTreeMap<String, String>,
 }
 
 impl Slot {
@@ -5362,7 +5431,7 @@ struct BranchResult {
     lines: Vec<String>,
     inits: Vec<bool>,
     /// Which function each enclosing slot is known to hold on this path.
-    holds: Vec<Option<String>>,
+    holds: Vec<BTreeMap<String, String>>,
     out_params: Vec<String>,
 }
 
@@ -5453,6 +5522,8 @@ struct Body<'a> {
     /// Parameters the contract hands an `is_valid` for, and so the only
     /// pointers this body may call through without knowing the target.
     valid_fps: &'a HashSet<String>,
+    /// Parameters whose ownership does not come back. See `FnSurface`.
+    consumed: &'a HashSet<String>,
     /// Addresses whose validity this body has seeded and not yet put down,
     /// with the pre and post it was seeded at. Both are needed to put it down
     /// again: a contract may hold a second, weaker validity for the same
@@ -5834,7 +5905,7 @@ impl<'a> Body<'a> {
                     init: true,
                     array: None,
                     global: false,
-                    holds_fn: None,
+                    holds_fn: BTreeMap::new(),
                 });
                 Ok(format!("loc_{}", v.val))
             }
@@ -6089,8 +6160,17 @@ impl<'a> Body<'a> {
             ));
             self.active.insert(a.clone(), f.val.to_string());
         }
+        // Storage that has never been written needs the step that starts from
+        // storage rather than from a value -- and once a member has been made
+        // active the union holds something, which is what the slot's release
+        // has to know.
+        let mut uninit_suffix = "";
         if writing {
             self.active.insert(a.clone(), f.val.to_string());
+            if let Some(i) = self.slots.iter().rposition(|s| s.addr == a && !s.init) {
+                uninit_suffix = "_uninit";
+                self.slots[i].init = true;
+            }
         }
         let focus = vec![format!("{}_focus_{} {};", un, f.val, a)];
         let close = |mut base: Vec<String>| {
@@ -6103,7 +6183,7 @@ impl<'a> Body<'a> {
             write_fn: format!("{}_write_uninit", pn),
             at: a.clone(),
             open_read: focus,
-            open_write: vec![format!("{}_switch_{} {};", un, f.val, a)],
+            open_write: vec![format!("{}_switch{}_{} {};", un, uninit_suffix, f.val, a)],
             // Whatever had to be opened to name the union is closed after the
             // union itself is, innermost first. Dropping these was invisible
             // until a union nested in a struct reached here.
@@ -6693,14 +6773,19 @@ impl<'a> Body<'a> {
             return Some(g);
         }
         match &e.val {
-            ExprT::Var(v) if self.slots.iter().any(|s| s.name == *v.val) => self
-                .slots
-                .iter()
-                .rev()
-                .find(|s| s.name == *v.val)
-                .and_then(|s| s.holds_fn.clone()),
             ExprT::Deref(inner) => self.target_of(inner),
-            _ => self.fn_ref_of(self.const_path(e)?.1?.as_ref()),
+            _ => {
+                // Storage this body owns: what it holds is what was last
+                // stored, which is in view here. Anything else -- a global,
+                // an initialised constant -- is reached by reading the
+                // declaration it was written in.
+                if let Some((slot, path)) = self.place_key(e)
+                    && let Some(s) = self.slots.iter().rev().find(|s| s.name == slot)
+                {
+                    return s.holds_fn.get(&path).cloned();
+                }
+                self.fn_ref_of(self.const_path(e)?.1?.as_ref())
+            }
         }
     }
 
@@ -6784,19 +6869,88 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// Record that a slot now holds a known function's address.
-    fn note_fn_store(&mut self, lhs: &Expr, rhs: &Expr) {
-        let ExprT::Var(v) = &strip_vattr(lhs).val else {
+    /// Which slot an lvalue lives in, and where within it: the empty path for
+    /// the slot itself, `op` for its field of that name. Only storage this
+    /// body owns outright is reachable this way -- a dereference leads
+    /// somewhere else and stops the walk -- which is exactly the storage whose
+    /// stores are all in view here.
+    fn place_key(&self, e: &Expr) -> Option<(String, String)> {
+        if let Some(p) = self.unalias(e) {
+            return self.place_key(&p);
+        }
+        match &strip_vattr(e).val {
+            ExprT::Var(v) if self.slots.iter().any(|s| s.name == *v.val) => {
+                Some((v.val.to_string(), String::new()))
+            }
+            ExprT::Member(base, f) => {
+                let (slot, path) = self.place_key(base)?;
+                Some((
+                    slot,
+                    if path.is_empty() {
+                        f.val.to_string()
+                    } else {
+                        format!("{}.{}", path, f.val)
+                    },
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Forget what was known about the code pointers a store overwrites.
+    /// Storing a whole struct replaces every field in it, so the whole subtree
+    /// under the path goes.
+    fn clear_fn_notes(&mut self, lhs: &Expr) {
+        let Some((slot, path)) = self.place_key(lhs) else {
             return;
         };
-        // Whatever the slot held before, it holds this now. Copying one
+        let Some(i) = self.slots.iter().rposition(|s| s.name == slot) else {
+            return;
+        };
+        if path.is_empty() {
+            self.slots[i].holds_fn.clear();
+        } else {
+            let under = format!("{}.", path);
+            self.slots[i]
+                .holds_fn
+                .retain(|k, _| *k != path && !k.starts_with(&under));
+        }
+    }
+
+    /// The code pointers a stored value is known to contain, keyed by their
+    /// path within it. A brace initialiser is a dispatch table written in one
+    /// statement, so its fields are read out here rather than each being a
+    /// store of its own.
+    fn fn_notes(&self, rhs: &Expr) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        if let Some(g) = self.target_of(rhs) {
+            out.insert(String::new(), g);
+        }
+        if let ExprT::StructInit(_, fields) = &strip_vattr(rhs).val {
+            for (f, e) in fields.iter() {
+                for (k, g) in self.fn_notes(e) {
+                    out.insert(join_path(&f.val.to_string(), &k), g);
+                }
+            }
+        }
+        out
+    }
+
+    /// Record that a place now holds known functions' addresses.
+    fn note_fn_store(&mut self, lhs: &Expr, rhs: &Expr) {
+        let Some((slot, path)) = self.place_key(lhs) else {
+            return;
+        };
+        // Whatever the place held before, it holds this now. Copying one
         // pointer into another carries the target across, and a store whose
-        // target is not known has to *clear* the note rather than leave the
-        // old one standing -- keeping it would be the one way this could go
+        // target is not known has to leave the note cleared rather than let
+        // the old one stand -- keeping it would be the one way this could go
         // wrong.
-        let g = self.target_of(rhs);
-        if let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val) {
-            self.slots[i].holds_fn = g;
+        let notes = self.fn_notes(rhs);
+        if let Some(i) = self.slots.iter().rposition(|s| s.name == slot) {
+            for (k, g) in notes {
+                self.slots[i].holds_fn.insert(join_path(&path, &k), g);
+            }
         }
     }
 
@@ -7371,10 +7525,20 @@ impl<'a> Body<'a> {
                 // pre/post are left to slprop matching: the fact in context is
                 // the author's, written in their own words, and naming them
                 // here would mean parsing those words.
-                if let ExprT::Var(v) = &strip_vattr(f).val
+                if let Some(base) = fp_base(f)
                     && self.target_of(f).is_none()
-                    && self.valid_fps.contains(&*v.val.to_string())
+                    && self.valid_fps.contains(&base)
                 {
+                    // The pointer itself, when the contract named it, and
+                    // otherwise a load of the field holding it. A load is
+                    // the identity on the state and comes with a
+                    // `rewrites_to`, so the address handed to `call_div` is
+                    // the same term the `is_valid` in context is stated at --
+                    // which is what makes slprop matching find it.
+                    let callee = match &strip_vattr(f).val {
+                        ExprT::Var(v) => format!("var_{}", v.val),
+                        _ => self.rvalue(f)?,
+                    };
                     let mut vs = Vec::new();
                     for a in args.iter() {
                         vs.push(self.rvalue(a)?);
@@ -7385,7 +7549,7 @@ impl<'a> Body<'a> {
                         _ => format!("({})", vs.join(", ")),
                     };
                     self.divergent = true;
-                    let t = self.fresh(&v.val);
+                    let t = self.fresh(&base);
                     // The witness the callee's wrapper takes is decided by
                     // its parameters, and a function-pointer type says what
                     // those are: a parameter with a pointee contributes the
@@ -7401,12 +7565,21 @@ impl<'a> Body<'a> {
                         _ => false,
                     };
                     self.lines.push(format!(
-                        "let {} = call_div _ _ var_{} {} {};",
+                        "let {} = call_div _ _ {} {} {};",
                         t,
-                        v.val,
+                        callee,
                         tuple,
                         if unit_witness { "(hide ())" } else { "_" }
                     ));
+                    // The callee hands the validity back -- it is a fact, not
+                    // a resource it uses up. Where the caller keeps the
+                    // ownership it came with, the fact goes back into the
+                    // postcondition along with it; where the caller handed
+                    // that ownership over for good, nothing wants it and it
+                    // has to be put down or it is left over at the end.
+                    if self.consumed.contains(&base) {
+                        self.lines.push("drop_is_valid _ _ _;".to_string());
+                    }
                     return Ok(t);
                 }
                 let g = self.target_of(f).ok_or_else(|| match &strip_vattr(f).val {
@@ -7618,7 +7791,7 @@ impl<'a> Body<'a> {
                 init: true,
                 array: Some((format!("{}sz", esize), true)),
                 global: false,
-                holds_fn: None,
+                holds_fn: BTreeMap::new(),
             });
             return Ok(pn);
         }
@@ -7645,7 +7818,7 @@ impl<'a> Body<'a> {
             init: false,
             array: None,
             global: false,
-            holds_fn: None,
+            holds_fn: BTreeMap::new(),
         });
         Ok(pn)
     }
@@ -7967,6 +8140,9 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(lhs) {
             return self.store(&p, pn, value);
         }
+        // Whatever was known about the code pointers here is stale now; the
+        // caller re-establishes it if the store was a decay.
+        self.clear_fn_notes(lhs);
         if let ExprT::Deref(inner) = &lhs.val {
             if let ExprT::Var(v) = &inner.val {
                 if let Some(i) = self.out_params.iter().position(|n| *n == *v.val) {
@@ -7985,9 +8161,6 @@ impl<'a> Body<'a> {
                     "write_uninit"
                 };
                 self.slots[i].init = true;
-                // Whatever was known about the code pointer here is stale now;
-                // the caller re-establishes it if the store was a decay.
-                self.slots[i].holds_fn = None;
                 let a = self.slots[i].addr.clone();
                 self.lines.push(format!("{}_{} {} {};", pn, op, a, value));
                 return Ok(());
@@ -8279,7 +8452,7 @@ impl<'a> Body<'a> {
                 let pn = self.alloc_slot(name, ty)?;
                 self.lines
                     .push(format!("{}_write_uninit loc_{} {};", pn, name.val, v));
-                let held = self.fn_ref_of(init);
+                let held = self.fn_notes(init);
                 let slot = self.slots.last_mut().unwrap();
                 slot.init = true;
                 slot.holds_fn = held;
@@ -8430,7 +8603,7 @@ impl<'a> Body<'a> {
                 let holds = last.holds.clone();
                 for (i, slot) in self.slots.iter_mut().enumerate() {
                     if arms.iter().any(|(_, a)| a.holds.get(i) != holds.get(i)) {
-                        slot.holds_fn = None;
+                        slot.holds_fn.clear();
                     }
                 }
 
@@ -8697,7 +8870,7 @@ impl<'a> Body<'a> {
                 // as whichever arm was translated last.
                 for (i, slot) in self.slots.iter_mut().enumerate() {
                     if then.holds.get(i) != els.holds.get(i) {
-                        slot.holds_fn = None;
+                        slot.holds_fn.clear();
                     }
                 }
 
@@ -8952,7 +9125,7 @@ impl<'a> Body<'a> {
         // path, so what it stores is only true on that path: the other arm has
         // to start where this one did, and what survives the join is what both
         // arms agree on.
-        let outer_state: Vec<(bool, Option<String>)> = self
+        let outer_state: Vec<(bool, BTreeMap<String, String>)> = self
             .slots
             .iter()
             .map(|s| (s.init, s.holds_fn.clone()))
@@ -9694,6 +9867,7 @@ fn emit_body(
         owned: &sig.owned,
         guarded: &sig.guarded,
         valid_fps: &sig.valid_fps,
+        consumed: &sig.consumed,
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
         seeded: Vec::new(),
