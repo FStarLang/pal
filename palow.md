@@ -2504,8 +2504,38 @@ new facts about memory.
    by shape rather than by name -- but only that one, since a validity the
    contract granted has to survive to the end.
 
-   As of this milestone: **787 specifications, 687 of them with real bodies,
-   94 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   The two linked-list tests come off the backlog. Their predicate is a
+   recursive `is_list` written by hand in inline Pulse, and it turned out to
+   be almost model-independent: what it needs from the model is "the object
+   at this address", "the right to free it", and "a points-to rules out
+   null". Naming those three once behind `#ifdef PALOW` keeps a single copy
+   of the predicate and its three ghost lemmas, which is the honest way to
+   read the result -- the reasoning is the same, only the vocabulary moved.
+   Palow now generates a `_pts_to_not_null` per struct for the third, which
+   is worth having anyway: a predicate over a linked structure is exactly
+   where the null case has to be ruled out, and the caller has no reason to
+   know which field sits at offset zero.
+
+   Two front-end things had to give. A `_letimpure` accessor -- `_elements_of(l)`,
+   the list `l` denotes -- is impure by construction and has no F\* definition
+   to call. The old model emits it as a `ghost fn` with `requires pure False`
+   and calls it inside its `with_pure` notation: a way of writing a value that
+   cannot be computed. In Palow the value is already bound, as the erased
+   implicit the parameter's `_refine_value` quantifies over, so a call to such
+   an accessor is read as a mention of that binder. This is also the answer to
+   the scoping limitation recorded above: the binder cannot be named directly
+   in the function's own contract, and `_letimpure` is the name for it.
+
+   And a `_refine_uninit` reached above a pointer rather than below it was
+   dropping the whole contract. Where the annotation sits says which storage
+   it is about: below a pointer it is the pointee's, which an `_out`
+   parameter is handed and which any other pointer parameter really would be
+   losing; above one it is the object's own, and a parameter passed by value
+   has none. There is nothing there to say, so nothing is lost by not saying
+   it -- which is what the old translator does with it too.
+
+   As of this milestone: **787 specifications, 693 of them with real bodies,
+   88 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

@@ -22,6 +22,27 @@ typedef struct node {
     _plain struct node *next;
 } node;
 
+/* The list predicate has the same shape in both memory models; what differs
+   is the vocabulary for "the object at this address", "the right to free it",
+   "a points-to rules out null", the permission the refinement holds the list
+   at, and the name of the ghost value it binds. Naming those once here keeps
+   one copy of the predicate and its three ghost lemmas. */
+#ifdef PALOW
+#define _node_pts_to(h, nd) struct_node_pts_to h 1.0R nd
+#define _node_freeable(h) freeable h struct_node_sizeof
+#define _node_not_null(h) struct_node_pts_to_not_null h
+#define _node_uninit(h) ptr_pts_to_uninit h
+#define _node_perm 1.0R
+#define _node_elements_of_head reveal val_head_elements
+#else
+#define _node_pts_to(h, nd) pts_to h nd
+#define _node_freeable(h) freeable h
+#define _node_not_null(h) Pulse.Lib.Reference.pts_to_not_null h
+#define _node_uninit(h) pts_to_uninit h
+#define _node_perm p
+#define _node_elements_of_head reveal $`val_head_0
+#endif
+
 _include_pulse(Pointer_view_include1,
   module L = FStar.List.Tot
 
@@ -31,8 +52,8 @@ _include_pulse(Pointer_view_include1,
     | [] -> pure (is_null head)
     | hd :: tl ->
       exists* (nd: $type(node)).
-        pts_to head nd **
-        freeable head **
+        _node_pts_to(head, nd) **
+        _node_freeable(head) **
         pure (nd.$field(node::data) == hd) **
         is_list nd.$field(node::next) p tl
 )
@@ -41,8 +62,8 @@ _type(spec_list, list Int32.t)
 
 // Registered as the default view for `node *`.
 _pointer_view
-_refine_value(spec_list elements, _inline_pulse(Pointer_view_include1.is_list $(this) p $(elements)))
-_refine_uninit(_inline_pulse(pts_to_uninit $(this)))
+_refine_value(spec_list elements, _inline_pulse(Pointer_view_include1.is_list $(this) _node_perm $(elements)))
+_refine_uninit(_inline_pulse(_node_uninit($(this))))
 _plain
 typedef struct node *list;
 
@@ -60,7 +81,7 @@ _include_pulse(Pointer_view_include2,
       Nil -> { () }
       Cons hd tl -> {
         unfold (Pointer_view_include1.is_list head _ (hd :: tl));
-        Pulse.Lib.Reference.pts_to_not_null head;
+        _node_not_null(head);
         unreachable ()
       }
     }
@@ -69,7 +90,7 @@ _include_pulse(Pointer_view_include2,
   ghost fn elim_is_list_nonnull (head: $type(node *)) (#l: list Int32.t)
     requires Pointer_view_include1.is_list head $`p l ** pure (not (is_null head))
     ensures exists* (nd: $type(node)) (tl: list Int32.t).
-      pts_to head nd ** freeable head **
+      _node_pts_to(head, nd) ** _node_freeable(head) **
       pure (l == nd.$field(node::data) :: tl) **
       Pointer_view_include1.is_list nd.$field(node::next) $`p tl
   {
@@ -84,8 +105,8 @@ _include_pulse(Pointer_view_include2,
     (nd: $type(node))
     (#tl: list Int32.t)
     requires
-      pts_to head nd **
-      freeable head **
+      _node_pts_to(head, nd) **
+      _node_freeable(head) **
       Pointer_view_include1.is_list nd.$field(node::next) $`p tl
     ensures Pointer_view_include1.is_list head $`p (nd.$field(node::data) :: tl)
   {
@@ -103,7 +124,7 @@ bool ptr_is_null(_plain node *n) {
 _rec void traverse(const node *head)
     // Pulse can't currently prove termination from the opaque _elements_of
     // accessor, so we measure on the predicate's spec value directly.
-    _decreases((spec_list) _inline_pulse(reveal $`val_head_0))
+    _decreases((spec_list) _inline_pulse(_node_elements_of_head))
 {
     if (head == NULL) {
         _ghost_stmt(Pointer_view_include2.is_list_nil_case $(head));

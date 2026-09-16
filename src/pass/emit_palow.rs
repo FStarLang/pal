@@ -240,6 +240,11 @@ struct Typedefs<'a> {
     /// ownership rather than a fact, so it belongs beside the points-to
     /// predicates rather than inside a `pure`.
     slprop_lets: HashSet<String>,
+    /// `_letimpure` accessors, with the F* type of their result. There is no
+    /// F* definition to call -- they are impure by construction -- but a call
+    /// to one in a contract still denotes something: the ghost value a
+    /// `_refine_value` on the argument binds. See `Spec::value`.
+    impure_lets: HashMap<String, String>,
 }
 
 impl<'a> Typedefs<'a> {
@@ -291,6 +296,7 @@ impl<'a> Typedefs<'a> {
                 })
                 .collect(),
             slprop_lets: HashSet::new(),
+            impure_lets: HashMap::new(),
             global_addrs: tu
                 .decls
                 .iter()
@@ -603,6 +609,27 @@ type Refinements = (
     Vec<(Rc<Ident>, Rc<Type>, Rc<Expr>)>,
 );
 
+/// Whether a `_refine_uninit` appears strictly below a pointer.
+///
+/// Where the annotation sits says what storage it is about. Reached through a
+/// pointer it describes the pointee's, which is what an `_out` parameter is
+/// handed and what any other pointer parameter would be silently dropping.
+/// Reached above one it describes the object's own storage -- and a parameter
+/// passed by value has none, so there is nothing there to say and nothing
+/// lost by not saying it. That is also what the old translator does with it.
+fn uninit_below_pointer(tds: &Typedefs, ty: &Type) -> bool {
+    match &tds.resolve(ty).val {
+        TypeT::Pointer(t, _) => refinements(tds, t).is_ok_and(|(_, u, _)| !u.is_empty()),
+        TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, _, _, _)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t) => uninit_below_pointer(tds, t),
+        _ => false,
+    }
+}
+
 fn refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
     match &tds.resolve(ty).val {
         TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
@@ -888,6 +915,11 @@ struct Spec<'a> {
     /// body under the precondition, which is exactly where the obligation is
     /// discharged.
     signed_ok: bool,
+    /// The `_refine_value` bindings in scope, as
+    /// `(parameter, F* type of the value, binder, whether a post binder
+    /// exists)`. A `_letimpure` accessor over a refined parameter is a way of
+    /// naming one of these.
+    valued: RefCell<Vec<(String, String, String, bool)>>,
 }
 
 impl<'a> Spec<'a> {
@@ -992,6 +1024,7 @@ impl<'a> Spec<'a> {
                         locals,
                         uses: RefCell::new(HashSet::new()),
                         signed_ok: false,
+                        valued: RefCell::new(Vec::new()),
                     };
                     let p = inner.prop(body, w)?;
                     self.uses
@@ -1537,6 +1570,50 @@ impl<'a> Spec<'a> {
                 }
                 self.inline_pulse(code, w)
             }
+            // A `_letimpure` accessor is not a function that can be called in
+            // a specification -- it is impure, which is the whole reason it
+            // exists. What it denotes, though, is a ghost value the contract
+            // already binds: `_elements_of(l)` is the list that `l`'s
+            // `_refine_value` quantifies over. So a call to one is read as a
+            // mention of that binder, which is both what the author meant and
+            // the only thing in scope with the right type.
+            //
+            // The old model instead emits the accessor as a `ghost fn` with
+            // `requires pure False` and calls it inside its `with_pure`
+            // notation: a way of writing a value that cannot be computed.
+            // Naming the binder is the same value, written directly.
+            ExprT::FnCall(name, args)
+                if self.tds.impure_lets.contains_key(&*name.val.to_string()) && args.len() == 1 =>
+            {
+                let want = self.tds.impure_lets[&*name.val.to_string()].clone();
+                let base = match &strip_vattr(&args[0]).val {
+                    ExprT::Var(v) => v.val.to_string(),
+                    _ => {
+                        return Err(format!(
+                            "`{}` of {} in a contract",
+                            name.val,
+                            expr_kind(&args[0])
+                        ));
+                    }
+                };
+                let valued = self.valued.borrow();
+                let hit = valued
+                    .iter()
+                    .find(|(b, fty, _, post)| {
+                        *b == base && *fty == want && (*post || !matches!(w, When::Post))
+                    })
+                    .map(|(_, _, binder, _)| binder.clone());
+                match hit {
+                    Some(binder) => Ok(match w {
+                        When::Post => format!("{}'", binder),
+                        _ => format!("(reveal {})", binder),
+                    }),
+                    None => Err(format!(
+                        "`{}` of `{}`, which carries no matching `_refine_value`",
+                        name.val, base
+                    )),
+                }
+            }
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
                 let mut out = format!("func_{}", name.val);
                 for a in args.iter() {
@@ -1606,6 +1683,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         locals: HashMap::new(),
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
+        valued: RefCell::new(Vec::new()),
     };
     let clause = |es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -1697,6 +1775,7 @@ fn emit_pure_fn(
         locals: HashMap::new(),
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
+        valued: RefCell::new(Vec::new()),
     };
     let clause = |sp: &Spec, es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -1911,10 +1990,7 @@ fn emit_fn(
         // A `_refine_uninit` is a claim about storage the callee is handed
         // unwritten. Anywhere else there is no uninitialised points-to for it
         // to sit beside, so saying it would be saying it of nothing.
-        if let Ok((_, u, _)) = refinements(tds, &arg.ty)
-            && !u.is_empty()
-            && !matches!(arg.mode, ParamMode::Out)
-        {
+        if uninit_below_pointer(tds, &arg.ty) && !matches!(arg.mode, ParamMode::Out) {
             refine_err.get_or_insert(format!(
                 "parameter {} carries a `_refine_uninit` but is not `_out`",
                 pname
@@ -2185,6 +2261,7 @@ fn emit_fn(
         locals: HashMap::new(),
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
+        valued: RefCell::new(Vec::new()),
     };
     let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
         es.iter()
@@ -2287,6 +2364,7 @@ fn emit_fn(
             locals,
             uses: RefCell::new(HashSet::new()),
             signed_ok: false,
+            valued: RefCell::new(Vec::new()),
         };
         let r = how(&inner, w);
         spec.uses
@@ -2452,6 +2530,9 @@ fn emit_fn(
             Ok(t) => {
                 ghosts.push(format!("(#{}: erased ({}))", binder, fty));
                 value_req.push(wrap(t));
+                spec.valued
+                    .borrow_mut()
+                    .push((base.clone(), fty.clone(), binder.clone(), false));
                 // A spliced ownership refinement quantified over the value at
                 // a pointer is taken at its word in the same way one written
                 // on a function pointer is. What it is usually for is a
@@ -2479,7 +2560,17 @@ fn emit_fn(
             Some((ident, format!("{}'", binder), vty)),
             &how,
         ) {
-            Ok(t) => value_fresh.push((format!("{}'", binder), fty.clone(), wrap(t))),
+            Ok(t) => {
+                value_fresh.push((format!("{}'", binder), fty.clone(), wrap(t)));
+                if let Some(e) = spec
+                    .valued
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|(b, _, bi, _)| b == base && bi == binder)
+                {
+                    e.3 = true;
+                }
+            }
             Err(why) => {
                 value_err.get_or_insert(why);
             }
@@ -3782,6 +3873,32 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // and `gather` puts a value back together out of fields that now hold
     // one. Nothing in between is a struct, which is exactly why neither the
     // focus nor the whole-object write could express it.
+    // A pointer to an object is a pointer to its first field, and a scalar
+    // points-to already says that its address is not null and has a
+    // provenance. That is worth stating at the object, because a predicate
+    // over a linked structure is where the null case has to be ruled out and
+    // the caller has no reason to know which field sits at offset zero.
+    if let Some(first) = si.fields.iter().find(|f| f.offset == 0) {
+        if let FieldShape::One { pn } = &first.shape {
+            if !matches!(
+                tds.resolve(&first.ty).val,
+                TypeT::TypeRef(..) | TypeT::FixedArray(..)
+            ) {
+                c += &format!(
+                    "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n\
+                     \x20 preserves {sn}_pts_to a p x\n\
+                     \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+                     {{\n\x20 {sn}_focus_{f} a;\n\
+                     \x20 {pn}_pts_to_not_null (a +! {sn}_offsetof_{f});\n\
+                     \x20 {sn}_unfocus_read_{f} a;\n}}\n\n",
+                    sn = sn,
+                    pn = pn,
+                    f = first.name
+                );
+            }
+        }
+    }
+
     c += &format!(
         "ghost fn {sn}_scatter_uninit (a: ptr)\n\
          \x20 requires {sn}_pts_to_uninit a\n\
@@ -4070,6 +4187,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
          \x20 preserves {sn}_pts_to a p x\n\
          \x20 returns  y : {sn}\n\
          \x20 ensures  pure (y == reveal x)\n\
+         \x20 ensures  rewrites_to y (reveal x)\n\
          {{\n{read}  {{ {fields} }}\n}}\n\n",
             sn = sn,
             read = read,
@@ -4841,6 +4959,11 @@ pub fn emit_palow(
             env.push_arg(a, crate::env::LocalDeclKind::RValue);
         }
         tds.pure_fns.insert(ld.name.val.to_string());
+        if ld.is_impure {
+            if let Some(f) = fstar_type(&tds, &ld.ret_type) {
+                tds.impure_lets.insert(ld.name.val.to_string(), f);
+            }
+        }
         let slprop = matches!(tds.resolve(&ld.ret_type).val, TypeT::SLProp);
         if slprop {
             tds.slprop_lets.insert(ld.name.val.to_string());
@@ -8471,6 +8594,7 @@ impl<'a> Body<'a> {
             locals,
             uses: RefCell::new(HashSet::new()),
             signed_ok: false,
+            valued: RefCell::new(Vec::new()),
         };
         let mut props: Vec<String> = Vec::new();
         for e in clause.iter() {
