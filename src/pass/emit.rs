@@ -139,9 +139,10 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::TypeRefSizeofPos(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefSizeofPos(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
         // Global address names live in the global's own module.
-        Name::GlobalAddr(v) | Name::GlobalAddrNotNull(v) | Name::GlobalAcquire(v) => {
-            Some(format!("Global_{}", v))
-        }
+        Name::GlobalAddr(v)
+        | Name::GlobalAddrNotNull(v)
+        | Name::GlobalAcquire(v)
+        | Name::GlobalLive(v) => Some(format!("Global_{}", v)),
         // Local names are not cross-module references.
         Name::Var(_) | Name::Label(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
     }
@@ -417,6 +418,10 @@ enum Name {
     /// Acquires *read-only* ownership of a global's storage. Called in the
     /// prologue of every function that takes the global's address.
     GlobalAcquire(Rc<IdentT>),
+    /// Ownership of a mutable array global: the slprop `_live(g)` stands for.
+    /// Named rather than inlined because it also pins the array's extent, which
+    /// no pure term over the bare handle can recover.
+    GlobalLive(Rc<IdentT>),
     Val(Rc<IdentT>, u32),
     Perm(Rc<IdentT>, u32),
     Fn(Rc<IdentT>),
@@ -484,6 +489,7 @@ impl Name {
             Name::GlobalAddr(v) => format!("addr_var_{}", v),
             Name::GlobalAddrNotNull(v) => format!("addr_var_{}_not_null", v),
             Name::GlobalAcquire(v) => format!("acquire_var_{}", v),
+            Name::GlobalLive(v) => format!("live_var_{}", v),
             Name::Val(v, idx) => {
                 let v: &str = v;
                 format!("val_{}_{}", v, idx)
@@ -3378,6 +3384,14 @@ impl<'a> Emitter<'a> {
                     ]))
                 }
                 ExprT::Live(v) => {
+                    // `_live(g)` for a mutable array global is the named slprop
+                    // emitted alongside the global's handle: unlike `live_array`
+                    // it also pins the array's extent. See `emit_global_array`.
+                    if let ExprT::Var(x) = &v.val
+                        && env.mutable_global_array(x).is_some()
+                    {
+                        return self.emit_name(Name::GlobalLive(x.val.clone()));
+                    }
                     // Check if the dereferenced expression is an array type
                     let is_array = if let ExprT::Deref(inner) = &v.val {
                         env.infer_expr(inner)
@@ -7981,6 +7995,12 @@ impl<'a> Emitter<'a> {
 
     fn emit_global_var(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
         if !gv.is_pure {
+            // A mutable array global is the array object itself, so it is
+            // modeled as a handle plus the permission its users thread; every
+            // other mutable global is modeled by the cell at its address.
+            if global_array_object(gv).is_some() {
+                return self.emit_global_array(env, gv);
+            }
             // A mutable global gets an address but no value: its storage is
             // mutable, so no F* constant describes it. Reads and writes go
             // through the address, with the permission supplied by the caller
@@ -7989,14 +8009,9 @@ impl<'a> Emitter<'a> {
             // holds is whatever the (assumed) permission says it holds.
             return match self.emit_global_addr(env, gv) {
                 Some(addr) => addr,
-                None => {
-                    // Only an array reaches here: an enumerator is always pure.
-                    self.report(
-                        "non-pure array globals are not yet supported".to_string(),
-                        &gv.name.loc,
-                    );
-                    Doc::nil()
-                }
+                // Nothing reaches here: an array was handled above and an
+                // enumerator is always pure.
+                None => Doc::nil(),
             };
         }
         let name = self.emit_name(Name::Var(gv.name.val.clone()));
@@ -8026,6 +8041,74 @@ impl<'a> Emitter<'a> {
             Some(addr) => def.append(Doc::hardline()).append(addr),
             None => def,
         }
+    }
+
+    /// Emit a mutable array global (`T g[N]` / `T g[]`): the assumed `array`
+    /// handle naming its storage, and the slprop that `_live(g)` stands for.
+    ///
+    /// ```fstar
+    /// assume val var_g : (array t)
+    /// [@@pulse_eager_unfold]
+    /// let live_var_g : slprop =
+    ///   exists* (s: full_array_lspec t N). array_pts_to var_g 1.0R s
+    /// ```
+    ///
+    /// Same bring-your-own-permission model as a mutable scalar global (see
+    /// `emit_global_addr`): the handle is assumed, the ownership is not, so a
+    /// function that touches `g` demands `_live(g)` and the entrypoint assumes
+    /// it. `array_pts_to ... 1.0R` is full ownership -- unlike a `_pure`
+    /// global, whose fraction stays existential, a mutable array must be
+    /// writable, and only one holder of the permission can exist at a time.
+    ///
+    /// The permission is a *named* slprop rather than plain `live_array var_g`
+    /// because it also pins the extent: the length of an `array` lives in its
+    /// spec, so `N` can only be stated by the spec binder in the existential.
+    /// That is what lets `g._length` (`reveal (length_of var_g)`) reduce to `N`
+    /// wherever `_live(g)` is held. An incomplete `T g[]` has no extent to pin
+    /// here, so it binds a plain `full_array_spec` and callers must state the
+    /// length themselves.
+    fn emit_global_array(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
+        let Some((elem, len)) = global_array_object(gv) else {
+            unreachable!("caller checked that this is an array object")
+        };
+        let elem_doc = self.emit_type(env, elem);
+        let handle = self.emit_name(Name::Var(gv.name.val.clone()));
+        let handle_val = Doc::text("assume val ")
+            .append(handle.clone())
+            .append(Doc::text(" : "))
+            .append(unaryfn(Doc::text("array"), elem_doc.clone()));
+
+        let spec_ty = match len {
+            Some(n) => naryfn([
+                Doc::text("full_array_lspec"),
+                elem_doc,
+                Doc::text(format!("{}", n)),
+            ]),
+            None => unaryfn(Doc::text("full_array_spec"), elem_doc),
+        };
+        let spec_var = Doc::text("s");
+        let pts_to = naryfn([
+            Doc::text("array_pts_to"),
+            handle,
+            Doc::text("1.0R"),
+            spec_var.clone(),
+        ]);
+        let live = Doc::text("[@@pulse_eager_unfold]")
+            .append(Doc::hardline())
+            .append(mk_let(
+                self.emit_name(Name::GlobalLive(gv.name.val.clone())),
+                &[],
+                Doc::text("slprop"),
+                wrap_exists(
+                    &[ExBinding {
+                        name: spec_var,
+                        ty: spec_ty,
+                    }],
+                    vec![pts_to],
+                ),
+            ));
+
+        handle_val.append(Doc::hardline()).append(live)
     }
 
     /// Emit a global's address: an assumed `ref` (one per global, so distinct

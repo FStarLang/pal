@@ -798,14 +798,26 @@ pub struct GlobalVar {
     pub is_enum_constant: bool,
 }
 
-/// Whether a global is an array. Array globals are emitted as a *spec*
-/// (`full_array_lspec`) rather than storage, so they are excluded from
-/// address-of support; see `Env::addressable_global`.
+/// Whether a global is an array. A *pure* array global is emitted as a *spec*
+/// (`full_array_lspec`) rather than storage, so it is excluded from address-of
+/// support; see `Env::addressable_global`. A mutable one is emitted as an
+/// assumed `array` handle; see `global_array_object`.
 pub fn global_var_is_array(gv: &GlobalVar) -> bool {
-    matches!(
-        &gv.ty.val,
-        TypeT::FixedArray(_, _) | TypeT::FlexArray(_) | TypeT::Pointer(_, PointerKind::Array)
-    )
+    global_array_object(gv).is_some()
+}
+
+/// The element type and declared extent of an array global.
+///
+/// The extent is `Some(N)` for `T g[N]` and `None` when this translation unit
+/// does not know it: `extern T g[]` (an incomplete type, sized in the defining
+/// unit) and the `_array T *g` spelling both arrive as an array pointer, which
+/// carries no length.
+pub fn global_array_object(gv: &GlobalVar) -> Option<(&Rc<Type>, Option<u64>)> {
+    match &gv.ty.val {
+        TypeT::FixedArray(elem, len) => Some((elem, Some(*len))),
+        TypeT::FlexArray(elem) | TypeT::Pointer(elem, PointerKind::Array) => Some((elem, None)),
+        _ => None,
+    }
 }
 
 pub type Decl = Ast<DeclT>;

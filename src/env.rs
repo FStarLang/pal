@@ -331,10 +331,25 @@ impl Env {
         self.globals.vars.get(&ident.val)
     }
 
-    pub fn lookup_var_type(&self, ident: &Ident) -> Option<&Rc<Type>> {
-        self.lookup_var(ident)
-            .map(|decl| &decl.ty)
-            .or_else(|| self.lookup_global_var(ident).map(|gv| &gv.ty))
+    pub fn lookup_var_type(&self, ident: &Ident) -> Option<Rc<Type>> {
+        if let Some(decl) = self.lookup_var(ident) {
+            return Some(decl.ty.clone());
+        }
+        let gv = self.lookup_global_var(ident)?;
+        // A mutable array global is storage, not a spec value, so it is modeled
+        // exactly like an `_array T *` parameter: the *expression* `g` is the
+        // `array T` handle. Only the declaration keeps the extent `N`, which the
+        // emitter needs to state the array's length (see `global_array_object`);
+        // every use of `g` sees the decayed type, so indexing goes through
+        // `array_read` / `array_write` rather than the pure `array_spec_idx`.
+        if !gv.is_pure
+            && let Some((elem, _)) = global_array_object(gv)
+        {
+            return Some(
+                TypeT::Pointer(elem.clone(), PointerKind::Array).with_loc(gv.ty.loc.clone()),
+            );
+        }
+        Some(gv.ty.clone())
     }
 
     pub fn push_stmt(&mut self, stmt: &Stmt) {
@@ -841,6 +856,23 @@ impl Env {
     pub fn mutable_global_lvalue(&self, ident: &Ident) -> Option<&GlobalVar> {
         let gv = self.addressable_global(ident)?;
         if gv.is_pure { None } else { Some(gv) }
+    }
+
+    /// The global named by `ident`, if it is a *mutable* C array object (`T g[N]`
+    /// or `T g[]`) and not shadowed locally.
+    ///
+    /// Like a mutable scalar global, its storage is assumed (here an `array T`
+    /// handle rather than a `ref`) and its ownership is not: contracts thread
+    /// `_live(g)`, which names the array's whole permission *and* its extent.
+    pub fn mutable_global_array(&self, ident: &Ident) -> Option<&GlobalVar> {
+        if self.lookup_var(ident).is_some() {
+            return None;
+        }
+        let gv = self.lookup_global_var(ident)?;
+        if gv.is_pure || global_array_object(gv).is_none() {
+            return None;
+        }
+        Some(gv)
     }
 
     pub fn is_lvalue(&self, expr: &Expr) -> bool {

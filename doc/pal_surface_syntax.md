@@ -309,7 +309,8 @@ See `test/addr_global/addr_global.c`.
 ### Mutable globals: bring your own permission
 
 A mutable global has no pure value — its contents change — so PAL emits *only*
-its address, and no ownership of it:
+its storage, and no ownership of it. For a scalar or struct global that storage
+is the cell at its address (arrays are [below](#mutable-array-globals)):
 
 ```fstar
 assume val addr_var_g : ref ty
@@ -362,12 +363,52 @@ Consequences worth knowing:
 - Nothing forces two globals' permissions to be held together, and nothing ties
   `_live(g)` to `&g` aliases beyond the fact that `&g` *is* `addr_var_g` — so
   writing through a pointer to `g` while holding `_live(g)` works.
-- Mutable *array* globals are still unsupported ("non-pure array globals are not
-  yet supported").
 
 See `test/global_mutable/global_mutable.c`, and
 `test/global_non_const_addr/global_non_const_addr.c` for the address-identity
 side.
+
+### Mutable array globals
+
+A mutable array global (`T g[N]`, `extern T g[]`, or the `_array T *g` spelling)
+is the array *object*, so it is modeled as an assumed handle rather than a cell
+at an address, and behaves in every other respect like an `_array T *`
+parameter — `g[i]` is `array_read` / `array_write`, `g._length` is
+`reveal (length_of var_g)`, and `g` decays to an array pointer:
+
+```fstar
+assume val var_g : (array t)
+[@@pulse_eager_unfold]
+let live_var_g : slprop =
+  exists* (s: full_array_lspec t N). array_pts_to var_g 1.0R s
+```
+
+`_live(g)` is that named slprop. It is named rather than the library's
+`live_array` because it also pins the extent: an `array`'s length lives in its
+spec, so `N` can only be stated by the existential's binder. That is what makes
+
+```c
+uint32_t buf[4];
+
+void set_last(uint32_t v)
+    _requires(_live(buf)) _ensures(_live(buf)) _ensures(buf[3] == v)
+{ buf[3] = v; }
+```
+
+go through with no length precondition of its own. `1.0R` is full ownership —
+unlike a `_pure` global's existential fraction, a mutable array must be
+writable, so only one holder of the permission can exist at a time.
+
+When the extent is unknown here (`extern T g[]`, `_array T *g`) the binder is a
+plain `full_array_spec`, and a contract that needs the length states it, as for
+an array parameter: `_requires(i < g._length)` plus
+`_preserves_value(g._length)`.
+
+A *pure* array global is unaffected: it keeps the ownership-free
+`full_array_lspec` spec model (`array_spec_idx`), which is why it is excluded
+from `&g`.
+
+See `test/global_mutable_array/global_mutable_array.c`.
 
 ## See also
 
