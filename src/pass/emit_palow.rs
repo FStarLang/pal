@@ -1358,6 +1358,27 @@ impl<'a> Spec<'a> {
                     .push(format!("{} < Seq.length {}", i, seq));
                 Ok(format!("(Seq.index {} {})", seq, i))
             }
+            // `u.m._active` asks which member of a union is the live one.
+            // Palow's union value is a tagged sum -- every member is a
+            // constructor -- so the question is which constructor it was
+            // built with, and the answer is a discriminator applied to the
+            // union's own value. Nothing is read: this is a fact about a
+            // value the contract already carries.
+            ExprT::VAttr(VAttr::Active(m), obj) => {
+                let uty = self.ty_of(obj)?;
+                let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &uty).val else {
+                    return Err(format!(
+                        "`_active` on {} in a contract",
+                        describe(self.tds.resolve(&uty))
+                    ));
+                };
+                Ok(format!(
+                    "(Union_{}_{}? {})",
+                    u.val,
+                    m.val,
+                    self.value(obj, w)?
+                ))
+            }
             // A struct value is an F* record, so a field of one is a
             // projection. `s->f` reaches here as `(*s).f`.
             ExprT::Member(base, f) => {
@@ -5418,6 +5439,12 @@ struct Body<'a> {
     /// changed it. Keyed by the address expression, which is the emitter's own
     /// name for the object.
     active: HashMap<String, String>,
+    /// Union members the function's own `_requires` says are the live ones,
+    /// as the C lvalue naming the union object and the member's name. A read
+    /// of a union member is only sound where the member is the live one, and
+    /// the contract is the other place besides a write in this body where
+    /// that can be known.
+    live_arms: Vec<(Rc<Expr>, String)>,
 }
 
 /// What a subscript through an array parameter needs: the element's Palow type
@@ -5633,6 +5660,25 @@ impl<'a> Body<'a> {
     }
 
     /// The place an aliased pointer stands for, when `e` dereferences one.
+    /// An lvalue with every alias resolved to the place it stands for, so
+    /// that two spellings of the same object compare equal.
+    fn unalias_place(&self, e: &Expr) -> Rc<Expr> {
+        if let Some(p) = self.unalias(e) {
+            return self.unalias_place(&p);
+        }
+        match &strip_vattr(e).val {
+            ExprT::Member(b, f) => Rc::new(Ast {
+                val: ExprT::Member(self.unalias_place(b), f.clone()),
+                loc: e.loc.clone(),
+            }),
+            ExprT::Deref(b) => Rc::new(Ast {
+                val: ExprT::Deref(self.unalias_place(b)),
+                loc: e.loc.clone(),
+            }),
+            _ => Rc::new(e.clone()),
+        }
+    }
+
     fn unalias(&self, e: &Expr) -> Option<Rc<Expr>> {
         let ExprT::Deref(inner) = &strip_vattr(e).val else {
             return None;
@@ -5947,26 +5993,63 @@ impl<'a> Body<'a> {
                 describe(self.tds.resolve(&fty))
             )
         })?;
-        let (a, _, _) = self.base_addr(base)?;
+        let (a, base_close_read, base_close_write) = self.base_addr(base)?;
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
-            return Err(format!(
-                "a read of union member `{}`, which is not known to be the live one here",
-                f.val
+            // The other way to know is the contract. There the union's value
+            // is whatever the caller passed, so the tag is a fact rather than
+            // a shape: the ownership in hand is stated at an opaque value,
+            // and `focus` wants it stated at the constructor. Re-stating it
+            // that way is the whole of the step, and it is sound exactly
+            // because the `_requires` said so -- which is why this is not
+            // reachable without one.
+            let uname = un.strip_prefix("union_").unwrap_or(&un).to_string();
+            let ctor = format!("Union_{}_{}", uname, f.val);
+            // A pointer bound to the address of a place stands for that
+            // place, and the contract names the place: `payload->uds` after
+            // `payload = &ctx.payload` is `ctx.payload.uds`.
+            let named = self.unalias_place(base);
+            if !self
+                .live_arms
+                .iter()
+                .any(|(obj, m)| *m == *f.val && same_lvalue(obj, &named))
+            {
+                return Err(format!(
+                    "a read of union member `{}`, which is not known to be the live one here",
+                    f.val
+                ));
+            }
+            let vp = self.fresh("perm");
+            let vu = self.fresh("union");
+            self.lines.push(format!(
+                "with {} {}. assert ({}_pts_to {} {} {});",
+                vp, vu, un, a, vp, vu
             ));
+            self.lines.push(format!(
+                "rewrite ({}_pts_to {} {} {}) as ({}_pts_to {} {} ({} ({}?._0 {})));",
+                un, a, vp, vu, un, a, vp, ctor, ctor, vu
+            ));
+            self.active.insert(a.clone(), f.val.to_string());
         }
         if writing {
             self.active.insert(a.clone(), f.val.to_string());
         }
         let focus = vec![format!("{}_focus_{} {};", un, f.val, a)];
-        let close = vec![format!("{}_unfocus_{} {};", un, f.val, a)];
+        let close = |mut base: Vec<String>| {
+            let mut v = vec![format!("{}_unfocus_{} {};", un, f.val, a)];
+            v.append(&mut base);
+            v
+        };
         Ok(Focus {
             pn: pn.clone(),
             write_fn: format!("{}_write_uninit", pn),
             at: a.clone(),
             open_read: focus,
             open_write: vec![format!("{}_switch_{} {};", un, f.val, a)],
-            close_read: close.clone(),
-            close_write: close,
+            // Whatever had to be opened to name the union is closed after the
+            // union itself is, innermost first. Dropping these was invisible
+            // until a union nested in a struct reached here.
+            close_read: close(base_close_read),
+            close_write: close(base_close_write),
         })
     }
 
@@ -6018,9 +6101,12 @@ impl<'a> Body<'a> {
         }
         if let ExprT::Member(b2, f2) = &strip_vattr(base).val {
             let fty = self.field_ty(b2, f2)?;
+            // A union-typed field is reached the same way: the aggregate
+            // holding it has to be opened before anything inside it can be
+            // named, and which of the two it is changes nothing about that.
             if matches!(
                 &peel(self.tds, &fty).val,
-                TypeT::TypeRef(TypeRefKind::Struct(_))
+                TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
             ) {
                 let inner = self.focus_field(b2, f2)?;
                 let mut close_read =
@@ -9511,6 +9597,18 @@ fn emit_body(
         blocks: Vec::new(),
         aliases: alias_map(&defn.body),
         active: HashMap::new(),
+        // Only where the contract survived: a dropped `_requires` is not a
+        // promise the caller made, so a read resting on it would be resting
+        // on nothing.
+        live_arms: if sig.contract {
+            let mut out = Vec::new();
+            for e in &defn.decl.requires {
+                active_claims(e, &mut out);
+            }
+            out
+        } else {
+            Vec::new()
+        },
         uses: HashSet::new(),
         forbidden,
         params: defn
@@ -9527,6 +9625,49 @@ fn emit_body(
         divergent: b.divergent,
         uses: b.uses,
     })
+}
+
+/// Collect every `u.m._active` claim a contract clause makes.
+///
+/// The walk is over the connectives a contract is built from rather than over
+/// every expression: a claim under something else -- an implication, a
+/// disjunction -- is not a claim the body may rely on unconditionally, and
+/// silently treating it as one would let a read past a guard that does not
+/// hold.
+fn active_claims(e: &Expr, out: &mut Vec<(Rc<Expr>, String)>) {
+    match &e.val {
+        ExprT::VAttr(VAttr::Active(m), obj) => out.push((obj.clone(), m.val.to_string())),
+        ExprT::Cast(x, _) => active_claims(x, out),
+        // `p == true` is how a `_Bool`-valued clause arrives, and `&&` is a
+        // conjunction of claims: both halves hold.
+        ExprT::BinOp(BinOp::LogAnd, l, r) => {
+            active_claims(l, out);
+            active_claims(r, out);
+        }
+        ExprT::BinOp(BinOp::Eq, l, r) => {
+            if matches!(&strip_vattr(r).val, ExprT::BoolLit(true)) {
+                active_claims(l, out);
+            }
+            if matches!(&strip_vattr(l).val, ExprT::BoolLit(true)) {
+                active_claims(r, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether two lvalue expressions name the same object, ignoring the
+/// annotations elaboration leaves behind. This is deliberately syntactic:
+/// two spellings that happen to denote the same object -- a pointer copied
+/// into a local, say -- are not matched, because deciding that is aliasing
+/// reasoning and not something a comparison of trees can do.
+fn same_lvalue(a: &Expr, b: &Expr) -> bool {
+    match (&strip_vattr(a).val, &strip_vattr(b).val) {
+        (ExprT::Var(x), ExprT::Var(y)) => x.val == y.val,
+        (ExprT::Deref(x), ExprT::Deref(y)) => same_lvalue(x, y),
+        (ExprT::Member(x, f), ExprT::Member(y, g)) => f.val == g.val && same_lvalue(x, y),
+        _ => false,
+    }
 }
 
 /// Whether a C block always leaves the function, so that whatever follows it

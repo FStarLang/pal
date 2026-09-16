@@ -2378,8 +2378,33 @@ new facts about memory.
    equation between two field reads, and that spelling is dropped and counted
    under the field-through-a-pointer gap rather than weakened in silence.
 
-   As of this milestone: **788 specifications, 668 of them with real bodies,
-   114 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   Reading a union member is now allowed where the function's own
+   `_requires` says that member is the live one. C says a union holds one of
+   its members at a time and that reading a different one is not reading what
+   you wrote, so the emitter had allowed the read only where it had put the
+   value there itself -- which left every function that receives an already
+   populated union unable to touch it. `u.m._active` translates now: Palow's
+   union value is a tagged sum, so "which member is live" is which
+   constructor the value was built with, and the clause is a discriminator
+   applied to a value the contract already carries. The body then has a fact
+   where it needs a shape -- the ownership in hand is stated at an opaque
+   value and `focus` wants it stated at the constructor -- so the read is
+   preceded by a `rewrite` between the two, which is sound exactly because
+   the `_requires` said so and is unreachable without one. A claim under an
+   implication or a disjunction is deliberately not collected: that is not
+   something the body may rely on unconditionally.
+
+   Two things fell out of doing this. A union nested in a struct was not
+   reachable at all, because the step that opens whatever aggregate holds a
+   place only opened struct-typed fields; and the lines closing that
+   aggregate were being dropped on the union path, which would have left the
+   struct in pieces past the end of the statement. Both are fixed, and
+   `union_test2` -- five spellings of the same read, through a value, a
+   pointer, a nested struct, and an alias to the nested union -- translates
+   and verifies with no admits.
+
+   As of this milestone: **788 specifications, 673 of them with real bodies,
+   109 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
