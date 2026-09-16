@@ -1182,6 +1182,85 @@ const struct mo_ops the_mo_ops = {
     .f1 = mo_one, .fs = mo_scalar, .f2 = mo_two, .f3 = mo_three
 };
 
+/* Framing a call is different from framing a function pointer's validity.
+   Both contracts use the same witness type; 42 is an arbitrary fixed
+   pointee value, so witness conversion is not involved in this example. */
+_include_pulse(Fp_frame_spec,
+  unfold let plain_pre (p: ref Int32.t) (w: erased unit) : slprop = emp
+  unfold let plain_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop = emp
+
+  unfold let framed_pre (p: ref Int32.t) (w: erased unit) : slprop =
+    Pulse.Lib.Reference.pts_to p 42l
+  unfold let framed_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop =
+    Pulse.Lib.Reference.pts_to p 42l
+
+  ghost fn frame_wpre (p: ref Int32.t) (w: erased unit)
+    requires framed_pre p w
+    ensures plain_pre p w ** framed_pre p w
+  { () }
+
+  ghost fn frame_wpost (p: ref Int32.t) (w: erased unit) (r: unit)
+    requires plain_post p w r ** framed_pre p w
+    ensures framed_post p w r
+  { () }
+
+  ghost fn frame_plain (f: Pulse.Lib.C.FuncPtr.func_ptr (ref Int32.t) unit)
+    requires Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post
+    ensures Pulse.Lib.C.FuncPtr.is_valid f true framed_pre framed_post **
+            Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post
+  {
+    unfold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+    fold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+    Pulse.Lib.C.FuncPtr.frame f true plain_pre plain_post framed_pre;
+    Pulse.Lib.C.FuncPtr.weaken f true true
+      (fun p w -> plain_pre p w ** framed_pre p w)
+      (fun p w r -> plain_post p w r ** framed_pre p w)
+      framed_pre framed_post (fun _ w -> w) frame_wpre frame_wpost;
+    fold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+  }
+)
+
+/* Control: ordinary call-site framing preserves the pointee. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_direct(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
+    _plain int *p)
+{
+    f(p);
+}
+
+/* Control: a consumer with the framed validity can call its pointer. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_consumer(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.framed_pre Fp_frame_spec.framed_post)),
+    _plain int *p)
+{
+    f(p);
+}
+
+/* Adapt the same arbitrary pointer's validity using the frame axiom.
+   Without this ghost step the consumer call fails with Error 19.
+   FuncPtr.weaken alone cannot carry a resource between its two coercions. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_adapt(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
+    _plain int *p)
+{
+    _ghost_stmt(Fp_frame_spec.frame_plain $(f));
+    fp_frame_consumer(f, p);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid $(f)
+      Fp_frame_spec.framed_pre Fp_frame_spec.framed_post);
+}
+
 #if 0
 
 /* [DEFERRED] Indirect recursion through a function pointer. Taking the
