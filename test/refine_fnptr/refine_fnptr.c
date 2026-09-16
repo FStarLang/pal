@@ -28,11 +28,22 @@ const struct ops the_ops = {.fa = on_a, .fb = on_b};
 // wrapper's precondition -- refinement `with_pure` included -- against
 // `pre_of`. That is where wrapping the requires in an identity could plausibly
 // disturb slprop matching, so it is worth covering explicitly.
+#ifdef PALOW
+// Palow's function pointers live in their own module and the wrapper is
+// emitted beside the function it wraps, so the names differ; what the clause
+// says is the same.
+int32_t apply_b(int32_t (*op)(struct b *)
+                    _refine((_slprop) _inline_pulse(
+                        Pulse.Lib.C.Palow.FnPtr.is_valid $(this) true
+                            (Pulse.Lib.C.Palow.FnPtr.pre_of Func_on_b.func_on_b__fp) (Pulse.Lib.C.Palow.FnPtr.post_of Func_on_b.func_on_b__fp))),
+                struct b *p)
+#else
 int32_t apply_b(int32_t (*op)(struct b *)
                     _refine((_slprop) _inline_pulse(
                         Pulse.Lib.C.FuncPtr.is_valid $(this) true
                             (Pulse.Lib.C.FuncPtr.pre_of Funcptr_on_b.func_on_b__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_on_b.func_on_b__fp))),
                 struct b *p)
+#endif
 {
   return op(p);
 }

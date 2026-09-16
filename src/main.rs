@@ -142,6 +142,15 @@ fn main() {
     };
     let mut diags = Diagnostics::empty();
 
+    // A source can be translated for either memory model, and hand-written
+    // Pulse in it names predicates only one of them has. `PALOW` lets the
+    // source say which fragment is which.
+    let defines: Vec<String> = if cli.palow {
+        vec!["PALOW".to_string()]
+    } else {
+        vec![]
+    };
+
     let parse_start = Instant::now();
     for file in &cli.files {
         let file_name = std::path::absolute(file)
@@ -154,7 +163,8 @@ fn main() {
             std::process::exit(1);
         }
 
-        let (tu, file_diags) = clang::parse_file(&file_name, &cli.include_paths, &mut *vfs);
+        let (tu, file_diags) =
+            clang::parse_file(&file_name, &cli.include_paths, &defines, &mut *vfs);
         combined_tu
             .main_file_names
             .push(tu.main_file_names[0].clone());

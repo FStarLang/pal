@@ -733,6 +733,10 @@ struct FnSurface {
     /// The `__fp` wrapper, when this function can be decayed to a code
     /// pointer: the flat, explicitly-quantified form `of_fn_div` needs.
     fp: Option<String>,
+    /// Whether that wrapper's witness type is `unit`, which decides whether a
+    /// caller has to name a witness at the indirect call or can pass the only
+    /// one there is.
+    fp_unit: bool,
     /// The mutable globals the contract hands in and back out. The body treats
     /// each as a slot it did not allocate.
     globals: Vec<Slot>,
@@ -1699,6 +1703,11 @@ fn emit_fn(
     let mut params: Vec<String> = Vec::new();
     let mut ghosts: Vec<String> = Vec::new();
     let mut perms: Vec<String> = Vec::new();
+    // The same implicit binders again, as (name, underlying type, erased),
+    // because the `__fp` wrapper below cannot have implicits: `valid` relates
+    // an address to a *flat* spec, so every one of them has to become a
+    // component of the explicit witness the caller passes.
+    let mut wits: Vec<(String, String, bool)> = Vec::new();
     let mut req: Vec<String> = Vec::new();
     // Hand-written ownership the contract hands back, which unlike the
     // generated kind binds no existential of its own -- the author names
@@ -1857,15 +1866,19 @@ fn emit_fn(
                 ParamMode::Const => {
                     let perm = format!("perm_{}", base);
                     perms.push(format!("(#{}: perm)", perm));
+                    wits.push((perm.clone(), "perm".to_string(), false));
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                    wits.push((vname.clone(), vty.clone(), true));
                     preserved.push(pts_to(&perm, &vname));
                 }
                 ParamMode::Consumed => {
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                    wits.push((vname.clone(), vty.clone(), true));
                     req.push(pts_to("1.0R", &vname));
                 }
                 ParamMode::Regular => {
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                    wits.push((vname.clone(), vty.clone(), true));
                     req.push(pts_to("1.0R", &vname));
                     fresh.push((
                         format!("{}'", vname),
@@ -1895,7 +1908,9 @@ fn emit_fn(
             ParamMode::Const => {
                 let perm = format!("perm_{}", base);
                 perms.push(format!("(#{}: perm)", perm));
+                wits.push((perm.clone(), "perm".to_string(), false));
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                wits.push((vname.clone(), vty.clone(), true));
                 preserved.push(pts_to(&perm, &vname));
                 owned.push(OwnedParam {
                     base: base.clone(),
@@ -1907,6 +1922,7 @@ fn emit_fn(
             }
             ParamMode::Consumed => {
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                wits.push((vname.clone(), vty.clone(), true));
                 req.push(pts_to("1.0R", &vname));
                 owned.push(OwnedParam {
                     base: base.clone(),
@@ -1917,6 +1933,7 @@ fn emit_fn(
             }
             ParamMode::Regular => {
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                wits.push((vname.clone(), vty.clone(), true));
                 req.push(pts_to("1.0R", &vname));
                 owned.push(OwnedParam {
                     base: base.clone(),
@@ -1952,6 +1969,7 @@ fn emit_fn(
             )
         })?;
         ghosts.push(format!("(#var_{}: erased ({}))", ga.name.val, vty));
+        wits.push((format!("var_{}", ga.name.val), vty.clone(), true));
     }
 
     // A mutable global's storage outlives every function, so C gives no
@@ -2288,16 +2306,20 @@ fn emit_fn(
     // pre/post back off the wrapper's type, which is why the contract has to
     // be written out here rather than referred to.
     //
-    // Only a function whose parameters carry no ownership gets one so far. A
-    // pointer parameter's `exists*` is exactly what the witness type `c` is
-    // for, and threading it needs the caller to name the witness at the call;
-    // until an indirect call is translated there is nothing to name it with,
-    // so `c` is `unit` and the wrapper is refused for anything else.
+    // The witness type `c` is what makes a pointer parameter work. A function
+    // taking a `T *` owns a `T` at it, and the value it owns is an implicit
+    // binder -- which the flat shape forbids. So every implicit the
+    // specification has, the permission of a `const` parameter as much as the
+    // value behind a pointer or a `_ghost_arg`, becomes a component of `c`,
+    // and the wrapper opens the tuple back up with a `let` inside the
+    // contract. The caller of `call_div` then has to name the witness, which
+    // is exactly the information an indirect call needs and cannot infer:
+    // which object the callee is about to be handed.
     let simple = decay
-        && decl.args.iter().all(|a| {
-            pointee(tds, &a.ty).is_none() && matches!(a.mode, ParamMode::Regular | ParamMode::Const)
-        })
-        && decl.ghost_args.is_empty()
+        && decl
+            .args
+            .iter()
+            .all(|a| matches!(a.mode, ParamMode::Regular | ParamMode::Const))
         && globals.is_empty()
         && contract_ok;
     let fp = if simple {
@@ -2315,48 +2337,85 @@ fn emit_fn(
                 None => format!("arg_{}", i),
             })
             .collect();
-        let n = tys.len();
-        let domain = match n {
-            0 => "unit".to_string(),
-            1 => tys[0].clone(),
-            _ => format!("({})", tys.join(" & ")),
-        };
         // The flat n-ary tuple is not nested pairs: arity 2 projects with
         // `fst`/`snd`, arity 3 and up with the `tupleN` field projectors.
-        let projs: Vec<String> = (0..n)
-            .map(|i| match n {
-                1 => "x_fp".to_string(),
-                2 => format!("({} x_fp)", if i == 0 { "fst" } else { "snd" }),
-                _ => format!("(Mktuple{}?._{} x_fp)", n, i + 1),
-            })
-            .collect();
-        let binds: String = names
-            .iter()
-            .zip(projs.iter())
-            .map(|(nm, pj)| format!("let {} = {} in ", nm, pj))
-            .collect();
+        let tuple = |tys: &[String]| -> String {
+            match tys.len() {
+                0 => "unit".to_string(),
+                1 => tys[0].clone(),
+                _ => format!("({})", tys.join(" & ")),
+            }
+        };
+        let projs = |n: usize, of: &str| -> Vec<String> {
+            (0..n)
+                .map(|i| match n {
+                    1 => of.to_string(),
+                    2 => format!("({} {})", if i == 0 { "fst" } else { "snd" }, of),
+                    _ => format!("(Mktuple{}?._{} {})", n, i + 1, of),
+                })
+                .collect()
+        };
+        let n = tys.len();
+        let domain = tuple(&tys);
+        let aprojs = projs(n, "x_fp");
+        let wtys: Vec<String> = wits.iter().map(|(_, t, _)| t.clone()).collect();
+        let witness = tuple(&wtys);
+        let wprojs = projs(wits.len(), "(reveal w_fp)");
+        let mut binds = String::new();
+        for (nm, pj) in names.iter().zip(aprojs.iter()) {
+            binds += &format!("let {} = {} in ", nm, pj);
+        }
+        // An erased implicit is re-hidden, so the binder has the type the
+        // contract was written against and the text below is the same text.
+        for ((nm, _, erased), pj) in wits.iter().zip(wprojs.iter()) {
+            binds += &format!(
+                "let {} = {} in ",
+                nm,
+                if *erased {
+                    format!("hide {}", pj)
+                } else {
+                    pj.clone()
+                }
+            );
+        }
         let conj = |ps: &[String]| -> String {
             if ps.is_empty() {
-                "emp".to_string()
+                format!("({}emp)", binds)
             } else {
-                format!(
-                    "({}{})",
-                    binds,
-                    ps.iter()
-                        .map(|p| format!("pure ({})", p))
-                        .collect::<Vec<_>>()
-                        .join(" ** ")
-                )
+                format!("({}{})", binds, ps.join(" ** "))
             }
+        };
+        // `preserves` is sugar for a conjunct at both ends, and the flat shape
+        // has no sugar, so it is written out on both sides here.
+        let mut pre = preserved.clone();
+        pre.extend(req.iter().cloned());
+        let mut post: Vec<String> = preserved.clone();
+        post.extend(bodies.iter().cloned());
+        let post = if fresh.is_empty() {
+            conj(&post)
+        } else {
+            let binders: Vec<String> = fresh
+                .iter()
+                .map(|(b, t, _)| format!("({}: {})", b, t))
+                .collect();
+            conj(&[format!(
+                "(exists* {}. {})",
+                binders.join(" "),
+                if post.is_empty() {
+                    "emp".to_string()
+                } else {
+                    post.join(" ** ")
+                }
+            )])
         };
         let call = if n == 0 {
             format!("func_{} ()", decl.name.val)
         } else {
-            format!("func_{} {}", decl.name.val, projs.join(" "))
+            format!("func_{} {}", decl.name.val, aprojs.join(" "))
         };
         Some(format!(
             "divergent\n\
-             fn {name}__fp (x_fp: {domain}) (w_fp: erased unit)\n\
+             fn {name}__fp (x_fp: {domain}) (w_fp: erased ({witness}))\n\
              \x20 requires prevent_lifting {pre}\n\
              \x20 returns  {ret_name} : {ret}\n\
              \x20 ensures  {post}\n\
@@ -2366,10 +2425,11 @@ fn emit_fn(
              }}\n\n",
             name = name,
             domain = domain,
-            pre = conj(&pre_props),
+            witness = witness,
+            pre = conj(&pre),
             ret_name = ret_name,
             ret = ret,
-            post = conj(&post_props),
+            post = post,
             call = call,
         ))
     } else {
@@ -2382,6 +2442,7 @@ fn emit_fn(
         guarded,
         contract: contract_ok,
         fp,
+        fp_unit: wits.is_empty(),
         globals: globals.to_vec(),
         uses: spec.uses.take(),
         // A contract that was dropped granted nothing, so nothing may be
@@ -4572,6 +4633,7 @@ pub fn emit_palow(
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
                 fp: sig.fp.is_some(),
+                fp_unit: sig.fp_unit,
                 outs: fndecl
                     .args
                     .iter()
@@ -4995,6 +5057,8 @@ struct Callee {
     /// Whether a `__fp` wrapper was emitted, so the function can be decayed
     /// to a code pointer.
     fp: bool,
+    /// Whether that wrapper's witness type is `unit`.
+    fp_unit: bool,
     /// Which parameters are `_out`, by position. Those arguments are not
     /// evaluated: what is passed is storage, not a value.
     outs: Vec<bool>,
@@ -6830,9 +6894,26 @@ impl<'a> Body<'a> {
                     };
                     self.divergent = true;
                     let t = self.fresh(&v.val);
+                    // The witness the callee's wrapper takes is decided by
+                    // its parameters, and a function-pointer type says what
+                    // those are: a parameter with a pointee contributes the
+                    // value the callee owns at it, and one without
+                    // contributes nothing. When nothing does, `unit` has only
+                    // one inhabitant and there is nothing to infer; otherwise
+                    // the ownership being handed over says which object it is.
+                    let fty = self.ty_of(f)?;
+                    let unit_witness = match &peel(self.tds, &fty).val {
+                        TypeT::FnPtr { args, .. } => {
+                            args.iter().all(|a| pointee(self.tds, a).is_none())
+                        }
+                        _ => false,
+                    };
                     self.lines.push(format!(
-                        "let {} = call_div _ _ var_{} {} (hide ());",
-                        t, v.val, tuple
+                        "let {} = call_div _ _ var_{} {} {};",
+                        t,
+                        v.val,
+                        tuple,
+                        if unit_witness { "(hide ())" } else { "_" }
                     ));
                     return Ok(t);
                 }
@@ -6855,6 +6936,14 @@ impl<'a> Body<'a> {
                     1 => vs[0].clone(),
                     _ => format!("({})", vs.join(", ")),
                 };
+                // A wrapper whose witness is `unit` has only one witness to
+                // pass; anything else is determined by the ownership the
+                // caller is handing over, which slprop matching can see.
+                let w = if self.callees.get(&g).is_some_and(|c| c.fp_unit) {
+                    "(hide ())"
+                } else {
+                    "_"
+                };
                 let (pre, post, addr) = Self::fp_spec(&g);
                 // `call_div` lives in the divergent effect, so its caller does
                 // too -- which every PAL function that is not `_total` already
@@ -6864,8 +6953,8 @@ impl<'a> Body<'a> {
                     .push(format!("of_fn_div_valid {} {} func_{}__fp;", pre, post, g));
                 let t = self.fresh(&g);
                 self.lines.push(format!(
-                    "let {} = call_div {} {} {} {} (hide ());",
-                    t, pre, post, addr, tuple
+                    "let {} = call_div {} {} {} {} {};",
+                    t, pre, post, addr, tuple, w
                 ));
                 self.lines
                     .push(format!("drop_is_valid {} {} {};", addr, pre, post));

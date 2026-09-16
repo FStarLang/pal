@@ -3283,6 +3283,15 @@ static void parse_file(RefMut<Ctx> ctx) {
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
+  // Extra preprocessor defines, which is how the caller says which memory
+  // model this translation is for.
+  size_t defineCount = ctx.get_define_count();
+  for (size_t i = 0; i < defineCount; i++) {
+    std::string def = "-D" + toString(ctx.get_define(i));
+    Tool.appendArgumentsAdjuster(
+        getInsertArgumentAdjuster(def.c_str(), ArgumentInsertPosition::BEGIN));
+  }
+
   // Add user-specified include paths
   size_t includePathCount = ctx.get_include_path_count();
   for (size_t i = 0; i < includePathCount; i++) {

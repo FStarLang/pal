@@ -2128,8 +2128,42 @@ new facts about memory.
    *through* a name has to ask whether an intervening assignment moved it.
    Both were refusals where nothing was in doubt.
 
-   As of this milestone: **771 specifications, 618 of them with real bodies,
-   153 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   A callback that takes a pointer was the next thing, and it is where the
+   backlog of hand-written Pulse started to move. A `__fp` wrapper is the flat
+   form `of_fn_div` can reflect -- `x:a -> y:erased c -> stt_div b (pre x y)
+   (post x y)` -- and flat means no implicit binders, which is exactly what a
+   pointer parameter has: the value the callee owns at it. So every wrapper
+   was refused for anything but a function of values, and since a C callback
+   is nearly always a function of a pointer, almost nothing could be decayed.
+
+   The witness type `c` was put there for this and had never been used. Every
+   implicit the specification has -- the value behind a pointer, the
+   permission of a `const` parameter, a `_ghost_arg` -- is now a component of
+   `c`, and the wrapper opens the tuple back up with a `let` inside its own
+   contract, so the text of the contract is the text that was already being
+   emitted. The caller of `call_div` then has to name the witness, and that is
+   not an imposition: it is precisely the information an indirect call cannot
+   infer from the pointer, namely which object the callee is about to be
+   handed. In practice slprop matching sees it in the ownership being handed
+   over, so the emitted call passes `_` and lets the match decide -- except
+   when the witness is `unit`, where there is nothing to match and the one
+   inhabitant is passed instead. Which of the two it is, is read off the
+   function-pointer *type*: a parameter with a pointee contributes a witness
+   component, one without contributes nothing.
+
+   That needed a way for a test to say which model it is being translated
+   for. Hand-written Pulse in a test names predicates, and the two models do
+   not have the same ones; until now such a test simply carried a marker
+   saying "not yet" and its fragments were dropped. `--palow` now defines
+   `PALOW` for the preprocessor, so one source can carry both spellings under
+   an `#ifdef` and be honest in both. `swap_struct` and `refine_fnptr` are the
+   first two out of that backlog, and `refine_fnptr` in particular now
+   translates with nothing admitted at all: the refinement granting
+   `is_valid`, the wrapper carrying the callee's ownership, and the indirect
+   call through it are all ordinary translated code.
+
+   As of this milestone: **771 specifications, 621 of them with real bodies,
+   150 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
