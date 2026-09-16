@@ -1668,6 +1668,20 @@ public:
     } else if (auto *co = dyn_cast<ConditionalOperator>(e)) {
       return mk_cond(std::move(loc), trRValue(co->getCond()),
                      trRValue(co->getTrueExpr()), trRValue(co->getFalseExpr()));
+    } else if (auto *bco = dyn_cast<BinaryConditionalOperator>(e)) {
+      // GNU `a ?: b`: `a` if it is nonzero, else `b`, with `a` evaluated
+      // once.
+      // TODO: The current encoding will evaluate `b` unconditionally; can be
+      // fix by translating to an if-statement?
+      if (bco->getFalseExpr()->HasSideEffects(*astCtx)) {
+        reportUnsupported(e->getSourceRange(), loc,
+                          "GNU ?: with an effectful right operand", "");
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
+      }
+      return mk_rvalue_binop(std::move(loc), ir::BinOp::Elvis(),
+                             trRValue(bco->getCommon()),
+                             trRValue(bco->getFalseExpr()));
     } else if (auto *dre = dyn_cast<DeclRefExpr>(e)) {
       if (auto *ecd = dyn_cast<EnumConstantDecl>(dre->getDecl())) {
         const auto val = ecd->getInitVal();

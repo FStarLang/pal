@@ -276,6 +276,8 @@ pub enum BinOp {
     BitXor,
     Shl,
     Shr,
+    /// GNU `a ?: b`: `a` if it is nonzero, else `b`.
+    Elvis,
 }
 
 impl BinOp {
@@ -297,6 +299,7 @@ impl BinOp {
             BinOp::BitXor => "^",
             BinOp::Shl => "<<",
             BinOp::Shr => ">>",
+            BinOp::Elvis => "?:",
         }
     }
 }
