@@ -71,6 +71,14 @@ ghost fn bool_t_pts_to_not_null (a: ptr) (#p: perm) (#x: bool)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
+(* Unwritten storage is still storage: it occupies bool_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn bool_t_pts_to_uninit_not_null (a: ptr)
+  preserves bool_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
 [@@allow_ambiguous]
 ghost fn bool_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: bool)
   preserves bool_t_pts_to a p1 x
@@ -150,6 +158,14 @@ val int8_t_repr_injective (x y: I8.t) (b: bytes)
 
 ghost fn int8_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I8.t)
   preserves int8_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+(* Unwritten storage is still storage: it occupies int8_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn int8_t_pts_to_uninit_not_null (a: ptr)
+  preserves int8_t_pts_to_uninit a
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
@@ -235,6 +251,14 @@ ghost fn int16_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I16.t)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
+(* Unwritten storage is still storage: it occupies int16_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn int16_t_pts_to_uninit_not_null (a: ptr)
+  preserves int16_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
 [@@allow_ambiguous]
 ghost fn int16_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I16.t)
   preserves int16_t_pts_to a p1 x
@@ -314,6 +338,14 @@ val int32_t_repr_injective (x y: I32.t) (b: bytes)
 
 ghost fn int32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I32.t)
   preserves int32_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+(* Unwritten storage is still storage: it occupies int32_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn int32_t_pts_to_uninit_not_null (a: ptr)
+  preserves int32_t_pts_to_uninit a
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
@@ -399,6 +431,14 @@ ghost fn int64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I64.t)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
+(* Unwritten storage is still storage: it occupies int64_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn int64_t_pts_to_uninit_not_null (a: ptr)
+  preserves int64_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
 [@@allow_ambiguous]
 ghost fn int64_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
   preserves int64_t_pts_to a p1 x
@@ -481,6 +521,14 @@ ghost fn uint16_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U16.t)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
+(* Unwritten storage is still storage: it occupies uint16_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn uint16_t_pts_to_uninit_not_null (a: ptr)
+  preserves uint16_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
 [@@allow_ambiguous]
 ghost fn uint16_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U16.t)
   preserves uint16_t_pts_to a p1 x
@@ -560,6 +608,14 @@ val uint64_t_repr_injective (x y: U64.t) (b: bytes)
 
 ghost fn uint64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U64.t)
   preserves uint64_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+(* Unwritten storage is still storage: it occupies uint64_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn uint64_t_pts_to_uninit_not_null (a: ptr)
+  preserves uint64_t_pts_to_uninit a
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
@@ -674,6 +730,14 @@ ghost fn size_t_pts_to_not_null (a: ptr) (#p: perm) (#x: SZ.t)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
+(* Unwritten storage is still storage: it occupies size_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn size_t_pts_to_uninit_not_null (a: ptr)
+  preserves size_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
 [@@allow_ambiguous]
 ghost fn size_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: SZ.t)
   preserves size_t_pts_to a p1 x
@@ -749,6 +813,14 @@ val uint8_t_repr_injective (x y: U8.t) (b: bytes)
 
 ghost fn uint8_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U8.t)
   preserves uint8_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+(* Unwritten storage is still storage: it occupies uint8_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn uint8_t_pts_to_uninit_not_null (a: ptr)
+  preserves uint8_t_pts_to_uninit a
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 

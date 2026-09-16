@@ -2298,8 +2298,55 @@ new facts about memory.
    left is honest: calls through a pointer whose target is genuinely not known
    at the call site, and four uses of the old emitter's `$unfold` antiquotation.
 
-   As of this milestone: **781 specifications, 657 of them with real bodies,
-   124 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   Four more tests came off the old-annotation backlog, and between them they
+   say what the two models' pointer algebras cost to translate between.
+
+   `container_of` existed to exercise the *pair* of inverse lemmas the old
+   emitter generates for every field of every structure -- `container (proj p)
+   == p` and `proj (container r) == r` -- one `container` symbol per field
+   kind, aggregate, scalar, pointer and inline array alike. Palow generates
+   none of them. A field's address is the structure's address plus the field's
+   offset and the recovery is the wrapping subtraction of that same offset, so
+   the left inverse is `add_sub_wrap`, one axiom covering every field of every
+   structure at once, and it holds for the array field and the by-value
+   aggregate field with no more said. That is the clearest case so far of the
+   model doing in one line what the old one had to generate per declaration.
+
+   The right inverse is where the two models genuinely differ, and Palow makes
+   the difference visible rather than hiding it. `(p -? off) +! off == p` needs
+   `off <= addr_of p`: at NULL it is false, because `(null -? off) +! off` has
+   address `off`. The old model's `ref` algebra had nowhere to put that side
+   condition and so implied it everywhere. `sub_wrap_add` states it, and is
+   derivable from `ptr_ext` in three lines, so it is an abbreviation rather
+   than an assumption. `container_field_read` -- the ownership move at the
+   heart of MsQuic's `QuicAckTrackerOnAckFrameAcked`, where a caller owns a
+   structure through a pointer to its embedded field and then reads that field
+   back through the original pointer -- now states the premise in its own
+   contract, as a `pure` fact about the field pointer it was handed. That is
+   the same thing ISO C requires of `container_of` and the old model never
+   asked for. Both tests translate with no admits.
+
+   `fnptr_slprop_spec` needed no model work at all, only the shim the
+   function-pointer port introduced: one `_include_pulse` naming "a `_plain
+   int32_t *` holding zero" in each model's vocabulary, and the rest of the
+   file is shared.
+
+   `refine_uninit` turned out to be an emitter gap rather than an annotation
+   one. `_refine_uninit` attaches a claim to storage the callee is handed
+   *unwritten*, and Palow refused it on the grounds that an uninitialised
+   points-to has no value for the claim to be about -- which is true, and is
+   exactly why `$(this)` there can only mean the pointer. It is now translated:
+   stated beside `<t>_pts_to_uninit`, on the way in only, since on the way out
+   the storage holds a value and the predicate it qualified is gone. A
+   `_refine_uninit` on a parameter that is not `_out` is reported rather than
+   dropped, because there is no unwritten points-to for it to sit beside.
+   Supporting it needed one fact the model did not have: unwritten storage is
+   still storage, so `<t>_pts_to_uninit a` implies `a` is not NULL. That is
+   what makes a `_out` parameter refined to be NULL vacuous rather than merely
+   unprovable, which is what the test checks.
+
+   As of this milestone: **788 specifications, 668 of them with real bodies,
+   120 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

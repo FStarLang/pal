@@ -135,6 +135,18 @@ val add_sub_wrap (a: ptr) (n: SZ.t)
   : Lemma ((a +! n) -? n == a)
           [SMTPat ((a +! n) -? n)]
 
+(* The other way round, which needs a side condition: the offset has to be
+   there to be taken back. At NULL it is not -- `(null -? n) +! n` has address
+   `n` -- so without the premise this would contradict `null_addr`. A caller
+   that reached a structure through one of its fields has the premise: the
+   field pointer really is `off` bytes into an object, which is exactly what
+   ISO C requires of `container_of` as well. Also derivable from `ptr_ext`, via
+   `addr_of_sub_wrap`. *)
+val sub_wrap_add (a: ptr) (n: SZ.t)
+  : Lemma (requires SZ.v n <= addr_of a)
+          (ensures  (a -? n) +! n == a)
+          [SMTPat ((a -? n) +! n)]
+
 (* Offset zero is the identity, which is what makes a `_container_of` on a
    first member pointer identity -- and, in particular, NULL-preserving. That
    matters: an intrusive list whose link sits at offset 0 is walked by

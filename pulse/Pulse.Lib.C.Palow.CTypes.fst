@@ -72,6 +72,16 @@ ghost fn bool_t_pts_to_not_null (a: ptr) (#p: perm) (#x: bool)
   fold bool_t_pts_to a p x;
 }
 
+ghost fn bool_t_pts_to_uninit_not_null (a: ptr)
+  preserves bool_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold bool_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold bool_t_pts_to_uninit a;
+}
+
 [@@allow_ambiguous]
 ghost fn bool_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: bool)
   preserves bool_t_pts_to a p1 x
@@ -183,6 +193,16 @@ ghost fn int8_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I8.t)
   unfold int8_t_pts_to a p x;
   mem_pts_to_not_null a;
   fold int8_t_pts_to a p x;
+}
+
+ghost fn int8_t_pts_to_uninit_not_null (a: ptr)
+  preserves int8_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold int8_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold int8_t_pts_to_uninit a;
 }
 
 [@@allow_ambiguous]
@@ -298,6 +318,16 @@ ghost fn int16_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I16.t)
   fold int16_t_pts_to a p x;
 }
 
+ghost fn int16_t_pts_to_uninit_not_null (a: ptr)
+  preserves int16_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold int16_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold int16_t_pts_to_uninit a;
+}
+
 [@@allow_ambiguous]
 ghost fn int16_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I16.t)
   preserves int16_t_pts_to a p1 x
@@ -409,6 +439,16 @@ ghost fn int32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I32.t)
   unfold int32_t_pts_to a p x;
   mem_pts_to_not_null a;
   fold int32_t_pts_to a p x;
+}
+
+ghost fn int32_t_pts_to_uninit_not_null (a: ptr)
+  preserves int32_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold int32_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold int32_t_pts_to_uninit a;
 }
 
 [@@allow_ambiguous]
@@ -524,6 +564,16 @@ ghost fn int64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I64.t)
   fold int64_t_pts_to a p x;
 }
 
+ghost fn int64_t_pts_to_uninit_not_null (a: ptr)
+  preserves int64_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold int64_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold int64_t_pts_to_uninit a;
+}
+
 [@@allow_ambiguous]
 ghost fn int64_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
   preserves int64_t_pts_to a p1 x
@@ -636,6 +686,16 @@ ghost fn uint16_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U16.t)
   fold uint16_t_pts_to a p x;
 }
 
+ghost fn uint16_t_pts_to_uninit_not_null (a: ptr)
+  preserves uint16_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold uint16_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold uint16_t_pts_to_uninit a;
+}
+
 [@@allow_ambiguous]
 ghost fn uint16_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U16.t)
   preserves uint16_t_pts_to a p1 x
@@ -746,6 +806,16 @@ ghost fn uint64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U64.t)
   unfold uint64_t_pts_to a p x;
   mem_pts_to_not_null a;
   fold uint64_t_pts_to a p x;
+}
+
+ghost fn uint64_t_pts_to_uninit_not_null (a: ptr)
+  preserves uint64_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold uint64_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold uint64_t_pts_to_uninit a;
 }
 
 [@@allow_ambiguous]
@@ -892,6 +962,16 @@ ghost fn size_t_pts_to_not_null (a: ptr) (#p: perm) (#x: SZ.t)
   fold size_t_pts_to a p x;
 }
 
+ghost fn size_t_pts_to_uninit_not_null (a: ptr)
+  preserves size_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold size_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold size_t_pts_to_uninit a;
+}
+
 [@@allow_ambiguous]
 ghost fn size_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: SZ.t)
   preserves size_t_pts_to a p1 x
@@ -1002,6 +1082,16 @@ ghost fn uint8_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U8.t)
   uint8_t_reveal a;
   mem_pts_to_not_null a;
   uint8_t_conceal a #p #_ #x;
+}
+
+ghost fn uint8_t_pts_to_uninit_not_null (a: ptr)
+  preserves uint8_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold uint8_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold uint8_t_pts_to_uninit a;
 }
 
 [@@allow_ambiguous]

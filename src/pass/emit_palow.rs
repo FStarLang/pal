@@ -590,20 +590,26 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
 /// supplies the ownership, and on exit where the callee hands it back. Which
 /// of those apply is decided by the parameter's mode, not here.
 ///
-/// `_refine_uninit` and `_refine_value` are refused. The first talks about a
-/// points-to that has no value in Palow, and the second binds a name the
-/// contract machinery does not carry.
-fn refinements(tds: &Typedefs, ty: &Type) -> Result<Vec<Rc<Expr>>, String> {
+/// `_refine_uninit` is returned separately, in the second component: it holds
+/// only while the storage is unwritten, so it belongs beside
+/// `<t>_pts_to_uninit` and nowhere else, and a parameter that never has an
+/// uninitialised points-to cannot state it at all. `_refine_value` is still
+/// refused, because it binds a name the contract machinery does not carry.
+fn refinements(tds: &Typedefs, ty: &Type) -> Result<(Vec<Rc<Expr>>, Vec<Rc<Expr>>), String> {
     match &tds.resolve(ty).val {
         TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
-            let mut v = refinements(tds, t)?;
+            let (mut v, u) = refinements(tds, t)?;
             v.push(p.clone());
-            Ok(v)
+            Ok((v, u))
         }
-        TypeT::RefineUninit(..) => Err("a `_refine_uninit`".to_string()),
+        TypeT::RefineUninit(t, p) => {
+            let (v, mut u) = refinements(tds, t)?;
+            u.push(p.clone());
+            Ok((v, u))
+        }
         TypeT::RefineValue(..) => Err("a `_refine_value`".to_string()),
         TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => refinements(tds, t),
-        _ => Ok(Vec::new()),
+        _ => Ok((Vec::new(), Vec::new())),
     }
 }
 
@@ -1748,6 +1754,9 @@ fn emit_fn(
     // The `_refine`s on each parameter's pointee, to be translated once the
     // pointee terms for the whole signature are known.
     let mut refines: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
+    // `_refine_uninit` clauses, kept apart because they are stated only where
+    // the unwritten points-to is: on the way in, for an `_out` parameter.
+    let mut refines_uninit: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
     let mut refine_err: Option<String> = None;
     // Parameters whose ownership the contract puts behind `unless_null`.
     let mut guarded: HashSet<String> = HashSet::new();
@@ -1770,6 +1779,18 @@ fn emit_fn(
         if let Err(why) = refinements(tds, &arg.ty) {
             refine_err.get_or_insert(format!("parameter {} carries {}", pname, why));
         }
+        // A `_refine_uninit` is a claim about storage the callee is handed
+        // unwritten. Anywhere else there is no uninitialised points-to for it
+        // to sit beside, so saying it would be saying it of nothing.
+        if let Ok((_, u)) = refinements(tds, &arg.ty)
+            && !u.is_empty()
+            && !matches!(arg.mode, ParamMode::Out)
+        {
+            refine_err.get_or_insert(format!(
+                "parameter {} carries a `_refine_uninit` but is not `_out`",
+                pname
+            ));
+        }
 
         // A refinement on a parameter with no storage is still a refinement.
         // Collecting it here rather than only in the pointer branch below is
@@ -1777,7 +1798,7 @@ fn emit_fn(
         // about the value, and one on a function pointer is a claim about the
         // code, and neither has a pointee to hang from.
         if pointee(tds, &arg.ty).is_none()
-            && let Ok(ps) = refinements(tds, &arg.ty)
+            && let Ok((ps, _)) = refinements(tds, &arg.ty)
         {
             let base = pname.trim_start_matches("var_").to_string();
             refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
@@ -1809,7 +1830,10 @@ fn emit_fn(
         // is what the dropped-contract path already does, and which is what
         // stops a caller from proving against the weaker version.
         match refinements(tds, &arg.ty) {
-            Ok(ps) => refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p))),
+            Ok((ps, us)) => {
+                refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+                refines_uninit.extend(us.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+            }
             Err(why) => {
                 refine_err.get_or_insert(format!("parameter {} carries {}", pname, why));
             }
@@ -1874,7 +1898,7 @@ fn emit_fn(
         // against a precondition the caller never granted.
         if null_guard {
             if refinements(tds, &arg.ty)
-                .map(|ps| !ps.is_empty())
+                .map(|(ps, us)| !ps.is_empty() || !us.is_empty())
                 .unwrap_or(true)
             {
                 refine_err.get_or_insert(format!(
@@ -2051,10 +2075,14 @@ fn emit_fn(
     // The caller says what to do with the specification translator once `this`
     // is bound, because the two things a refinement can be -- a proposition and
     // a piece of ownership -- take different routes out of it.
+    // `as_value` forces the second reading below. A `_refine_uninit` needs it:
+    // the storage it talks about has no value, so `$(this)` can only mean the
+    // pointer itself, even for a parameter that does have a pointee entry.
     let with_this = |base: &str,
                      ty: &Rc<Type>,
                      p: &Rc<Expr>,
                      w: When,
+                     as_value: bool,
                      how: &dyn Fn(&Spec, When) -> Result<String, String>|
      -> Result<String, String> {
         let mut pointees = spec.pointees.clone();
@@ -2067,7 +2095,7 @@ fn emit_fn(
         // no storage and `this` is simply the value, so it is bound as a
         // local instead. Without the second case a `_refine` on such a
         // parameter had nowhere to go and was dropped in silence.
-        let by_value = match pointees.get(base).cloned() {
+        let by_value = match pointees.get(base).cloned().filter(|_| !as_value) {
             Some(entry) => {
                 pointees.insert("this".to_string(), entry);
                 if arrays.contains(base) {
@@ -2120,8 +2148,8 @@ fn emit_fn(
             .extend(inner.uses.borrow().iter().cloned());
         r
     };
-    let refine_clause = |base: &str, ty: &Rc<Type>, p: &Rc<Expr>, w: When| {
-        with_this(base, ty, p, w, &|sp: &Spec, w| sp.prop(p, w))
+    let refine_clause = |base: &str, ty: &Rc<Type>, p: &Rc<Expr>, w: When, as_value: bool| {
+        with_this(base, ty, p, w, as_value, &|sp: &Spec, w| sp.prop(p, w))
     };
     // Whether a parameter's ownership is stated at this end of the contract,
     // which is also where its refinements belong.
@@ -2146,7 +2174,16 @@ fn emit_fn(
                 continue;
             }
             if stated(base, w) {
-                out.push(refine_clause(base, ty, p, w)?);
+                out.push(refine_clause(base, ty, p, w, false)?);
+            }
+        }
+        // An `_out` parameter's storage is unwritten exactly on the way in,
+        // and that is the only place a `_refine_uninit` says anything. On the
+        // way out the storage holds a value, so the clause is not merely
+        // unnecessary there -- it is about a points-to that is gone.
+        if matches!(w, When::Pre) {
+            for (base, ty, p) in &refines_uninit {
+                out.push(refine_clause(base, ty, p, w, true)?);
             }
         }
         Ok(out)
@@ -2181,8 +2218,9 @@ fn emit_fn(
                 match allocated_own(tds, ty, &format!("var_{}", base), code)? {
                     Some(t) => t,
                     None => {
-                        let t =
-                            with_this(base, ty, p, w, &|sp: &Spec, w| sp.inline_pulse(code, w))?;
+                        let t = with_this(base, ty, p, w, false, &|sp: &Spec, w| {
+                            sp.inline_pulse(code, w)
+                        })?;
                         // A spliced ownership refinement on a function pointer
                         // is taken at its word: nothing else could be granting
                         // the validity an indirect call needs.
