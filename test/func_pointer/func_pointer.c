@@ -1182,6 +1182,60 @@ const struct mo_ops the_mo_ops = {
     .f1 = mo_one, .fs = mo_scalar, .f2 = mo_two, .f3 = mo_three
 };
 
+/* Framing a call is different from framing a function pointer's validity.
+   Both contracts use the same witness type; 42 is an arbitrary fixed
+   pointee value, so witness conversion is not involved in this example. */
+_include_pulse(Fp_frame_spec,
+  unfold let plain_pre (p: ref Int32.t) (w: erased unit) : slprop = emp
+  unfold let plain_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop = emp
+
+  unfold let framed_pre (p: ref Int32.t) (w: erased unit) : slprop =
+    Pulse.Lib.Reference.pts_to p 42l
+  unfold let framed_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop =
+    Pulse.Lib.Reference.pts_to p 42l
+)
+
+/* Control: ordinary call-site framing preserves the pointee. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_direct(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
+    _plain int *p)
+{
+    f(p);
+}
+
+/* Control: a consumer with the framed validity can call its pointer. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_consumer(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.framed_pre Fp_frame_spec.framed_post)),
+    _plain int *p)
+{
+    f(p);
+}
+
+/* FAILS (Error 19): same arbitrary pointer, but the consumer expects validity
+   at the framed contract. No concrete implementation is available to rewrap.
+   Unfold/fold leaves an unproved `valid` fact. FuncPtr.weaken's post coercion
+   would need to prove `pts_to p 42l` from emp: its separate pre/post coercions
+   do not carry a frame between them. The direct-call control above needs no
+   such validity conversion. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_adapt(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
+    _plain int *p)
+{
+    fp_frame_consumer(f, p);
+}
+
 #if 0
 
 /* [DEFERRED] Indirect recursion through a function pointer. Taking the
