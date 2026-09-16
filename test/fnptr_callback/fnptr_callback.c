@@ -24,8 +24,8 @@ int32_t add(int32_t a, int32_t b)
 int32_t apply(int32_t (*op)(int32_t, int32_t)
                   _refine((_slprop) _inline_pulse(
                       is_valid $(this) true
-                          (pre_of Func_add.func_add__fp)
-                          (post_of Func_add.func_add__fp))),
+                          (pre_of Funcptr_add.func_add__fp)
+                          (post_of Funcptr_add.func_add__fp))),
               int32_t a, int32_t b)
     _requires(a > 0 && a < 100 && b > 0 && b < 100)
     _ensures(return == a + b)
@@ -44,8 +44,8 @@ int32_t neg(int32_t a)
 int32_t apply1(int32_t (*op)(int32_t)
                    _refine((_slprop) _inline_pulse(
                        is_valid $(this) true
-                           (pre_of Func_neg.func_neg__fp)
-                           (post_of Func_neg.func_neg__fp))),
+                           (pre_of Funcptr_neg.func_neg__fp)
+                           (post_of Funcptr_neg.func_neg__fp))),
                int32_t a)
     _requires(a > -100 && a < 100)
     _ensures(return == -a)

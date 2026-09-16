@@ -2337,10 +2337,12 @@ fn emit_fn(
     // is exactly the information an indirect call needs and cannot infer:
     // which object the callee is about to be handed.
     let simple = decay
-        && decl
-            .args
-            .iter()
-            .all(|a| matches!(a.mode, ParamMode::Regular | ParamMode::Const))
+        && decl.args.iter().all(|a| {
+            matches!(
+                a.mode,
+                ParamMode::Regular | ParamMode::Const | ParamMode::Consumed
+            )
+        })
         && globals.is_empty()
         && contract_ok;
     let fp = if simple {
@@ -4303,6 +4305,8 @@ struct FnItem<'a> {
     defn: Option<&'a FnDefn>,
     env: Env,
     sig: Option<FnSurface>,
+    /// The `__fp` wrapper's text, which goes into a module of its own.
+    fp: Option<String>,
 }
 
 /// The order to write the functions out in, callees first.
@@ -4620,6 +4624,7 @@ pub fn emit_palow(
                     defn: None,
                     env,
                     sig: None,
+                    fp: None,
                 });
                 continue;
             }
@@ -4669,6 +4674,7 @@ pub fn emit_palow(
             uses: HashSet::new(),
             defn,
             env,
+            fp: sig.fp.clone(),
             sig: Some(sig),
         });
     }
@@ -4718,13 +4724,6 @@ pub fn emit_palow(
                     out += &format!("{{\n  admit() (* body: {} *)\n}}\n\n", why);
                 }
             }
-            // The wrapper follows the function it wraps, since its body calls
-            // it. It is emitted only for a function whose address is taken:
-            // one per function would be noise, and the contract has to be
-            // written out a second time to produce it.
-            if let Some(fp) = &sig.fp {
-                out += fp;
-            }
             it.code = out;
         }
         let settled = found.is_subset(&divergent_fns);
@@ -4740,11 +4739,26 @@ pub fn emit_palow(
         }
     };
     for i in order {
+        let name = items[i].name.clone();
         chunks.push(Chunk {
-            module: format!("Func_{}", items[i].name),
+            module: format!("Func_{}", name),
             code: std::mem::take(&mut items[i].code),
             origin: items[i].origin.clone(),
         });
+        // The wrapper gets a module of its own, next to the function it
+        // wraps. It is emitted only for a function whose address is taken --
+        // one per function would be noise, and the contract has to be written
+        // out a second time to produce it -- so a caller that only calls the
+        // function directly should not have to depend on it. The name is the
+        // one PAL already uses, which lets a test spell a wrapper the same way
+        // for both memory models.
+        if let Some(fp) = items[i].fp.take() {
+            chunks.push(Chunk {
+                module: format!("Funcptr_{}", name),
+                code: fp,
+                origin: items[i].origin.clone(),
+            });
+        }
     }
 
     into_modules(chunks)
@@ -4807,15 +4821,33 @@ fn defined_names(code: &str) -> Vec<String> {
         if line.starts_with(char::is_whitespace) || line.is_empty() {
             continue;
         }
+        // A definition always opens with one of the modifiers above. Spliced
+        // Pulse is not indented the way generated code is, so a contract
+        // clause can start in column zero: without this, `requires` would be
+        // recorded as a name the module defines, and every module in the file
+        // would then be made to open it.
         let mut words = line.split_whitespace();
+        let mut saw_modifier = false;
         let name = loop {
             match words.next() {
                 None => break None,
-                Some(w) if MODIFIERS.contains(&w) => continue,
+                Some(w) if MODIFIERS.contains(&w) => {
+                    saw_modifier = true;
+                    continue;
+                }
                 Some(w) => break Some(w),
             }
         };
         let Some(name) = name else { continue };
+        if !saw_modifier {
+            continue;
+        }
+        // `let x = e in` binds locally, however far left it is written. A
+        // spliced definition's body runs down the left margin, so without
+        // this its local names would be published as the module's.
+        if words.clone().any(|w| w == "in") {
+            continue;
+        }
         let name: String = name
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\'')
@@ -5055,6 +5087,8 @@ struct ArrayBlock {
 struct BranchResult {
     lines: Vec<String>,
     inits: Vec<bool>,
+    /// Which function each enclosing slot is known to hold on this path.
+    holds: Vec<Option<String>>,
     out_params: Vec<String>,
 }
 
@@ -5142,8 +5176,11 @@ struct Body<'a> {
     /// Parameters the contract hands an `is_valid` for, and so the only
     /// pointers this body may call through without knowing the target.
     valid_fps: &'a HashSet<String>,
-    /// Addresses whose validity this body has seeded and not yet put down.
-    seeded: Vec<String>,
+    /// Addresses whose validity this body has seeded and not yet put down,
+    /// with the pre and post it was seeded at. Both are needed to put it down
+    /// again: a contract may hold a second, weaker validity for the same
+    /// address, and `_` would let Pulse pick that one instead.
+    seeded: Vec<(String, String, String)>,
     /// The labels in scope, innermost last, each with the statements that run
     /// when control reaches it. A `goto` is translated by translating its
     /// label's continuation there and then: Pulse has no jump, and every path
@@ -6927,7 +6964,7 @@ impl<'a> Body<'a> {
                     "of_fn_div_valid {} {} func_{}__fp;",
                     pre, post, g.val
                 ));
-                self.seeded.push(addr.clone());
+                self.seeded.push((addr.clone(), pre.clone(), post.clone()));
                 Ok(addr)
             }
             // An indirect call needs the `valid` fact, which no points-to
@@ -7997,6 +8034,14 @@ impl<'a> Body<'a> {
                 for (slot, init) in self.slots.iter_mut().zip(&inits) {
                     slot.init = *init;
                 }
+                // As for an `if`: a slot only still holds a known function
+                // after the join if every case left the same one in it.
+                let holds = last.holds.clone();
+                for (i, slot) in self.slots.iter_mut().enumerate() {
+                    if arms.iter().any(|(_, a)| a.holds.get(i) != holds.get(i)) {
+                        slot.holds_fn = None;
+                    }
+                }
 
                 // Pulse infers the join of an `if` but not of a `match`, so
                 // the frame at the join has to be written out. `switch` is the
@@ -8255,6 +8300,15 @@ impl<'a> Body<'a> {
                 for (slot, init) in self.slots.iter_mut().zip(&then.inits) {
                     slot.init = *init;
                 }
+                // Which function a slot holds is only known after the join if
+                // both arms left the same one in it. Without this, a pointer
+                // assigned different functions in the two arms would be called
+                // as whichever arm was translated last.
+                for (i, slot) in self.slots.iter_mut().enumerate() {
+                    if then.holds.get(i) != els.holds.get(i) {
+                        slot.holds_fn = None;
+                    }
+                }
 
                 let (then_pre, else_pre) = match nt {
                     Some((i, null_when_true)) => {
@@ -8503,6 +8557,15 @@ impl<'a> Body<'a> {
     /// to agree on.
     fn branch(&mut self, stmts: &Stmts) -> Result<BranchResult, String> {
         let mark = self.slots.len();
+        // What the enclosing slots hold before the arm runs. An arm is one
+        // path, so what it stores is only true on that path: the other arm has
+        // to start where this one did, and what survives the join is what both
+        // arms agree on.
+        let outer_state: Vec<(bool, Option<String>)> = self
+            .slots
+            .iter()
+            .map(|s| (s.init, s.holds_fn.clone()))
+            .collect();
         let outer_env = self.env.clone();
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
@@ -8538,11 +8601,19 @@ impl<'a> Body<'a> {
             Ok(BranchResult {
                 lines: std::mem::take(&mut self.lines),
                 inits: self.slots[..mark].iter().map(|s| s.init).collect(),
+                holds: self.slots[..mark]
+                    .iter()
+                    .map(|s| s.holds_fn.clone())
+                    .collect(),
                 out_params: std::mem::take(&mut self.out_params),
             })
         })();
 
         self.slots.truncate(mark);
+        for (slot, (init, holds)) in self.slots.iter_mut().zip(outer_state) {
+            slot.init = init;
+            slot.holds_fn = holds;
+        }
         self.env = outer_env;
         self.lines = outer_lines;
         if out.is_err() {
@@ -8562,8 +8633,9 @@ impl<'a> Body<'a> {
     /// fact, but it is `pure` behind a definition, so Pulse will not absorb it
     /// on its own.
     fn drop_seeded(&mut self, mark: usize) {
-        for addr in self.seeded.split_off(mark) {
-            self.lines.push(format!("drop_is_valid {} _ _;", addr));
+        for (addr, pre, post) in self.seeded.split_off(mark) {
+            self.lines
+                .push(format!("drop_is_valid {} {} {};", addr, pre, post));
         }
     }
 
@@ -8572,8 +8644,9 @@ impl<'a> Body<'a> {
         // validity seeded for a use that did not consume it -- storing a
         // decayed function in a slot, say.
         if mark == 0 {
-            for addr in self.seeded.clone() {
-                self.lines.push(format!("drop_is_valid {} _ _;", addr));
+            for (addr, pre, post) in self.seeded.clone() {
+                self.lines
+                    .push(format!("drop_is_valid {} {} {};", addr, pre, post));
             }
         }
         for i in (mark..self.slots.len()).rev() {

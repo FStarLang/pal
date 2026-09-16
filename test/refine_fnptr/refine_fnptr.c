@@ -35,7 +35,7 @@ const struct ops the_ops = {.fa = on_a, .fb = on_b};
 int32_t apply_b(int32_t (*op)(struct b *)
                     _refine((_slprop) _inline_pulse(
                         Pulse.Lib.C.Palow.FnPtr.is_valid $(this) true
-                            (Pulse.Lib.C.Palow.FnPtr.pre_of Func_on_b.func_on_b__fp) (Pulse.Lib.C.Palow.FnPtr.post_of Func_on_b.func_on_b__fp))),
+                            (Pulse.Lib.C.Palow.FnPtr.pre_of Funcptr_on_b.func_on_b__fp) (Pulse.Lib.C.Palow.FnPtr.post_of Funcptr_on_b.func_on_b__fp))),
                 struct b *p)
 #else
 int32_t apply_b(int32_t (*op)(struct b *)

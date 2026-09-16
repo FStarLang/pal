@@ -737,6 +737,15 @@ new facts about memory.
   clang may miscompile.
 - `size_t` is eight bytes and `SizeT.v` is assumed to be below `pow2 64`, for
   the same reason and with the same justification as `Ptr.addr_bound`.
+- Palow has no *total* function pointers. Divergence is inferred per body,
+  after the wrapper text is built, so every `__fp` wrapper is `divergent` and
+  `_total` is not reflected in it. A caller therefore gets `stt_div` where the
+  old model would have given `stt`, which is sound but loses the termination
+  argument across an indirect call.
+- A `_refine` on a `_nullable` parameter is stated as written rather than
+  wrapped in `unless_null`. That is a *stronger* precondition than C's -- the
+  caller must establish the refinement even when passing NULL -- so it is
+  sound, but it is less useful than the old model's phrasing.
 - `--palow` translates the user's `_requires`/`_ensures` clauses where it can,
   but all-or-nothing per function: if any clause is untranslatable the whole
   contract is dropped and a `(* contract dropped: ... *)` comment is emitted in
@@ -2234,8 +2243,63 @@ new facts about memory.
    need nothing, because the recovered pointer *is* the original address
    rather than a second name for it.
 
-   As of this milestone: **771 specifications, 630 of them with real bodies,
-   141 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   `test/func_pointer` was the single largest pocket of annotations written
+   against the old model -- 19 admits and 9 dropped contracts, a third of the
+   whole backlog -- and porting it turned on three things at once.
+
+   The first is a naming decision. Palow used to append the `__fp` wrapper to
+   the function's own module, which meant a caller that only ever calls `g`
+   directly still depended on the wrapper, and meant the wrapper had a
+   different name in the two models. It now gets its own `Funcptr_<g>` module,
+   which is what the old emitter already called it, so a `_refine` that names
+   `Funcptr_add.func_add__fp` is the same text under either model.
+
+   The second is that a hand-written fragment does not have to be duplicated
+   just because the two models spell a library differently. An F\* module
+   containing nothing but `include Pulse.Lib.C.Palow.FnPtr` re-exports every
+   name in it, so a test can say `Fp_shim.is_valid` once and `#ifdef` only the
+   two-line shim. The same trick names the two models' `int32_t` and its
+   points-to predicate -- the old model's is a generated `Typedef_int32_t`,
+   Palow's is `FStar.Int32.t` with no predicate at all -- and with that, some
+   two hundred references collapse to one conditional. Where a fragment is
+   pure scaffolding for the old model, an `_fp_ghost(...)` macro that expands
+   to `_ghost_stmt(...)` only when `PALOW` is not defined removes it; a macro
+   *around* an annotation works because clang resolves a macro argument's
+   source range back to its call-site spelling, which is what PAL reads.
+
+   The third is a genuine bug, and it is the seventh silent weakening this
+   exercise has found. A slot remembers which function a pointer variable is
+   known to hold, so that a call through it can be emitted as a direct call.
+   That fact survived an `if` arm and was not joined, so a function that
+   assigned `add` in one arm and `subtract` in the other emitted an
+   unconditional call to whichever arm ran last -- code that would have
+   verified and been wrong. It now joins to "unknown", the call is refused with
+   a reason, and the count went up rather than down. The rule this confirms is
+   the one the `_live` audit produced: any field that records *what I am
+   currently holding* has to be saved and restored in both `tail_arm` and
+   `branch`, and joined in both the `if` and the `switch` join.
+
+   Two smaller emitter fixes came with it. `defined_names`, which decides a
+   module's `open`s by reading the first word of every column-zero line, was
+   reading spliced Pulse the same way -- and spliced Pulse is not indented the
+   way generated code is, so a contract clause `requires ...` published
+   `requires` as a name that module owned, and a continuation line `let x = e
+   in` published `x`. Both made every other module open the splice, which F\*
+   reports as a recursive dependency. A defined name now has to follow an
+   actual modifier and may not sit on a line that continues a `let`. These
+   only surfaced once the spliced modules stopped being dropped wholesale.
+
+   A `__fp` wrapper is now also built for a function with a `_consumes`
+   parameter. Nothing about the flat shape objected to it; the restriction was
+   inherited from before the witness tuple existed. This is what a destructor
+   stored in a vtable needs -- `void (*destroy)(struct itemx *)` whose
+   implementation frees its receiver -- which is the shape `test/dpe` uses.
+   `func_pointer` is down to 12 admits and 2 dropped contracts, and what is
+   left is honest: calls through a pointer whose target is genuinely not known
+   at the call site, and four uses of the old emitter's `$unfold` antiquotation.
+
+   As of this milestone: **781 specifications, 657 of them with real bodies,
+   124 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
