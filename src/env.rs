@@ -778,10 +778,9 @@ impl Env {
 
     /// Whether `&expr` is allowed, i.e. `expr` denotes storage.
     ///
-    /// This is `is_lvalue` plus the address-taking-only cases. Neither a
-    /// `_pure` global nor a mutable one is an lvalue -- PAL emits the former as
-    /// a plain top-level F* value and the latter as nothing but an address --
-    /// yet both can have their address taken. See `addressable_global`.
+    /// This is `is_lvalue` plus the address-taking-only cases. A `_pure` global
+    /// is not an lvalue -- PAL emits it as a plain top-level F* value -- yet its
+    /// address can still be taken. See `addressable_global`.
     pub fn is_addressable(&self, expr: &Expr) -> bool {
         if self.is_lvalue(expr) {
             return true;
@@ -800,10 +799,11 @@ impl Env {
     ///   pointer can never be written through), which is what keeps its
     ///   ownership-free reads sound.
     /// * A mutable global gets the address and nothing else -- no `var_g` and
-    ///   no acquire. Since no `pts_to` is ever produced for it, no permission to
-    ///   read or write through the pointer can be obtained, so handing out the
-    ///   address is inert. Reads of the global itself are rejected in the
-    ///   emitter.
+    ///   no acquire. Its storage is named by that address, so reads and writes
+    ///   go through it (`!addr_var_g`, `addr_var_g := ..`), and the permission
+    ///   to do so is threaded by hand: a function that touches `g` says
+    ///   `_requires(_live(g))`, and the entrypoint assumes it. See
+    ///   `mutable_global_lvalue`.
     ///
     /// Excluded:
     ///
@@ -825,11 +825,31 @@ impl Env {
         Some(gv)
     }
 
+    /// The global named by `ident`, if it is a *mutable* one whose storage PAL
+    /// models directly, i.e. the global is an lvalue denoting the cell at its
+    /// assumed address.
+    ///
+    /// PAL follows a bring-your-own-permission model for these: the emitted
+    /// module assumes only the address (`assume val addr_var_g : ref t`), never
+    /// any `pts_to` for it, so nothing can be read or written through it until
+    /// a caller supplies the permission. Contracts thread it explicitly with
+    /// `_live(g)`, and the entrypoint (`main`, or whatever the build treats as
+    /// one) assumes it, exactly as if `g` were a pointer parameter.
+    ///
+    /// A `_pure` global is excluded: it is a plain F* value, not storage. The
+    /// same exclusions as `addressable_global` apply otherwise.
+    pub fn mutable_global_lvalue(&self, ident: &Ident) -> Option<&GlobalVar> {
+        let gv = self.addressable_global(ident)?;
+        if gv.is_pure { None } else { Some(gv) }
+    }
+
     pub fn is_lvalue(&self, expr: &Expr) -> bool {
         match &expr.val {
             ExprT::Var(x) => match self.lookup_var(x) {
                 Some(decl) => decl.kind == LocalDeclKind::LValue,
-                None => false,
+                // A mutable global denotes the cell at its assumed address, so
+                // it is writable storage; a `_pure` one is a plain F* value.
+                None => self.mutable_global_lvalue(x).is_some(),
             },
             ExprT::Deref(_) => true,
             ExprT::Member(x, _) => self.is_lvalue(x),

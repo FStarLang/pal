@@ -193,24 +193,25 @@ Notes:
 
 ## Global variables
 
-A global must be **pure**; non-pure globals are rejected with "non-pure global
-variables are not yet supported". A global is pure when *either*:
+A global is either **pure** (immutable) or **mutable**, and the two are modeled
+very differently. A global is pure when *either*:
 
 - it is annotated `_pure`, or
 - it is `const`-qualified **and has an initializer** — this is implicit, no
   annotation needed (`cpp/impl.cpp`: `isConstQualified() && hasInit()`).
 
-A `const` global *without* an initializer is **not** pure and is rejected, since
-there is no value for the emitted definition to take.
+Anything else — including a `const` global *without* an initializer, which has
+no value for a definition to take — is mutable, and is handled by the
+bring-your-own-permission model below.
 
 ```c
-_pure uint32_t g_a = 42;      /* explicit  */
-const uint32_t g_b = 7;       /* implicit — same treatment as g_a */
-const uint32_t g_c;           /* rejected: const but no initializer */
-uint32_t       g_d = 1;       /* rejected: not const, not _pure */
+_pure uint32_t g_a = 42;      /* pure, explicit  */
+const uint32_t g_b = 7;       /* pure, implicit — same treatment as g_a */
+const uint32_t g_c;           /* mutable: const but no initializer */
+uint32_t       g_d = 1;       /* mutable: not const, not _pure */
 ```
 
-Either way the global lowers to a plain top-level F* value, and every read of it
+A pure global lowers to a plain top-level F* value, and every read of it
 is **ownership-free** — the read just evaluates to `var_g`, with nothing in the
 `requires`:
 
@@ -218,11 +219,11 @@ is **ownership-free** — the read just evaluates to `var_g`, with nothing in th
 let var_g_b : ty_uint32_t = 7ul
 ```
 
-**Address-of (`&g`)** is supported for scalar and struct globals (both spellings
-of purity). Because reads are ownership-free, any pointer to a global must be
-read-only forever — a writable alias would let a callee store a value that
-PAL-emitted reads do not observe, which is unsound. So alongside `var_g`, PAL
-emits
+**Address-of (`&g`)** is supported for scalar and struct globals (pure or
+mutable). For a pure global, because reads are ownership-free, any pointer to it
+must be read-only forever — a writable alias would let a callee store a value
+that PAL-emitted reads do not observe, which is unsound. So alongside `var_g`,
+PAL emits
 
 ```fstar
 assume val addr_var_g : ref ty                          // keyed on the global's identity
@@ -304,6 +305,69 @@ Array globals are out of scope for `&g` (they have no pointer path at all —
 `array_spec_idx` model of `test/global_array_tactic` unaffected.
 
 See `test/addr_global/addr_global.c`.
+
+### Mutable globals: bring your own permission
+
+A mutable global has no pure value — its contents change — so PAL emits *only*
+its address, and no ownership of it:
+
+```fstar
+assume val addr_var_g : ref ty
+assume val addr_var_g_not_null : squash (~(is_null addr_var_g))
+```
+
+There is no `var_g` and, deliberately, no `acquire_var_g`: handing out ownership
+of writable storage for free would let two callers each take full permission and
+race. Instead the global behaves exactly like a pointer parameter whose
+permission the caller supplies — **bring your own permission**. Reads and writes
+go through the address (`!addr_var_g`, `addr_var_g := ..`), and every function
+that touches `g` names the permission in its contract with `_live(g)`:
+
+```c
+uint32_t counter;
+
+void bump(void)
+    _requires(_live(counter)) _requires(counter < 100)
+    _ensures(_live(counter)) _ensures(counter == _old(counter) + 1)
+{
+    counter = counter + 1;
+}
+```
+
+`_live(g)` is `live addr_var_g`, i.e. `exists* v. addr_var_g |-> v`; in spec
+position `g` reads as `!addr_var_g`, and `_old(g)` as its pre-state value.
+Ownership threads through calls like any other: a caller holding `_live(g)`
+hands it to the callee and gets it back.
+
+The permission has to enter the program somewhere, and that somewhere is the
+entrypoint: `main` (or whatever the build treats as one) simply *assumes* it in
+its `_requires`. Nothing checks that assumption — it is the model's axiom, the
+counterpart of the pure global's `acquire_var_g`. Keep the matching `_ensures`,
+or Pulse rejects the function for leaking ownership (`Leftover resources`).
+
+```c
+int main(void)
+    _requires(_live(x)) _requires(_live(counter))
+    _ensures(_live(x)) _ensures(_live(counter))
+{ ... }
+```
+
+Consequences worth knowing:
+
+- A function that omits `_live(g)` does not fail *silently*: the read or write
+  fails to verify for want of the `pts_to`, exactly as for a pointer parameter.
+- An initializer on a mutable global is ignored; what the storage holds is
+  whatever the supplied permission says it holds. State it in a `_requires` if
+  a function depends on it.
+- Nothing forces two globals' permissions to be held together, and nothing ties
+  `_live(g)` to `&g` aliases beyond the fact that `&g` *is* `addr_var_g` — so
+  writing through a pointer to `g` while holding `_live(g)` works.
+- Mutable *array* globals are still unsupported ("non-pure array globals are not
+  yet supported").
+
+See `test/global_mutable/global_mutable.c`, and
+`test/global_non_const_addr/global_non_const_addr.c` for the address-identity
+side.
 
 ## See also
 

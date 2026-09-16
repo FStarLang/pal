@@ -1963,15 +1963,21 @@ impl<'a> Emitter<'a> {
                         LocalDeclKind::LValue => ExprKind::LValue(x2),
                     }
                 } else if let Some(gv) = env.lookup_global_var(x) {
-                    // A mutable global emits no `var_g`, so there is no name to
-                    // refer to here. Reject the read rather than emit a dangling
-                    // reference that F* would report as an unbound identifier.
-                    // Arrays are exempt: they are still emitted as a spec value.
+                    // A mutable global has no `var_g` value; its storage is
+                    // named by its assumed address, so it emits as an lvalue
+                    // over that address (`!addr_var_g` / `addr_var_g := ..`).
+                    // The permission comes from the caller, threaded by hand as
+                    // `_live(g)`. Arrays are exempt: they are still emitted as a
+                    // spec value.
+                    if env.mutable_global_lvalue(x).is_some() {
+                        return ExprKind::LValue(annotated(v, || {
+                            self.emit_name(Name::GlobalAddr(x.val.clone()))
+                        }));
+                    }
                     if !gv.is_pure && !global_var_is_array(gv) {
                         self.report(
                             format!(
-                                "cannot read the mutable global {}; its address may be taken, \
-                                 but its value is not available",
+                                "cannot read the global {}; it has neither a value nor storage",
                                 x
                             ),
                             &x.loc,
@@ -7975,9 +7981,12 @@ impl<'a> Emitter<'a> {
 
     fn emit_global_var(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
         if !gv.is_pure {
-            // A mutable global gets an address but no value: its storage cannot
-            // be read or written, so there is nothing for an initializer to
-            // mean and nothing for a spec value to describe.
+            // A mutable global gets an address but no value: its storage is
+            // mutable, so no F* constant describes it. Reads and writes go
+            // through the address, with the permission supplied by the caller
+            // (`_live(g)`); see `Env::mutable_global_lvalue`. That also means
+            // an initializer has nothing to be attached to -- what the storage
+            // holds is whatever the (assumed) permission says it holds.
             return match self.emit_global_addr(env, gv) {
                 Some(addr) => addr,
                 None => {
@@ -8024,11 +8033,14 @@ impl<'a> Emitter<'a> {
     /// additionally gets the acquire that hands out *read-only* ownership of
     /// its storage; a mutable one gets no acquire at all.
     ///
-    /// A mutable global has no `var_g` for a `pts_to` to mention, and giving
-    /// out ownership of something writable would be unsound anyway. Emitting
-    /// the bare address is still safe: with no `pts_to` in existence there is
-    /// no permission to obtain, so the pointer can be compared but never read
-    /// or written through.
+    /// A mutable global has no `var_g` for a `pts_to` to mention, and handing
+    /// out ownership of something writable for free would be unsound: two
+    /// callers could each acquire full permission and race. So PAL emits the
+    /// bare address and follows a *bring-your-own-permission* model instead --
+    /// the ownership is threaded through contracts by hand, `_requires(_live(g))`
+    /// / `_ensures(_live(g))`, down from an entrypoint that assumes it. With no
+    /// permission in hand the pointer can still be compared, just not read or
+    /// written through.
     ///
     /// Reads of a `_pure` global are ownership-free, which is only sound if the
     /// storage holds `var_g` forever -- so the pointer must never be writable.
@@ -8071,7 +8083,8 @@ impl<'a> Emitter<'a> {
 
         // A mutable global gets the address and nothing else: the acquire below
         // mentions `var_g`, which is not emitted for it, and handing out
-        // ownership of a mutable object is exactly what must not happen.
+        // ownership of a mutable object for free is exactly what must not
+        // happen -- its permission is brought by the caller instead.
         if !gv.is_pure {
             return Some(addr_val.append(Doc::hardline()).append(not_null));
         }
