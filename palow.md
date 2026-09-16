@@ -2427,8 +2427,31 @@ new facts about memory.
    existing emitter accepts the same spelling, so `rec_fn` and
    `recursive_functions` say it once for both models.
 
-   As of this milestone: **788 specifications, 677 of them with real bodies,
-   105 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   Assertions got three things they were missing. `_assert(u.m._active)`
+   works now: a contract can read a union's tag straight off the value it has
+   a binder for, but a body deliberately keeps no binders, so it names the
+   union's current value the only way it can -- asserting the ownership it
+   already holds, binding the witness, and applying the discriminator to
+   that. `_assert(false)` works, which sounds trivial and is: C has no
+   separate notion of truth, a condition is a number and holds when the
+   number is not zero, and the fallback had only ever accepted `_Bool`. And
+   a `_let` function may be named in an assertion, which is not making a call
+   -- a `_let` is an F\* term, nothing runs -- so it reads as the term it is,
+   with specification-typed arguments translated as mathematical values
+   rather than machine ones.
+
+   Doing that turned up a rule applied one place too widely. Signed machine
+   arithmetic is refused in a specification, because `Int32.v (a + b)` is not
+   `Int32.v a + Int32.v b` and a contract boundary offers nothing to rule the
+   overflow out. But the *body* of a `_let` or a `_pure` function with its
+   own `requires` is not a boundary: F\* checks that body under the
+   precondition, which is exactly where such an obligation is discharged. So
+   those two bodies now allow it, and `double_int_spec(int x)
+   requires(int_fits((_specint) x + x))` is an F\* definition rather than a
+   function nobody may mention.
+
+   As of this milestone: **787 specifications, 679 of them with real bodies,
+   102 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

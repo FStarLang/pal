@@ -876,6 +876,13 @@ struct Spec<'a> {
     /// but a contract can name a constant the body never reads -- and does,
     /// whenever the body is admitted.
     uses: RefCell<HashSet<String>>,
+    /// Whether signed machine arithmetic may be written out. A specification
+    /// generally may not: `Int32.v (a + b)` is not `Int32.v a + Int32.v b`,
+    /// and nothing at a contract boundary rules the overflow out. The body of
+    /// a `_let` with its own `requires` is the exception -- F* checks that
+    /// body under the precondition, which is exactly where the obligation is
+    /// discharged.
+    signed_ok: bool,
 }
 
 impl<'a> Spec<'a> {
@@ -979,6 +986,7 @@ impl<'a> Spec<'a> {
                         ret: self.ret.clone(),
                         locals,
                         uses: RefCell::new(HashSet::new()),
+                        signed_ok: false,
                     };
                     let p = inner.prop(body, w)?;
                     self.uses
@@ -1484,7 +1492,7 @@ impl<'a> Spec<'a> {
                     // something rules the overflow out. The same operator table
                     // serves both, so a contract cannot quietly describe an
                     // operation the body would not perform.
-                    let o = binop(self.tds, *op, &ty, false)?;
+                    let o = binop(self.tds, *op, &ty, self.signed_ok)?;
                     return Ok(format!(
                         "({} {} {})",
                         self.value(l, w)?,
@@ -1582,7 +1590,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
             .ok_or_else(|| format!("it returns {}", describe(tds.resolve(&ld.ret_type))))?
     };
 
-    let sp = Spec {
+    let mut sp = Spec {
         tds,
         env,
         pointees: HashMap::new(),
@@ -1592,6 +1600,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         ret: "ret".to_string(),
         locals: HashMap::new(),
         uses: RefCell::new(HashSet::new()),
+        signed_ok: false,
     };
     let clause = |es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -1611,6 +1620,10 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
     };
     let req = clause(&ld.requires)?;
     let ens = clause(&ld.ensures)?;
+    // The body is checked under the `requires`, so signed arithmetic there
+    // has somewhere to discharge its overflow obligation -- unlike a
+    // contract, which is a claim about a boundary and has nothing.
+    sp.signed_ok = !ld.requires.is_empty();
     let body = sp.value(&ld.body, When::Pre)?;
 
     // `GTot` rather than `Tot`: a `_let` is only ever used in a specification,
@@ -1678,6 +1691,7 @@ fn emit_pure_fn(
         ret: "ret".to_string(),
         locals: HashMap::new(),
         uses: RefCell::new(HashSet::new()),
+        signed_ok: false,
     };
     let clause = |sp: &Spec, es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -1706,6 +1720,10 @@ fn emit_pure_fn(
         None => None,
     };
 
+    // The body of a `_let` is checked under its own `requires`, so signed
+    // arithmetic there has somewhere to discharge its overflow obligation --
+    // unlike a contract, which is a claim about a boundary and has nothing.
+    sp.signed_ok = !decl.requires.is_empty();
     let value = match body {
         Some(b) => Some(pure_body(&mut sp, b)?),
         None => None,
@@ -2154,6 +2172,7 @@ fn emit_fn(
         ret: ret_name.clone(),
         locals: HashMap::new(),
         uses: RefCell::new(HashSet::new()),
+        signed_ok: false,
     };
     let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
         es.iter()
@@ -2255,6 +2274,7 @@ fn emit_fn(
             ret: ret_name.clone(),
             locals,
             uses: RefCell::new(HashSet::new()),
+            signed_ok: false,
         };
         let r = how(&inner, w);
         spec.uses
@@ -6459,6 +6479,28 @@ impl<'a> Body<'a> {
     /// see `read`.
     fn prop(&mut self, e: &Expr) -> Result<String, String> {
         match &e.val {
+            // Which member of a union is live. The contract can read the tag
+            // straight off a value it has a binder for; a body has no such
+            // binder, so it names the union's current value the only way it
+            // can -- by asserting the ownership it already holds and binding
+            // the witness -- and applies the discriminator to that. Whatever
+            // had to be opened to reach the union is closed again right
+            // after: the binder is a ghost value and outlives its slprop.
+            ExprT::VAttr(VAttr::Active(m), obj) => {
+                let un = self
+                    .union_of(obj)
+                    .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
+                let uname = un.strip_prefix("union_").unwrap_or(&un).to_string();
+                let (a, close_read, _) = self.base_addr(obj)?;
+                let vp = self.fresh("perm");
+                let vu = self.fresh("union");
+                self.lines.push(format!(
+                    "with {} {}. assert ({}_pts_to {} {} {});",
+                    vp, vu, un, a, vp, vu
+                ));
+                self.lines.extend(close_read);
+                Ok(format!("(Union_{}_{}? {})", uname, m.val, vu))
+            }
             ExprT::VAttr(_, inner) => self.prop(inner),
             ExprT::Cast(inner, to) if matches!(self.tds.resolve(to).val, TypeT::SLProp) => {
                 self.prop(inner)
@@ -6548,10 +6590,17 @@ impl<'a> Body<'a> {
             }
             _ => {
                 let ty = self.ty_of(e)?;
-                if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
-                    Ok(format!("({} == true)", self.inline(e)?))
-                } else {
-                    Err(format!("{} in an assertion", expr_kind(e)))
+                match self.tds.resolve(&ty).val {
+                    TypeT::Bool => Ok(format!("({} == true)", self.inline(e)?)),
+                    // C has no separate notion of truth: a condition is a
+                    // number, and it holds when that number is not zero. An
+                    // assertion is a condition, so `_assert(false)` -- which
+                    // is the integer literal 0 once the preprocessor is done
+                    // -- means exactly this and nothing more special.
+                    TypeT::Int { .. } | TypeT::SizeT | TypeT::SpecInt | TypeT::SpecNat => {
+                        Ok(format!("({} <> 0)", self.num(e)?))
+                    }
+                    _ => Err(format!("{} in an assertion", expr_kind(e))),
                 }
             }
         }
@@ -6594,6 +6643,12 @@ impl<'a> Body<'a> {
                     let a = self.num(l)?;
                     let b = self.num(r)?;
                     return Ok(format!("({} {} {})", a, op.to_str(), b));
+                }
+                // A `_let` function is an F* term, so naming it in an
+                // assertion is not making a call: nothing runs, and the
+                // result is already a mathematical integer.
+                ExprT::FnCall(name, _) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
+                    return self.inline(e);
                 }
                 _ => {}
             }
@@ -7238,7 +7293,18 @@ impl<'a> Body<'a> {
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
                 let mut out = format!("func_{}", name.val);
                 for a in args.iter() {
-                    let v = self.rvalue(a)?;
+                    // A `_let` function may take a specification integer,
+                    // which has no machine representation to produce -- the
+                    // argument is a mathematical value, so it is translated
+                    // as one.
+                    let spec_arg = self.ty_of(a).is_ok_and(|t| {
+                        matches!(self.tds.resolve(&t).val, TypeT::SpecInt | TypeT::SpecNat)
+                    });
+                    let v = if spec_arg {
+                        self.num(a)?
+                    } else {
+                        self.rvalue(a)?
+                    };
                     out += &format!(" {}", v);
                 }
                 if args.is_empty() {
@@ -8039,6 +8105,7 @@ impl<'a> Body<'a> {
             ret: String::new(),
             locals,
             uses: RefCell::new(HashSet::new()),
+            signed_ok: false,
         };
         let mut props: Vec<String> = Vec::new();
         for e in clause.iter() {
