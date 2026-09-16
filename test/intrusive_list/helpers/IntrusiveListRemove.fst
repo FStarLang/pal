@@ -1,4 +1,8 @@
 module IntrusiveListRemove
+
+(* Stable filtering keeps survivor order and collects every removed node/payload.
+   The saved successor allows traversal to continue after unlinking the current node. *)
+
 open Pulse
 open Pulse.Lib.C
 open FStar.List.Tot
@@ -6,36 +10,35 @@ open FStar.List.Tot
 
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
-module L = IntrusiveListIndexed
 module X = IntrusiveListIndexed
 module C = IntrusiveListContext
 
-let inv (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
+let inv (#a: Type0) (p: X.ipayload a) (m: X.matcher a) (head pos: X.lref)
         (es: X.entries a) : slprop =
   exists* (seen back: X.entries a).
     X.split p head pos (X.without m seen) back **
     X.detached p (X.matching m seen) **
     pure (seen @ back == es)
 
-let mid (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
+let mid (#a: Type0) (p: X.ipayload a) (m: X.matcher a) (head pos: X.lref)
         (es: X.entries a) (description: a) (v: N.struct_list_node) : slprop =
   exists* (seen back: X.entries a).
     X.cursor_rest p head pos (X.without m seen) description back v **
     X.detached p (X.matching m seen) **
-    pure (L.lnext v == L.first_or head back) **
+    pure (X.lnext v == X.first_or head back) **
     pure (seen @ ((pos, description) :: back) == es)
 
 (* Deletion consumes the ring; previously detached entries remain framed. *)
-let pending (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-            (head pos next: L.lref) (es: X.entries a) (description: a)
+let pending (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+            (head pos next: X.lref) (es: X.entries a) (description: a)
             (seen back: X.entries a) : slprop =
   X.detached p (X.matching m seen) **
   pure (seen @ ((pos, description) :: back) == es) **
-  pure (next == L.first_or head back) **
+  pure (next == X.first_or head back) **
   pure (m pos description)
 
-unfold let removal_context (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-                    (head pos: L.lref) (description: a)
+unfold let removal_context (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+                    (head pos: X.lref) (description: a)
                     (seen back: X.entries a) : GTot C.cut = {
   model = {
     description_type = a;
@@ -49,9 +52,9 @@ unfold let removal_context (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
 }
 
 ghost
-fn start (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
+fn start (#a: Type0) (p: X.ipayload a) (m: X.matcher a) (head pos: X.lref)
          (es: X.entries a) (#hv: N.struct_list_node)
-  requires R.pts_to head hv ** X.head_rest p head es hv ** pure (pos == L.lnext hv)
+  requires R.pts_to head hv ** X.head_rest p head es hv ** pure (pos == X.lnext hv)
   ensures inv p m head pos es
 {
   X.cursor_start p head pos es;
@@ -62,7 +65,7 @@ fn start (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
 }
 
 ghost
-fn expose (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
+fn expose (#a: Type0) (p: X.ipayload a) (m: X.matcher a) (head pos: X.lref)
           (es: X.entries a)
   requires inv p m head pos es ** pure (pos =!= head)
   ensures exists* (description: a) (v: N.struct_list_node).
@@ -81,10 +84,10 @@ fn expose (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
 }
 
 ghost
-fn keep (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos next: L.lref)
+fn keep (#a: Type0) (p: X.ipayload a) (m: X.matcher a) (head pos next: X.lref)
         (es: X.entries a) (#description: a) (#v: N.struct_list_node)
   requires R.pts_to pos v ** p pos description ** mid p m head pos es description v **
-    pure (next == L.lnext v) ** pure (not (m pos description))
+    pure (next == X.lnext v) ** pure (not (m pos description))
   ensures inv p m head next es
 {
   unfold (mid p m head pos es description v);
@@ -95,7 +98,7 @@ fn keep (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos next: L.lref)
   X.matching_append m seen [(pos, description)];
   FStar.List.Tot.append_l_nil (X.matching m seen);
   FStar.List.Tot.Properties.append_assoc seen [(pos, description)] back;
-  rewrite (X.split p head (L.lnext v) (X.without m seen @ [(pos, description)]) back)
+  rewrite (X.split p head (X.lnext v) (X.without m seen @ [(pos, description)]) back)
     as (X.split p head next (X.without m (seen @ [(pos, description)])) back);
   rewrite (X.detached p (X.matching m seen))
     as (X.detached p (X.matching m (seen @ [(pos, description)])));
@@ -103,11 +106,11 @@ fn keep (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos next: L.lref)
 }
 
 ghost
-fn drop_prepare (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-                (head pos next: L.lref) (es: X.entries a)
+fn drop_prepare (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+                (head pos next: X.lref) (es: X.entries a)
                 (#description: a) (#v: N.struct_list_node)
   requires R.pts_to pos v ** p pos description ** mid p m head pos es description v **
-    pure (next == L.lnext v) ** pure (m pos description)
+    pure (next == X.lnext v) ** pure (m pos description)
   ensures exists* (seen back: X.entries a).
     C.remove_pre (removal_context p m head pos description seen back) pos **
     pending p m head pos next es description seen back
@@ -123,8 +126,8 @@ fn drop_prepare (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
 }
 
 ghost
-fn drop_finish (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-               (head pos next: L.lref) (es: X.entries a)
+fn drop_finish (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+               (head pos next: X.lref) (es: X.entries a)
                (#description: a) (#seen #back: X.entries a) (#empty: bool)
   requires C.remove_post (removal_context p m head pos description seen back) pos empty **
     pending p m head pos next es description seen back
@@ -147,10 +150,10 @@ fn drop_finish (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
 }
 
 ghost
-fn finish (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
+fn finish (#a: Type0) (p: X.ipayload a) (m: X.matcher a) (head pos: X.lref)
           (es: X.entries a)
   requires inv p m head pos es ** pure (pos == head)
-  ensures L.is_list_ring_ix p head 1.0R (X.without m es) **
+  ensures X.is_list_ring_ix p head 1.0R (X.without m es) **
     X.detached p (X.matching m es) **
     pure (X.no_match m (X.without m es)) **
     pure (X.first_match_entry m (X.without m es) == None) **
@@ -162,8 +165,8 @@ fn finish (#a: Type0) (p: L.ipayload a) (m: X.matcher a) (head pos: L.lref)
   FStar.List.Tot.append_l_nil seen;
   FStar.List.Tot.append_l_nil (X.without m seen);
   X.split_close p head pos (X.without m seen) back;
-  rewrite (L.is_list_ring_ix p head 1.0R (X.without m seen @ back))
-    as (L.is_list_ring_ix p head 1.0R (X.without m es));
+  rewrite (X.is_list_ring_ix p head 1.0R (X.without m seen @ back))
+    as (X.is_list_ring_ix p head 1.0R (X.without m es));
   rewrite (X.detached p (X.matching m seen))
     as (X.detached p (X.matching m es));
   X.filtered_no_match m es;

@@ -3,6 +3,7 @@
 #include "list.h"
 #include "pal.h"
 
+/* Indexed integer items: lookup, stable insertion, filtering, and ownership-returning pop. */
 struct item {
     int value;
     struct list_node link;
@@ -345,14 +346,8 @@ void list_example(void)
     assert(removed == NULL);
 
     items_insert_sorted(&source, &first);
-    _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl
-        $(&source) [($(first_link), 3l)]);
     items_insert_sorted(&source, &second);
-    _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl
-        $(&source) [($(second_link), 1l); ($(first_link), 3l)]);
     items_insert_sorted(&source, &third);
-    _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl
-        $(&source) [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
     _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&source) $(&source) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
@@ -405,8 +400,6 @@ void list_example(void)
         assertion_empty = false;
     }
     items_insert_sorted(&source, &fourth);
-    _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl
-        $(&source) [($(fourth_link), 4l)]);
     _ghost_stmt(IntrusiveListContext.prepare_move IntrusiveListExample.item_ipl
         $(&source) $(&destination) [($(fourth_link), 4l)]
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l)]);
@@ -419,9 +412,6 @@ void list_example(void)
     list_validate(&source);
     _ghost_stmt(IntrusiveListContext.finish_validation IntrusiveListExample.item_ipl
         $(&source) $(&source) [] []);
-    _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl
-        $(&destination)
-        [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
     _ghost_stmt(IntrusiveListContext.prepare_validation IntrusiveListExample.item_ipl
         $(&destination) $(&destination) []
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
@@ -442,8 +432,6 @@ void list_example(void)
     list_move(&source, &destination);
     _ghost_stmt(IntrusiveListContext.finish_move IntrusiveListExample.item_ipl
         $(&source) $(&destination) []
-        [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
-    _ghost_stmt(IntrusiveListOps.indexed_normalize IntrusiveListExample.item_ipl $(&destination)
         [($(second_link), 1l); ($(third_link), 2l); ($(first_link), 3l); ($(fourth_link), 4l)]);
 
     items_remove_value(&destination, 2);

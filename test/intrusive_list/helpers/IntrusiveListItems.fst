@@ -1,4 +1,8 @@
 module IntrusiveListItems
+
+(* Generic first-match traversal and ownership-returning pop. Concrete container
+   recovery and field comparisons belong to the client-specific Example modules. *)
+
 open Pulse
 open Pulse.Lib.C
 open FStar.List.Tot
@@ -6,22 +10,21 @@ open FStar.List.Tot
 
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
-module L = IntrusiveListIndexed
 module X = IntrusiveListIndexed
 module C = IntrusiveListContext
 
-let find_post (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-              (head: L.lref) (es: X.entries a) (result: L.lref) : slprop =
-  L.is_list_ring_ix p head 1.0R es ** pure (result == X.first_match m es)
+let find_post (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+              (head: X.lref) (es: X.entries a) (result: X.lref) : slprop =
+  X.is_list_ring_ix p head 1.0R es ** pure (result == X.first_match m es)
 
-let find_inv (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-             (head pos: L.lref) (es: X.entries a) : slprop =
+let find_inv (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+             (head pos: X.lref) (es: X.entries a) : slprop =
   exists* (front back: X.entries a).
     X.split p head pos front back **
     pure (front @ back == es) ** pure (X.no_match m front)
 
-let find_mid (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-             (head pos: L.lref) (es: X.entries a) (description: a)
+let find_mid (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+             (head pos: X.lref) (es: X.entries a) (description: a)
              (v: N.struct_list_node) : slprop =
   exists* (front back: X.entries a).
     X.cursor_rest p head pos front description back v **
@@ -29,9 +32,9 @@ let find_mid (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
     pure (X.no_match m front)
 
 ghost
-fn find_start (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-              (head pos: L.lref) (es: X.entries a) (#hv: N.struct_list_node)
-  requires R.pts_to head hv ** X.head_rest p head es hv ** pure (pos == L.lnext hv)
+fn find_start (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+              (head pos: X.lref) (es: X.entries a) (#hv: N.struct_list_node)
+  requires R.pts_to head hv ** X.head_rest p head es hv ** pure (pos == X.lnext hv)
   ensures find_inv p m head pos es
 {
   X.cursor_start p head pos es;
@@ -39,8 +42,8 @@ fn find_start (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
 }
 
 ghost
-fn find_open (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-             (head pos: L.lref) (es: X.entries a)
+fn find_open (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+             (head pos: X.lref) (es: X.entries a)
   requires find_inv p m head pos es ** pure (pos =!= head)
   ensures exists* (description: a) (v: N.struct_list_node).
     R.pts_to pos v ** p pos description ** find_mid p m head pos es description v
@@ -57,12 +60,12 @@ fn find_open (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
 }
 
 ghost
-fn find_found (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-              (head pos: L.lref) (es: X.entries a) (description: a)
+fn find_found (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+              (head pos: X.lref) (es: X.entries a) (description: a)
               (#v: N.struct_list_node)
   requires R.pts_to pos v ** p pos description ** find_mid p m head pos es description v **
     pure (m pos description)
-  ensures L.is_list_ring_ix p head 1.0R es **
+  ensures X.is_list_ring_ix p head 1.0R es **
     pure (X.first_match_entry m es == Some (pos, description)) **
     pure (X.first_match m es == pos)
 {
@@ -71,16 +74,16 @@ fn find_found (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
   X.first_match_skip m front ((pos, description) :: back);
   X.cursor_restore p head pos front description back;
   X.split_close p head pos front ((pos, description) :: back);
-  rewrite (L.is_list_ring_ix p head 1.0R (front @ ((pos, description) :: back)))
-    as (L.is_list_ring_ix p head 1.0R es);
+  rewrite (X.is_list_ring_ix p head 1.0R (front @ ((pos, description) :: back)))
+    as (X.is_list_ring_ix p head 1.0R es);
 }
 
 ghost
-fn find_step (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-             (head pos next: L.lref) (es: X.entries a) (description: a)
+fn find_step (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+             (head pos next: X.lref) (es: X.entries a) (description: a)
              (#v: N.struct_list_node)
   requires R.pts_to pos v ** p pos description ** find_mid p m head pos es description v **
-    pure (not (m pos description)) ** pure (next == L.lnext v)
+    pure (not (m pos description)) ** pure (next == X.lnext v)
   ensures find_inv p m head next es
 {
   unfold (find_mid p m head pos es description v);
@@ -88,16 +91,16 @@ fn find_step (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
   X.no_match_snoc m front pos description;
   X.cursor_advance p head pos front description back;
   FStar.List.Tot.Properties.append_assoc front [(pos, description)] back;
-  rewrite (X.split p head (L.lnext v) (front @ [(pos, description)]) back)
+  rewrite (X.split p head (X.lnext v) (front @ [(pos, description)]) back)
     as (X.split p head next (front @ [(pos, description)]) back);
   fold (find_inv p m head next es);
 }
 
 ghost
-fn find_end (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
-            (head pos: L.lref) (es: X.entries a)
+fn find_end (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
+            (head pos: X.lref) (es: X.entries a)
   requires find_inv p m head pos es ** pure (pos == head)
-  ensures L.is_list_ring_ix p head 1.0R es **
+  ensures X.is_list_ring_ix p head 1.0R es **
     pure (X.first_match_entry m es == None) ** pure (X.first_match m es == null)
 {
   unfold (find_inv p m head pos es);
@@ -105,31 +108,31 @@ fn find_end (#a: Type0) (p: L.ipayload a) (m: X.matcher a)
   X.split_facts p head pos front back;
   X.first_match_skip m front back;
   X.split_close p head pos front back;
-  rewrite (L.is_list_ring_ix p head 1.0R (front @ back))
-    as (L.is_list_ring_ix p head 1.0R es);
+  rewrite (X.is_list_ring_ix p head 1.0R (front @ back))
+    as (X.is_list_ring_ix p head 1.0R es);
 }
 
-let pop_post (#a: Type0) (p: L.ipayload a) (head: L.lref)
-             (es: X.entries a) (result: L.lref) : slprop =
+let pop_post (#a: Type0) (p: X.ipayload a) (head: X.lref)
+             (es: X.entries a) (result: X.lref) : slprop =
   match es with
-  | [] -> L.is_list_ring_ix p head 1.0R [] ** pure (result == null)
+  | [] -> X.is_list_ring_ix p head 1.0R [] ** pure (result == null)
   | e :: rest ->
-    L.is_list_ring_ix p head 1.0R rest **
+    X.is_list_ring_ix p head 1.0R rest **
     (exists* (v: N.struct_list_node). R.pts_to (fst e) v) **
     p (fst e) (snd e) ** pure (result == fst e)
 
 ghost
-fn pop_empty (#a: Type0) (p: L.ipayload a) (head: L.lref) (es: X.entries a)
-  requires L.is_list_ring_ix p head 1.0R es ** pure (es == [])
+fn pop_empty (#a: Type0) (p: X.ipayload a) (head: X.lref) (es: X.entries a)
+  requires X.is_list_ring_ix p head 1.0R es ** pure (es == [])
   ensures pop_post p head es null
 {
-  rewrite (L.is_list_ring_ix p head 1.0R es) as (L.is_list_ring_ix p head 1.0R []);
+  rewrite (X.is_list_ring_ix p head 1.0R es) as (X.is_list_ring_ix p head 1.0R []);
   fold (pop_post p head [] null);
   rewrite (pop_post p head [] null) as (pop_post p head es null);
 }
 
 ghost
-fn pop_finish (#a: Type0) (p: L.ipayload a) (head result: L.lref) (es: X.entries a)
+fn pop_finish (#a: Type0) (p: X.ipayload a) (head result: X.lref) (es: X.entries a)
   requires C.remove_head_post (C.make p es) head result
   ensures pop_post p head es result
 {
@@ -140,12 +143,12 @@ fn pop_finish (#a: Type0) (p: L.ipayload a) (head result: L.lref) (es: X.entries
     }
     Cons e rest -> {
       rewrite (C.remove_head_post (C.make p es) head result)
-        as (L.is_list_ring_ix p head 1.0R rest **
-          (exists* (next: L.lref). R.pts_to result (L.mklink next head)) **
+        as (X.is_list_ring_ix p head 1.0R rest **
+          (exists* (next: X.lref). R.pts_to result (X.mklink next head)) **
           p result (snd e) ** pure (result == fst e));
-      with next. assert (R.pts_to result (L.mklink next head));
-      rewrite (R.pts_to result (L.mklink next head))
-        as (R.pts_to (fst e) (L.mklink next head));
+      with next. assert (R.pts_to result (X.mklink next head));
+      rewrite (R.pts_to result (X.mklink next head))
+        as (R.pts_to (fst e) (X.mklink next head));
       rewrite (p result (snd e)) as (p (fst e) (snd e));
       fold (pop_post p head es result);
     }

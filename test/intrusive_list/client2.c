@@ -4,6 +4,8 @@
 #include "list.h"
 #include "pal.h"
 
+/* Indexed resource items: queue operations retain the samples and owned counter.
+   Sample processing happens after dequeue, when the caller owns the whole item. */
 struct item2 {
     int priority;
     unsigned used;

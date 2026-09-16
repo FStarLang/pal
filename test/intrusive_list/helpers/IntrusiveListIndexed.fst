@@ -1,4 +1,8 @@
 module IntrusiveListIndexed
+
+(* Canonical indexed ownership: each member owns its links and P node description;
+   the sentinel owns only its links. Structural proofs never inspect P. *)
+
 open Pulse
 open Pulse.Lib.C
 open FStar.List.Tot

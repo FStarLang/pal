@@ -1,4 +1,8 @@
 module IntrusiveListExample2
+
+(* The payload owns metadata, the inline samples, and a separate counter cell.
+   Detached ownership reunites those resources with the link for sample processing. *)
+
 open Pulse
 open Pulse.Lib.C
 open FStar.List.Tot
@@ -62,6 +66,7 @@ let item_ipl ([@@@mkey] node: X.lref) (d: description) : slprop = fields (owner 
 unfold let processed (d: description) : description =
   { d with count = UInt32.add_mod d.count 1ul }
 
+(* Total specification accessor; C processing requires index < used <= 4. *)
 let sample_at (d: description) (index: nat) : UInt32.t =
   if index < 4 then array_spec_idx d.samples index else 0ul
 
@@ -125,6 +130,7 @@ fn payload_to_item (node: X.lref) (d: description) (#link: N.struct_list_node)
   fold (owned (owner node) d link);
 }
 
+(* Check that splitting/rejoining array and counter ownership preserves the item. *)
 ghost
 fn resource_roundtrip (item: item_ref) (d: description) (link: N.struct_list_node)
   requires owned item d link

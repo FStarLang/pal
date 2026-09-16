@@ -4,6 +4,8 @@
 #include "list.h"
 #include "pal.h"
 
+/* The unary queue payload requires ready=true for every linked item.
+   The unit adapters below hide indexed transport; dequeue clears the flag. */
 struct item3 {
     bool ready;
     struct list_node link;

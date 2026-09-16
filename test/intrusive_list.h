@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include "pal.h"
 
+/* Shared by the three clients through the test's list.h symlink. Contexts carry
+   payload descriptions only in proofs; native callers still pass ordinary pointers. */
 struct list_node {
     _plain struct list_node *next;
     _plain struct list_node *prev;

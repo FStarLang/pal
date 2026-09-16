@@ -1,19 +1,23 @@
 module IntrusiveList
+
+(* The nonindexed API specializes Indexed at unit and tracks node sequences.
+   A unary payload can still specify field values and ownership. The F* operation
+   wrappers check all nine generated C contracts; later adapters support client3. *)
+
 open Pulse
 open Pulse.Lib.C
 open FStar.List.Tot
 #lang-pulse
 
-module B = IntrusiveListIndexed
-module I = IntrusiveListIndexed
+module X = IntrusiveListIndexed
 module C = IntrusiveListContext
 module R = Pulse.Lib.Reference
 
-unfold let lref = B.lref
-unfold let payload = I.ipayload unit
+unfold let lref = X.lref
+unfold let payload = X.ipayload unit
 
 (* The unindexed API is only the unit specialization of the indexed model. *)
-let rec entries (nodes: list lref) : Tot (I.entries unit) (decreases nodes) =
+let rec entries (nodes: list lref) : Tot (X.entries unit) (decreases nodes) =
   match nodes with
   | [] -> []
   | node :: rest -> (node, ()) :: entries rest
@@ -22,11 +26,11 @@ let of_unary (p: lref -> slprop) : payload = fun node () -> p node
 
 let is_list_seg_with (p: payload) (prev cur endl: lref) (permission: perm)
                      (nodes: list lref) : slprop =
-  I.is_list_seg_ix p prev cur endl permission (entries nodes)
+  X.is_list_seg_ix p prev cur endl permission (entries nodes)
 
 let is_list_ring_with (p: payload) ([@@@mkey] head: lref) (permission: perm)
                       (nodes: list lref) : slprop =
-  I.is_list_ring_ix p head permission (entries nodes)
+  X.is_list_ring_ix p head permission (entries nodes)
 
 let rec entries_append (front back: list lref)
   : Lemma (entries (front @ back) == entries front @ entries back)
@@ -36,13 +40,13 @@ let rec entries_append (front back: list lref)
   | _ :: rest -> entries_append rest back
 
 let rec entries_nodes (nodes: list lref)
-  : Lemma (I.cells_of (entries nodes) == nodes) (decreases nodes) =
+  : Lemma (X.cells_of (entries nodes) == nodes) (decreases nodes) =
   match nodes with
   | [] -> ()
   | _ :: rest -> entries_nodes rest
 
-let rec nodes_entries (es: I.entries unit)
-  : Lemma (entries (I.cells_of es) == es) (decreases es) =
+let rec nodes_entries (es: X.entries unit)
+  : Lemma (entries (X.cells_of es) == es) (decreases es) =
   match es with
   | [] -> ()
   | _ :: rest -> nodes_entries rest
@@ -50,14 +54,14 @@ let rec nodes_entries (es: I.entries unit)
 ghost
 fn ring_to_indexed (p: payload) (head: lref) (permission: perm) (nodes: list lref)
   requires is_list_ring_with p head permission nodes
-  ensures I.is_list_ring_ix p head permission (entries nodes)
+  ensures X.is_list_ring_ix p head permission (entries nodes)
 {
   unfold (is_list_ring_with p head permission nodes);
 }
 
 ghost
 fn ring_from_indexed (p: payload) (head: lref) (permission: perm) (nodes: list lref)
-  requires I.is_list_ring_ix p head permission (entries nodes)
+  requires X.is_list_ring_ix p head permission (entries nodes)
   ensures is_list_ring_with p head permission nodes
 {
   fold (is_list_ring_with p head permission nodes);
@@ -67,7 +71,7 @@ ghost
 fn segment_to_indexed (p: payload) (prev cur endl: lref)
                      (permission: perm) (nodes: list lref)
   requires is_list_seg_with p prev cur endl permission nodes
-  ensures I.is_list_seg_ix p prev cur endl permission (entries nodes)
+  ensures X.is_list_seg_ix p prev cur endl permission (entries nodes)
 {
   unfold (is_list_seg_with p prev cur endl permission nodes);
 }
@@ -75,13 +79,11 @@ fn segment_to_indexed (p: payload) (prev cur endl: lref)
 ghost
 fn segment_from_indexed (p: payload) (prev cur endl: lref)
                        (permission: perm) (nodes: list lref)
-  requires I.is_list_seg_ix p prev cur endl permission (entries nodes)
+  requires X.is_list_seg_ix p prev cur endl permission (entries nodes)
   ensures is_list_seg_with p prev cur endl permission nodes
 {
   fold (is_list_seg_with p prev cur endl permission nodes);
 }
-
-let checked = unit
 
 unfold let model (p: payload) (nodes: list lref) : C.context =
   C.make p (entries nodes)
@@ -130,7 +132,7 @@ divergent fn empty (#p: erased payload) (#nodes: erased (list lref)) (head: lref
 divergent fn validate (#p: erased payload) (#front #back: erased (list lref))
                       (head node: lref)
   requires is_list_ring_with (reveal p) head 1.0R (reveal front @ reveal back) **
-    pure (node == I.last_or head (entries (reveal front)))
+    pure (node == X.last_or head (entries (reveal front)))
   ensures is_list_ring_with (reveal p) head 1.0R (reveal front @ reveal back)
 {
   entries_append (reveal front) (reveal back);
@@ -175,7 +177,7 @@ divergent fn insert_tail (#p: erased payload) (#nodes: erased (list lref))
 divergent fn insert_after (#p: erased payload) (#front #back: erased (list lref))
                           (head position entry: lref)
   requires is_list_ring_with (reveal p) head 1.0R (reveal front @ reveal back) **
-    pure (position == I.last_or head (entries (reveal front))) **
+    pure (position == X.last_or head (entries (reveal front))) **
     R.pts_to_uninit entry ** (reveal p) entry ()
   ensures is_list_ring_with (reveal p) head 1.0R (reveal front @ (entry :: reveal back))
 {
@@ -197,9 +199,9 @@ divergent fn remove (#p: erased payload) (#front #back: erased (list lref))
   requires is_list_ring_with (reveal p) head 1.0R (reveal front @ (entry :: reveal back))
   returns result: bool
   ensures is_list_ring_with (reveal p) head 1.0R (reveal front @ reveal back) **
-    R.pts_to entry (B.mklink
-      (I.first_or head (entries (reveal back)))
-      (I.last_or head (entries (reveal front)))) **
+    R.pts_to entry (X.mklink
+      (X.first_or head (entries (reveal back)))
+      (X.last_or head (entries (reveal front)))) **
     (reveal p) entry () ** pure (result <==> reveal front @ reveal back == [])
 {
   entries_append (reveal front) (entry :: reveal back);
@@ -223,7 +225,7 @@ divergent fn remove_head (#p: erased payload) (#rest: erased (list lref))
   requires is_list_ring_with (reveal p) head 1.0R (node :: reveal rest)
   returns result: lref
   ensures is_list_ring_with (reveal p) head 1.0R (reveal rest) **
-    (exists* (next: lref). R.pts_to result (B.mklink next head)) **
+    (exists* (next: lref). R.pts_to result (X.mklink next head)) **
     (reveal p) result () ** pure (result == node)
 {
   ring_to_indexed (reveal p) head 1.0R (node :: reveal rest);
@@ -365,7 +367,7 @@ let pop_post (p: payload) (head: lref) (nodes: list lref) (result: lref) : slpro
   | [] -> pure False
   | node :: rest ->
     is_list_ring_with p head 1.0R rest **
-    (exists* (next: lref). R.pts_to result (B.mklink next head)) **
+    (exists* (next: lref). R.pts_to result (X.mklink next head)) **
     p result () ** pure (result == node)
 
 ghost
@@ -428,5 +430,5 @@ fn release_empty (p: payload) (head: lref)
   ensures exists* (v: Struct_list_node.struct_list_node). R.pts_to head v
 {
   ring_to_indexed p head 1.0R [];
-  I.ring_elim_empty p head;
+  X.ring_elim_empty p head;
 }

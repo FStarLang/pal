@@ -3,6 +3,8 @@
 #include "pal.h"
 
 /* Nodes and the sentinel are caller-owned; no allocation or freeing occurs. */
+/* Ops proves individual link updates; Validate borrows neighboring links.
+   Post-return ghost annotations close the proof before PAL emits the Pulse return. */
 
 /* Expand proof parameters in annotations without materializing erased values. */
 #define LIST_CTX (reveal $(ctx))

@@ -1,4 +1,8 @@
 module IntrusiveListExample3
+
+(* FIFO contracts track addresses, not per-entry descriptions. Queued ownership
+   fixes ready=true; dequeue restores a whole item whose flag has been cleared. *)
+
 open Pulse
 open Pulse.Lib.C
 open FStar.List.Tot

@@ -1,4 +1,8 @@
 module IntrusiveListValidate
+
+(* Neighbor reads borrow fractional link ownership and restore the same witness.
+   Only link storage is shared; the indexed payload bundle is framed once. *)
+
 open Pulse
 open Pulse.Lib.C
 open FStar.List.Tot
@@ -6,23 +10,22 @@ open FStar.List.Tot
 
 module R = Pulse.Lib.Reference
 module N = Struct_list_node
-module B = IntrusiveListIndexed
 module X = IntrusiveListIndexed
 module T = Pulse.Lib.Trade
 
 unfold let quarter : perm = 0.25R
 
-unfold let segment (#a: Type0) (prev cur endl: B.lref) (p: perm) (es: X.entries a) =
+unfold let segment (#a: Type0) (prev cur endl: X.lref) (p: perm) (es: X.entries a) =
   X.is_list_seg_ix X.no_payload prev cur endl p es
 
-unfold let ring (#a: Type0) (head: B.lref) (p: perm) (es: X.entries a) =
+unfold let ring (#a: Type0) (head: X.lref) (p: perm) (es: X.entries a) =
   X.is_list_ring_ix X.no_payload head p es
 
-let held (r: B.lref) (p: perm) (v: N.struct_list_node) = R.pts_to r #p v
+let held (r: X.lref) (p: perm) (v: N.struct_list_node) = R.pts_to r #p v
 
 (* Only the empty-payload specialization is shared; descriptions stay indexed. *)
 ghost
-fn rec seg_share (#a: Type0) (prev cur endl: B.lref) (p: perm) (es: X.entries a)
+fn rec seg_share (#a: Type0) (prev cur endl: X.lref) (p: perm) (es: X.entries a)
   requires segment prev cur endl p es
   ensures segment prev cur endl (p /. 2.0R) es **
     segment prev cur endl (p /. 2.0R) es
@@ -38,7 +41,7 @@ fn rec seg_share (#a: Type0) (prev cur endl: B.lref) (p: perm) (es: X.entries a)
       X.seg_cons_elim X.no_payload prev cur endl p e rest;
       with v. assert (R.pts_to cur #p v);
       R.share cur;
-      seg_share cur (B.lnext v) endl p rest;
+      seg_share cur (X.lnext v) endl p rest;
       X.seg_cons_intro X.no_payload prev cur endl (p /. 2.0R) e rest;
       X.seg_cons_intro X.no_payload prev cur endl (p /. 2.0R) e rest;
     }
@@ -46,7 +49,7 @@ fn rec seg_share (#a: Type0) (prev cur endl: B.lref) (p: perm) (es: X.entries a)
 }
 
 ghost
-fn rec seg_gather (#a: Type0) (prev cur endl: B.lref) (p: perm { p <=. 0.5R })
+fn rec seg_gather (#a: Type0) (prev cur endl: X.lref) (p: perm { p <=. 0.5R })
                   (es: X.entries a)
   requires segment prev cur endl p es ** segment prev cur endl p es
   ensures segment prev cur endl (p +. p) es
@@ -66,29 +69,29 @@ fn rec seg_gather (#a: Type0) (prev cur endl: B.lref) (p: perm { p <=. 0.5R })
       with v2. assert (R.pts_to cur #p v2);
       unfold (held cur p v1);
       R.gather cur #(hide v1) #(hide v2) #p #p;
-      rewrite (segment cur (B.lnext v2) endl p rest)
-        as (segment cur (B.lnext v1) endl p rest);
-      seg_gather cur (B.lnext v1) endl p rest;
+      rewrite (segment cur (X.lnext v2) endl p rest)
+        as (segment cur (X.lnext v1) endl p rest);
+      seg_gather cur (X.lnext v1) endl p rest;
       X.seg_cons_intro X.no_payload prev cur endl (p +. p) e rest;
     }
   }
 }
 
 ghost
-fn ring_share (#a: Type0) (head: B.lref) (p: perm) (es: X.entries a)
+fn ring_share (#a: Type0) (head: X.lref) (p: perm) (es: X.entries a)
   requires ring head p es
   ensures ring head (p /. 2.0R) es ** ring head (p /. 2.0R) es
 {
   X.ring_open X.no_payload head;
   with hv. assert (R.pts_to head #p hv);
   R.share head;
-  seg_share head (B.lnext hv) head p es;
+  seg_share head (X.lnext hv) head p es;
   X.ring_close X.no_payload head;
   X.ring_close X.no_payload head;
 }
 
 ghost
-fn ring_gather (#a: Type0) (head: B.lref) (p: perm { p <=. 0.5R }) (es: X.entries a)
+fn ring_gather (#a: Type0) (head: X.lref) (p: perm { p <=. 0.5R }) (es: X.entries a)
   requires ring head p es ** ring head p es
   ensures ring head (p +. p) es
 {
@@ -99,14 +102,14 @@ fn ring_gather (#a: Type0) (head: B.lref) (p: perm { p <=. 0.5R }) (es: X.entrie
   with hv2. assert (R.pts_to head #p hv2);
   unfold (held head p hv1);
   R.gather head #(hide hv1) #(hide hv2) #p #p;
-  rewrite (segment head (B.lnext hv2) head p es)
-    as (segment head (B.lnext hv1) head p es);
-  seg_gather head (B.lnext hv1) head p es;
+  rewrite (segment head (X.lnext hv2) head p es)
+    as (segment head (X.lnext hv1) head p es);
+  seg_gather head (X.lnext hv1) head p es;
   X.ring_close X.no_payload head;
 }
 
 ghost
-fn ring_quarters (#a: Type0) (head: B.lref) (es: X.entries a)
+fn ring_quarters (#a: Type0) (head: X.lref) (es: X.entries a)
   requires ring head 1.0R es
   ensures ring head quarter es ** ring head quarter es **
     ring head quarter es ** ring head quarter es
@@ -123,7 +126,7 @@ fn ring_quarters (#a: Type0) (head: B.lref) (es: X.entries a)
 }
 
 ghost
-fn ring_unquarters (#a: Type0) (head: B.lref) (es: X.entries a)
+fn ring_unquarters (#a: Type0) (head: X.lref) (es: X.entries a)
   requires ring head quarter es ** ring head quarter es **
     ring head quarter es ** ring head quarter es
   ensures ring head 1.0R es
@@ -137,13 +140,13 @@ fn ring_unquarters (#a: Type0) (head: B.lref) (es: X.entries a)
 }
 
 ghost
-fn rec seg_borrow (#a: Type0) (prev cur endl: B.lref) (p: perm)
+fn rec seg_borrow (#a: Type0) (prev cur endl: X.lref) (p: perm)
                   (front: X.entries a) (e: X.entry a) (back: X.entries a)
   requires segment prev cur endl p (front @ (e :: back))
   ensures
-    R.pts_to (fst e) #p (B.mklink (X.first_or endl back) (X.last_or prev front)) **
+    R.pts_to (fst e) #p (X.mklink (X.first_or endl back) (X.last_or prev front)) **
     T.trade
-      (R.pts_to (fst e) #p (B.mklink (X.first_or endl back) (X.last_or prev front)))
+      (R.pts_to (fst e) #p (X.mklink (X.first_or endl back) (X.last_or prev front)))
       (segment prev cur endl p (front @ (e :: back)))
   decreases front
 {
@@ -151,15 +154,15 @@ fn rec seg_borrow (#a: Type0) (prev cur endl: B.lref) (p: perm)
     Nil -> {
       X.seg_cons_elim X.no_payload prev cur endl p e back;
       with v. assert (R.pts_to cur #p v);
-      X.seg_first X.no_payload cur (B.lnext v) endl;
+      X.seg_first X.no_payload cur (X.lnext v) endl;
       rewrite (R.pts_to cur #p v)
-        as (R.pts_to (fst e) #p (B.mklink (X.first_or endl back) prev));
+        as (R.pts_to (fst e) #p (X.mklink (X.first_or endl back) prev));
       intro (T.trade
-        (R.pts_to (fst e) #p (B.mklink (X.first_or endl back) prev))
+        (R.pts_to (fst e) #p (X.mklink (X.first_or endl back) prev))
         (segment prev cur endl p (front @ (e :: back))))
-        #(segment cur (B.lnext v) endl p back)
+        #(segment cur (X.lnext v) endl p back)
       fn _ {
-        rewrite (R.pts_to (fst e) #p (B.mklink (X.first_or endl back) prev))
+        rewrite (R.pts_to (fst e) #p (X.mklink (X.first_or endl back) prev))
           as (R.pts_to cur #p v);
         X.seg_cons_intro X.no_payload prev cur endl p e back;
       };
@@ -167,22 +170,22 @@ fn rec seg_borrow (#a: Type0) (prev cur endl: B.lref) (p: perm)
     Cons hd rest -> {
       X.seg_cons_elim X.no_payload prev cur endl p hd (rest @ (e :: back));
       with v. assert (R.pts_to cur #p v);
-      seg_borrow cur (B.lnext v) endl p rest e back;
-      let nv = B.mklink (X.first_or endl back) (X.last_or prev front);
-      rewrite (R.pts_to (fst e) #p (B.mklink (X.first_or endl back) (X.last_or cur rest)))
+      seg_borrow cur (X.lnext v) endl p rest e back;
+      let nv = X.mklink (X.first_or endl back) (X.last_or prev front);
+      rewrite (R.pts_to (fst e) #p (X.mklink (X.first_or endl back) (X.last_or cur rest)))
         as (R.pts_to (fst e) #p nv);
       intro (T.trade (R.pts_to (fst e) #p nv)
         (segment prev cur endl p (front @ (e :: back))))
         #(R.pts_to cur #p v **
           T.trade
-            (R.pts_to (fst e) #p (B.mklink (X.first_or endl back) (X.last_or cur rest)))
-            (segment cur (B.lnext v) endl p (rest @ (e :: back))))
+            (R.pts_to (fst e) #p (X.mklink (X.first_or endl back) (X.last_or cur rest)))
+            (segment cur (X.lnext v) endl p (rest @ (e :: back))))
       fn _ {
         rewrite (R.pts_to (fst e) #p nv)
-          as (R.pts_to (fst e) #p (B.mklink (X.first_or endl back) (X.last_or cur rest)));
+          as (R.pts_to (fst e) #p (X.mklink (X.first_or endl back) (X.last_or cur rest)));
         T.elim_trade
-          (R.pts_to (fst e) #p (B.mklink (X.first_or endl back) (X.last_or cur rest)))
-          (segment cur (B.lnext v) endl p (rest @ (e :: back)));
+          (R.pts_to (fst e) #p (X.mklink (X.first_or endl back) (X.last_or cur rest)))
+          (segment cur (X.lnext v) endl p (rest @ (e :: back)));
         X.seg_cons_intro X.no_payload prev cur endl p hd (rest @ (e :: back));
       };
     }
@@ -190,20 +193,20 @@ fn rec seg_borrow (#a: Type0) (prev cur endl: B.lref) (p: perm)
 }
 
 ghost
-fn borrow_head (#a: Type0) (head: B.lref) (p: perm) (es: X.entries a)
+fn borrow_head (#a: Type0) (head: X.lref) (p: perm) (es: X.entries a)
   requires ring head p es
   ensures
-    R.pts_to head #p (B.mklink (X.first_or head es) (X.last_or head es)) **
+    R.pts_to head #p (X.mklink (X.first_or head es) (X.last_or head es)) **
     T.trade
-      (R.pts_to head #p (B.mklink (X.first_or head es) (X.last_or head es)))
+      (R.pts_to head #p (X.mklink (X.first_or head es) (X.last_or head es)))
       (ring head p es)
 {
   X.ring_open X.no_payload head;
   with hv. assert (R.pts_to head #p hv);
-  let v = B.mklink (X.first_or head es) (X.last_or head es);
+  let v = X.mklink (X.first_or head es) (X.last_or head es);
   rewrite (R.pts_to head #p hv) as (R.pts_to head #p v);
   intro (T.trade (R.pts_to head #p v) (ring head p es))
-    #(segment head (B.lnext hv) head p es)
+    #(segment head (X.lnext hv) head p es)
   fn _ {
     rewrite (R.pts_to head #p v) as (R.pts_to head #p hv);
     X.ring_close X.no_payload head;
@@ -211,26 +214,26 @@ fn borrow_head (#a: Type0) (head: B.lref) (p: perm) (es: X.entries a)
 }
 
 ghost
-fn borrow_member (#a: Type0) (head: B.lref) (p: perm)
+fn borrow_member (#a: Type0) (head: X.lref) (p: perm)
                  (front: X.entries a) (e: X.entry a) (back: X.entries a)
   requires ring head p (front @ (e :: back))
   ensures
-    R.pts_to (fst e) #p (B.mklink (X.first_or head back) (X.last_or head front)) **
+    R.pts_to (fst e) #p (X.mklink (X.first_or head back) (X.last_or head front)) **
     T.trade
-      (R.pts_to (fst e) #p (B.mklink (X.first_or head back) (X.last_or head front)))
+      (R.pts_to (fst e) #p (X.mklink (X.first_or head back) (X.last_or head front)))
       (ring head p (front @ (e :: back)))
 {
   X.ring_open X.no_payload head;
   with hv. assert (R.pts_to head #p hv);
-  seg_borrow head (B.lnext hv) head p front e back;
-  let v = B.mklink (X.first_or head back) (X.last_or head front);
+  seg_borrow head (X.lnext hv) head p front e back;
+  let v = X.mklink (X.first_or head back) (X.last_or head front);
   intro (T.trade (R.pts_to (fst e) #p v) (ring head p (front @ (e :: back))))
     #(R.pts_to head #p hv **
       T.trade (R.pts_to (fst e) #p v)
-        (segment head (B.lnext hv) head p (front @ (e :: back))))
+        (segment head (X.lnext hv) head p (front @ (e :: back))))
   fn _ {
     T.elim_trade (R.pts_to (fst e) #p v)
-      (segment head (B.lnext hv) head p (front @ (e :: back)));
+      (segment head (X.lnext hv) head p (front @ (e :: back)));
     X.ring_close X.no_payload head;
   };
 }
@@ -239,16 +242,16 @@ let rec init_last (#a: Type0) (es: X.entries a { Cons? es })
   : Lemma (init es @ [last es] == es) (decreases es)
   = match es with | [_] -> () | _ :: rest -> init_last rest
 
-let rec last_is_last (#a: Type0) (head: B.lref) (es: X.entries a { Cons? es })
+let rec last_is_last (#a: Type0) (head: X.lref) (es: X.entries a { Cons? es })
   : Lemma (X.last_or head es == fst (last es)) (decreases es)
   = match es with | [_] -> () | e :: rest -> last_is_last (fst e) rest
 
 ghost
-fn borrow_successor (#a: Type0) (head: B.lref) (p: perm)
+fn borrow_successor (#a: Type0) (head: X.lref) (p: perm)
                     (front: X.entries a) (e: X.entry a) (back: X.entries a)
   requires ring head p (front @ (e :: back))
   ensures exists* (v: N.struct_list_node).
-    R.pts_to (X.first_or head back) #p v ** pure (B.lprev v == fst e) **
+    R.pts_to (X.first_or head back) #p v ** pure (X.lprev v == fst e) **
     T.trade (R.pts_to (X.first_or head back) #p v) (ring head p (front @ (e :: back)))
 {
   match back {
@@ -262,7 +265,7 @@ fn borrow_successor (#a: Type0) (head: B.lref) (p: perm)
       rewrite (ring head p (front @ (e :: back)))
         as (ring head p ((front @ [e]) @ (hd :: rest)));
       borrow_member head p (front @ [e]) hd rest;
-      let v = B.mklink (X.first_or head rest) (X.last_or head (front @ [e]));
+      let v = X.mklink (X.first_or head rest) (X.last_or head (front @ [e]));
       rewrite (T.trade (R.pts_to (fst hd) #p v)
         (ring head p ((front @ [e]) @ (hd :: rest))))
         as (T.trade (R.pts_to (X.first_or head back) #p v)
@@ -272,11 +275,11 @@ fn borrow_successor (#a: Type0) (head: B.lref) (p: perm)
 }
 
 ghost
-fn borrow_predecessor (#a: Type0) (head: B.lref) (p: perm)
+fn borrow_predecessor (#a: Type0) (head: X.lref) (p: perm)
                       (front: X.entries a) (e: X.entry a) (back: X.entries a)
   requires ring head p (front @ (e :: back))
   ensures exists* (v: N.struct_list_node).
-    R.pts_to (X.last_or head front) #p v ** pure (B.lnext v == fst e) **
+    R.pts_to (X.last_or head front) #p v ** pure (X.lnext v == fst e) **
     T.trade (R.pts_to (X.last_or head front) #p v) (ring head p (front @ (e :: back)))
 {
   match front {
@@ -288,7 +291,7 @@ fn borrow_predecessor (#a: Type0) (head: B.lref) (p: perm)
       rewrite (ring head p (front @ (e :: back)))
         as (ring head p (init front @ (last front :: e :: back)));
       borrow_member head p (init front) (last front) (e :: back);
-      let v = B.mklink (fst e) (X.last_or head (init front));
+      let v = X.mklink (fst e) (X.last_or head (init front));
       rewrite (R.pts_to (fst (last front)) #p v)
         as (R.pts_to (X.last_or head front) #p v);
       rewrite (T.trade (R.pts_to (fst (last front)) #p v)
@@ -300,10 +303,10 @@ fn borrow_predecessor (#a: Type0) (head: B.lref) (p: perm)
 }
 
 ghost
-fn borrow_first (#a: Type0) (head: B.lref) (p: perm) (es: X.entries a)
+fn borrow_first (#a: Type0) (head: X.lref) (p: perm) (es: X.entries a)
   requires ring head p es
   ensures exists* (v: N.struct_list_node).
-    R.pts_to (X.first_or head es) #p v ** pure (B.lprev v == head) **
+    R.pts_to (X.first_or head es) #p v ** pure (X.lprev v == head) **
     T.trade (R.pts_to (X.first_or head es) #p v) (ring head p es)
 {
   match es {
@@ -313,10 +316,10 @@ fn borrow_first (#a: Type0) (head: B.lref) (p: perm) (es: X.entries a)
 }
 
 ghost
-fn borrow_last (#a: Type0) (head: B.lref) (p: perm) (es: X.entries a)
+fn borrow_last (#a: Type0) (head: X.lref) (p: perm) (es: X.entries a)
   requires ring head p es
   ensures exists* (v: N.struct_list_node).
-    R.pts_to (X.last_or head es) #p v ** pure (B.lnext v == head) **
+    R.pts_to (X.last_or head es) #p v ** pure (X.lnext v == head) **
     T.trade (R.pts_to (X.last_or head es) #p v) (ring head p es)
 {
   match es {
@@ -326,7 +329,7 @@ fn borrow_last (#a: Type0) (head: B.lref) (p: perm) (es: X.entries a)
       last_is_last head es;
       rewrite (ring head p es) as (ring head p (init es @ [last es]));
       borrow_member head p (init es) (last es) [];
-      let v = B.mklink head (X.last_or head (init es));
+      let v = X.mklink head (X.last_or head (init es));
       rewrite (R.pts_to (fst (last es)) #p v) as (R.pts_to (X.last_or head es) #p v);
       rewrite (T.trade (R.pts_to (fst (last es)) #p v) (ring head p (init es @ [last es])))
         as (T.trade (R.pts_to (X.last_or head es) #p v) (ring head p es));
@@ -341,52 +344,52 @@ noeq type witness = {
 }
 
 (* Even three aliases use only three quarters. The witness fixes returned values. *)
-let view (node: B.lref) (w: witness) : slprop =
+let view (node: X.lref) (w: witness) : slprop =
   R.pts_to node #quarter w.focus_value **
-  R.pts_to (B.lnext w.focus_value) #quarter w.next_value **
-  R.pts_to (B.lprev w.focus_value) #quarter w.prev_value **
-  pure (B.lprev w.next_value == node /\ B.lnext w.prev_value == node)
+  R.pts_to (X.lnext w.focus_value) #quarter w.next_value **
+  R.pts_to (X.lprev w.focus_value) #quarter w.prev_value **
+  pure (X.lprev w.next_value == node /\ X.lnext w.prev_value == node)
 
 ghost
-fn view_from_borrows (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
+fn view_from_borrows (#a: Type0) (pl: X.ipayload a) (head node: X.lref)
                     (es: X.entries a) (v nv pv: N.struct_list_node)
   requires R.pts_to node #quarter v **
-    R.pts_to (B.lnext v) #quarter nv ** R.pts_to (B.lprev v) #quarter pv **
-    pure (B.lprev nv == node /\ B.lnext pv == node) **
+    R.pts_to (X.lnext v) #quarter nv ** R.pts_to (X.lprev v) #quarter pv **
+    pure (X.lprev nv == node /\ X.lnext pv == node) **
     T.trade (R.pts_to node #quarter v) (ring head quarter es) **
-    T.trade (R.pts_to (B.lnext v) #quarter nv) (ring head quarter es) **
-    T.trade (R.pts_to (B.lprev v) #quarter pv) (ring head quarter es) **
+    T.trade (R.pts_to (X.lnext v) #quarter nv) (ring head quarter es) **
+    T.trade (R.pts_to (X.lprev v) #quarter pv) (ring head quarter es) **
     ring head quarter es ** X.ipayload_of pl es
   ensures exists* (w: witness).
     view node w ** T.trade (view node w) (X.is_list_ring_ix pl head 1.0R es)
 {
   let w = { focus_value = v; next_value = nv; prev_value = pv };
-  rewrite (R.pts_to (B.lnext v) #quarter nv)
-    as (R.pts_to (B.lnext w.focus_value) #quarter w.next_value);
-  rewrite (R.pts_to (B.lprev v) #quarter pv)
-    as (R.pts_to (B.lprev w.focus_value) #quarter w.prev_value);
+  rewrite (R.pts_to (X.lnext v) #quarter nv)
+    as (R.pts_to (X.lnext w.focus_value) #quarter w.next_value);
+  rewrite (R.pts_to (X.lprev v) #quarter pv)
+    as (R.pts_to (X.lprev w.focus_value) #quarter w.prev_value);
   fold (view node w);
   intro (T.trade (view node w) (X.is_list_ring_ix pl head 1.0R es))
     #(T.trade (R.pts_to node #quarter v) (ring head quarter es) **
-      T.trade (R.pts_to (B.lnext v) #quarter nv) (ring head quarter es) **
-      T.trade (R.pts_to (B.lprev v) #quarter pv) (ring head quarter es) **
+      T.trade (R.pts_to (X.lnext v) #quarter nv) (ring head quarter es) **
+      T.trade (R.pts_to (X.lprev v) #quarter pv) (ring head quarter es) **
       ring head quarter es ** X.ipayload_of pl es)
   fn _ {
     unfold (view node w);
-    rewrite (R.pts_to (B.lnext w.focus_value) #quarter w.next_value)
-      as (R.pts_to (B.lnext v) #quarter nv);
-    rewrite (R.pts_to (B.lprev w.focus_value) #quarter w.prev_value)
-      as (R.pts_to (B.lprev v) #quarter pv);
+    rewrite (R.pts_to (X.lnext w.focus_value) #quarter w.next_value)
+      as (R.pts_to (X.lnext v) #quarter nv);
+    rewrite (R.pts_to (X.lprev w.focus_value) #quarter w.prev_value)
+      as (R.pts_to (X.lprev v) #quarter pv);
     T.elim_trade (R.pts_to node #quarter v) (ring head quarter es);
-    T.elim_trade (R.pts_to (B.lnext v) #quarter nv) (ring head quarter es);
-    T.elim_trade (R.pts_to (B.lprev v) #quarter pv) (ring head quarter es);
+    T.elim_trade (R.pts_to (X.lnext v) #quarter nv) (ring head quarter es);
+    T.elim_trade (R.pts_to (X.lprev v) #quarter pv) (ring head quarter es);
     ring_unquarters head es;
     X.ring_pl_in pl head 1.0R es;
   };
 }
 
 ghost
-fn member_view (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
+fn member_view (#a: Type0) (pl: X.ipayload a) (head node: X.lref)
                (front: X.entries a) (description: a) (back: X.entries a)
   requires X.is_list_ring_ix pl head 1.0R (front @ ((node, description) :: back))
   ensures exists* (w: witness).
@@ -396,7 +399,7 @@ fn member_view (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
   X.ring_pl_out pl head 1.0R (front @ ((node, description) :: back));
   ring_quarters head (front @ ((node, description) :: back));
   borrow_member head quarter front (node, description) back;
-  let v = B.mklink (X.first_or head back) (X.last_or head front);
+  let v = X.mklink (X.first_or head back) (X.last_or head front);
   fold (held node quarter v);
   borrow_successor head quarter front (node, description) back;
   with nv. assert (R.pts_to (X.first_or head back) #quarter nv);
@@ -405,21 +408,21 @@ fn member_view (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
   with pv. assert (R.pts_to (X.last_or head front) #quarter pv);
   unfold (held node quarter v);
   unfold (held (X.first_or head back) quarter nv);
-  rewrite (R.pts_to (X.first_or head back) #quarter nv) as (R.pts_to (B.lnext v) #quarter nv);
-  rewrite (R.pts_to (X.last_or head front) #quarter pv) as (R.pts_to (B.lprev v) #quarter pv);
+  rewrite (R.pts_to (X.first_or head back) #quarter nv) as (R.pts_to (X.lnext v) #quarter nv);
+  rewrite (R.pts_to (X.last_or head front) #quarter pv) as (R.pts_to (X.lprev v) #quarter pv);
   rewrite (T.trade (R.pts_to (X.first_or head back) #quarter nv)
     (ring head quarter (front @ ((node, description) :: back))))
-    as (T.trade (R.pts_to (B.lnext v) #quarter nv)
+    as (T.trade (R.pts_to (X.lnext v) #quarter nv)
       (ring head quarter (front @ ((node, description) :: back))));
   rewrite (T.trade (R.pts_to (X.last_or head front) #quarter pv)
     (ring head quarter (front @ ((node, description) :: back))))
-    as (T.trade (R.pts_to (B.lprev v) #quarter pv)
+    as (T.trade (R.pts_to (X.lprev v) #quarter pv)
       (ring head quarter (front @ ((node, description) :: back))));
   view_from_borrows pl head node (front @ ((node, description) :: back)) v nv pv;
 }
 
 ghost
-fn sentinel_view (#a: Type0) (pl: X.ipayload a) (head: B.lref) (es: X.entries a)
+fn sentinel_view (#a: Type0) (pl: X.ipayload a) (head: X.lref) (es: X.entries a)
   requires X.is_list_ring_ix pl head 1.0R es
   ensures exists* (w: witness).
     view head w ** T.trade (view head w) (X.is_list_ring_ix pl head 1.0R es)
@@ -427,7 +430,7 @@ fn sentinel_view (#a: Type0) (pl: X.ipayload a) (head: B.lref) (es: X.entries a)
   X.ring_pl_out pl head 1.0R es;
   ring_quarters head es;
   borrow_head head quarter es;
-  let v = B.mklink (X.first_or head es) (X.last_or head es);
+  let v = X.mklink (X.first_or head es) (X.last_or head es);
   fold (held head quarter v);
   borrow_first head quarter es;
   with nv. assert (R.pts_to (X.first_or head es) #quarter nv);
@@ -436,17 +439,17 @@ fn sentinel_view (#a: Type0) (pl: X.ipayload a) (head: B.lref) (es: X.entries a)
   with pv. assert (R.pts_to (X.last_or head es) #quarter pv);
   unfold (held head quarter v);
   unfold (held (X.first_or head es) quarter nv);
-  rewrite (R.pts_to (X.first_or head es) #quarter nv) as (R.pts_to (B.lnext v) #quarter nv);
-  rewrite (R.pts_to (X.last_or head es) #quarter pv) as (R.pts_to (B.lprev v) #quarter pv);
+  rewrite (R.pts_to (X.first_or head es) #quarter nv) as (R.pts_to (X.lnext v) #quarter nv);
+  rewrite (R.pts_to (X.last_or head es) #quarter pv) as (R.pts_to (X.lprev v) #quarter pv);
   rewrite (T.trade (R.pts_to (X.first_or head es) #quarter nv) (ring head quarter es))
-    as (T.trade (R.pts_to (B.lnext v) #quarter nv) (ring head quarter es));
+    as (T.trade (R.pts_to (X.lnext v) #quarter nv) (ring head quarter es));
   rewrite (T.trade (R.pts_to (X.last_or head es) #quarter pv) (ring head quarter es))
-    as (T.trade (R.pts_to (B.lprev v) #quarter pv) (ring head quarter es));
+    as (T.trade (R.pts_to (X.lprev v) #quarter pv) (ring head quarter es));
   view_from_borrows pl head head es v nv pv;
 }
 
 ghost
-fn rec member_at (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
+fn rec member_at (#a: Type0) (pl: X.ipayload a) (head node: X.lref)
                  (front back: X.entries a)
   requires X.is_list_ring_ix pl head 1.0R (front @ back) **
     pure (memP node (X.cells_of back))
@@ -479,7 +482,7 @@ fn rec member_at (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
 }
 
 ghost
-fn begin_validation (#a: Type0) (pl: X.ipayload a) (head node: B.lref) (es: X.entries a)
+fn begin_validation (#a: Type0) (pl: X.ipayload a) (head node: X.lref) (es: X.entries a)
   requires X.is_list_ring_ix pl head 1.0R es **
     pure (node == head \/ memP node (X.cells_of es))
   ensures exists* (w: witness).
@@ -498,7 +501,7 @@ fn begin_validation (#a: Type0) (pl: X.ipayload a) (head node: B.lref) (es: X.en
 }
 
 ghost
-fn end_validation (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
+fn end_validation (#a: Type0) (pl: X.ipayload a) (head node: X.lref)
                   (es: X.entries a) (#w: witness)
   requires view node w ** T.trade (view node w) (X.is_list_ring_ix pl head 1.0R es)
   ensures X.is_list_ring_ix pl head 1.0R es
@@ -507,7 +510,7 @@ fn end_validation (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
 }
 
 ghost
-fn ring_view (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
+fn ring_view (#a: Type0) (pl: X.ipayload a) (head node: X.lref)
              (front back: X.entries a)
   requires X.is_list_ring_ix pl head 1.0R (front @ back) **
     pure (node == X.last_or head front)
@@ -541,7 +544,7 @@ fn ring_view (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
 }
 
 ghost
-fn restore_ring (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
+fn restore_ring (#a: Type0) (pl: X.ipayload a) (head node: X.lref)
                 (es: X.entries a) (#w: witness)
   requires view node w ** T.trade (view node w) (X.is_list_ring_ix pl head 1.0R es)
   ensures X.is_list_ring_ix pl head 1.0R es
@@ -549,78 +552,78 @@ fn restore_ring (#a: Type0) (pl: X.ipayload a) (head node: B.lref)
   end_validation pl head node es;
 }
 
-let fields (node: B.lref) (v: N.struct_list_node) : slprop =
+let fields (node: X.lref) (v: N.struct_list_node) : slprop =
   N.struct_list_node__aux_raw_unfolded node quarter **
-  R.pts_to (N.struct_list_node__next_1 node) #quarter (B.lnext v) **
-  R.pts_to (N.struct_list_node__prev_1 node) #quarter (B.lprev v)
+  R.pts_to (N.struct_list_node__next_1 node) #quarter (X.lnext v) **
+  R.pts_to (N.struct_list_node__prev_1 node) #quarter (X.lprev v)
 
-let all_fields (node: B.lref) (w: witness) =
+let all_fields (node: X.lref) (w: witness) =
   fields node w.focus_value **
-  fields (B.lnext w.focus_value) w.next_value **
-  fields (B.lprev w.focus_value) w.prev_value
+  fields (X.lnext w.focus_value) w.next_value **
+  fields (X.lprev w.focus_value) w.prev_value
 
 (* All reads stay inside the unchanged, conditionally evaluated assertions. *)
 ghost
-fn view_open_all (node: B.lref) (#w: witness)
+fn view_open_all (node: X.lref) (#w: witness)
   requires view node w
   ensures
     N.struct_list_node__aux_raw_unfolded node quarter **
-    R.pts_to (N.struct_list_node__next_1 node) #quarter (B.lnext w.focus_value) **
-    R.pts_to (N.struct_list_node__prev_1 node) #quarter (B.lprev w.focus_value) **
-    N.struct_list_node__aux_raw_unfolded (B.lnext w.focus_value) quarter **
-    R.pts_to (N.struct_list_node__next_1 (B.lnext w.focus_value))
-      #quarter (B.lnext w.next_value) **
-    R.pts_to (N.struct_list_node__prev_1 (B.lnext w.focus_value))
-      #quarter (B.lprev w.next_value) **
-    N.struct_list_node__aux_raw_unfolded (B.lprev w.focus_value) quarter **
-    R.pts_to (N.struct_list_node__next_1 (B.lprev w.focus_value))
-      #quarter (B.lnext w.prev_value) **
-    R.pts_to (N.struct_list_node__prev_1 (B.lprev w.focus_value))
-      #quarter (B.lprev w.prev_value) **
-    pure (B.lprev w.next_value == node /\ B.lnext w.prev_value == node) **
+    R.pts_to (N.struct_list_node__next_1 node) #quarter (X.lnext w.focus_value) **
+    R.pts_to (N.struct_list_node__prev_1 node) #quarter (X.lprev w.focus_value) **
+    N.struct_list_node__aux_raw_unfolded (X.lnext w.focus_value) quarter **
+    R.pts_to (N.struct_list_node__next_1 (X.lnext w.focus_value))
+      #quarter (X.lnext w.next_value) **
+    R.pts_to (N.struct_list_node__prev_1 (X.lnext w.focus_value))
+      #quarter (X.lprev w.next_value) **
+    N.struct_list_node__aux_raw_unfolded (X.lprev w.focus_value) quarter **
+    R.pts_to (N.struct_list_node__next_1 (X.lprev w.focus_value))
+      #quarter (X.lnext w.prev_value) **
+    R.pts_to (N.struct_list_node__prev_1 (X.lprev w.focus_value))
+      #quarter (X.lprev w.prev_value) **
+    pure (X.lprev w.next_value == node /\ X.lnext w.prev_value == node) **
     T.trade (all_fields node w) (view node w)
 {
   unfold (view node w);
   N.struct_list_node__aux_raw_unfold node w.focus_value;
-  N.struct_list_node__aux_raw_unfold (B.lnext w.focus_value) w.next_value;
-  N.struct_list_node__aux_raw_unfold (B.lprev w.focus_value) w.prev_value;
+  N.struct_list_node__aux_raw_unfold (X.lnext w.focus_value) w.next_value;
+  N.struct_list_node__aux_raw_unfold (X.lprev w.focus_value) w.prev_value;
   intro (T.trade (all_fields node w) (view node w)) #emp
   fn _ {
     unfold (all_fields node w);
     unfold (fields node w.focus_value);
-    unfold (fields (B.lnext w.focus_value) w.next_value);
-    unfold (fields (B.lprev w.focus_value) w.prev_value);
-    N.struct_list_node__aux_raw_fold node (B.lnext w.focus_value) (B.lprev w.focus_value);
-    N.struct_list_node__aux_raw_fold (B.lnext w.focus_value)
-      (B.lnext w.next_value) (B.lprev w.next_value);
-    N.struct_list_node__aux_raw_fold (B.lprev w.focus_value)
-      (B.lnext w.prev_value) (B.lprev w.prev_value);
+    unfold (fields (X.lnext w.focus_value) w.next_value);
+    unfold (fields (X.lprev w.focus_value) w.prev_value);
+    N.struct_list_node__aux_raw_fold node (X.lnext w.focus_value) (X.lprev w.focus_value);
+    N.struct_list_node__aux_raw_fold (X.lnext w.focus_value)
+      (X.lnext w.next_value) (X.lprev w.next_value);
+    N.struct_list_node__aux_raw_fold (X.lprev w.focus_value)
+      (X.lnext w.prev_value) (X.lprev w.prev_value);
     fold (view node w);
   };
 }
 
 ghost
-fn view_close_all (node: B.lref) (#w: witness)
+fn view_close_all (node: X.lref) (#w: witness)
   requires
     N.struct_list_node__aux_raw_unfolded node quarter **
-    R.pts_to (N.struct_list_node__next_1 node) #quarter (B.lnext w.focus_value) **
-    R.pts_to (N.struct_list_node__prev_1 node) #quarter (B.lprev w.focus_value) **
-    N.struct_list_node__aux_raw_unfolded (B.lnext w.focus_value) quarter **
-    R.pts_to (N.struct_list_node__next_1 (B.lnext w.focus_value))
-      #quarter (B.lnext w.next_value) **
-    R.pts_to (N.struct_list_node__prev_1 (B.lnext w.focus_value))
-      #quarter (B.lprev w.next_value) **
-    N.struct_list_node__aux_raw_unfolded (B.lprev w.focus_value) quarter **
-    R.pts_to (N.struct_list_node__next_1 (B.lprev w.focus_value))
-      #quarter (B.lnext w.prev_value) **
-    R.pts_to (N.struct_list_node__prev_1 (B.lprev w.focus_value))
-      #quarter (B.lprev w.prev_value) **
+    R.pts_to (N.struct_list_node__next_1 node) #quarter (X.lnext w.focus_value) **
+    R.pts_to (N.struct_list_node__prev_1 node) #quarter (X.lprev w.focus_value) **
+    N.struct_list_node__aux_raw_unfolded (X.lnext w.focus_value) quarter **
+    R.pts_to (N.struct_list_node__next_1 (X.lnext w.focus_value))
+      #quarter (X.lnext w.next_value) **
+    R.pts_to (N.struct_list_node__prev_1 (X.lnext w.focus_value))
+      #quarter (X.lprev w.next_value) **
+    N.struct_list_node__aux_raw_unfolded (X.lprev w.focus_value) quarter **
+    R.pts_to (N.struct_list_node__next_1 (X.lprev w.focus_value))
+      #quarter (X.lnext w.prev_value) **
+    R.pts_to (N.struct_list_node__prev_1 (X.lprev w.focus_value))
+      #quarter (X.lprev w.prev_value) **
     T.trade (all_fields node w) (view node w)
   ensures view node w
 {
   fold (fields node w.focus_value);
-  fold (fields (B.lnext w.focus_value) w.next_value);
-  fold (fields (B.lprev w.focus_value) w.prev_value);
+  fold (fields (X.lnext w.focus_value) w.next_value);
+  fold (fields (X.lprev w.focus_value) w.prev_value);
   fold (all_fields node w);
   T.elim_trade (all_fields node w) (view node w);
 }
