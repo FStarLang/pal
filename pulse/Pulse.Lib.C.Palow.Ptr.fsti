@@ -104,6 +104,46 @@ val addr_of_sub (a: ptr) (n: SZ.t { SZ.v n <= addr_of a })
            prov_of (a -! n) == prov_of a)
           [SMTPat (addr_of (a -! n))]
 
+(* The same offset backwards, total.
+
+   `_container_of` -- Linux's `container_of`, MsQuic's
+   `CXPLAT_CONTAINING_RECORD` -- recovers a pointer to an enclosing structure
+   from a pointer to one of its fields. The offset it subtracts fits only
+   because the field pointer really does point into such a structure, and that
+   is a fact about the caller's ownership, not about the expression: nothing in
+   `p` itself says it is `&s->f` rather than an arbitrary address. So the
+   subtraction is total for the same reason `( +! )` is -- forming a pointer is
+   never an error here, only accessing through one -- and coincides with
+   `( -! )` wherever that is defined.
+
+   What the offset is below that point is deliberately unspecified. A caller
+   who knows the field pointer came from a structure knows it as
+   `base +! offset`, and the round trip below is then exactly the
+   `container (proj p) == p` the old model had to generate a lemma for. *)
+val ( -? ) (a: ptr) (n: SZ.t) : ptr
+
+val addr_of_sub_wrap (a: ptr) (n: SZ.t)
+  : Lemma (requires SZ.v n <= addr_of a)
+          (ensures addr_of (a -? n) == addr_of a - SZ.v n /\
+                   prov_of (a -? n) == prov_of a)
+          [SMTPat (addr_of (a -? n))]
+
+(* Derivable from the two lemmas above by `ptr_ext` -- `addr_of (a +! n)` is at
+   least `SZ.v n`, so the offset fits -- and stated here so that it fires
+   without one. *)
+val add_sub_wrap (a: ptr) (n: SZ.t)
+  : Lemma ((a +! n) -? n == a)
+          [SMTPat ((a +! n) -? n)]
+
+(* Offset zero is the identity, which is what makes a `_container_of` on a
+   first member pointer identity -- and, in particular, NULL-preserving. That
+   matters: an intrusive list whose link sits at offset 0 is walked by
+   recovering the node from the link, and a NULL terminator has to survive the
+   recovery or the walk never ends. *)
+val sub_wrap_zero (a: ptr)
+  : Lemma (a -? 0sz == a)
+          [SMTPat (a -? 0sz)]
+
 (* Ranges of addresses. `disjoint_ranges` is what `mem_pts_to_disjoint` returns:
    it is stated on addresses rather than on allocations because it is also what
    client code needs in order to conclude that two objects do not overlap. *)

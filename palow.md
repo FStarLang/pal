@@ -2162,8 +2162,44 @@ new facts about memory.
    `is_valid`, the wrapper carrying the callee's ownership, and the indirect
    call through it are all ordinary translated code.
 
-   As of this milestone: **771 specifications, 621 of them with real bodies,
-   150 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   `_container_of` came next, and it is the clearest thing the flat pointer
+   has bought so far. Recovering an enclosing structure from a pointer to one
+   of its fields -- Linux's `container_of`, MsQuic's
+   `CXPLAT_CONTAINING_RECORD` -- was, in the old model, a generated projection
+   per field with two round-trip lemmas each, because a `ref` to a field and a
+   `ref` to the structure were different kinds of thing and nothing related
+   them but those lemmas. Here both are addresses, so the recovery is a
+   subtraction and the projection back down is the matching addition, and the
+   round trip is an equation about arithmetic rather than a generated axiom.
+
+   The subtraction has to be total, and that is the one thing worth stating
+   carefully. The offset fits only because the field pointer really does point
+   into such a structure, and nothing in the pointer says so: `p` alone does
+   not know it is `&s->f` rather than an arbitrary address. So `( -? )` is
+   total in exactly the way `( +! )` already is -- forming a pointer is never
+   an error here, only accessing through one -- and agrees with the refined
+   `( -! )` wherever that is defined. What it is below zero is left
+   unspecified, which is enough: a caller who knows the pointer came from a
+   structure knows it as `base +! offset`, and `(a +! n) -? n == a` is then
+   the whole round trip. Offset zero is the identity, which is what makes a
+   first-member recovery NULL-preserving -- an intrusive list whose link sits
+   at offset 0 is walked by recovering the node from the link, and the NULL
+   terminator has to survive that or the walk never ends.
+
+   `&s.f` became an address at the same time, and for a related reason: taking
+   an address reads nothing, so it needs no ownership and no focus that would
+   have to stay open past the statement. It is the structure's address plus
+   the field's offset and that is all it ever was; the old refusal was an
+   artefact of reaching for the machinery that *accesses* a field.
+
+   `containing_record` is ported to this spelling and now states its contract
+   rather than dropping it. What remains admitted there is honest and is the
+   next cluster: a local that holds a pointer whose ownership the contract
+   granted in the author's own Pulse is opaque to the emitter, which cannot
+   see that the text covers the address the local holds.
+
+   As of this milestone: **771 specifications, 622 of them with real bodies,
+   149 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

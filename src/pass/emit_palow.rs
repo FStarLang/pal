@@ -1244,6 +1244,27 @@ impl<'a> Spec<'a> {
                     Err(format!("`{}` in a contract", v.val))
                 }
             }
+            // As in a body: the enclosing structure is the field pointer less
+            // the field's offset.
+            ExprT::ContainerOf(inner, ty, field) => {
+                let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(ty).val else {
+                    return Err(format!(
+                        "`_container_of` of {}",
+                        describe(self.tds.resolve(ty))
+                    ));
+                };
+                if !self.tds.structs.contains_key(&*sname.val) {
+                    return Err(format!(
+                        "`_container_of` of {}",
+                        describe(self.tds.resolve(ty))
+                    ));
+                }
+                let base = self.value(inner, w)?;
+                Ok(format!(
+                    "({} -? struct_{}_offsetof_{})",
+                    base, sname.val, field.val
+                ))
+            }
             ExprT::Deref(inner) => self.pointee_at(inner, None, w),
             ExprT::Index(base, idx) if matches!(strip_vattr(base).val, ExprT::Var(_)) => {
                 self.pointee_at(base, Some(idx), w)
@@ -5494,6 +5515,16 @@ impl<'a> Body<'a> {
                     expr_kind_of(other)
                 )),
             },
+            // `&s.f` is the structure's address plus the field's offset.
+            // Taking an address needs no ownership -- nothing is read by it --
+            // so this does not have to open the field the way an access does,
+            // and there is no focus left hanging past the statement.
+            ExprT::Member(base, f) => {
+                let (sn, _) = self.struct_of(base)?;
+                self.field_ty(base, f)?;
+                let a = self.addr(base)?;
+                Ok(format!("({} +! {}_offsetof_{})", a, sn, f.val))
+            }
             ExprT::VAttr(_, inner) => self.addr(inner),
             other => Err(format!(
                 "{}, which is not an lvalue Palow can address",
@@ -6959,6 +6990,33 @@ impl<'a> Body<'a> {
                 self.lines
                     .push(format!("drop_is_valid {} {} {};", addr, pre, post));
                 Ok(t)
+            }
+            // `_container_of` recovers the enclosing structure from a pointer
+            // to one of its fields. In the old model that was a generated
+            // projection with a pair of round-trip lemmas, because a `ref` to
+            // a field was a different kind of thing from a `ref` to the
+            // struct. Here both are addresses, so it is a subtraction, and the
+            // round trip is `add_sub_wrap`: a caller who knows the field
+            // pointer came from a structure knows it as `base +! offset`, and
+            // that is exactly the form the lemma fires on.
+            ExprT::ContainerOf(inner, ty, field) => {
+                let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(ty).val else {
+                    return Err(format!(
+                        "`_container_of` of {}",
+                        describe(self.tds.resolve(ty))
+                    ));
+                };
+                if !self.tds.structs.contains_key(&*sname.val) {
+                    return Err(format!(
+                        "`_container_of` of {}",
+                        describe(self.tds.resolve(ty))
+                    ));
+                }
+                let base = self.rvalue(inner)?;
+                Ok(format!(
+                    "({} -? struct_{}_offsetof_{})",
+                    base, sname.val, field.val
+                ))
             }
             ExprT::SizeOf(t) => {
                 let n = palow_sizeof(self.tds, t)
