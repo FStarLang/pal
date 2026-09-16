@@ -1260,9 +1260,9 @@ impl<'a> Spec<'a> {
                     ));
                 }
                 let base = self.value(inner, w)?;
-                Ok(format!(
-                    "({} -? struct_{}_offsetof_{})",
-                    base, sname.val, field.val
+                Ok(sub_offset(
+                    base,
+                    &format!("struct_{}_offsetof_{}", sname.val, field.val),
                 ))
             }
             ExprT::Deref(inner) => self.pointee_at(inner, None, w),
@@ -5407,6 +5407,35 @@ impl<'a> Body<'a> {
         self.aliases.get(&v).cloned()
     }
 
+    /// Whether a pointer expression is a fixed function of the function's
+    /// parameters: the same address every time it is written, computed by
+    /// arithmetic on a name the body never rebinds and never read out of
+    /// memory.
+    ///
+    /// Dereferencing one is allowed for the same reason dereferencing a
+    /// parameter is. A parameter's pointee is the contract's business -- the
+    /// emitter does not check that the ownership is there, it emits the access
+    /// and lets slprop matching find it -- and an expression like
+    /// `_container_of(node, struct outer, node)` is as much a parameter's
+    /// pointee as `node` is, since it denotes one fixed object for the whole
+    /// call. A pointer *loaded* out of memory is not: what it addresses
+    /// depends on what was stored, which the contract would have to grant
+    /// separately.
+    fn stable_ptr(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) => {
+                // An alias is a name for a place, and the alias map has
+                // already established that the place is the same one for the
+                // whole call.
+                self.aliases.contains_key(&*v.val.to_string())
+                    || (self.params.contains(&*v.val.to_string())
+                        && !self.slots.iter().any(|s| s.name == *v.val))
+            }
+            ExprT::ContainerOf(inner, _, _) | ExprT::Cast(inner, _) => self.stable_ptr(inner),
+            _ => false,
+        }
+    }
+
     /// The address of an lvalue, as an F* expression of type `ptr`.
     fn addr(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
@@ -5510,6 +5539,7 @@ impl<'a> Body<'a> {
                     "a dereference of local `{}`, whose target the contract does not grant",
                     v.val
                 )),
+                _ if self.stable_ptr(inner) => self.rvalue(inner),
                 other => Err(format!(
                     "a dereference of {}, whose target the contract does not grant",
                     expr_kind_of(other)
@@ -6502,8 +6532,14 @@ impl<'a> Body<'a> {
                 self.uses.insert(v.clone());
                 return Ok(a);
             }
-            if self.aliases.contains_key(&v) {
-                return Err(format!("`{}`, whose place would have to escape", v));
+            // The value of an alias is the address of the place it stands
+            // for, and an address is not ownership: nothing is read by taking
+            // one and no focus is opened, so handing it out costs nothing.
+            // Whoever accesses through it still has to have the ownership,
+            // which is where the obligation belongs.
+            if let Some(place) = self.aliases.get(&v).cloned() {
+                self.uses.insert(v.clone());
+                return self.addr(&place);
             }
         }
         match &e.val {
@@ -7013,9 +7049,9 @@ impl<'a> Body<'a> {
                     ));
                 }
                 let base = self.rvalue(inner)?;
-                Ok(format!(
-                    "({} -? struct_{}_offsetof_{})",
-                    base, sname.val, field.val
+                Ok(sub_offset(
+                    base,
+                    &format!("struct_{}_offsetof_{}", sname.val, field.val),
                 ))
             }
             ExprT::SizeOf(t) => {
@@ -9030,8 +9066,98 @@ fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
             })
         });
         if cand.len() == before {
-            return cand.into_iter().collect();
+            break;
         }
+    }
+
+    // A local that is assigned once from a pointer expression built only out
+    // of names the body never rebinds stands for one fixed object for the
+    // whole call, so it is an alias too -- of the place that expression
+    // dereferences. `struct outer *parent = _container_of(node, struct outer,
+    // node);` is the case that matters, and it is the ordinary way C spells
+    // the recovery: the recovery itself is a name for the enclosing object,
+    // not a pointer variable anyone stores through.
+    //
+    // No `&` was taken here, so nothing is charged to the fixpoint above and
+    // nothing has to be paid back.
+    let mut out: HashMap<String, Rc<Expr>> = cand.into_iter().collect();
+    for st in body.iter() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        // The one assignment is the whole story: if `q` is written again, or
+        // its address is taken, it is an object after all.
+        if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) || out.contains_key(&q) {
+            continue;
+        }
+        if !derived_ptr(rhs) {
+            continue;
+        }
+        let mut used = Touched::default();
+        touch_expr(rhs, &mut used);
+        // A name the expression is built from must denote the same object
+        // for the whole call: a parameter the body never rebinds, or another
+        // alias, which is a name for a place and not an object that can be
+        // written.
+        if !used.vars.iter().all(|v| {
+            out.contains_key(v)
+                || (!locals.contains(v) && t.rebound.get(v).copied().unwrap_or(0) == 0)
+        }) {
+            continue;
+        }
+        out.insert(
+            q,
+            ExprT::Deref(rhs.clone()).with_loc(st.loc.clone()) as Rc<Expr>,
+        );
+    }
+    out
+}
+
+/// Whether an expression names an address by arithmetic alone -- no load, no
+/// call -- so that it denotes the same object every time it is written.
+/// Subtract a field offset from an address, cancelling it syntactically
+/// against an addition of the same offset.
+///
+/// `add_sub_wrap` says the two undo each other, but a lemma is of no help to
+/// the frame matcher, which compares addresses as terms and does not call the
+/// solver. Casting a pointer out to an initial member and back is exactly this
+/// pattern, so the cancellation has to happen in the text.
+fn sub_offset(base: String, off: &str) -> String {
+    let suffix = format!(" +! {})", off);
+    if let Some(inner) = base.strip_prefix('(').and_then(|b| b.strip_suffix(&suffix))
+        && balanced(inner)
+    {
+        return inner.to_string();
+    }
+    format!("({} -? {})", base, off)
+}
+
+/// Whether every parenthesis in `s` is closed within it.
+fn balanced(s: &str) -> bool {
+    let mut d = 0i32;
+    for c in s.chars() {
+        match c {
+            '(' => d += 1,
+            ')' => {
+                d -= 1;
+                if d < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    d == 0
+}
+
+fn derived_ptr(e: &Expr) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::ContainerOf(inner, _, _) => derived_ptr(inner) || lvalue_name(inner).is_some(),
+        ExprT::Cast(inner, _) => derived_ptr(inner),
+        _ => false,
     }
 }
 

@@ -2198,8 +2198,44 @@ new facts about memory.
    granted in the author's own Pulse is opaque to the emitter, which cannot
    see that the text covers the address the local holds.
 
-   As of this milestone: **771 specifications, 622 of them with real bodies,
-   149 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   A pointer that is a fixed function of the parameters denotes one object
+   for the whole call, and so a dereference of it is a parameter's dereference
+   in every sense that matters. `addr` already lets a bare parameter's
+   dereference through without asking who owns the target -- that is the
+   contract's business and the frame matcher's to find -- and the same is now
+   true of `_container_of(node, struct outer, node)` and of casts of such an
+   expression. A pointer *loaded out of memory* is deliberately not admitted
+   to this club: what it addresses depends on what was last stored there.
+   `struct outer *parent = _container_of(node, struct outer, node);` is C's
+   ordinary spelling of the recovery, and the local it binds is a name for an
+   object rather than a pointer variable anyone stores through, so the alias
+   map now records it as such.
+
+   The value of an alias followed from that. An alias is a name for a place,
+   and the *value* of such a name is the place's address -- which is not
+   ownership: nothing is read by taking an address, no focus is opened, and
+   whoever accesses through it still has to hold the permission. The old
+   refusal ("whose place would have to escape") was inherited from a model in
+   which a field's address could only be got by opening it. Aliases may now
+   also be built out of other aliases, which is what a cast out to an initial
+   member and back is made of.
+
+   That round trip exposed the one place where a lemma is not enough.
+   `add_sub_wrap` says `(p +! n) -? n == p`, but the Pulse frame matcher
+   compares addresses as terms and does not call the solver, so a focus
+   emitted at `((o +! off_in) +! off_x -? off_x) -? off_in` will not match
+   ownership held at `o`. The cancellation therefore happens in the emitted
+   text: subtracting an offset from an address that is syntactically an
+   addition of that same offset just removes the addition.
+   `struct_first_field_cast` and `struct_transitive_first_field_cast` are
+   ported on that basis and translate with no admits at all -- including the
+   two round-trip functions, which in the old model needed hand-written ghost
+   `rewrite` bridges to re-address every cell the write touched, and in Palow
+   need nothing, because the recovered pointer *is* the original address
+   rather than a second name for it.
+
+   As of this milestone: **771 specifications, 630 of them with real bodies,
+   141 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
