@@ -2345,9 +2345,42 @@ new facts about memory.
    what makes a `_out` parameter refined to be NULL vacuous rather than merely
    unprovable, which is what the test checks.
 
+   Two things the count was saying wrongly have been separated out. A
+   function declared in a header and defined in some other translation unit
+   was being reported as an admitted body, which made the coverage number
+   blame the translation for six functions it was never given any C for.
+   There is nothing to verify about such a declaration: its contract is the
+   promise the other half of the link makes, and the honest thing is to assume
+   it in so many words. It is now emitted as `assume (pure False); unreachable
+   ()` -- the same shape the existing emitter uses -- behind an `(* external:
+   the contract is assumed *)` marker, and counted in a column of its own.
+
+   `_refine_value` is translated. It is the annotation that says a pointer's
+   invariant is not about the pointer but about some abstract value the
+   invariant itself quantifies over -- a list of the elements reachable from a
+   list head, the specification-level state of a DPE context, the validity of
+   a function pointer stored in a field. Palow had been refusing it on the
+   grounds that "it binds a name the contract machinery does not carry", which
+   was true and is now false: the binder becomes an erased implicit on the way
+   in and a fresh existential on the way out, exactly like the value of a
+   pointee, and the clause itself follows the same split as every other
+   refinement -- an `_slprop` is ownership and stands beside the points-to,
+   anything else is a proposition and goes under a `pure`. That took seven
+   contracts off the dropped list, including `func_pointer`'s cross-function
+   dispatch through a struct field.
+
+   It also revealed a limit worth recording. The name a `_refine_value` binds
+   is in scope only inside the refinement that introduces it, so a function
+   cannot relate that abstract value to its own arguments or result -- which
+   is much of the reason to have one. Putting it in scope is a front-end
+   change that would affect the existing emitter too, so it is left alone
+   here; `inline_array_aliasing` states its aliasing claim in C instead, as an
+   equation between two field reads, and that spelling is dropped and counted
+   under the field-through-a-pointer gap rather than weakened in silence.
+
    As of this milestone: **788 specifications, 668 of them with real bodies,
-   120 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
-   F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
+   114 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
    mattered.

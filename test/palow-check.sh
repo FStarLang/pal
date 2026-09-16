@@ -79,4 +79,8 @@ fi
 emitted=$(cat "$WORK"/*/*.fst | grep '^fn ' | grep -cvE '^fn (rec )?(struct|union|array)_|__fp ')
 skipped=$(cat "$WORK"/*/*.fst | grep -c '^(\* skipped')
 admitted=$(cat "$WORK"/*/*.fst | grep -c 'admit() (\* body')
-echo "palow-check: ok; $emitted specifications, $((emitted - admitted)) with bodies, $admitted admitted, $skipped skipped"
+# A function declared here and defined elsewhere has no body to translate, so
+# it is neither covered nor a gap. Counting it as an admit would make the
+# measurement say the translation failed at something it was never given.
+external=$(cat "$WORK"/*/*.fst | grep -c '(\* external:')
+echo "palow-check: ok; $emitted specifications, $((emitted - admitted - external)) with bodies, $admitted admitted, $external external, $skipped skipped"

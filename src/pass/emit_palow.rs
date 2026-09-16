@@ -593,23 +593,88 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
 /// `_refine_uninit` is returned separately, in the second component: it holds
 /// only while the storage is unwritten, so it belongs beside
 /// `<t>_pts_to_uninit` and nowhere else, and a parameter that never has an
-/// uninitialised points-to cannot state it at all. `_refine_value` is still
-/// refused, because it binds a name the contract machinery does not carry.
-fn refinements(tds: &Typedefs, ty: &Type) -> Result<(Vec<Rc<Expr>>, Vec<Rc<Expr>>), String> {
+/// uninitialised points-to cannot state it at all. A `_refine_value` comes
+/// back in the third bucket, together with the name and type it binds: unlike
+/// the other two it is not a closed clause, so whoever states it has to
+/// produce the value it quantifies over as well.
+type Refinements = (
+    Vec<Rc<Expr>>,
+    Vec<Rc<Expr>>,
+    Vec<(Rc<Ident>, Rc<Type>, Rc<Expr>)>,
+);
+
+fn refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
     match &tds.resolve(ty).val {
         TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
-            let (mut v, u) = refinements(tds, t)?;
+            let (mut v, u, b) = refinements(tds, t)?;
             v.push(p.clone());
-            Ok((v, u))
+            Ok((v, u, b))
         }
         TypeT::RefineUninit(t, p) => {
-            let (v, mut u) = refinements(tds, t)?;
+            let (v, mut u, b) = refinements(tds, t)?;
             u.push(p.clone());
-            Ok((v, u))
+            Ok((v, u, b))
         }
-        TypeT::RefineValue(..) => Err("a `_refine_value`".to_string()),
+        TypeT::RefineValue(t, n, vty, p) => {
+            let (v, u, mut b) = refinements(tds, t)?;
+            b.push((n.clone(), vty.clone(), p.clone()));
+            Ok((v, u, b))
+        }
         TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => refinements(tds, t),
-        _ => Ok((Vec::new(), Vec::new())),
+        _ => Ok((Vec::new(), Vec::new(), Vec::new())),
+    }
+}
+
+/// Turn the `_refine_value`s found on one parameter into the shape the
+/// contract builder wants, or record why they cannot be stated.
+///
+/// The binder gets a name built from the parameter and the name the source
+/// chose, so that two parameters refined against the same vocabulary do not
+/// collide. A binder whose type has no F* counterpart is the one failure:
+/// there is then nothing to quantify over, and a clause mentioning it would
+/// be a clause about nothing.
+/// One `_refine_value` as the contract builder needs it: the parameter it is
+/// written on, that parameter's type, the binder's name and type as the source
+/// wrote them, the F* name and type the generated contract will use for it,
+/// and the clause.
+type RefineValueOn = (
+    String,
+    Rc<Type>,
+    Rc<Ident>,
+    Rc<Type>,
+    String,
+    String,
+    Rc<Expr>,
+);
+
+fn collect_valued(
+    into: &mut Vec<RefineValueOn>,
+    err: &mut Option<String>,
+    tds: &Typedefs,
+    base: &str,
+    ty: &Rc<Type>,
+    bs: Vec<(Rc<Ident>, Rc<Type>, Rc<Expr>)>,
+) {
+    for (n, vty, p) in bs {
+        match fstar_type(tds, &vty) {
+            Some(f) => into.push((
+                base.to_string(),
+                ty.clone(),
+                n.clone(),
+                vty.clone(),
+                format!("val_{}_{}", base, n.val),
+                f,
+                p,
+            )),
+            None => {
+                err.get_or_insert(format!(
+                    "parameter var_{} is refined against {}, which is {}",
+                    base,
+                    n.val,
+                    describe(tds.resolve(&vty))
+                ));
+            }
+        }
     }
 }
 
@@ -1447,6 +1512,12 @@ impl<'a> Spec<'a> {
     }
 }
 
+/// The reason string for a function declared here and defined elsewhere. It
+/// travels through the same `Result` as a translation failure, and is picked
+/// out again where the body is written, because everything in between -- the
+/// divergence fixpoint, the call-graph sort -- treats "no body" alike.
+const EXTERNAL: &str = "it has no definition here";
+
 /// Build the F* definition for one `_let`, or explain why we cannot.
 ///
 /// A `_let` exists only at specification level: it is a name for a
@@ -1757,6 +1828,10 @@ fn emit_fn(
     // `_refine_uninit` clauses, kept apart because they are stated only where
     // the unwritten points-to is: on the way in, for an `_out` parameter.
     let mut refines_uninit: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
+    // A `_refine_value` on a parameter: the parameter it is written on, that
+    // parameter's type, the name of the binder the contract quantifies over,
+    // the F* type of that binder, and the clause itself.
+    let mut refines_value: Vec<RefineValueOn> = Vec::new();
     let mut refine_err: Option<String> = None;
     // Parameters whose ownership the contract puts behind `unless_null`.
     let mut guarded: HashSet<String> = HashSet::new();
@@ -1782,7 +1857,7 @@ fn emit_fn(
         // A `_refine_uninit` is a claim about storage the callee is handed
         // unwritten. Anywhere else there is no uninitialised points-to for it
         // to sit beside, so saying it would be saying it of nothing.
-        if let Ok((_, u)) = refinements(tds, &arg.ty)
+        if let Ok((_, u, _)) = refinements(tds, &arg.ty)
             && !u.is_empty()
             && !matches!(arg.mode, ParamMode::Out)
         {
@@ -1798,10 +1873,11 @@ fn emit_fn(
         // about the value, and one on a function pointer is a claim about the
         // code, and neither has a pointee to hang from.
         if pointee(tds, &arg.ty).is_none()
-            && let Ok((ps, _)) = refinements(tds, &arg.ty)
+            && let Ok((ps, _, bs)) = refinements(tds, &arg.ty)
         {
             let base = pname.trim_start_matches("var_").to_string();
             refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+            collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
         }
 
         let Some(pt) = pointee(tds, &arg.ty) else {
@@ -1830,9 +1906,10 @@ fn emit_fn(
         // is what the dropped-contract path already does, and which is what
         // stops a caller from proving against the weaker version.
         match refinements(tds, &arg.ty) {
-            Ok((ps, us)) => {
+            Ok((ps, us, bs)) => {
                 refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
                 refines_uninit.extend(us.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+                collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
             }
             Err(why) => {
                 refine_err.get_or_insert(format!("parameter {} carries {}", pname, why));
@@ -1898,7 +1975,7 @@ fn emit_fn(
         // against a precondition the caller never granted.
         if null_guard {
             if refinements(tds, &arg.ty)
-                .map(|(ps, us)| !ps.is_empty() || !us.is_empty())
+                .map(|(ps, us, bs)| !ps.is_empty() || !us.is_empty() || !bs.is_empty())
                 .unwrap_or(true)
             {
                 refine_err.get_or_insert(format!(
@@ -2078,16 +2155,23 @@ fn emit_fn(
     // `as_value` forces the second reading below. A `_refine_uninit` needs it:
     // the storage it talks about has no value, so `$(this)` can only mean the
     // pointer itself, even for a parameter that does have a pointee entry.
+    // `bind` is what a `_refine_value` adds: besides `$(this)` the clause may
+    // name the value the contract quantifies over, and that name is spelled
+    // differently at the two ends of the contract, so the caller supplies it.
     let with_this = |base: &str,
                      ty: &Rc<Type>,
                      p: &Rc<Expr>,
                      w: When,
                      as_value: bool,
+                     bind: Option<(&Rc<Ident>, String, &Rc<Type>)>,
                      how: &dyn Fn(&Spec, When) -> Result<String, String>|
      -> Result<String, String> {
         let mut pointees = spec.pointees.clone();
         let mut arrays = spec.arrays.clone();
         let mut locals = HashMap::new();
+        if let Some((n, spelling, _)) = &bind {
+            locals.insert(n.val.to_string(), spelling.clone());
+        }
         // `$(this)` means the parameter. Which parameter it is decides what
         // that means: for a pointer it is the storage the contract grants,
         // so `this` inherits the pointee entry and `$(this)` reads through
@@ -2131,6 +2215,9 @@ fn emit_fn(
                 crate::env::LocalDeclKind::LValue
             },
         );
+        if let Some((n, _, vty)) = &bind {
+            env.push_var_decl(n, (*vty).clone(), crate::env::LocalDeclKind::RValue);
+        }
         let inner = Spec {
             tds,
             env: &env,
@@ -2149,7 +2236,9 @@ fn emit_fn(
         r
     };
     let refine_clause = |base: &str, ty: &Rc<Type>, p: &Rc<Expr>, w: When, as_value: bool| {
-        with_this(base, ty, p, w, as_value, &|sp: &Spec, w| sp.prop(p, w))
+        with_this(base, ty, p, w, as_value, None, &|sp: &Spec, w| {
+            sp.prop(p, w)
+        })
     };
     // Whether a parameter's ownership is stated at this end of the contract,
     // which is also where its refinements belong.
@@ -2218,7 +2307,7 @@ fn emit_fn(
                 match allocated_own(tds, ty, &format!("var_{}", base), code)? {
                     Some(t) => t,
                     None => {
-                        let t = with_this(base, ty, p, w, false, &|sp: &Spec, w| {
+                        let t = with_this(base, ty, p, w, false, None, &|sp: &Spec, w| {
                             sp.inline_pulse(code, w)
                         })?;
                         // A spliced ownership refinement on a function pointer
@@ -2272,6 +2361,63 @@ fn emit_fn(
         }
     }
 
+    // `_refine_value` is a refinement that quantifies. The value it binds is
+    // not the parameter's and not the pointee's -- it is whatever the author's
+    // predicate says it is -- so it becomes an erased implicit on the way in
+    // and a fresh existential on the way out, exactly like a pointee value.
+    // What the clause then *is* follows the same split as every other
+    // refinement: an `_slprop` is ownership and stands beside the points-to,
+    // anything else is a proposition and goes under a `pure`.
+    let mut value_req: Vec<String> = Vec::new();
+    let mut value_fresh: Vec<(String, String, String)> = Vec::new();
+    let mut value_err: Option<String> = None;
+    for (base, ty, ident, vty, binder, fty, p) in &refines_value {
+        let both = spec.pointees.get(base).is_none();
+        let wrap = |t: String| match slprop_refine(tds, p) {
+            Some(_) => t,
+            None => format!("pure ({})", t),
+        };
+        let how = |sp: &Spec, w: When| match slprop_refine(tds, p) {
+            Some(code) => sp.inline_pulse(code, w),
+            None => sp.prop(p, w),
+        };
+        match with_this(
+            base,
+            ty,
+            p,
+            When::Pre,
+            false,
+            Some((ident, format!("(reveal {})", binder), vty)),
+            &how,
+        ) {
+            Ok(t) => {
+                ghosts.push(format!("(#{}: erased ({}))", binder, fty));
+                value_req.push(wrap(t));
+            }
+            Err(why) => {
+                value_err.get_or_insert(why);
+                continue;
+            }
+        }
+        if !(both || stated(base, When::Post)) {
+            continue;
+        }
+        match with_this(
+            base,
+            ty,
+            p,
+            When::Post,
+            false,
+            Some((ident, format!("{}'", binder), vty)),
+            &how,
+        ) {
+            Ok(t) => value_fresh.push((format!("{}'", binder), fty.clone(), wrap(t))),
+            Err(why) => {
+                value_err.get_or_insert(why);
+            }
+        }
+    }
+
     let mut own_pre: Vec<String> = Vec::new();
     let mut own_post: Vec<String> = Vec::new();
     let contract = translate(&req_props, When::Pre)
@@ -2284,9 +2430,11 @@ fn emit_fn(
             Ok((pre, post))
         });
     let (pre_props, post_props, contract_ok, dropped) = match contract {
-        Ok((pre, post)) if slprop_err.is_none() => {
+        Ok((pre, post)) if slprop_err.is_none() && value_err.is_none() => {
             req.extend(own_pre.iter().cloned());
+            req.extend(value_req.iter().cloned());
             owned_post.extend(own_post.iter().cloned());
+            fresh.extend(value_fresh.iter().cloned());
             (pre, post, true, None)
         }
         contract => {
@@ -2298,7 +2446,7 @@ fn emit_fn(
             owned_post.clear();
             let why = match contract {
                 Err(why) => why,
-                _ => slprop_err.unwrap_or_default(),
+                _ => slprop_err.or(value_err).unwrap_or_default(),
             };
             (
                 Vec::new(),
@@ -4734,7 +4882,7 @@ pub fn emit_palow(
             let empty = HashSet::new();
             let no = forbidden.get(&it.name).unwrap_or(&empty);
             let body = match it.defn {
-                None => Err("it has no definition here".to_string()),
+                None => Err(EXTERNAL.to_string()),
                 Some(d) => emit_body(&tds, it.env.clone(), d, sig, &callees, no, &divergent_fns),
             };
             if matches!(&body, Ok(b) if b.divergent) {
@@ -4757,6 +4905,17 @@ pub fn emit_palow(
                         out += &format!("  {}\n", l);
                     }
                     out += "}\n\n";
+                }
+                // A declaration with no definition in this translation unit
+                // is not a translation gap: there is no C here to translate,
+                // and its contract is what the linker's other half promises.
+                // It is assumed, in the same words the old emitter uses, and
+                // counted apart from the bodies this translation could not
+                // produce -- counting the two together would make the
+                // coverage measurement say something it does not mean.
+                Err(why) if why == EXTERNAL => {
+                    out += "{\n  (* external: the contract is assumed *)\n  \
+                            assume (pure False);\n  unreachable ()\n}\n\n";
                 }
                 Err(why) => {
                     out += &format!("{{\n  admit() (* body: {} *)\n}}\n\n", why);
