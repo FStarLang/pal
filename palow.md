@@ -2482,8 +2482,30 @@ new facts about memory.
    and validity gathered at an indirect call through such a parameter is put
    down rather than left over.
 
-   As of this milestone: **787 specifications, 684 of them with real bodies,
-   97 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   A local struct is built one field at a time, and between the first
+   assignment and the last it is neither storage nor a value. The focus
+   operations cannot say that -- a focus opens a value and puts the same
+   value back -- so the object is *scattered* into its fields' storage on the
+   first write and *gathered* back into a value on the last, with each field
+   in between written through its own address and nothing open around it.
+   Both halves are generated per struct and both proofs are a single
+   `unfold` or `fold`: `_pts_to_uninit` was already field-by-field, which is
+   the whole reason this works. A third operation, `_gather_uninit`, is the
+   way back for an object that went out of scope half-built -- each written
+   field gives its value up on its own and what is left is the storage the
+   local started with.
+
+   This is what the old model's source-level `$unfold-uninit` was for, so
+   under `PALOW` that annotation is now a no-op macro in the one test that
+   uses it. One wrinkle came with it: a validity seeded for a function stored
+   into a struct field, and then handed to a call inside that struct, comes
+   back stated at whatever value the callee's postcondition binds. The term
+   that was seeded is no longer a term in scope, so such a fact is put down
+   by shape rather than by name -- but only that one, since a validity the
+   contract granted has to survive to the end.
+
+   As of this milestone: **787 specifications, 687 of them with real bodies,
+   94 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

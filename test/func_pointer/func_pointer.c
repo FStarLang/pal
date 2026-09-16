@@ -80,6 +80,15 @@ typedef int32_t binop_fn(int32_t, int32_t);
 #define _fp_ghost(x) _ghost_stmt(x)
 #endif
 
+/* Likewise for opening a local struct's storage before its fields are
+   written one at a time: the old model needs the source to say so, Palow
+   scatters and gathers the object itself. */
+#ifdef PALOW
+#define _unfold_uninit(T, p)
+#else
+#define _unfold_uninit(T, p) _ghost_stmt($unfold-uninit(T) p)
+#endif
+
 /* Both memory models axiomatize function pointers the same way, under
    different names: `Pulse.Lib.C.FuncPtr` for PAL's model and
    `Pulse.Lib.C.Palow.FnPtr` for Palow's. A one-line `include` gives the
@@ -883,7 +892,7 @@ int32_t use_struct_field(void)
     _ensures(return == 5)
 {
     struct ops o;
-    _ghost_stmt($unfold-uninit(struct ops) $&(o));
+    _unfold_uninit(struct ops, $&(o));
     o.op = add;
     _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return o.op(2, 3);
@@ -1001,7 +1010,7 @@ int32_t multilayer(void)
     tbl[0] = add;
     int32_t (*slot)(int32_t, int32_t) = tbl[0];
     struct ops o;
-    _ghost_stmt($unfold-uninit(struct ops) $&(o));
+    _unfold_uninit(struct ops, $&(o));
     o.op = slot;
     _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     _fp_ghost(Fp_shim.valid_cast _ $(slot));
@@ -1065,7 +1074,7 @@ int32_t use_dispatch(void)
     _ensures(return == 5)
 {
     struct ops_c o;
-    _ghost_stmt($unfold-uninit(struct ops_c) $&(o));
+    _unfold_uninit(struct ops_c, $&(o));
     o.op = add;
     _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return dispatch(&o, 2, 3);
@@ -1082,7 +1091,7 @@ int32_t use_two_field_vtable(void)
     _ensures(return == -5)
 {
     struct vtable2 v;
-    _ghost_stmt($unfold-uninit(struct vtable2) $&(v));
+    _unfold_uninit(struct vtable2, $&(v));
     v.bin = add;
     v.un = neg;
     _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
@@ -1308,7 +1317,7 @@ void destroy_via_field(_consumes itemx_ptr p) {
 itemx_ptr mk_itemx(void)
 {
     struct itemx *it = (struct itemx *) malloc(sizeof(struct itemx));
-    _ghost_stmt($unfold-uninit(struct itemx) $(it));
+    _unfold_uninit(struct itemx, $(it));
     it->destroy = destroy_impl;
     it->n = 0;
     _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);

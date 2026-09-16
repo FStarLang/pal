@@ -3774,6 +3774,86 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         sn
     );
 
+    // `struct S s; s.f = ...; s.g = ...;` is ordinary C: the object is built
+    // one field at a time, and between the two statements it is neither
+    // storage nor a value but a mixture. The two halves of that are these.
+    // `scatter_uninit` gives up the object and keeps its fields' storage --
+    // which is all `_pts_to_uninit` ever was, so the proof is an `unfold` --
+    // and `gather` puts a value back together out of fields that now hold
+    // one. Nothing in between is a struct, which is exactly why neither the
+    // focus nor the whole-object write could express it.
+    c += &format!(
+        "ghost fn {sn}_scatter_uninit (a: ptr)\n\
+         \x20 requires {sn}_pts_to_uninit a\n\
+         \x20 ensures  {u}\n\
+         \x20 ensures  {sn}_padding a 1.0R\n\
+         {{\n  unfold {sn}_pts_to_uninit a;\n}}\n\n",
+        sn = sn,
+        u = uninit.join("\n\x20 ensures  ")
+    );
+    // The way back for an object that was scattered and then abandoned:
+    // a local that went out of scope before every field had been written.
+    c += &format!(
+        "ghost fn {sn}_gather_uninit (a: ptr)\n\
+         \x20 requires {u}\n\
+         \x20 requires {sn}_padding a 1.0R\n\
+         \x20 ensures  {sn}_pts_to_uninit a\n\
+         {{\n  fold {sn}_pts_to_uninit a;\n}}\n\n",
+        sn = sn,
+        u = uninit.join("\n\x20 requires ")
+    );
+    {
+        let binders: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| {
+                let elem = match &tds.resolve(&f.ty).val {
+                    TypeT::FixedArray(t, _) => fstar_type(tds, t),
+                    _ => fstar_type(tds, &f.ty),
+                }
+                .unwrap_or_else(|| "unit".to_string());
+                format!("(#val_{}: {})", f.name, f.shape.value_type(&elem))
+            })
+            .collect();
+        let value = if si.fields.is_empty() {
+            "()".to_string()
+        } else {
+            format!(
+                "({{ {} }})",
+                si.fields
+                    .iter()
+                    .map(|f| format!("fld_{} = val_{}", f.name, f.name))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        };
+        let reqs: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| {
+                f.shape.pts_to(
+                    &format!("(a +! {}_offsetof_{})", sn, f.name),
+                    &format!("val_{}", f.name),
+                )
+            })
+            .collect();
+        c += &format!(
+            "ghost fn {sn}_gather (a: ptr) (#p: perm) {b}\n\
+             \x20 requires {r}\n\
+             \x20 requires {sn}_padding a p\n\
+             \x20 ensures  {sn}_pts_to a p {v}\n\
+             {{\n  fold {sn}_pts_to a p {v};\n}}\n\n",
+            sn = sn,
+            b = binders.join(" "),
+            r = if reqs.is_empty() {
+                "emp".to_string()
+            } else {
+                reqs.join("\n\x20 requires ")
+            },
+            v = value
+        );
+    }
+
     // Every boundary inside the object, in the order the splits have to run.
     let mut bounds: Vec<u64> = si
         .fields
@@ -4584,6 +4664,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     array: Some((format!("{}sz", esize), false)),
                     global: true,
                     holds_fn: BTreeMap::new(),
+                    scattered: BTreeSet::new(),
                 }
             }
             _ => {
@@ -4608,6 +4689,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     array: None,
                     global: true,
                     holds_fn: BTreeMap::new(),
+                    scattered: BTreeSet::new(),
                 }
             }
         };
@@ -5335,6 +5417,12 @@ struct Slot {
     /// dispatch table is exactly a struct whose fields are code pointers, so
     /// the record has to be per-field rather than per-slot.
     holds_fn: BTreeMap<String, String>,
+    /// The fields already written, while the slot holds a struct that is being
+    /// built one field at a time. Empty means the slot is whole: either
+    /// storage or a value, according to `init`. Non-empty means it is neither
+    /// -- `_scatter_uninit` has run and `_gather` has not -- and the fields
+    /// named here hold values while the rest is still storage.
+    scattered: BTreeSet<String>,
 }
 
 impl Slot {
@@ -5528,7 +5616,12 @@ struct Body<'a> {
     /// with the pre and post it was seeded at. Both are needed to put it down
     /// again: a contract may hold a second, weaker validity for the same
     /// address, and `_` would let Pulse pick that one instead.
-    seeded: Vec<(String, String, String)>,
+    seeded: Vec<(String, String, String, String)>,
+    /// The functions whose seeded validity has since been handed to a call
+    /// inside an aggregate. What comes back is the same fact, but stated at
+    /// the value the callee's postcondition binds, so the term that was
+    /// seeded is no longer the term to put down.
+    laundered: HashSet<String>,
     /// The labels in scope, innermost last, each with the statements that run
     /// when control reaches it. A `goto` is translated by translating its
     /// label's continuation there and then: Pulse has no jump, and every path
@@ -5906,6 +5999,7 @@ impl<'a> Body<'a> {
                     array: None,
                     global: false,
                     holds_fn: BTreeMap::new(),
+                    scattered: BTreeSet::new(),
                 });
                 Ok(format!("loc_{}", v.val))
             }
@@ -6056,7 +6150,12 @@ impl<'a> Body<'a> {
             }
             ExprT::Member(base, f) => {
                 let pn = self.field_pn(base, f)?;
-                let ff = self.focus_field(base, f)?;
+                let ff = self.open_field(base, f)?;
+                if let Some(focus) = self.scattered_field(&ff, f, &pn, writing) {
+                    return Ok(focus);
+                }
+                self.lines
+                    .push(format!("{}_focus_{} {};", ff.sn, f.val, ff.a));
                 let mut close_read = vec![format!("{}_unfocus_read_{} {};", ff.sn, f.val, ff.a)];
                 close_read.extend(ff.close_read);
                 let mut close_write = vec![format!("{}_unfocus_{} {};", ff.sn, f.val, ff.a)];
@@ -6216,11 +6315,88 @@ impl<'a> Body<'a> {
     /// be opened to reach the base -- in read and in write form, because a
     /// write through an inner field changes the outer struct's value and a
     /// read does not.
-    fn focus_field(&mut self, base: &Expr, f: &Ident) -> Result<FieldFocus, String> {
+    /// Open a field of an object that is being built one field at a time,
+    /// if that is what this access is.
+    ///
+    /// `struct S s; s.f = x; s.g = y;` has no point at which `s` is a struct:
+    /// the first assignment writes a field of storage, and only the last one
+    /// completes an object. A focus cannot describe that, because a focus
+    /// opens a value and puts the same value back. So the object is scattered
+    /// into its fields' storage on the first write and gathered back into a
+    /// value on the last, and in between each field is written -- or read --
+    /// through its own address, with nothing open around it.
+    fn scattered_field(
+        &mut self,
+        ff: &FieldFocus,
+        f: &Ident,
+        pn: &str,
+        writing: bool,
+    ) -> Option<Focus> {
+        // A nested field -- `s.inner.f` -- reaches its object through a focus
+        // that is already open, so there is no slot at that address and this
+        // is not the case being handled.
+        if !ff.close_read.is_empty() || !ff.close_write.is_empty() {
+            return None;
+        }
+        let sname = ff.sn.strip_prefix("struct_")?;
+        let si = self.tds.structs.get(sname)?;
+        // The scatter and gather operations only exist when the struct got an
+        // uninitialised view, which needs every field to have one.
+        if !si.fields.iter().all(|x| match &x.shape {
+            FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+            FieldShape::Array { .. } => true,
+        }) {
+            return None;
+        }
+        let names: Vec<String> = si.fields.iter().map(|x| x.name.clone()).collect();
+        if !names.iter().any(|n| n == &*f.val) {
+            return None;
+        }
+        let i = self
+            .slots
+            .iter()
+            .rposition(|s| s.addr == ff.a && !s.init && s.array.is_none())?;
+        if !writing {
+            if !self.slots[i].scattered.contains(&*f.val) {
+                return None;
+            }
+            return Some(Focus {
+                write_fn: format!("{}_write", pn),
+                pn: pn.to_string(),
+                at: ff.at.clone(),
+                open_read: Vec::new(),
+                open_write: Vec::new(),
+                close_read: Vec::new(),
+                close_write: Vec::new(),
+            });
+        }
+        if self.slots[i].scattered.is_empty() {
+            self.lines
+                .push(format!("{}_scatter_uninit {};", ff.sn, ff.a));
+        }
+        self.slots[i].scattered.insert(f.val.to_string());
+        let mut close_write = Vec::new();
+        if names.iter().all(|n| self.slots[i].scattered.contains(n)) {
+            close_write.push(format!("{}_gather {};", ff.sn, ff.a));
+            self.slots[i].scattered.clear();
+            self.slots[i].init = true;
+        }
+        Some(Focus {
+            write_fn: format!("{}_write_uninit", pn),
+            pn: pn.to_string(),
+            at: ff.at.clone(),
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: Vec::new(),
+            close_write,
+        })
+    }
+
+    /// Everything `focus_field` does except emitting the focus itself.
+    fn open_field(&mut self, base: &Expr, f: &Ident) -> Result<FieldFocus, String> {
         let (sn, _) = self.struct_of(base)?;
         let (a, close_read, close_write) = self.base_addr(base)?;
         let at = format!("({} +! {}_offsetof_{})", a, sn, f.val);
-        self.lines.push(format!("{}_focus_{} {};", sn, f.val, a));
         Ok(FieldFocus {
             sn,
             a,
@@ -6228,6 +6404,13 @@ impl<'a> Body<'a> {
             close_read,
             close_write,
         })
+    }
+
+    fn focus_field(&mut self, base: &Expr, f: &Ident) -> Result<FieldFocus, String> {
+        let ff = self.open_field(base, f)?;
+        self.lines
+            .push(format!("{}_focus_{} {};", ff.sn, f.val, ff.a));
+        Ok(ff)
     }
 
     /// The address of the object a field belongs to. Usually just `addr`, but
@@ -7506,7 +7689,8 @@ impl<'a> Body<'a> {
                     "of_fn_div_valid {} {} func_{}__fp;",
                     pre, post, g.val
                 ));
-                self.seeded.push((addr.clone(), pre.clone(), post.clone()));
+                self.seeded
+                    .push((addr.clone(), pre.clone(), post.clone(), g.val.to_string()));
                 Ok(addr)
             }
             // An indirect call needs the `valid` fact, which no points-to
@@ -7703,6 +7887,12 @@ impl<'a> Body<'a> {
             } else {
                 self.rvalue(a)?
             };
+            // Passing the address of an object that holds a code pointer
+            // hands the validity along with it.
+            if let Some(slot) = self.slots.iter().find(|s| s.addr == v) {
+                let held: Vec<String> = slot.holds_fn.values().cloned().collect();
+                self.laundered.extend(held);
+            }
             out += &format!(" {}", v);
         }
         if args.is_empty() {
@@ -7792,6 +7982,7 @@ impl<'a> Body<'a> {
                 array: Some((format!("{}sz", esize), true)),
                 global: false,
                 holds_fn: BTreeMap::new(),
+                scattered: BTreeSet::new(),
             });
             return Ok(pn);
         }
@@ -7819,6 +8010,7 @@ impl<'a> Body<'a> {
             array: None,
             global: false,
             holds_fn: BTreeMap::new(),
+            scattered: BTreeSet::new(),
         });
         Ok(pn)
     }
@@ -9125,10 +9317,10 @@ impl<'a> Body<'a> {
         // path, so what it stores is only true on that path: the other arm has
         // to start where this one did, and what survives the join is what both
         // arms agree on.
-        let outer_state: Vec<(bool, BTreeMap<String, String>)> = self
+        let outer_state: Vec<(bool, BTreeMap<String, String>, BTreeSet<String>)> = self
             .slots
             .iter()
-            .map(|s| (s.init, s.holds_fn.clone()))
+            .map(|s| (s.init, s.holds_fn.clone(), s.scattered.clone()))
             .collect();
         let outer_env = self.env.clone();
         let outer_lines = std::mem::take(&mut self.lines);
@@ -9174,9 +9366,10 @@ impl<'a> Body<'a> {
         })();
 
         self.slots.truncate(mark);
-        for (slot, (init, holds)) in self.slots.iter_mut().zip(outer_state) {
+        for (slot, (init, holds, scattered)) in self.slots.iter_mut().zip(outer_state) {
             slot.init = init;
             slot.holds_fn = holds;
+            slot.scattered = scattered;
         }
         self.env = outer_env;
         self.lines = outer_lines;
@@ -9197,10 +9390,29 @@ impl<'a> Body<'a> {
     /// fact, but it is `pure` behind a definition, so Pulse will not absorb it
     /// on its own.
     fn drop_seeded(&mut self, mark: usize) {
-        for (addr, pre, post) in self.seeded.split_off(mark) {
-            self.lines
-                .push(format!("drop_is_valid {} {} {};", addr, pre, post));
+        for (addr, pre, post, g) in self.seeded.split_off(mark) {
+            self.lines.push(if self.laundered.contains(&g) {
+                "drop_is_valid _ _ _;".to_string()
+            } else {
+                format!("drop_is_valid {} {} {};", addr, pre, post)
+            });
         }
+    }
+
+    /// The written fields of a scattered slot, with the Palow name of each.
+    fn scattered_field_names(&self, i: usize) -> Vec<(String, String)> {
+        let sn = self.slots[i].palow_ty.strip_prefix("struct_").unwrap_or("");
+        let Some(si) = self.tds.structs.get(sn) else {
+            return Vec::new();
+        };
+        si.fields
+            .iter()
+            .filter(|f| self.slots[i].scattered.contains(&f.name))
+            .filter_map(|f| match &f.shape {
+                FieldShape::One { pn } => Some((f.name.clone(), pn.clone())),
+                FieldShape::Array { .. } => None,
+            })
+            .collect()
     }
 
     fn release_from(&mut self, mark: usize) {
@@ -9208,13 +9420,16 @@ impl<'a> Body<'a> {
         // validity seeded for a use that did not consume it -- storing a
         // decayed function in a slot, say.
         if mark == 0 {
-            for (addr, pre, post) in self.seeded.clone() {
-                self.lines
-                    .push(format!("drop_is_valid {} {} {};", addr, pre, post));
+            for (addr, pre, post, g) in self.seeded.clone() {
+                self.lines.push(if self.laundered.contains(&g) {
+                    "drop_is_valid _ _ _;".to_string()
+                } else {
+                    format!("drop_is_valid {} {} {};", addr, pre, post)
+                });
             }
         }
         for i in (mark..self.slots.len()).rev() {
-            let (addr, pn, init, array, global) = {
+            let (addr, pn, init, array, global, scattered) = {
                 let s = &self.slots[i];
                 (
                     s.addr.clone(),
@@ -9222,6 +9437,7 @@ impl<'a> Body<'a> {
                     s.init,
                     s.array.clone(),
                     s.global,
+                    s.scattered.clone(),
                 )
             };
             // A global's storage outlives the function; the contract hands it
@@ -9236,7 +9452,20 @@ impl<'a> Body<'a> {
                     .push(format!("array_stack_free {}_repr {} {};", pn, addr, esize));
                 continue;
             }
-            if init {
+            // A half-built object never became a value, so there is nothing
+            // to forget as a whole: each field that did get written gives its
+            // own value up, and what is left is the storage the slot started
+            // with.
+            if !scattered.is_empty() {
+                let fpn = self.scattered_field_names(i);
+                for (name, p) in fpn {
+                    self.lines.push(format!(
+                        "{}_forget ({} +! {}_offsetof_{});",
+                        p, addr, pn, name
+                    ));
+                }
+                self.lines.push(format!("{}_gather_uninit {};", pn, addr));
+            } else if init {
                 self.lines.push(format!("{}_forget {};", pn, addr));
             }
             self.lines.push(format!("{}_stack_free {};", pn, addr));
@@ -9871,6 +10100,7 @@ fn emit_body(
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,
         seeded: Vec::new(),
+        laundered: HashSet::new(),
         gotos: Vec::new(),
         in_loop: false,
         pending_close: Vec::new(),
