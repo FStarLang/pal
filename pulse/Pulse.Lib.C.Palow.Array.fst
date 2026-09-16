@@ -569,3 +569,52 @@ ghost fn array_claim_all (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
   unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs;
   fold array_pts_to t_repr (SZ.v esize) a 1.0R vs;
 }
+
+let somes_length (#t: Type0) (xs: Seq.seq t)
+  : Lemma (Seq.length (somes xs) == Seq.length xs)
+          [SMTPat (Seq.length (somes xs))] = ()
+
+let somes_index (#t: Type0) (xs: Seq.seq t) (i: nat)
+  : Lemma (requires i < Seq.length xs)
+          (ensures  Seq.index (somes xs) i == Some (Seq.index xs i))
+          [SMTPat (Seq.index (somes xs) i)] = ()
+
+(* ---------------------------------------------------------------------------
+   Handing a local array to a callee
+
+   A local array is storage that remembers which elements have been written,
+   so it is held in the `option` view; a function that takes `T *` wants every
+   element to hold a value, so it asks for the plain one. Passing one to the
+   other is these two ghost steps and nothing else -- no bytes move, and the
+   array is at the same address throughout.
+
+   `array_somes` carries out the obligation that makes the call legal at all:
+   C says reading an uninitialised object is undefined, so a callee that may
+   read every element may only be given an array where every element has been
+   written. That is exactly its precondition.
+
+   The `xs == somes vs` it leaves behind is what lets the caller put its own
+   view back together afterwards: `array_unsomes` returns `somes vs`, and the
+   equation says that is the sequence it started with. *)
+ghost fn array_somes (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                     (#p: perm) (#xs: Seq.seq (option t))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a p xs
+  requires pure (forall (i: nat). i < Seq.length xs ==> Some? (Seq.index xs i))
+  ensures  exists* (vs: Seq.seq t).
+             array_pts_to t_repr (SZ.v esize) a p vs **
+             pure (xs == somes vs /\ Seq.length vs == Seq.length xs)
+{
+  unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a p xs;
+  let vs : Seq.seq t = Seq.init (Seq.length xs) (fun i -> Some?.v (Seq.index xs i));
+  Seq.lemma_eq_intro xs (somes vs);
+  fold array_pts_to t_repr (SZ.v esize) a p vs;
+}
+
+ghost fn array_unsomes (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                       (#p: perm) (#vs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a p vs
+  ensures  array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a p (somes vs)
+{
+  unfold array_pts_to t_repr (SZ.v esize) a p vs;
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a p (somes vs);
+}

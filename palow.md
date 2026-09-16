@@ -2090,8 +2090,30 @@ new facts about memory.
    open need, which is the honest statement that F\* `open` is not transitive
    and these generated modules are one namespace.
 
-   As of this milestone: **771 specifications, 612 of them with real bodies,
-   159 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
+   A local array with an initialiser followed, and it is the same shape of
+   problem one level down. `char buf[] = "lo"` reaches the IR as a declaration
+   and an assignment of a brace list that clang has already padded out to the
+   declared length -- and an array is not assignable in C, so the assignment
+   can only mean one store per element. Saying exactly that is the whole
+   translation: each store goes through the element focus a subscript
+   assignment already used, and the sequence the slot holds records what has
+   been written, so `_assert(buf[0] == 'o')` afterwards is discharged by the
+   same obligation any other read of a local array is.
+
+   Passing that array to a function was the other half, and it is where the
+   two views of an array meet. A local is held in the `option` view because
+   its elements are written one at a time; a callee taking `T *` asks for the
+   plain one, because it may read any of them. The conversion between them is
+   two ghost steps with no bytes moving -- and the precondition of the first
+   is precisely C's rule that reading an uninitialised object is undefined,
+   which is to say that a local array may only be handed over once every
+   element has been written. That is a proof obligation on the generated code,
+   discharged from the sequence, and not a translator refusal. The way back is
+   owed until the end of the statement, because it cannot be emitted until the
+   call has been.
+
+   As of this milestone: **771 specifications, 615 of them with real bodies,
+   156 admitted, 44 functions skipped**, plus **18 `_pure` functions emitted as
    F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

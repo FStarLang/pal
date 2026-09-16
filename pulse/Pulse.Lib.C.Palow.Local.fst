@@ -36,7 +36,7 @@ fn array_stack_alloc (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (n: 
 }
 
 fn array_stack_free (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
-                    (#xs: Seq.seq (option t))
+                    (#xs: erased (Seq.seq (option t)))
   requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs
 {
   array_forget t_repr a esize;

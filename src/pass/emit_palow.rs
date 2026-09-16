@@ -5067,6 +5067,10 @@ struct Body<'a> {
     /// Whether a loop encloses the statement being translated, so `break` and
     /// `continue` have something to leave.
     in_loop: bool,
+    /// Ghost steps owed at the end of the current statement. A local array
+    /// handed to a callee is converted to the view the callee asks for and
+    /// back again, and the way back cannot be emitted until the call has been.
+    pending_close: Vec<String>,
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
@@ -6578,6 +6582,35 @@ impl<'a> Body<'a> {
             ExprT::IntLit(n, ty) => int_literal(self.tds, n, ty),
             ExprT::Cast(inner, to) => {
                 let from = self.ty_of(inner)?;
+                // An array in an rvalue context is its first element's
+                // address: C's decay, which clang has already made explicit as
+                // this cast. What the address carries is the other half. A
+                // local array is held in the `option` view, because its
+                // elements are written one at a time, and a callee taking
+                // `T *` asks for the plain one -- so the conversion happens
+                // here, and the way back is owed until the statement is done.
+                if let (TypeT::FixedArray(..), TypeT::Pointer { .. }) =
+                    (&self.tds.resolve(&from).val, &self.tds.resolve(to).val)
+                {
+                    if let Some(v) = lvalue_name(inner) {
+                        if let Some(sl) = self.slots.iter().rev().find(|s| s.name == v) {
+                            if let Some((esize, maybe)) = sl.array.clone() {
+                                let (addr, pn) = (sl.addr.clone(), sl.palow_ty.clone());
+                                if maybe {
+                                    self.lines.push(format!(
+                                        "array_somes {}_repr {} {};",
+                                        pn, addr, esize
+                                    ));
+                                    self.pending_close.push(format!(
+                                        "array_unsomes {}_repr {} {};",
+                                        pn, addr, esize
+                                    ));
+                                }
+                                return Ok(addr);
+                            }
+                        }
+                    }
+                }
                 // A literal cast to another integer type is that literal at
                 // that type. C has already reduced it, and going through
                 // `convert` would emit a cast that cannot always be justified
@@ -7601,7 +7634,19 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    /// One C statement, plus whatever the statement borrowed and has to give
+    /// back. A local array handed to a callee is converted to the view the
+    /// callee asks for, and the way back can only be emitted once the call
+    /// has been -- so it is owed here rather than emitted in place.
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
+        let r = self.stmt_inner(s);
+        let close = std::mem::take(&mut self.pending_close);
+        r?;
+        self.lines.extend(close);
+        Ok(())
+    }
+
+    fn stmt_inner(&mut self, s: &Stmt) -> Result<(), String> {
         match &s.val {
             StmtT::Decl(name, ty) => {
                 if self.aliases.contains_key(&*name.val.to_string()) {
@@ -7634,6 +7679,32 @@ impl<'a> Body<'a> {
                     }
                 }
                 let ty = self.ty_of(lhs)?;
+                // An array is not assignable in C; this is the initialiser of
+                // a local array, which clang has already padded out to the
+                // declared length. It means one store per element, and saying
+                // so is the whole translation: each store then goes through
+                // the same element focus a subscript assignment uses, and the
+                // sequence the slot holds records what has been written.
+                if let TypeT::FixedArray(_, n) = &self.tds.resolve(&ty).val {
+                    if let ExprT::ArrayInit { elems, .. } = &strip_vattr(rhs).val {
+                        if elems.len() as u64 != *n {
+                            return Err("an array initialiser of another length".to_string());
+                        }
+                        let elems = elems.clone();
+                        for (i, e) in elems.iter().enumerate() {
+                            let idx = ExprT::IntLit(
+                                Rc::new(BigInt::from(i)),
+                                TypeT::SizeT.with_loc(s.loc.clone()),
+                            )
+                            .with_loc(s.loc.clone());
+                            let at = ExprT::Index(Rc::new(lhs.as_ref().clone()), idx)
+                                .with_loc(s.loc.clone());
+                            let st = StmtT::Assign(at, e.clone()).with_loc(s.loc.clone());
+                            self.stmt(&st)?;
+                        }
+                        return Ok(());
+                    }
+                }
                 let pn = palow_name(self.tds, &ty)
                     .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
                 if let ExprT::Var(v) = &strip_vattr(lhs).val {
@@ -8880,6 +8951,7 @@ fn emit_body(
         seeded: Vec::new(),
         gotos: Vec::new(),
         in_loop: false,
+        pending_close: Vec::new(),
         loop_mark: None,
         divergent_fns,
         blocks: Vec::new(),
