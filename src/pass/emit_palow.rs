@@ -838,10 +838,9 @@ struct FnSurface {
     /// The `__fp` wrapper, when this function can be decayed to a code
     /// pointer: the flat, explicitly-quantified form `of_fn_div` needs.
     fp: Option<String>,
-    /// Whether that wrapper's witness type is `unit`, which decides whether a
-    /// caller has to name a witness at the indirect call or can pass the only
-    /// one there is.
-    fp_unit: bool,
+    /// How many components that wrapper's witness tuple has, which is the
+    /// shape an indirect call has to write out for its holes to be solvable.
+    fp_wits: usize,
     /// The mutable globals the contract hands in and back out. The body treats
     /// each as a slot it did not allocate.
     globals: Vec<Slot>,
@@ -2755,6 +2754,14 @@ fn emit_fn(
         let n = tys.len();
         let domain = tuple(&tys);
         let aprojs = projs(n, "x_fp");
+        // The witness, unlike the argument tuple, is folded to the RIGHT into
+        // nested pairs rather than left flat. A caller of `call_div` does not
+        // write the witness down -- it is inferred from the ownership being
+        // handed over -- and the rule that makes that inference possible
+        // (`eta_expanded_pair`) is binary. A flat `tuple3` is not two nested
+        // `tuple2`s, so it would not fire, and a three-component witness would
+        // be uninferrable for want of a rule rather than for want of
+        // information.
         let wtys: Vec<String> = wits.iter().map(|(_, t, _)| t.clone()).collect();
         let witness = tuple(&wtys);
         let wprojs = projs(wits.len(), "(reveal w_fp)");
@@ -2762,6 +2769,8 @@ fn emit_fn(
         for (nm, pj) in names.iter().zip(aprojs.iter()) {
             binds += &format!("let {} = {} in ", nm, pj);
         }
+        // An erased implicit is re-hidden, so the binder has the type the
+        // contract was written against and the text below is the same text.
         // An erased implicit is re-hidden, so the binder has the type the
         // contract was written against and the text below is the same text.
         for ((nm, _, erased), pj) in wits.iter().zip(wprojs.iter()) {
@@ -2863,7 +2872,7 @@ fn emit_fn(
         granted,
         contract: contract_ok,
         fp,
-        fp_unit: wits.is_empty(),
+        fp_wits: wits.len(),
         globals: globals.to_vec(),
         uses: spec.uses.take(),
         // A contract that was dropped granted nothing, so nothing may be
@@ -4404,15 +4413,20 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
         // an object. Nothing can write it -- that is what `_pure` says -- so a
         // subscript of it is `Seq.index`, with no ownership involved at all.
         if global_var_is_array(gv) {
+            // Whether or not the elements are known, the object has an
+            // address, and a contract that owns the array names it. Publishing
+            // it unconditionally is what makes a mutable array global work at
+            // all: its ownership is threaded by hand through `_live`, and the
+            // address is the only thing the model needs from the declaration.
+            out += &format!("assume val addr_var_{} : ptr\n", name);
+            out += &format!(
+                "assume val addr_var_{}_not_null : squash (not (is_null addr_var_{}))\n",
+                name, name
+            );
             if gv.is_pure && !gv.is_extern {
                 if let Some((fty, n, term)) =
                     gv.init.as_ref().and_then(|e| const_array(tds, &gv.ty, e))
                 {
-                    out += &format!("assume val addr_var_{} : ptr\n", name);
-                    out += &format!(
-                        "assume val addr_var_{}_not_null : squash (not (is_null addr_var_{}))\n",
-                        name, name
-                    );
                     // `_pulse_opaque_to_smt` on the source declaration is
                     // load-bearing here, not decoration: the value of a
                     // thousand-element array is a chain of a thousand
@@ -4433,13 +4447,13 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
                         n,
                         term
                     );
-                    chunks.push(Chunk {
-                        module: format!("Global_{}", name),
-                        code: out,
-                        origin: origin_of(decl),
-                    });
                 }
             }
+            chunks.push(Chunk {
+                module: format!("Global_{}", name),
+                code: out,
+                origin: origin_of(decl),
+            });
             continue;
         }
         // The address is a `ptr` whatever the global's type is, so it is
@@ -4491,6 +4505,25 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
         });
     }
     chunks
+}
+
+/// The witness argument of an indirect call, written out as a tuple spine of
+/// `n` holes.
+///
+/// Inference stops at the tuple itself: Pulse solves a hole standing for a
+/// witness LEAF, but a hole standing for a whole tuple stays stuck, because
+/// the projections the callee's contract applies to it (`fst (reveal ?w)`)
+/// cannot reduce until the hole is a real `Mktuple`. Writing the spine --
+/// which is all the emitter knows, and all that is missing -- turns one stuck
+/// hole into `n` solvable ones. The leaves are still inferred: which values
+/// the callee is being handed is what the ownership in the caller's context
+/// says, and that is exactly what slprop matching reads off.
+fn witness_holes(n: usize) -> String {
+    match n {
+        0 => "(hide ())".to_string(),
+        1 => "_".to_string(),
+        _ => format!("(hide ({}))", vec!["_"; n].join(", ")),
+    }
 }
 
 /// What a C name is used for, once ownership has to be threaded through the
@@ -5216,7 +5249,7 @@ pub fn emit_palow(
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
                 fp: sig.fp.is_some(),
-                fp_unit: sig.fp_unit,
+                fp_wits: sig.fp_wits,
                 outs: fndecl
                     .args
                     .iter()
@@ -5698,8 +5731,8 @@ struct Callee {
     /// Whether a `__fp` wrapper was emitted, so the function can be decayed
     /// to a code pointer.
     fp: bool,
-    /// Whether that wrapper's witness type is `unit`.
-    fp_unit: bool,
+    /// How many components that wrapper's witness tuple has.
+    fp_wits: usize,
     /// Which parameters are `_out`, by position. Those arguments are not
     /// evaluated: what is passed is storage, not a value.
     outs: Vec<bool>,
@@ -6742,6 +6775,25 @@ impl<'a> Body<'a> {
 
     /// Open one element of an array for a single access.
     fn focus_elem(&mut self, base: &Expr, idx: Option<&Expr>) -> Result<Focus, String> {
+        // `array_focus` demands `i < Seq.length xs`. A constant index of an
+        // array whose extent is in its type carries that bound with it;
+        // anything else is the function's own `_requires` saying so, and
+        // emitting the access without one produces a failure about the
+        // subscript rather than about the memory model.
+        let bounded = match (idx, &strip_vattr(base).val) {
+            (None, _) => true,
+            (Some(e), ExprT::Var(v)) => {
+                let n = self.global_array_len(v).unwrap_or(0);
+                const_index(&strip_vattr(e).val).is_some_and(|k| k < n)
+            }
+            _ => false,
+        };
+        if !bounded && !self.signed_ok {
+            return Err(
+                "a subscript, whose bounds obligation needs the untranslated `_requires`"
+                    .to_string(),
+            );
+        }
         let (arr, pn, esize, close, maybe) = self.array_place(base)?;
         let i = match idx {
             Some(e) => self.index(e)?,
@@ -7941,22 +7993,21 @@ impl<'a> Body<'a> {
                     // its parameters, and a function-pointer type says what
                     // those are: a parameter with a pointee contributes the
                     // value the callee owns at it, and one without
-                    // contributes nothing. When nothing does, `unit` has only
-                    // one inhabitant and there is nothing to infer; otherwise
-                    // the ownership being handed over says which object it is.
+                    // contributes nothing.
                     let fty = self.ty_of(f)?;
-                    let unit_witness = match &peel(self.tds, &fty).val {
-                        TypeT::FnPtr { args, .. } => {
-                            args.iter().all(|a| pointee(self.tds, a).is_none())
-                        }
-                        _ => false,
+                    let nwit = match &peel(self.tds, &fty).val {
+                        TypeT::FnPtr { args, .. } => args
+                            .iter()
+                            .filter(|a| pointee(self.tds, a).is_some())
+                            .count(),
+                        _ => 0,
                     };
                     self.lines.push(format!(
                         "let {} = call_div _ _ {} {} {};",
                         t,
                         callee,
                         tuple,
-                        if unit_witness { "(hide ())" } else { "_" }
+                        witness_holes(nwit)
                     ));
                     // The callee hands the validity back -- it is a fact, not
                     // a resource it uses up. Where the caller keeps the
@@ -7988,14 +8039,11 @@ impl<'a> Body<'a> {
                     1 => vs[0].clone(),
                     _ => format!("({})", vs.join(", ")),
                 };
-                // A wrapper whose witness is `unit` has only one witness to
-                // pass; anything else is determined by the ownership the
-                // caller is handing over, which slprop matching can see.
-                let w = if self.callees.get(&g).is_some_and(|c| c.fp_unit) {
-                    "(hide ())"
-                } else {
-                    "_"
-                };
+                // The wrapper's witness has one component per implicit its
+                // contract quantifies, and the emitter built that wrapper, so
+                // it knows how many. Which values they are is left to slprop
+                // matching against the ownership being handed over.
+                let w = witness_holes(self.callees.get(&g).map_or(0, |c| c.fp_wits));
                 let (pre, post, addr) = Self::fp_spec(&g);
                 // `call_div` lives in the divergent effect, so its caller does
                 // too -- which every PAL function that is not `_total` already

@@ -136,11 +136,12 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::TypeRefPredFold(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefPredFold(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
         // Global address names live in the global's own module.
-        Name::GlobalAddr(v) | Name::GlobalAddrNotNull(v) | Name::GlobalAcquire(v) => {
-            Some(format!("Global_{}", v))
-        }
-        // Local names (Var, Val, Perm) are not cross-module references
-        Name::Var(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
+        Name::GlobalAddr(v)
+        | Name::GlobalAddrNotNull(v)
+        | Name::GlobalAcquire(v)
+        | Name::GlobalLive(v) => Some(format!("Global_{}", v)),
+        // Local names are not cross-module references.
+        Name::Var(_) | Name::Label(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
     }
 }
 
@@ -220,6 +221,10 @@ struct FnPtrSpecCore {
     /// parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter doc);
     /// `unit` when no parameter needs one.
     witness_domain: Doc,
+    /// A `rewrite each` statement for the top of the wrapper body, unsticking
+    /// the `match` the `requires`' witness pattern-`let` introduces; `nil` when
+    /// there is no witness to bind.
+    witness_rewrite: Doc,
     ret_name: Doc,
     ret_ty_doc: Doc,
     projs: Vec<Doc>,
@@ -400,6 +405,8 @@ impl From<&TypeRefKind> for TypeRef {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Name {
     Var(Rc<IdentT>),
+    /// C labels occupy a separate namespace from ordinary identifiers.
+    Label(Rc<IdentT>),
     /// The address of a `_pure` global: an assumed `ref` naming its storage,
     /// one per global, so distinct globals get distinct addresses.
     GlobalAddr(Rc<IdentT>),
@@ -408,6 +415,10 @@ enum Name {
     /// Acquires *read-only* ownership of a global's storage. Called in the
     /// prologue of every function that takes the global's address.
     GlobalAcquire(Rc<IdentT>),
+    /// Ownership of a mutable array global: the slprop `_live(g)` stands for.
+    /// Named rather than inlined because it also pins the array's extent, which
+    /// no pure term over the bare handle can recover.
+    GlobalLive(Rc<IdentT>),
     Val(Rc<IdentT>, u32),
     Perm(Rc<IdentT>, u32),
     Fn(Rc<IdentT>),
@@ -470,9 +481,11 @@ impl Name {
                     _ => format!("var_{}", v),
                 }
             }
+            Name::Label(v) => format!("label_{}", v),
             Name::GlobalAddr(v) => format!("addr_var_{}", v),
             Name::GlobalAddrNotNull(v) => format!("addr_var_{}_not_null", v),
             Name::GlobalAcquire(v) => format!("acquire_var_{}", v),
+            Name::GlobalLive(v) => format!("live_var_{}", v),
             Name::Val(v, idx) => {
                 let v: &str = v;
                 format!("val_{}_{}", v, idx)
@@ -805,22 +818,75 @@ fn nary_tuple_proj(base: Doc, i: usize, n: usize) -> Doc {
     parens(Doc::text(format!("Mktuple{n}?._{} ", i + 1)).append(base))
 }
 
-/// If `ty` is a bare (non-`_plain`, non-`_core_ref`, non-`_nullable`) pointer
-/// type, return its pointee type -- this is exactly the pointer shape whose
-/// ownership `emit_fnptr_spec_core` witnesses via an explicit `erased c`
-/// wrapper parameter (see `Pulse.Lib.C.FuncPtr.fsti`'s witness-parameter
-/// doc). Used at `FnPtrCall` call sites (from the callee's static `FnPtr`
-/// argument types alone) to determine, in argument order, which call
-/// arguments contribute a witness component.
-fn fnptr_witness_pointee(ty: &Rc<Type>) -> Option<Rc<Type>> {
-    match &ty.val {
-        TypeT::Refine(inner, _)
-        | TypeT::RefineAlways(inner, _)
-        | TypeT::RefineUninit(inner, _)
-        | TypeT::RefineValue(inner, ..) => fnptr_witness_pointee(inner),
-        TypeT::Pointer(pointee, PointerKind::Ref | PointerKind::Unknown) => Some(pointee.clone()),
-        _ => None,
+/// A right-nested tuple of *binary* pairs: `unit` for arity 0, the bare type
+/// for arity 1, and `(a & (b & c))` for arity >= 2.
+///
+/// Deliberately NOT `fnptr_domain_doc`. That builds F*'s flat `tupleN` (`a & b
+/// & c` is `tuple3`, not nested `tuple2`s), which is right for the argument
+/// domain but wrong for the witness: `Pulse.Lib.C.FuncPtr.eta_expanded_pair` is
+/// binary, so it can only walk a spine that is binary the whole way down. The
+/// explicit parens are what force that.
+fn nested_pair_doc(docs: Vec<Doc>) -> Doc {
+    let mut it = docs.into_iter().rev();
+    match it.next() {
+        None => Doc::text("unit"),
+        Some(last) => it.fold(last, |acc, d| parens(d.append(" & ").append(acc))),
     }
+}
+
+/// The irrefutable pattern that destructures a `nested_pair_doc` value, binding
+/// `names` left to right: `_` for arity 0 (the value is `unit`, and naming it
+/// would only draw an unused-binder warning), the bare name for arity 1, and
+/// `(a, (b, c))` for arity >= 2.
+fn nested_pair_pat(names: Vec<Doc>) -> Doc {
+    let mut it = names.into_iter().rev();
+    match it.next() {
+        None => Doc::text("_"),
+        Some(last) => it.fold(last, |acc, d| parens(d.append(", ").append(acc))),
+    }
+}
+
+/// The projection for component `i` of `n` out of a `nested_pair_doc`-shaped
+/// value: `fst p`, `fst (snd p)`, `snd (snd p)`, ... (`base` itself for
+/// arity <= 1). The nesting is binary, so this is `snd` applied `i` times and
+/// then `fst` unless `i` is the last component -- NOT `nary_tuple_proj`, whose
+/// `MktupleN?._i` projectors are for the flat argument tuple.
+fn nested_pair_proj(base: Doc, i: usize, n: usize) -> Doc {
+    if n <= 1 {
+        return base;
+    }
+    let mut e = base;
+    for _ in 0..i {
+        e = parens(Doc::text("snd ").append(e));
+    }
+    if i < n - 1 {
+        e = parens(Doc::text("fst ").append(e));
+    }
+    e
+}
+
+/// The eta-expanded form of the `nested_pair_doc`-shaped value at `path`,
+/// written as an explicit `Mktuple2` spine: `(Mktuple2 (fst p) (Mktuple2 (fst
+/// (snd p)) (snd (snd p))))` and so on, `path` itself for arity <= 1.
+///
+/// Rewriting the witness to this in the wrapper body is what unsticks the
+/// `match` that the `requires`' pattern-`let` introduces. FStarLang/FStar#4512
+/// lets Pulse *purify* a spec under that match, but the prover still cannot
+/// unify a goal against a context that is itself a stuck match; once the
+/// scrutinee is a literal constructor application, iota reduces it away.
+fn eta_expand_doc(path: Doc, n: usize) -> Doc {
+    if n <= 1 {
+        return path;
+    }
+    parens(
+        Doc::text("Mktuple2 ")
+            .append(parens(Doc::text("fst ").append(path.clone())))
+            .append(" ")
+            .append(eta_expand_doc(
+                parens(Doc::text("snd ").append(path)),
+                n - 1,
+            )),
+    )
 }
 
 /// Visit every sub-expression of `e`, outermost first.
@@ -1910,16 +1976,28 @@ impl<'a> Emitter<'a> {
     fn emit_expr(&mut self, env: &Env, v: &Expr) -> ExprKind {
         match &v.val {
             ExprT::Var(x) => {
-                if let Some(gv) = env.lookup_global_var(x) {
-                    // A mutable global emits no `var_g`, so there is no name to
-                    // refer to here. Reject the read rather than emit a dangling
-                    // reference that F* would report as an unbound identifier.
-                    // Arrays are exempt: they are still emitted as a spec value.
+                if let Some(decl) = env.lookup_var(x) {
+                    let x2 = annotated(v, || self.emit_var(x));
+                    match decl.kind {
+                        LocalDeclKind::RValue => ExprKind::RValue(x2),
+                        LocalDeclKind::LValue => ExprKind::LValue(x2),
+                    }
+                } else if let Some(gv) = env.lookup_global_var(x) {
+                    // A mutable global has no `var_g` value; its storage is
+                    // named by its assumed address, so it emits as an lvalue
+                    // over that address (`!addr_var_g` / `addr_var_g := ..`).
+                    // The permission comes from the caller, threaded by hand as
+                    // `_live(g)`. Arrays are exempt: they are still emitted as a
+                    // spec value.
+                    if env.mutable_global_lvalue(x).is_some() {
+                        return ExprKind::LValue(annotated(v, || {
+                            self.emit_name(Name::GlobalAddr(x.val.clone()))
+                        }));
+                    }
                     if !gv.is_pure && !global_var_is_array(gv) {
                         self.report(
                             format!(
-                                "cannot read the mutable global {}; its address may be taken, \
-                                 but its value is not available",
+                                "cannot read the global {}; it has neither a value nor storage",
                                 x
                             ),
                             &x.loc,
@@ -1941,16 +2019,7 @@ impl<'a> Emitter<'a> {
                     });
                     ExprKind::RValue(x2)
                 } else {
-                    let x2 = annotated(v, || self.emit_var(x));
-                    if let Some(LocalDecl {
-                        kind: LocalDeclKind::RValue,
-                        ..
-                    }) = env.lookup_var(x)
-                    {
-                        ExprKind::RValue(x2)
-                    } else {
-                        ExprKind::LValue(x2)
-                    }
+                    ExprKind::LValue(annotated(v, || self.emit_var(x)))
                 }
             }
             ExprT::Deref(inner) => {
@@ -2389,6 +2458,24 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
             Doc::text(format!("`{}.rem`", get_int_mod(signed, width)?))
         }
         (BinOp::Mod, TypeT::SizeT) => Doc::text("`SizeT.rem`"),
+        (BinOp::Elvis, TypeT::Int { signed, width }) => Doc::text(format!(
+            "`Pulse.Lib.C.GNU.Elvis.elvis_{}int{}`",
+            if *signed { "" } else { "u" },
+            width
+        )),
+        (BinOp::Elvis, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_size_t`"),
+        (BinOp::Elvis, TypeT::PtrdiffT) => Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_ptrdiff_t`"),
+        (BinOp::Elvis, TypeT::Bool) => Doc::text("||"),
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_ref`")
+        }
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Core)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_core`")
+        }
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_array`")
+        }
+        (BinOp::Elvis, _) => return None,
         (BinOp::Add, TypeT::Int { signed, width }) => {
             Doc::text(format!("`{}.add`", get_int_mod(signed, width)?))
         }
@@ -3302,35 +3389,23 @@ impl<'a> Emitter<'a> {
                     // `self`, the field getter's own unfold and this witness
                     // read open two independent existentials for the same
                     // value that Pulse can't unify.
-                    let param_tys: Option<Vec<Rc<Type>>> = env
-                        .infer_expr(f)
-                        .ok()
-                        .map(|t| env.vtype_whnf(t))
-                        .and_then(|t| match &t.val {
-                            TypeT::FnPtr { args, .. } => Some(args.clone()),
-                            _ => None,
-                        });
-                    let witness_vals: Vec<Doc> = param_tys
-                        .iter()
-                        .flatten()
-                        .zip(args.iter())
-                        .filter(|(ty, _)| fnptr_witness_pointee(ty).is_some())
-                        .map(|(_, a)| {
-                            let derefed = ExprT::Deref(a.clone()).with_loc(a.loc.clone());
-                            self.emit_rvalue(env, &derefed)
-                        })
-                        .collect();
-                    let witness_arg = match witness_vals.len() {
-                        0 => Doc::text("(hide ())"),
-                        1 => parens(
-                            Doc::text("hide ")
-                                .append(parens(witness_vals.into_iter().next().unwrap())),
-                        ),
-                        _ => parens(
-                            Doc::text("hide ")
-                                .append(parens(Doc::intersperse(witness_vals, Doc::text(", ")))),
-                        ),
-                    };
+                    // The explicit `w: erased c` witness argument is left as an
+                    // inference hole. `c` is the pair `(ELIMS & GHOSTS)` that
+                    // `emit_fnptr_spec_core` builds, and its leaves are solved
+                    // by unification against the caller's context: the
+                    // `eta_expanded w` conjunct in `call`/`call_div`'s
+                    // precondition (see `Pulse.Lib.C.FuncPtr.fsti`) forces `?w`
+                    // to be eta-expanded down the binary spine, so each leaf
+                    // becomes its own solvable hole.
+                    //
+                    // Deriving the witness here instead — reading the callee's
+                    // declared `FnPtr` argument types and emitting one `hide
+                    // !arg` component per bare pointer — is what used to make
+                    // caller and callee disagree about the witness shape
+                    // (issue #277), and it could never see a callee's
+                    // `_ghost_arg`s at all, since a function-pointer type does
+                    // not record them.
+                    let witness_arg = Doc::text("_");
                     parens(naryfn([
                         Doc::text(call_prim),
                         Doc::text("_"),
@@ -3341,6 +3416,14 @@ impl<'a> Emitter<'a> {
                     ]))
                 }
                 ExprT::Live(v) => {
+                    // `_live(g)` for a mutable array global is the named slprop
+                    // emitted alongside the global's handle: unlike `live_array`
+                    // it also pins the array's extent. See `emit_global_array`.
+                    if let ExprT::Var(x) = &v.val
+                        && env.mutable_global_array(x).is_some()
+                    {
+                        return self.emit_name(Name::GlobalLive(x.val.clone()));
+                    }
                     // Check if the dereferenced expression is an array type
                     let is_array = if let ExprT::Deref(inner) = &v.val {
                         env.infer_expr(inner)
@@ -4507,7 +4590,7 @@ impl<'a> Emitter<'a> {
                     self.emit_inline_pulse_tokens(env, code).append(";")
                 }
                 StmtT::Goto(label) => Doc::text("goto ")
-                    .append(self.emit_name(Name::Var(label.val.clone())))
+                    .append(self.emit_name(Name::Label(label.val.clone())))
                     .append(";"),
                 StmtT::Label { .. } => Doc::text("(* unrestructured label *)"),
                 StmtT::GotoBlock {
@@ -4524,7 +4607,7 @@ impl<'a> Emitter<'a> {
                     }
                     doc.append(Doc::hardline())
                         .append("label ")
-                        .append(self.emit_name(Name::Var(label.val.clone())))
+                        .append(self.emit_name(Name::Label(label.val.clone())))
                         .append(":;")
                 }
                 StmtT::Error => Doc::text("(admit());"),
@@ -6467,6 +6550,24 @@ impl<'a> Emitter<'a> {
             arg_names.push(n.clone());
             env.push_arg(arg, LocalDeclKind::RValue);
         }
+        // The GHOSTS half of the witness `c`, in declaration order. A direct
+        // call takes its `_ghost_arg`s as implicit `#(v: erased t)` parameters,
+        // but a function pointer has a fixed arity, so here they travel inside
+        // the single `y_fp` witness instead and are bound by its pattern-`let`.
+        // The component type is the bare `t`: the whole witness is already
+        // `erased`.
+        //
+        // Each is pushed into the local env so that a `$(v)` inside an
+        // `_inline_pulse` spec resolves to the pattern-bound name. This has to
+        // happen before any spec is lowered below, or the name is free -- which
+        // is what made the wrapper emit a read of a nonexistent C variable.
+        let mut ghost_ty_docs: Vec<Doc> = vec![];
+        let mut ghost_name_docs: Vec<Doc> = vec![];
+        for ga in &decl.ghost_args {
+            ghost_ty_docs.push(self.emit_type(env, &ga.ty));
+            ghost_name_docs.push(self.emit_name(Name::Var(ga.name.val.clone())));
+            env.push_var_decl(&ga.name, ga.ty.clone(), LocalDeclKind::RValue);
+        }
         // Domain: one component per C argument, in argument order. Pointer
         // arguments contribute their pointer type; the pointee ownership
         // (`pts_to`) is carried by the general type-slprop lowering below.
@@ -6618,42 +6719,110 @@ impl<'a> Emitter<'a> {
             }
         }
         // Combine every requires-side existential group's bindings (in arg
-        // order) into a single flat witness type tuple `c`, and bind them all
-        // with `let`s projecting out of ONE explicit `y_fp: erased c` wrapper
-        // parameter (see comment above).
-        let witness_count: usize = req_witness_groups.iter().map(|(b, _)| b.len()).sum();
-        let witness_ty_docs: Vec<Doc> = req_witness_groups
+        // order) into the ELIMS half of the witness `c`, and bind them all by
+        // ONE pattern-`let` off the explicit `y_fp: erased c` wrapper parameter
+        // (see comment above).
+        //
+        // `c` is the pair `(ELIMS & GHOSTS)`: the existentials eliminated from
+        // the pointer arguments, paired with the `_ghost_arg`s. Both halves are
+        // right-nested binary pairs, and either may be `unit`.
+        let elim_ty_docs: Vec<Doc> = req_witness_groups
             .iter()
             .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
             .collect();
-        let witness_domain = fnptr_domain_doc(witness_ty_docs);
-        // Every group's `let`s are hoisted into ONE prefix placed in front of
-        // the whole `requires` conjunction, rather than each group carrying
-        // its own. A `let` is a term-level binder, so it cannot appear as the
-        // right operand of `**`: emitting it per group parses only while
-        // there is a single group, and is a syntax error from two groups on.
-        // Hoisting also keeps every witness binding in scope for the trailing
-        // `pure` conjunct below.
+        let elim_name_docs: Vec<Doc> = req_witness_groups
+            .iter()
+            .flat_map(|(b, _)| b.iter().map(|eb| eb.name.clone()))
+            .collect();
+        let witness_domain = parens(
+            nested_pair_doc(elim_ty_docs)
+                .append(" & ")
+                .append(nested_pair_doc(ghost_ty_docs)),
+        );
+        // ONE prefix in front of the whole `requires` conjunction, rather than
+        // each group carrying its own. A `let` is a term-level binder, so it
+        // cannot appear as the right operand of `**`: emitting it per group
+        // parses only while there is a single group, and is a syntax error from
+        // two groups on. Hoisting also keeps every binding in scope for the
+        // trailing `pure` conjunct below.
+        //
+        // Destructured by PATTERN, not by `fst`/`snd`. Pulse solves a caller's
+        // witness by unification, and it recovers the individual leaves only
+        // through a pattern match; `pts_to x (fst ?w)` is inert, because F*
+        // does not reduce projectors. A pattern-`let` desugars to a single-
+        // branch match, which Pulse purifies into since FStarLang/FStar#4512.
+        let has_witness_bindings = !elim_name_docs.is_empty() || !ghost_name_docs.is_empty();
+        let elim_arity = elim_name_docs.len();
+        let ghost_arity = ghost_name_docs.len();
+        // The post needs the ghosts too: a `_preserves` conjunct mentioning one
+        // appears in both the pre and the post. It does NOT re-bind the elims,
+        // which the post quantifies existentially instead (their value may have
+        // changed).
+        //
+        // Bound by PROJECTION here, unlike the `requires`. The pattern form is
+        // needed only where a caller solves the witness by unification, which
+        // is the precondition; in the postcondition it would just put a stuck
+        // `match` in the goal, which the body's `witness_rewrite` -- acting on
+        // the context -- cannot reach.
+        let witness_post_prefix = if ghost_arity > 0 {
+            let ghost_base = parens(Doc::text("snd ").append(parens(Doc::text("reveal y_fp"))));
+            Doc::concat(ghost_name_docs.iter().enumerate().map(|(i, name)| {
+                Doc::text("let ")
+                    .append(name.clone())
+                    .append(" = ")
+                    .append(nested_pair_proj(ghost_base.clone(), i, ghost_arity))
+                    .append(" in")
+                    .append(Doc::hardline())
+            }))
+        } else {
+            Doc::nil()
+        };
         let witness_let_prefix = {
-            let witness_base = parens(Doc::text("reveal y_fp"));
-            let mut widx = 0usize;
-            let mut lets: Vec<Doc> = vec![];
-            for (bindings, props) in req_witness_groups {
-                for b in &bindings {
-                    let proj = nary_tuple_proj(witness_base.clone(), widx, witness_count);
-                    widx += 1;
-                    lets.push(
-                        Doc::text("let ")
-                            .append(b.name.clone())
-                            .append(" = ")
-                            .append(proj)
-                            .append(" in")
-                            .append(Doc::hardline()),
-                    );
-                }
+            let pat = parens(
+                nested_pair_pat(elim_name_docs)
+                    .append(", ")
+                    .append(nested_pair_pat(ghost_name_docs)),
+            );
+            for (_, props) in req_witness_groups {
                 requires_props.push(mk_star(props));
             }
-            Doc::concat(lets)
+            // With nothing to bind, emit no prefix at all. The `match` a
+            // pattern-`let` desugars to is not free: it would wrap the whole
+            // `requires` for no gain, and the pure conjuncts inside it (which
+            // here speak only of `x_fp`) would have to be dug back out of it.
+            if has_witness_bindings {
+                Doc::text("let ")
+                    .append(pat)
+                    .append(" = reveal y_fp in")
+                    .append(Doc::hardline())
+            } else {
+                Doc::nil()
+            }
+        };
+        // Its counterpart for the body. Both halves are eta-expanded in ONE
+        // rewrite of the whole witness, so a single equality obligation covers
+        // the entire spine.
+        let witness_rewrite = if has_witness_bindings {
+            let base = parens(Doc::text("reveal y_fp"));
+            Doc::text("rewrite each ")
+                .append(base.clone())
+                .append(" as ")
+                .append(parens(
+                    Doc::text("Mktuple2 ")
+                        .append(eta_expand_doc(
+                            parens(Doc::text("fst ").append(base.clone())),
+                            elim_arity,
+                        ))
+                        .append(" ")
+                        .append(eta_expand_doc(
+                            parens(Doc::text("snd ").append(base)),
+                            ghost_arity,
+                        )),
+                ))
+                .append(";")
+                .append(Doc::hardline())
+        } else {
+            Doc::nil()
         };
         // `preserves` (const params) hold across the call, so they belong in
         // both the pre and the post.
@@ -6774,7 +6943,11 @@ impl<'a> Emitter<'a> {
                     .append(pre_body),
             ),
         ));
-        let post_expr = parens(bind_prefix(&name_docs).append(post_body));
+        let post_expr = parens(
+            bind_prefix(&name_docs)
+                .append(witness_post_prefix)
+                .append(post_body),
+        );
 
         FnPtrSpecCore {
             pre_expr,
@@ -6783,6 +6956,7 @@ impl<'a> Emitter<'a> {
             callee,
             domain,
             witness_domain,
+            witness_rewrite,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6800,6 +6974,7 @@ impl<'a> Emitter<'a> {
             callee,
             domain,
             witness_domain,
+            witness_rewrite,
             ret_name,
             ret_ty_doc,
             projs,
@@ -6857,7 +7032,12 @@ impl<'a> Emitter<'a> {
             .append(Doc::hardline())
             .append(Doc::text("{"))
             .append(Doc::hardline())
-            .append(Doc::text("  ").append(call_body).nest(2))
+            .append(
+                Doc::text("  ")
+                    .append(witness_rewrite)
+                    .append(call_body)
+                    .nest(2),
+            )
             .append(Doc::hardline())
             .append(Doc::text("}"));
 
@@ -7798,19 +7978,23 @@ impl<'a> Emitter<'a> {
 
     fn emit_global_var(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
         if !gv.is_pure {
-            // A mutable global gets an address but no value: its storage cannot
-            // be read or written, so there is nothing for an initializer to
-            // mean and nothing for a spec value to describe.
+            // A mutable array global is the array object itself, so it is
+            // modeled as a handle plus the permission its users thread; every
+            // other mutable global is modeled by the cell at its address.
+            if global_array_object(gv).is_some() {
+                return self.emit_global_array(env, gv);
+            }
+            // A mutable global gets an address but no value: its storage is
+            // mutable, so no F* constant describes it. Reads and writes go
+            // through the address, with the permission supplied by the caller
+            // (`_live(g)`); see `Env::mutable_global_lvalue`. That also means
+            // an initializer has nothing to be attached to -- what the storage
+            // holds is whatever the (assumed) permission says it holds.
             return match self.emit_global_addr(env, gv) {
                 Some(addr) => addr,
-                None => {
-                    // Only an array reaches here: an enumerator is always pure.
-                    self.report(
-                        "non-pure array globals are not yet supported".to_string(),
-                        &gv.name.loc,
-                    );
-                    Doc::nil()
-                }
+                // Nothing reaches here: an array was handled above and an
+                // enumerator is always pure.
+                None => Doc::nil(),
             };
         }
         let name = self.emit_name(Name::Var(gv.name.val.clone()));
@@ -7842,16 +8026,87 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Emit a mutable array global (`T g[N]` / `T g[]`): the assumed `array`
+    /// handle naming its storage, and the slprop that `_live(g)` stands for.
+    ///
+    /// ```fstar
+    /// assume val var_g : (array t)
+    /// [@@pulse_eager_unfold]
+    /// let live_var_g : slprop =
+    ///   exists* (s: full_array_lspec t N). array_pts_to var_g 1.0R s
+    /// ```
+    ///
+    /// Same bring-your-own-permission model as a mutable scalar global (see
+    /// `emit_global_addr`): the handle is assumed, the ownership is not, so a
+    /// function that touches `g` demands `_live(g)` and the entrypoint assumes
+    /// it. `array_pts_to ... 1.0R` is full ownership -- unlike a `_pure`
+    /// global, whose fraction stays existential, a mutable array must be
+    /// writable, and only one holder of the permission can exist at a time.
+    ///
+    /// The permission is a *named* slprop rather than plain `live_array var_g`
+    /// because it also pins the extent: the length of an `array` lives in its
+    /// spec, so `N` can only be stated by the spec binder in the existential.
+    /// That is what lets `g._length` (`reveal (length_of var_g)`) reduce to `N`
+    /// wherever `_live(g)` is held. An incomplete `T g[]` has no extent to pin
+    /// here, so it binds a plain `full_array_spec` and callers must state the
+    /// length themselves.
+    fn emit_global_array(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
+        let Some((elem, len)) = global_array_object(gv) else {
+            unreachable!("caller checked that this is an array object")
+        };
+        let elem_doc = self.emit_type(env, elem);
+        let handle = self.emit_name(Name::Var(gv.name.val.clone()));
+        let handle_val = Doc::text("assume val ")
+            .append(handle.clone())
+            .append(Doc::text(" : "))
+            .append(unaryfn(Doc::text("array"), elem_doc.clone()));
+
+        let spec_ty = match len {
+            Some(n) => naryfn([
+                Doc::text("full_array_lspec"),
+                elem_doc,
+                Doc::text(format!("{}", n)),
+            ]),
+            None => unaryfn(Doc::text("full_array_spec"), elem_doc),
+        };
+        let spec_var = Doc::text("s");
+        let pts_to = naryfn([
+            Doc::text("array_pts_to"),
+            handle,
+            Doc::text("1.0R"),
+            spec_var.clone(),
+        ]);
+        let live = Doc::text("[@@pulse_eager_unfold]")
+            .append(Doc::hardline())
+            .append(mk_let(
+                self.emit_name(Name::GlobalLive(gv.name.val.clone())),
+                &[],
+                Doc::text("slprop"),
+                wrap_exists(
+                    &[ExBinding {
+                        name: spec_var,
+                        ty: spec_ty,
+                    }],
+                    vec![pts_to],
+                ),
+            ));
+
+        handle_val.append(Doc::hardline()).append(live)
+    }
+
     /// Emit a global's address: an assumed `ref` (one per global, so distinct
     /// globals get distinct addresses) and a non-null axiom. A `_pure` global
     /// additionally gets the acquire that hands out *read-only* ownership of
     /// its storage; a mutable one gets no acquire at all.
     ///
-    /// A mutable global has no `var_g` for a `pts_to` to mention, and giving
-    /// out ownership of something writable would be unsound anyway. Emitting
-    /// the bare address is still safe: with no `pts_to` in existence there is
-    /// no permission to obtain, so the pointer can be compared but never read
-    /// or written through.
+    /// A mutable global has no `var_g` for a `pts_to` to mention, and handing
+    /// out ownership of something writable for free would be unsound: two
+    /// callers could each acquire full permission and race. So PAL emits the
+    /// bare address and follows a *bring-your-own-permission* model instead --
+    /// the ownership is threaded through contracts by hand, `_requires(_live(g))`
+    /// / `_ensures(_live(g))`, down from an entrypoint that assumes it. With no
+    /// permission in hand the pointer can still be compared, just not read or
+    /// written through.
     ///
     /// Reads of a `_pure` global are ownership-free, which is only sound if the
     /// storage holds `var_g` forever -- so the pointer must never be writable.
@@ -7894,7 +8149,8 @@ impl<'a> Emitter<'a> {
 
         // A mutable global gets the address and nothing else: the acquire below
         // mentions `var_g`, which is not emitted for it, and handing out
-        // ownership of a mutable object is exactly what must not happen.
+        // ownership of a mutable object for free is exactly what must not
+        // happen -- its permission is brought by the caller instead.
         if !gv.is_pure {
             return Some(addr_val.append(Doc::hardline()).append(not_null));
         }

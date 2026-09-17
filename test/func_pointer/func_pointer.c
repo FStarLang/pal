@@ -95,15 +95,19 @@ typedef int32_t binop_fn(int32_t, int32_t);
    annotations below a single spelling that works for either, so the test can
    say what it is about instead of saying it twice.
 
-   The one genuine difference is the type of an address. PAL's `func_ptr a b`
-   remembers the domain and range; Palow's `ptr` is one type for every pointer
-   and forgets them, since C does too. The shim names that away. */
+   The genuine differences are two. PAL's `func_ptr a b` remembers the domain
+   and range; Palow's `ptr` is one type for every pointer and forgets them,
+   since C does too. And the two emitters build a callback's ghost witness
+   differently -- PAL pairs the resource witness with the `_ghost_arg` tuple,
+   Palow has neither here -- so the witness type gets a name as well. The shim
+   names both away. */
 #ifdef PALOW
 _include_pulse(Fp_shim,
   include Pulse.Lib.C.Palow.FnPtr
 
   let func_ptr (a b: Type0) = Pulse.Lib.C.Palow.Ptr.ptr
   let i32 = FStar.Int32.t
+  let wit = unit
   unfold let i32_pred (x: i32) (p: perm) : slprop = emp
 )
 #else
@@ -111,6 +115,7 @@ _include_pulse(Fp_shim,
   include Pulse.Lib.C.FuncPtr
 
   let i32 = Typedef_int32_t.ty_int32_t
+  let wit = unit & unit
   unfold let i32_pred (x: i32) (p: perm) : slprop =
     Typedef_int32_t.ty_int32_t__pred x p
 )
@@ -540,7 +545,7 @@ int32_t use_hof(void)
 _include_pulse(Apply_weaker_spec,
   unfold
   let aw_post (x_fp: (Fp_shim.i32 & Fp_shim.i32))
-              (y_fp: erased unit)
+              (y_fp: erased Fp_shim.wit)
               (return_1: Fp_shim.i32) : slprop =
     let var_a = fst x_fp in
     let var_b = snd x_fp in
@@ -555,7 +560,7 @@ _include_pulse(Apply_weaker_spec,
 
   ghost
   fn wpost_weak (x: (Fp_shim.i32 & Fp_shim.i32))
-                (y: erased unit)
+                (y: erased Fp_shim.wit)
                 (r: Fp_shim.i32)
     requires (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) x y r
     ensures aw_post x y r
@@ -563,7 +568,7 @@ _include_pulse(Apply_weaker_spec,
 
   ghost
   fn wpre_id (x: (Fp_shim.i32 & Fp_shim.i32))
-             (y: erased unit)
+             (y: erased Fp_shim.wit)
     requires (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) x y
     ensures (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
@@ -579,6 +584,7 @@ _include_pulse(Apply_weaker_spec,
     Fp_shim.weaken f true true
       (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp)
       (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) aw_post
+      (fun _ y -> y)
       wpre_id
       wpost_weak
   }
@@ -662,7 +668,7 @@ _include_pulse(Reassign_join_spec,
   unfold
   let rj_pre (g: bool)
              (x_fp: (Fp_shim.i32 & Fp_shim.i32))
-             (y_fp: erased unit) : slprop =
+             (y_fp: erased Fp_shim.wit) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
     ((Fp_shim.i32_pred var_a 1.0R)) **
@@ -682,7 +688,7 @@ _include_pulse(Reassign_join_spec,
   unfold
   let rj_post (g: bool)
               (x_fp: (Fp_shim.i32 & Fp_shim.i32))
-              (y_fp: erased unit)
+              (y_fp: erased Fp_shim.wit)
               (return_1: Fp_shim.i32) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
@@ -703,14 +709,14 @@ _include_pulse(Reassign_join_spec,
 
   ghost
   fn wpre_sub (x: (Fp_shim.i32 & Fp_shim.i32))
-              (y: erased unit)
+              (y: erased Fp_shim.wit)
     requires rj_pre true x y
     ensures (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
 
   ghost
   fn wpost_sub (x: (Fp_shim.i32 & Fp_shim.i32))
-               (y: erased unit)
+               (y: erased Fp_shim.wit)
                (r: Fp_shim.i32)
     requires (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) x y r
     ensures rj_post true x y r
@@ -718,14 +724,14 @@ _include_pulse(Reassign_join_spec,
 
   ghost
   fn wpre_add (x: (Fp_shim.i32 & Fp_shim.i32))
-              (y: erased unit)
+              (y: erased Fp_shim.wit)
     requires rj_pre false x y
     ensures (Fp_shim.pre_of Funcptr_add.func_add__fp) x y
   { () }
 
   ghost
   fn wpost_add (x: (Fp_shim.i32 & Fp_shim.i32))
-               (y: erased unit)
+               (y: erased Fp_shim.wit)
                (r: Fp_shim.i32)
     requires (Fp_shim.post_of Funcptr_add.func_add__fp) x y r
     ensures rj_post false x y r
@@ -749,11 +755,11 @@ int32_t reassign_join(int32_t use_sub)
     {
         fp = subtract;
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _fp_ghost(Fp_shim.drop_is_valid _ _ _);
@@ -771,11 +777,11 @@ int32_t reassign_join(int32_t use_sub)
     {
         fp = subtract;
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _fp_ghost(Fp_shim.drop_is_valid _ _ _);
@@ -798,11 +804,11 @@ int32_t reassign_join_call(int32_t use_sub)
     {
         fp = subtract;
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _fp_ghost(Fp_shim.drop_is_valid _ _ _);
@@ -820,11 +826,11 @@ int32_t reassign_join_call(int32_t use_sub)
     {
         fp = subtract;
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _fp_ghost(Fp_shim.drop_is_valid _ _ _);
@@ -841,11 +847,11 @@ binop select_op(int32_t use_sub)
 {
     if (use_sub) {
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
         return subtract;
     } else {
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
         return add;
     }
 }
@@ -857,11 +863,11 @@ binop select_op(int32_t use_sub)
     _ghost_stmt(let g_use_sub = Pulse.Lib.C.Ref.ghost_read $&(use_sub));
     if (use_sub) {
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
         return subtract;
     } else {
         _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
         return add;
     }
 }
@@ -1153,14 +1159,14 @@ int32_t apply_t(int32_t (*op)(int32_t, int32_t)
 _include_pulse(Total_to_div_spec,
   ghost
   fn wpre_id (x: (Fp_shim.i32 & Fp_shim.i32))
-             (y: erased unit)
+             (y: erased Fp_shim.wit)
     requires (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) x y
     ensures (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) x y
   { () }
 
   ghost
   fn wpost_id (x: (Fp_shim.i32 & Fp_shim.i32))
-               (y: erased unit)
+               (y: erased Fp_shim.wit)
                (r: Fp_shim.i32)
     requires (Fp_shim.post_of Funcptr_add_t.func_add_t__fp) x y r
     ensures (Fp_shim.post_of Funcptr_add_t.func_add_t__fp) x y r
@@ -1177,6 +1183,7 @@ _include_pulse(Total_to_div_spec,
     Fp_shim.weaken f true true
       (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp)
       (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp)
+      (fun _ y -> y)
       wpre_id
       wpost_id
   }
@@ -1185,14 +1192,14 @@ _include_pulse(Total_to_div_spec,
 _include_pulse(Total_to_div_spec,
   ghost
   fn wpre_id (x: (Fp_shim.i32 & Fp_shim.i32))
-             (y: erased unit)
+             (y: erased Fp_shim.wit)
     requires (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
     ensures (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
   { () }
 
   ghost
   fn wpost_id (x: (Fp_shim.i32 & Fp_shim.i32))
-               (y: erased unit)
+               (y: erased Fp_shim.wit)
                (r: Fp_shim.i32)
     requires (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
     ensures (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
@@ -1209,6 +1216,7 @@ _include_pulse(Total_to_div_spec,
     Fp_shim.weaken f false true
       (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp)
       (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp)
+      (fun _ y -> y)
       wpre_id
       wpost_id
   }
@@ -1388,6 +1396,91 @@ struct mo_ops {
 const struct mo_ops the_mo_ops = {
     .f1 = mo_one, .fs = mo_scalar, .f2 = mo_two, .f3 = mo_three
 };
+
+/* Framing a call is different from framing a function pointer's validity.
+   Both contracts use the same witness type; 42 is an arbitrary fixed
+   pointee value, so witness conversion is not involved in this example.
+
+   Old model only for now: Palow's `FnPtr` has no `frame` axiom yet, and the
+   contracts below are written against Pulse references rather than addresses.
+   Porting it is on the Palow backlog. */
+#ifndef PALOW
+_include_pulse(Fp_frame_spec,
+  unfold let plain_pre (p: ref Int32.t) (w: erased unit) : slprop = emp
+  unfold let plain_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop = emp
+
+  unfold let framed_pre (p: ref Int32.t) (w: erased unit) : slprop =
+    Pulse.Lib.Reference.pts_to p 42l
+  unfold let framed_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop =
+    Pulse.Lib.Reference.pts_to p 42l
+
+  ghost fn frame_wpre (p: ref Int32.t) (w: erased unit)
+    requires framed_pre p w
+    ensures plain_pre p w ** framed_pre p w
+  { () }
+
+  ghost fn frame_wpost (p: ref Int32.t) (w: erased unit) (r: unit)
+    requires plain_post p w r ** framed_pre p w
+    ensures framed_post p w r
+  { () }
+
+  ghost fn frame_plain (f: Pulse.Lib.C.FuncPtr.func_ptr (ref Int32.t) unit)
+    requires Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post
+    ensures Pulse.Lib.C.FuncPtr.is_valid f true framed_pre framed_post **
+            Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post
+  {
+    unfold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+    fold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+    Pulse.Lib.C.FuncPtr.frame f true plain_pre plain_post framed_pre;
+    Pulse.Lib.C.FuncPtr.weaken f true true
+      (fun p w -> plain_pre p w ** framed_pre p w)
+      (fun p w r -> plain_post p w r ** framed_pre p w)
+      framed_pre framed_post (fun _ w -> w) frame_wpre frame_wpost;
+    fold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+  }
+)
+
+/* Control: ordinary call-site framing preserves the pointee. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_direct(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
+    _plain int *p)
+{
+    f(p);
+}
+
+/* Control: a consumer with the framed validity can call its pointer. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_consumer(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.framed_pre Fp_frame_spec.framed_post)),
+    _plain int *p)
+{
+    f(p);
+}
+
+/* Adapt the same arbitrary pointer's validity using the frame axiom.
+   Without this ghost step the consumer call fails with Error 19.
+   FuncPtr.weaken alone cannot carry a resource between its two coercions. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_adapt(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
+    _plain int *p)
+{
+    _ghost_stmt(Fp_frame_spec.frame_plain $(f));
+    fp_frame_consumer(f, p);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid $(f)
+      Fp_frame_spec.framed_pre Fp_frame_spec.framed_post);
+}
+#endif
 
 #if 0
 

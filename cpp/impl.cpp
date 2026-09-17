@@ -1708,6 +1708,20 @@ public:
     } else if (auto *co = dyn_cast<ConditionalOperator>(e)) {
       return mk_cond(std::move(loc), trRValue(co->getCond()),
                      trRValue(co->getTrueExpr()), trRValue(co->getFalseExpr()));
+    } else if (auto *bco = dyn_cast<BinaryConditionalOperator>(e)) {
+      // GNU `a ?: b`: `a` if it is nonzero, else `b`, with `a` evaluated
+      // once.
+      // TODO: The current encoding will evaluate `b` unconditionally; can be
+      // fix by translating to an if-statement?
+      if (bco->getFalseExpr()->HasSideEffects(*astCtx)) {
+        reportUnsupported(e->getSourceRange(), loc,
+                          "GNU ?: with an effectful right operand", "");
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
+      }
+      return mk_rvalue_binop(std::move(loc), ir::BinOp::Elvis(),
+                             trRValue(bco->getCommon()),
+                             trRValue(bco->getFalseExpr()));
     } else if (auto *dre = dyn_cast<DeclRefExpr>(e)) {
       if (auto *ecd = dyn_cast<EnumConstantDecl>(dre->getDecl())) {
         const auto val = ecd->getInitVal();
@@ -2628,6 +2642,15 @@ public:
                                    trRValue(vd->getInit())));
             }
           }
+        } else if (auto fd = dyn_cast<FunctionDecl>(d); fd && !fd->hasBody()) {
+          // C allows declaring a function in block scope: the K&R-era idiom of
+          // declaring a library function locally instead of including its
+          // header. The declared function is the same entity as one declared
+          // at file scope, and the statement itself has no runtime effect, so
+          // hoist the declaration out of the body. A body here would be a GNU
+          // nested function, which can capture enclosing locals and hence
+          // cannot be hoisted; that falls through to the error below.
+          HandleDecl(fd);
         } else {
           reportUnsupported(d->getSourceRange(), dloc,
                             "unsupported variable declaration ",
@@ -3278,8 +3301,11 @@ static void parse_file(RefMut<Ctx> ctx) {
 
   // Tool.appendArgumentsAdjuster(OptionsParser->getArgumentsAdjuster());
 
+  // On macOS, _FORTIFY_SOURCE is set to 2 by default, hence all libc functions
+  // will be rewritten into calls the translator does not model.
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
-      {"-DC2PULSE", "-fno-builtin"}, ArgumentInsertPosition::BEGIN));
+      {"-DC2PULSE", "-fno-builtin", "-D_FORTIFY_SOURCE=0"},
+      ArgumentInsertPosition::BEGIN));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 

@@ -349,6 +349,7 @@ impl<'a> Checker<'a> {
                     };
                     match bin_op {
                         BinOp::Eq => check_eq(self),
+                        BinOp::Elvis => check_eq(self),
                         BinOp::LogAnd | BinOp::LogOr | BinOp::Implies => {
                             check_eq(self);
                             match &env.vtype_whnf(lhs_ty.clone().into()).val {
@@ -598,7 +599,9 @@ impl<'a> Checker<'a> {
         match env.lookup_var(n) {
             None => match env.lookup_global_var(n) {
                 Some(_) => {
-                    if needs_lvalue {
+                    // A mutable global is storage (see `mutable_global_lvalue`);
+                    // a `_pure` one is a plain value and cannot be assigned to.
+                    if needs_lvalue && env.mutable_global_lvalue(n).is_none() {
                         self.report(
                             format!("need lvalue, but global {} is rvalue", n.val),
                             &n.loc,

@@ -144,16 +144,37 @@ val of_fn_div_not_null (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a
 
 (* Transfer validity across a spec weakening and/or a divergence relaxation. The
    refinement `div ==> div'` permits total->divergent (a total pointer is
-   trivially a valid divergent one) but forbids the unsound divergent->total. *)
-val weaken (#a #b #c: Type0) (f: ptr)
+   trivially a valid divergent one) but forbids the unsound divergent->total.
+
+   The witness type may change too, which is what `mapw` is for: the weaker
+   specification quantifies over its own witnesses and says which of the
+   original's each of them stands for. A weakening that keeps the witness
+   passes the identity. *)
+val weaken (#a #b #c #c': Type0) (f: ptr)
   (div: bool) (div': bool { div ==> div' })
   (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
-  (pre': a -> erased c -> slprop) (post': a -> erased c -> b -> slprop)
-  (wpre:  (x:a -> y:erased c -> stt_ghost unit emp_inames (pre' x y) (fun _ -> pre x y)))
-  (wpost: (x:a -> y:erased c -> r:b -> stt_ghost unit emp_inames (post x y r) (fun _ -> post' x y r)))
+  (pre': a -> erased c' -> slprop) (post': a -> erased c' -> b -> slprop)
+  (mapw: a -> erased c' -> erased c)
+  (wpre:  (x:a -> y':erased c' -> stt_ghost unit emp_inames (pre' x y') (fun _ -> pre x (mapw x y'))))
+  (wpost: (x:a -> y':erased c' -> r:b -> stt_ghost unit emp_inames (post x (mapw x y') r) (fun _ -> post' x y' r)))
   : stt_ghost unit emp_inames
       (is_valid f div pre post)
       (fun _ -> (is_valid f div' pre' post'))
+
+(* Frame a resource into a pointer's contract without changing the pointer, the
+   witness type, or the divergence flag. The resource may depend on the
+   arguments and the witness but not on the result, and is the same in the pre
+   and the post. Unlike `weaken`'s two independent coercions, this one carries
+   the resource across the call. It transfers validity only: ownership of the
+   frame is wanted at the call, not at this ghost step. *)
+val frame (#a #b #c: Type0) (f: ptr) (div: bool)
+  (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+  (resource: a -> erased c -> slprop)
+  : stt_ghost unit emp_inames
+      (is_valid f div pre post)
+      (fun _ -> is_valid f div
+        (fun x w -> pre x w ** resource x w)
+        (fun x w r -> post x w r ** resource x w))
 
 (* Indirect call of a TOTAL pointer: consume `is_valid f false pre post ** pre x
    w`. pre/post are explicit (SMT will not solve the higher-order

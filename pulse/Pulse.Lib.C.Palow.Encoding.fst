@@ -65,7 +65,7 @@ let encode_tail (n: nat { n > 0 }) (p: prov) (x: nat)
     bytes_ext lhs rhs
 #pop-options
 
-#push-options "--z3rlimit 60 --fuel 2 --ifuel 2"
+#push-options "--z3rlimit 120 --fuel 2 --ifuel 2"
 let rec decode_encode (n: nat) (p: prov) (x: nat)
   : Lemma (ensures decode (encode n p x) == Some (x % pow2 (8 * n)))
           (decreases n)
@@ -80,6 +80,10 @@ let rec decode_encode (n: nat) (p: prov) (x: nat)
       decode_encode (n - 1) p (x / 256);
       assert (decode (slice b 1 (len b)) == Some ((x / 256) % m));
       assert (decode b == Some (x % 256 + 256 * ((x / 256) % m)));
+      // `8 * n == 8 + 8 * (n - 1)` is linear, but leaving it to the solver
+      // inside the `pow2` argument makes the step nonlinear. Saying it first
+      // keeps `pow2_plus` a rewrite rather than a search.
+      assert (8 * n == 8 + 8 * (n - 1));
       M.pow2_plus 8 (8 * (n - 1));
       assert (pow2 (8 * n) == 256 * m);
       M.modulo_division_lemma x 256 m;

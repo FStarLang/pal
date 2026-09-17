@@ -49,6 +49,9 @@ statements. The pass scans for label/goto pairs from the bottom of each
 statement list and wraps the intermediate code in `GotoBlock` nodes --
 structured loops with break semantics that Pulse can express. Labels
 that no goto references are left as-is and removed later.
+The emitter gives labels their own `label_` naming category, separate from
+`var_` locals, so a C label and variable can share a name. Both label
+declarations and `goto` targets use the same name mangler.
 
 - **Decay.** [`src/pass/decay.rs`](../src/pass/decay.rs) handles C's array-to-pointer decay
 rule for function parameters. A parameter declared as `T x[]` or
@@ -68,6 +71,10 @@ source code. Each top-level declaration produces its own `.fst` module
 (and optionally a `.fsti` interface). The emitter uses the `pretty`
 crate for layout and tracks source range mappings so that positions
 in the generated Pulse can be traced back to the original C.
+Variable emission resolves parameters and locals before globals, matching
+the environment's type lookup in both contracts and function bodies.
+Address-taking follows the same rule: a shadowing local uses its own storage,
+not the same-named global's address.
 
 ---
 

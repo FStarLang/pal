@@ -2582,8 +2582,8 @@ new facts about memory.
    else: what a `_preserves` written in Pulse covers is the author's business
    and not something Palow can read.
 
-   As of this milestone: **787 specifications, 697 of them with real bodies,
-   84 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   As of this milestone: **911 specifications, 774 of them with real bodies,
+   121 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -2832,6 +2832,48 @@ new facts about memory.
    emitted to fail. Only a parameter's pointee is owned, because only
    parameters appear in the contract. `test/palow_struct` covers reads, writes,
    two fields of one struct, mixed field widths, and two structs at once.
+
+   Merging the main line brought four tests that exercise function pointers
+   and mutable globals harder than anything before them, and each found
+   something.
+
+   An indirect call now writes its witness out as a tuple spine. The witness
+   is the tuple of implicits the callee's wrapper quantifies -- one component
+   per pointer parameter, saying which object it is being handed -- and the
+   caller does not have to know the values: the ownership in its context says
+   what they are, and slprop matching reads them off. What it does have to
+   know is the *shape*, because Pulse solves a hole standing for a witness
+   leaf but not one standing for a whole tuple: the projections the callee's
+   contract applies to it cannot reduce until the hole is a real tuple, so a
+   single hole stays stuck no matter what the context offers. Writing `(hide
+   (_, _))` instead of `_` turns one stuck hole into two solvable ones, and
+   the emitter built the wrapper, so it knows the arity. A one-component
+   witness was already inferrable, which is why this only showed up once a
+   test called through a pointer to a function owning two objects.
+
+   A mutable array global now publishes its address. Palow had emitted a
+   module only for an array global that is `const` with a known initialiser,
+   on the reasoning that such an array is a sequence constant and not an
+   object; but the address is what a contract naming the array needs, whatever
+   is stored there. Without it the generated contracts referred to a name
+   nothing defined. Ownership is unchanged -- it is threaded by hand through
+   `_live` and assumed at the entrypoint -- and the address is the only thing
+   the declaration has to contribute.
+
+   An array subscript now checks that its bound is available before emitting.
+   The rule was already there for an array *parameter*, whose extent is
+   dynamic and whose bound can only come from the function's own `_requires`;
+   the path that reaches a global array had been left out, so a body with a
+   dropped contract would index into it and fail. A constant index into an
+   array whose extent is in its type still goes through, since it carries its
+   own bound.
+
+   Two of the new tests are on the backlog rather than translated: their
+   hand-written Pulse -- in one case a whole directory of it -- is written
+   against the old memory model, and they carry the marker that says so.
+   `Pulse.Lib.C.Palow.FnPtr` gained the `weaken` generalization across witness
+   types and the `frame` axiom that the main line added to its counterpart,
+   so the two function-pointer libraries stay in step.
 
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;

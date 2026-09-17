@@ -137,6 +137,7 @@ mod crate::ir {
         constructor BitXor;
         constructor Shl;
         constructor Shr;
+        constructor Elvis;
     }
 
     type ParamMode {

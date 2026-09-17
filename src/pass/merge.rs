@@ -230,7 +230,7 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
 
 pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // === Phase 1: Deduplicate identical declarations from shared headers ===
-    // For each declaration kind+name, keep the most complete (last) content at the
+    // For each declaration kind+name, keep the most complete content at the
     // earliest (first) position. This preserves the source ordering so that later
     // passes (e.g. elab) that build their environment incrementally see types
     // before they are referenced by `_include_pulse` blocks in the same file.
@@ -255,41 +255,7 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             };
             if let Some(key) = key {
                 if let Some(&first) = first_idx.get(&key) {
-                    // If this is a second (or later) bare `FnDecl` for a function
-                    // that was already seen (no `FnDefn` involved — that case is
-                    // handled separately in Phase 2), and both occurrences carry
-                    // specs, make sure the specs agree (up to parameter
-                    // renaming) instead of silently keeping whichever
-                    // occurrence happens to be processed last.
-                    if key.0 == 5 {
-                        if let (DeclT::FnDecl(first_decl), DeclT::FnDecl(this_decl)) =
-                            (&tu.decls[first].val, &decl.val)
-                        {
-                            let first_has_specs =
-                                !first_decl.requires.is_empty() || !first_decl.ensures.is_empty();
-                            let this_has_specs =
-                                !this_decl.requires.is_empty() || !this_decl.ensures.is_empty();
-                            if first_has_specs && this_has_specs {
-                                let renames = param_renames(first_decl, this_decl);
-                                let renamed_requires = rename_specs(&first_decl.requires, &renames);
-                                let renamed_ensures = rename_specs(&first_decl.ensures, &renames);
-                                if renamed_requires != this_decl.requires
-                                    || renamed_ensures != this_decl.ensures
-                                {
-                                    report(
-                                        diags,
-                                        format!(
-                                            "multiple declarations of {} have differing specifications",
-                                            this_decl.name.val
-                                        ),
-                                        &this_decl.name.loc,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    // Copy this (later, more complete) decl back to the first position
-                    // and mark this duplicate for removal.
+                    // Merge this decl into the first position and remove the duplicate.
                     moves.push((i, first));
                     to_remove.push(i);
                 } else {
@@ -298,10 +264,40 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             }
         }
 
-        // Apply moves in order so the final value at each first position is the
-        // last (most complete) occurrence.
+        // Merge in order, comparing against the accumulated result rather than
+        // the original first declaration, which may have had no specifications.
         for &(src, dst) in &moves {
             let later = tu.decls[src].clone();
+            if let DeclT::FnDecl(later_decl) = &later.val
+                && let DeclT::FnDecl(earlier_decl) = &tu.decls[dst].val
+            {
+                let earlier_has_specs =
+                    !earlier_decl.requires.is_empty() || !earlier_decl.ensures.is_empty();
+                let later_has_specs =
+                    !later_decl.requires.is_empty() || !later_decl.ensures.is_empty();
+                if earlier_has_specs && !later_has_specs {
+                    // Keep the whole signature so specs retain their parameter
+                    // names, ghost binders, and annotated types.
+                    continue;
+                }
+                if earlier_has_specs && later_has_specs {
+                    let renames = param_renames(earlier_decl, later_decl);
+                    let renamed_requires = rename_specs(&earlier_decl.requires, &renames);
+                    let renamed_ensures = rename_specs(&earlier_decl.ensures, &renames);
+                    if renamed_requires != later_decl.requires
+                        || renamed_ensures != later_decl.ensures
+                    {
+                        report(
+                            diags,
+                            format!(
+                                "multiple declarations of {} have differing specifications",
+                                later_decl.name.val
+                            ),
+                            &later_decl.name.loc,
+                        );
+                    }
+                }
+            }
             // A global's value, purity and externness belong to the object, not
             // to any one of its declarations, so "last wins" would discard
             // information an earlier declaration carried: in
