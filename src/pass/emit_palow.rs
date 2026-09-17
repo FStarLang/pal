@@ -3601,6 +3601,200 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
 /// combinator's, on purpose: a field access and a subscript are the same
 /// operation on a sub-range, and the emitter should not have to tell them
 /// apart.
+/// One sub-object that a struct's `_own` predicate covers: the pointee of an
+/// owned pointer field, or of an owned pointer reached through one.
+///
+/// C's `struct simple { int x, *y, **z; }` describes three fields but four
+/// objects: the struct, `*y`, `*z` and `**z`. Palow's `_pts_to` is the first
+/// of those and nothing else -- it is the struct's own bytes, and `y` and `z`
+/// are addresses held in them, not objects. The other three are what `_own`
+/// names.
+struct OwnItem {
+    /// Suffix of the spec record's field, `y` or `z_1`.
+    name: String,
+    /// The F\* type of the value held there.
+    ty: String,
+    /// The Palow name of its type, whose `_pts_to` states the ownership.
+    pn: String,
+    /// Its address, as an expression over the struct value `x` and the spec
+    /// record `s`.
+    at: String,
+}
+
+/// The pointee of a pointer that carries ownership of what it points at, or
+/// `None` when it does not.
+///
+/// Three kinds of pointer own nothing by design and are the reason this is a
+/// question rather than a projection. `_plain` says the parameter is a bare
+/// address; `_core_ref` says the pointer exists to break a cycle and carries
+/// no predicate; and an array pointer points at an extent nothing here knows,
+/// so there is no amount of memory to claim. `_nullable` is excluded for a
+/// different reason: its ownership is real but sits behind a guard, and an
+/// unconditional conjunct would be a claim about a null pointer.
+fn owned_pointer<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
+    match &tds.resolve(ty).val {
+        TypeT::Pointer(to, PointerKind::Unknown | PointerKind::Ref) => Some(to),
+        TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..) => owned_pointer(tds, t),
+        _ => None,
+    }
+}
+
+/// Walk one owned pointer as far as the chain of owned pointers goes.
+///
+/// `int **z` reaches two objects and the second one's address is the first
+/// one's value, which is why the address of an item can mention the spec
+/// record being defined. The walk stops at a struct or union: its own
+/// `_pts_to` is claimed, but what *it* points at is left to whoever states it,
+/// because following that would need the pointee's module -- which for a
+/// mutually recursive pair does not exist yet -- and would make a
+/// self-referential struct's predicate infinite.
+fn own_chain(tds: &Typedefs, at: String, name: String, ty: &Type, out: &mut Vec<OwnItem>) {
+    let (Some(pn), Some(fty)) = (palow_name(tds, ty), fstar_type(tds, ty)) else {
+        return;
+    };
+    out.push(OwnItem {
+        name: name.clone(),
+        ty: fty,
+        pn,
+        at,
+    });
+    if let Some(to) = owned_pointer(tds, ty) {
+        let to = to.clone();
+        own_chain(
+            tds,
+            format!("((s).own_{})", name),
+            format!("{}_1", name),
+            &to,
+            out,
+        );
+    }
+}
+
+/// Everything a struct's `_own` predicate covers, in field order.
+fn own_items(tds: &Typedefs, si: &StructInfo, self_name: &str) -> Vec<OwnItem> {
+    let mut out = Vec::new();
+    for f in &si.fields {
+        let Some(to) = owned_pointer(tds, &f.ty) else {
+            continue;
+        };
+        // A struct that points at itself, directly or through a chain, would
+        // give an infinite conjunction. Stopping is the same choice C makes
+        // when it asks for a forward declaration.
+        if matches!(&tds.resolve(to).val, TypeT::TypeRef(TypeRefKind::Struct(n)) if &*n.val == self_name)
+        {
+            continue;
+        }
+        let to = to.clone();
+        own_chain(
+            tds,
+            format!("((x).fld_{})", f.name),
+            f.name.clone(),
+            &to,
+            &mut out,
+        );
+    }
+    out
+}
+
+/// The second of a struct's two predicates: what the pointers *inside* it own.
+///
+/// Palow's `_pts_to` is deliberately shallow. It says which bytes the object
+/// occupies and what values they encode, and a pointer field's value is an
+/// address and nothing more -- which is what makes two views of the same
+/// bytes agree, and what lets a struct be an array element or a union member.
+/// But almost every C struct that holds a pointer means to own what it points
+/// at, and a function taking one has to be able to say so without writing the
+/// conjunction out by hand.
+///
+/// So ownership is a separate predicate over the struct's *value*, not its
+/// address: `_own x p s` claims the objects reachable from the pointers in
+/// `x`, and `s` records their values. Keeping it separate is what makes it
+/// optional -- a `_pts_to` on its own is still a legitimate, and much
+/// cheaper, thing to hold -- and it is also the only way the two can carry
+/// different fractional permissions, which is what sharing a structure while
+/// mutating through one of its pointers needs.
+fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
+    let si = &tds.structs[name];
+    let sn = format!("struct_{}", name);
+    let items = own_items(tds, si, name);
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut c = String::new();
+    c += &format!(
+        "noeq type {}_own_spec = {{ {} }}\n\n",
+        sn,
+        items
+            .iter()
+            .map(|i| format!("own_{}: {}", i.name, i.ty))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let conj = |val: &dyn Fn(&OwnItem) -> String| -> String {
+        items
+            .iter()
+            .map(|i| format!("{}_pts_to {} p {}", i.pn, i.at, val(i)))
+            .collect::<Vec<_>>()
+            .join(" **\n  ")
+    };
+    let from_spec = |i: &OwnItem| format!("((s).own_{})", i.name);
+    c += &format!(
+        "let {sn}_own ([@@@mkey] x: {sn}) (p: perm) (s: {sn}_own_spec) : slprop =\n  {body}\n\n",
+        sn = sn,
+        body = conj(&from_spec)
+    );
+    c += &format!(
+        "ghost fn {sn}_own_scatter (x: {sn}) (#p: perm) (#s: {sn}_own_spec)\n\
+         \x20 requires {sn}_own x p s\n\
+         {ens}\n\
+         {{\n  unfold {sn}_own x p s;\n}}\n\n",
+        sn = sn,
+        ens = items
+            .iter()
+            .map(|i| format!("  ensures  {}_pts_to {} p {}", i.pn, i.at, from_spec(i)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // The gather takes each value as its own ghost argument, because the
+    // caller holds the pieces at values Pulse has to be free to unify. The
+    // arguments are in chain order, so that the address of a later one can be
+    // an earlier one's value -- which is exactly what `**z` is.
+    let arg = |i: &OwnItem| format!("own_{}", i.name);
+    let at_args = |i: &OwnItem| -> String {
+        let mut a = i.at.clone();
+        for j in &items {
+            a = a.replace(&format!("((s).own_{})", j.name), &arg(j));
+        }
+        a
+    };
+    c += &format!(
+        "ghost fn {sn}_own_gather (x: {sn}) (#p: perm) {binders}\n\
+         {req}\n\
+         \x20 ensures  {sn}_own x p ({{ {rec_} }})\n\
+         {{\n  fold {sn}_own x p ({{ {rec_} }});\n}}\n\n",
+        sn = sn,
+        binders = items
+            .iter()
+            .map(|i| format!("(#{}: {})", arg(i), i.ty))
+            .collect::<Vec<_>>()
+            .join(" "),
+        req = items
+            .iter()
+            .map(|i| format!("  requires {}_pts_to {} p {}", i.pn, at_args(i), arg(i)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        rec_ = items
+            .iter()
+            .map(|i| format!("own_{} = {}", i.name, arg(i)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    c
+}
+
 fn emit_struct(tds: &Typedefs, name: &str) -> String {
     let si = &tds.structs[name];
     let sn = format!("struct_{}", name);
@@ -3741,6 +3935,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             owned = owned(&format!("x.fld_{}", f.name))
         );
     }
+    c += &emit_struct_own(tds, name);
     c += &emit_struct_storage(tds, name, &gaps);
     c += &emit_struct_bytes(tds, name, &gaps);
     c

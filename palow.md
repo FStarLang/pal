@@ -2593,6 +2593,45 @@ new facts about memory.
    destructor in the suite -- `sum_and_free_point`, `destroy_impl` -- was an
    admit for want of it.
 
+   A struct's two predicates. C's `struct simple { int x, *y, **z; }`
+   describes three fields but four objects: the struct, `*y`, `*z` and `**z`.
+   Palow's `_pts_to` is deliberately the first of those and nothing else -- it
+   says which bytes the object occupies and what values they encode, and a
+   pointer field's value is an address, not an object. That shallowness is
+   load-bearing: it is what makes a byte-level view of the same storage agree
+   with the field-wise one, and it is what lets a struct be an array element
+   or a union member at all.
+
+   But almost every C struct holding a pointer means to own what it points at,
+   and a function taking one has to be able to say so without writing the
+   conjunction out by hand. The old model answered this by folding the two
+   together -- one generated predicate that owned the fields *and* everything
+   reachable through them, against a flattened record of all their values.
+   Palow keeps them apart instead. Each struct now also gets an `_own`
+   predicate over its *value* rather than its address: `_own x p s` claims the
+   objects the pointers in `x` reach, and `s` records what is in them. The
+   two are independent conjuncts, which is what makes deep ownership optional
+   -- holding a bare `_pts_to` is still a legitimate and much cheaper thing to
+   do -- and it is also the only way the two can carry different fractional
+   permissions, which is what sharing a structure while mutating through one
+   of its pointers needs.
+
+   Three kinds of pointer field own nothing, and that they are a *question* at
+   all rather than a projection is the interesting part. `_plain` says the
+   field is a bare address; `_core_ref` says the pointer exists to break a
+   cycle and carries no predicate by construction; an array pointer points at
+   an extent nothing here knows, so there is no amount of memory to claim. A
+   `_nullable` field is excluded for a different reason: its ownership is
+   real but sits behind a guard, and an unconditional conjunct would be a
+   claim about a null pointer. The walk follows a chain of owned pointers as
+   far as it goes -- `**z` is two objects, and the second one's *address* is
+   the first one's *value*, which is why an item's address may mention the
+   record being defined -- and stops at a struct or union, claiming its
+   `_pts_to` but not what it in turn points at. Following that would need the
+   pointee's module, which for a mutually recursive pair does not exist yet,
+   and would make a self-referential struct's predicate infinite. Stopping is
+   the same choice C makes when it asks for a forward declaration.
+
    As of this milestone: **911 specifications, 803 of them with real bodies,
    92 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
