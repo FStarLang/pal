@@ -335,3 +335,21 @@ ghost fn ptr_to_elem (a: ptr) (#p: perm) (#x: ptr)
   ensures  elem_pts_to ptr_repr a p x
 
 
+
+(* ---------------------------------------------------------------------------
+   GNU `a ?: b`, at each integer type.
+
+   `a` when it is nonzero and `b` otherwise. The left operand is evaluated
+   once, which is the whole reason the operator exists; PAL binds it before
+   applying one of these, so the duplication below the `if` is in the
+   specification only.
+   --------------------------------------------------------------------------- *)
+unfold let elvis_int8 (a b: FStar.Int8.t) : FStar.Int8.t = if a = 0y then b else a
+unfold let elvis_int16 (a b: FStar.Int16.t) : FStar.Int16.t = if a = 0s then b else a
+unfold let elvis_int32 (a b: FStar.Int32.t) : FStar.Int32.t = if a = 0l then b else a
+unfold let elvis_int64 (a b: FStar.Int64.t) : FStar.Int64.t = if a = 0L then b else a
+unfold let elvis_uint8 (a b: FStar.UInt8.t) : FStar.UInt8.t = if a = 0uy then b else a
+unfold let elvis_uint16 (a b: FStar.UInt16.t) : FStar.UInt16.t = if a = 0us then b else a
+unfold let elvis_uint32 (a b: FStar.UInt32.t) : FStar.UInt32.t = if a = 0ul then b else a
+unfold let elvis_uint64 (a b: FStar.UInt64.t) : FStar.UInt64.t = if a = 0uL then b else a
+unfold let elvis_size_t (a b: SZ.t) : SZ.t = if a = 0sz then b else a

@@ -2582,8 +2582,8 @@ new facts about memory.
    else: what a `_preserves` written in Pulse covers is the author's business
    and not something Palow can read.
 
-   As of this milestone: **911 specifications, 781 of them with real bodies,
-   114 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   As of this milestone: **911 specifications, 788 of them with real bodies,
+   107 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -2896,6 +2896,15 @@ new facts about memory.
    there is not -- the initialiser is in another unit. `_live(g)` in the
    source is the author asking for the ownership, and that is now enough to
    keep it.
+
+   GNU's `a ?: b` translates at every type Palow has. It is an infix
+   operator like any other -- `a \`elvis_int32\` b` -- because PAL binds the
+   left operand to a name before applying it, so what the definition
+   duplicates below its `if` is a value and not a computation, which is the
+   whole content of "evaluated once". On a pointer it is the one truth test C
+   has that is not a comparison with the integer zero, and under Palow the
+   only form it could take: a pointer's value is not a number, so "nonzero"
+   can only mean "not null".
 
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;

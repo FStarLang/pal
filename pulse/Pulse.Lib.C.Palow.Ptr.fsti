@@ -191,3 +191,13 @@ val literal_addr (#a: Type0) (xs: list a) : ptr
 val literal_addr_not_null (#a: Type0) (xs: list a)
   : Lemma (~(is_null (literal_addr xs)))
           [SMTPat (is_null (literal_addr xs))]
+
+(* ---------------------------------------------------------------------------
+   GNU `a ?: b`
+
+   `a` when it is nonzero and `b` otherwise, with `a` evaluated once. For a
+   pointer, "nonzero" is "not null" -- the one place C's truth test on a
+   pointer means something other than a comparison with the integer zero, and
+   under Palow the only place it can, since a pointer's value is not a number.
+   --------------------------------------------------------------------------- *)
+unfold let elvis_ptr (a b: ptr) : ptr = if is_null a then b else a

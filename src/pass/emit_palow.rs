@@ -10032,6 +10032,10 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         TypeT::Pointer(..) | TypeT::FnPtr { .. } => {
             return match op {
                 BinOp::Eq => Ok("`ptr_eq`".to_string()),
+                // The one truth test on a pointer C has: `a ?: b` is `a`
+                // unless `a` is null. Under Palow that is the only form it
+                // could take, a pointer's value not being a number.
+                BinOp::Elvis => Ok("`elvis_ptr`".to_string()),
                 _ => Err("an operator on a pointer".to_string()),
             };
         }
@@ -10039,6 +10043,18 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     };
     match op {
         BinOp::Eq => return Ok("=".to_string()),
+        // GNU `a ?: b`. The operand is already bound to a name by the time
+        // this is applied, so the `if` below it duplicates a value and not a
+        // computation -- which is the whole content of "evaluated once".
+        BinOp::Elvis => {
+            return Ok(format!(
+                "`elvis_{}`",
+                match m.as_str() {
+                    "SizeT" => "size_t".to_string(),
+                    other => other.to_lowercase(),
+                }
+            ));
+        }
         BinOp::Lt => return Ok(format!("`{}.lt`", m)),
         BinOp::LEq => return Ok(format!("`{}.lte`", m)),
         // The bitwise operators are defined on the whole range at both
