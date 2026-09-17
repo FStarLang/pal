@@ -2632,8 +2632,29 @@ new facts about memory.
    and would make a self-referential struct's predicate infinite. Stopping is
    the same choice C makes when it asks for a forward declaration.
 
-   As of this milestone: **911 specifications, 803 of them with real bodies,
-   92 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   A contract states both halves, and a body opens the second one when it
+   needs it. A struct pointer parameter now carries `_own` alongside
+   `_pts_to`, which is what makes the two models comparable
+   annotation-for-annotation: the old one's single generated predicate owned
+   the same objects, just folded into one. The interesting half is the body.
+   Deep ownership is held *folded*, because that is the form a contract
+   states and a call passes; a statement that reaches through a pointer field
+   scatters it, uses the pieces, and gathers them back before the statement
+   ends. Bracketing it per statement rather than per function is what keeps
+   every branch, loop and call seeing the same shape, and it costs nothing at
+   runtime because both directions are ghost.
+
+   The item names do the addressing. `_own`'s record is named after the path
+   that reaches each object -- `z` for what `s->z` points at, `z_1` for what
+   *that* points at -- so resolving an access is a walk of the same shape over
+   the expression, and `**s->z = 42` comes out as a field read, a pointer
+   read, a write, and the two ghost brackets around them. The parameter is
+   the only root a walk starts from: what a struct reached any other way owns
+   is not something this signature states, and saying so is the same refusal
+   as everywhere else in the emitter.
+
+   As of this milestone: **911 specifications, 804 of them with real bodies,
+   91 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

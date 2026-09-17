@@ -2300,6 +2300,28 @@ fn emit_fn(
                     )
                 }
             };
+        // The deep half of the parameter's ownership. A struct pointer in C
+        // almost always means the struct *and* what its pointers reach; the
+        // two are separate predicates here, so the contract states both. A
+        // struct with no owned pointer field has nothing to add and gets
+        // nothing, which is why this is an option rather than a conjunct.
+        let own_info: Option<(String, String)> = (extent(tds, &arg.ty) == Some(Extent::One))
+            .then(|| match &tds.resolve(pt).val {
+                TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
+                    .structs
+                    .get(&*n.val)
+                    .filter(|si| !own_items(tds, si, &n.val).is_empty())
+                    .map(|_| {
+                        (
+                            format!("struct_{}", n.val),
+                            format!("struct_{}_own_spec", n.val),
+                        )
+                    }),
+                _ => None,
+            })
+            .flatten();
+        let oname = format!("own_{}", base);
+
         let pts_to: Box<dyn Fn(&str, &str) -> String> = if null_guard {
             let p = pname.clone();
             Box::new(move |perm: &str, v: &str| format!("unless_null {} ({})", p, pts_to(perm, v)))
@@ -2379,6 +2401,14 @@ fn emit_fn(
                     pre: pts_to(&perm, ""),
                     entry: format!("(reveal {})", vname),
                 });
+                if let Some((sn, osty)) = &own_info {
+                    ghosts.push(format!("(#{}: erased ({}))", oname, osty));
+                    wits.push((oname.clone(), osty.clone(), true));
+                    preserved.push(format!(
+                        "{}_own (reveal {}) {} (reveal {})",
+                        sn, vname, perm, oname
+                    ));
+                }
                 let v = format!("(reveal {})", vname);
                 pointees.insert(base, (Some(v.clone()), Some(v)));
             }
@@ -2392,6 +2422,14 @@ fn emit_fn(
                     pre: pts_to("1.0R", ""),
                     entry: format!("(reveal {})", vname),
                 });
+                if let Some((sn, osty)) = &own_info {
+                    ghosts.push(format!("(#{}: erased ({}))", oname, osty));
+                    wits.push((oname.clone(), osty.clone(), true));
+                    req.push(format!(
+                        "{}_own (reveal {}) 1.0R (reveal {})",
+                        sn, vname, oname
+                    ));
+                }
                 pointees.insert(base, (Some(format!("(reveal {})", vname)), None));
             }
             ParamMode::Regular => {
@@ -2409,6 +2447,22 @@ fn emit_fn(
                     vty,
                     pts_to("1.0R", &format!("{}'", vname)),
                 ));
+                // The new value comes first, because what the deep half owns
+                // is stated in terms of it: a body that overwrote a pointer
+                // field owns what the *new* pointer reaches.
+                if let Some((sn, osty)) = &own_info {
+                    ghosts.push(format!("(#{}: erased ({}))", oname, osty));
+                    wits.push((oname.clone(), osty.clone(), true));
+                    req.push(format!(
+                        "{}_own (reveal {}) 1.0R (reveal {})",
+                        sn, vname, oname
+                    ));
+                    fresh.push((
+                        format!("{}'", oname),
+                        osty.clone(),
+                        format!("{}_own {}' 1.0R {}'", sn, vname, oname),
+                    ));
+                }
                 pointees.insert(
                     base,
                     (
@@ -6295,6 +6349,13 @@ struct Body<'a> {
     /// handed to a callee is converted to the view the callee asks for and
     /// back again, and the way back cannot be emitted until the call has been.
     pending_close: Vec<String>,
+    /// Parameters whose `_own` is currently unfolded. Deep ownership is held
+    /// folded, because that is the form a contract states and a call passes;
+    /// a statement that reaches through a pointer field scatters it, uses the
+    /// pieces, and gathers them back before the statement ends. Bracketing it
+    /// per statement rather than per function is what keeps every branch,
+    /// loop and call seeing the same shape.
+    own_open: Vec<(String, String)>,
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
@@ -6588,6 +6649,68 @@ impl<'a> Body<'a> {
     /// call. A pointer *loaded* out of memory is not: what it addresses
     /// depends on what was stored, which the contract would have to grant
     /// separately.
+    /// What a struct's `_own` predicate covers, by C struct name.
+    fn own_items_of(&self, sn: &str) -> Vec<OwnItem> {
+        self.tds
+            .structs
+            .get(sn)
+            .map(|si| own_items(self.tds, si, sn))
+            .unwrap_or_default()
+    }
+
+    /// Which `_own` item, if any, holds the object `e` points at.
+    ///
+    /// The items are named after the path that reaches them -- `z` for what
+    /// `s->z` points at, `z_1` for what *that* points at -- so this is a walk
+    /// of the same shape over the expression. A parameter the contract does
+    /// not really own is not a starting point, because the ownership would
+    /// then be one the signature never stated.
+    fn own_item(&self, e: &Expr) -> Option<(String, String, String)> {
+        match &strip_vattr(e).val {
+            // `s->f`, which reaches the IR as `(*s).f`. The parameter itself
+            // is the only root: what a struct reached any other way owns is
+            // not something this signature states.
+            ExprT::Member(base, f) => {
+                let ExprT::Deref(root) = &strip_vattr(base).val else {
+                    return None;
+                };
+                let ExprT::Var(v) = &strip_vattr(root).val else {
+                    return None;
+                };
+                let p = v.val.to_string();
+                if !self.params.contains(&p) || !self.granted.contains(&p) {
+                    return None;
+                }
+                let ty = self.ty_of(base).ok()?;
+                let TypeT::TypeRef(TypeRefKind::Struct(n)) = &self.tds.resolve(&ty).val else {
+                    return None;
+                };
+                let sn = n.val.to_string();
+                let name = f.val.to_string();
+                self.own_items_of(&sn).iter().find(|i| i.name == name)?;
+                Some((p, sn, name))
+            }
+            ExprT::Deref(inner) => {
+                let (p, sn, item) = self.own_item(inner)?;
+                let name = format!("{}_1", item);
+                self.own_items_of(&sn).iter().find(|i| i.name == name)?;
+                Some((p, sn, name))
+            }
+            _ => None,
+        }
+    }
+
+    /// Unfold a parameter's deep ownership for the rest of this statement.
+    fn open_own(&mut self, p: &str, sn: &str) {
+        let sn = format!("struct_{}", sn);
+        let v = format!("(reveal val_{})", p);
+        if self.own_open.iter().any(|(s, x)| *s == sn && *x == v) {
+            return;
+        }
+        self.lines.push(format!("{}_own_scatter {};", sn, v));
+        self.own_open.push((sn, v));
+    }
+
     fn stable_ptr(&self, e: &Expr) -> bool {
         match &strip_vattr(e).val {
             ExprT::Var(v) => {
@@ -6720,6 +6843,16 @@ impl<'a> Body<'a> {
                     v.val
                 )),
                 _ if self.stable_ptr(inner) => self.rvalue(inner),
+                // A pointer loaded out of a struct the contract deeply owns.
+                // `_own` says what it reaches, so unfolding it for the length
+                // of this statement is all the access needs; the matching
+                // gather is owed at the end of the statement, like any other
+                // borrow.
+                _ if self.own_item(inner).is_some() => {
+                    let (p, sn, _) = self.own_item(inner).unwrap();
+                    self.open_own(&p, &sn);
+                    self.rvalue(inner)
+                }
                 other => Err(format!(
                     "a dereference of {}, whose target the contract does not grant",
                     expr_kind_of(other)
@@ -9462,8 +9595,12 @@ impl<'a> Body<'a> {
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
         let r = self.stmt_inner(s);
         let close = std::mem::take(&mut self.pending_close);
+        let open = std::mem::take(&mut self.own_open);
         r?;
         self.lines.extend(close);
+        for (sn, v) in open.into_iter().rev() {
+            self.lines.push(format!("{}_own_gather {};", sn, v));
+        }
         Ok(())
     }
 
@@ -11038,6 +11175,7 @@ fn emit_body(
         gotos: Vec::new(),
         in_loop: false,
         pending_close: Vec::new(),
+        own_open: Vec::new(),
         loop_mark: None,
         divergent_fns,
         blocks: Vec::new(),
