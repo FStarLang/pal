@@ -823,6 +823,13 @@ struct FnSurface {
     owned: Vec<OwnedParam>,
     /// Parameters whose ownership sits behind a nullness guard.
     guarded: HashSet<String>,
+    /// Parameters whose pointee the emitted `requires` really owns. A `_plain`
+    /// pointer owns nothing by itself: what ownership it has comes from a
+    /// `_refine_value`, and the all-or-nothing contract drop takes that away
+    /// with everything else. A body that went on dereferencing one would be
+    /// asking Pulse for ownership its own signature no longer states, so the
+    /// access is refused and counted instead.
+    granted: HashSet<String>,
     /// Whether the C function's own `_requires`/`_ensures` made it into the
     /// specification. When they did not, the contract we emit is weaker than
     /// the source says, and in particular cannot discharge an overflow
@@ -2826,10 +2833,34 @@ fn emit_fn(
         None
     };
 
+    let mut granted: HashSet<String> = owned
+        .iter()
+        .map(|o| o.base.clone())
+        .chain(
+            refines_value
+                .iter()
+                .filter(|(.., p)| contract_ok && slprop_refine(tds, p).is_some())
+                .map(|(base, ..)| base.clone()),
+        )
+        .collect();
+    // A contract with hand-written ownership in it is ownership Palow did not
+    // put there and cannot read: what a spliced `_preserves` says about which
+    // parameter it covers is the author's business. So one is taken as a grant
+    // over everything, which is the same trust a spliced clause gets
+    // everywhere else.
+    if contract_ok && !(req_slprops.is_empty() && ens_slprops.is_empty()) {
+        granted.extend(
+            decl.args
+                .iter()
+                .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string())),
+        );
+    }
+
     Ok(FnSurface {
         decl: out,
         owned,
         guarded,
+        granted,
         contract: contract_ok,
         fp,
         fp_unit: wits.is_empty(),
@@ -5731,6 +5762,8 @@ struct Body<'a> {
     /// The ownership the contract grants over the parameters' pointees, which
     /// a loop invariant has to restate.
     owned: &'a [OwnedParam],
+    /// Parameters whose pointee the emitted contract owns; see `FnSurface`.
+    granted: &'a HashSet<String>,
     /// Parameters whose ownership sits behind a nullness guard, so a loop
     /// invariant claiming their storage is claiming the guard is discharged.
     guarded: &'a HashSet<String>,
@@ -6156,7 +6189,19 @@ impl<'a> Body<'a> {
                         .unwrap();
                     Ok(b.tmp.clone())
                 }
-                ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => self.rvalue(inner),
+                ExprT::Var(v)
+                    if self.params.contains(&*v.val.to_string())
+                        && self.granted.contains(&*v.val.to_string()) =>
+                {
+                    self.rvalue(inner)
+                }
+                // A parameter the contract says nothing about points at
+                // memory this function does not hold. Saying so is the whole
+                // difference between a weaker specification and a wrong one.
+                ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => Err(format!(
+                    "a dereference of `{}`, whose ownership the contract does not state",
+                    v.val
+                )),
                 // `malloc` may fail, so an allocation the source never tested
                 // is genuinely not owned. This is a real difference from the
                 // old model, whose allocator could not return null.
@@ -7560,6 +7605,18 @@ impl<'a> Body<'a> {
                 // ownership, no sequencing, and usable inside an assertion.
                 if let Some(x) = self.const_read(e) {
                     return Ok(x);
+                }
+                // A field whose type is an array decays to a pointer to its
+                // first element, exactly as a whole array does, and Palow
+                // names that pointer by the field's address. Nothing is read
+                // and no ownership changes hands by taking one: whoever
+                // accesses through it still has to focus the field out of the
+                // struct, which is where the obligation belongs.
+                if let ExprT::Member(base, f) = &e.val {
+                    let fty = self.field_ty(base, f)?;
+                    if matches!(peel(self.tds, &fty).val, TypeT::FixedArray(..)) {
+                        return self.addr(e);
+                    }
                 }
                 let hint = match &e.val {
                     ExprT::Member(_, f) => f.val.to_string(),
@@ -10277,6 +10334,7 @@ fn emit_body(
         arrays,
         requires_ok: sig.contract && !defn.decl.requires.is_empty(),
         owned: &sig.owned,
+        granted: &sig.granted,
         guarded: &sig.guarded,
         valid_fps: &sig.valid_fps,
         consumed: &sig.consumed,

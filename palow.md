@@ -2560,8 +2560,30 @@ new facts about memory.
    ownership, which is what really differs between the two, is not part of
    the value.
 
-   As of this milestone: **787 specifications, 696 of them with real bodies,
-   85 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   A struct field whose type is an array now decays like any other array: to
+   the address of its first element, which under Palow is the field's own
+   address. Nothing is read by taking one and no ownership changes hands --
+   whoever accesses through the pointer still has to focus the field out of
+   the struct, which is where the obligation belongs. That is the whole of
+   what the old model needed a decayed handle for, and it comes out as
+   arithmetic rather than as a different kind of value.
+
+   Emitting those bodies exposed a gap that had been hiding behind them. A
+   `_plain` pointer parameter owns nothing by itself: whatever ownership it
+   has comes from a `_refine_value`, and the all-or-nothing contract drop
+   takes that away along with everything else. A body that went on
+   dereferencing such a parameter was asking Pulse for ownership its own
+   signature no longer stated -- a generated file that fails rather than a
+   weaker one, which is the one outcome the measurement discipline does not
+   allow. Parameters are now tracked by whether the emitted `requires` really
+   owns the pointee, and a dereference of one that it does not is refused and
+   counted. A contract with hand-written ownership in it is taken as a grant
+   over everything, which is the same trust a spliced clause gets everywhere
+   else: what a `_preserves` written in Pulse covers is the author's business
+   and not something Palow can read.
+
+   As of this milestone: **787 specifications, 697 of them with real bodies,
+   84 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
