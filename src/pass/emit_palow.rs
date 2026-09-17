@@ -909,6 +909,13 @@ struct OwnedParam {
     vty: String,
     /// `array_pts_to uint32_t_repr 4 var_a 1.0R ` -- append a value to it.
     pre: String,
+    /// What the value was on entry to the *function*. A loop invariant needs
+    /// it because `_old` inside one means the same thing it means in an
+    /// `_ensures` -- the state the call started in -- and that is a different
+    /// value from the one the invariant binds for the current iteration. The
+    /// name is the signature's own ghost binder, which is in scope throughout
+    /// the body.
+    entry: String,
 }
 
 /// Which values a specification expression refers to: the ones on entry, the
@@ -930,6 +937,11 @@ struct Spec<'a> {
     /// `None` on entry means an `_out` parameter, which has no incoming value;
     /// `None` on exit means ownership the function does not give back.
     pointees: HashMap<String, (Option<String>, Option<String>)>,
+    /// Where `_old` names something other than the entry term in `pointees`.
+    /// A loop invariant is the case that needs it: the invariant binds a fresh
+    /// value for the current iteration, but `_old` still means the state the
+    /// *function* was called in, which is the signature's own ghost binder.
+    olds: HashMap<String, String>,
     /// Parameters whose `pointees` entry is a sequence rather than a value.
     arrays: HashSet<String>,
     /// Parameters whose storage the contract grants only behind a nullness
@@ -1060,6 +1072,7 @@ impl<'a> Spec<'a> {
                         tds: self.tds,
                         env: &env,
                         pointees: self.pointees.clone(),
+                        olds: self.olds.clone(),
                         arrays: self.arrays.clone(),
                         guarded: self.guarded.clone(),
                         guards: RefCell::new(Vec::new()),
@@ -1183,8 +1196,13 @@ impl<'a> Spec<'a> {
         let Some((pre, post)) = self.pointees.get(&*v.val) else {
             return Err(format!("`*{}` in a contract", v.val));
         };
+        let old;
         let chosen = match w {
             When::Post => post,
+            When::Old if self.olds.contains_key(&*v.val) => {
+                old = Some(self.olds[&*v.val].clone());
+                &old
+            }
             When::Pre | When::Old => pre,
         };
         let Some(term) = chosen else {
@@ -1608,6 +1626,20 @@ impl<'a> Spec<'a> {
                         width,
                         self.value(inner, w)?
                     )),
+                    // The bitwise complement is total on the whole unsigned
+                    // range, so it needs nothing said about it and is the same
+                    // function the body emits.
+                    (
+                        UnOp::BitNot,
+                        TypeT::Int {
+                            signed: false,
+                            width,
+                        },
+                    ) => Ok(format!(
+                        "(FStar.UInt{}.lognot {})",
+                        width,
+                        self.value(inner, w)?
+                    )),
                     _ => Err(format!(
                         "`{}` on {} in a contract",
                         op.to_str(),
@@ -1841,6 +1873,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         tds,
         env,
         pointees: HashMap::new(),
+        olds: HashMap::new(),
         arrays: HashSet::new(),
         guarded: HashSet::new(),
         guards: RefCell::new(Vec::new()),
@@ -1933,6 +1966,7 @@ fn emit_pure_fn(
         tds,
         env,
         pointees: HashMap::new(),
+        olds: HashMap::new(),
         arrays: HashSet::new(),
         guarded: HashSet::new(),
         guards: RefCell::new(Vec::new()),
@@ -2336,6 +2370,7 @@ fn emit_fn(
                     base: base.clone(),
                     vty: vty.clone(),
                     pre: pts_to(&perm, ""),
+                    entry: format!("(reveal {})", vname),
                 });
                 let v = format!("(reveal {})", vname);
                 pointees.insert(base, (Some(v.clone()), Some(v)));
@@ -2348,6 +2383,7 @@ fn emit_fn(
                     base: base.clone(),
                     vty: vty.clone(),
                     pre: pts_to("1.0R", ""),
+                    entry: format!("(reveal {})", vname),
                 });
                 pointees.insert(base, (Some(format!("(reveal {})", vname)), None));
             }
@@ -2359,6 +2395,7 @@ fn emit_fn(
                     base: base.clone(),
                     vty: vty.clone(),
                     pre: pts_to("1.0R", ""),
+                    entry: format!("(reveal {})", vname),
                 });
                 fresh.push((
                     format!("{}'", vname),
@@ -2435,6 +2472,7 @@ fn emit_fn(
         tds,
         env,
         pointees,
+        olds: HashMap::new(),
         arrays,
         guarded: guarded.clone(),
         guards: RefCell::new(Vec::new()),
@@ -2538,6 +2576,7 @@ fn emit_fn(
             tds,
             env: &env,
             pointees,
+            olds: spec.olds.clone(),
             arrays,
             guarded: spec.guarded.clone(),
             guards: RefCell::new(Vec::new()),
@@ -8944,11 +8983,33 @@ impl<'a> Body<'a> {
         &mut self,
         clause: &Exprs,
         what: &str,
+        body: Option<&Stmts>,
     ) -> Result<(Vec<String>, Vec<String>, Vec<String>), String> {
         let mut binders: Vec<String> = Vec::new();
         let mut owns: Vec<String> = Vec::new();
         let mut locals: HashMap<String, String> = HashMap::new();
+        // A loop invariant rebinds every value it mentions, which is the point
+        // for a local the body changes and a disaster for one it does not: a
+        // local bound existentially and then constrained by nothing is a local
+        // whose value the loop has forgotten. Pulse's frame rule already
+        // carries what the body leaves alone, and carrying it *outside* the
+        // invariant is the only way its value survives. So the invariant
+        // covers exactly the locals the body may write and the ones a clause
+        // names -- which for a nested loop is a much smaller set than
+        // everything in scope, and is why an inner loop no longer destroys
+        // what the outer one knows.
+        let kept: Option<HashSet<String>> = body.map(|b| {
+            let mut t = Touched::default();
+            touch_stmts(b, &mut t);
+            touch_exprs(clause, &mut t);
+            t.written.union(&t.vars).cloned().collect()
+        });
         for s in &self.slots {
+            if let Some(k) = &kept
+                && !k.contains(&s.name)
+            {
+                continue;
+            }
             if !s.init {
                 // The frame would have to say that the slot still holds
                 // storage rather than a value, and the body would have to
@@ -8967,6 +9028,7 @@ impl<'a> Body<'a> {
         // contents has to be reachable as a pointee rather than as a local's
         // value. The invariant is a contract about one point in the body, and
         // the two should not need different words for the same object.
+        let mut olds: HashMap<String, String> = HashMap::new();
         let mut arrays: HashSet<String> = self.arrays.keys().cloned().collect();
         for s in &self.slots {
             if s.global && s.array.is_some() {
@@ -8979,13 +9041,17 @@ impl<'a> Body<'a> {
             let b = format!("inv_val_{}", o.base);
             binders.push(format!("({}: {})", b, o.vty));
             owns.push(format!("{}{}", o.pre, b));
+            // `_old` is the function's entry state, not this iteration's, so
+            // it gets the signature's ghost binder rather than the invariant's.
             pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
+            olds.insert(o.base.clone(), o.entry.clone());
         }
 
         let spec = Spec {
             tds: self.tds,
             env: &self.env,
             pointees,
+            olds,
             arrays,
             guarded: self.guarded.clone(),
             guards: RefCell::new(Vec::new()),
@@ -9017,7 +9083,7 @@ impl<'a> Body<'a> {
 
     /// The same frame, written out as one slprop.
     fn frame_slprop(&mut self, clause: &Exprs, what: &str, indent: &str) -> Result<String, String> {
-        let (binders, owns, props) = self.frame(clause, what)?;
+        let (binders, owns, props) = self.frame(clause, what, None)?;
         let sep = format!("\n{}", indent);
         let quant = if binders.is_empty() {
             String::new()
@@ -9051,7 +9117,7 @@ impl<'a> Body<'a> {
             return Err("a loop in a function with an `_out` parameter".to_string());
         }
 
-        let (binders, owns, props) = self.frame(inv, "a loop")?;
+        let (binders, owns, props) = self.frame(inv, "a loop", Some(body))?;
 
         let before = self.lines.len();
         self.in_guard = true;
@@ -9070,12 +9136,25 @@ impl<'a> Body<'a> {
         self.in_loop = true;
         let was_mark = self.loop_mark.replace(self.slots.len());
         let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+        // A declaration inside the body is in scope for the rest of the body
+        // and nowhere else, so the environment is extended as the statements
+        // go by and restored at the closing brace, as it is for a branch.
+        let outer_env = self.env.clone();
+        let mark = self.slots.len();
         let r = (|| -> Result<(), String> {
             for s in body.iter() {
+                self.env.push_stmt(s);
                 self.stmt(s)?;
             }
+            // Storage declared in the body belongs to the iteration, and the
+            // invariant has to hold at the closing brace without it: Pulse
+            // would otherwise be asked to carry a local across an edge where C
+            // says its lifetime has ended.
+            self.release_from(mark);
             Ok(())
         })();
+        self.env = outer_env;
+        self.slots.truncate(mark);
         self.in_branch = was_branch;
         self.in_loop = was_loop;
         self.loop_mark = was_mark;
@@ -10189,6 +10268,13 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
         TypeT::Int { signed, width } => Ok(format!("0{}", int_suffix(*signed, *width)?)),
         TypeT::SizeT => Ok("0sz".to_string()),
         TypeT::Bool => Ok("false".to_string()),
+        // C says a pointer zero-initialised by a brace initialiser, by static
+        // storage, or by `calloc` is a *null pointer*, not an all-zero object,
+        // and Palow's `null` is that pointer. The two happen to agree on the
+        // bytes here -- `null_addr` says its address is 0 -- but it is the
+        // value that matters, because that is what a comparison with `NULL`
+        // will ask about.
+        TypeT::Pointer(..) => Ok("null".to_string()),
         TypeT::TypeRef(TypeRefKind::Struct(name)) => {
             let Some(si) = tds.structs.get(&*name.val) else {
                 return Err(format!("a zeroed struct {}", name.val));

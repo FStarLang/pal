@@ -2582,8 +2582,8 @@ new facts about memory.
    else: what a `_preserves` written in Pulse covers is the author's business
    and not something Palow can read.
 
-   As of this milestone: **911 specifications, 799 of them with real bodies,
-   96 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   As of this milestone: **911 specifications, 801 of them with real bodies,
+   94 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -2962,6 +2962,35 @@ new facts about memory.
    top of a clause cannot mention a variable the clause binds itself, and
    these casts appear under exactly such a `_forall`. `test/reverse_test`'s
    specification now translates in full.
+
+   A loop body is a scope. Declarations inside one never reached the
+   environment, so the first use of such a local failed to typecheck and the
+   whole function was admitted -- which is why `test/reverse_test`, the
+   showcase for array ownership, had no body at all. Extending the
+   environment as the body's statements go by, and releasing the storage they
+   declare at the closing brace, is what a branch already did; a loop simply
+   had not been given it.
+
+   With bodies emitted, two things that had never been exercised turned out
+   to be wrong. `_old` inside an invariant meant the current iteration's
+   value rather than the function's entry state, which for `reverse` made the
+   invariant say every element equals itself -- a statement that is both
+   useless and false of a half-reversed array. It now resolves to the
+   signature's own ghost binder, which is in scope throughout the body and is
+   what `_old` means everywhere else.
+
+   And an invariant covered every local in scope, which is a disaster for the
+   ones the body does not touch: a local bound existentially and constrained
+   by nothing is a local whose value the loop has forgotten. Pulse's frame
+   rule already carries what the body leaves alone, and carrying it *outside*
+   the invariant is the only way its value survives. The invariant now covers
+   exactly the locals the body may write and the ones a clause names, which
+   is why an inner loop no longer destroys what the outer one knows --
+   `test/do_while`'s nested `continue` is the case that found it. Invariants
+   got considerably shorter as a side effect.
+
+   `test/reverse_test` -- an in-place array reversal with a real invariant
+   over the permuted contents -- now translates and verifies end to end.
 
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;
