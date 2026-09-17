@@ -888,6 +888,13 @@ struct FnSurface {
     /// what it does -- so this is exactly the set of pointers the body may call
     /// through without knowing which function it is calling.
     valid_fps: HashSet<String>,
+    /// Parameters the caller hands over *with* the right to free them: an
+    /// `_allocated` pointer taken `_consumes`. The block is the callee's to
+    /// return, and a `free` of one is as ordinary as a `free` of a block this
+    /// body allocated itself -- the ownership says the same thing either way.
+    /// Keyed by the C name; the value is the Palow name of the pointee type
+    /// and the element size when the block is an array.
+    freeables: HashMap<String, String>,
     /// Parameters whose ownership the caller hands over for good. Whatever
     /// the contract granted at one of these is not wanted back, which is what
     /// decides whether validity gathered at an indirect call has to be put
@@ -2639,6 +2646,7 @@ fn emit_fn(
     // writes, and it says the caller hands over the right to free the block.
     // It goes where the points-to goes.
     let valid_fps: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    let freeables: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     let refine_own = |w: When| -> Result<Vec<String>, String> {
         let mut out = Vec::new();
         for (base, ty, p) in &refines {
@@ -2662,7 +2670,18 @@ fn emit_fn(
             // clause, and refused with the same words when that rule says no.
             out.push(
                 match allocated_own(tds, ty, &format!("var_{}", base), code)? {
-                    Some(t) => t,
+                    Some(t) => {
+                        // Only if the caller is giving it up: freeing what the
+                        // `ensures` still promises back would be a body that
+                        // cannot be proved.
+                        if consumed.contains(base)
+                            && let Some(pt) = pointee(tds, ty)
+                            && let Some(pn) = palow_name(tds, &pt)
+                        {
+                            freeables.borrow_mut().insert(base.clone(), pn);
+                        }
+                        t
+                    }
                     None => {
                         let t = with_this(base, ty, p, w, false, None, &|sp: &Spec, w| {
                             sp.inline_pulse(code, w)
@@ -3095,6 +3114,11 @@ fn emit_fn(
             valid_fps.take()
         } else {
             HashSet::new()
+        },
+        freeables: if contract_ok {
+            freeables.take()
+        } else {
+            HashMap::new()
         },
         consumed,
         self_rec: decreases.is_some(),
@@ -6047,6 +6071,11 @@ struct Body<'a> {
     /// Parameters the contract hands an `is_valid` for, and so the only
     /// pointers this body may call through without knowing the target.
     valid_fps: &'a HashSet<String>,
+    /// Consumed `_allocated` parameters and the Palow name of what they point
+    /// at. See `FnSurface::freeables`.
+    freeables: &'a HashMap<String, String>,
+    /// Which of those this body has already returned to the allocator.
+    consumed_freed: HashSet<String>,
     /// Parameters whose ownership does not come back. See `FnSurface`.
     consumed: &'a HashSet<String>,
     /// Addresses whose validity this body has seeded and not yet put down,
@@ -8844,6 +8873,21 @@ impl<'a> Body<'a> {
             ExprT::Var(v) => v.val.to_string(),
             _ => return Err("a `free` of something other than a local".to_string()),
         };
+        // A block the caller handed over: the `_allocated` refinement put a
+        // `freeable` in the precondition and `_consumes` says it is not wanted
+        // back, so this is the same three statements as below with the
+        // parameter's own address in place of the block's.
+        if let Some(pn) = self.freeables.get(&name) {
+            let pn = pn.clone();
+            if !self.consumed_freed.insert(name.clone()) {
+                return Err(format!("a second `free` of `{}`", name));
+            }
+            self.lines.push(format!("{}_forget var_{};", pn, name));
+            self.lines
+                .push(format!("{}_reveal_uninit var_{};", pn, name));
+            self.lines.push(format!("free var_{};", name));
+            return Ok(());
+        }
         let i = self
             .blocks
             .iter()
@@ -10789,6 +10833,8 @@ fn emit_body(
         granted: &sig.granted,
         guarded: &sig.guarded,
         valid_fps: &sig.valid_fps,
+        freeables: &sig.freeables,
+        consumed_freed: HashSet::new(),
         consumed: &sig.consumed,
         has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
         divergent: false,

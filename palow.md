@@ -2582,8 +2582,19 @@ new facts about memory.
    else: what a `_preserves` written in Pulse covers is the author's business
    and not something Palow can read.
 
-   As of this milestone: **911 specifications, 801 of them with real bodies,
-   94 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   `free` had one more case than the block bookkeeping knew about. A block
+   is something this body allocated and can therefore see the size of; a
+   `_consumes _allocated` parameter is a block someone else allocated and
+   handed over, and its size is already written into the signature as a
+   `freeable`. The two are the same obligation reached by different routes,
+   so the emitter now recognises the second as well: a `free` of such a
+   parameter forgets the typed view, reveals the bytes underneath, and
+   returns them. That is what a destructor is, and until now every
+   destructor in the suite -- `sum_and_free_point`, `destroy_impl` -- was an
+   admit for want of it.
+
+   As of this milestone: **911 specifications, 803 of them with real bodies,
+   92 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
