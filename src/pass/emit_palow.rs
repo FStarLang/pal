@@ -204,6 +204,12 @@ struct Typedefs<'a> {
     typedefs: HashMap<&'a str, &'a Rc<Type>>,
     structs: HashMap<String, StructInfo>,
     unions: HashMap<String, UnionInfo>,
+    /// The size and alignment clang reports for every aggregate in the file,
+    /// including the ones Palow declines to model. A `sizeof` is a number
+    /// from the target ABI and does not need a representation: a union with a
+    /// `double` arm has no `_pts_to` here, but its size is still the size
+    /// clang would compile, and a contract may say so.
+    aggregate_layouts: HashMap<String, (u64, u64)>,
     /// Structs carrying a `_refine`. The refinement is not part of the
     /// generated `_pts_to` yet, which costs nothing while the object is behind
     /// a pointer -- no body so far has needed it -- but is fatal for a
@@ -248,6 +254,12 @@ struct Typedefs<'a> {
 }
 
 impl<'a> Typedefs<'a> {
+    /// The size and alignment clang reports for an aggregate, whether or not
+    /// Palow models it.
+    fn aggregate_layout(&self, key: &str) -> Option<(u64, u64)> {
+        self.aggregate_layouts.get(key).copied()
+    }
+
     /// Why a fragment was not spliced, phrased so the two markers stay
     /// distinguishable in a census of the generated files.
     fn no_splice(&self) -> String {
@@ -271,6 +283,7 @@ impl<'a> Typedefs<'a> {
             model_specific,
             structs: HashMap::new(),
             unions: HashMap::new(),
+            aggregate_layouts: HashMap::new(),
             refined_structs: tu
                 .decls
                 .iter()
@@ -562,9 +575,23 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
         TypeT::Bool => Some(1),
         TypeT::Int { width, .. } => Some((*width / 8) as u64),
         TypeT::SizeT | TypeT::PtrdiffT | TypeT::Pointer(..) | TypeT::FnPtr { .. } => Some(8),
+        // A size is a number from clang's ABI and needs no representation in
+        // the model: `sizeof(double)` is answerable even though Palow cannot
+        // say what a `double` holds.
+        TypeT::Float { width } => Some((*width / 8) as u64),
         TypeT::FixedArray(t, n) => palow_sizeof(tds, t).map(|s| s * n),
-        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).map(|s| s.size),
-        TypeT::TypeRef(TypeRefKind::Union(n)) => tds.unions.get(&*n.val).map(|u| u.size),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            tds.structs.get(&*n.val).map(|s| s.size).or_else(|| {
+                tds.aggregate_layout(&format!("struct {}", n.val))
+                    .map(|l| l.0)
+            })
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            tds.unions.get(&*n.val).map(|u| u.size).or_else(|| {
+                tds.aggregate_layout(&format!("union {}", n.val))
+                    .map(|l| l.0)
+            })
+        }
         TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -580,8 +607,18 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
 fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     match &tds.resolve(ty).val {
         TypeT::FixedArray(t, _) => palow_alignof(tds, t),
-        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).map(|s| s.align),
-        TypeT::TypeRef(TypeRefKind::Union(n)) => tds.unions.get(&*n.val).map(|u| u.align),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            tds.structs.get(&*n.val).map(|s| s.align).or_else(|| {
+                tds.aggregate_layout(&format!("struct {}", n.val))
+                    .map(|l| l.1)
+            })
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            tds.unions.get(&*n.val).map(|u| u.align).or_else(|| {
+                tds.aggregate_layout(&format!("union {}", n.val))
+                    .map(|l| l.1)
+            })
+        }
         _ => palow_sizeof(tds, ty),
     }
 }
@@ -1369,6 +1406,13 @@ impl<'a> Spec<'a> {
                     Ok(format!("var_{}", v.val))
                 } else if let Some(t) = self.global_const(v) {
                     Ok(t)
+                } else if self.pointees.contains_key(&*v.val) && !self.arrays.contains(&*v.val) {
+                    // A mutable global is not reached through a pointer, so
+                    // its name *is* the object and the value the ownership
+                    // conjunct names is what the contract means by it. An
+                    // array global is excluded because there the name is a
+                    // decayed pointer and not a value at all.
+                    self.pointee_at(e, None, w)
                 } else {
                     Err(format!("`{}` in a contract", v.val))
                 }
@@ -1629,6 +1673,20 @@ impl<'a> Spec<'a> {
                     out += " ()";
                 }
                 Ok(format!("({})", out))
+            }
+            // A size is a literal in Palow, so it is the same literal on
+            // both sides: the contract states exactly the number the body
+            // computes, which is what makes `return == sizeof(int)` provable
+            // rather than merely consistent.
+            ExprT::SizeOf(t) => {
+                let n = palow_sizeof(self.tds, t)
+                    .ok_or_else(|| format!("`sizeof` of {}", describe(self.tds.resolve(t))))?;
+                Ok(format!("{}sz", n))
+            }
+            ExprT::AlignOf(t) => {
+                let n = palow_alignof(self.tds, t)
+                    .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
+                Ok(format!("{}sz", n))
             }
             _ => Err(format!("{} in a contract", expr_kind(e))),
         }
@@ -2966,6 +3024,8 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
         ) else {
             continue;
         };
+        tds.aggregate_layouts
+            .insert(format!("struct {}", name), (size, align));
         // Every field has to have a Palow type. Structs are processed in
         // declaration order, so a field of an earlier struct type works and a
         // field of a later one does not -- which is also all C allows.
@@ -3081,6 +3141,8 @@ fn collect_union(
     ) else {
         return skip("it has no layout".to_string());
     };
+    tds.aggregate_layouts
+        .insert(format!("union {}", name), (size, align));
     let mut members = Vec::new();
     for f in &ud.fields {
         let mname = f.val.name().val.to_string();

@@ -2582,8 +2582,8 @@ new facts about memory.
    else: what a `_preserves` written in Pulse covers is the author's business
    and not something Palow can read.
 
-   As of this milestone: **911 specifications, 790 of them with real bodies,
-   105 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   As of this milestone: **911 specifications, 796 of them with real bodies,
+   99 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -2918,6 +2918,26 @@ new facts about memory.
    of array the emitter knows -- a parameter, a local, a mutable global, an
    allocated block -- and not only for an array parameter, which is the one
    case the old gate happened to ask about.
+
+   A mutable global's name is a value in a contract. The conjunct that hands
+   its ownership over already names what it holds; all that was missing was
+   letting `x` in a specification mean that name, as `*p` already meant the
+   pointee of a pointer parameter. An array global is deliberately not
+   included: there the name is a decayed pointer and not a value, and
+   `buf[i]` reaches the contents by the route it already had. With that,
+   `test/global_mutable` -- read, write, read-modify-write, a call that
+   threads the permission, a write through `&x`, and a struct-typed global
+   whose fields the postcondition constrains one at a time -- translates with
+   nothing dropped.
+
+   A `sizeof` in a contract is the same literal the body emits. Milestone 3
+   made every size a concrete number from clang's ABI, which is exactly what
+   makes `return == sizeof(int)` provable rather than merely consistent, but
+   the contract translator had never been taught the two expression forms.
+   Along the way it became clear that a size needs no *representation*:
+   `sizeof(double)` and `sizeof` of a union with a `double` arm are answerable
+   numbers even though Palow models neither type, so clang's layout for every
+   aggregate is now recorded whether or not the aggregate is modelled.
 
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;
