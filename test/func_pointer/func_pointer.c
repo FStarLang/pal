@@ -1301,7 +1301,9 @@ void fp_frame_adapt(
       Fp_frame_spec.framed_pre Fp_frame_spec.framed_post);
 }
 
-/* Ghost snapshots relate entry and exit values without `_old`. */
+/* Ghost snapshots relate entry and exit values without `_old`.
+ * Witness hints resolve inference, but generated postcondition guards still
+ * prevent verification of the callers' final-value guarantees. */
 uint32_t global_live_counter;
 
 _ghost_arg(uint32_t before)
@@ -1323,6 +1325,8 @@ void global_live_call(void)
 {
     void (*fp)(void) = global_live_bump;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_bump.func_global_live_bump__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_leaf #(erased (UInt32.t & UInt32.t))
+        (hide (reveal $(before), reveal $(before))));
     fp();
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -1368,8 +1372,30 @@ void global_live_mixed_call(uint32_t *p, _plain uint32_t *q)
 {
     void (*fp)(uint32_t *, _plain uint32_t *) = global_live_mixed;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_leaf
+        (hide ((reveal $(before_p), (reveal $(before_left), reveal $(before_right))),
+            (reveal $(before_left), (reveal $(before_right), (reveal $(before_p), reveal $(saved)))))));
     fp(p, q);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Distinct values expose swapped witnesses and vacuous postconditions. */
+void global_live_distinct(void)
+    _requires(_live(global_live_left) && _live(global_live_right))
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(global_live_left == 11 && global_live_right == 21)
+{
+    global_live_left = 10;
+    global_live_right = 20;
+    uint32_t p = 30;
+    uint32_t q = 40;
+    void (*fp)(uint32_t *, _plain uint32_t *) = global_live_mixed;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_leaf
+        (hide ((30ul, (10ul, 20ul)), (10ul, (20ul, (30ul, 40ul))))));
+    fp(&p, &q);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _assert(p == 31 && q == 40);
 }
 
 #if 0
