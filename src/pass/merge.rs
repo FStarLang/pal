@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::{
@@ -569,6 +569,9 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     for &i in to_remove.iter().rev() {
         tu.decls.remove(i);
     }
+
+    // === Phase 2.5: Give implicitly-declared struct tags a placeholder ===
+    declare_implicit_structs(tu);
 
     // === Phase 3: Break definitional cycles between type declarations ===
     break_type_cycles(diags, tu);
@@ -1160,56 +1163,7 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
     let mut prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, d) in tu.decls.iter().enumerate() {
         let mut refs: Vec<TypeKey> = Vec::new();
-        match &d.val {
-            DeclT::Typedef(t) => collect_type_refs(&t.body, &mut refs),
-            DeclT::StructDefn(s) => {
-                collect_type_refs(&s.refines, &mut refs);
-                for f in &s.fields {
-                    collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
-                }
-            }
-            DeclT::UnionDefn(u) => {
-                for f in &u.fields {
-                    collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
-                }
-            }
-            // Functions, globals and let-definitions also reference type
-            // predicates (via their signature types) when emitting specs, so
-            // they must follow the type definitions they mention.
-            DeclT::FnDecl(fd) => {
-                collect_type_refs(&fd.ret_type, &mut refs);
-                for a in &fd.args {
-                    collect_type_refs(&a.ty, &mut refs);
-                }
-                for e in fd.requires.iter().chain(fd.ensures.iter()) {
-                    collect_refs_expr(e, &mut refs);
-                }
-            }
-            DeclT::FnDefn(fd) => {
-                collect_type_refs(&fd.decl.ret_type, &mut refs);
-                for a in &fd.decl.args {
-                    collect_type_refs(&a.ty, &mut refs);
-                }
-                for e in fd.decl.requires.iter().chain(fd.decl.ensures.iter()) {
-                    collect_refs_expr(e, &mut refs);
-                }
-                for st in fd.body.iter() {
-                    collect_refs_stmt(st, &mut refs);
-                }
-            }
-            DeclT::LetDecl(ld) => {
-                collect_type_refs(&ld.ret_type, &mut refs);
-                for a in &ld.params {
-                    collect_type_refs(&a.ty, &mut refs);
-                }
-                for e in ld.requires.iter().chain(ld.ensures.iter()) {
-                    collect_refs_expr(e, &mut refs);
-                }
-                collect_refs_expr(&ld.body, &mut refs);
-            }
-            DeclT::GlobalVar(gv) => collect_type_refs(&gv.ty, &mut refs),
-            _ => {}
-        }
+        collect_decl_type_refs(d, &mut refs);
         for r in refs {
             if let Some(&j) = node_of_key.get(&r) {
                 if j != i {
@@ -1240,5 +1194,149 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
             .map(Some)
             .collect();
         tu.decls = order.into_iter().map(|i| old[i].take().unwrap()).collect();
+    }
+}
+
+/// Synthesize a `StructDecl` for every struct tag that is referenced but never
+/// declared or defined in this translation unit.
+///
+/// C lets a struct tag be introduced implicitly by its first use, so
+///
+/// ```c
+/// struct holder { struct opaque *p; };   // no `struct opaque;` anywhere
+/// ```
+///
+/// names a perfectly legal incomplete type. Clang only hands us a `RecordDecl`
+/// for a tag that appears in declaration position, so the implicit case
+/// produced no `StructDecl`, and `check` reported `unknown struct opaque`.
+///
+/// That diagnostic did not stop emission: `Struct_holder.fst` was still written
+/// out referring to `Struct_opaque.struct_opaque`, a module that was never
+/// created. Every consumer then failed with `Error 72: Module name
+/// Struct_opaque could not be resolved` -- which reads like a proof failure and
+/// is nothing of the kind. In FunOS's cocovisor this was the single largest
+/// group of failing modules, all of it traced to five SDK pointer fields such
+/// as `struct per_lport_stats *perlport_stats` in vplocal.h.
+///
+/// The treatment here is exactly the one an explicit `struct opaque;` already
+/// receives: an axiomatized placeholder module. An incomplete type cannot be
+/// used by value in C, so nothing is lost by having no layout for it, and
+/// making the implicit and explicit spellings agree is the whole of the fix.
+///
+/// Synthesized declarations go at the FRONT of the unit, before any use.
+/// `reorder_type_deps` runs afterwards and is free to move them.
+fn declare_implicit_structs(tu: &mut TranslationUnit) {
+    let mut known: HashSet<Rc<str>> = HashSet::new();
+    for decl in &tu.decls {
+        match &decl.val {
+            DeclT::StructDefn(d) => {
+                known.insert(d.name.val.clone());
+            }
+            DeclT::StructDecl(n) => {
+                known.insert(n.val.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // `collect_type_refs` deliberately does not descend into `core_ref`
+    // pointers, which is right here too: a `core_ref` erases its pointee on
+    // emission, so it never names the module and needs no placeholder.
+    let mut refs: Vec<TypeKey> = Vec::new();
+    for decl in &tu.decls {
+        collect_decl_type_refs(decl, &mut refs);
+    }
+
+    let mut missing: Vec<Rc<str>> = Vec::new();
+    let mut seen: HashSet<Rc<str>> = HashSet::new();
+    for (ns, name) in refs {
+        if ns == STRUCT_NS && !known.contains(&name) && seen.insert(name.clone()) {
+            missing.push(name);
+        }
+    }
+
+    // Deterministic order: two runs over the same input must emit the same
+    // modules in the same order, or the per-image merge in a driver that
+    // compares outputs byte-for-byte will see spurious disagreements.
+    missing.sort();
+
+    // A unit with no declarations cannot reference a struct, so `missing` is
+    // empty here and the loop does not run.
+    let Some(loc) = tu.decls.first().map(|d| d.loc.clone()) else {
+        return;
+    };
+
+    for name in missing.into_iter().rev() {
+        let ident = Rc::new(Ast {
+            val: name,
+            loc: loc.clone(),
+        });
+        tu.decls.insert(
+            0,
+            Ast {
+                loc: loc.clone(),
+                val: DeclT::StructDecl(ident),
+            },
+        );
+    }
+}
+
+/// Collect every type a declaration mentions: its own types, the types in its
+/// specification clauses, and (for a definition) the types in its body.
+///
+/// Extracted so `reorder_type_deps` and `declare_implicit_structs` cannot drift
+/// apart. They ask the same question -- which types does this declaration name
+/// -- and a tag missed here becomes a dangling module reference in one pass or
+/// a bad emission order in the other.
+fn collect_decl_type_refs(d: &Decl, refs: &mut Vec<TypeKey>) {
+    match &d.val {
+        DeclT::Typedef(t) => collect_type_refs(&t.body, refs),
+        DeclT::StructDefn(s) => {
+            collect_type_refs(&s.refines, refs);
+            for f in &s.fields {
+                collect_type_refs(&f.val.logical_type(&f.loc), refs);
+            }
+        }
+        DeclT::UnionDefn(u) => {
+            for f in &u.fields {
+                collect_type_refs(&f.val.logical_type(&f.loc), refs);
+            }
+        }
+        // Functions, globals and let-definitions also reference type
+        // predicates (via their signature types) when emitting specs, so
+        // they must follow the type definitions they mention.
+        DeclT::FnDecl(fd) => {
+            collect_type_refs(&fd.ret_type, refs);
+            for a in &fd.args {
+                collect_type_refs(&a.ty, refs);
+            }
+            for e in fd.requires.iter().chain(fd.ensures.iter()) {
+                collect_refs_expr(e, refs);
+            }
+        }
+        DeclT::FnDefn(fd) => {
+            collect_type_refs(&fd.decl.ret_type, refs);
+            for a in &fd.decl.args {
+                collect_type_refs(&a.ty, refs);
+            }
+            for e in fd.decl.requires.iter().chain(fd.decl.ensures.iter()) {
+                collect_refs_expr(e, refs);
+            }
+            for st in fd.body.iter() {
+                collect_refs_stmt(st, refs);
+            }
+        }
+        DeclT::LetDecl(ld) => {
+            collect_type_refs(&ld.ret_type, refs);
+            for a in &ld.params {
+                collect_type_refs(&a.ty, refs);
+            }
+            for e in ld.requires.iter().chain(ld.ensures.iter()) {
+                collect_refs_expr(e, refs);
+            }
+            collect_refs_expr(&ld.body, refs);
+        }
+        DeclT::GlobalVar(gv) => collect_type_refs(&gv.ty, refs),
+        _ => {}
     }
 }
