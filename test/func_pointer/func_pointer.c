@@ -3,7 +3,8 @@
 #include <stdlib.h>
 
 /* Function-pointer tests against the axiomatized Pulse.Lib.C.FuncPtr library.
- * All examples verify except `rec_via_ptr` (`#if 0` at the end).
+ * The global_live ghost-snapshot examples currently fail verification.
+ * `rec_via_ptr` remains disabled (`#if 0` at the end).
  *
  * Divergence: every function is `divergent fn` unless `_total`. A pointer to
  * a divergent target uses `of_fn_div`/`of_fn_div_valid`; a `_total` target
@@ -1298,6 +1299,77 @@ void fp_frame_adapt(
     fp_frame_consumer(f, p);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid $(f)
       Fp_frame_spec.framed_pre Fp_frame_spec.framed_post);
+}
+
+/* Ghost snapshots relate entry and exit values without `_old`. */
+uint32_t global_live_counter;
+
+_ghost_arg(uint32_t before)
+void global_live_bump(void)
+    _requires(_live(global_live_counter))
+    _requires(global_live_counter == before && before < 100)
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == before + 1)
+{
+    global_live_counter = global_live_counter + 1;
+}
+
+_ghost_arg(uint32_t before)
+void global_live_call(void)
+    _requires(_live(global_live_counter))
+    _requires(global_live_counter == before && before < 100)
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == before + 1)
+{
+    void (*fp)(void) = global_live_bump;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_bump.func_global_live_bump__fp);
+    fp();
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Snapshot both globals and the updated pointee; preserve q's saved value. */
+uint32_t global_live_left;
+uint32_t global_live_right;
+
+_ghost_arg(uint32_t before_left)
+_ghost_arg(uint32_t before_right)
+_ghost_arg(uint32_t before_p)
+_ghost_arg(uint32_t saved)
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(saved)))
+void global_live_mixed(uint32_t *p, _plain uint32_t *q)
+    _requires(_live(global_live_left) && _live(global_live_right))
+    _requires(global_live_left == before_left && before_left < 100)
+    _requires(global_live_right == before_right && before_right < 100)
+    _requires(*p == before_p && before_p < 100)
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(global_live_left == before_left + 1)
+    _ensures(global_live_right == before_right + 1)
+    _ensures(*p == before_p + 1)
+{
+    global_live_left = global_live_left + 1;
+    global_live_right = global_live_right + 1;
+    *p = *p + 1;
+}
+
+_ghost_arg(uint32_t before_left)
+_ghost_arg(uint32_t before_right)
+_ghost_arg(uint32_t before_p)
+_ghost_arg(uint32_t saved)
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(saved)))
+void global_live_mixed_call(uint32_t *p, _plain uint32_t *q)
+    _requires(_live(global_live_left) && _live(global_live_right))
+    _requires(global_live_left == before_left && before_left < 100)
+    _requires(global_live_right == before_right && before_right < 100)
+    _requires(*p == before_p && before_p < 100)
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(global_live_left == before_left + 1)
+    _ensures(global_live_right == before_right + 1)
+    _ensures(*p == before_p + 1)
+{
+    void (*fp)(uint32_t *, _plain uint32_t *) = global_live_mixed;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
+    fp(p, q);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
 
 #if 0
