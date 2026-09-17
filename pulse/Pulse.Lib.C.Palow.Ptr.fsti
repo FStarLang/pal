@@ -164,3 +164,30 @@ let in_range (a: ptr) (n: nat) (x: nat) : prop =
 
 let disjoint_ranges (a1: ptr) (n1: nat) (a2: ptr) (n2: nat) : prop =
   addr_of a1 + n1 <= addr_of a2 \/ addr_of a2 + n2 <= addr_of a1
+
+(* ---------------------------------------------------------------------------
+   Literals.
+
+   A string literal, and a compound literal at file scope or handed straight to
+   a call, is an object with static storage duration. It outlives every call,
+   so what the expression denotes is nothing more than an address -- there is
+   no allocation to account for and no scope at which it goes away.
+
+   Deliberately, no ownership comes with it. A literal is read-only and shared,
+   and the only thing C code may do with one that this model can justify is
+   hand the pointer to a callee that promised to hold nothing: reading through
+   it would need a points-to, and there is none to be had here. The translator
+   enforces that, refusing a literal in any other argument position.
+
+   Indexing by the contents rather than by an occurrence keeps two identical
+   literals interchangeable. C leaves it unspecified whether they share
+   storage, so a program may not rely on their addresses differing, and a
+   program may not rely on them agreeing either -- which is why nothing below
+   says two different lists give two different addresses. *)
+val literal_addr (#a: Type0) (xs: list a) : ptr
+
+(* A literal is an object, and no object is at NULL. Without this a caller
+   whose `_plain` parameter is not `_nullable` could not pass one. *)
+val literal_addr_not_null (#a: Type0) (xs: list a)
+  : Lemma (~(is_null (literal_addr xs)))
+          [SMTPat (is_null (literal_addr xs))]

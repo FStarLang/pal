@@ -5191,6 +5191,7 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| a.mode == ParamMode::Out)
                     .collect(),
+                plain_ptrs: fndecl.args.iter().map(|a| is_plain(&tds, &a.ty)).collect(),
             },
         );
         items.push(FnItem {
@@ -5671,6 +5672,9 @@ struct Callee {
     /// Which parameters are `_out`, by position. Those arguments are not
     /// evaluated: what is passed is storage, not a value.
     outs: Vec<bool>,
+    /// Which parameters are `_plain`, by position. A literal has no ownership
+    /// to give, so its address may only be passed to one of these.
+    plain_ptrs: Vec<bool>,
 }
 
 struct Body<'a> {
@@ -7418,6 +7422,25 @@ impl<'a> Body<'a> {
         }
         match &e.val {
             ExprT::VAttr(_, inner) => self.rvalue(inner),
+            // A string or compound literal used as a value is an object with
+            // static storage duration, and what the expression denotes is its
+            // address. There is no ownership to produce and no scope to free
+            // it at: the address is the whole of it.
+            ExprT::ArrayInit { elems, .. } => {
+                let ty = self.ty_of(e)?;
+                let TypeT::FixedArray(elem, _) = &peel(self.tds, &ty).val else {
+                    return Err("an initialiser list is not translated yet".to_string());
+                };
+                let elem = elem.clone();
+                let mut vs = Vec::new();
+                for x in elems {
+                    vs.push(self.init_value(&elem, x)?);
+                }
+                Ok(format!(
+                    "(Pulse.Lib.C.Palow.Ptr.literal_addr [{}])",
+                    vs.join("; ")
+                ))
+            }
             // C says the value of an assignment is the value stored, after
             // the conversion to the left operand's type -- which elaboration
             // has already inserted, so the stored expression is the answer.
@@ -8003,8 +8026,17 @@ impl<'a> Body<'a> {
             return Err(format!("`{}`'s contract was dropped", name.val));
         }
         let outs = c.outs.clone();
+        let plain_ptrs = c.plain_ptrs.clone();
         let mut out = format!("func_{}", name.val);
         for (i, a) in args.iter().enumerate() {
+            // A literal's address carries nothing, so a parameter that wants
+            // ownership -- an `_array`, or any pointer that is not `_plain` --
+            // cannot be handed one. Saying so here rather than emitting the
+            // address keeps the refusal visible instead of leaving F* to fail
+            // on a missing points-to.
+            if is_literal(a) && plain_ptrs.get(i) != Some(&true) {
+                return Err("an initialiser list is not translated yet".to_string());
+            }
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
             } else {
@@ -9718,6 +9750,12 @@ fn convert(from: &Type, to: &Type, v: &str) -> Result<String, String> {
         (TypeT::Pointer(..) | TypeT::FnPtr { .. }, TypeT::Bool) => {
             Ok(format!("(not (is_null {}))", v))
         }
+        // An array decays to a pointer to its first element. Palow already
+        // names an array by that address, so the conversion is the identity.
+        // What really differs between the two is the ownership, and ownership
+        // is not part of the value: it is settled where the pointer is used,
+        // not here.
+        (TypeT::FixedArray(..), TypeT::Pointer(..)) => Ok(v.to_string()),
         _ => Err(format!(
             "a conversion from {} to {}",
             describe(from),
@@ -9929,6 +9967,27 @@ struct Focus {
     open_write: Vec<String>,
     close_read: Vec<String>,
     close_write: Vec<String>,
+}
+
+/// Whether an expression is a literal object: a string or compound literal,
+/// possibly under the array-to-pointer decay elaboration inserted around it.
+fn is_literal(e: &Expr) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::ArrayInit { .. } => true,
+        ExprT::Cast(inner, _) => is_literal(inner),
+        _ => false,
+    }
+}
+
+/// Whether a parameter is `_plain`: a pointer the callee may dereference but
+/// holds nothing through. That is the one argument position a literal's
+/// address can be passed in, since a literal comes with no ownership at all.
+fn is_plain(tds: &Typedefs, ty: &Type) -> bool {
+    match &tds.resolve(ty).val {
+        TypeT::Plain(_) => true,
+        TypeT::Nullable(t) | TypeT::RefineValue(t, ..) => is_plain(tds, t),
+        _ => false,
+    }
 }
 
 /// The lvalue a pointer expression denotes. `&x` names `x` directly, and

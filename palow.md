@@ -2534,8 +2534,34 @@ new facts about memory.
    has none. There is nothing there to say, so nothing is lost by not saying
    it -- which is what the old translator does with it too.
 
-   As of this milestone: **787 specifications, 693 of them with real bodies,
-   88 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
+   String and compound literals get the treatment C's storage-duration rule
+   asks for. A literal is an object with static storage duration, so what the
+   expression denotes is nothing more than an address: `literal_addr xs` in
+   the pointer layer, indexed by the contents rather than by the occurrence,
+   since C leaves it unspecified whether two identical literals share storage
+   and a program may rely on neither answer. Deliberately no ownership comes
+   with it. A literal is read-only and shared, and the only use of one this
+   model can justify is handing the pointer to a callee that promised to hold
+   nothing -- so the translator refuses a literal in any argument position
+   whose parameter is not `_plain`, which is visible as a refusal rather than
+   left for F\* to discover as a missing points-to.
+
+   That is a deliberate divergence from the old model, which stack-allocates a
+   fresh array, copies the literal into it, and frees it after the call. That
+   works, and it is what lets `write("hello", 6)` go through today, but it
+   hands the callee a writable object where C has a read-only one, and it
+   gives the literal automatic storage where C gives it static. The two calls
+   in `stringlit` that need ownership of a literal stay admitted until there
+   is a read-only sharing predicate to give them; the three that only need the
+   address -- a returned name, a `_plain` argument, a `switch` selecting one
+   of several names -- now translate in full. Array-to-pointer decay became
+   the identity in the process, which it already was for every other array:
+   Palow names an array by the address of its first element, and the
+   ownership, which is what really differs between the two, is not part of
+   the value.
+
+   As of this milestone: **787 specifications, 696 of them with real bodies,
+   85 admitted, 6 external, 44 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
