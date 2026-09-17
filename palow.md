@@ -2582,8 +2582,8 @@ new facts about memory.
    else: what a `_preserves` written in Pulse covers is the author's business
    and not something Palow can read.
 
-   As of this milestone: **911 specifications, 796 of them with real bodies,
-   99 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   As of this milestone: **911 specifications, 799 of them with real bodies,
+   96 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -2938,6 +2938,30 @@ new facts about memory.
    `sizeof(double)` and `sizeof` of a union with a `double` arm are answerable
    numbers even though Palow models neither type, so clang's layout for every
    aggregate is now recorded whether or not the aggregate is modelled.
+
+   A partial operator states its own definedness. C's shift is undefined
+   when the count reaches the width, and its signed arithmetic when the
+   result does not fit; the source says so in a `_requires`, and a body may
+   lean on that clause because Pulse puts it in scope. A *contract* clause
+   may not: F\* types the clauses independently, so `return == (a << b)` was
+   an application whose own typing had nowhere to look, and the whole
+   contract was dropped -- which then took the body's `_requires` with it and
+   cost an admit as well. The obligation is now stated in the clause that
+   needs it, conjoined to its own left: `p /\ q` types `q` with `p` assumed,
+   which is precisely the scope the application was missing. The clause is
+   then a stronger statement than C's and provable from the `_requires` that
+   motivated it -- and `size_t`, whose F\* operations are the checked ones,
+   owes exactly the same thing.
+
+   A cast from a specification type reads as the number it already is. PAL
+   writes `arr[(size_t) ((_specint) (len - j) - 1)]` when the author wrote
+   `arr[len - j - 1]`, and that cast has no content: the mathematical integer
+   is what was meant. Reading it that way rather than as `SizeT.uint_to_t n`
+   is not merely simpler but necessary, because the alternative carries a
+   typing obligation the clause cannot discharge -- a guard conjoined at the
+   top of a clause cannot mention a variable the clause binds itself, and
+   these casts appear under exactly such a `_forall`. `test/reverse_test`'s
+   specification now translates in full.
 
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;

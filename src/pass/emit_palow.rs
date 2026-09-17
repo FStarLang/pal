@@ -1210,6 +1210,72 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// What has to hold for a partial machine operator to be defined: a shift
+    /// count below the width, and no overflow for signed arithmetic. These are
+    /// C's own rules, so stating them costs the contract nothing it did not
+    /// already owe.
+    fn definedness(&self, op: BinOp, ty: &Type, l: &Expr, r: &Expr, w: When) -> Option<String> {
+        // `size_t` is unsigned and its F* operations are the checked ones, so
+        // what it owes is the same non-overflow C already demands of it.
+        if matches!(peel(self.tds, ty).val, TypeT::SizeT) {
+            let (a, b) = (self.value(l, w).ok()?, self.value(r, w).ok()?);
+            return match op {
+                BinOp::Add => Some(format!("SizeT.fits (SizeT.v {} + SizeT.v {})", a, b)),
+                BinOp::Sub => Some(format!("SizeT.v {} >= SizeT.v {}", a, b)),
+                BinOp::Mul => Some(format!(
+                    "SizeT.fits (SizeT.v {} `op_Multiply` SizeT.v {})",
+                    a, b
+                )),
+                _ => None,
+            };
+        }
+        let TypeT::Int { signed, width } = peel(self.tds, ty).val else {
+            return None;
+        };
+        let m = format!("{}Int{}", if signed { "" } else { "U" }, width);
+        match op {
+            BinOp::Shl | BinOp::Shr => {
+                // The count has a type of its own, and F* reads it with that
+                // type's `v`.
+                let rty = self.ty_of(r).ok()?;
+                let TypeT::Int {
+                    signed: rs,
+                    width: rw,
+                } = peel(self.tds, &rty).val
+                else {
+                    return None;
+                };
+                let mut g = format!(
+                    "{}Int{}.v {} < {}",
+                    if rs { "" } else { "U" },
+                    rw,
+                    self.value(r, w).ok()?,
+                    width
+                );
+                // A shift of a negative signed value is undefined in C, and
+                // F* refuses it too.
+                if signed {
+                    g = format!(r"{} /\ {}.v {} >= 0", g, m, self.value(l, w).ok()?);
+                }
+                Some(g)
+            }
+            BinOp::Add | BinOp::Sub | BinOp::Mul if signed => Some(format!(
+                "FStar.Int.size ({}.v {} {} {}.v {}) {}",
+                m,
+                self.value(l, w).ok()?,
+                match op {
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    _ => "`op_Multiply`",
+                },
+                m,
+                self.value(r, w).ok()?,
+                width
+            )),
+            _ => None,
+        }
+    }
+
     fn num(&self, e: &Expr, w: When) -> Result<String, String> {
         if let ExprT::Old(inner) = &e.val {
             return self.num(inner, When::Old);
@@ -1235,6 +1301,23 @@ impl<'a> Spec<'a> {
                     self.num(r, w)?
                 ));
             }
+        }
+        // A cast from a specification type is the author writing a
+        // mathematical integer where C's grammar wants a machine one, and the
+        // number they meant is the number it already is. Reading it that way
+        // rather than as `SizeT.uint_to_t n` also avoids a typing obligation
+        // the clause has no way to discharge: a guard conjoined at the top of
+        // the clause cannot mention a variable the clause binds itself, which
+        // is exactly where these casts appear.
+        if let ExprT::Cast(inner, _) = &strip_vattr(e).val
+            && matches!(
+                self.tds.resolve(&ty).val,
+                TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT
+            )
+            && let Ok(ity) = self.ty_of(inner)
+            && matches!(self.tds.resolve(&ity).val, TypeT::SpecInt | TypeT::SpecNat)
+        {
+            return self.num(inner, w);
         }
         // Negation is subtraction from zero, so it is undefined on overflow
         // for the same reason and reads mathematically for the same reason.
@@ -1580,7 +1663,25 @@ impl<'a> Spec<'a> {
                     // something rules the overflow out. The same operator table
                     // serves both, so a contract cannot quietly describe an
                     // operation the body would not perform.
-                    let o = binop(self.tds, *op, &ty, self.signed_ok)?;
+                    let o = match binop(self.tds, *op, &ty, self.signed_ok) {
+                        Ok(o) => o,
+                        // The operator is partial, and what makes it defined
+                        // is a fact the C source states in a `_requires` of
+                        // this same contract. A body can lean on that clause
+                        // because Pulse puts it in scope; a contract clause
+                        // cannot, because F* types the clauses independently.
+                        // So the obligation is stated here, in the clause that
+                        // needs it, as a conjunct to its own left: `p /\ q`
+                        // types `q` with `p` assumed, which is exactly the
+                        // scope the application is missing. The clause it
+                        // guards is then a stronger statement than C's, and
+                        // provable from the `_requires` that motivated it.
+                        Err(e) => {
+                            let g = self.definedness(*op, &ty, l, r, w).ok_or(e)?;
+                            self.guards.borrow_mut().push(g);
+                            binop(self.tds, *op, &ty, true)?
+                        }
+                    };
                     return Ok(format!(
                         "({} {} {})",
                         self.value(l, w)?,
