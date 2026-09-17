@@ -2582,8 +2582,8 @@ new facts about memory.
    else: what a `_preserves` written in Pulse covers is the author's business
    and not something Palow can read.
 
-   As of this milestone: **911 specifications, 788 of them with real bodies,
-   107 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   As of this milestone: **911 specifications, 790 of them with real bodies,
+   105 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -2905,6 +2905,19 @@ new facts about memory.
    has that is not a comparison with the integer zero, and under Palow the
    only form it could take: a pointer's value is not a number, so "nonzero"
    can only mean "not null".
+
+   An array reached through a second name is the same array. `T *p = a;` is
+   C's array-to-pointer decay, and it copies nothing: `p[i]` and `a[i]` name
+   one object. Palow used to give `p` a slot of its own, which meant loading
+   from `a` as if it were a pointer and then owning a pointer whose pointee is
+   an element -- ownership no contract grants, and none has to, because the
+   contract already granted the array. Such a local is now recognised as a
+   name rather than as storage, exactly as an alias `q = &x` already was, and
+   its declaration and its one assignment emit nothing. In the same spirit a
+   subscript may now be the base of a field access, `a[i].f`, for every kind
+   of array the emitter knows -- a parameter, a local, a mutable global, an
+   allocated block -- and not only for an array parameter, which is the one
+   case the old gate happened to ask about.
 
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;

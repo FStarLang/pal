@@ -5888,6 +5888,9 @@ struct Body<'a> {
     /// Local pointers that stand for a place rather than for storage. See
     /// `alias_map`.
     aliases: HashMap<String, Rc<Expr>>,
+    /// Locals that are another name for an array: `T *p = a;`. A subscript of
+    /// one is a subscript of the array it names. See `array_alias_map`.
+    array_aliases: HashMap<String, String>,
     /// Which member of a union at a given address is live, where the emitter
     /// knows. C's rule is that reading a member other than the one last
     /// written is not reading what you wrote, and Palow says the same thing by
@@ -6697,14 +6700,51 @@ impl<'a> Body<'a> {
             let f = self.focus_elem(base, None)?;
             return Ok((f.at, f.close_read, f.close_write));
         }
+        // The same for `a[i].f`, and for every kind of array there is: a
+        // parameter, a local, a global, an allocated block. Which of them the
+        // sequence is owned through changes where the ownership came from and
+        // nothing about the access.
         if let ExprT::Index(arr, idx) = &strip_vattr(base).val
-            && let ExprT::Var(v) = &strip_vattr(arr).val
-            && self.arrays.contains_key(&v.val.to_string())
+            && self.is_array_place(arr)
         {
             let f = self.focus_elem(arr, Some(idx))?;
             return Ok((f.at, f.close_read, f.close_write));
         }
         Ok((self.addr(base)?, Vec::new(), Vec::new()))
+    }
+
+    /// Whether this expression names an array whose elements the body can
+    /// focus: a parameter, a local, a mutable global, or an allocated block.
+    /// The mirror of `array_place`'s cases, asked before committing to one.
+    fn is_array_place(&self, e: &Expr) -> bool {
+        let ExprT::Var(v) = &strip_vattr(e).val else {
+            return false;
+        };
+        let v = self.array_alias(&v.val.to_string());
+        self.blocks
+            .iter()
+            .any(|b| b.var == v && b.checked && !b.freed && b.array.is_some())
+            || self.slots.iter().any(|s| s.name == v && s.array.is_some())
+            || self.arrays.contains_key(&v)
+    }
+
+    /// The array a local is another name for, or the name itself.
+    fn array_alias(&self, v: &str) -> String {
+        match self.array_aliases.get(v) {
+            Some(a) if self.names_array(a) => a.clone(),
+            _ => v.to_string(),
+        }
+    }
+
+    /// Whether this local is another name for an array rather than storage.
+    fn is_array_alias(&self, v: &str) -> bool {
+        self.array_aliases
+            .get(v)
+            .is_some_and(|a| self.names_array(a))
+    }
+
+    fn names_array(&self, v: &str) -> bool {
+        self.slots.iter().any(|s| s.name == *v && s.array.is_some()) || self.arrays.contains_key(v)
     }
 
     /// Whether the number of elements at this array is settled here rather
@@ -6742,6 +6782,10 @@ impl<'a> Body<'a> {
     ) -> Result<(String, String, String, Vec<String>, bool), String> {
         match &strip_vattr(e).val {
             ExprT::Var(v) => {
+                // A local that is another name for an array is that array:
+                // the decay copied no elements, and the ownership the
+                // contract granted is the one the subscript needs.
+                let v = self.array_alias(&v.val.to_string());
                 // An allocated block is looked at before the pointer local is,
                 // because the local holds the same address and going through it
                 // would mean a load whose result the frame would then have to
@@ -6749,16 +6793,16 @@ impl<'a> Body<'a> {
                 if let Some(b) = self
                     .blocks
                     .iter()
-                    .find(|b| b.var == *v.val && b.checked && !b.freed && b.array.is_some())
+                    .find(|b| b.var == v && b.checked && !b.freed && b.array.is_some())
                 {
                     let a = b.array.clone().unwrap();
                     return Ok((b.tmp.clone(), b.pn.clone(), a.esize, Vec::new(), true));
                 }
                 // A local array's elements are `option`s; a parameter's are
                 // not, because the caller has already initialised them.
-                if let Some(s) = self.slots.iter().rev().find(|s| s.name == *v.val) {
+                if let Some(s) = self.slots.iter().rev().find(|s| s.name == v) {
                     let Some(esize) = s.array.clone() else {
-                        return Err(format!("a subscript of local `{}`", v.val));
+                        return Err(format!("a subscript of local `{}`", v));
                     };
                     return Ok((
                         s.addr.clone(),
@@ -6768,10 +6812,10 @@ impl<'a> Body<'a> {
                         esize.1,
                     ));
                 }
-                let Some(ap) = self.arrays.get(&*v.val.to_string()) else {
+                let Some(ap) = self.arrays.get(&v) else {
                     return Err(format!(
                         "a subscript of `{}`, which is not an array parameter",
-                        v.val
+                        v
                     ));
                 };
                 // An array parameter's length is whatever the caller passed, so
@@ -8945,7 +8989,9 @@ impl<'a> Body<'a> {
     fn stmt_inner(&mut self, s: &Stmt) -> Result<(), String> {
         match &s.val {
             StmtT::Decl(name, ty) => {
-                if self.aliases.contains_key(&*name.val.to_string()) {
+                if self.aliases.contains_key(&*name.val.to_string())
+                    || self.is_array_alias(&name.val.to_string())
+                {
                     return Ok(());
                 }
                 self.alloc_slot(name, ty)?;
@@ -8970,7 +9016,7 @@ impl<'a> Body<'a> {
                 // The alias itself: nothing is stored, because the pointer is
                 // a name and not an object.
                 if let Some(v) = lvalue_name(lhs) {
-                    if self.aliases.contains_key(&v) {
+                    if self.aliases.contains_key(&v) || self.is_array_alias(&v) {
                         return Ok(());
                     }
                 }
@@ -10216,6 +10262,44 @@ struct TranslatedBody {
 /// the alias is taken only when nothing rebinds the pointer again and nothing
 /// rebinds any name the place is built from. Writing *through* those names is
 /// fine, and is the whole point.
+/// The locals that are another name for an array rather than storage of their
+/// own: `T *p = a;` where `a` is itself an array and `p` is never assigned
+/// again.
+///
+/// C's array-to-pointer decay makes this the ordinary way to reach an array
+/// through a shorter name, and nothing is copied by it -- `p[i]` and `a[i]`
+/// are the same object. Treating `p` as a slot would mean owning a pointer
+/// whose pointee is an element of `a`, which is ownership the contract never
+/// granted and never had to: it granted the array.
+fn array_alias_map(body: &Stmts) -> HashMap<String, String> {
+    let mut t = Touched::default();
+    touch_stmts(body, &mut t);
+    let locals: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut out: HashMap<String, String> = HashMap::new();
+    for st in body.iter() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let (Some(q), ExprT::Var(a)) = (lvalue_name(lhs), &strip_vattr(rhs).val) else {
+            continue;
+        };
+        // That assignment is the one rebinding of `q`; anything else and `q`
+        // is a pointer object whose value changes, which is a different thing
+        // entirely.
+        if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
+            continue;
+        }
+        out.insert(q, a.val.to_string());
+    }
+    out
+}
+
 fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
@@ -10468,6 +10552,7 @@ fn emit_body(
         divergent_fns,
         blocks: Vec::new(),
         aliases: alias_map(&defn.body),
+        array_aliases: array_alias_map(&defn.body),
         active: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
