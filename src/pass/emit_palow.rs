@@ -2248,6 +2248,22 @@ fn emit_fn(
             g.fstar_ty.clone(),
             g.pts_to(&format!("gval_{}'", g.name)),
         ));
+        // Having named the value the ownership is at, the contract can talk
+        // about it: `g` in a specification is that value, before and after,
+        // exactly as a pointer parameter's pointee is. The global is not
+        // reached through a pointer, but nothing in the translation of `*p` or
+        // `p[i]` depended on that -- what it needs is a term for the contents,
+        // and the conjunct that hands the ownership over supplies one.
+        pointees.insert(
+            g.name.clone(),
+            (
+                Some(format!("(reveal gval_{})", g.name)),
+                Some(format!("gval_{}'", g.name)),
+            ),
+        );
+        if g.array.is_some() {
+            arrays.insert(g.name.clone());
+        }
     }
 
     let ret = fstar_type(tds, &decl.ret_type)
@@ -4555,6 +4571,8 @@ struct Touched {
     /// what a body does to `*q` is recorded against the place instead. Empty
     /// while `alias_map` is deciding what belongs here.
     aliases: HashMap<String, Rc<Expr>>,
+    /// The globals a contract asks to hold, named in `_live(g)`.
+    lived: HashSet<String>,
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -4656,7 +4674,6 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::UnOp(_, x)
         | ExprT::Cast(x, _)
         | ExprT::ContainerOf(x, _, _)
-        | ExprT::Live(x)
         | ExprT::Old(x)
         | ExprT::Forall(_, _, x)
         | ExprT::Exists(_, _, x)
@@ -4668,6 +4685,12 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::MemsetZero(_, x)
         | ExprT::Free(x)
         | ExprT::PreDecr(x) => go(x),
+        ExprT::Live(x) => {
+            if let ExprT::Var(v) = &strip_vattr(x).val {
+                t.lived.insert(v.val.to_string());
+            }
+            touch_expr(x, t);
+        }
         ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PostDecr(x) => {
             touch_write(x, t);
             touch_expr(x, t);
@@ -4825,8 +4848,15 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
         // A global array's elements are not `option`s: static storage is
         // zero-initialised before the program starts, so every element already
         // holds a value, and a read of one needs nothing but the ownership.
-        let slot = match &peel(tds, &gv.ty).val {
-            TypeT::FixedArray(elem, n) => {
+        let slot = match global_array_object(gv) {
+            // The extent is in the type when this file declares the array and
+            // absent when another one sizes it (`extern T g[]`). Both are
+            // arrays and both are owned the same way: the ownership is an
+            // `array_pts_to` over a sequence either way, and all the extent
+            // does is refine that sequence's length. Where it is missing a
+            // contract that needs a bound states one, exactly as it must for
+            // an `_array T *` parameter.
+            Some((elem, n)) => {
                 let (Some(pn), Some(esize), Some(ety)) = (
                     palow_name(tds, elem),
                     palow_sizeof(tds, elem),
@@ -4841,7 +4871,10 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     name: gv.name.val.to_string(),
                     addr: format!("addr_var_{}", gv.name.val),
                     palow_ty: pn,
-                    fstar_ty: format!("(s: Seq.seq {} {{ Seq.length s == {} }})", ety, n),
+                    fstar_ty: match n {
+                        Some(n) => format!("(s: Seq.seq {} {{ Seq.length s == {} }})", ety, n),
+                        None => format!("(Seq.seq {})", ety),
+                    },
                     init: true,
                     array: Some((format!("{}sz", esize), false)),
                     global: true,
@@ -4849,7 +4882,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     scattered: BTreeSet::new(),
                 }
             }
-            _ => {
+            None => {
                 let (Some(pn), Some(fty)) = (palow_name(tds, &gv.ty), fstar_type(tds, &gv.ty))
                 else {
                     continue;
@@ -5115,6 +5148,7 @@ pub fn emit_palow(
     let mut calls: HashMap<String, HashSet<String>> = HashMap::new();
     let mut touched: Vec<(String, Touched)> = Vec::new();
     let mut written: HashSet<String> = HashSet::new();
+    let mut lived: HashSet<String> = HashSet::new();
     let mut decayed: HashSet<String> = HashSet::new();
     for decl in &tu.decls {
         let DeclT::FnDefn(d) = &decl.val else {
@@ -5128,6 +5162,7 @@ pub fn emit_palow(
         touch_exprs(&d.decl.requires, &mut t);
         touch_exprs(&d.decl.ensures, &mut t);
         written.extend(t.written.iter().cloned());
+        lived.extend(t.lived.iter().cloned());
         decayed.extend(t.refs.iter().cloned());
         touched.push((d.decl.name.val.to_string(), t));
     }
@@ -5152,7 +5187,14 @@ pub fn emit_palow(
     // is the better answer, and is what milestone 5 already does for a `const`
     // one; until an initialiser of any type can be published, such a global
     // stays as it was.
-    globals.retain(|n, _| written.contains(n));
+    //
+    // Unless the source asked for the ownership. `_live(g)` is the author
+    // saying that this function holds `g`, and the reasoning above assumed
+    // there was something better to give them -- which there is not for a
+    // global declared `extern` and never stored through here: the value is
+    // decided in another unit, so publishing it says nothing, and dropping
+    // the ownership leaves the contract naming an object with no contents.
+    globals.retain(|n, _| written.contains(n) || lived.contains(n));
     for (name, t) in touched {
         grants.insert(
             name.clone(),
@@ -8713,6 +8755,19 @@ impl<'a> Body<'a> {
             locals.insert(s.name.clone(), b);
         }
         let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        // A global array is named in an invariant the way it is named in a
+        // contract -- `g[i]`, not `g` -- so the binder standing for its
+        // contents has to be reachable as a pointee rather than as a local's
+        // value. The invariant is a contract about one point in the body, and
+        // the two should not need different words for the same object.
+        let mut arrays: HashSet<String> = self.arrays.keys().cloned().collect();
+        for s in &self.slots {
+            if s.global && s.array.is_some() {
+                let b = format!("inv_{}", s.name);
+                pointees.insert(s.name.clone(), (Some(b.clone()), Some(b)));
+                arrays.insert(s.name.clone());
+            }
+        }
         for o in self.owned {
             let b = format!("inv_val_{}", o.base);
             binders.push(format!("({}: {})", b, o.vty));
@@ -8724,7 +8779,7 @@ impl<'a> Body<'a> {
             tds: self.tds,
             env: &self.env,
             pointees,
-            arrays: self.arrays.keys().cloned().collect(),
+            arrays,
             guarded: self.guarded.clone(),
             guards: RefCell::new(Vec::new()),
             ret: String::new(),

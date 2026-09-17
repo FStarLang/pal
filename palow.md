@@ -2582,8 +2582,8 @@ new facts about memory.
    else: what a `_preserves` written in Pulse covers is the author's business
    and not something Palow can read.
 
-   As of this milestone: **911 specifications, 774 of them with real bodies,
-   121 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   As of this milestone: **911 specifications, 781 of them with real bodies,
+   114 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -2874,6 +2874,28 @@ new facts about memory.
    `Pulse.Lib.C.Palow.FnPtr` gained the `weaken` generalization across witness
    types and the `frame` axiom that the main line added to its counterpart,
    so the two function-pointer libraries stay in step.
+
+   A contract can now talk about a mutable global's contents, and not only
+   about holding it. The conjunct that hands the ownership over already named
+   the value -- `gval_g` before, `gval_g'` after -- so all that was missing
+   was letting a specification reach it: `g[i]` and `g._length` now resolve
+   against that binder exactly as `p[i]` and `p._length` resolve against a
+   pointer parameter's. Nothing in the translation of a pointee ever depended
+   on there being a pointer; what it needs is a term for the contents, and the
+   ownership conjunct supplies one. A loop invariant says it with the same
+   words, which it should, an invariant being a contract about one point in
+   the body.
+
+   An array global whose extent this file does not know -- `extern T g[]`,
+   sized in the defining unit -- is owned like any other array. The extent
+   only refines the sequence's length, and where it is absent a contract that
+   needs a bound states one, as it must for an `_array T *` parameter anyway.
+   Such a global is also kept rather than dropped as immutable: the rule that
+   a global nothing here stores through is better published as a value than
+   owned assumed there was a value to publish, and for one declared `extern`
+   there is not -- the initialiser is in another unit. `_live(g)` in the
+   source is the author asking for the ownership, and that is now enough to
+   keep it.
 
 3. **Done for `sizeof`/`alignof`.** Sizes and alignments now come from clang's
    target ABI and are emitted as concrete `SizeT` literals;
