@@ -210,14 +210,16 @@ struct Typedefs<'a> {
     /// `double` arm has no `_pts_to` here, but its size is still the size
     /// clang would compile, and a contract may say so.
     aggregate_layouts: HashMap<String, (u64, u64)>,
-    /// Structs carrying a `_refine`. The refinement is not part of the
-    /// generated `_pts_to` yet, which costs nothing while the object is behind
-    /// a pointer -- no body so far has needed it -- but is fatal for a
-    /// by-value parameter, where the refinement is the only thing that makes
-    /// the value's contract say anything. Those are reported as a dropped
-    /// contract rather than silently translated into a body that cannot be
-    /// proved.
-    refined_structs: HashSet<String>,
+    /// The `_refine` chain written on each struct declaration that carries
+    /// one, keyed by struct name.
+    ///
+    /// A refinement on a *type* is an invariant every value of it satisfies,
+    /// so it belongs to every parameter of that type rather than to the
+    /// object's ownership: it is a fact about the value, and stating it where
+    /// the parameter's own refinements are stated is what makes it hold for a
+    /// by-value struct -- which has no ownership at all, and for which the
+    /// refinement is the only thing its contract could say.
+    refined_structs: HashMap<String, Rc<Type>>,
     /// Whether hand-written Pulse from `_ghost_stmt`, `_inline_pulse` and
     /// `_include_pulse` is spliced into the output. A test whose fragments are
     /// written against the old memory model marks itself beside its source,
@@ -294,7 +296,7 @@ impl<'a> Typedefs<'a> {
                             TypeT::Refine(..) | TypeT::RefineAlways(..) | TypeT::RefineUninit(..)
                         ) =>
                     {
-                        Some(sd.name.val.to_string())
+                        Some((sd.name.val.to_string(), sd.refines.clone()))
                     }
                     _ => None,
                 })
@@ -2159,7 +2161,27 @@ fn emit_fn(
     let mut arrays: HashSet<String> = HashSet::new();
     // The `_refine`s on each parameter's pointee, to be translated once the
     // pointee terms for the whole signature are known.
+    // A `_refine` written on a struct declaration is an invariant of the
+    // *type*, so every parameter of it carries the refinement whether or not
+    // the parameter itself was annotated. Collecting it beside the
+    // parameter's own refinements is what makes it reach the contract, and
+    // binding `this` to the struct value is what makes it mean the same thing
+    // it means in the declaration.
+    let struct_refines = |ty: &Type| -> Vec<Rc<Expr>> {
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+            return Vec::new();
+        };
+        tds.refined_structs
+            .get(&*n.val.to_string())
+            .and_then(|r| refinements(tds, r).ok())
+            .map(|(ps, _, _)| ps)
+            .unwrap_or_default()
+    };
     let mut refines: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
+    /// A refinement a *pointer* parameter inherits from the struct it points
+    /// at. `this` is the pointee, so it is spelled with the pointee's value
+    /// term rather than with the parameter.
+    let mut refines_struct: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
     // `_refine_uninit` clauses, kept apart because they are stated only where
     // the unwritten points-to is: on the way in, for an `_out` parameter.
     let mut refines_uninit: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
@@ -2216,18 +2238,15 @@ fn emit_fn(
         {
             let base = pname.trim_start_matches("var_").to_string();
             refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+            refines.extend(
+                struct_refines(&arg.ty)
+                    .into_iter()
+                    .map(|p| (base.clone(), arg.ty.clone(), p)),
+            );
             collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
         }
 
         let Some(pt) = pointee(tds, &arg.ty) else {
-            if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &arg.ty).val
-                && tds.refined_structs.contains(&*n.val)
-            {
-                refine_err.get_or_insert(format!(
-                    "parameter {} is a struct whose `_refine` is not part of its value",
-                    pname
-                ));
-            }
             continue;
         };
         let pn = palow_name(tds, pt).ok_or_else(|| {
@@ -2247,6 +2266,16 @@ fn emit_fn(
         match refinements(tds, &arg.ty) {
             Ok((ps, us, bs)) => {
                 refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+                // A struct's own refinement is about the struct, so `this`
+                // is bound at the *pointee* type and to the pointee's value:
+                // the declaration writes `this.x`, not `(*this).x`, and it
+                // means the same thing whether the parameter holding it is a
+                // value or an address.
+                refines_struct.extend(
+                    struct_refines(pt)
+                        .into_iter()
+                        .map(|p| (base.clone(), pt.clone(), p)),
+                );
                 refines_uninit.extend(us.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
                 collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
             }
@@ -2573,7 +2602,12 @@ fn emit_fn(
     // `bind` is what a `_refine_value` adds: besides `$(this)` the clause may
     // name the value the contract quantifies over, and that name is spelled
     // differently at the two ends of the contract, so the caller supplies it.
+    // `this_value` overrides what `this` *is*: the term for the pointee's
+    // value rather than the parameter. A refinement written on a struct
+    // declaration needs it -- the declaration says `this.x`, meaning the
+    // struct, and that is the pointee when the parameter is a pointer to one.
     let with_this = |base: &str,
+                     this_value: Option<&str>,
                      ty: &Rc<Type>,
                      p: &Rc<Expr>,
                      w: When,
@@ -2594,7 +2628,11 @@ fn emit_fn(
         // no storage and `this` is simply the value, so it is bound as a
         // local instead. Without the second case a `_refine` on such a
         // parameter had nowhere to go and was dropped in silence.
-        let by_value = match pointees.get(base).cloned().filter(|_| !as_value) {
+        let by_value = match pointees
+            .get(base)
+            .cloned()
+            .filter(|_| !as_value && this_value.is_none())
+        {
             Some(entry) => {
                 pointees.insert("this".to_string(), entry);
                 if arrays.contains(base) {
@@ -2603,7 +2641,12 @@ fn emit_fn(
                 false
             }
             None => {
-                locals.insert("this".to_string(), format!("var_{}", base));
+                locals.insert(
+                    "this".to_string(),
+                    this_value
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("var_{}", base)),
+                );
                 true
             }
         };
@@ -2653,10 +2696,22 @@ fn emit_fn(
             .extend(inner.uses.borrow().iter().cloned());
         r
     };
-    let refine_clause = |base: &str, ty: &Rc<Type>, p: &Rc<Expr>, w: When, as_value: bool| {
-        with_this(base, ty, p, w, as_value, None, &|sp: &Spec, w| {
-            sp.prop(p, w)
-        })
+    let refine_clause = |base: &str,
+                         this_value: Option<&str>,
+                         ty: &Rc<Type>,
+                         p: &Rc<Expr>,
+                         w: When,
+                         as_value: bool| {
+        with_this(
+            base,
+            this_value,
+            ty,
+            p,
+            w,
+            as_value,
+            None,
+            &|sp: &Spec, w| sp.prop(p, w),
+        )
     };
     // Whether a parameter's ownership is stated at this end of the contract,
     // which is also where its refinements belong.
@@ -2681,7 +2736,19 @@ fn emit_fn(
                 continue;
             }
             if stated(base, w) {
-                out.push(refine_clause(base, ty, p, w, false)?);
+                out.push(refine_clause(base, None, ty, p, w, false)?);
+            }
+        }
+        for (base, ty, p) in &refines_struct {
+            let Some((pre, post)) = spec.pointees.get(base) else {
+                continue;
+            };
+            let this = match w {
+                When::Post => post.as_deref(),
+                _ => pre.as_deref(),
+            };
+            if let Some(this) = this {
+                out.push(refine_clause(base, Some(this), ty, p, w, false)?);
             }
         }
         // An `_out` parameter's storage is unwritten exactly on the way in,
@@ -2690,7 +2757,7 @@ fn emit_fn(
         // unnecessary there -- it is about a points-to that is gone.
         if matches!(w, When::Pre) {
             for (base, ty, p) in &refines_uninit {
-                out.push(refine_clause(base, ty, p, w, true)?);
+                out.push(refine_clause(base, None, ty, p, w, true)?);
             }
         }
         Ok(out)
@@ -2737,7 +2804,7 @@ fn emit_fn(
                         t
                     }
                     None => {
-                        let t = with_this(base, ty, p, w, false, None, &|sp: &Spec, w| {
+                        let t = with_this(base, None, ty, p, w, false, None, &|sp: &Spec, w| {
                             sp.inline_pulse(code, w)
                         })?;
                         // A spliced ownership refinement on a function pointer
@@ -2813,6 +2880,7 @@ fn emit_fn(
         };
         match with_this(
             base,
+            None,
             ty,
             p,
             When::Pre,
@@ -2846,6 +2914,7 @@ fn emit_fn(
         }
         match with_this(
             base,
+            None,
             ty,
             p,
             When::Post,

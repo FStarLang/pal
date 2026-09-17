@@ -2653,6 +2653,28 @@ new facts about memory.
    is not something this signature states, and saying so is the same refusal
    as everywhere else in the emitter.
 
+   A refinement on a struct *declaration* is a fact about every value of that
+   type, and it was being thrown away. `struct _refine(this.x == 1) b` says
+   something true of every `struct b` anywhere -- a parameter of that type, a
+   pointee of a pointer to it, a callback that takes one -- and until now
+   Palow could only report that it had nothing to do with it. That cost the
+   by-value case everything: a struct passed by value owns nothing, so the
+   refinement is the only thing its contract could possibly say, and dropping
+   it left `read_positive` with `requires emp` for a function whose whole
+   point is that its field is positive.
+
+   The machinery for stating it already existed -- a `_refine` written on a
+   parameter goes through the same path -- and what was missing was only the
+   collection step and one question about what `this` means. On a by-value
+   parameter it is the value, which is what the existing path already does.
+   On a pointer it is the *pointee*: the declaration writes `this.x`, not
+   `(*this).x`, because it is talking about the struct and not about whatever
+   happens to hold it. So the clause is bound at the pointee's type and to the
+   pointee's value term, which differs at the two ends of the contract exactly
+   as the pointee itself does. `on_b` and `apply_b` in `refine_fnptr` now
+   carry the refinement through an indirect call, which is what that test was
+   written to check.
+
    As of this milestone: **911 specifications, 804 of them with real bodies,
    91 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is

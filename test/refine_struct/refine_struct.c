@@ -67,11 +67,22 @@ int read_positive(struct forward_refined s)
 // entirely: `_plain` suppresses the default ownership and `_refine` states that
 // the struct always owns `*y`, whose contents equal the `x` field. This mirrors
 // test/refine_typedef_pred, which is the same declaration behind a typedef.
+#ifdef PALOW
+// Palow spells a scalar's ownership with the predicate generated for its type,
+// at an explicit permission; there is no overloaded `pts_to`, and a pointer
+// field's value is a plain address rather than a typed reference.
+struct _refine(_inline_pulse (int32_t_pts_to $(this.y) 1.0R $(this.x)))
+    _plain selfref {
+  int x;
+  int *y;
+};
+#else
 struct _refine(_inline_pulse (Pulse.Lib.Reference.pts_to $(this.y) $(this.x)))
     _plain selfref {
   int x;
   int *y;
 };
+#endif
 
 int read_via_y(struct selfref s)
   _ensures(return == s.x)
