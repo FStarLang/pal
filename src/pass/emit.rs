@@ -1995,7 +1995,13 @@ impl<'a> Emitter<'a> {
     fn emit_expr(&mut self, env: &Env, v: &Expr) -> ExprKind {
         match &v.val {
             ExprT::Var(x) => {
-                if let Some(gv) = env.lookup_global_var(x) {
+                // C scoping: a parameter or local shadows a file-scope global of
+                // the same name, so the global is not in scope at this occurrence
+                // at all. `check_var` already resolves locals first; emission has
+                // to agree with it, or the two passes disagree about which
+                // variable an identifier denotes -- and emission wins.
+                let shadowed = env.lookup_var(x).is_some();
+                if let Some(gv) = env.lookup_global_var(x).filter(|_| !shadowed) {
                     // A mutable global emits no `var_g`, so there is no name to
                     // refer to here. Reject the read rather than emit a dangling
                     // reference that F* would report as an unbound identifier.
