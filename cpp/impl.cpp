@@ -55,6 +55,23 @@ static bool hasTopLevelContinue(const Stmt *s) {
   return false;
 }
 
+// A `break` that would bind to the enclosing do-while. Unlike `continue`, a
+// `break` also binds to a `switch`, so a switch is a boundary here and is not
+// one above.
+static bool hasTopLevelBreak(const Stmt *s) {
+  if (!s)
+    return false;
+  if (isa<BreakStmt>(s))
+    return true;
+  if (isa<ForStmt>(s) || isa<WhileStmt>(s) || isa<DoStmt>(s) ||
+      isa<SwitchStmt>(s))
+    return false;
+  for (const Stmt *child : s->children())
+    if (hasTopLevelBreak(child))
+      return true;
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -2025,14 +2042,21 @@ public:
       auto enss = Vec<Rc<ir::Expr>>::new_();
       std::string flagName;
       std::string condName;
+      // Whether the user wrote any loop annotation on this do-while. The Vec
+      // bridge exposes only new_/push, so emptiness is tracked here rather
+      // than queried afterwards.
+      bool sawLoopAnnot = false;
       if (auto attrBody = dyn_cast<AttributedStmt>(body)) {
         for (auto attr : attrBody->getAttrs()) {
           if (auto inv = isUnaryAttrOf(attr, "pal-invariant")) {
             invs.push(std::move(inv.value()));
+            sawLoopAnnot = true;
           } else if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
             reqs.push(std::move(req.value()));
+            sawLoopAnnot = true;
           } else if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
             enss.push(std::move(ens.value()));
+            sawLoopAnnot = true;
           } else if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
             if (ann->getAnnotation() == "pal-do-while-first" &&
                 ann->args_size() == 1) {
@@ -2050,6 +2074,43 @@ public:
           }
         }
         body = attrBody->getSubStmt();
+      }
+
+      // `do { ... } while (0)` is not a loop. It is C's standard idiom for
+      // giving a multi-statement macro a single-statement body (C FAQ 10.4),
+      // and coco's BUG_ON/BUG_ON_MSG/BUG_ON_NULL are all built from it.
+      //
+      // Desugaring it like any other do-while is semantically correct but
+      // destroys the facts it establishes: the body becomes a Pulse `while`,
+      // and the *only* thing that survives a loop is its invariant. The
+      // auto-generated invariant relates the two loop-control flags and says
+      // nothing about program state, so
+      //
+      //     BUG_ON(i >= n);   // do { if (i >= n) abort(); } while (0)
+      //
+      // taught the solver nothing about `i` afterwards -- even though
+      // _pal_abort ensures `pure False`, so the `if` really does establish
+      // `i < n` on the path that continues. Every bounds check written this
+      // way was invisible, which for a codebase whose validation idiom *is*
+      // BUG_ON means essentially all of its input validation was invisible.
+      //
+      // When the guard is a constant zero the body runs exactly once, so
+      // emitting it straight-line is not an optimisation but the faithful
+      // translation. Guarded conservatively:
+      //   * a top-level `break` or `continue` in the body targets this
+      //     do-while (both exit it, since the guard is false); inlining would
+      //     silently re-bind them to an enclosing loop, or to nothing;
+      //   * any user annotation means the user is treating this as a loop, so
+      //     honour that and take the general path.
+      {
+        auto condVal = d->getCond()->getIntegerConstantExpr(*astCtx);
+        bool isZeroGuard = !d->getCond()->HasSideEffects(*astCtx) &&
+                           condVal.has_value() && *condVal == 0;
+        if (isZeroGuard && !sawLoopAnnot && flagName.empty() &&
+            condName.empty() && !hasTopLevelBreak(body) &&
+            !hasTopLevelContinue(body)) {
+          return trStmt(stmts, body);
+        }
       }
 
       // First-iteration flag: named by _do_while_first, else auto-generated.
