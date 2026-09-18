@@ -59,6 +59,22 @@ void do_nothing(void)
 {
 }
 
+_ghost_arg(uint32_t before)
+void ghost_only(void)
+    _requires(before < 100)
+{
+}
+
+_total
+_ghost_arg(uint32_t before)
+_ghost_arg(uint32_t after)
+uint32_t ghost_next(uint32_t value)
+    _requires(value == before && before < 100 && after == before + 1)
+    _ensures(return == after)
+{
+    return value + 1;
+}
+
 /* ---- shared type aliases ---- */
 
 typedef int32_t (*binop)(int32_t, int32_t);
@@ -72,6 +88,29 @@ typedef int32_t binop_fn(int32_t, int32_t);
 void store_no_call(void)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
+}
+
+/* The erased call witness supplies before without changing the C signature. */
+void take_pointer(void)
+{
+    void (*fp)(void) = ghost_only;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_ghost_only.func_ghost_only__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), 0ul)));
+    fp();
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Multiple ghosts must be forwarded from the same witness into pre and post. */
+_total
+uint32_t take_pointer_ghost_args(void)
+    _ensures(return == 42)
+{
+    uint32_t (*fp)(uint32_t) = ghost_next;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Funcptr_ghost_next.func_ghost_next__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), (41ul, 42ul))));
+    uint32_t result = fp(41);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return result;
 }
 
 /* Function-to-pointer decay without `&`. */
