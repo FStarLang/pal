@@ -2017,6 +2017,35 @@ impl<'a> Emitter<'a> {
                     // That reads like a proof failure, when the truth is that
                     // PAL declined to translate the global.
                     if !gv.is_pure {
+                        // An ARRAY is different, and the difference is C's, not
+                        // PAL's: an array name has no value in the first place.
+                        // Except as the operand of `sizeof` or `&`, it decays to
+                        // a pointer to its first element (C17 6.3.2.1p3), so
+                        // there is nothing here to "read" and the objection
+                        // above does not apply. Emit the address as an
+                        // `ArrayLValue`, which is exactly what an `_array T *`
+                        // parameter already is, and every array operation --
+                        // subscript, assignment through a subscript,
+                        // `length_of` -- works on it unchanged.
+                        //
+                        // This gives out no ownership: `emit_global_addr`
+                        // emits no acquire for a mutable global, so without one
+                        // supplied by the project there is no `array_pts_to` in
+                        // existence and the handle can be compared and passed
+                        // around but never dereferenced.
+                        if global_var_is_array(gv) {
+                            let addr = annotated(v, || {
+                                let mangled =
+                                    self.nm.mangle(&Name::GlobalAddr(x.val.clone())).to_string();
+                                match self.fn_module_map.get(&x.val) {
+                                    Some(owner) if *owner != self.current_module => {
+                                        Doc::text(format!("{}.{}", owner, mangled))
+                                    }
+                                    _ => Doc::text(mangled),
+                                }
+                            });
+                            return ExprKind::ArrayLValue(addr);
+                        }
                         self.report(
                             format!(
                                 "cannot read the mutable global {}; its address may be taken, \
@@ -8131,14 +8160,11 @@ impl<'a> Emitter<'a> {
             // mean and nothing for a spec value to describe.
             return match self.emit_global_addr(env, gv) {
                 Some(addr) => addr,
-                None => {
-                    // Only an array reaches here: an enumerator is always pure.
-                    self.report(
-                        "non-pure array globals are not yet supported".to_string(),
-                        &gv.name.loc,
-                    );
-                    Doc::nil()
-                }
+                // Only an enumerator reaches here, and it is always pure, so in
+                // practice this is unreachable. A mutable array global is
+                // emitted by `emit_global_addr` as storage of type
+                // `array <elem>`; see there.
+                None => Doc::nil(),
             };
         }
         let name = self.emit_name(Name::Var(gv.name.val.clone()));
@@ -8203,22 +8229,67 @@ impl<'a> Emitter<'a> {
         // An enumerator is a constant, not an object: it has no storage, and
         // `&Color_Red` cannot be written in C. Giving it an address would assume
         // a cell that nothing can ever produce.
-        if global_var_is_array(gv) || gv.is_enum_constant {
+        if gv.is_enum_constant {
+            return None;
+        }
+        // A *pure* array global is a spec value, not storage; it is emitted by
+        // `emit_global_var` as `full_array_lspec` and has no address.
+        let array_elem = global_var_array_elem(gv).filter(|_| !gv.is_pure);
+        if global_var_is_array(gv) && array_elem.is_none() {
             return None;
         }
         let addr = self.emit_name(Name::GlobalAddr(gv.name.val.clone()));
-        let ty = self.emit_type(env, &gv.ty);
-        let ref_ty = parens(Doc::text("ref").append(Doc::line()).append(ty).nest(2));
+
+        // A mutable array global's storage has type `array <elem>`, the same
+        // type an `_array T *` parameter has, so every existing array
+        // operation -- `array_pts_to`, `array_idx`, `array_update`,
+        // `length_of` -- applies to it unchanged.
+        let (addr_ty, is_array) = match &array_elem {
+            Some(elem) => (
+                parens(
+                    Doc::text("array")
+                        .append(Doc::line())
+                        .append(self.emit_type(env, elem))
+                        .nest(2),
+                ),
+                true,
+            ),
+            None => {
+                let ty = self.emit_type(env, &gv.ty);
+                (
+                    parens(Doc::text("ref").append(Doc::line()).append(ty).nest(2)),
+                    false,
+                )
+            }
+        };
 
         let addr_val = Doc::text("assume val ")
             .append(addr.clone())
             .append(Doc::text(" : "))
-            .append(ref_ty.clone());
+            .append(addr_ty);
+        // `Pulse.Lib.Reference.is_null` is about a `ref`. The array case states
+        // the same fact against the array library's own null: a C array object
+        // has at least one element, so its handle is never `array_null`. Stated
+        // as a disequality rather than through `array_is_null`, which is a
+        // `bool` and so cannot sit directly under `~`.
         let not_null = Doc::text("assume val ")
             .append(self.emit_name(Name::GlobalAddrNotNull(gv.name.val.clone())))
-            .append(Doc::text(" : squash (~(Pulse.Lib.Reference.is_null "))
-            .append(addr.clone())
+            .append(if is_array {
+                Doc::text(" : squash (~(")
+                    .append(addr.clone())
+                    .append(Doc::text(" == Pulse.Lib.C.Array.array_null"))
+            } else {
+                Doc::text(" : squash (~(Pulse.Lib.Reference.is_null ").append(addr.clone())
+            })
             .append(Doc::text("))"));
+
+        // A mutable array gets the address and nothing else, for the same
+        // reason a mutable scalar does: handing out ownership of writable
+        // storage is exactly what must not happen. A project that needs to read
+        // one supplies its own acquire under an explicit trust argument.
+        if is_array {
+            return Some(addr_val.append(Doc::hardline()).append(not_null));
+        }
 
         // A mutable global gets the address and nothing else: the acquire below
         // mentions `var_g`, which is not emitted for it, and handing out

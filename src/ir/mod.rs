@@ -802,10 +802,22 @@ pub struct GlobalVar {
 /// (`full_array_lspec`) rather than storage, so they are excluded from
 /// address-of support; see `Env::addressable_global`.
 pub fn global_var_is_array(gv: &GlobalVar) -> bool {
-    matches!(
-        &gv.ty.val,
-        TypeT::FixedArray(_, _) | TypeT::FlexArray(_) | TypeT::Pointer(_, PointerKind::Array)
-    )
+    global_var_array_elem(gv).is_some()
+}
+
+/// The element type of an array global, or `None` if it is not an array.
+///
+/// A *pure* array global is emitted as a spec value (`full_array_lspec`) and
+/// needs no element type. A *mutable* one is emitted as storage of type
+/// `array <elem>`, which is what this is for: C gives an array name no value of
+/// its own, only decay to a pointer to its first element, so the element type
+/// is the whole of what the address needs to know.
+pub fn global_var_array_elem(gv: &GlobalVar) -> Option<Rc<Type>> {
+    match &gv.ty.val {
+        TypeT::FixedArray(elem, _) | TypeT::FlexArray(elem) => Some(elem.clone()),
+        TypeT::Pointer(elem, PointerKind::Array) => Some(elem.clone()),
+        _ => None,
+    }
 }
 
 pub type Decl = Ast<DeclT>;
