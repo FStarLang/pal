@@ -34,15 +34,6 @@ For example, `read_first(int *first, ...)` may return `*first`, and a caller
 may use `read_first(&a, &b, &c)`. Only `&a` is passed in the generated Pulse
 call. See `test/variadic_call/variadic_call.c`.
 
-## Switch labels
-
-Consecutive case labels may share a final `default` body, for example
-`case 1: case 2: default: ...`. PAL supports this shape with terminal
-breaks, returns, and fall-through from an earlier case.
-
-PAL still requires the default group to be last and rejects later case
-groups. This is a PAL restriction, not a C requirement.
-
 ## Syntax for specifications
 
 ### Annotating function arguments
