@@ -2966,6 +2966,14 @@ public:
       return {};
     } else if (auto *VD = dyn_cast<VarDecl>(D)) {
       auto loc = getRange(VD->getSourceRange());
+      // A bare `extern T x;` over mutable storage is NOT dropped here. Doing
+      // so was this branch's original fix for "merely declaring one -- as a
+      // macro-generated handler table does -- stops the translation", but the
+      // `is_extern` path below supersedes it: the object is emitted as an
+      // `assume val`, which keeps the declaration from stopping translation
+      // *and* leaves the name resolvable, so its address can still be taken.
+      // Dropping it instead regresses test/global_header_addr with
+      // "Identifier not found: var_h_mut".
       auto id = ctx.mk_ident(toStr(VD->getName()), loc.clone());
       auto ty = trQualType(VD->getType(), VD->getSourceRange(), nullptr,
                            findFnProtoTypeLoc(VD->getTypeSourceInfo()));
@@ -3037,6 +3045,18 @@ public:
     } else if (dyn_cast<StaticAssertDecl>(D)) {
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
+      return {};
+    } else if (dyn_cast<EmptyDecl>(D)) {
+      // A stray `;` at file scope. It is what a macro that already ends in a
+      // semicolon leaves behind when it is invoked with one, which is how
+      // every assertion macro in a header is written, so this is common in
+      // real code and declares nothing.
+      return {};
+    } else if (dyn_cast<FileScopeAsmDecl>(D)) {
+      // File-scope assembly has no C-level meaning to translate. Skipping it
+      // is unsound in principle, so say so rather than pass silently.
+      reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
+                        "file-scope assembly is not translated", "");
       return {};
     }
 
@@ -3273,6 +3293,16 @@ static void parse_file(RefMut<Ctx> ctx) {
 
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-DC2PULSE", "-fno-builtin"}, ArgumentInsertPosition::BEGIN));
+  // Under `-DC2PULSE` the annotation macros expand away, so a variable that a
+  // production build reads from inside an assertion or a logging macro can
+  // look written-but-never-read here. That is an artifact of how PAL
+  // configures the preprocessor, not a property of the source, and with a
+  // compilation database that carries `-Werror` it would otherwise stop the
+  // translation. These go at the end because a `-Wall` from the database
+  // would re-enable them.
+  Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+      {"-Wno-unused-but-set-variable", "-Wno-unused-variable"},
+      ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
