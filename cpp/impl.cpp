@@ -1555,6 +1555,22 @@ public:
           return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
                             trQualType(e->getType(), e->getSourceRange()));
         }
+        // Any other builtin that answers a question about the *program text*
+        // rather than about a value: fold it to the answer clang computed.
+        // See the matching fold at the end of trRValue for the rationale; this
+        // arm is needed as well because a CallExpr never reaches that fallback
+        // -- it translates to a call node, and only a later pass discovers
+        // that the callee has no body to call.
+        if (fd->getBuiltinID() != 0 &&
+            e->getType()->isIntegralOrEnumerationType()) {
+          Expr::EvalResult builtinRes;
+          if (e->EvaluateAsInt(builtinRes, *astCtx, Expr::SE_NoSideEffects)) {
+            SmallString<32> digits;
+            builtinRes.Val.getInt().toString(digits, 10, /*Signed=*/true);
+            return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                              trQualType(e->getType(), e->getSourceRange()));
+          }
+        }
         // Detect free(ptr)
         if (fd->getName() == "free" && c->getNumArgs() == 1) {
           auto arg = c->getArg(0);
@@ -1848,6 +1864,41 @@ public:
                         "offsetof whose value is not a constant", "");
       return mk_rvalue_err(std::move(loc),
                            trQualType(e->getType(), e->getSourceRange()));
+    }
+
+    // Last resort, before giving up: an expression that asks a question about
+    // the *program text* rather than about a value, and that clang has already
+    // answered.
+    //
+    // These are the type-level predicates -- __builtin_classify_type,
+    // __builtin_types_compatible_p, and their relatives -- which C code uses to
+    // select between branches at compile time. Translating such a test
+    // faithfully is not merely hard, it is wrong: the branch not taken is
+    // typically an error stub that has no definition, so only the folded value
+    // describes the program that is actually compiled.
+    //
+    // Three things make this safe to do here rather than as a general
+    // simplification:
+    //   * it is reached only where PAL was about to emit `(admit())` for the
+    //     whole enclosing expression, so it cannot displace any translation
+    //     PAL would otherwise perform, and cannot weaken any obligation --
+    //     an admit() discards them all;
+    //   * SE_NoSideEffects makes clang decline the fold if evaluating the
+    //     expression could do anything observable;
+    //   * an integral result type, since that is all mk_int_lit can carry.
+    //
+    // FunOS reaches this through its generated CDX import headers, where every
+    // cross-domain call argument is wrapped in a _CDX_CHECK_SCALAR test that
+    // rejects struct and union arguments at compile time. See
+    // test/classify_type.
+    if (e->getType()->isIntegralOrEnumerationType()) {
+      Expr::EvalResult constRes;
+      if (e->EvaluateAsInt(constRes, *astCtx, Expr::SE_NoSideEffects)) {
+        SmallString<32> digits;
+        constRes.Val.getInt().toString(digits, 10, /*Signed=*/true);
+        return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                          trQualType(e->getType(), e->getSourceRange()));
+      }
     }
 
     reportUnsupported(e->getSourceRange(), loc,
