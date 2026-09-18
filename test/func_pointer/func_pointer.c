@@ -754,11 +754,9 @@ int32_t reassign_join(int32_t use_sub)
     _ensures(_inline_pulse(exists* v. ptr_pts_to $&(fp) 1.0R v ** Fp_shim.is_valid v true (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub)))))
     {
         fp = subtract;
-        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
         _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
-        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
         _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
@@ -803,11 +801,9 @@ int32_t reassign_join_call(int32_t use_sub)
     _ensures(_inline_pulse(exists* v. ptr_pts_to $&(fp) 1.0R v ** Fp_shim.is_valid v true (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub)))))
     {
         fp = subtract;
-        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
         _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
-        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
         _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);

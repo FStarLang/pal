@@ -2751,8 +2751,34 @@ new facts about memory.
    nothing: the projection is `p +! 0sz`, and that a zero offset moves no
    pointer is arithmetic the model already knows.
 
-   As of this milestone: **911 specifications, 811 of them with real bodies,
-   84 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   An `if` can carry an `_ensures`, and until now Palow dropped it: Pulse
+   computes the join of an `if` by itself, so an annotation that says only
+   what is live is a check and not a necessity. An annotation that states
+   *ownership* is a different thing. A function-pointer local assigned a
+   different callee in each arm has no common description that the emitter can
+   invent -- each arm knows a concrete function, and only the author's own
+   words say what the two have in common -- so the annotation is the join.
+   Palow now emits it, with one caveat learned the hard way: Pulse does **not**
+   frame an `if`'s annotation. Anything live and unmentioned is left over, so
+   the emitted annotation has to be the whole state at the join, which is the
+   author's clause plus the generated frame for everything they did not speak
+   for. Which slots the author spoke for is read off the `$&(x)` antiquotations
+   in the clause; an `$(x)` is a *read*, and a read still needs the frame to
+   say what is there.
+
+   Validity is the resource that makes this worth doing. `is_valid` is carried
+   by no points-to -- the bytes of a code pointer say where the code is, not
+   what it does -- so before this milestone a call through a local whose target
+   was decided by a branch could not be translated at all. Now a clause that
+   speaks for such a local is what makes the call possible, and the validity it
+   establishes is recorded as held by the body and put down at the end with
+   everything else. Because the clause binds a fresh name for what the slot
+   holds, a validity that was seeded at a concrete function is no longer
+   spelled that way once the clause has been proved, and it has to be put down
+   by inference rather than by name.
+
+   As of this milestone: **911 specifications, 814 of them with real bodies,
+   81 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

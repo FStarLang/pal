@@ -1005,6 +1005,10 @@ struct Spec<'a> {
     olds: HashMap<String, String>,
     /// Parameters whose `pointees` entry is a sequence rather than a value.
     arrays: HashSet<String>,
+    /// C object -> the term naming its *address*, where it has one. A
+    /// parameter is passed by value and a pointer parameter is already an
+    /// address, but a local lives in a slot, and `$&(x)` means that slot.
+    addrs: HashMap<String, String>,
     /// Struct *value* term -> (the deep-ownership record on entry, on exit).
     ///
     /// Keyed by the value rather than by the parameter because `struct_X_own`
@@ -1143,6 +1147,7 @@ impl<'a> Spec<'a> {
                         olds: self.olds.clone(),
                         arrays: self.arrays.clone(),
                         owns: self.owns.clone(),
+                        addrs: self.addrs.clone(),
                         guarded: self.guarded.clone(),
                         guards: RefCell::new(Vec::new()),
                         ret: self.ret.clone(),
@@ -1477,8 +1482,12 @@ impl<'a> Spec<'a> {
                     let ExprT::Var(v) = &strip_vattr(expr).val else {
                         return Err("`$&` of something a contract cannot address".to_string());
                     };
+                    let n = v.val.to_string();
                     out.push_str(before);
-                    out.push_str(&format!("(var_{})", v.val));
+                    match self.addrs.get(&n) {
+                        Some(a) => out.push_str(&format!("({})", a)),
+                        None => out.push_str(&format!("(var_{})", n)),
+                    }
                 }
                 InlinePulseToken::TypeAntiquot { before, ty } => {
                     let t = fstar_type(self.tds, ty)
@@ -1994,6 +2003,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         olds: HashMap::new(),
         arrays: HashSet::new(),
         owns: HashMap::new(),
+        addrs: HashMap::new(),
         guarded: HashSet::new(),
         guards: RefCell::new(Vec::new()),
         ret: "ret".to_string(),
@@ -2088,6 +2098,7 @@ fn emit_pure_fn(
         olds: HashMap::new(),
         arrays: HashSet::new(),
         owns: HashMap::new(),
+        addrs: HashMap::new(),
         guarded: HashSet::new(),
         guards: RefCell::new(Vec::new()),
         ret: "ret".to_string(),
@@ -2234,6 +2245,22 @@ fn pure_let(
         None => sp.locals.remove(&*name.val.to_string()),
     };
     Ok(format!("(let {} = {} in {})", n, value, body?))
+}
+
+/// Whether a contract clause states *ownership* rather than a proposition.
+///
+/// A call to an slprop-valued `_let` is the same thing under a name: the
+/// author has given a piece of ownership a word, and a contract that uses the
+/// word means the ownership.
+fn is_slprop_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::InlinePulse(_, t) => matches!(tds.resolve(t).val, TypeT::SLProp),
+        ExprT::FnCall(n, _) => tds.slprop_lets.contains(&*n.val.to_string()),
+        ExprT::Cast(inner, t) if matches!(tds.resolve(t).val, TypeT::SLProp) => {
+            matches!(&strip_vattr(inner).val, ExprT::FnCall(n, _) if tds.slprop_lets.contains(&*n.val.to_string()))
+        }
+        _ => false,
+    }
 }
 
 /// Build the Pulse declaration for one C function, or explain why we cannot.
@@ -2722,6 +2749,7 @@ fn emit_fn(
         olds: HashMap::new(),
         arrays,
         owns,
+        addrs: HashMap::new(),
         guarded: guarded.clone(),
         guards: RefCell::new(Vec::new()),
         ret: ret_name.clone(),
@@ -2841,6 +2869,7 @@ fn emit_fn(
             olds: spec.olds.clone(),
             arrays,
             owns: spec.owns.clone(),
+            addrs: spec.addrs.clone(),
             guarded: spec.guarded.clone(),
             guards: RefCell::new(Vec::new()),
             ret: ret_name.clone(),
@@ -2986,14 +3015,7 @@ fn emit_fn(
     // A call to an slprop-valued `_let` is the same thing under a name: the
     // author has given a piece of ownership a word, and a contract that uses
     // the word means the ownership.
-    let is_slprop = |e: &Rc<Expr>| match &strip_vattr(e).val {
-        ExprT::InlinePulse(_, t) => matches!(tds.resolve(t).val, TypeT::SLProp),
-        ExprT::FnCall(n, _) => tds.slprop_lets.contains(&*n.val.to_string()),
-        ExprT::Cast(inner, t) if matches!(tds.resolve(t).val, TypeT::SLProp) => {
-            matches!(&strip_vattr(inner).val, ExprT::FnCall(n, _) if tds.slprop_lets.contains(&*n.val.to_string()))
-        }
-        _ => false,
-    };
+    let is_slprop = |e: &Rc<Expr>| is_slprop_clause(tds, e);
     let split = |es: &Exprs| -> (Exprs, Exprs) { es.iter().cloned().partition(|e| is_slprop(e)) };
     let (req_slprops, req_props) = split(&decl.requires);
     let (ens_slprops, ens_props) = split(&decl.ensures);
@@ -5500,6 +5522,40 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
     }
 }
 
+/// The C objects a clause's spliced Pulse fragments name.
+///
+/// `touch_expr` deliberately looks past an `_inline_pulse`: a spliced fragment
+/// is not C and reads and writes nothing in C's sense. But an ownership clause
+/// speaks *about* C objects through its antiquotations, and which ones it
+/// speaks about is exactly what decides whether the author or the generated
+/// frame states them.
+fn spliced_names(e: &Expr, out: &mut HashSet<String>) {
+    match &strip_vattr(e).val {
+        ExprT::InlinePulse(code, _) => {
+            for tok in &code.tokens {
+                // Only `$&(x)`. An rvalue antiquotation *reads* an object,
+                // and a read still needs the frame to say what is there;
+                // taking an object's address is what a clause does when it is
+                // about to state that object's ownership itself.
+                let InlinePulseToken::LValueAntiquot { expr: x, .. } = tok else {
+                    continue;
+                };
+                let mut t = Touched::default();
+                touch_expr(x, &mut t);
+                out.extend(t.vars);
+                out.extend(t.written);
+            }
+        }
+        ExprT::Cast(inner, _) => spliced_names(inner, out),
+        ExprT::FnCall(_, args) => {
+            for a in args.iter() {
+                spliced_names(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn touch_exprs(es: &Exprs, t: &mut Touched) {
     for e in es.iter() {
         touch_expr(e, t);
@@ -6603,6 +6659,10 @@ struct Body<'a> {
     /// Parameters the contract hands an `is_valid` for, and so the only
     /// pointers this body may call through without knowing the target.
     valid_fps: &'a HashSet<String>,
+    /// Locals whose validity an `_ensures` on an `if` established. The
+    /// signature's `valid_fps` says which *parameters* the contract spoke for;
+    /// this says which locals the body's own annotations did.
+    local_valid_fps: HashSet<String>,
     /// Consumed `_allocated` parameters and the Palow name of what they point
     /// at. See `FnSurface::freeables`.
     freeables: &'a HashMap<String, String>,
@@ -9012,7 +9072,7 @@ impl<'a> Body<'a> {
                 // here would mean parsing those words.
                 if let Some(base) = fp_base(f)
                     && self.target_of(f).is_none()
-                    && self.valid_fps.contains(&base)
+                    && (self.valid_fps.contains(&base) || self.local_valid_fps.contains(&base))
                 {
                     // The pointer itself, when the contract named it, and
                     // otherwise a load of the field holding it. A load is
@@ -9021,7 +9081,9 @@ impl<'a> Body<'a> {
                     // the same term the `is_valid` in context is stated at --
                     // which is what makes slprop matching find it.
                     let callee = match &strip_vattr(f).val {
-                        ExprT::Var(v) => format!("var_{}", v.val),
+                        ExprT::Var(v) if self.params.contains(&v.val.to_string()) => {
+                            format!("var_{}", v.val)
+                        }
                         _ => self.rvalue(f)?,
                     };
                     let mut vs = Vec::new();
@@ -9777,10 +9839,33 @@ impl<'a> Body<'a> {
             touch_exprs(clause, &mut t);
             t.written.union(&t.vars).cloned().collect()
         });
+        // A clause that states ownership is the author speaking about storage
+        // the generated frame would otherwise claim as well, and two claims to
+        // one object is not a frame. So whatever such a clause names is left
+        // out of the generated half and taken from the author's words instead.
+        let (own_clauses, prop_clauses): (Exprs, Exprs) = clause
+            .iter()
+            .cloned()
+            .partition(|e| is_slprop_clause(self.tds, e));
+        let mut stated: HashSet<String> = HashSet::new();
+        for e in own_clauses.iter() {
+            spliced_names(e, &mut stated);
+        }
+        // An author's ownership clause binds a fresh name for what a slot
+        // holds, so a function-pointer validity that was seeded at a concrete
+        // address is no longer spelled that way once the clause has been
+        // proved. Put it down by inference instead.
+        if !own_clauses.is_empty() {
+            let held: Vec<String> = self.seeded.iter().map(|s| s.3.clone()).collect();
+            self.laundered.extend(held);
+        }
         for s in &self.slots {
             if let Some(k) = &kept
                 && !k.contains(&s.name)
             {
+                continue;
+            }
+            if stated.contains(&s.name) {
                 continue;
             }
             if !s.init {
@@ -9811,6 +9896,9 @@ impl<'a> Body<'a> {
             }
         }
         for o in self.owned {
+            if stated.contains(&o.base) {
+                continue;
+            }
             let b = format!("inv_val_{}", o.base);
             binders.push(format!("({}: {})", b, o.vty));
             owns.push(format!("{}{}", o.pre, b));
@@ -9831,6 +9919,14 @@ impl<'a> Body<'a> {
             // something the invariant has a name for yet, so a clause that
             // reaches into one is dropped with its own reason.
             owns: HashMap::new(),
+            // An ownership clause in a body-level annotation is written about
+            // the objects in scope there, and a local in scope there is a
+            // slot: `$&(x)` has to be the slot's address, not a parameter's.
+            addrs: self
+                .slots
+                .iter()
+                .map(|s| (s.name.clone(), s.addr.clone()))
+                .collect(),
             guarded: self.guarded.clone(),
             guards: RefCell::new(Vec::new()),
             ret: String::new(),
@@ -9839,8 +9935,17 @@ impl<'a> Body<'a> {
             signed_ok: false,
             valued: RefCell::new(Vec::new()),
         };
+        for e in own_clauses.iter() {
+            let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
+                return Err(format!(
+                    "{} with an ownership clause that is not inline Pulse",
+                    what
+                ));
+            };
+            owns.push(spec.inline_pulse(code, When::Pre)?);
+        }
         let mut props: Vec<String> = Vec::new();
-        for e in clause.iter() {
+        for e in prop_clauses.iter() {
             spec.guards.borrow_mut().clear();
             let p = spec.prop(e, When::Pre)?;
             let guards = spec.guards.borrow();
@@ -10372,15 +10477,21 @@ impl<'a> Body<'a> {
                 cond,
                 then_branch,
                 else_branch,
-                ..
+                ensures,
             } => {
                 // Either arm may make a different member live, and the two
                 // arms need not agree, so nothing survives the join.
                 self.active.clear();
-                // The `_ensures` PAL requires on an `if` today is not
-                // translated, and does not need to be: Pulse computes the join
-                // itself from the two branches, so the annotation exists only
-                // to be checked, not to make the code typecheck.
+                // A `_ensures` that says only what is live needs no
+                // translation: Pulse computes the join of an `if` itself, so
+                // the annotation exists to be checked and not to make the code
+                // typecheck. One that states *ownership* is different. The two
+                // arms may have established it in different words -- a
+                // function pointer weakened from two different callees is the
+                // case that matters -- and then only the author's own words
+                // name the shape they have in common.
+                let states_own = ensures.iter().any(|e| is_slprop_clause(self.tds, e));
+                let mut fps: Vec<(String, String)> = Vec::new();
                 let nt = self.null_test(cond);
                 let c = match nt {
                     Some((i, when)) => Self::null_cond(&self.blocks[i].tmp, when),
@@ -10465,6 +10576,35 @@ impl<'a> Body<'a> {
                     None => (Vec::new(), Vec::new()),
                 };
                 self.lines.push(format!("if ({})", c));
+                if states_own {
+                    // Pulse does not frame an `if`'s annotation, so it has to
+                    // be the whole state at the join: the author's ownership
+                    // plus everything they did not speak for.
+                    let join = self.frame_slprop(ensures, "an `if`", "    ")?;
+                    self.lines.push(format!("  ensures {}", join));
+                    // Validity is not carried by any points-to -- the bytes of
+                    // a code pointer say where the code is, not what it does --
+                    // so a clause that speaks for a function-pointer local is
+                    // the only thing that can make a call through it possible.
+                    let mut stated: HashSet<String> = HashSet::new();
+                    for e in ensures.iter() {
+                        spliced_names(e, &mut stated);
+                    }
+                    for n in stated {
+                        if let Some(sl) = self.slots.iter().find(|s| s.name == n) {
+                            let addr = sl.addr.clone();
+                            self.local_valid_fps.insert(n.clone());
+                            // Nobody owns this validity once the function is
+                            // over, so it is recorded as held and put down
+                            // with the rest. It is laundered from the start:
+                            // the author's clause bound a fresh name for what
+                            // the slot holds, and that name is all there is.
+                            let key = format!("$if${}", addr);
+                            fps.push((addr, key.clone()));
+                            self.laundered.insert(key);
+                        }
+                    }
+                }
                 self.lines.push("{".to_string());
                 self.lines.extend(then_pre.iter().map(|l| indent(l)));
                 self.lines.extend(then.lines.iter().map(|l| indent(l)));
@@ -10472,6 +10612,10 @@ impl<'a> Body<'a> {
                 self.lines.extend(else_pre.iter().map(|l| indent(l)));
                 self.lines.extend(els.lines.iter().map(|l| indent(l)));
                 self.lines.push("};".to_string());
+                for (addr, key) in fps {
+                    self.seeded
+                        .push((addr, "_".to_string(), "_".to_string(), key));
+                }
                 Ok(())
             }
             _ => Err(format!("{} is not translated yet", stmt_kind(s))),
@@ -11592,6 +11736,7 @@ fn emit_body(
         granted: &sig.granted,
         guarded: &sig.guarded,
         valid_fps: &sig.valid_fps,
+        local_valid_fps: HashSet::new(),
         freeables: &sig.freeables,
         consumed_freed: HashSet::new(),
         consumed: &sig.consumed,
