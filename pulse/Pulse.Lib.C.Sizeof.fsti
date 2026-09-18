@@ -27,12 +27,26 @@ val c_sizeof_bool_pos (a: Type0 { a == bool })
   : Lemma (v (c_sizeof a) > 0)
     [SMTPat (v (c_sizeof a))]
 
-val c_sizeof_int8_pos (a: Type0 { a == FStar.Int8.t })
-  : Lemma (v (c_sizeof a) > 0)
+/// The character types are the one case where C fixes the value rather than
+/// merely bounding it: a byte is defined as the storage `char` occupies, so
+/// `sizeof(char)`, `sizeof(signed char)` and `sizeof(unsigned char)` are 1 by
+/// definition (C17 6.5.3.4p4). `int8_t` and `uint8_t` are covered by the same
+/// fact -- they are required to have exactly 8 bits and no padding, which a
+/// type larger than one byte cannot satisfy on an implementation where they
+/// exist at all.
+///
+/// Stating it matters, because `sizeof` of a char ARRAY is the commonest way C
+/// writes a buffer's length. `c_sizeof_array` gives
+/// `sizeof(char[n]) == sizeof(char) * n`, so without this the size of a
+/// 16-byte name field is only known to be "some positive multiple of 16", and
+/// an obligation as ordinary as `sizeof(r->name) <= r->name._length` cannot be
+/// discharged.
+val c_sizeof_int8_one (a: Type0 { a == FStar.Int8.t })
+  : Lemma (v (c_sizeof a) == 1)
     [SMTPat (v (c_sizeof a))]
 
-val c_sizeof_uint8_pos (a: Type0 { a == FStar.UInt8.t })
-  : Lemma (v (c_sizeof a) > 0)
+val c_sizeof_uint8_one (a: Type0 { a == FStar.UInt8.t })
+  : Lemma (v (c_sizeof a) == 1)
     [SMTPat (v (c_sizeof a))]
 
 val c_sizeof_int16_pos (a: Type0 { a == FStar.Int16.t })
