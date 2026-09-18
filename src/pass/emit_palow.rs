@@ -851,6 +851,21 @@ fn allocated_own(
     Ok(Some(format!("freeable {} {}sz", ptr, n)))
 }
 
+/// Where the pointer goes in a slprop the caller has to restate at a name of
+/// its own. Nothing in generated F\* can contain it, so it cannot collide.
+const PTR_HOLE: &str = "$PTR$";
+
+/// What a call hands the caller when the callee's return type grants a block.
+#[derive(Clone)]
+struct RetBlock {
+    /// The Palow type name of what the block holds.
+    pn: String,
+    /// For a `_nullable` return, the slprop the guard encloses, with the
+    /// pointer left as `PTR_HOLE`. The caller names it to get past its own
+    /// nullness test; a non-nullable return has nothing to get past.
+    guarded: Option<String>,
+}
+
 /// The Palow type name of what an `_allocated` return type points at, when the
 /// contract grants the block to the caller. Both ends read the annotation the
 /// same way -- the callee's `ensures` hands the block over, the caller has to
@@ -979,6 +994,10 @@ struct FnSurface {
     /// decides whether validity gathered at an indirect call has to be put
     /// down again.
     consumed: HashSet<String>,
+    /// What a call to this function hands the caller, when its return type
+    /// grants a block. The grant is the emitter's reading of an annotation, so
+    /// it stands whether or not the author's own clauses translated.
+    ret_block: Option<RetBlock>,
     /// Set when the signature came out as `fn rec` with a `decreases`, so the
     /// body may call itself. Direct recursion is the only kind: a cycle
     /// through two functions would need them emitted as one mutually
@@ -2841,6 +2860,10 @@ fn emit_fn(
     // existential for the value it holds, the points-to at full permission,
     // and the `freeable` the annotation asked for.
     let mut ret_freeable: Option<String> = None;
+    // The same grant when the return type is `_nullable`: one conjunct, with
+    // everything the block gives inside the guard.
+    let mut ret_guarded: Option<String> = None;
+    let mut ret_block: Option<RetBlock> = None;
     // Ownership the author wrote on the return type in their own Pulse, which
     // `_allocated` is only the commonest case of. A constructor that hands back
     // a validated object says so with a `_refine` or a `_refine_value` on the
@@ -2886,6 +2909,44 @@ fn emit_fn(
                 fstar_type(tds, pt),
                 extent(tds, &decl.ret_type),
             ) {
+                // `_nullable` says the allocation may have failed, and that
+                // is the honest contract for a constructor: a caller that
+                // tests the result gets the block, and one that does not gets
+                // nothing it can use. The guard has to enclose the value
+                // binder as well as the ownership -- there is no value when
+                // there is no object -- so this conjunct is built whole rather
+                // than through `fresh`, and the pointee map deliberately stays
+                // empty, which is what makes a contract that dereferences the
+                // result say so.
+                (Some(pn), Some(vty), Some(Extent::One)) if is_nullable(tds, &decl.ret_type) => {
+                    let mut binders = format!("(val_return: {})", vty);
+                    let mut inner = vec![
+                        format!("{}_pts_to {} 1.0R val_return", pn, PTR_HOLE),
+                        freeable.replace(&ret_name, PTR_HOLE),
+                    ];
+                    if let Some((sn, osty)) = own_for(pt) {
+                        binders += &format!(" (own_return: {})", osty);
+                        inner.push(format!("{}_own val_return 1.0R own_return", sn));
+                    }
+                    if !struct_refines(pt).is_empty() || !field_refines(pt).is_empty() {
+                        refine_err.get_or_insert(
+                            "a refinement on the pointee of a `_nullable` return".to_string(),
+                        );
+                    }
+                    // The same words serve the caller, which has to name this
+                    // slprop to get past the nullness test, so the pointer is
+                    // left as a hole rather than written twice.
+                    let guard = format!("(exists* {}. {})", binders, inner.join(" ** "));
+                    ret_guarded = Some(format!(
+                        "unless_null {} {}",
+                        ret_name,
+                        guard.replace(PTR_HOLE, &ret_name)
+                    ));
+                    ret_block = Some(RetBlock {
+                        pn,
+                        guarded: Some(guard),
+                    });
+                }
                 (Some(pn), Some(vty), Some(Extent::One)) => {
                     fresh.push((
                         "val_return".to_string(),
@@ -2912,6 +2973,7 @@ fn emit_fn(
                     // map like any parameter's dereference, and the pointee
                     // type's own refinements have somewhere to be stated.
                     pointees.insert("return".to_string(), (None, Some("val_return".to_string())));
+                    ret_block = Some(RetBlock { pn, guarded: None });
                     refines_struct.extend(
                         struct_refines(pt)
                             .into_iter()
@@ -3512,6 +3574,9 @@ fn emit_fn(
     if let Some(f) = ret_freeable {
         owned_post.push(f);
     }
+    if let Some(g) = ret_guarded {
+        owned_post.push(g);
+    }
     fresh.extend(ret_fresh);
     owned_post.extend(ret_own);
 
@@ -3782,6 +3847,7 @@ fn emit_fn(
             HashMap::new()
         },
         consumed,
+        ret_block,
         self_rec: decreases.is_some(),
     })
 }
@@ -6520,7 +6586,7 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| a.mode == ParamMode::Consumed)
                     .collect(),
-                allocated: allocated_return(&tds, &fndecl.ret_type),
+                allocated: sig.ret_block.clone(),
             },
         );
         items.push(FnItem {
@@ -6942,6 +7008,11 @@ struct Block {
     /// what lets C read it before writing it -- the one thing `calloc` gives
     /// that `malloc` does not.
     zero: Option<(String, Vec<String>)>,
+    /// For a block a call handed over rather than an allocator: the slprop the
+    /// nullness guard encloses, in the callee's own words. Such a block
+    /// arrives already typed, so the nullness test spends the guard and stops
+    /// there -- there is nothing left to claim.
+    taken: Option<String>,
     /// Whether the null test has been passed. Until it has, the block is under
     /// `unless_null` and unusable.
     checked: bool,
@@ -7012,10 +7083,10 @@ struct Callee {
     /// Which parameters are `_consumes`, by position. The argument's ownership
     /// does not come back, so the caller stops accounting for it.
     consumes: Vec<bool>,
-    /// The pointee's Palow type name when the return type is `_allocated`: the
-    /// call hands the caller a block, and the caller has to start tracking it
-    /// or the ownership the `ensures` just granted would be left over.
-    allocated: Option<String>,
+    /// What the call hands the caller, when the return type grants a block.
+    /// The caller has to start tracking it or the ownership the `ensures` just
+    /// granted would be left over.
+    allocated: Option<RetBlock>,
 }
 
 struct Body<'a> {
@@ -9966,6 +10037,12 @@ impl<'a> Body<'a> {
     /// elimination is by `rewrite`, which cannot see through the `if` inside
     /// `unless_null` on its own.
     fn block_slprop(b: &Block) -> String {
+        // A block handed over by a call is already typed: the guard encloses
+        // the callee's own words, not raw bytes, and restating it as bytes
+        // would name a slprop nobody has.
+        if let Some(t) = &b.taken {
+            return t.clone();
+        }
         let n = match &b.array {
             Some(a) => a.nbytes.clone(),
             None => format!("{}_sizeof", b.pn),
@@ -9982,11 +10059,11 @@ impl<'a> Body<'a> {
     /// ordinary value and goes into the local's slot like any other; what is
     /// new is that the caller now holds the block's points-to and its
     /// `freeable`, and nothing but this record would say so. The block arrives
-    /// checked and initialised -- an `_allocated` return is not nullable, and
-    /// the `ensures` names the value it holds -- which is the whole difference
-    /// between taking one over and allocating one.
+    /// initialised -- the `ensures` names the value it holds -- and, unless the
+    /// return type is `_nullable`, already past its nullness test, which is the
+    /// difference between taking one over and allocating one.
     fn take_block(&mut self, var: &Ident, init: &Expr, v: &str) -> Result<(), String> {
-        let Some(pn) = self.allocating_call(init) else {
+        let Some(rb) = self.allocating_call(init) else {
             return Ok(());
         };
         if self.in_branch {
@@ -9996,12 +10073,15 @@ impl<'a> Body<'a> {
         self.blocks.push(Block {
             var: var.val.to_string(),
             tmp: v.to_string(),
-            pn,
+            pn: rb.pn,
             fill: "uninit",
-            checked: true,
+            // A `_nullable` return may have failed, and the block is behind
+            // the same guard an allocation's is until the source tests it.
+            checked: rb.guarded.is_none(),
             init: true,
             freed: false,
             zero: None,
+            taken: rb.guarded.map(|g| g.replace(PTR_HOLE, v)),
             array: None,
         });
         Ok(())
@@ -10011,7 +10091,7 @@ impl<'a> Body<'a> {
     /// of what it points at. The `_allocated` on the callee's return type is
     /// the whole of C's vocabulary for this, and the caller reads it the same
     /// way the callee's `ensures` wrote it.
-    fn allocating_call(&self, e: &Expr) -> Option<String> {
+    fn allocating_call(&self, e: &Expr) -> Option<RetBlock> {
         match &strip_vattr(e).val {
             ExprT::Cast(inner, _) => self.allocating_call(inner),
             ExprT::FnCall(name, _) => self
@@ -10165,6 +10245,7 @@ impl<'a> Body<'a> {
             init: false,
             freed: false,
             zero: None,
+            taken: None,
             array: Some(ArrayBlock {
                 n,
                 esize: format!("{}sz", esize),
@@ -10207,6 +10288,7 @@ impl<'a> Body<'a> {
             init: zero.is_some(),
             freed: false,
             zero,
+            taken: None,
             array: None,
         });
         Ok(tmp)
@@ -10289,6 +10371,9 @@ impl<'a> Body<'a> {
         (
             vec![format!("elim_unless_null_null {} {};", b.tmp, sl)],
             match &b.array {
+                // Nothing to claim: what the guard held is the points-to
+                // itself, so spending the guard is the whole step.
+                _ if b.taken.is_some() => vec![format!("elim_unless_null {} {};", b.tmp, sl)],
                 None => vec![
                     format!("elim_unless_null {} {};", b.tmp, sl),
                     match &b.zero {
@@ -10336,10 +10421,12 @@ impl<'a> Body<'a> {
         // look up, but there is nothing to look up either: the call's result
         // is the block, and the three statements that give it back can be
         // written against the temporary the call was bound to.
-        if let Some(pn) = self.allocating_call(arg) {
+        if let Some(rb) = self.allocating_call(arg)
+            && rb.guarded.is_none()
+        {
             let tmp = self.rvalue(arg)?;
-            self.lines.push(format!("{}_forget {};", pn, tmp));
-            self.lines.push(format!("{}_reveal_uninit {};", pn, tmp));
+            self.lines.push(format!("{}_forget {};", rb.pn, tmp));
+            self.lines.push(format!("{}_reveal_uninit {};", rb.pn, tmp));
             self.lines.push(format!("free {};", tmp));
             return Ok(());
         }

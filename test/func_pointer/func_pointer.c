@@ -923,6 +923,9 @@ int32_t malloc_fp(void)
 {
     int32_t (**pp)(int32_t, int32_t) =
         (int32_t (**)(int32_t, int32_t)) malloc(sizeof(int32_t (*)(int32_t, int32_t)));
+    if (pp == NULL) {
+        return 5;
+    }
     *pp = add;
     _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     int32_t r = (*pp)(2, 3);

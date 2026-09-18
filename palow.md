@@ -3040,8 +3040,30 @@ new facts about memory.
    destructor that dispatches through the object's own function pointer --
    verifies with no ghost step at all.
 
-   As of this milestone: **917 specifications, 849 of them with real bodies,
-   52 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   An allocation can fail, and a constructor that returns the block has to say
+   so. `_nullable` on a return type now puts the entire grant -- the points-to,
+   the value binder, the `freeable` -- inside a single `unless_null` conjunct,
+   rather than beside a guard as the old model does; `freeable null n` is not
+   provable here, so there is nowhere else for it to go. The callee needs no
+   step to establish it, both introductions being `pulse_intro`. The caller is
+   the harder half: it receives a block that is *typed but unchecked*, which is
+   a state the tracking did not have a name for, since an allocation's block is
+   untyped-and-unchecked and a handed-over `_allocated` block is
+   typed-and-checked. Recording the callee's own words for what the guard
+   encloses covers both -- the nullness test spends exactly that slprop and,
+   unlike an allocation, has nothing left to claim afterwards. `malloc_return`
+   is the acceptance test, and it is the first place where the two models
+   genuinely part: PAL's current emitter states the same guard in the callee
+   but never spends it at a call site, so a caller under it cannot reach the
+   block. The `#ifdef PALOW` there records that rather than working around it.
+   A `_nullable` return whose pointee carries refinements still drops its
+   contract: the author's clauses would have to move inside the guard, and a
+   clause like `mk_point`'s `return->x + return->y == 13` has no meaning when
+   the allocation failed. That is a question about what the annotation should
+   mean, not a translation gap, and it is left open.
+
+   As of this milestone: **917 specifications, 850 of them with real bodies,
+   51 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
