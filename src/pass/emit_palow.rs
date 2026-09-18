@@ -7671,7 +7671,8 @@ impl<'a> Body<'a> {
             && let ExprT::Var(v) = &strip_vattr(inner).val
             && self.arrays.contains_key(&v.val.to_string())
         {
-            let f = self.focus_elem(base, None)?;
+            let inner = inner.clone();
+            let f = self.focus_elem(&inner, None)?;
             return Ok((f.at, f.close_read, f.close_write));
         }
         // The same for `a[i].f`, and for every kind of array there is: a

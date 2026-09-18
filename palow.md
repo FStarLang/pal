@@ -2796,8 +2796,24 @@ new facts about memory.
    elements, free it with the rest. The name it is allocated under is invented
    here, because C never gave it one.
 
-   As of this milestone: **911 specifications, 818 of them with real bodies,
-   77 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   Two of the tests whose hand-written Pulse was written for the old model are
+   now written for this one, and what they had to say came out shorter. PAL's
+   `_arrayptr` names an interior pointer, and the old model needed a predicate
+   relating it to the array it came out of -- `arrayptr_pts_to p arr`, plus
+   arithmetic about `offset_of` on both. Here a pointer *is* an address, so the
+   cell an accessor returns is `table +! (sizeof(E) * idx)` and that equation is
+   the whole postcondition; and a function handed an interior pointer is handed
+   a run of cells starting at it, which is the ordinary array contract with a
+   `_requires` saying the run is not empty. Both dropped contracts became real
+   ones, and `set_x_via_ptr` got a body.
+
+   That last one also uncovered a plain bug. `p->f` where `p` is an array
+   parameter is `p[0].f`, and the code that says so was focusing the element
+   out of `*p` rather than out of `p` -- so it asked for the subscript of a
+   dereference and refused itself. No test had reached it before.
+
+   As of this milestone: **911 specifications, 819 of them with real bodies,
+   76 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
