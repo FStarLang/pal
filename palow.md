@@ -2777,8 +2777,27 @@ new facts about memory.
    spelled that way once the clause has been proved, and it has to be put down
    by inference rather than by name.
 
-   As of this milestone: **911 specifications, 814 of them with real bodies,
-   81 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   C11 makes a compound literal an lvalue, which is why a named constant is so
+   often a macro expanding to one, and why the base of a member access is so
+   often a literal rather than a variable. Palow had been sending such a read
+   down the same path as any other field access, which asks for an address and
+   finds none. A structure is a record value here, so the read is simply the
+   projection -- no address, no ownership, nothing to focus. The literal's
+   record has no type of its own, so the projection has to say which record it
+   is, and an ascription does that.
+
+   The same lvalue-with-no-name shows up as an argument, and there it is a
+   string literal: `write("hello", 6)` passes an anonymous array with automatic
+   storage. A `_plain` parameter is content with the literal's address and
+   asks for nothing else, which is what `literal_addr` has always given it, but
+   an `_array` parameter wants the elements -- and the only thing that can hand
+   those over is storage. So the literal now gets storage, and the translation
+   is exactly the one a declared local array already had: allocate, write the
+   elements, free it with the rest. The name it is allocated under is invented
+   here, because C never gave it one.
+
+   As of this milestone: **911 specifications, 818 of them with real bodies,
+   77 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

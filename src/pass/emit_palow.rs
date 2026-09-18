@@ -8776,6 +8776,22 @@ impl<'a> Body<'a> {
                         return self.addr(e);
                     }
                 }
+                // A compound literal is an lvalue in C, but it is one with no
+                // storage a program can name, and C code reads a field out of
+                // one the moment a named constant is written as a macro. In
+                // Palow a structure is a record value, so the read is the
+                // projection: no address, no ownership, and nothing to focus.
+                if let ExprT::Member(base, f) = &e.val
+                    && matches!(&strip_vattr(base).val, ExprT::StructInit(..))
+                {
+                    // The literal is a record with no type of its own, so the
+                    // projection has to say which record it is.
+                    let bty = self.ty_of(base)?;
+                    let pn = palow_name(self.tds, &bty)
+                        .ok_or_else(|| format!("a field of {}", describe(&bty)))?;
+                    let v = self.rvalue(base)?;
+                    return Ok(format!("(({} <: {}).fld_{})", v, pn, f.val));
+                }
                 let hint = match &e.val {
                     ExprT::Member(_, f) => f.val.to_string(),
                     _ => "elem".to_string(),
@@ -9247,11 +9263,10 @@ impl<'a> Body<'a> {
             // cannot be handed one. Saying so here rather than emitting the
             // address keeps the refusal visible instead of leaving F* to fail
             // on a missing points-to.
-            if is_literal(a) && plain_ptrs.get(i) != Some(&true) {
-                return Err("an initialiser list is not translated yet".to_string());
-            }
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
+            } else if is_literal(a) && plain_ptrs.get(i) != Some(&true) {
+                self.literal_arg(a)?
             } else {
                 self.rvalue(a)?
             };
@@ -9304,6 +9319,71 @@ impl<'a> Body<'a> {
             return Ok(format!("var_{}", v.val));
         }
         Err("an `_out` argument that is not unwritten storage here".to_string())
+    }
+
+    /// Give an anonymous array literal storage. C makes a compound literal an
+    /// lvalue with automatic storage, and a string literal passed to a
+    /// function is exactly that -- so the translation is the one a declared
+    /// local array already gets: allocate it, write the elements, and let it
+    /// be freed with the rest. The name is invented here because C never gave
+    /// it one.
+    fn array_literal(&mut self, e: &Expr) -> Result<String, String> {
+        let ty = self.ty_of(e)?;
+        let TypeT::FixedArray(_, n) = &self.tds.resolve(&ty).val else {
+            return Err("an array literal of no fixed length".to_string());
+        };
+        let ExprT::ArrayInit { elems, .. } = &strip_vattr(e).val else {
+            return Err("an array literal that is not an initialiser".to_string());
+        };
+        if elems.len() as u64 != *n {
+            return Err("an array initialiser of another length".to_string());
+        }
+        self.tmp += 1;
+        let name: Rc<IdentT> = Rc::from(format!("lit{}", self.tmp).as_str());
+        let id: Rc<Ident> = name.clone().with_loc(e.loc.clone());
+        self.env
+            .push_var_decl(&id, ty.clone(), crate::env::LocalDeclKind::LValue);
+        self.alloc_slot(&id, &ty)?;
+        let elems = elems.clone();
+        let base = ExprT::Var(id).with_loc(e.loc.clone());
+        for (i, x) in elems.iter().enumerate() {
+            let idx = ExprT::IntLit(
+                Rc::new(BigInt::from(i)),
+                TypeT::SizeT.with_loc(e.loc.clone()),
+            )
+            .with_loc(e.loc.clone());
+            let at = ExprT::Index(base.clone(), idx).with_loc(e.loc.clone());
+            let st = StmtT::Assign(at, x.clone()).with_loc(e.loc.clone());
+            self.stmt(&st)?;
+        }
+        Ok(name.to_string())
+    }
+
+    /// A literal handed to a parameter that wants ownership. A `_plain`
+    /// pointer is content with the literal's address and nothing else, which
+    /// is what `literal_addr` gives it; anything else -- an `_array`
+    /// parameter, above all -- asks for the elements, and the only thing that
+    /// can hand those over is storage. So the literal gets some.
+    fn literal_arg(&mut self, a: &Expr) -> Result<String, String> {
+        let mut lit = Rc::new(strip_vattr(a).clone());
+        while let ExprT::Cast(inner, _) = &lit.clone().val {
+            lit = Rc::new(strip_vattr(inner).clone());
+        }
+        let v = self.array_literal(&lit)?;
+        let Some(sl) = self.slots.iter().rev().find(|s| s.name == v) else {
+            return Err("an initialiser list is not translated yet".to_string());
+        };
+        let (addr, pn) = (sl.addr.clone(), sl.palow_ty.clone());
+        let Some((esize, maybe)) = sl.array.clone() else {
+            return Err("an initialiser list is not translated yet".to_string());
+        };
+        if maybe {
+            self.lines
+                .push(format!("array_somes {}_repr {} {};", pn, addr, esize));
+            self.pending_close
+                .push(format!("array_unsomes {}_repr {} {};", pn, addr, esize));
+        }
+        Ok(addr)
     }
 
     fn alloc_slot(&mut self, name: &Ident, ty: &Type) -> Result<String, String> {
