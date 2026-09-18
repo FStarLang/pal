@@ -1491,6 +1491,39 @@ public:
                               std::move(result));
       }
 
+      case clang::BO_Comma: {
+        // The comma operator in rvalue position.
+        //
+        // `(a, b)` evaluates `a`, discards it, then yields `b`.  PAL's
+        // expression IR has nowhere to put `a`: there is no statement
+        // sequencing inside an rvalue, and hoisting it out would move it
+        // across the surrounding expression's other operands, which C's
+        // sequencing rules do not permit in general.
+        //
+        // So this is translated only when `a` cannot be observed at all --
+        // when Clang can tell us it has no side effects.  Then `(a, b)` and
+        // `b` are the same program and the arm is a pure simplification.
+        //
+        // This is not a corner case.  FunOS's generated CDX import macros
+        // (build/*/co3/*/cdx_imports.h) are all of the form
+        //
+        //   #define f(...) ((void)sizeof(f(__VA_ARGS__)),
+        //   (uint64_t)_cdx_invoke_N(...))
+        //
+        // where the left operand is a compile-time prototype check whose
+        // operand is unevaluated.  Refusing it made every cross-domain CDX
+        // call site an `admit()`, discarding the surrounding obligations
+        // along with it.
+        //
+        // A left operand that *does* have side effects still reaches the
+        // unsupported diagnostic below, deliberately: silently dropping it
+        // would change the program.
+        if (!bo->getLHS()->HasSideEffects(*astCtx)) {
+          return trRValue(bo->getRHS());
+        }
+        break;
+      }
+
       default:;
         // continue to error case
       }
