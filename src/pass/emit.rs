@@ -2005,8 +2005,18 @@ impl<'a> Emitter<'a> {
                     // A mutable global emits no `var_g`, so there is no name to
                     // refer to here. Reject the read rather than emit a dangling
                     // reference that F* would report as an unbound identifier.
-                    // Arrays are exempt: they are still emitted as a spec value.
-                    if !gv.is_pure && !global_var_is_array(gv) {
+                    //
+                    // Arrays used to be exempt, on the grounds that they are
+                    // "still emitted as a spec value" -- but that is only true
+                    // of a PURE array. `emit_global_var` reports "non-pure array
+                    // globals are not yet supported" and emits an empty module,
+                    // so exempting them here produced exactly the dangling
+                    // reference this check exists to prevent: consumers named
+                    // `Global_g.var_g` into an empty module and F* answered
+                    // "Error 72: Identifier var_g not found in module Global_g".
+                    // That reads like a proof failure, when the truth is that
+                    // PAL declined to translate the global.
+                    if !gv.is_pure {
                         self.report(
                             format!(
                                 "cannot read the mutable global {}; its address may be taken, \
