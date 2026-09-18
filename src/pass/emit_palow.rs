@@ -851,6 +851,24 @@ fn allocated_own(
     Ok(Some(format!("freeable {} {}sz", ptr, n)))
 }
 
+/// The Palow type name of what an `_allocated` return type points at, when the
+/// contract grants the block to the caller. Both ends read the annotation the
+/// same way -- the callee's `ensures` hands the block over, the caller has to
+/// take it -- so the two sides agree by asking the same question here.
+fn allocated_return(tds: &Typedefs, ty: &Type) -> Option<String> {
+    let (ps, _, _) = refinements(tds, ty).ok()?;
+    ps.iter().find_map(|p| {
+        let code = slprop_refine(tds, p)?;
+        allocated_own(tds, ty, "_", code).ok().flatten()
+    })?;
+    if extent(tds, ty) != Some(Extent::One) {
+        return None;
+    }
+    let pt = pointee(tds, ty)?;
+    fstar_type(tds, pt)?;
+    palow_name(tds, pt)
+}
+
 fn refined(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Refine(..) | TypeT::RefineAlways(..) | TypeT::RefineUninit(..) => true,
@@ -2813,6 +2831,82 @@ fn emit_fn(
         .ok_or_else(|| format!("it returns {}", describe(tds.resolve(&decl.ret_type))))?;
     let ret_name = format!("ret_{}", decl.name.val);
 
+    // `_allocated` on a *return* type is the only way C has of saying that a
+    // function hands its caller a block: storage the caller now owns, may read
+    // and write, and must eventually free. Until now the postcondition simply
+    // left that out, which made every allocating constructor look like it
+    // returned a bare address -- a caller could not read through the pointer,
+    // could not free it, and, worst of all, nothing said so. The block goes
+    // into the `ensures` the same way a parameter's ownership does: an
+    // existential for the value it holds, the points-to at full permission,
+    // and the `freeable` the annotation asked for.
+    let mut ret_freeable: Option<String> = None;
+    if let Ok((ps, _, _)) = refinements(tds, &decl.ret_type) {
+        let alloc = ps.iter().find_map(|p| {
+            let code = slprop_refine(tds, p)?;
+            allocated_own(tds, &decl.ret_type, &ret_name, code)
+                .ok()
+                .flatten()
+        });
+        if let Some(freeable) = alloc {
+            let pt = pointee(tds, &decl.ret_type).unwrap();
+            match (
+                palow_name(tds, pt),
+                fstar_type(tds, pt),
+                extent(tds, &decl.ret_type),
+            ) {
+                (Some(pn), Some(vty), Some(Extent::One)) => {
+                    fresh.push((
+                        "val_return".to_string(),
+                        vty,
+                        format!("{}_pts_to {} 1.0R val_return", pn, ret_name),
+                    ));
+                    ret_freeable = Some(freeable);
+                    // A returned struct pointer owns what its own pointers
+                    // reach, exactly as a parameter does; the deep half is
+                    // stated at the value the existential just named.
+                    if let Some((sn, osty)) = own_for(pt) {
+                        fresh.push((
+                            "own_return".to_string(),
+                            osty,
+                            format!("{}_own val_return 1.0R own_return", sn),
+                        ));
+                        owns.insert(
+                            "val_return".to_string(),
+                            (None, Some("own_return".to_string())),
+                        );
+                    }
+                    // Having named the value, the contract can talk about it:
+                    // `*return` and `return->f` resolve through the pointee
+                    // map like any parameter's dereference, and the pointee
+                    // type's own refinements have somewhere to be stated.
+                    pointees.insert("return".to_string(), (None, Some("val_return".to_string())));
+                    refines_struct.extend(
+                        struct_refines(pt)
+                            .into_iter()
+                            .map(|p| ("return".to_string(), pt.clone(), p)),
+                    );
+                    refines_field.extend(
+                        field_refines(pt)
+                            .into_iter()
+                            .map(|(f, fty, p)| ("return".to_string(), f, fty, p, true)),
+                    );
+                }
+                _ => {
+                    refine_err.get_or_insert(match pointee(tds, &decl.ret_type) {
+                        Some(pt) => format!(
+                            "an `_allocated` return of a pointer to {}",
+                            describe(tds.resolve(pt))
+                        ),
+                        None => {
+                            "an `_allocated` return of something that is not a pointer".to_string()
+                        }
+                    });
+                }
+            }
+        }
+    }
+
     // The contract is all-or-nothing: a half-translated one would be silently
     // weaker in a way nothing downstream could detect.
     let spec = Spec {
@@ -3323,6 +3417,13 @@ fn emit_fn(
             )
         }
     };
+
+    // The returned block is the emitter's own conjunct, not the author's, so
+    // it survives a dropped contract: a caller that cannot be told what the
+    // block holds can still be told that it has one.
+    if let Some(f) = ret_freeable {
+        owned_post.push(f);
+    }
 
     let mut out = String::new();
     if let Some(why) = dropped {
@@ -6321,6 +6422,7 @@ pub fn emit_palow(
                     .map(|a| a.mode == ParamMode::Out)
                     .collect(),
                 plain_ptrs: fndecl.args.iter().map(|a| is_plain(&tds, &a.ty)).collect(),
+                allocated: allocated_return(&tds, &fndecl.ret_type),
             },
         );
         items.push(FnItem {
@@ -6809,6 +6911,10 @@ struct Callee {
     /// Which parameters are `_plain`, by position. A literal has no ownership
     /// to give, so its address may only be passed to one of these.
     plain_ptrs: Vec<bool>,
+    /// The pointee's Palow type name when the return type is `_allocated`: the
+    /// call hands the caller a block, and the caller has to start tracking it
+    /// or the ownership the `ensures` just granted would be left over.
+    allocated: Option<String>,
 }
 
 struct Body<'a> {
@@ -9736,6 +9842,50 @@ impl<'a> Body<'a> {
         )
     }
 
+    /// Start tracking a block a call just handed over. The pointer is an
+    /// ordinary value and goes into the local's slot like any other; what is
+    /// new is that the caller now holds the block's points-to and its
+    /// `freeable`, and nothing but this record would say so. The block arrives
+    /// checked and initialised -- an `_allocated` return is not nullable, and
+    /// the `ensures` names the value it holds -- which is the whole difference
+    /// between taking one over and allocating one.
+    fn take_block(&mut self, var: &Ident, init: &Expr, v: &str) -> Result<(), String> {
+        let Some(pn) = self.allocating_call(init) else {
+            return Ok(());
+        };
+        if self.in_branch {
+            return Err("a call returning a block inside a branch".to_string());
+        }
+        self.blocks.retain(|b| b.var != *var.val);
+        self.blocks.push(Block {
+            var: var.val.to_string(),
+            tmp: v.to_string(),
+            pn,
+            fill: "uninit",
+            checked: true,
+            init: true,
+            freed: false,
+            zero: None,
+            array: None,
+        });
+        Ok(())
+    }
+
+    /// A call whose result is a block the callee allocated, with the Palow name
+    /// of what it points at. The `_allocated` on the callee's return type is
+    /// the whole of C's vocabulary for this, and the caller reads it the same
+    /// way the callee's `ensures` wrote it.
+    fn allocating_call(&self, e: &Expr) -> Option<String> {
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, _) => self.allocating_call(inner),
+            ExprT::FnCall(name, _) => self
+                .callees
+                .get(&*name.val.to_string())
+                .and_then(|c| c.allocated.clone()),
+            _ => None,
+        }
+    }
+
     /// An allocation of a single object, with the Palow name of the type
     /// allocated. `malloc(sizeof(T) * n)` is an array allocation and is not
     /// this; nor is a flexible-array-member allocation.
@@ -10046,6 +10196,17 @@ impl<'a> Body<'a> {
     /// full permission is what makes freeing a subrange, or a pointer into the
     /// middle of a block, unprovable.
     fn free(&mut self, arg: &Expr) -> Result<(), String> {
+        // `free(alloc())` never names the block at all. There is no local to
+        // look up, but there is nothing to look up either: the call's result
+        // is the block, and the three statements that give it back can be
+        // written against the temporary the call was bound to.
+        if let Some(pn) = self.allocating_call(arg) {
+            let tmp = self.rvalue(arg)?;
+            self.lines.push(format!("{}_forget {};", pn, tmp));
+            self.lines.push(format!("{}_reveal_uninit {};", pn, tmp));
+            self.lines.push(format!("free {};", tmp));
+            return Ok(());
+        }
         let name = match &strip_vattr(arg).val {
             ExprT::Var(v) => v.val.to_string(),
             _ => return Err("a `free` of something other than a local".to_string()),
@@ -10515,7 +10676,11 @@ impl<'a> Body<'a> {
                 let v = match (self.alloc_of(init), self.array_alloc_of(init)) {
                     (Some((which, pointee, z)), _) => self.allocate(name, which, &pointee, z)?,
                     (_, Some((which, ty, n))) => self.allocate_array(name, which, &ty, &n)?,
-                    _ => self.rvalue(init)?,
+                    _ => {
+                        let v = self.rvalue(init)?;
+                        self.take_block(name, init, &v)?;
+                        v
+                    }
                 };
                 let pn = self.alloc_slot(name, ty)?;
                 self.lines
@@ -10574,6 +10739,9 @@ impl<'a> Body<'a> {
                     }
                 }
                 let v = self.rvalue(rhs)?;
+                if let ExprT::Var(n) = &strip_vattr(lhs).val {
+                    self.take_block(n, rhs, &v)?;
+                }
                 self.store(lhs, &pn, &v)?;
                 self.note_fn_store(lhs, rhs);
                 self.note_union_store(lhs, rhs);

@@ -2972,8 +2972,37 @@ new facts about memory.
    a function whose whole job is to allocate and hand the block back -- which
    waits on a `_nullable` return type that neither model has.
 
-   As of this milestone: **917 specifications, 847 of them with real bodies,
-   54 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   The other half of an allocation is who gets the block, and until now the
+   answer was nobody. `_allocated` on a *return* type is the only vocabulary C
+   has for a function that hands its caller storage to own and eventually free,
+   and the emitted `ensures` was simply leaving it out -- every allocating
+   constructor looked like it returned a bare address. That is the worst kind
+   of gap, because nothing said so: a caller could not read through the
+   pointer and could not free it, and the coverage count registered neither.
+   The postcondition now says what the annotation says, in the same shape a
+   parameter's ownership takes: an existential for the value the block holds,
+   the points-to at full permission, and the `freeable`. Having named the
+   value, the contract can also talk about it -- `*return` and `return->f`
+   resolve through the pointee map like any dereference, a returned struct
+   pointer carries the deep half its own pointers reach, and a `_refine` on
+   the pointee type has somewhere to be stated.
+
+   The caller side is the mirror image: a call to such a function starts
+   tracking a block, checked and initialised from the start, since an
+   `_allocated` return is not nullable and the `ensures` already names what it
+   holds. From there `free` is the ordinary path, including `free(alloc())`,
+   which never names the block at all -- there is no local to look up, but
+   there is nothing to look up either, because the call's own temporary is the
+   block. What remains admitted is the *callee*: a function whose whole job is
+   to allocate cannot prove it returns a non-null block without a null test,
+   and there is nothing to return early with until a `_nullable` return type
+   exists. Making the grant explicit also made one silence audible --
+   `vec_new` returns a pointer to a flexible-array-member struct, whose size is
+   not a constant, and that now reads as a dropped contract rather than as
+   nothing at all.
+
+   As of this milestone: **917 specifications, 848 of them with real bodies,
+   53 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
