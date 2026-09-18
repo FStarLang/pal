@@ -3084,6 +3084,10 @@ fn emit_fn(
                 if arrays.contains(base) {
                     arrays.insert("this".to_string());
                 }
+                // `*this` reads through the entry; bare `$(this)` is still the
+                // pointer itself, and without this it would come out as the
+                // name of a binder nobody declared.
+                locals.insert("this".to_string(), format!("var_{}", base));
                 false
             }
             None => {
@@ -3280,6 +3284,11 @@ fn emit_fn(
     // writes, and it says the caller hands over the right to free the block.
     // It goes where the points-to goes.
     let valid_fps: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    // Whether a type-level `_refine` contributed ownership in the author's own
+    // Pulse. Like a spliced contract clause, it can grant something the
+    // emitter never reads, so the body has to stop insisting it knows what is
+    // unowned.
+    let refine_own_spliced: RefCell<bool> = RefCell::new(false);
     // The same, for a function pointer held in a *field* of a struct the
     // contract owns: the validity is stated at `x.fld_f`, so what the body may
     // call through is the field, not the parameter.
@@ -3330,6 +3339,7 @@ fn emit_fn(
                         if matches!(peel(tds, ty).val, TypeT::FnPtr { .. }) {
                             valid_fps.borrow_mut().insert(base.clone());
                         }
+                        *refine_own_spliced.borrow_mut() = true;
                         t
                     }
                 },
@@ -3357,6 +3367,7 @@ fn emit_fn(
                     .borrow_mut()
                     .insert((base.clone(), fname.clone()));
             }
+            *refine_own_spliced.borrow_mut() = true;
         }
         Ok(out)
     };
@@ -3828,7 +3839,8 @@ fn emit_fn(
         owned,
         guarded,
         granted,
-        spliced_own: contract_ok && !(req_slprops.is_empty() && ens_slprops.is_empty()),
+        spliced_own: contract_ok
+            && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
         contract: contract_ok,
         fp,
         fp_wits: wits.len(),
@@ -7732,6 +7744,12 @@ impl<'a> Body<'a> {
                     self.open_own(&p, &sn);
                     self.rvalue(inner)
                 }
+                // A contract that spliced its own ownership in can have
+                // granted anything, in words the emitter does not read. It
+                // cannot say what is unowned, so it says nothing and lets
+                // slprop matching decide -- which is where the honesty is: if
+                // the splice did not grant this, F* rejects the access.
+                _ if self.spliced_own => self.rvalue(inner),
                 other => Err(format!(
                     "a dereference of {}, whose target the contract does not grant",
                     expr_kind_of(other)

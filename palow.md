@@ -3062,8 +3062,42 @@ new facts about memory.
    the allocation failed. That is a question about what the annotation should
    mean, not a translation gap, and it is left open.
 
-   As of this milestone: **917 specifications, 850 of them with real bodies,
-   51 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   `_core_ref` can now go. It exists because PAL's ownership of a struct is
+   shallow: a `struct a *` says nothing about what a pointer field points at,
+   so a back-pointer had to be marked and the ownership behind it spelled out
+   in a `_refine` on a separate typedef -- separate because folding it into the
+   struct's own predicate would have made two mutually recursive modules.
+   Palow's struct ownership already reaches one level through its pointer
+   fields, so an ordinary `struct a *` parameter says everything the chain
+   `o->pb->y` needs, in the contract and in the body alike, and the annotation
+   has nothing left to add. `core_ref_chain` is now two plain functions under
+   `#ifdef PALOW`, with the marked-up version kept only for the older model.
+
+   The other half is about not over-claiming. A contract that splices ownership
+   in, in the author's own Pulse, may have granted anything at all: the emitter
+   does not read those words and so cannot say what is *not* owned. It used to
+   say it anyway for a dereference it could not account for, and refused the
+   body. It now steps aside and lets slprop matching decide, which is where the
+   honesty is -- if the splice did not grant the access, F\* rejects it and the
+   body never gets written. The same rule already applied to a spliced
+   `_requires`; what was missing is that a type-level `_refine` is exactly as
+   opaque, which is what `refine_struct`'s `_plain` struct with a hand-written
+   points-to is.
+
+   One thing that looked like the next step turned out not to be. A
+   `_refine_value` whose body is word for word the generated points-to, as
+   `inline_array_aliasing` writes it, could be recognised as naming the
+   pointee, which would let its contracts read fields through the pointer. It
+   does -- but the bodies that then become translatable hand a decayed inline
+   array to a callee, and that needs the field focused out of the struct's
+   points-to, which puts the struct's record at a new value while its deep
+   ownership is still stated at the old one. `struct_S_own` is keyed on the
+   whole record, so the two no longer match. Fixing that means keying the deep
+   ownership on the fields it actually reaches, which is a change to the model
+   rather than to the translator, and it is left for one.
+
+   As of this milestone: **917 specifications, 853 of them with real bodies,
+   48 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
