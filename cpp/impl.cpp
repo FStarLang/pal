@@ -237,6 +237,42 @@ public:
   // When inside a switch desugaring, break sets this flag instead of mk_break
   Rc<ir::Ident> *switchBreakId = nullptr;
 
+  // The arm a `?:` actually takes, when clang can decide the condition at
+  // compile time, or null when it cannot.
+  //
+  // C evaluates exactly one arm of a conditional, so when the condition is a
+  // constant the program IS that arm and nothing else. Translating the whole
+  // conditional is not merely wasteful, it is wrong in the way that matters
+  // here: the arm that is never taken is often not meant to be compiled at
+  // all. FunOS's generated CDX import headers wrap every cross-domain call
+  // argument in
+  //
+  //   (__builtin_classify_type(x) == 12 || __builtin_classify_type(x) == 13)
+  //       ? CDX_ERROR__Struct_or_union_arguments_not_allowed_in_CDX_...()
+  //       : (uint64_t)(x)
+  //
+  // where the error function is declared and deliberately never defined, so
+  // that a struct argument fails to link. Once the classify_type calls fold,
+  // the condition is `1 == 12 || 1 == 13` and the dead arm is a call to a
+  // function PAL has no body for -- which, before this, both introduced an
+  // admitted module and made the conditional ill-typed, since the two arms'
+  // types agree in C but not after PAL maps a typedef and its underlying type
+  // to different F* names ("The branches of a conditional must return the same
+  // type: Typedef_uint64_t.ty_uint64_t and UInt64.t").
+  //
+  // Requiring the condition to be side-effect free is what makes dropping it
+  // sound: `f() ? a : b` must still call f. HasSideEffects is asked
+  // separately from the evaluation because EvaluateAsBooleanCondition has no
+  // equivalent of EvaluateAsInt's SE_NoSideEffects.
+  Expr *constantCondArm(const ConditionalOperator *co) {
+    bool val = false;
+    if (co->getCond()->HasSideEffects(*astCtx) ||
+        !co->getCond()->EvaluateAsBooleanCondition(val, *astCtx)) {
+      return nullptr;
+    }
+    return val ? co->getTrueExpr() : co->getFalseExpr();
+  }
+
   // TODO: should probably wait with translation until after parsing
 
   void Initialize(ASTContext &Context) override {
@@ -1856,6 +1892,9 @@ public:
     } else if (auto *init = dyn_cast<InitListExpr>(e)) {
       return trInitList(init, e->getSourceRange(), std::move(loc));
     } else if (auto *co = dyn_cast<ConditionalOperator>(e)) {
+      if (auto *arm = constantCondArm(co)) {
+        return trRValue(arm);
+      }
       // The condition is evaluated unconditionally and may hoist; the two arms
       // are not, so a statement expression in either must stay where it is.
       auto cond = trRValue(co->getCond());
@@ -3144,6 +3183,9 @@ public:
         return trStmt(stmts, cse->getSubExpr());
       }
     } else if (auto *co = dyn_cast<ConditionalOperator>(stmt)) {
+      if (auto *arm = constantCondArm(co)) {
+        return trStmt(stmts, arm);
+      }
       // `c ? a : b;` as a statement: the value is discarded, but a and b may
       // still do something, so this is an if/else -- not a no-op, and not an
       // rvalue, which is why it cannot go through trRValue.
