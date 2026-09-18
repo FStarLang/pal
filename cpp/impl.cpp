@@ -2318,6 +2318,11 @@ public:
             currentGroup->caseValues.push_back(innerCs->getLHS());
             caseBody = innerCs->getSubStmt();
           }
+          if (auto *ds = dyn_cast_or_null<DefaultStmt>(caseBody)) {
+            seenDefault = true;
+            currentGroup->isDefault = true;
+            caseBody = ds->getSubStmt();
+          }
           if (caseBody)
             currentGroup->body.push_back(caseBody);
         } else if (auto *ds = dyn_cast<DefaultStmt>(child)) {
