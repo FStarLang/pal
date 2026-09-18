@@ -488,8 +488,13 @@ impl DeclBuilder {
         })
     }
     fn arg_anon(&mut self, ty: Rc<Type>, mode: ParamMode) {
+        // Give the parameter the same synthesized name the emitter would print
+        // for it, so that the environment and the generated Pulse agree. An
+        // unregistered name resolves as an lvalue and picks up a spurious
+        // dereference in the generated `requires`/`ensures` (see Env::push_arg).
+        let name = Rc::<str>::from(format!("_unnamed{}", self.args.len())).with_loc(ty.loc.clone());
         self.args.push(FnArg {
-            name: None,
+            name: Some(name),
             ty,
             mode,
         })
