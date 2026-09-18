@@ -46,6 +46,25 @@ int32_t classify(int32_t x)
     return r;
 }
 
+/* The final group shares its body between a named case and default. */
+int32_t default_stacked_last(int32_t x)
+    _ensures(x == 0 ==> return == 10)
+    _ensures(x == 1 ==> return == 20)
+    _ensures((x != 0 && x != 1) ==> return == 20)
+{
+    int32_t result = 0;
+    switch (x) {
+    case 0:
+        result = 10;
+        break;
+    case 1:
+    default:
+        result = 20;
+        break;
+    }
+    return result;
+}
+
 /* A genuine fall-through switch retains the general switch encoding. */
 int32_t accumulate_with_fallthrough(int32_t x)
     _requires(x == 0 || x == 1)
