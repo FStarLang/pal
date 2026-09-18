@@ -756,10 +756,17 @@ new facts about memory.
 - `malloc` may return null here, and the old model's allocator cannot: PAL
   emits `Pulse.Lib.C.Ref.alloc_ref`, which always succeeds. So C that
   allocates and then dereferences or frees without testing the result
-  translates today and is refused by `--palow`, which accounts for eleven of
-  the admitted bodies. This is the deviation being in the honest direction --
-  the refused programs have a real bug -- but it is a deviation, and the
-  count it costs is real.
+  translates today and is refused by `--palow`. This is the deviation being in
+  the honest direction -- the refused programs have a real bug -- and where the
+  function returns `void` the fix is the one a C programmer would make anyway:
+  test the result and return early. Six admitted bodies came back that way, and
+  the checks verify unchanged under the old model too, so nothing had to be
+  hidden behind `#ifdef PALOW`. What is left is the case where there is nothing
+  to return early *with*: a function whose job is to allocate and hand the
+  block back -- `mk_point`, `alloc_int`, `mk_itemx`, `get_ops` -- cannot test
+  the result without its return type becoming `_nullable`, and a `_nullable`
+  *return* is an annotation neither model has. Five admitted bodies wait on
+  that.
 - An `if`'s two arms must agree on which locals and `_out` parameters hold a
   value and which still hold uninitialised storage; those are different
   slprops and there is nothing to join them to. This is a real restriction on
@@ -2929,8 +2936,44 @@ new facts about memory.
    in the body, while the old model has to be told again in a `_requires`. The
    test asks for it under `#ifndef PALOW` rather than hiding the difference.
 
-   As of this milestone: **917 specifications, 840 of them with real bodies,
-   61 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   `calloc` is the allocator whose result can be read before it is written,
+   and until now Palow only half believed it: the storage arrived with its
+   bytes known to be zero, and the claim threw that away and took the block as
+   write-only. For an array of scalars `array_claim_zeroed` already did the
+   right thing, so what was missing was the two cases either side of it. A
+   single object now claims the value directly -- `encode_zero 4;
+   int32_t_claim p 0l` -- which is what `int *p = calloc(1, sizeof(int));
+   ... *p == 0` needs and what no amount of a write-only view could give. And
+   an aggregate now has a reason of its own: each generated struct that can be
+   all-zero gets a `_repr_zero` lemma, proved from `encode_zero` at each
+   scalar field and from the nested struct's own lemma below that, resting on
+   one new fact at the byte layer -- that cutting up an all-zero range leaves
+   all-zero ranges. A pointer field is deliberately not zeroable: C says
+   `calloc` gives a null pointer, but null's representation is not fixed to be
+   all-zero, and the model does not pretend otherwise.
+
+   Two smaller things fell out of writing that down. A count C computes at
+   compile time is still a count that is written down -- `calloc(1 + 0, ...)`
+   is as fixed as `calloc(1, ...)` -- so the array allocator constant-folds it
+   rather than demanding a `_requires` to bound something that cannot vary.
+   And reaching a *field* of an element of an allocated block was emitting the
+   element's focus without its opening: the closing lines were kept and the
+   opening ones dropped, which for an ordinary array is no loss (there is
+   nothing to open) and for a block whose elements may be uninitialised is the
+   whole step. `a[i].f` on `calloc`ed storage now says `elem_maybe_get` before
+   it says `_focus_f`.
+
+   The allocator-null deviation shrank at the same time, and not by changing
+   the model: where the function returns `void`, testing `malloc`'s result and
+   returning early is what a C programmer would write anyway, and the six
+   places in the test suite that did not do so now do. The checks verify
+   unchanged under the old model too, so none of them had to be hidden behind
+   an `#ifdef`. What remains is the case with nothing to return early *with* --
+   a function whose whole job is to allocate and hand the block back -- which
+   waits on a `_nullable` return type that neither model has.
+
+   As of this milestone: **917 specifications, 847 of them with real bodies,
+   54 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

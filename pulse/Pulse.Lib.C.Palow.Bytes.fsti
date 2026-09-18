@@ -94,6 +94,15 @@ let slice (b: bytes) (i: nat) (j: nat { i <= j /\ j <= len b })
 let append (b1 b2: bytes) : b:bytes { len b == len b1 + len b2 } =
   Seq.append b1 b2
 
+(* An all-zero range stays all-zero when it is cut up, which is the whole of
+   what an aggregate needs in order to see `calloc`'s storage as a value: a
+   struct's `_repr` reads each field out of an absolute slice of the object,
+   and every one of those slices is zeroed if the object is. *)
+let zeroed_slice (n: nat) (i: nat) (j: nat { i <= j /\ j <= n })
+  : Lemma (slice (zeroed n) i j == zeroed (j - i))
+          [SMTPat (slice (zeroed n) i j)]
+  = Seq.lemma_eq_elim (slice (zeroed n) i j) (zeroed (j - i))
+
 let slice_append (b: bytes) (i: nat { i <= len b })
   : Lemma (append (slice b 0 i) (slice b i (len b)) == b)
   = Seq.lemma_eq_intro (append (slice b 0 i) (slice b i (len b))) b

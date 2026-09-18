@@ -4580,6 +4580,35 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         sn = sn
     );
 
+    // What `calloc` gives back is a value only if the type says an all-zero
+    // object is one. Each field contributes its own reason, and the padding
+    // contributes nothing -- the representation says nothing about it, which
+    // is why an all-zero object is representable at all.
+    if let Some(proofs) = si
+        .fields
+        .iter()
+        .map(|f| zero_repr_proof(tds, &f.ty))
+        .collect::<Option<Vec<_>>>()
+    {
+        let zero = si
+            .fields
+            .iter()
+            .map(|f| Ok(format!("fld_{} = {}", f.name, zero_value(tds, &f.ty)?)))
+            .collect::<Result<Vec<_>, String>>();
+        if let Ok(zero) = zero {
+            let mut steps: Vec<String> = proofs.into_iter().flatten().collect();
+            steps.push("()".to_string());
+            c += &format!(
+                "let {sn}_repr_zero (_: unit)\n  \
+                 : Lemma ({sn}_repr ({{ {z} }}) (zeroed (SizeT.v {sn}_sizeof)))\n  \
+                 = {steps}\n\n",
+                sn = sn,
+                z = zero.join("; "),
+                steps = steps.join(" ")
+            );
+        }
+    }
+
     // ---- reveal: fields to bytes ----
     let mut r = format!(
         "  unfold {sn}_pts_to a p x;\n  unfold {sn}_padding a p;\n",
@@ -6705,10 +6734,14 @@ struct Block {
     /// The pointee's Palow type name.
     pn: String,
     /// The byte pattern the allocator promises: `uninit` for `malloc`,
-    /// `zeroed` for `calloc`. The zeroing is not carried into the claim yet, so
-    /// a `calloc`ed block still arrives write-only; the shape only has to match
-    /// what the allocator's postcondition said.
+    /// `zeroed` for `calloc`.
     fill: &'static str,
+    /// For a `calloc`ed single object whose type says an all-zero range is a
+    /// value: that value, and the lemma calls that say so. The block is then
+    /// claimed as an initialised object rather than as raw storage, which is
+    /// what lets C read it before writing it -- the one thing `calloc` gives
+    /// that `malloc` does not.
+    zero: Option<(String, Vec<String>)>,
     /// Whether the null test has been passed. Until it has, the block is under
     /// `unless_null` and unusable.
     checked: bool,
@@ -6733,8 +6766,9 @@ struct ArrayBlock {
     /// The whole block's size in bytes, as a `SizeT.t` term.
     nbytes: String,
     /// The element value an all-zero range represents, when the allocator
-    /// promised zeros and the element type has such a value.
-    zero: Option<String>,
+    /// promised zeros and the element type has such a value, together with the
+    /// lemma calls that say so.
+    zero: Option<(String, Vec<String>)>,
 }
 
 /// What one arm of an `if` produced: its statements, and the state it leaves
@@ -7574,7 +7608,7 @@ impl<'a> Body<'a> {
             }
             ExprT::Member(base, f) => {
                 let pn = self.field_pn(base, f)?;
-                let ff = self.open_field(base, f)?;
+                let ff = self.open_field(base, f, writing)?;
                 if let Some(focus) = self.scattered_field(&ff, f, &pn, writing) {
                     return Ok(focus);
                 }
@@ -7648,7 +7682,7 @@ impl<'a> Body<'a> {
                 describe(self.tds.resolve(&fty))
             )
         })?;
-        let (a, base_close_read, base_close_write) = self.base_addr(base)?;
+        let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
             // The other way to know is the contract. There the union's value
             // is whatever the caller passed, so the tag is a fact rather than
@@ -7819,9 +7853,9 @@ impl<'a> Body<'a> {
     }
 
     /// Everything `focus_field` does except emitting the focus itself.
-    fn open_field(&mut self, base: &Expr, f: &Ident) -> Result<FieldFocus, String> {
+    fn open_field(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<FieldFocus, String> {
         let (sn, _) = self.struct_of(base)?;
-        let (a, close_read, close_write) = self.base_addr(base)?;
+        let (a, close_read, close_write) = self.base_addr(base, writing)?;
         let at = format!("({} +! {}_offsetof_{})", a, sn, f.val);
         Ok(FieldFocus {
             sn,
@@ -7832,8 +7866,8 @@ impl<'a> Body<'a> {
         })
     }
 
-    fn focus_field(&mut self, base: &Expr, f: &Ident) -> Result<FieldFocus, String> {
-        let ff = self.open_field(base, f)?;
+    fn focus_field(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<FieldFocus, String> {
+        let ff = self.open_field(base, f, writing)?;
         self.lines
             .push(format!("{}_focus_{} {};", ff.sn, f.val, ff.a));
         Ok(ff)
@@ -7843,9 +7877,13 @@ impl<'a> Body<'a> {
     /// a field of a *nested* struct -- which is what an anonymous member and a
     /// first-field cast both come out as -- has to focus the outer field first,
     /// and that focus stays open until the access through it is done.
-    fn base_addr(&mut self, base: &Expr) -> Result<(String, Vec<String>, Vec<String>), String> {
+    fn base_addr(
+        &mut self,
+        base: &Expr,
+        writing: bool,
+    ) -> Result<(String, Vec<String>, Vec<String>), String> {
         if let Some(p) = self.unalias(base) {
-            return self.base_addr(&p);
+            return self.base_addr(&p, writing);
         }
         if let ExprT::Member(b2, f2) = &strip_vattr(base).val {
             let fty = self.field_ty(b2, f2)?;
@@ -7856,7 +7894,7 @@ impl<'a> Body<'a> {
                 &peel(self.tds, &fty).val,
                 TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
             ) {
-                let inner = self.focus_field(b2, f2)?;
+                let inner = self.focus_field(b2, f2, writing)?;
                 let mut close_read =
                     vec![format!("{}_unfocus_read_{} {};", inner.sn, f2.val, inner.a)];
                 close_read.extend(inner.close_read);
@@ -7875,6 +7913,16 @@ impl<'a> Body<'a> {
         {
             let inner = inner.clone();
             let f = self.focus_elem(&inner, None)?;
+            // The element has to be *opened* as well as focused: a block whose
+            // elements may be uninitialised is owned at the `maybe` view, and
+            // a field of one cannot be reached until the element has been
+            // turned into a value of its type. Dropping these was how a field
+            // of a `calloc`ed struct came out as a focus with nothing under it.
+            self.lines.extend(if writing {
+                f.open_write.clone()
+            } else {
+                f.open_read.clone()
+            });
             return Ok((f.at, f.close_read, f.close_write));
         }
         // The same for `a[i].f`, and for every kind of array there is: a
@@ -7885,6 +7933,11 @@ impl<'a> Body<'a> {
             && self.is_array_place(arr)
         {
             let f = self.focus_elem(arr, Some(idx))?;
+            self.lines.extend(if writing {
+                f.open_write.clone()
+            } else {
+                f.open_read.clone()
+            });
             return Ok((f.at, f.close_read, f.close_write));
         }
         Ok((self.addr(base)?, Vec::new(), Vec::new()))
@@ -8050,7 +8103,7 @@ impl<'a> Body<'a> {
                         describe(self.tds.resolve(&fty))
                     ));
                 };
-                let ff = self.focus_field(base, f)?;
+                let ff = self.focus_field(base, f, false)?;
                 // A read goes back with the field's read-only unfocus, which
                 // hands the struct back at the very value it had. The general
                 // one rebuilds the record field by field, and a rebuilt record
@@ -8287,7 +8340,7 @@ impl<'a> Body<'a> {
                     .union_of(obj)
                     .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
                 let uname = un.strip_prefix("union_").unwrap_or(&un).to_string();
-                let (a, close_read, _) = self.base_addr(obj)?;
+                let (a, close_read, _) = self.base_addr(obj, false)?;
                 let vp = self.fresh("perm");
                 let vu = self.fresh("union");
                 self.lines.push(format!(
@@ -9686,15 +9739,29 @@ impl<'a> Body<'a> {
     /// An allocation of a single object, with the Palow name of the type
     /// allocated. `malloc(sizeof(T) * n)` is an array allocation and is not
     /// this; nor is a flexible-array-member allocation.
-    fn alloc_of(&self, e: &Expr) -> Option<(&'static str, String)> {
+    fn alloc_of(&self, e: &Expr) -> Option<(&'static str, String, Option<(String, Vec<String>)>)> {
         let e = strip_vattr(e);
         let e = match &e.val {
             ExprT::Cast(inner, _) => strip_vattr(inner),
             _ => e,
         };
         match &e.val {
-            ExprT::Malloc(ty) => palow_name(self.tds, ty).map(|pn| ("malloc", pn)),
-            ExprT::Calloc(ty) => palow_name(self.tds, ty).map(|pn| ("calloc", pn)),
+            ExprT::Malloc(ty) => palow_name(self.tds, ty).map(|pn| ("malloc", pn, None)),
+            // `calloc` of a *scalar* hands back a readable object: the storage
+            // is all zeros and the type says that is the encoding of zero.
+            // Only a scalar, because an aggregate's claim would be a generated
+            // `_claim` the struct emitter does not write.
+            ExprT::Calloc(ty) => palow_name(self.tds, ty).map(|pn| {
+                let scalar = matches!(
+                    peel(self.tds, ty).val,
+                    TypeT::Int { .. } | TypeT::SizeT | TypeT::Bool
+                );
+                let z = zero_value(self.tds, ty)
+                    .ok()
+                    .zip(zero_repr_proof(self.tds, ty))
+                    .filter(|_| scalar);
+                ("calloc", pn, z)
+            }),
             _ => None,
         }
     }
@@ -9746,10 +9813,24 @@ impl<'a> Body<'a> {
         // code, discharged by the function's own `_requires`, so without one
         // there is nothing to discharge it with unless the count is written
         // down, in which case the product is too.
+        // A count C computed at compile time is still a count that is written
+        // down -- `sizeof(struct vec) + n` is not, but `1 + 0` is, and the
+        // difference between the two is whether anything in it can vary.
         fn lit(e: &Expr) -> Option<u64> {
             match &strip_vattr(e).val {
                 ExprT::IntLit(k, _) => u64::try_from(&**k).ok(),
                 ExprT::Cast(inner, _) => lit(inner),
+                ExprT::BinOp(op, a, b) => {
+                    let (a, b) = (lit(a)?, lit(b)?);
+                    match op {
+                        BinOp::Add => a.checked_add(b),
+                        BinOp::Sub => a.checked_sub(b),
+                        BinOp::Mul => a.checked_mul(b),
+                        BinOp::Div if b != 0 => Some(a / b),
+                        BinOp::Mod if b != 0 => Some(a % b),
+                        _ => None,
+                    }
+                }
                 _ => None,
             }
         }
@@ -9774,7 +9855,11 @@ impl<'a> Body<'a> {
         // type makes of an all-zero range, and only a type that has such a
         // value can say.
         let zero = match which {
-            "calloc" => zero_value(self.tds, ty).ok(),
+            // A value is not enough: the type also has to say that an all-zero
+            // range represents it, and not every type does.
+            "calloc" => zero_value(self.tds, ty)
+                .ok()
+                .zip(zero_repr_proof(self.tds, ty)),
             _ => None,
         };
         let tmp = self.fresh(&var.val);
@@ -9793,6 +9878,7 @@ impl<'a> Body<'a> {
             checked: false,
             init: false,
             freed: false,
+            zero: None,
             array: Some(ArrayBlock {
                 n,
                 esize: format!("{}sz", esize),
@@ -9808,7 +9894,13 @@ impl<'a> Body<'a> {
     /// The pointer itself is an ordinary value and goes into `p`'s slot like
     /// any other. What is new is the resource that comes with it, which stays
     /// under `unless_null` until the source tests the pointer.
-    fn allocate(&mut self, var: &Ident, which: &str, pn: &str) -> Result<String, String> {
+    fn allocate(
+        &mut self,
+        var: &Ident,
+        which: &str,
+        pn: &str,
+        zero: Option<(String, Vec<String>)>,
+    ) -> Result<String, String> {
         if self.in_branch {
             return Err("an allocation inside a branch".to_string());
         }
@@ -9826,8 +9918,9 @@ impl<'a> Body<'a> {
                 "uninit"
             },
             checked: false,
-            init: false,
+            init: zero.is_some(),
             freed: false,
+            zero,
             array: None,
         });
         Ok(tmp)
@@ -9912,7 +10005,12 @@ impl<'a> Body<'a> {
             match &b.array {
                 None => vec![
                     format!("elim_unless_null {} {};", b.tmp, sl),
-                    format!("{}_claim_uninit {};", b.pn, b.tmp),
+                    match &b.zero {
+                        Some((z, why)) => {
+                            format!("{} {}_claim {} {};", why.join(" "), b.pn, b.tmp, z)
+                        }
+                        None => format!("{}_claim_uninit {};", b.pn, b.tmp),
+                    },
                 ],
                 Some(a) => vec![
                     format!("elim_unless_null {} {};", b.tmp, sl),
@@ -9921,9 +10019,14 @@ impl<'a> Body<'a> {
                         // says that an all-zero range *is* the encoding of
                         // zero. Nothing else in the generated code needs that,
                         // so it is named here rather than left to a pattern.
-                        Some(z) => format!(
-                            "encode_zero (SizeT.v {}); array_claim_zeroed {}_repr {} {} {} #{};",
-                            a.esize, b.pn, b.tmp, a.esize, a.n, z
+                        Some((z, why)) => format!(
+                            "{} array_claim_zeroed {}_repr {} {} {} #{};",
+                            why.join(" "),
+                            b.pn,
+                            b.tmp,
+                            a.esize,
+                            a.n,
+                            z
                         ),
                         None => format!(
                             "array_claim_uninit {}_repr {} {} {};",
@@ -10410,7 +10513,7 @@ impl<'a> Body<'a> {
             }
             StmtT::Let(name, ty, init) => {
                 let v = match (self.alloc_of(init), self.array_alloc_of(init)) {
-                    (Some((which, pointee)), _) => self.allocate(name, which, &pointee)?,
+                    (Some((which, pointee, z)), _) => self.allocate(name, which, &pointee, z)?,
                     (_, Some((which, ty, n))) => self.allocate_array(name, which, &ty, &n)?,
                     _ => self.rvalue(init)?,
                 };
@@ -10461,8 +10564,8 @@ impl<'a> Body<'a> {
                 let pn = palow_name(self.tds, &ty)
                     .ok_or_else(|| format!("an assignment to {}", describe(&ty)))?;
                 if let ExprT::Var(v) = &strip_vattr(lhs).val {
-                    if let Some((which, pointee)) = self.alloc_of(rhs) {
-                        let value = self.allocate(v, which, &pointee)?;
+                    if let Some((which, pointee, z)) = self.alloc_of(rhs) {
+                        let value = self.allocate(v, which, &pointee, z)?;
                         return self.store(lhs, &pn, &value);
                     }
                     if let Some((which, ty, n)) = self.array_alloc_of(rhs) {
@@ -11479,6 +11582,38 @@ fn static_zero(tds: &Typedefs, ty: &Type) -> Result<String, String> {
         return Ok(format!("({{ {} }})", vals.join("; ")));
     }
     zero_value(tds, ty)
+}
+
+/// The lemma calls that prove a type's zero value is what an all-zero byte
+/// range represents, or `None` when the type has no such value.
+///
+/// `calloc` is what needs this: the storage arrives all-zero, and turning
+/// that into a *value* takes a fact about the type. For a scalar the fact is
+/// `encode_zero`; for a struct it is the struct's own `_repr_zero`, which is
+/// emitted exactly when this returns `Some` for every field. A pointer field
+/// is not zeroable -- C says `calloc` gives a null pointer, but null's
+/// representation is not fixed to be all-zero, and the model does not pretend
+/// otherwise.
+fn zero_repr_proof(tds: &Typedefs, ty: &Type) -> Option<Vec<String>> {
+    let t = peel(tds, ty);
+    match &t.val {
+        TypeT::Int { .. } | TypeT::SizeT => {
+            Some(vec![format!("encode_zero {};", palow_sizeof(tds, ty)?)])
+        }
+        TypeT::TypeRef(TypeRefKind::Struct(name)) => {
+            let si = tds.structs.get(&*name.val)?;
+            let pn = palow_name(tds, ty)?;
+            if !si
+                .fields
+                .iter()
+                .all(|f| zero_repr_proof(tds, &f.ty).is_some())
+            {
+                return None;
+            }
+            Some(vec![format!("{}_repr_zero ();", pn)])
+        }
+        _ => None,
+    }
 }
 
 fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
