@@ -462,6 +462,12 @@ impl<'a> Elaborator<'a> {
                             TypeT::Pointer(_, k @ (PointerKind::Array | PointerKind::ArrayPtr)) => {
                                 Some(k.clone())
                             }
+                            // A declared array decays to a pointer to its first
+                            // element (C17 6.3.2.1p3), so `&tbl[i]` is the same
+                            // construct as `&p[i]` for `_array T *p`.
+                            TypeT::FixedArray(_, _) | TypeT::FlexArray(_) => {
+                                Some(PointerKind::Array)
+                            }
                             _ => None,
                         });
                     // When `&a[i]` is expected to produce a plain `int *`
@@ -740,17 +746,19 @@ impl<'a> Elaborator<'a> {
                     | BinOp::BitAnd
                     | BinOp::BitOr
                     | BinOp::BitXor => {
-                        // Pointer arithmetic: array/arrayptr ± integer → cast integer to SizeT
+                        // Pointer arithmetic: array/arrayptr ± integer → cast integer to SizeT.
+                        //
+                        // FixedArray and FlexArray count as pointers here. An
+                        // array used in an arithmetic expression is not an
+                        // array: it decays to a pointer to its first element
+                        // (C17 6.3.2.1p3), so `tbl + i` is pointer arithmetic
+                        // even though `tbl` is declared `T tbl[N]`. Without
+                        // this, `tbl + i` fails the meet and reports
+                        // "cannot apply + to arguments of type T[N] and size_t".
                         let lhs_w = env.vtype_whnf(lhs_ty.clone());
                         let rhs_w = env.vtype_whnf(rhs_ty.clone());
-                        let lhs_is_ptr = matches!(
-                            &lhs_w.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        );
-                        let rhs_is_ptr = matches!(
-                            &rhs_w.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        );
+                        let lhs_is_ptr = crate::ir::decays_to_array_ptr(&lhs_w.val);
+                        let rhs_is_ptr = crate::ir::decays_to_array_ptr(&rhs_w.val);
                         if lhs_is_ptr && !rhs_is_ptr && matches!(bin_op, BinOp::Add | BinOp::Sub) {
                             let rhs_w = env.vtype_whnf(rhs_ty.clone());
                             if !matches!(rhs_w.val, TypeT::SizeT) {

@@ -820,6 +820,25 @@ pub fn global_var_array_elem(gv: &GlobalVar) -> Option<Rc<Type>> {
     }
 }
 
+/// Whether a type behaves as a pointer to an array's first element.
+///
+/// In C an array is not an array in most expression contexts: except as the
+/// operand of `sizeof`, `_Alignof` or `&`, it decays to a pointer to its first
+/// element (C17 6.3.2.1p3). So `T x[N]` and `_array T *x` are the same thing to
+/// `x + i`, to `&x[i]`, and to anything else that wants a base address.
+///
+/// Every place that asks "is this an array pointer?" in order to *use* the
+/// value must ask this instead of matching `Pointer(_, Array)` alone, or a
+/// declared array fails where a parameter of identical meaning succeeds.
+pub fn decays_to_array_ptr(t: &TypeT) -> bool {
+    matches!(
+        t,
+        TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
+            | TypeT::FixedArray(_, _)
+            | TypeT::FlexArray(_)
+    )
+}
+
 pub type Decl = Ast<DeclT>;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum DeclT {

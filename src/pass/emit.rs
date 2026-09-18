@@ -3303,21 +3303,23 @@ impl<'a> Emitter<'a> {
                     if *op == BinOp::Add {
                         let lhs_ty = env.infer_expr(lhs).ok().map(|t| env.vtype_whnf(t));
                         let rhs_ty = env.infer_expr(rhs).ok().map(|t| env.vtype_whnf(t));
-                        let lhs_is_ptr = lhs_ty.as_ref().is_some_and(|t| {
-                            matches!(
-                                t.val,
-                                TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                            )
-                        });
-                        let rhs_is_ptr = rhs_ty.as_ref().is_some_and(|t| {
-                            matches!(
-                                t.val,
-                                TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                            )
-                        });
+                        let lhs_is_ptr = lhs_ty
+                            .as_ref()
+                            .is_some_and(|t| crate::ir::decays_to_array_ptr(&t.val));
+                        let rhs_is_ptr = rhs_ty
+                            .as_ref()
+                            .is_some_and(|t| crate::ir::decays_to_array_ptr(&t.val));
                         if lhs_is_ptr {
+                            // A declared array is emitted as storage of type
+                            // `array`, so it shifts with `array_to_arrayptr`
+                            // just like an `_array T *`, not `arrayptr_shift`.
                             let is_array = lhs_ty.as_ref().is_some_and(|t| {
-                                matches!(t.val, TypeT::Pointer(_, PointerKind::Array))
+                                matches!(
+                                    t.val,
+                                    TypeT::Pointer(_, PointerKind::Array)
+                                        | TypeT::FixedArray(_, _)
+                                        | TypeT::FlexArray(_)
+                                )
                             });
                             let fn_name = if is_array {
                                 "array_to_arrayptr"
@@ -3330,8 +3332,16 @@ impl<'a> Emitter<'a> {
                                 self.emit_rvalue(env, rhs),
                             ]));
                         } else if rhs_is_ptr {
+                            // A declared array is emitted as storage of type
+                            // `array`, so it shifts with `array_to_arrayptr`
+                            // just like an `_array T *`, not `arrayptr_shift`.
                             let is_array = rhs_ty.as_ref().is_some_and(|t| {
-                                matches!(t.val, TypeT::Pointer(_, PointerKind::Array))
+                                matches!(
+                                    t.val,
+                                    TypeT::Pointer(_, PointerKind::Array)
+                                        | TypeT::FixedArray(_, _)
+                                        | TypeT::FlexArray(_)
+                                )
                             });
                             let fn_name = if is_array {
                                 "array_to_arrayptr"
@@ -3349,18 +3359,12 @@ impl<'a> Emitter<'a> {
                     if *op == BinOp::Sub {
                         let lhs_ty = env.infer_expr(lhs).ok().map(|t| env.vtype_whnf(t));
                         let rhs_ty = env.infer_expr(rhs).ok().map(|t| env.vtype_whnf(t));
-                        let lhs_is_ptr = lhs_ty.as_ref().is_some_and(|t| {
-                            matches!(
-                                t.val,
-                                TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                            )
-                        });
-                        let rhs_is_ptr = rhs_ty.as_ref().is_some_and(|t| {
-                            matches!(
-                                t.val,
-                                TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                            )
-                        });
+                        let lhs_is_ptr = lhs_ty
+                            .as_ref()
+                            .is_some_and(|t| crate::ir::decays_to_array_ptr(&t.val));
+                        let rhs_is_ptr = rhs_ty
+                            .as_ref()
+                            .is_some_and(|t| crate::ir::decays_to_array_ptr(&t.val));
                         if lhs_is_ptr && rhs_is_ptr {
                             return parens(naryfn([
                                 Doc::text("arrayptr_diff"),
@@ -4257,9 +4261,7 @@ impl<'a> Emitter<'a> {
                             .infer_expr(arr)
                             .ok()
                             .map(|ty| env.vtype_whnf(ty))
-                            .is_some_and(|ty| {
-                                matches!(ty.val, TypeT::Pointer(_, PointerKind::Array))
-                            })
+                            .is_some_and(|ty| crate::ir::decays_to_array_ptr(&ty.val))
                         && env
                             .infer_expr(x)
                             .ok()

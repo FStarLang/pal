@@ -93,3 +93,39 @@ int tag_of(size_t i)
 		Pulse.Lib.C.Array.array_pts_to_full Global_tbl.addr_var_tbl 1.0R v));
 	return t;
 }
+
+/*
+ * Array decay in the two contexts that take a base address.
+ *
+ * Both of these already worked for an `_array T *` parameter and failed for a
+ * declared array, reporting
+ *
+ *   error: cannot apply + to arguments of type struct entry[4] and size_t
+ *   error: cannot produce lvalue for tbl[i]
+ *
+ * which is the same defect in two places: code asking "is this an array
+ * pointer?" by matching `Pointer(_, Array)` alone, so that `T x[N]` failed
+ * where a parameter of identical meaning succeeded. C draws no such
+ * distinction (C17 6.3.2.1p3), and `&a[i]` is *defined* as `a + i`
+ * (C17 6.5.3.2p3).
+ */
+
+/* `tbl + i` -- decay in an arithmetic context. */
+_arrayptr struct entry *shifted(size_t i)
+	_requires(i < TBL_LEN)
+{
+	return tbl + i;
+}
+
+/* `&tbl[i]` into a plain `T *` local -- emits array_borrow_cell. */
+uint64_t via_cell_ref(size_t i)
+	_requires(i < TBL_LEN)
+{
+	_ghost_stmt(ArrayGlobals.acquire_var_tbl ());
+	struct entry *p = &tbl[i];
+	uint64_t r = p->val;
+	_ghost_stmt(Pulse.Lib.C.Array.array_return_cell Global_tbl.addr_var_tbl);
+	_ghost_stmt(drop_ (exists* (v: (Pulse.Lib.C.Array.array_spec Struct_entry.struct_entry)).
+		Pulse.Lib.C.Array.array_pts_to Global_tbl.addr_var_tbl 1.0R v));
+	return r;
+}

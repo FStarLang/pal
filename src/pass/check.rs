@@ -376,13 +376,8 @@ impl<'a> Checker<'a> {
                             let lhs_w = env.vtype_whnf(lhs_ty.clone().into());
                             let rhs_w = env.vtype_whnf(rhs_ty.clone().into());
                             let is_ptr_arith = matches!(bin_op, BinOp::Add | BinOp::Sub)
-                                && (matches!(
-                                    &lhs_w.val,
-                                    TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                                ) || matches!(
-                                    &rhs_w.val,
-                                    TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                                ));
+                                && (crate::ir::decays_to_array_ptr(&lhs_w.val)
+                                    || crate::ir::decays_to_array_ptr(&rhs_w.val));
                             if !is_ptr_arith {
                                 check_eq(self)
                             }
