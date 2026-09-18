@@ -4159,6 +4159,21 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     let sn = format!("struct_{}", name);
     let mut c = String::new();
 
+    // A `_refine` written on a *field* is an invariant of the struct type, and
+    // this model has nowhere to put it: the generated ownership is built from
+    // the fields' representations, and there is no hook for a clause about one
+    // of them. Saying so here keeps it out of the silent-weakening bucket --
+    // every owner of such a struct has a contract weaker than the source's.
+    for f in &si.fields {
+        if refined(tds, &f.ty) {
+            c += &format!(
+                "(* contract dropped: a `_refine` on field `{}`, which this \
+                 model does not state *)\n",
+                f.name
+            );
+        }
+    }
+
     c += &format!(
         "noeq type {} = {{ {} }}\n\n",
         sn,
@@ -6090,8 +6105,6 @@ pub fn emit_palow(
                     )
                 }) {
                     Err("moves ownership across the call")
-                } else if !fndecl.ghost_args.is_empty() {
-                    Err("takes a ghost argument")
                 } else if fndecl.args.iter().any(|a| refined(&tds, &a.ty)) && !sig.contract {
                     // A `_refine` on a parameter is part of the contract on
                     // both sides of the call. When the contract translated it

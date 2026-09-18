@@ -2828,8 +2828,35 @@ new facts about memory.
    predicates is enough. All three of its dropped contracts and both of its
    admitted bodies went away.
 
-   As of this milestone: **911 specifications, 824 of them with real bodies,
-   71 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   `ghost_fnptr` was the largest backlog entry and moved over almost
+   mechanically, which is itself the interesting part. Its subject is the
+   *witness* a function-pointer wrapper quantifies -- the erased data a callee's
+   contract needs that its arguments do not carry -- and the old model splits
+   that witness in two: an "elim" half, one component per pointer argument
+   whose existential the wrapper had to eliminate, and a "ghost" half, one per
+   `_ghost_arg`. Palow has no elim half. A points-to is stated at an address,
+   and an address is an argument, so nothing has to be existentially
+   quantified to state the precondition; the witness is a single flat tuple of
+   values. The weakening the test exercises pins two of its components, and
+   what was `fst (snd y)` and `snd (snd y)` over a nested pair is now
+   `Mktuple4?._3 y` and `Mktuple4?._4 y` over one. The identity post-coercion
+   that `weaken` demands also loses its `prevent_lifting`, for the same reason
+   it did in `weaken_generalize`.
+
+   Two things fell out. A direct call to a function with `_ghost_arg`s was
+   refused outright; in this model a ghost argument is an ordinary erased
+   implicit at the end of the signature, and the caller's own points-to pins it
+   by matching, so the refusal was never justified and removing it cost
+   nothing. And a `_refine` written on a struct *field* -- which is how this
+   test advertises that the `m` field of a `struct ops` is a valid function
+   pointer -- turned out to be ignored silently. That is a real weakening of
+   every contract mentioning such a struct, so the struct's module now says so.
+   Eight of them exist across the suite, in `dpe`, `fnptr_spec` and here; the
+   two bodies still admitted in `ghost_fnptr` are downstream of exactly that
+   gap and of the allocator-null deviation.
+
+   As of this milestone: **911 specifications, 832 of them with real bodies,
+   63 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
