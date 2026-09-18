@@ -1305,6 +1305,15 @@ _refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
 _plain
 typedef struct itemx *itemx_ptr;
 
+/* The same object, but only if there is one. `mk_itemx` allocates, so its
+   result is the nullable spelling; `destroy_via_field` consumes an object that
+   already exists, so it keeps the plain one. Palow alone: PAL's emitter states
+   a nullable grant but has no way to spend it at a call site. */
+_type(itemx_val, Struct_itemx.struct_itemx)
+_refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
+_nullable _plain
+typedef struct itemx *itemx_optr;
+
 /* Self-dispatch through a field verifies once `self` is `_consumes`: a
    borrowed `self` opens two separate existentials for the same value
    (call-site witness vs. field-getter unfold), which Pulse can't unify
@@ -1321,9 +1330,18 @@ void destroy_via_field(_consumes itemx_ptr p) {
    `mk_point`. `malloc`'s memory is genuinely uninitialized, so an explicit
    `$unfold-uninit` is needed before the field writes (unlike `vec_fam.c`'s
    `calloc`-based `vec_new`). */
+#ifdef PALOW
+itemx_optr mk_itemx(void)
+#else
 itemx_ptr mk_itemx(void)
+#endif
 {
     struct itemx *it = (struct itemx *) malloc(sizeof(struct itemx));
+#ifdef PALOW
+    if (it == NULL) {
+        return NULL;
+    }
+#endif
     _unfold_uninit(struct itemx, $(it));
     it->destroy = destroy_impl;
     it->n = 0;
@@ -1334,6 +1352,11 @@ itemx_ptr mk_itemx(void)
 void use_mk_itemx(void)
 {
     itemx_ptr it = mk_itemx();
+#ifdef PALOW
+    if (it == NULL) {
+        return;
+    }
+#endif
     destroy_via_field(it);
 }
 

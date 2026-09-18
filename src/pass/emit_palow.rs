@@ -998,6 +998,10 @@ struct FnSurface {
     /// grants a block. The grant is the emitter's reading of an annotation, so
     /// it stands whether or not the author's own clauses translated.
     ret_block: Option<RetBlock>,
+    /// The functions whose `__fp` wrapper is named anywhere in the emitted
+    /// `ensures`. A validity the postcondition talks about is a validity the
+    /// caller receives, so the body must not put it down on the way out.
+    post_valid: HashSet<String>,
     /// Set when the signature came out as `fn rec` with a `decreases`, so the
     /// body may call itself. Direct recursion is the only kind: a cycle
     /// through two functions would need them emitted as one mutually
@@ -2862,7 +2866,13 @@ fn emit_fn(
     let mut ret_freeable: Option<String> = None;
     // The same grant when the return type is `_nullable`: one conjunct, with
     // everything the block gives inside the guard.
-    let mut ret_guarded: Option<String> = None;
+    // The pieces of that guard: the binders it quantifies and the conjuncts it
+    // encloses so far. It is assembled only once the author's own `ensures`
+    // have been translated, because a clause about what the block holds has to
+    // go *inside* -- there is nothing for it to be about when the allocation
+    // failed, and stating it outside would be a promise the callee cannot
+    // keep.
+    let mut ret_guard: Option<(String, String, Vec<String>)> = None;
     let mut ret_block: Option<RetBlock> = None;
     // Ownership the author wrote on the return type in their own Pulse, which
     // `_allocated` is only the commonest case of. A constructor that hands back
@@ -2927,25 +2937,23 @@ fn emit_fn(
                     if let Some((sn, osty)) = own_for(pt) {
                         binders += &format!(" (own_return: {})", osty);
                         inner.push(format!("{}_own val_return 1.0R own_return", sn));
-                    }
-                    if !struct_refines(pt).is_empty() || !field_refines(pt).is_empty() {
-                        refine_err.get_or_insert(
-                            "a refinement on the pointee of a `_nullable` return".to_string(),
+                        owns.insert(
+                            "val_return".to_string(),
+                            (None, Some("own_return".to_string())),
                         );
                     }
-                    // The same words serve the caller, which has to name this
-                    // slprop to get past the nullness test, so the pointer is
-                    // left as a hole rather than written twice.
-                    let guard = format!("(exists* {}. {})", binders, inner.join(" ** "));
-                    ret_guarded = Some(format!(
-                        "unless_null {} {}",
-                        ret_name,
-                        guard.replace(PTR_HOLE, &ret_name)
-                    ));
-                    ret_block = Some(RetBlock {
-                        pn,
-                        guarded: Some(guard),
-                    });
+                    pointees.insert("return".to_string(), (None, Some("val_return".to_string())));
+                    refines_struct.extend(
+                        struct_refines(pt)
+                            .into_iter()
+                            .map(|p| ("return".to_string(), pt.clone(), p)),
+                    );
+                    refines_field.extend(
+                        field_refines(pt)
+                            .into_iter()
+                            .map(|(f, fty, p)| ("return".to_string(), f, fty, p, true)),
+                    );
+                    ret_guard = Some((pn, binders, inner));
                 }
                 (Some(pn), Some(vty), Some(Extent::One)) => {
                     fresh.push((
@@ -3585,11 +3593,78 @@ fn emit_fn(
     if let Some(f) = ret_freeable {
         owned_post.push(f);
     }
-    if let Some(g) = ret_guarded {
-        owned_post.push(g);
-    }
     fresh.extend(ret_fresh);
     owned_post.extend(ret_own);
+    // `_allocated` is the commonest reason a returned pointer carries
+    // something, but it is not the only one: a constructor may hand back a
+    // validated object through a `_refine_value` instead. `_nullable` means
+    // the same thing either way, so a return type that has no `_allocated`
+    // still opens a guard for whatever the contract turns out to say.
+    if ret_guard.is_none()
+        && is_nullable(tds, &decl.ret_type)
+        && let TypeT::Pointer(pt, _) = &peel(tds, &decl.ret_type).val
+        && let Some(pn) = palow_name(tds, pt)
+    {
+        ret_guard = Some((pn, String::new(), Vec::new()));
+    }
+    // Everything the contract said about what the block holds belongs inside
+    // the nullness guard, and nowhere else: the binders it speaks of are the
+    // guard's, and the promise itself is conditional on there being an object
+    // to make it about. Which clauses those are is read off the binders they
+    // name, which is the only thing that decides it.
+    let mut post_props = post_props;
+    if let Some((pn, mut binders, mut inner)) = ret_guard {
+        let about_block =
+            |t: &str| t.contains("val_return") || t.contains("own_return") || t.contains(&ret_name);
+        // An existential the contract opened for what the block holds is the
+        // guard's to quantify: outside it there is no object for the binder to
+        // range over.
+        let (mine, rest): (Vec<_>, Vec<_>) = fresh
+            .into_iter()
+            .partition(|(b, _, t): &(String, String, String)| about_block(b) || about_block(t));
+        fresh = rest;
+        for (b, ty, t) in mine {
+            binders += &format!(
+                "{}({}: {})",
+                if binders.is_empty() { "" } else { " " },
+                b,
+                ty
+            );
+            inner.push(t);
+        }
+        let (mine, rest): (Vec<String>, Vec<String>) =
+            owned_post.into_iter().partition(|t| about_block(t));
+        owned_post = rest;
+        inner.extend(mine);
+        let (mine, rest): (Vec<String>, Vec<String>) =
+            post_props.into_iter().partition(|t| about_block(t));
+        post_props = rest;
+        inner.extend(mine.into_iter().map(|t| format!("pure ({})", t)));
+        // A `_nullable` that guards nothing is just a pointer, and an empty
+        // `exists*` is not a slprop, so say nothing rather than nothing at
+        // length.
+        if !inner.is_empty() {
+            // The same words serve the caller, which has to name this slprop
+            // to get past its own nullness test, so the pointer is left as a
+            // hole rather than written twice.
+            let body = inner.join(" ** ");
+            let guard = if binders.is_empty() {
+                format!("({})", body)
+            } else {
+                format!("(exists* {}. {})", binders, body)
+            }
+            .replace(&ret_name, PTR_HOLE);
+            owned_post.push(format!(
+                "unless_null {} {}",
+                ret_name,
+                guard.replace(PTR_HOLE, &ret_name)
+            ));
+            ret_block = Some(RetBlock {
+                pn,
+                guarded: Some(guard),
+            });
+        }
+    }
 
     let mut out = String::new();
     if let Some(why) = dropped {
@@ -3643,6 +3718,20 @@ fn emit_fn(
     let mut bodies: Vec<String> = fresh.iter().map(|(_, _, s)| s.clone()).collect();
     bodies.extend(owned_post.iter().cloned());
     bodies.extend(post_props.iter().map(|p| format!("pure ({})", p)));
+    // A postcondition that names a `__fp` wrapper is one that hands something
+    // about that function on -- a validity, most of the time, and one the
+    // body seeded itself. Reading it back off the assembled text is cruder
+    // than tracking it, but it is exactly the question the body has to ask.
+    let mut post_valid: HashSet<String> = HashSet::new();
+    for clause in bodies.iter() {
+        let mut rest = clause.as_str();
+        while let Some(i) = rest.find("__fp") {
+            if let Some(j) = rest[..i].rfind("func_") {
+                post_valid.insert(rest[j + 5..i].to_string());
+            }
+            rest = &rest[i + 4..];
+        }
+    }
     if bodies.is_empty() {
         out += "  ensures  emp\n";
     } else if fresh.is_empty() {
@@ -3835,6 +3924,7 @@ fn emit_fn(
     }
 
     Ok(FnSurface {
+        post_valid,
         decl: out,
         owned,
         guarded,
@@ -7186,6 +7276,9 @@ struct Body<'a> {
     /// the value the callee's postcondition binds, so the term that was
     /// seeded is no longer the term to put down.
     laundered: HashSet<String>,
+    /// The functions whose validity this function's `ensures` hands on. One of
+    /// these is not the body's to put down on the way out.
+    post_valid: &'a HashSet<String>,
     /// The labels in scope, innermost last, each with the statements that run
     /// when control reaches it. A `goto` is translated by translating its
     /// label's continuation there and then: Pulse has no jump, and every path
@@ -8150,6 +8243,20 @@ impl<'a> Body<'a> {
 
     /// Everything `focus_field` does except emitting the focus itself.
     fn open_field(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<FieldFocus, String> {
+        // A field focus splits a points-to, and freshly allocated storage has
+        // none: it holds bytes, not a value. C that fills a `malloc`ed object
+        // one field at a time is perfectly ordinary, but the model has no
+        // partial view of an uninitialised aggregate to hand the field out of,
+        // so say so rather than focus something that is not there.
+        if let ExprT::Deref(inner) = &strip_vattr(base).val
+            && let ExprT::Var(v) = &strip_vattr(inner).val
+            && self
+                .blocks
+                .iter()
+                .any(|b| b.var == *v.val && b.checked && !b.freed && !b.init)
+        {
+            return Err(format!("a field of `{}`, which holds no value yet", v.val));
+        }
         let (sn, _) = self.struct_of(base)?;
         let (a, close_read, close_write) = self.base_addr(base, writing)?;
         let at = format!("({} +! {}_offsetof_{})", a, sn, f.val);
@@ -11756,6 +11863,11 @@ impl<'a> Body<'a> {
         // decayed function in a slot, say.
         if mark == 0 {
             for (addr, pre, post, g) in self.seeded.clone() {
+                // ...unless the contract promised it to the caller, which is
+                // what a field-level `_refine` on a returned block does.
+                if self.post_valid.contains(&g) {
+                    continue;
+                }
                 self.lines.push(if self.laundered.contains(&g) {
                     "drop_is_valid _ _ _;".to_string()
                 } else {
@@ -12612,6 +12724,7 @@ fn emit_body(
         divergent: false,
         seeded: Vec::new(),
         laundered: HashSet::new(),
+        post_valid: &sig.post_valid,
         gotos: Vec::new(),
         in_loop: false,
         pending_close: Vec::new(),

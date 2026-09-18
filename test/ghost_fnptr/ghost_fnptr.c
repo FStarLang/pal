@@ -158,7 +158,8 @@ _include_pulse(Ops_spec,
   }
 
   ghost fn m_wpost (x: m_dom) (y: erased m_wit) (r: I32.t)
-    requires post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r
+    requires prevent_lifting
+               (post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r)
     ensures post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r
   { () }
 )
@@ -415,10 +416,23 @@ int32_t call_via_local_fp(int32_t *a, int32_t *b,
    `weaken`'s `pre`/`post` are written out rather than left as holes: F* checks
    arguments left to right, so leaving them uninstantiated makes the two
    coercions' types unresolvable (Error 189). */
+/* `_nullable` is Palow's alone: it puts the field refinements the pointee
+   carries -- the validity of every code pointer in the table -- inside the
+   nullness guard, where they belong, and PAL's emitter leaves them outside.
+   A caller under it could not spend the guard in any case. */
+#ifdef PALOW
+_allocated _nullable
+#else
 _allocated
+#endif
 struct ops *get_ops(void)
 {
     struct ops *p = (struct ops *) malloc(sizeof(struct ops));
+#ifdef PALOW
+    if (p == NULL) {
+        return NULL;
+    }
+#endif
     *p = (struct ops){
         .f = impl_one, .g = impl_two, .m = impl_mixed, .e = impl_elim_two
     };

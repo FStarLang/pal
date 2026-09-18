@@ -3096,8 +3096,33 @@ new facts about memory.
    ownership on the fields it actually reaches, which is a change to the model
    rather than to the translator, and it is left for one.
 
-   As of this milestone: **917 specifications, 853 of them with real bodies,
-   48 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   A `_nullable` return says the allocation may have failed, and everything
+   the contract promises about the object then holds only when there is one.
+   Palow now states it that way: once the author's own `_ensures` have been
+   translated, every clause and every existential that speaks of the returned
+   block moves *inside* the nullness guard, beside the ownership it is about.
+   Stating it outside would be a promise the callee cannot keep on the failing
+   path, which is exactly what PAL's emitter does, so the nullable spelling of
+   `mk_point` is Palow's alone. The same guard is no longer tied to
+   `_allocated`: a constructor that hands back a validated object through a
+   `_refine_value` -- `func_pointer`'s `mk_itemx` -- gets it too, because
+   `_nullable` means the same thing whatever put the ownership there.
+
+   Two things fell out of finally running those bodies rather than admitting
+   them. `ghost_fnptr`'s `get_ops` returns a table whose `m` field carries a
+   weakened contract, and the body was putting that validity down on the way
+   out: a validity the postcondition names is one the caller receives, so the
+   release pass now reads the assembled `ensures` and leaves those alone. And
+   its hand-written `m_wpost` needed `prevent_lifting`, for the same reason the
+   old model's copy does -- without it Pulse unfolds `post_of`, hoists the
+   existential out of the precondition, and the coercion no longer has the type
+   `weaken` wants. `func_pointer`'s `mk_itemx` fills a `malloc`ed object one
+   field at a time, and a field focus splits a points-to that uninitialised
+   storage does not have; that now says so instead of focusing something that
+   is not there.
+
+   As of this milestone: **917 specifications, 855 of them with real bodies,
+   46 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
