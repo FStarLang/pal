@@ -2855,7 +2855,21 @@ new facts about memory.
    two bodies still admitted in `ghost_fnptr` are downstream of exactly that
    gap and of the allocator-null deviation.
 
-   As of this milestone: **911 specifications, 832 of them with real bodies,
+   The other half of that field-level `_refine` then went in, because a note
+   saying "not stated" is only worth having once it is as narrow as it can be.
+   A refinement written on a field is an invariant of the struct *type*, so it
+   reaches a contract exactly the way a struct-level one does: every parameter
+   of the type carries it, with `this` standing for the field rather than for
+   the whole struct -- `(reveal val_b).fld_n` through a pointer, `var_b.fld_n`
+   by value. `test/refine_field` is the new acceptance test; its `twice`
+   discharges an `int32` overflow obligation that nothing else in the contract
+   could. What remains uncovered, and what the struct module's note now says,
+   is narrower: the generated ownership does not *carry* the invariant, so a
+   value of the type that arrives any other way -- a return, a local, a global
+   -- does not have it. That is why `ghost_fnptr`'s call through a returned
+   `struct ops *` is still admitted.
+
+   As of this milestone: **915 specifications, 836 of them with real bodies,
    63 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the

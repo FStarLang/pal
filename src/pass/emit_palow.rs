@@ -2316,6 +2316,30 @@ fn emit_fn(
             .map(|(ps, _, _)| ps)
             .unwrap_or_default()
     };
+    // A `_refine` written on one *field* of a struct is an invariant of the
+    // struct type just as a struct-level one is, and it means the same thing
+    // wherever a value of that type is: `this` is the field. The generated
+    // ownership cannot carry it -- it is built from representations and has no
+    // hook for a clause -- so it is stated in the contract of every function
+    // that holds such a struct, at whichever ends the struct itself is stated.
+    let field_refines = |ty: &Type| -> Vec<(String, Rc<Type>, Rc<Expr>)> {
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+            return Vec::new();
+        };
+        let Some(si) = tds.structs.get(&*n.val.to_string()) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for f in &si.fields {
+            let Ok((ps, _, _)) = refinements(tds, &f.ty) else {
+                continue;
+            };
+            for cl in ps {
+                out.push((f.name.clone(), f.ty.clone(), cl));
+            }
+        }
+        out
+    };
     // The `_own` predicate a value of this type carries, when its type is a
     // struct that has one.
     // `peel` and not `resolve`: the annotation that makes a struct interesting
@@ -2340,6 +2364,11 @@ fn emit_fn(
     /// at. `this` is the pointee, so it is spelled with the pointee's value
     /// term rather than with the parameter.
     let mut refines_struct: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
+    /// A refinement written on one field of the struct a parameter is, or
+    /// points at: the parameter, the field's name and type, the clause, and
+    /// whether the struct is behind a pointer (so that `this` is the pointee's
+    /// value) or is the parameter itself.
+    let mut refines_field: Vec<(String, String, Rc<Type>, Rc<Expr>, bool)> = Vec::new();
     // `_refine_uninit` clauses, kept apart because they are stated only where
     // the unwritten points-to is: on the way in, for an `_out` parameter.
     let mut refines_uninit: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
@@ -2401,6 +2430,11 @@ fn emit_fn(
                     .into_iter()
                     .map(|p| (base.clone(), arg.ty.clone(), p)),
             );
+            refines_field.extend(
+                field_refines(&arg.ty)
+                    .into_iter()
+                    .map(|(f, fty, p)| (base.clone(), f, fty, p, false)),
+            );
             collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
         }
 
@@ -2457,6 +2491,11 @@ fn emit_fn(
                     struct_refines(pt)
                         .into_iter()
                         .map(|p| (base.clone(), pt.clone(), p)),
+                );
+                refines_field.extend(
+                    field_refines(pt)
+                        .into_iter()
+                        .map(|(f, fty, p)| (base.clone(), f, fty, p, true)),
                 );
                 refines_uninit.extend(us.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
                 collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
@@ -2914,6 +2953,25 @@ fn emit_fn(
             _ => pre.is_some(),
         },
     };
+    // The term `this` stands for in a field refinement: the struct's value
+    // projected at the field. Which struct value that is depends on whether the
+    // parameter is the struct or points at it, and it exists only at the ends
+    // of the contract where the struct's own ownership is stated.
+    let field_this = |base: &str, fname: &str, via: bool, w: When| -> Option<String> {
+        let this = if via {
+            let (pre, post) = spec.pointees.get(base)?;
+            match w {
+                When::Post => post.clone()?,
+                _ => pre.clone()?,
+            }
+        } else {
+            if !stated(base, w) {
+                return None;
+            }
+            format!("var_{}", base)
+        };
+        Some(format!("({}).fld_{}", this, fname))
+    };
     let refine_props = |w: When| -> Result<Vec<String>, String> {
         if let Some(why) = &refine_err {
             return Err(why.clone());
@@ -2939,6 +2997,14 @@ fn emit_fn(
                 out.push(refine_clause(base, Some(this), ty, p, w, false)?);
             }
         }
+        for (base, fname, fty, p, via) in &refines_field {
+            if slprop_refine(tds, p).is_some() {
+                continue;
+            }
+            if let Some(this) = field_this(base, fname, *via, w) {
+                out.push(refine_clause(base, Some(&this), fty, p, w, false)?);
+            }
+        }
         // An `_out` parameter's storage is unwritten exactly on the way in,
         // and that is the only place a `_refine_uninit` says anything. On the
         // way out the storage holds a value, so the clause is not merely
@@ -2955,6 +3021,10 @@ fn emit_fn(
     // writes, and it says the caller hands over the right to free the block.
     // It goes where the points-to goes.
     let valid_fps: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    // The same, for a function pointer held in a *field* of a struct the
+    // contract owns: the validity is stated at `x.fld_f`, so what the body may
+    // call through is the field, not the parameter.
+    let valid_fp_fields: RefCell<HashSet<(String, String)>> = RefCell::new(HashSet::new());
     let freeables: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     let refine_own = |w: When| -> Result<Vec<String>, String> {
         let mut out = Vec::new();
@@ -3005,6 +3075,29 @@ fn emit_fn(
                     }
                 },
             );
+        }
+        for (base, fname, fty, p, via) in &refines_field {
+            let Some(code) = slprop_refine(tds, p) else {
+                continue;
+            };
+            let Some(this) = field_this(base, fname, *via, w) else {
+                continue;
+            };
+            out.push(with_this(
+                base,
+                Some(&this),
+                fty,
+                p,
+                w,
+                false,
+                None,
+                &|sp: &Spec, w| sp.inline_pulse(code, w),
+            )?);
+            if matches!(peel(tds, fty).val, TypeT::FnPtr { .. }) {
+                valid_fp_fields
+                    .borrow_mut()
+                    .insert((base.clone(), fname.clone()));
+            }
         }
         Ok(out)
     };
@@ -4159,16 +4252,17 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     let sn = format!("struct_{}", name);
     let mut c = String::new();
 
-    // A `_refine` written on a *field* is an invariant of the struct type, and
-    // this model has nowhere to put it: the generated ownership is built from
-    // the fields' representations, and there is no hook for a clause about one
-    // of them. Saying so here keeps it out of the silent-weakening bucket --
-    // every owner of such a struct has a contract weaker than the source's.
+    // A `_refine` written on a *field* is an invariant of the struct type. A
+    // function that takes such a struct, or a pointer to one, states it in its
+    // contract like any other refinement -- but the generated ownership does
+    // not carry it, so a value of the type that arrives any other way (a
+    // return, a local, a global) does not have it. Saying so here keeps the
+    // remaining half out of the silent-weakening bucket.
     for f in &si.fields {
         if refined(tds, &f.ty) {
             c += &format!(
-                "(* contract dropped: a `_refine` on field `{}`, which this \
-                 model does not state *)\n",
+                "(* contract dropped: the `_refine` on field `{}` reaches a \
+                 parameter of this type but is not carried by its ownership *)\n",
                 f.name
             );
         }
