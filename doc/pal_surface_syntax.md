@@ -154,18 +154,11 @@ PAL exposes two ghost constructs for proof assistance that have no runtime effec
 - `_ghost_arg(T name)` — extra parameter erased at runtime; usable only in specs and ghost statements.
 - `_ghost_stmt(expr)` — Pulse statement executed only during verification (e.g. applying a lemma).
 
-Ghost arguments do not change a function's C function-pointer signature. PAL's
-pointer wrapper carries them in an erased witness and forwards those same
-values to the callee. A function with no C arguments still receives a unit
-argument in generated Pulse, even when it has implicit ghost parameters.
-
-For a zero-argument pointer with one `uint32_t` ghost argument, a ghost call to
-`Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), 0ul))` selects zero as the
-call witness. The pair contains runtime-argument ownership witnesses and ghost
-arguments, respectively. The precondition must still hold; merely asserting
-`0 < 100` does not currently make Pulse infer zero for an unconstrained ghost.
-Taking the pointer without calling it requires no witness. See
-`test/func_pointer/func_pointer.c` for complete examples.
+Ghost arguments do not change C function-pointer signatures. Generated
+wrappers forward them through erased witnesses. If inference cannot determine
+a call's ghost arguments, supply a witness with a ghost statement; the callee's
+precondition must still hold. Taking a function's address requires no witness.
+See `test/func_pointer/func_pointer.c` for examples.
 
 ## Pulse interop
 
