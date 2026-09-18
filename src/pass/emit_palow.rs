@@ -998,6 +998,9 @@ struct FnSurface {
     /// grants a block. The grant is the emitter's reading of an annotation, so
     /// it stands whether or not the author's own clauses translated.
     ret_block: Option<RetBlock>,
+    /// Whether the emitted `requires` carries pure facts about the arguments,
+    /// from any source. See `Body::requires_ok`.
+    req_props: bool,
     /// The functions whose `__fp` wrapper is named anywhere in the emitted
     /// `ensures`. A validity the postcondition talks about is a validity the
     /// caller receives, so the body must not put it down on the way out.
@@ -1119,6 +1122,19 @@ impl<'a> Spec<'a> {
         if !global_has_value(self.tds, gv) {
             return None;
         }
+        self.uses.borrow_mut().insert(format!("Global_{}", v.val));
+        Some(format!("var_{}", v.val))
+    }
+
+    /// An array global this file published as a sequence constant. Nothing
+    /// can write it -- that is what `_pure` says -- so a contract may read it
+    /// with no ownership at all, and its refined type carries the length.
+    fn global_array_const(&self, v: &Ident) -> Option<String> {
+        let gv = self.env.lookup_global_var(v)?;
+        if !global_var_is_array(gv) || !gv.is_pure || gv.is_extern {
+            return None;
+        }
+        const_array(self.tds, &gv.ty, gv.init.as_ref()?)?;
         self.uses.borrow_mut().insert(format!("Global_{}", v.val));
         Some(format!("var_{}", v.val))
     }
@@ -1303,6 +1319,15 @@ impl<'a> Spec<'a> {
         let ExprT::Var(v) = &inner.val else {
             return Some(Err("`_length` of a computed pointer".to_string()));
         };
+        // A `_pure` array global is published as a sequence constant rather
+        // than as an object, so there is no ownership to read the length off
+        // and no need for one: the sequence itself has it, and its refined
+        // type fixes it to the literal the initialiser gave.
+        if !self.pointees.contains_key(&*v.val)
+            && let Some(t) = self.global_array_const(v)
+        {
+            return Some(Ok(format!("(Seq.length {})", t)));
+        }
         Some(match self.pointees.get(&*v.val) {
             None => Err(format!("`{}._length` in a contract", v.val)),
             Some((pre, post)) => {
@@ -3707,6 +3732,11 @@ fn emit_fn(
         out += &format!("  preserves {}\n", slprop);
     }
     let mut req = req;
+    // Whether the precondition says anything at all beyond ownership. A bounds
+    // or overflow obligation in the body is discharged by these, and it does
+    // not matter whether the author wrote them as a `_requires` or the
+    // emitter read them off a `_refine` on a parameter's type.
+    let req_props = !pre_props.is_empty();
     req.extend(pre_props.iter().map(|p| format!("pure ({})", p)));
     if req.is_empty() {
         out += "  requires emp\n";
@@ -3924,6 +3954,7 @@ fn emit_fn(
     }
 
     Ok(FnSurface {
+        req_props,
         post_valid,
         decl: out,
         owned,
@@ -7238,9 +7269,10 @@ struct Body<'a> {
     /// The function's parameters, by C name. Ownership of what a pointer points
     /// to is granted by the contract, and the contract only names parameters.
     params: HashSet<String>,
-    /// Whether the function has a translated `_requires`. Bounds and overflow
-    /// obligations are discharged by it, so without one there is nothing to
-    /// discharge them with.
+    /// Whether the emitted precondition carries any pure fact. Bounds and
+    /// overflow obligations are discharged by those, so without one there is
+    /// nothing to discharge them with. A `_refine` on a parameter's type
+    /// counts: the fact reaches the body the same way whoever wrote it down.
     requires_ok: bool,
     /// The ownership the contract grants over the parameters' pointees, which
     /// a loop invariant has to restate.
@@ -12710,7 +12742,7 @@ fn emit_body(
         spec_binders: HashMap::new(),
         ret_binding: None,
         arrays,
-        requires_ok: sig.contract && !defn.decl.requires.is_empty(),
+        requires_ok: sig.req_props,
         owned: &sig.owned,
         granted: &sig.granted,
         spliced_own: sig.spliced_own,

@@ -3121,8 +3121,28 @@ new facts about memory.
    storage does not have; that now says so instead of focusing something that
    is not there.
 
-   As of this milestone: **917 specifications, 855 of them with real bodies,
-   46 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   Two facts that were in the contract all along but that nothing could read.
+   A `_pure` array global is published as a sequence constant rather than as an
+   object, so `my_array._length` has no ownership record to come from -- but it
+   does not need one: the constant's own refined type fixes the length, and
+   reading it there is all `global_array_tactic`'s precondition wanted. And
+   "the body has a `_requires` to lean on" was being asked as "did the author
+   write a `_requires`", which is not the same question: `refine_always`'s
+   length fact arrives from a `_refine` on the parameter's type and lands in
+   the emitted precondition like any other, so the body may use it. Both are
+   now read off what the precondition actually says.
+
+   The constant table came with a proof attached, and it is the more
+   interesting half. `global_array_tactic` proves its thousand-element array
+   sorted with a tactic, over the list the initialiser gave, and then carries
+   the result to the indexed form. In PAL's model that crossing is
+   `array_spec_to_list`; in Palow it is `ConstSeq`'s indexing lemma, which is
+   an SMT pattern, so the whole bridge is one `()`-proof and the tactic itself
+   is unchanged. The fact is the same and only the module it lives in differs,
+   which is what a `const_seq` was meant to buy.
+
+   As of this milestone: **917 specifications, 857 of them with real bodies,
+   44 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
