@@ -713,6 +713,31 @@ impl<'a> Emitter<'a> {
         tmp
     }
 
+    /// Give a raw address (`core_ref`) the pointer kind an integer-to-pointer
+    /// cast asks for. The result carries no ownership whichever kind
+    /// it is -- `core_to_ref` recovers a typed reference, not a `pts_to`.
+    fn emit_core_as_ptr(
+        &mut self,
+        env: &Env,
+        kind: &PointerKind,
+        pointee: &Rc<Type>,
+        val: Doc,
+    ) -> Doc {
+        match kind {
+            PointerKind::Core => val,
+            PointerKind::Array | PointerKind::ArrayPtr => parens(naryfn([
+                Doc::text("Pulse.Lib.C.Array.ref_to_array"),
+                self.emit_type(env, pointee),
+                val,
+            ])),
+            PointerKind::Ref | PointerKind::Unknown => parens(naryfn([
+                Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
+                self.emit_type(env, pointee),
+                val,
+            ])),
+        }
+    }
+
     /// Emit a Name with full module qualification when it refers to a different module.
     fn emit_name(&mut self, name: Name) -> Doc {
         let mangled = self.nm.mangle(&name).to_string();
@@ -3136,6 +3161,39 @@ impl<'a> Emitter<'a> {
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
                             TypeT::Pointer(_, PointerKind::Core),
                         ) => unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val_doc),
+                        // Integer → pointer: an address the C program did not
+                        // derive from an object.
+                        //
+                        // The result carries NO ownership, so nothing can be
+                        // read or written through it. That is what keeps this
+                        // direction honest: the claim "address A holds an
+                        // object of type T" comes from a linker script or a
+                        // hardware manual, not from the C, so it cannot be
+                        // discharged here and must be assumed where it is made.
+                        // Translating the cast rather than refusing it is still
+                        // the right move -- refusing made the whole enclosing
+                        // function an untranslated `(admit())`, which hides the
+                        // surrounding code's real obligations as well.
+                        (TypeT::Int { signed, width }, TypeT::Pointer(to_pointee, to_kind)) => {
+                            let u64 = if !*signed && *width == 64 {
+                                val_doc
+                            } else if get_int_mod(signed, width).is_some() {
+                                unaryfn(
+                                    Doc::text(format!(
+                                        "Int.Cast.{}int{}_to_uint64",
+                                        if *signed { "" } else { "u" },
+                                        width
+                                    )),
+                                    val_doc,
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                return Doc::text("(admit())");
+                            };
+                            let core =
+                                unaryfn(Doc::text("Pulse.Lib.C.CoreRef.u64_to_core_ref"), u64);
+                            self.emit_core_as_ptr(env, to_kind, to_pointee, core)
+                        }
                         // array/arrayptr → `core_ref`: convert the arrayptr to a
                         // `ref` of the same handle (`array_to_ref`, the identity
                         // coercion) and erase it to the raw base+offset address

@@ -964,6 +964,26 @@ public:
         return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
                               trQualType(ic->getType(), ic->getSourceRange()));
 
+      // Integer -> pointer. Lowered to an ordinary IR cast; the emitter
+      // routes it through `core_ref`, PAL's raw-pointer model, and the result
+      // carries no ownership.
+      //
+      // `isNull` is tested first, because a null pointer constant that has
+      // already picked up an integral cast -- `(T *)(uintptr_t)0` -- must stay
+      // a null pointer rather than become an opaque address.
+      //
+      // This used to fall through to "unsupported rvalue expression
+      // CStyleCastExpr", which is much worse than it sounds: PAL then emits
+      // `(admit())` for the whole enclosing expression, so the *rest* of the
+      // function's obligations go unchecked too.
+      case CK_IntegralToPointer:
+        if (isNull(ic)) {
+          return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
+                            trQualType(ic->getType(), ic->getSourceRange()));
+        }
+        return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                              trQualType(ic->getType(), ic->getSourceRange()));
+
       default:;
         if (isNull(ic)) {
           return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
