@@ -2720,6 +2720,8 @@ public:
           }
         }
       }
+    } else if (auto *attr = dyn_cast<AttributedStmt>(stmt)) {
+      return trStmt(stmts, attr->getSubStmt());
     } else if (auto *cse = dyn_cast<CStyleCastExpr>(stmt)) {
       if (cse->getType()->isVoidType()) {
         // (void)expr — translate the sub-expression as a statement to

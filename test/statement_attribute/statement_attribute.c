@@ -20,3 +20,21 @@ int32_t explicit_fallthrough(int32_t x)
     }
     return result;
 }
+
+static void set_value(int32_t *p)
+    _ensures(*p == 42)
+{
+    *p = 42;
+}
+
+int32_t attributed_call(void)
+    _ensures(return == 42)
+{
+    int32_t value = 0;
+    /* GCC does not support nomerge on statements. */
+#ifdef __clang__
+    __attribute__((nomerge))
+#endif
+    set_value(&value);
+    return value;
+}
