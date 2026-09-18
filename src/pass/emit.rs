@@ -3182,6 +3182,17 @@ impl<'a> Emitter<'a> {
                                 unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc)
                             }
                         }
+                        // FixedArray → `core_ref`: an array decaying straight to
+                        // a raw pointer, which is what `(void *)a` does. Two
+                        // steps that are each the identity in Pulse -- take the
+                        // array's handle as a `ref`, then erase its pointee type
+                        // -- so the result is the array's base address carrying
+                        // no ownership and no length. That is the honest model
+                        // of a `void *`: there is no pointee type to own.
+                        (TypeT::FixedArray(_, _), TypeT::Pointer(_, PointerKind::Core)) => unaryfn(
+                            Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                            unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
+                        ),
                         // `core_ref` (raw `_core_ref` back-pointer) → typed `ref T`:
                         // recover the typed reference. The pointee type is known
                         // from the cast target. Mirrors array_to_arrayptr below.

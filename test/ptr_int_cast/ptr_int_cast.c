@@ -141,3 +141,34 @@ int falsifications_are_documented_above(void)
 {
     return 0;
 }
+
+/* A fixed array decaying straight to a raw pointer, which is what `(void *)a`
+ * does. Both steps are the identity in Pulse -- take the array's handle as a
+ * `ref`, then erase its pointee type -- so the result is the base address
+ * carrying no ownership and no length. That is the honest model of a `void *`:
+ * there is no pointee type left to own, so nothing can be read through it.
+ *
+ * This sits here rather than in its own test because it is the same erasure to
+ * `core_ref` that the two address primitives above are built on; before it was
+ * handled the cast reported "unsupported cast from uint8_t[65536] to
+ * void*[core]" and took its whole function's proof down with it.
+ */
+struct blobholder {
+    uint8_t blob[64];
+};
+
+void *blob_as_void(struct blobholder *h)
+{
+    return h->blob;
+}
+
+/* The caller keeps its ownership across the decay: `h` is still fully owned on
+ * return, which the generated `ensures` states and the body has to re-establish. */
+uint8_t blob_decay_then_read(struct blobholder *h)
+{
+    void *raw = h->blob;
+    if (raw == NULL) {
+        return 0;
+    }
+    return h->blob[0];
+}
