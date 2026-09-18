@@ -32,6 +32,17 @@ struct bar {
  * one of that bar's fields. The caller hands over ownership of the bar reached
  * through `back`; a `_core_ref` carries none by design, so this clause cannot be
  * auto-generated and is supplied (and preserved) by hand. */
+#ifdef PALOW
+/* No coercion and nothing to convert: a `_core_ref` is an address and so is a
+   `struct bar *`. The clause still has to reach through the pointer field, so
+   `$(*(b->myinner))` is the inner struct's value and the field projection off
+   it is the address the points-to is stated at. */
+void via_inner(struct bar *b)
+  _preserves(_inline_pulse(
+    (exists* (bv: $type(struct bar)).
+      Struct_bar.struct_bar_pts_to
+        (($(*(b->myinner))).$field(struct inner::back)) 1.0R bv)))
+#else
 void via_inner(struct bar *b)
   _requires(_inline_pulse(
     exists* (bv: $type(struct bar)).
@@ -41,6 +52,7 @@ void via_inner(struct bar *b)
     exists* (bv: $type(struct bar)).
       pts_to (Pulse.Lib.C.CoreRef.core_to_ref $type(struct bar)
                 ($(*(b->myinner))).$field(struct inner::back)) bv))
+#endif
 {
     struct inner *p = b->myinner; // pointer-embed field read on bar
     struct bar *b2 = p->back;     // core_to_ref coercion emitted here

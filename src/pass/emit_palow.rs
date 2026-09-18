@@ -921,6 +921,13 @@ struct FnSurface {
     /// asking Pulse for ownership its own signature no longer states, so the
     /// access is refused and counted instead.
     granted: HashSet<String>,
+    /// Whether the contract carries ownership the author wrote by hand. Palow
+    /// cannot read such a clause, so it cannot tell which object it covers;
+    /// a parameter's dereference already takes one as a grant over everything,
+    /// and a *local* holding a pointer the author's clause is about -- a
+    /// back-pointer read out of a field, say -- needs the same trust or the
+    /// clause is unusable by the code it was written for.
+    spliced_own: bool,
     /// Whether the C function's own `_requires`/`_ensures` made it into the
     /// specification. When they did not, the contract we emit is weaker than
     /// the source says, and in particular cannot discharge an overflow
@@ -1294,6 +1301,15 @@ impl<'a> Spec<'a> {
     /// value; for an array parameter it is an index into the ghost sequence,
     /// which is why the two cannot share a translation.
     fn pointee_at(&self, base: &Expr, idx: Option<&Expr>, w: When) -> Result<String, String> {
+        // `*(s->f)` where the contract owns `s` deeply. The deep half already
+        // names the value behind every pointer field, so the dereference is a
+        // projection out of it rather than something the contract has to be
+        // asked for again -- the same route `_length` of such a field takes.
+        if idx.is_none()
+            && let ExprT::Member(b, f) = &strip_vattr(base).val
+        {
+            return self.own_field(b, &f.val, w);
+        }
         let ExprT::Var(v) = &base.val else {
             return Err("a contract that dereferences a computed pointer".to_string());
         };
@@ -3500,6 +3516,7 @@ fn emit_fn(
         owned,
         guarded,
         granted,
+        spliced_own: contract_ok && !(req_slprops.is_empty() && ens_slprops.is_empty()),
         contract: contract_ok,
         fp,
         fp_wits: wits.len(),
@@ -6760,6 +6777,8 @@ struct Body<'a> {
     owned: &'a [OwnedParam],
     /// Parameters whose pointee the emitted contract owns; see `FnSurface`.
     granted: &'a HashSet<String>,
+    /// See `FnSurface::spliced_own`.
+    spliced_own: bool,
     /// Parameters whose ownership sits behind a nullness guard, so a loop
     /// invariant claiming their storage is claiming the guard is discharged.
     guarded: &'a HashSet<String>,
@@ -6825,6 +6844,9 @@ struct Body<'a> {
     /// Local pointers that stand for a place rather than for storage. See
     /// `alias_map`.
     aliases: HashMap<String, Rc<Expr>>,
+    /// Local pointers loaded once out of memory, with what they were loaded
+    /// from. See `ptr_source_map`.
+    ptr_src: HashMap<String, Rc<Expr>>,
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
@@ -7310,6 +7332,23 @@ impl<'a> Body<'a> {
                         v.val
                     ))
                 }
+                // A local holding a pointer loaded out of a struct the contract
+                // owns deeply. The ownership behind it is in that struct's
+                // `_own`, so the access opens it exactly as a direct
+                // `*(s->f)` would; whether the local still holds that field's
+                // value is left to slprop matching.
+                ExprT::Var(v)
+                    if self
+                        .ptr_src
+                        .get(&*v.val.to_string())
+                        .is_some_and(|src| self.own_item(src).is_some()) =>
+                {
+                    let src = self.ptr_src[&*v.val.to_string()].clone();
+                    let (p, sn, _) = self.own_item(&src).unwrap();
+                    self.open_own(&p, &sn);
+                    self.rvalue(inner)
+                }
+                ExprT::Var(v) if self.spliced_own => self.rvalue(inner),
                 ExprT::Var(v) => Err(format!(
                     "a dereference of local `{}`, whose target the contract does not grant",
                     v.val
@@ -11846,6 +11885,46 @@ fn balanced(s: &str) -> bool {
     d == 0
 }
 
+/// Every local pointer assigned exactly once out of memory, with the
+/// expression it was loaded from.
+///
+/// This is *not* an alias: what such a pointer addresses depends on what was
+/// stored, so the two are the same object only for as long as nothing writes
+/// the source. It is enough for one thing, though -- deciding which piece of
+/// deep ownership an access through the local wants opened. Whether the two
+/// really are the same address is then left to slprop matching, which is
+/// exactly the question it is good at: the load carries a `rewrites_to` to the
+/// field's value, and a body that had overwritten the field would be matching
+/// against the new value and fail.
+fn ptr_source_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
+    let mut t = Touched::default();
+    touch_stmts(body, &mut t);
+    let locals: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut out = HashMap::new();
+    for st in body.iter() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
+            continue;
+        }
+        if !matches!(&strip_vattr(rhs).val, ExprT::Member(..)) {
+            continue;
+        }
+        out.insert(q, rhs.clone());
+    }
+    out
+}
+
 fn derived_ptr(e: &Expr) -> bool {
     match &strip_vattr(e).val {
         ExprT::ContainerOf(inner, _, _) => derived_ptr(inner) || lvalue_name(inner).is_some(),
@@ -11922,6 +12001,7 @@ fn emit_body(
         requires_ok: sig.contract && !defn.decl.requires.is_empty(),
         owned: &sig.owned,
         granted: &sig.granted,
+        spliced_own: sig.spliced_own,
         guarded: &sig.guarded,
         valid_fps: &sig.valid_fps,
         local_valid_fps: HashSet::new(),
@@ -11940,6 +12020,7 @@ fn emit_body(
         divergent_fns,
         blocks: Vec::new(),
         aliases: alias_map(&defn.body),
+        ptr_src: ptr_source_map(&defn.body),
         array_aliases: array_alias_map(&defn.body),
         active: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a

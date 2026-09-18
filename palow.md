@@ -2869,8 +2869,37 @@ new facts about memory.
    -- does not have it. That is why `ghost_fnptr`'s call through a returned
    `struct ops *` is still admitted.
 
-   As of this milestone: **915 specifications, 836 of them with real bodies,
-   63 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   The two `_core_ref` tests that use a back-pointer in executable code came
+   next, and they are the clearest case yet of the collapse paying for itself.
+   The old model stores a back-pointer as an untyped `core_ref` precisely so
+   that `struct inner` need not mention `struct bar` -- and then has to convert
+   at every use, with `core_to_ref` in the read direction and `ref_to_core` in
+   the write direction. Here a `_core_ref` is an address and so is a
+   `struct bar *`, so there is nothing to convert and the hand-written clause
+   is the ordinary points-to at the address the field holds. Both tests came
+   off the model-specific floor; `core_ref_use` had been counted there, which
+   was wrong -- what the model deliberately does not have is `core_ref`, not
+   back-pointers.
+
+   Three emitter rules came out of it. A contract may now dereference a pointer
+   *field* of a struct it owns deeply -- `$(*(b->myinner))` -- because the deep
+   half already names the value behind every pointer field, which is the same
+   route `_length` of such a field takes; this also sharpened the message when
+   the field is a `_core_ref`, which by design has no such entry, from "a
+   contract that dereferences a computed pointer" to the accurate "`.pb`, whose
+   ownership the contract does not state". A body may dereference a local
+   holding a pointer it loaded once out of such a field, opening the deep
+   ownership exactly as a direct `*(s->f)` would -- and whether the local still
+   holds that field's value is left to slprop matching, which is the question
+   it is good at: the load carries a `rewrites_to`, so a body that had
+   overwritten the field would be matching against the new value and fail. And
+   a contract carrying hand-written ownership is now a grant over a *local*
+   dereference too, not only over a parameter's -- the same trust a spliced
+   clause already gets everywhere else, and without it a clause written about a
+   back-pointer is unusable by the code it was written for.
+
+   As of this milestone: **915 specifications, 838 of them with real bodies,
+   61 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
