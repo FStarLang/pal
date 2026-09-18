@@ -869,6 +869,27 @@ public:
     return nullptr;
   }
 
+  bool canOmitVariadicArgument(Expr *e) {
+    if (e->HasSideEffects(*astCtx))
+      return false;
+    e = e->IgnoreParenImpCasts();
+    if (isa<IntegerLiteral, CharacterLiteral, FloatingLiteral>(e))
+      return true;
+    bool address = false;
+    if (auto *op = dyn_cast<UnaryOperator>(e);
+        op && op->getOpcode() == UO_AddrOf) {
+      address = true;
+      e = op->getSubExpr()->IgnoreParens();
+    }
+    auto *ref = dyn_cast<DeclRefExpr>(e);
+    auto *var = ref ? dyn_cast<VarDecl>(ref->getDecl()) : nullptr;
+    if (!var || (!isa<ParmVarDecl>(var) && !var->hasLocalStorage()))
+      return false;
+    auto ty = var->getType();
+    return !ty.isVolatileQualified() && !ty->isAtomicType() &&
+           (address || ty->isScalarType());
+  }
+
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
 
@@ -1638,7 +1659,21 @@ public:
         auto fn = ctx.mk_ident(toStr(fd->getName()),
                                getRange(c->getCallee()->getSourceRange()));
         auto args = Vec<Rc<ir::Expr>>::new_();
-        for (auto arg : c->arguments()) {
+        for (unsigned i = 0; i < c->getNumArgs(); ++i) {
+          auto *arg = c->getArg(i);
+          if (fd->isVariadic() && i >= fd->getNumParams()) {
+            if (!canOmitVariadicArgument(arg)) {
+              reportUnsupported(
+                  arg->getSourceRange(), getRange(arg->getSourceRange()),
+                  "unsupported ignored variadic argument: expected a scalar "
+                  "literal, a non-volatile local value, or a local address",
+                  "");
+              return mk_rvalue_err(
+                  std::move(loc),
+                  trQualType(c->getType(), c->getSourceRange()));
+            }
+            continue;
+          }
           args.push(trRValue(arg));
         }
         return mk_rvalue_fncall(std::move(loc), std::move(fn), std::move(args));
@@ -1646,6 +1681,15 @@ public:
         // Indirect call through a function-pointer value: `fptr(a, b, ...)`.
         // Clang gives no direct callee; the callee is an rvalue of
         // function-pointer type.
+        if (auto *ptr = c->getCallee()->getType()->getAs<PointerType>()) {
+          if (auto *proto = ptr->getPointeeType()->getAs<FunctionProtoType>();
+              proto && proto->isVariadic()) {
+            reportUnsupported(c->getSourceRange(), loc,
+                              "indirect variadic calls are not supported", "");
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
+          }
+        }
         auto callee = trRValue(c->getCallee());
         auto args = Vec<Rc<ir::Expr>>::new_();
         for (auto arg : c->arguments()) {
