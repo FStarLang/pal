@@ -15,6 +15,25 @@ In the following, we differentiate between two kinds of annotations:
 
 To suppress the default ownership for one parameter, prefix it with `_plain`. -->
 
+## Variadic calls with an ignored tail
+
+PAL supports direct calls to variadic functions whose bodies do not access
+the variadic arguments. The generated function and its calls contain only
+the fixed parameters; extra arguments do not transfer ownership to the
+callee.
+
+For this initial support, ignored arguments must be scalar literals,
+non-volatile/non-atomic scalar or pointer local/parameter values, or addresses
+of ordinary local variables or parameters. Parentheses and implicit value
+conversions (including default promotions) are allowed. Computations,
+dereferences, member/subscript reads, side effects, and other unsupported
+extra expressions are rejected rather than silently skipping their evaluation.
+Indirect variadic calls and variadic argument extraction are not supported.
+
+For example, `read_first(int *first, ...)` may return `*first`, and a caller
+may use `read_first(&a, &b, &c)`. Only `&a` is passed in the generated Pulse
+call. See `test/variadic_call/variadic_call.c`.
+
 ## Syntax for specifications
 
 ### Annotating function arguments
