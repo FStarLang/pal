@@ -3001,6 +3001,24 @@ new facts about memory.
    not a constant, and that now reads as a dropped contract rather than as
    nothing at all.
 
+   Granting the block put one more admit within reach and then explained why
+   it is not: `call_via_returned_ops` calls through the `m` field of a block
+   `get_ops` handed back, and with the block tracked the only thing missing is
+   permission to call through a *field* whose refinement stated an `is_valid`.
+   Wiring that through is a small change and the call then matches -- but the
+   witness tuple does not. An indirect call has to supply one hole per ghost
+   component of the callee's specification, and a C function-pointer type
+   describes parameters, not ghost arity: `m` is declared with two owned
+   pointers and two `_plain` ones, while `impl_mixed`'s specification takes
+   four witnesses, because its two `_plain` pointers get their values from
+   `_ghost_arg`s the type cannot mention. Where the emitter knows which
+   function it is calling it reads the arity off the wrapper; where it knows
+   only what the contract said, nothing in C says how many. Guessing from the
+   declared type is right for every other indirect call in the suite and wrong
+   for this one, and a body that fails F\* is worse than an honest `admit()`,
+   so this waits on a way to write ghost arity into a function-pointer type
+   rather than on translator work.
+
    As of this milestone: **917 specifications, 848 of them with real bodies,
    53 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
