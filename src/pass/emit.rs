@@ -743,6 +743,51 @@ impl<'a> Emitter<'a> {
         format!("{}:{id}", self.current_module)
     }
 
+    /// Erase a pointer of any kind to `core_ref`, PAL's model of a raw C
+    /// pointer.
+    ///
+    /// Pointer<->integer conversion is defined once, on `core_ref`, rather than
+    /// once per `PointerKind`. Every kind already has a total coercion to it,
+    /// so funnelling here costs nothing and means a new pointer kind cannot
+    /// silently acquire a second, differently-behaved address primitive.
+    fn emit_ptr_as_core(&mut self, _env: &Env, kind: &PointerKind, val: Doc) -> Doc {
+        match kind {
+            PointerKind::Core => val,
+            PointerKind::Array | PointerKind::ArrayPtr => unaryfn(
+                Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val),
+            ),
+            PointerKind::Ref | PointerKind::Unknown => {
+                unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val)
+            }
+        }
+    }
+
+    /// The inverse of `emit_ptr_as_core`: give a raw address the pointer kind
+    /// the cast target asks for. The result carries no ownership whichever kind
+    /// it is -- `core_to_ref` recovers a typed reference, not a `pts_to`.
+    fn emit_core_as_ptr(
+        &mut self,
+        env: &Env,
+        kind: &PointerKind,
+        pointee: &Rc<Type>,
+        val: Doc,
+    ) -> Doc {
+        match kind {
+            PointerKind::Core => val,
+            PointerKind::Array | PointerKind::ArrayPtr => parens(naryfn([
+                Doc::text("Pulse.Lib.C.Array.ref_to_array"),
+                self.emit_type(env, pointee),
+                val,
+            ])),
+            PointerKind::Ref | PointerKind::Unknown => parens(naryfn([
+                Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
+                self.emit_type(env, pointee),
+                val,
+            ])),
+        }
+    }
+
     /// Emit a Name with full module qualification when it refers to a different module.
     fn emit_name(&mut self, name: Name) -> Doc {
         let mangled = self.nm.mangle(&name).to_string();
@@ -3153,6 +3198,85 @@ impl<'a> Emitter<'a> {
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
                             TypeT::Pointer(_, PointerKind::Core),
                         ) => unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val_doc),
+                        // Pointer → integer: the address as a number.
+                        //
+                        // `core_ref_to_u64` is uninterpreted, so this direction
+                        // is SOUND rather than trusted -- a program learns
+                        // nothing about memory by looking at an address, and it
+                        // gives up nothing either, since the pointer it started
+                        // from is unaffected. Every pointer kind funnels
+                        // through `core_ref`, which is PAL's model of a raw C
+                        // pointer, so there is one primitive rather than one
+                        // per kind.
+                        //
+                        // A narrower target composes with the ordinary integer
+                        // conversion, exactly as the SizeT → Int case does, so
+                        // `(uint32_t)p` truncates the way C says instead of
+                        // demanding a proof that it does not.
+                        //
+                        // `size_t`/`ptrdiff_t` targets are deliberately NOT
+                        // handled. Both would have to go through
+                        // `SizeT.uint_to_t`, whose `fits` precondition is only
+                        // guaranteed to 16 bits, so the arm would translate the
+                        // cast and then leave behind an obligation no address
+                        // can discharge. A diagnostic naming the construct is
+                        // more useful than a proof that cannot close; add the
+                        // arm when a caller actually needs it and can say why
+                        // its address fits.
+                        (TypeT::Pointer(_, from_kind), TypeT::Int { signed, width }) => {
+                            let addr = self.emit_ptr_as_core(env, from_kind, val_doc);
+                            let u64 =
+                                unaryfn(Doc::text("Pulse.Lib.C.CoreRef.core_ref_to_u64"), addr);
+                            if !*signed && *width == 64 {
+                                u64
+                            } else if get_int_mod(signed, width).is_some() {
+                                unaryfn_with_type(
+                                    Doc::text(format!(
+                                        "Int.Cast.uint64_to_{}int{}",
+                                        if *signed { "" } else { "u" },
+                                        width
+                                    )),
+                                    u64,
+                                    self.emit_type(env, &to_ty),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
+                        // Integer → pointer: an address the C program did not
+                        // derive from an object.
+                        //
+                        // The result carries NO ownership, so nothing can be
+                        // read or written through it. That is what keeps this
+                        // direction honest: the claim "address A holds an
+                        // object of type T" comes from a linker script or a
+                        // hardware manual, not from the C, so it cannot be
+                        // discharged here and must be assumed where it is made.
+                        // Translating the cast rather than refusing it is still
+                        // the right move -- refusing made the whole enclosing
+                        // function an untranslated `(admit())`, which hides the
+                        // surrounding code's real obligations as well.
+                        (TypeT::Int { signed, width }, TypeT::Pointer(to_pointee, to_kind)) => {
+                            let u64 = if !*signed && *width == 64 {
+                                val_doc
+                            } else if get_int_mod(signed, width).is_some() {
+                                unaryfn(
+                                    Doc::text(format!(
+                                        "Int.Cast.{}int{}_to_uint64",
+                                        if *signed { "" } else { "u" },
+                                        width
+                                    )),
+                                    val_doc,
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                return Doc::text("(admit())");
+                            };
+                            let core =
+                                unaryfn(Doc::text("Pulse.Lib.C.CoreRef.u64_to_core_ref"), u64);
+                            self.emit_core_as_ptr(env, to_kind, to_pointee, core)
+                        }
                         // array/arrayptr → `core_ref`: convert the arrayptr to a
                         // `ref` of the same handle (`array_to_ref`, the identity
                         // coercion) and erase it to the raw base+offset address

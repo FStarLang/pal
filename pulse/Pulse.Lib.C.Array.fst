@@ -653,6 +653,7 @@ let arrayptr_lt #t x z = admit ()
 // Stuck: need a concrete pointer comparison primitive.
 
 let array_to_ref #t r = r
+let ref_to_array #t r = r
 // An arrayptr/array and a `ref` share the same underlying handle
 // (`ref a == array a`, exposed here via `friend Pulse.Lib.Reference`), so this
 // coercion is the identity -- no primitive needed. It lets a mixed
