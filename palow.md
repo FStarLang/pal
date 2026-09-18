@@ -2812,8 +2812,24 @@ new facts about memory.
    out of `*p` rather than out of `p` -- so it asked for the subscript of a
    dereference and refused itself. No test had reached it before.
 
-   As of this milestone: **911 specifications, 819 of them with real bodies,
-   76 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   The `weaken_generalize` test moved over too, and it is the first one whose
+   hand-written Pulse is a *specification* rather than a proof step: it gives
+   two functions with different contracts a single common interface, so that
+   one caller can invoke either through the same pointer. The old model's
+   version of this needed `Pulse.Lib.C.FuncPtr.weaken` and a `prevent_lifting`
+   wrapper around the postcondition it had to re-establish; this model's
+   `weaken` does not, so the four witness-map lemmas became bodies that do
+   nothing. The one thing that did need care is that a function pointer here
+   may carry more than one `is_valid` at once -- one at the wrapper's own
+   contract, from the store that put the address in the slot, and one at the
+   common contract, from the `weaken`. Dropping the second cannot be written
+   `drop_is_valid _ _ _`: with two candidates in the context the underscores
+   have nothing to pick by, and the proof state names both. Naming the
+   predicates is enough. All three of its dropped contracts and both of its
+   admitted bodies went away.
+
+   As of this milestone: **911 specifications, 824 of them with real bodies,
+   71 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
