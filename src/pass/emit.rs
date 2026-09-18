@@ -3352,6 +3352,24 @@ impl<'a> Emitter<'a> {
                             Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
                             unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
                         ),
+                        // array/arrayptr → plain `ref`: the identity coercion.
+                        // `ref t` and `array t` are the same handle, so this
+                        // reads nothing and carries no ownership -- which is
+                        // exactly right when the destination wants none (a
+                        // `_plain` parameter, say `strcmp(tab + off, want)`).
+                        // When the destination *does* want ownership the call
+                        // still fails, but as an honest unprovable `pts_to`
+                        // rather than as an ill-typed term, which is the
+                        // difference between a proof obligation the user can
+                        // read and "Expected expression of type ref Int8.t".
+                        // Note this is NOT the borrow path: initializing a
+                        // plain-pointer local from an arrayptr is handled
+                        // earlier and lowers to `arrayptr_borrow_cell`, which
+                        // carves real ownership out of the parent array.
+                        (
+                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
+                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
+                        ) => unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
                         (TypeT::Pointer(_, _), TypeT::Pointer(_, to_kind)) => {
                             // Pointer kind change (e.g., Ref→ArrayPtr for null)
                             if matches!(&val.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) {
