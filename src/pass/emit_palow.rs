@@ -7181,6 +7181,54 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// The address an lvalue denotes, computed by arithmetic alone.
+    ///
+    /// `&e` reads nothing, so it needs no ownership. In Palow an address is
+    /// inert until a points-to for it is produced, and an access through this
+    /// one will ask for that separately -- so `&p->f` is a subtraction-free
+    /// `p +! offsetof_f` even where `*p` is memory this function does not
+    /// hold. `addr` is the version for an access, which must know it does.
+    fn addr_only(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(p) = self.unalias(e) {
+            return self.addr_only(&p);
+        }
+        if let Some(v) = lvalue_name(e)
+            && self.aliases.contains_key(&v)
+        {
+            return Err(format!("`{}`, whose place would have to escape", v));
+        }
+        match &strip_vattr(e).val {
+            ExprT::Member(base, f) => {
+                let (sn, _) = self.struct_of(base)?;
+                self.field_ty(base, f)?;
+                let a = self.addr_only(base)?;
+                Ok(format!("({} +! {}_offsetof_{})", a, sn, f.val))
+            }
+            ExprT::Deref(inner) => match &strip_vattr(inner).val {
+                ExprT::Ref(place) => self.addr_only(place),
+                // A checked block is named by the allocation rather than by
+                // the local that holds it, so that every mention of it is the
+                // same term the frame is stated in.
+                ExprT::Var(v)
+                    if self
+                        .blocks
+                        .iter()
+                        .any(|b| b.var == *v.val && b.checked && !b.freed) =>
+                {
+                    Ok(self
+                        .blocks
+                        .iter()
+                        .find(|b| b.var == *v.val && b.checked && !b.freed)
+                        .unwrap()
+                        .tmp
+                        .clone())
+                }
+                _ => self.rvalue(inner),
+            },
+            _ => self.addr(e),
+        }
+    }
+
     /// The index of a subscript, as a `size_t`. C allows any integer type
     /// here; a signed one would need `i >= 0` to convert, which is exactly the
     /// obligation the dropped `_requires` would have carried.
@@ -8878,7 +8926,7 @@ impl<'a> Body<'a> {
                 {
                     Ok(format!("addr_var_{}", v.val))
                 }
-                _ => self.addr(inner),
+                _ => self.addr_only(inner),
             },
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
                 let mut out = format!("func_{}", name.val);

@@ -2735,8 +2735,24 @@ new facts about memory.
    under it. They peel now, and `array_test` is down to its one untranslated
    allocation.
 
-   As of this milestone: **911 specifications, 810 of them with real bodies,
-   85 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   Taking an address had been conflated with reaching through one. `&p->f`
+   reads nothing, so it needs no ownership at all -- an address in Palow is
+   inert until a points-to for it is produced, and an access through it asks
+   for that separately -- but it went through the same path as an access and
+   so demanded that the function hold `*p`. There are two questions here, and
+   there are now two answers: one for an access, which must know the storage
+   is held, and one for arithmetic, which must not care.
+
+   `containing_record`'s `value_proj_null_fires` is the case that shows why it
+   matters, and it also shows the model doing without something the old one
+   needed. Recovering a first member's address from a structure pointer has to
+   preserve null, or an intrusive list walk could never detect its terminator;
+   the old model emitted a `proj_null` axiom per field to say so. Palow emits
+   nothing: the projection is `p +! 0sz`, and that a zero offset moves no
+   pointer is arithmetic the model already knows.
+
+   As of this milestone: **911 specifications, 811 of them with real bodies,
+   84 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
