@@ -3019,8 +3019,29 @@ new facts about memory.
    so this waits on a way to write ghost arity into a function-pointer type
    rather than on translator work.
 
-   As of this milestone: **917 specifications, 848 of them with real bodies,
-   53 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   `_allocated` is only the commonest way a return type carries ownership, not
+   the only one. `func_pointer`'s `itemx_ptr` is a `_plain` typedef with a
+   `_refine_value` whose predicate is the author's own `itemx_valid` -- the
+   points-to, the `freeable`, and an `is_valid` for the destructor the object
+   carries, all in one word -- and that was being left out for exactly the
+   reason `_allocated` was. The return type's refinements are now stated where
+   the result is, at the exit end only because there is no result before the
+   call, with `this` bound to the returned value and a `_refine_value`'s binder
+   becoming one more existential in the `ensures`.
+
+   The other end of that is a call that takes ownership away. A `_consumes`
+   parameter was refused outright at every call site, on the grounds that the
+   caller's bookkeeping did not model the move -- but the move needs nothing
+   emitted: the callee's `requires` asks for the ownership and slprop matching
+   hands it over. What the caller has to do is *stop* accounting for the
+   object, or it would go on believing it could still read it or free it. With
+   both halves in place a constructor and a destructor compose the way C
+   programmers write them, and `use_mk_itemx` -- make an object, hand it to a
+   destructor that dispatches through the object's own function pointer --
+   verifies with no ghost step at all.
+
+   As of this milestone: **917 specifications, 849 of them with real bodies,
+   52 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

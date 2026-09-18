@@ -2841,13 +2841,44 @@ fn emit_fn(
     // existential for the value it holds, the points-to at full permission,
     // and the `freeable` the annotation asked for.
     let mut ret_freeable: Option<String> = None;
-    if let Ok((ps, _, _)) = refinements(tds, &decl.ret_type) {
+    // Ownership the author wrote on the return type in their own Pulse, which
+    // `_allocated` is only the commonest case of. A constructor that hands back
+    // a validated object says so with a `_refine` or a `_refine_value` on the
+    // returned pointer, and the contract has to carry it for the same reason:
+    // otherwise the caller is handed an address and nothing else.
+    let mut ret_slprops: Vec<Rc<Expr>> = Vec::new();
+    let mut ret_valued: Vec<RefineValueOn> = Vec::new();
+    if let Ok((ps, _, bs)) = refinements(tds, &decl.ret_type) {
         let alloc = ps.iter().find_map(|p| {
             let code = slprop_refine(tds, p)?;
             allocated_own(tds, &decl.ret_type, &ret_name, code)
                 .ok()
                 .flatten()
         });
+        ret_slprops.extend(
+            ps.iter()
+                .filter(|p| {
+                    slprop_refine(tds, p).is_some()
+                        && allocated_own(
+                            tds,
+                            &decl.ret_type,
+                            &ret_name,
+                            slprop_refine(tds, p).unwrap(),
+                        )
+                        .ok()
+                        .flatten()
+                        .is_none()
+                })
+                .cloned(),
+        );
+        collect_valued(
+            &mut ret_valued,
+            &mut refine_err,
+            tds,
+            "return",
+            &decl.ret_type,
+            bs,
+        );
         if let Some(freeable) = alloc {
             let pt = pointee(tds, &decl.ret_type).unwrap();
             match (
@@ -3379,6 +3410,63 @@ fn emit_fn(
         }
     }
 
+    // The return type's own refinements, stated where the result is: at the
+    // exit end only, because there is no result before the call. `this` is the
+    // returned value itself rather than a pointee -- a refinement written on a
+    // pointer type is about the pointer -- so it is bound by value, and a
+    // `_refine_value`'s binder becomes one more existential in the `ensures`.
+    // These are the emitter's reading of an annotation rather than the
+    // author's own clauses, so they survive a dropped contract: a caller that
+    // cannot be told what the result satisfies can still be told what it owns.
+    let mut ret_own: Vec<String> = Vec::new();
+    let mut ret_fresh: Vec<(String, String, String)> = Vec::new();
+    for p in &ret_slprops {
+        let code = slprop_refine(tds, p).unwrap();
+        match with_this(
+            "return",
+            Some((&ret_name, None)),
+            &decl.ret_type,
+            p,
+            When::Post,
+            false,
+            None,
+            &|sp: &Spec, w| sp.inline_pulse(code, w),
+        ) {
+            Ok(t) => ret_own.push(t),
+            Err(why) => {
+                value_err.get_or_insert(why);
+            }
+        }
+    }
+    for (_, ty, ident, vty, binder, fty, p) in &ret_valued {
+        let how = |sp: &Spec, w: When| match slprop_refine(tds, p) {
+            Some(code) => sp.inline_pulse(code, w),
+            None => sp.prop(p, w),
+        };
+        match with_this(
+            "return",
+            Some((&ret_name, None)),
+            ty,
+            p,
+            When::Post,
+            false,
+            Some((ident, binder.clone(), vty)),
+            &how,
+        ) {
+            Ok(t) => ret_fresh.push((
+                binder.clone(),
+                fty.clone(),
+                match slprop_refine(tds, p) {
+                    Some(_) => t,
+                    None => format!("pure ({})", t),
+                },
+            )),
+            Err(why) => {
+                value_err.get_or_insert(why);
+            }
+        }
+    }
+
     let mut own_pre: Vec<String> = Vec::new();
     let mut own_post: Vec<String> = Vec::new();
     let contract = translate(&req_props, When::Pre)
@@ -3424,6 +3512,8 @@ fn emit_fn(
     if let Some(f) = ret_freeable {
         owned_post.push(f);
     }
+    fresh.extend(ret_fresh);
+    owned_post.extend(ret_own);
 
     let mut out = String::new();
     if let Some(why) = dropped {
@@ -6398,7 +6488,10 @@ pub fn emit_palow(
                 simple: if !fndecl.args.iter().all(|a| {
                     matches!(
                         a.mode,
-                        ParamMode::Regular | ParamMode::Const | ParamMode::Out
+                        ParamMode::Regular
+                            | ParamMode::Const
+                            | ParamMode::Out
+                            | ParamMode::Consumed
                     )
                 }) {
                     Err("moves ownership across the call")
@@ -6422,6 +6515,11 @@ pub fn emit_palow(
                     .map(|a| a.mode == ParamMode::Out)
                     .collect(),
                 plain_ptrs: fndecl.args.iter().map(|a| is_plain(&tds, &a.ty)).collect(),
+                consumes: fndecl
+                    .args
+                    .iter()
+                    .map(|a| a.mode == ParamMode::Consumed)
+                    .collect(),
                 allocated: allocated_return(&tds, &fndecl.ret_type),
             },
         );
@@ -6911,6 +7009,9 @@ struct Callee {
     /// Which parameters are `_plain`, by position. A literal has no ownership
     /// to give, so its address may only be passed to one of these.
     plain_ptrs: Vec<bool>,
+    /// Which parameters are `_consumes`, by position. The argument's ownership
+    /// does not come back, so the caller stops accounting for it.
+    consumes: Vec<bool>,
     /// The pointee's Palow type name when the return type is `_allocated`: the
     /// call hands the caller a block, and the caller has to start tracking it
     /// or the ownership the `ensures` just granted would be left over.
@@ -9618,6 +9719,7 @@ impl<'a> Body<'a> {
         }
         let outs = c.outs.clone();
         let plain_ptrs = c.plain_ptrs.clone();
+        let consumes = c.consumes.clone();
         let mut out = format!("func_{}", name.val);
         for (i, a) in args.iter().enumerate() {
             // A literal's address carries nothing, so a parameter that wants
@@ -9632,6 +9734,14 @@ impl<'a> Body<'a> {
             } else {
                 self.rvalue(a)?
             };
+            // A `_consumes` parameter takes the argument's ownership for good.
+            // Nothing has to be emitted for that -- the callee's `requires`
+            // asks for it and slprop matching hands it over -- but the
+            // caller's own accounting has to stop, or it would go on believing
+            // it could read the object, or free it a second time.
+            if consumes.get(i) == Some(&true) {
+                self.give_away(a)?;
+            }
             // Passing the address of an object that holds a code pointer
             // hands the validity along with it.
             if let Some(slot) = self.slots.iter().find(|s| s.addr == v) {
@@ -9644,6 +9754,32 @@ impl<'a> Body<'a> {
             out += " ()";
         }
         Ok(format!("({})", out))
+    }
+
+    /// Stop accounting for an object whose ownership a `_consumes` parameter
+    /// just took.
+    ///
+    /// The ownership itself needs no statement -- it is matched out of the
+    /// context by the callee's `requires` -- but everything the emitter
+    /// remembers about the object is now false: a tracked block is gone, and a
+    /// `_consumes` parameter of this function has been passed on and may not
+    /// be freed here as well. An argument the emitter was not tracking is
+    /// simply ownership the contract granted, and giving it away is what the
+    /// call is for.
+    fn give_away(&mut self, a: &Expr) -> Result<(), String> {
+        let target = self.unalias(a);
+        let Some(name) = lvalue_name(target.as_deref().unwrap_or(a)) else {
+            // Not a name: an ownership-carrying argument that is not an object
+            // this body can stop tracking, because it never started.
+            return Ok(());
+        };
+        if self.freeables.contains_key(&name) && !self.consumed_freed.insert(name.clone()) {
+            return Err(format!("`{}`, already given up, passed on", name));
+        }
+        if let Some(b) = self.blocks.iter_mut().find(|b| b.var == name && !b.freed) {
+            b.freed = true;
+        }
+        Ok(())
     }
 
     /// The storage passed for an `_out` parameter.
