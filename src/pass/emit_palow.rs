@@ -1005,6 +1005,13 @@ struct Spec<'a> {
     olds: HashMap<String, String>,
     /// Parameters whose `pointees` entry is a sequence rather than a value.
     arrays: HashSet<String>,
+    /// Struct *value* term -> (the deep-ownership record on entry, on exit).
+    ///
+    /// Keyed by the value rather than by the parameter because `struct_X_own`
+    /// is a predicate about the value, and because that is the one spelling
+    /// the two ways of reaching a struct -- by value, or through a pointer,
+    /// or as `this` in the struct's own `_refine` -- all agree on.
+    owns: HashMap<String, (Option<String>, Option<String>)>,
     /// Parameters whose storage the contract grants only behind a nullness
     /// guard. `_live` on one of these is the claim that the guard is
     /// discharged, which is exactly the claim this model cannot yet make.
@@ -1135,6 +1142,7 @@ impl<'a> Spec<'a> {
                         pointees: self.pointees.clone(),
                         olds: self.olds.clone(),
                         arrays: self.arrays.clone(),
+                        owns: self.owns.clone(),
                         guarded: self.guarded.clone(),
                         guards: RefCell::new(Vec::new()),
                         ret: self.ret.clone(),
@@ -1229,6 +1237,16 @@ impl<'a> Spec<'a> {
         let ExprT::VAttr(VAttr::Length, inner) = &e.val else {
             return None;
         };
+        // An `_array` *field*'s ownership is a sequence in the struct's
+        // ownership record, so its length is there for the asking -- and this
+        // is the only place it can come from, since the predicate on purpose
+        // does not fix it.
+        if let ExprT::Member(b, f) = &strip_vattr(inner).val {
+            return Some(
+                self.own_field(b, &f.val, w)
+                    .map(|o| format!("(Seq.length {})", o)),
+            );
+        }
         let ExprT::Var(v) = &inner.val else {
             return Some(Err("`_length` of a computed pointer".to_string()));
         };
@@ -1245,6 +1263,26 @@ impl<'a> Spec<'a> {
                 }
             }
         })
+    }
+
+    /// The sequence or value a struct's deep ownership holds for one of its
+    /// fields, at the value the struct has at `w`.
+    fn own_field(&self, base: &Expr, f: &str, w: When) -> Result<String, String> {
+        let sv = self.value(base, w)?;
+        let Some((pre, post)) = self.owns.get(&sv) else {
+            return Err(format!(
+                "`.{}`, whose ownership the contract does not state",
+                f
+            ));
+        };
+        let chosen = match w {
+            When::Post => post,
+            When::Pre | When::Old => pre,
+        };
+        match chosen {
+            Some(o) => Ok(format!("(({}).own_{})", o, f)),
+            None => Err(format!("`.{}` has no value here", f)),
+        }
     }
 
     /// `*p` and `p[i]`. For a scalar parameter the pointee *is* the ghost
@@ -1604,6 +1642,25 @@ impl<'a> Spec<'a> {
             ExprT::Index(base, idx) if matches!(strip_vattr(base).val, ExprT::Var(_)) => {
                 self.pointee_at(base, Some(idx), w)
             }
+            // An `_array` field's elements are not in the struct's value at
+            // all -- the value holds only the pointer -- so the sequence comes
+            // from the struct's deep ownership.
+            ExprT::Index(base, idx)
+                if matches!(&strip_vattr(base).val, ExprT::Member(..))
+                    && self
+                        .ty_of(base)
+                        .is_ok_and(|t| extent(self.tds, &t) == Some(Extent::Array)) =>
+            {
+                let ExprT::Member(b, f) = &strip_vattr(base).val else {
+                    unreachable!()
+                };
+                let seq = self.own_field(b, &f.val, w)?;
+                let i = self.num(idx, w)?;
+                self.guards
+                    .borrow_mut()
+                    .push(format!("{} < Seq.length {}", i, seq));
+                Ok(format!("(Seq.index {} {})", seq, i))
+            }
             // A fixed-size array *field* is a sequence in the struct's record,
             // so indexing it is `Seq.index` of a projection rather than a
             // lookup in a parameter's own sequence.
@@ -1936,6 +1993,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         pointees: HashMap::new(),
         olds: HashMap::new(),
         arrays: HashSet::new(),
+        owns: HashMap::new(),
         guarded: HashSet::new(),
         guards: RefCell::new(Vec::new()),
         ret: "ret".to_string(),
@@ -2029,6 +2087,7 @@ fn emit_pure_fn(
         pointees: HashMap::new(),
         olds: HashMap::new(),
         arrays: HashSet::new(),
+        owns: HashMap::new(),
         guarded: HashSet::new(),
         guards: RefCell::new(Vec::new()),
         ret: "ret".to_string(),
@@ -2211,6 +2270,7 @@ fn emit_fn(
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut owned: Vec<OwnedParam> = Vec::new();
     let mut arrays: HashSet<String> = HashSet::new();
+    let mut owns: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     // The `_refine`s on each parameter's pointee, to be translated once the
     // pointee terms for the whole signature are known.
     // A `_refine` written on a struct declaration is an invariant of the
@@ -2331,6 +2391,13 @@ fn emit_fn(
                     osty,
                     format!("{}_own {} 1.0R {}'", sn, pname, oname),
                 ));
+                owns.insert(
+                    pname.clone(),
+                    (
+                        Some(format!("(reveal {})", oname)),
+                        Some(format!("{}'", oname)),
+                    ),
+                );
             }
             continue;
         };
@@ -2510,6 +2577,8 @@ fn emit_fn(
                         "{}_own (reveal {}) {} (reveal {})",
                         sn, vname, perm, oname
                     ));
+                    let o = format!("(reveal {})", oname);
+                    owns.insert(format!("(reveal {})", vname), (Some(o.clone()), Some(o)));
                 }
                 let v = format!("(reveal {})", vname);
                 pointees.insert(base, (Some(v.clone()), Some(v)));
@@ -2531,6 +2600,10 @@ fn emit_fn(
                         "{}_own (reveal {}) 1.0R (reveal {})",
                         sn, vname, oname
                     ));
+                    owns.insert(
+                        format!("(reveal {})", vname),
+                        (Some(format!("(reveal {})", oname)), None),
+                    );
                 }
                 pointees.insert(base, (Some(format!("(reveal {})", vname)), None));
             }
@@ -2564,6 +2637,14 @@ fn emit_fn(
                         osty.clone(),
                         format!("{}_own {}' 1.0R {}'", sn, vname, oname),
                     ));
+                    // The two ends have different value terms as well as
+                    // different ownership records, so each spelling of the
+                    // struct gets the record that goes with it.
+                    owns.insert(
+                        format!("(reveal {})", vname),
+                        (Some(format!("(reveal {})", oname)), None),
+                    );
+                    owns.insert(format!("{}'", vname), (None, Some(format!("{}'", oname))));
                 }
                 pointees.insert(
                     base,
@@ -2637,6 +2718,7 @@ fn emit_fn(
         pointees,
         olds: HashMap::new(),
         arrays,
+        owns,
         guarded: guarded.clone(),
         guards: RefCell::new(Vec::new()),
         ret: ret_name.clone(),
@@ -2755,6 +2837,7 @@ fn emit_fn(
             pointees,
             olds: spec.olds.clone(),
             arrays,
+            owns: spec.owns.clone(),
             guarded: spec.guarded.clone(),
             guards: RefCell::new(Vec::new()),
             ret: ret_name.clone(),
@@ -6864,18 +6947,32 @@ impl<'a> Body<'a> {
     /// then be one the signature never stated.
     fn own_item(&self, e: &Expr) -> Option<(String, String, String)> {
         match &strip_vattr(e).val {
-            // `s->f`, which reaches the IR as `(*s).f`. The parameter itself
-            // is the only root: what a struct reached any other way owns is
-            // not something this signature states.
+            // `s->f`, which reaches the IR as `(*s).f`, or `a.f` on a struct
+            // passed by value. A parameter is the only root: what a struct
+            // reached any other way owns is not something this signature
+            // states. The two roots differ only in how the struct's value is
+            // spelled -- a ghost binder, or the parameter itself.
             ExprT::Member(base, f) => {
-                let ExprT::Deref(root) = &strip_vattr(base).val else {
-                    return None;
-                };
-                let ExprT::Var(v) = &strip_vattr(root).val else {
-                    return None;
-                };
-                let p = v.val.to_string();
-                if !self.params.contains(&p) || !self.granted.contains(&p) {
+                let p;
+                let term;
+                match &strip_vattr(base).val {
+                    ExprT::Deref(root) => {
+                        let ExprT::Var(v) = &strip_vattr(root).val else {
+                            return None;
+                        };
+                        p = v.val.to_string();
+                        if !self.granted.contains(&p) {
+                            return None;
+                        }
+                        term = format!("(reveal val_{})", p);
+                    }
+                    ExprT::Var(v) => {
+                        p = v.val.to_string();
+                        term = format!("var_{}", p);
+                    }
+                    _ => return None,
+                }
+                if !self.params.contains(&p) {
                     return None;
                 }
                 let ty = self.ty_of(base).ok()?;
@@ -6885,22 +6982,30 @@ impl<'a> Body<'a> {
                 let sn = n.val.to_string();
                 let name = f.val.to_string();
                 self.own_items_of(&sn).iter().find(|i| i.name == name)?;
-                Some((p, sn, name))
+                Some((term, sn, name))
             }
             ExprT::Deref(inner) => {
-                let (p, sn, item) = self.own_item(inner)?;
+                let (term, sn, item) = self.own_item(inner)?;
                 let name = format!("{}_1", item);
                 self.own_items_of(&sn).iter().find(|i| i.name == name)?;
-                Some((p, sn, name))
+                Some((term, sn, name))
             }
             _ => None,
         }
     }
 
-    /// Unfold a parameter's deep ownership for the rest of this statement.
-    fn open_own(&mut self, p: &str, sn: &str) {
+    /// Fold back every deep ownership this statement unfolded, innermost
+    /// first: a later item's address can be an earlier one's value.
+    fn close_own(&mut self) {
+        for (sn, v) in std::mem::take(&mut self.own_open).into_iter().rev() {
+            self.lines.push(format!("{}_own_gather {};", sn, v));
+        }
+    }
+
+    /// Unfold a struct's deep ownership for the rest of this statement.
+    fn open_own(&mut self, v: &str, sn: &str) {
         let sn = format!("struct_{}", sn);
-        let v = format!("(reveal val_{})", p);
+        let v = v.to_string();
         if self.own_open.iter().any(|(s, x)| *s == sn && *x == v) {
             return;
         }
@@ -7602,6 +7707,27 @@ impl<'a> Body<'a> {
             }
             ExprT::Member(base, f) => {
                 let fty = self.field_ty(base, f)?;
+                // An `_array` field holds a pointer, not the elements, so its
+                // storage is not inside the struct at all: it is what the
+                // struct's deep ownership claims. The address still has to be
+                // read out of the field, which is an ordinary rvalue.
+                if let Some((term, sn, item)) = self.own_item(e)
+                    && let Some(i) = self
+                        .own_items_of(&sn)
+                        .into_iter()
+                        .find(|i| i.name == item && i.esize.is_some())
+                {
+                    self.open_own(&term, &sn);
+                    let addr = self.rvalue(e)?;
+                    return Ok(ArrayPlace {
+                        addr,
+                        pn: i.pn,
+                        esize: format!("{}sz", i.esize.unwrap()),
+                        close_read: Vec::new(),
+                        close_write: Vec::new(),
+                        maybe: false,
+                    });
+                }
                 let Some(FieldShape::Array { pn, esize, .. }) = field_shape(self.tds, &fty) else {
                     return Err(format!(
                         "a subscript of a field of type {}",
@@ -9647,6 +9773,11 @@ impl<'a> Body<'a> {
             pointees,
             olds,
             arrays,
+            // A loop invariant binds a fresh value for every struct it
+            // carries, and the deep ownership of a fresh value is not
+            // something the invariant has a name for yet, so a clause that
+            // reaches into one is dropped with its own reason.
+            owns: HashMap::new(),
             guarded: self.guarded.clone(),
             guards: RefCell::new(Vec::new()),
             ret: String::new(),
@@ -9820,9 +9951,8 @@ impl<'a> Body<'a> {
         let open = std::mem::take(&mut self.own_open);
         r?;
         self.lines.extend(close);
-        for (sn, v) in open.into_iter().rev() {
-            self.lines.push(format!("{}_own_gather {};", sn, v));
-        }
+        self.own_open = open;
+        self.close_own();
         Ok(())
     }
 
@@ -10314,6 +10444,11 @@ impl<'a> Body<'a> {
                         Some(e) => Some(self.rvalue(e)?),
                         None => None,
                     };
+                    // A `return` is not routed through `stmt`, so anything the
+                    // returned expression unfolded has to be folded back here
+                    // -- before the frame is released, since the frame is
+                    // stated in terms of the folded predicate.
+                    self.close_own();
                     // Ghost statements after a `return` are the only way to
                     // establish a postcondition that talks about the returned
                     // value, so the value is given a name and they are run

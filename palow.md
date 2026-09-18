@@ -2705,8 +2705,29 @@ new facts about memory.
    field's read-only unfocus, which returns the struct at the very value it
    had.
 
-   As of this milestone: **911 specifications, 804 of them with real bodies,
-   91 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   An `_array` field's ownership is then something a contract can read. Its
+   sequence is the only place its length can come from, so `this.x._length`
+   is `Seq.length` of the ownership record's field, and `a.x[i]` is
+   `Seq.index` of it -- neither is in the struct's *value*, which holds only
+   the pointer. The ownership record is looked up by the struct's value term
+   rather than by the parameter, because that is the one spelling the three
+   ways of naming a struct -- by value, through a pointer, or as `this` in the
+   struct's own `_refine` -- all agree on. A loop invariant gets none, since
+   it binds a fresh value whose ownership it has no name for yet, and says so.
+
+   A body can reach the same storage. A subscript of an `_array` field reads
+   the pointer out of the field and focuses the extent the deep ownership
+   claims, inside the same scatter/gather bracket the pointer fields already
+   used -- widened here to a struct passed by value, whose value term is the
+   parameter itself. One gap showed up doing it: a `return` is not routed
+   through the statement emitter, so whatever the returned expression unfolded
+   was never folded back, and the frame release that follows is stated in
+   terms of the folded predicate. It closes explicitly now. All of
+   `refine_struct` -- `b32_arr`, `set_elem`, `copy_elem` -- has a real body and
+   a real contract for the first time.
+
+   As of this milestone: **911 specifications, 809 of them with real bodies,
+   86 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
