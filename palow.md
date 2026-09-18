@@ -2898,7 +2898,38 @@ new facts about memory.
    clause already gets everywhere else, and without it a clause written about a
    back-pointer is unusable by the code it was written for.
 
-   As of this milestone: **915 specifications, 838 of them with real bodies,
+   A refinement written on a struct type reaches a parameter that *points* at
+   the struct, and until now it reached it at the wrong binding. `refinements`
+   looks through a pointer -- `_allocated` is written on the pointer, so it has
+   to -- and everything it found there was treated as a refinement of the
+   parameter, with `this` bound to the parameter itself. For a refinement
+   written under the pointer that is the wrong `this`: the clause says
+   `this.buf._length`, meaning the struct, and asking which field an *address*
+   owns has no answer. The emitter now splits the two by where the clause was
+   found, and a clause from below the pointer is bound as a value at the
+   pointee's type, which is what a refinement written on the struct declaration
+   already got. This is why three of `dpe`'s structs looked as though the
+   contract did not state the ownership of their own array fields: it did, but
+   nothing was asking the right object.
+
+   The other half is what `this` means when it is bound to a *field*. A field's
+   value is what the struct's value holds there, and for an `_array` field that
+   is an address, not the sequence behind it -- so `this._length`, which is
+   very nearly the only refinement anyone writes on an array field, had nothing
+   to read. The sequence is in the struct's deep ownership record, and the
+   binding now carries it alongside the value: `this` is the address when the
+   clause asks for the address and the sequence when it asks for the length.
+   With both halves in place `authenticate_l0_image` and `engine_main` state
+   the lengths of all five of `engine_record_t`'s buffers, which is the
+   difference between a contract that can be called and one that cannot.
+
+   The acceptance test gained a `_refine(this._length == 4)` on an array field,
+   and with it a small divergence worth recording: in Palow the invariant is
+   strong enough on its own to discharge the bounds obligation of `s->fixed[0]`
+   in the body, while the old model has to be told again in a `_requires`. The
+   test asks for it under `#ifndef PALOW` rather than hiding the difference.
+
+   As of this milestone: **917 specifications, 840 of them with real bodies,
    61 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the

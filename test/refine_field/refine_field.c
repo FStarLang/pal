@@ -43,3 +43,30 @@ int32_t sum(const struct box *b) _requires(b->m > 0 && b->m < 100)
 {
     return b->n + b->m;
 }
+
+/* An `_array` field's refinement is almost always about its length, and a
+   length is not part of the field's value: the field holds an address, and the
+   sequence behind it lives in the struct's ownership record. `this._length`
+   therefore reads that record, which is the only place the length could come
+   from -- the points-to predicate on purpose does not fix it. */
+struct buf {
+    _refine(this._length == 4) _array uint8_t *fixed;
+};
+
+uint8_t fourth(const struct buf *s) _requires(s->fixed._length == 4)
+    _ensures(return == s->fixed[3])
+{
+    return s->fixed[3];
+}
+
+/* In Palow it is available to the *body* with no `_requires` of its own: the
+   subscript's bounds obligation is discharged by the invariant alone. The old
+   model does not carry a field's refinement that far, so there it has to be
+   asked for again. */
+uint8_t first(const struct buf *s)
+#ifndef PALOW
+    _requires(s->fixed._length == 4)
+#endif
+{
+    return s->fixed[0];
+}

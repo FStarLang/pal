@@ -2497,7 +2497,25 @@ fn emit_fn(
         // stops a caller from proving against the weaker version.
         match refinements(tds, &arg.ty) {
             Ok((ps, us, bs)) => {
-                refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+                // A refinement found *below* the pointer is about the
+                // pointee, however it was written -- on the struct, or on a
+                // typedef that names it, or on the pointee type of the
+                // parameter's own typedef. `this` is then the pointee, so it
+                // belongs with the struct's own refinements and not with the
+                // pointer's: bound as a value, it can be projected at a field
+                // and asked what that field owns. Bound as the pointer it
+                // would be an address, and a question about a field of an
+                // address has no answer.
+                let below = refinements(tds, pt)
+                    .map(|(ps, _, _)| ps)
+                    .unwrap_or_default();
+                for cl in ps {
+                    if below.iter().any(|q| Rc::ptr_eq(q, &cl)) {
+                        refines_struct.push((base.clone(), pt.clone(), cl));
+                    } else {
+                        refines.push((base.clone(), arg.ty.clone(), cl));
+                    }
+                }
                 // A struct's own refinement is about the struct, so `this`
                 // is bound at the *pointee* type and to the pointee's value:
                 // the declaration writes `this.x`, not `(*this).x`, and it
@@ -2848,7 +2866,7 @@ fn emit_fn(
     // declaration needs it -- the declaration says `this.x`, meaning the
     // struct, and that is the pointee when the parameter is a pointer to one.
     let with_this = |base: &str,
-                     this_value: Option<&str>,
+                     this_value: Option<(&str, Option<&str>)>,
                      ty: &Rc<Type>,
                      p: &Rc<Expr>,
                      w: When,
@@ -2885,9 +2903,22 @@ fn emit_fn(
                 locals.insert(
                     "this".to_string(),
                     this_value
-                        .map(str::to_string)
+                        .map(|(v, _)| v.to_string())
                         .unwrap_or_else(|| format!("var_{}", base)),
                 );
+                // A `this` bound to a *field* is the field's value, which for
+                // an array field is an address and not the sequence behind it.
+                // `this._length` asks about the sequence, and the sequence is
+                // in the struct's ownership record, so the caller hands it
+                // over here: without it the only refinement anyone writes on
+                // an array field -- its length -- could not be stated.
+                if let Some((_, Some(pt))) = this_value {
+                    pointees.insert(
+                        "this".to_string(),
+                        (Some(pt.to_string()), Some(pt.to_string())),
+                    );
+                    arrays.insert("this".to_string());
+                }
                 true
             }
         };
@@ -2940,7 +2971,7 @@ fn emit_fn(
         r
     };
     let refine_clause = |base: &str,
-                         this_value: Option<&str>,
+                         this_value: Option<(&str, Option<&str>)>,
                          ty: &Rc<Type>,
                          p: &Rc<Expr>,
                          w: When,
@@ -2973,7 +3004,12 @@ fn emit_fn(
     // projected at the field. Which struct value that is depends on whether the
     // parameter is the struct or points at it, and it exists only at the ends
     // of the contract where the struct's own ownership is stated.
-    let field_this = |base: &str, fname: &str, via: bool, w: When| -> Option<String> {
+    let field_this = |base: &str,
+                      fname: &str,
+                      fty: &Rc<Type>,
+                      via: bool,
+                      w: When|
+     -> Option<(String, Option<String>)> {
         let this = if via {
             let (pre, post) = spec.pointees.get(base)?;
             match w {
@@ -2986,7 +3022,20 @@ fn emit_fn(
             }
             format!("var_{}", base)
         };
-        Some(format!("({}).fld_{}", this, fname))
+        // For an array field the struct's ownership record holds the sequence,
+        // and that is what `this` points at.
+        let own = if matches!(extent(tds, fty), Some(Extent::Array)) {
+            spec.owns.get(&this).and_then(|(pre, post)| {
+                let o = match w {
+                    When::Post => post.as_deref(),
+                    _ => pre.as_deref(),
+                }?;
+                Some(format!("({}).own_{}", o, fname))
+            })
+        } else {
+            None
+        };
+        Some((format!("({}).fld_{}", this, fname), own))
     };
     let refine_props = |w: When| -> Result<Vec<String>, String> {
         if let Some(why) = &refine_err {
@@ -3010,15 +3059,22 @@ fn emit_fn(
                 _ => pre.as_deref(),
             };
             if let Some(this) = this {
-                out.push(refine_clause(base, Some(this), ty, p, w, false)?);
+                out.push(refine_clause(base, Some((this, None)), ty, p, w, false)?);
             }
         }
         for (base, fname, fty, p, via) in &refines_field {
             if slprop_refine(tds, p).is_some() {
                 continue;
             }
-            if let Some(this) = field_this(base, fname, *via, w) {
-                out.push(refine_clause(base, Some(&this), fty, p, w, false)?);
+            if let Some((this, own)) = field_this(base, fname, fty, *via, w) {
+                out.push(refine_clause(
+                    base,
+                    Some((&this, own.as_deref())),
+                    fty,
+                    p,
+                    w,
+                    false,
+                )?);
             }
         }
         // An `_out` parameter's storage is unwritten exactly on the way in,
@@ -3096,12 +3152,12 @@ fn emit_fn(
             let Some(code) = slprop_refine(tds, p) else {
                 continue;
             };
-            let Some(this) = field_this(base, fname, *via, w) else {
+            let Some((this, own)) = field_this(base, fname, fty, *via, w) else {
                 continue;
             };
             out.push(with_this(
                 base,
-                Some(&this),
+                Some((&this, own.as_deref())),
                 fty,
                 p,
                 w,
