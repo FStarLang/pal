@@ -2291,8 +2291,11 @@ fn emit_fn(
     };
     // The `_own` predicate a value of this type carries, when its type is a
     // struct that has one.
+    // `peel` and not `resolve`: the annotation that makes a struct interesting
+    // is as often on the typedef that names it, and a `_refine` wrapper must
+    // not hide the struct underneath.
     let own_for = |ty: &Type| -> Option<(String, String)> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &tds.resolve(ty).val else {
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
             return None;
         };
         tds.structs
@@ -6976,7 +6979,7 @@ impl<'a> Body<'a> {
                     return None;
                 }
                 let ty = self.ty_of(base).ok()?;
-                let TypeT::TypeRef(TypeRefKind::Struct(n)) = &self.tds.resolve(&ty).val else {
+                let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
                     return None;
                 };
                 let sn = n.val.to_string();
@@ -7289,7 +7292,9 @@ impl<'a> Body<'a> {
     /// The struct a field belongs to, if the emitter generated a type for it.
     fn struct_of(&self, base: &Expr) -> Result<(String, Rc<Type>), String> {
         let bty = self.ty_of(base)?;
-        let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(&bty).val else {
+        // `peel`, because a `_refine` written on the typedef that names the
+        // struct is still that struct as far as its fields go.
+        let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &peel(self.tds, &bty).val else {
             return Err(format!("a field of {}", describe(self.tds.resolve(&bty))));
         };
         if !self.tds.structs.contains_key(&*sname.val) {

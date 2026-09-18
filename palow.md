@@ -2726,8 +2726,17 @@ new facts about memory.
    `refine_struct` -- `b32_arr`, `set_elem`, `copy_elem` -- has a real body and
    a real contract for the first time.
 
-   As of this milestone: **911 specifications, 809 of them with real bodies,
-   86 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   A follow-up found the same mistake in three places. An annotation is as
+   often written on the typedef that names a struct as on the struct itself,
+   and resolving a typedef is not the same as looking past the `_refine` the
+   typedef carries: `array_test`'s `b32_struct` is exactly `refine_struct`'s,
+   spelled the other way, and it got no ownership, no contract and no body
+   because three lookups stopped at the annotation instead of the struct
+   under it. They peel now, and `array_test` is down to its one untranslated
+   allocation.
+
+   As of this milestone: **911 specifications, 810 of them with real bodies,
+   85 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
