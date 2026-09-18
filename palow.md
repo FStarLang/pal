@@ -2675,6 +2675,36 @@ new facts about memory.
    carry the refinement through an indirect call, which is what that test was
    written to check.
 
+   The generated ownership then needed two corrections before it could be
+   widened. The first is that `_plain` suppresses it. `_plain` says the
+   declaration's ownership is the author's business, and it is as often
+   written on the typedef that names a struct as on the struct itself; both
+   spellings now suppress the generated predicate, because otherwise a
+   hand-written `_refine` and a generated `struct_X_own` would claim the same
+   memory twice. The second is that a struct passed *by value* also gets the
+   deep ownership: the pointers it holds are the same pointers whether the
+   struct arrived by value or through an address, and a by-value parameter had
+   no way to say what they reach.
+
+   The pointers that reach an extent rather than one object can now be owned
+   too. An `_array` field contributes `array_pts_to` over a sequence whose
+   length the predicate deliberately does not fix -- a struct that knows its
+   own length says so in a `_refine`, and that refinement is a clause about
+   `Seq.length` of this very sequence, so pinning it in the predicate would be
+   saying the same thing twice in a place where a struct without such a
+   refinement could not follow. `b32_struct` and `mixed` now carry their
+   arrays' ownership through every call.
+
+   That last change was what first made the deep predicate's matching
+   fragile, and the fix is worth recording because it is a general hazard. A
+   struct field's general unfocus hands the struct back as a record rebuilt
+   field by field, which is the original only up to eta. F\* proves that
+   without complaint, but Pulse finds `struct_X_own` in the context by
+   matching on the struct *value*, and a rebuilt record does not match
+   syntactically. Reading through an array field therefore now closes with the
+   field's read-only unfocus, which returns the struct at the very value it
+   had.
+
    As of this milestone: **911 specifications, 804 of them with real bodies,
    91 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is

@@ -210,6 +210,12 @@ struct Typedefs<'a> {
     /// `double` arm has no `_pts_to` here, but its size is still the size
     /// clang would compile, and a contract may say so.
     aggregate_layouts: HashMap<String, (u64, u64)>,
+    /// Structs declared `_plain`. The annotation says the struct's ownership
+    /// is the author's business and not the generator's, so no `_own`
+    /// predicate is made for one: whatever it owns is written by hand in a
+    /// `_refine`, and a generated conjunct beside it would be claiming the
+    /// same memory twice.
+    plain_structs: HashSet<String>,
     /// The `_refine` chain written on each struct declaration that carries
     /// one, keyed by struct name.
     ///
@@ -286,6 +292,26 @@ impl<'a> Typedefs<'a> {
             structs: HashMap::new(),
             unions: HashMap::new(),
             aggregate_layouts: HashMap::new(),
+            plain_structs: tu
+                .decls
+                .iter()
+                .filter_map(|d| match &d.val {
+                    DeclT::StructDefn(sd) if is_plain_chain(&sd.refines) => {
+                        Some(sd.name.val.to_string())
+                    }
+                    // `_plain` is as often written on the typedef that names
+                    // the struct as on the struct itself, and it says the same
+                    // thing: the two are one object, so suppressing the
+                    // generated ownership for one suppresses it for both.
+                    DeclT::Typedef(td) if is_plain_chain(&td.body) => {
+                        match &strip_annotations(&td.body).val {
+                            TypeT::TypeRef(TypeRefKind::Struct(n)) => Some(n.val.to_string()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect(),
             refined_structs: tu
                 .decls
                 .iter()
@@ -451,6 +477,32 @@ fn int_module(tds: &Typedefs, ty: &Type) -> Option<String> {
         }
         TypeT::SizeT => Some("SizeT".to_string()),
         _ => None,
+    }
+}
+
+/// The type a declaration's annotation chain wraps.
+fn strip_annotations(ty: &Type) -> &Type {
+    match &ty.val {
+        TypeT::Plain(t)
+        | TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..)
+        | TypeT::Nullable(t) => strip_annotations(t),
+        _ => ty,
+    }
+}
+
+/// Whether a declaration's annotation chain contains `_plain`.
+fn is_plain_chain(ty: &Type) -> bool {
+    match &ty.val {
+        TypeT::Plain(_) => true,
+        TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..)
+        | TypeT::Nullable(t) => is_plain_chain(t),
+        _ => false,
     }
 }
 
@@ -2177,6 +2229,22 @@ fn emit_fn(
             .map(|(ps, _, _)| ps)
             .unwrap_or_default()
     };
+    // The `_own` predicate a value of this type carries, when its type is a
+    // struct that has one.
+    let own_for = |ty: &Type| -> Option<(String, String)> {
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &tds.resolve(ty).val else {
+            return None;
+        };
+        tds.structs
+            .get(&*n.val.to_string())
+            .filter(|si| !own_items(tds, si, &n.val).is_empty())
+            .map(|_| {
+                (
+                    format!("struct_{}", n.val),
+                    format!("struct_{}_own_spec", n.val),
+                )
+            })
+    };
     let mut refines: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
     /// A refinement a *pointer* parameter inherits from the struct it points
     /// at. `this` is the pointee, so it is spelled with the pointee's value
@@ -2247,6 +2315,23 @@ fn emit_fn(
         }
 
         let Some(pt) = pointee(tds, &arg.ty) else {
+            // A struct passed by value still owns what its pointers reach.
+            // The value is the parameter itself, so the deep half attaches
+            // to it directly with no points-to to hang from -- which is the
+            // clearest case for keeping the two predicates apart, since here
+            // there is no first one at all.
+            if let Some((sn, osty)) = own_for(&arg.ty) {
+                let base = pname.trim_start_matches("var_").to_string();
+                let oname = format!("own_{}", base);
+                ghosts.push(format!("(#{}: erased ({}))", oname, osty));
+                wits.push((oname.clone(), osty.clone(), true));
+                req.push(format!("{}_own {} 1.0R (reveal {})", sn, pname, oname));
+                fresh.push((
+                    format!("{}'", oname),
+                    osty,
+                    format!("{}_own {} 1.0R {}'", sn, pname, oname),
+                ));
+            }
             continue;
         };
         let pn = palow_name(tds, pt).ok_or_else(|| {
@@ -2335,19 +2420,7 @@ fn emit_fn(
         // struct with no owned pointer field has nothing to add and gets
         // nothing, which is why this is an option rather than a conjunct.
         let own_info: Option<(String, String)> = (extent(tds, &arg.ty) == Some(Extent::One))
-            .then(|| match &tds.resolve(pt).val {
-                TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
-                    .structs
-                    .get(&*n.val)
-                    .filter(|si| !own_items(tds, si, &n.val).is_empty())
-                    .map(|_| {
-                        (
-                            format!("struct_{}", n.val),
-                            format!("struct_{}_own_spec", n.val),
-                        )
-                    }),
-                _ => None,
-            })
+            .then(|| own_for(pt))
             .flatten();
         let oname = format!("own_{}", base);
 
@@ -3732,6 +3805,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
 /// of those and nothing else -- it is the struct's own bytes, and `y` and `z`
 /// are addresses held in them, not objects. The other three are what `_own`
 /// names.
+#[derive(Clone)]
 struct OwnItem {
     /// Suffix of the spec record's field, `y` or `z_1`.
     name: String,
@@ -3742,6 +3816,34 @@ struct OwnItem {
     /// Its address, as an expression over the struct value `x` and the spec
     /// record `s`.
     at: String,
+    /// The element size, when the field is an `_array` pointer and what it
+    /// owns is therefore an extent rather than one object.
+    ///
+    /// The extent is left unconstrained here. A struct that knows its own
+    /// length says so in a `_refine`, and that refinement is a clause about
+    /// `Seq.length` of this very sequence -- so pinning the length in the
+    /// predicate would be saying the same thing twice, in a place where a
+    /// struct without such a refinement could not follow.
+    esize: Option<u64>,
+}
+
+impl OwnItem {
+    /// The same item at a different address, which the gather needs: its
+    /// ghost binders stand where the spec record's fields do.
+    fn at(&self, at: String) -> OwnItem {
+        OwnItem { at, ..self.clone() }
+    }
+
+    /// The ownership this item states, at a permission and a value.
+    fn pts_to(&self, p: &str, v: &str) -> String {
+        match self.esize {
+            None => format!("{}_pts_to {} {} {}", self.pn, self.at, p, v),
+            Some(es) => format!(
+                "array_pts_to {}_repr {} {} {} {}",
+                self.pn, es, self.at, p, v
+            ),
+        }
+    }
 }
 
 /// The pointee of a pointer that carries ownership of what it points at, or
@@ -3783,6 +3885,7 @@ fn own_chain(tds: &Typedefs, at: String, name: String, ty: &Type, out: &mut Vec<
         ty: fty,
         pn,
         at,
+        esize: None,
     });
     if let Some(to) = owned_pointer(tds, ty) {
         let to = to.clone();
@@ -3799,7 +3902,32 @@ fn own_chain(tds: &Typedefs, at: String, name: String, ty: &Type, out: &mut Vec<
 /// Everything a struct's `_own` predicate covers, in field order.
 fn own_items(tds: &Typedefs, si: &StructInfo, self_name: &str) -> Vec<OwnItem> {
     let mut out = Vec::new();
+    if tds.plain_structs.contains(self_name) {
+        return out;
+    }
     for f in &si.fields {
+        // An `_array` field owns an extent. Its length is not in the
+        // predicate -- see `OwnItem::esize` -- so the sequence is simply as
+        // long as it is, and a struct that knows better says so in a
+        // `_refine` about this same sequence.
+        if extent(tds, &f.ty) == Some(Extent::Array)
+            && let Some(el) = pointee(tds, &f.ty)
+            && has_repr(tds, el)
+            && let (Some(pn), Some(ety), Some(es)) = (
+                palow_name(tds, el),
+                fstar_type(tds, el),
+                palow_sizeof(tds, el),
+            )
+        {
+            out.push(OwnItem {
+                name: f.name.clone(),
+                ty: format!("Seq.seq ({})", ety),
+                pn,
+                at: format!("((x).fld_{})", f.name),
+                esize: Some(es),
+            });
+            continue;
+        }
         let Some(to) = owned_pointer(tds, &f.ty) else {
             continue;
         };
@@ -3859,7 +3987,7 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
     let conj = |val: &dyn Fn(&OwnItem) -> String| -> String {
         items
             .iter()
-            .map(|i| format!("{}_pts_to {} p {}", i.pn, i.at, val(i)))
+            .map(|i| i.pts_to("p", &val(i)))
             .collect::<Vec<_>>()
             .join(" **\n  ")
     };
@@ -3877,7 +4005,7 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
         sn = sn,
         ens = items
             .iter()
-            .map(|i| format!("  ensures  {}_pts_to {} p {}", i.pn, i.at, from_spec(i)))
+            .map(|i| format!("  ensures  {}", i.pts_to("p", &from_spec(i))))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -3906,7 +4034,7 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
             .join(" "),
         req = items
             .iter()
-            .map(|i| format!("  requires {}_pts_to {} p {}", i.pn, at_args(i), arg(i)))
+            .map(|i| format!("  requires {}", i.at(at_args(i)).pts_to("p", &arg(i))))
             .collect::<Vec<_>>()
             .join("\n"),
         rec_ = items
@@ -7404,10 +7532,7 @@ impl<'a> Body<'a> {
     /// size, and the lines that give it back. Either a parameter, which owns
     /// its sequence outright, or a fixed-size array field, which has to be
     /// focused out of its struct first.
-    fn array_place(
-        &mut self,
-        e: &Expr,
-    ) -> Result<(String, String, String, Vec<String>, bool), String> {
+    fn array_place(&mut self, e: &Expr) -> Result<ArrayPlace, String> {
         match &strip_vattr(e).val {
             ExprT::Var(v) => {
                 // A local that is another name for an array is that array:
@@ -7424,7 +7549,14 @@ impl<'a> Body<'a> {
                     .find(|b| b.var == v && b.checked && !b.freed && b.array.is_some())
                 {
                     let a = b.array.clone().unwrap();
-                    return Ok((b.tmp.clone(), b.pn.clone(), a.esize, Vec::new(), true));
+                    return Ok(ArrayPlace {
+                        addr: b.tmp.clone(),
+                        pn: b.pn.clone(),
+                        esize: a.esize,
+                        close_read: Vec::new(),
+                        close_write: Vec::new(),
+                        maybe: true,
+                    });
                 }
                 // A local array's elements are `option`s; a parameter's are
                 // not, because the caller has already initialised them.
@@ -7432,13 +7564,14 @@ impl<'a> Body<'a> {
                     let Some(esize) = s.array.clone() else {
                         return Err(format!("a subscript of local `{}`", v));
                     };
-                    return Ok((
-                        s.addr.clone(),
-                        s.palow_ty.clone(),
-                        esize.0,
-                        Vec::new(),
-                        esize.1,
-                    ));
+                    return Ok(ArrayPlace {
+                        addr: s.addr.clone(),
+                        pn: s.palow_ty.clone(),
+                        esize: esize.0,
+                        close_read: Vec::new(),
+                        close_write: Vec::new(),
+                        maybe: esize.1,
+                    });
                 }
                 let Some(ap) = self.arrays.get(&v) else {
                     return Err(format!(
@@ -7458,13 +7591,14 @@ impl<'a> Body<'a> {
                             .to_string(),
                     );
                 }
-                Ok((
-                    ap.addr.clone(),
-                    ap.pn.clone(),
-                    ap.esize.clone(),
-                    Vec::new(),
-                    ap.maybe,
-                ))
+                Ok(ArrayPlace {
+                    addr: ap.addr.clone(),
+                    pn: ap.pn.clone(),
+                    esize: ap.esize.clone(),
+                    close_read: Vec::new(),
+                    close_write: Vec::new(),
+                    maybe: ap.maybe,
+                })
             }
             ExprT::Member(base, f) => {
                 let fty = self.field_ty(base, f)?;
@@ -7475,13 +7609,24 @@ impl<'a> Body<'a> {
                     ));
                 };
                 let ff = self.focus_field(base, f)?;
-                // Even a read through an array field goes back with the
-                // general unfocus: what comes out of the element access is a
-                // sequence, and `Seq.upd xs i (Seq.index xs i)` is only `xs`
-                // up to a lemma that is not worth generating per field.
-                let mut close = vec![format!("{}_unfocus_{} {};", ff.sn, f.val, ff.a)];
-                close.extend(ff.close_write);
-                Ok((ff.at, pn, format!("{}sz", esize), close, false))
+                // A read goes back with the field's read-only unfocus, which
+                // hands the struct back at the very value it had. The general
+                // one rebuilds the record field by field, and a rebuilt record
+                // is only the original up to eta -- which is enough for F* but
+                // not for the syntactic match that finds the struct's deep
+                // ownership in the context.
+                let mut close_read = vec![format!("{}_unfocus_read_{} {};", ff.sn, f.val, ff.a)];
+                let mut close_write = vec![format!("{}_unfocus_{} {};", ff.sn, f.val, ff.a)];
+                close_read.extend(ff.close_read);
+                close_write.extend(ff.close_write);
+                Ok(ArrayPlace {
+                    addr: ff.at,
+                    pn,
+                    esize: format!("{}sz", esize),
+                    close_read,
+                    close_write,
+                    maybe: false,
+                })
             }
             other => Err(format!("a subscript of {}", expr_kind_of(other))),
         }
@@ -7508,7 +7653,14 @@ impl<'a> Body<'a> {
                     .to_string(),
             );
         }
-        let (arr, pn, esize, close, maybe) = self.array_place(base)?;
+        let ArrayPlace {
+            addr: arr,
+            pn,
+            esize,
+            close_read: cl_read,
+            close_write: cl_write,
+            maybe,
+        } = self.array_place(base)?;
         let i = match idx {
             Some(e) => self.index(e)?,
             None => "0sz".to_string(),
@@ -7539,8 +7691,8 @@ impl<'a> Body<'a> {
                 format!("{}_to_elem {};", pn, at),
                 format!("array_unfocus {} {};", repr, common),
             ];
-            close_read.extend(close.iter().cloned());
-            close_write.extend(close);
+            close_read.extend(cl_read);
+            close_write.extend(cl_write);
             return Ok(Focus {
                 at,
                 write_fn: format!("{}_write", pn),
@@ -7571,9 +7723,10 @@ impl<'a> Body<'a> {
             format!("elem_maybe_put {}_repr {} {};", pn, esize, at),
             format!("array_unfocus {} {};", repr, common),
         ];
-        both.extend(close);
-        let close_read = both.clone();
-        let close_write = both;
+        let mut close_write = both.clone();
+        let mut close_read = both;
+        close_read.extend(cl_read);
+        close_write.extend(cl_write);
         Ok(Focus {
             at,
             write_fn: format!("{}_write_uninit", pn),
@@ -9970,7 +10123,13 @@ impl<'a> Body<'a> {
                     let Some(esize) = palow_sizeof(self.tds, ty) else {
                         return Err(format!("a `memset` of {}", describe(self.tds.resolve(ty))));
                     };
-                    let (arr, pn, _, close, maybe) = self.array_place(p)?;
+                    let ArrayPlace {
+                        addr: arr,
+                        pn,
+                        close_write: close,
+                        maybe,
+                        ..
+                    } = self.array_place(p)?;
                     let z = zero_value(self.tds, ty)?;
                     // `Seq.length xs == n` is what says the fill stays inside
                     // the array, and for a parameter that can only come from
@@ -10873,6 +11032,17 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
 
 /// A place opened for one access: where it is, what type it is, and the lines
 /// that put it back after a read or after a write.
+/// Where an array subscript's storage lives, and what it takes to put it
+/// back. The two closes differ for an array *field*: see `array_place`.
+struct ArrayPlace {
+    addr: String,
+    pn: String,
+    esize: String,
+    close_read: Vec<String>,
+    close_write: Vec<String>,
+    maybe: bool,
+}
+
 struct Focus {
     at: String,
     pn: String,
