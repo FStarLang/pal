@@ -444,7 +444,13 @@ impl Env {
                 .into()),
             ExprT::FnCall(f, _args) => match self.globals.fns.get(&f.val) {
                 Some(f_decl) => Ok(f_decl.ret_type.clone().into()),
-                None => Err(InferError::NotAFunction(f.clone())),
+                // A PAL primitive has no C declaration to look up; its result
+                // type is recorded alongside the library function it stands
+                // for. See `crate::prims`.
+                None => match crate::prims::ret_type(&f.val) {
+                    Some(ty) => Ok(expr.reuse_loc(ty).into()),
+                    None => Err(InferError::NotAFunction(f.clone())),
+                },
             },
             ExprT::FnRef(f) => match self.globals.fns.get(&f.val) {
                 Some(f_decl) => {

@@ -213,6 +213,27 @@ public:
   std::unordered_map<RecordDecl *, std::string>
       structNames; // map record decls to generated struct names
   Expr *forLoopIncrement = nullptr;
+
+  // Where a statement expression used as an rvalue may put the statements
+  // ahead of its value, or null if there is nowhere to put them.
+  //
+  // Set only by trStmt, and only for a position that is genuinely a statement
+  // context evaluated exactly once: a declaration's initializer, and the
+  // right-hand side of an assignment statement. It is cleared again around any
+  // operand that C evaluates conditionally -- ?:'s arms, &&'s and ||'s right
+  // operand -- where running the statements unconditionally would change the
+  // program. See the StmtExpr arm in trRValue.
+  Vec<Rc<ir::Stmt>> *hoistTarget = nullptr;
+
+  // Clears hoistTarget for the extent of a conditionally-evaluated operand.
+  struct NoHoist {
+    Vec<Rc<ir::Stmt>> **slot;
+    Vec<Rc<ir::Stmt>> *saved;
+    explicit NoHoist(Vec<Rc<ir::Stmt>> **s) : slot(s), saved(*s) {
+      *slot = nullptr;
+    }
+    ~NoHoist() { *slot = saved; }
+  };
   // When inside a switch desugaring, break sets this flag instead of mk_break
   Rc<ir::Ident> *switchBreakId = nullptr;
 
@@ -1395,6 +1416,14 @@ public:
         // continue to error case
       }
     } else if (auto *bo = dyn_cast<BinaryOperator>(e)) {
+      // `a && b` and `a || b` evaluate `b` only if `a` does not decide the
+      // answer, so a statement expression in `b` must not hoist out.
+      auto shortCircuit = [&](BinaryOperator *op_e, auto &l, ir::BinOp op) {
+        auto lhs = trRValue(op_e->getLHS());
+        NoHoist noHoist(&hoistTarget);
+        return mk_rvalue_binop(std::move(l), std::move(op), std::move(lhs),
+                               trRValue(op_e->getRHS()));
+      };
       auto m = [&](ir::BinOp op) {
         return mk_rvalue_binop(std::move(loc), std::move(op),
                                trRValue(bo->getLHS()), trRValue(bo->getRHS()));
@@ -1411,7 +1440,7 @@ public:
       case clang::BO_Rem:
         return m(ir::BinOp::Mod());
       case clang::BO_LAnd:
-        return m(ir::BinOp::LogAnd());
+        return shortCircuit(bo, loc, ir::BinOp::LogAnd());
       case clang::BO_EQ:
         return m(ir::BinOp::Eq());
       case clang::BO_NE: {
@@ -1430,7 +1459,7 @@ public:
         return mk_rvalue_binop(std::move(loc), ir::BinOp::LEq(),
                                trRValue(bo->getRHS()), trRValue(bo->getLHS()));
       case clang::BO_LOr:
-        return m(ir::BinOp::LogOr());
+        return shortCircuit(bo, loc, ir::BinOp::LogOr());
       case clang::BO_And:
         return m(ir::BinOp::BitAnd());
       case clang::BO_Or:
@@ -1550,6 +1579,19 @@ public:
         if (bname == "__builtin_expect_with_probability" &&
             c->getNumArgs() == 3) {
           return trRValue(c->getArg(0));
+        }
+        // Byte-reversal builtins. `Pulse.Lib.C.UInt64.bswap64` is a
+        // definition in terms of shifts and masks, not an axiom, so this
+        // assumes nothing -- a caller that needs to reason about the result
+        // can unfold it. FunOS reaches this through its big-endian hardware
+        // descriptors.
+        if (bname == "__builtin_bswap64" && c->getNumArgs() == 1) {
+          auto prim =
+              ctx.mk_ident(toStr(StringRef("__pal_bswap64")), loc.clone());
+          auto primArgs = Vec<Rc<ir::Expr>>::new_();
+          primArgs.push(trRValue(c->getArg(0)));
+          return mk_rvalue_fncall(std::move(loc), std::move(prim),
+                                  std::move(primArgs));
         }
         if (bname == "__builtin_constant_p" && c->getNumArgs() == 1) {
           return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
@@ -1755,8 +1797,39 @@ public:
         auto fn = ctx.mk_ident(toStr(fd->getName()),
                                getRange(c->getCallee()->getSourceRange()));
         auto args = Vec<Rc<ir::Expr>>::new_();
-        for (auto arg : c->arguments()) {
-          args.push(trRValue(arg));
+        // A variadic function's arguments past the last declared parameter are
+        // passed only at the call site, so PAL has no type for them and the
+        // declaration it emits has no place to put them. Left in, they make the
+        // call ill-typed and take the whole CALLING function down with them --
+        // which is expensive, because in C the variadic function is almost
+        // always printf, and the calls are diagnostics attached to code that
+        // does matter.
+        //
+        // So the extra arguments are dropped. What that gives up is exactly
+        // what the declaration never claimed: PAL models printf as taking the
+        // format string and preserving it, and says nothing about the values
+        // it formats, so nothing about them was going to be proved either way.
+        // In particular this does NOT check that the arguments match the
+        // format string.
+        //
+        // An argument with a side effect is not dropped silently --
+        // `printf("%d", i++)` would become a different program -- and still
+        // reaches the diagnostic below.
+        unsigned fixedArgs = c->getNumArgs();
+        if (fd->isVariadic() && fd->getNumParams() < c->getNumArgs()) {
+          fixedArgs = fd->getNumParams();
+          for (unsigned i = fixedArgs; i < c->getNumArgs(); i++) {
+            if (c->getArg(i)->HasSideEffects(*astCtx)) {
+              reportUnsupported(c->getArg(i)->getSourceRange(),
+                                getRange(c->getArg(i)->getSourceRange()),
+                                "a variadic argument with a side effect cannot "
+                                "be dropped; hoist it into a local first",
+                                "");
+            }
+          }
+        }
+        for (unsigned i = 0; i < fixedArgs; i++) {
+          args.push(trRValue(c->getArg(i)));
         }
         return mk_rvalue_fncall(std::move(loc), std::move(fn), std::move(args));
       } else {
@@ -1783,7 +1856,11 @@ public:
     } else if (auto *init = dyn_cast<InitListExpr>(e)) {
       return trInitList(init, e->getSourceRange(), std::move(loc));
     } else if (auto *co = dyn_cast<ConditionalOperator>(e)) {
-      return mk_cond(std::move(loc), trRValue(co->getCond()),
+      // The condition is evaluated unconditionally and may hoist; the two arms
+      // are not, so a statement expression in either must stay where it is.
+      auto cond = trRValue(co->getCond());
+      NoHoist noHoist(&hoistTarget);
+      return mk_cond(std::move(loc), std::move(cond),
                      trRValue(co->getTrueExpr()), trRValue(co->getFalseExpr()));
     } else if (auto *dre = dyn_cast<DeclRefExpr>(e)) {
       if (auto *ecd = dyn_cast<EnumConstantDecl>(dre->getDecl())) {
@@ -1864,6 +1941,105 @@ public:
                         "offsetof whose value is not a constant", "");
       return mk_rvalue_err(std::move(loc),
                            trQualType(e->getType(), e->getSourceRange()));
+    }
+
+    // __builtin_choose_expr(c, a, b) is `a` or `b` -- decided by the compiler,
+    // not at run time -- and, crucially, the branch not chosen is not even
+    // type-checked.  So the choice must be made here rather than translated:
+    // the other operand may not be a well-typed expression at all.  Clang has
+    // already made it.
+    //
+    // FunOS reaches this through ROUND_UP, which uses the builtin to pick a
+    // width-appropriate rounding expression from the argument's size.
+    if (auto *ce = dyn_cast<ChooseExpr>(e)) {
+      return trRValue(ce->getChosenSubExpr());
+    }
+
+    // A statement expression whose body reduces to a single expression.
+    //
+    // `({ e; })` is exactly `e`.  PAL cannot translate the general form --
+    // `({ s1; s2; e; })` has statements in it, and an rvalue has nowhere to
+    // put them; hoisting them out would move them across the surrounding
+    // expression's other operands, which C's sequencing rules do not permit --
+    // but the degenerate form is common, because the GNU idiom is how C
+    // writes a macro that must not evaluate its argument twice or must not be
+    // usable as an lvalue, and many such macros wrap a single expression.
+    //
+    // Statements are skipped ahead of the final expression only when they
+    // cannot affect it: a null statement, and a declaration group consisting
+    // entirely of static assertions (which FunOS uses for macro argument type
+    // checking, e.g. call_fn_on_stack's _call_on_stack_type_check).  A
+    // declaration that introduces a variable, or any other statement, still
+    // reaches the unsupported diagnostic -- dropping it would change the
+    // program, and keeping it is the hoisting problem above.
+    //
+    // In statement position no restriction is needed; see trStmt.
+    if (auto *se = dyn_cast<StmtExpr>(e)) {
+      if (auto *comp = dyn_cast<CompoundStmt>(se->getSubStmt())) {
+        Expr *value = nullptr;
+        bool reducible = comp->size() > 0;
+        for (auto *s : comp->body()) {
+          if (value != nullptr) {
+            // The value-yielding expression must be last.
+            reducible = false;
+            break;
+          }
+          if (isa<NullStmt>(s)) {
+            continue;
+          }
+          if (auto *ds = dyn_cast<DeclStmt>(s)) {
+            bool allStaticAsserts = true;
+            for (auto *d : ds->decls()) {
+              if (!isa<StaticAssertDecl>(d)) {
+                allStaticAsserts = false;
+              }
+            }
+            if (allStaticAsserts) {
+              continue;
+            }
+            reducible = false;
+            break;
+          }
+          if (auto *sub = dyn_cast<Expr>(s)) {
+            value = sub;
+            continue;
+          }
+          reducible = false;
+          break;
+        }
+        if (reducible && value != nullptr) {
+          return trRValue(value);
+        }
+        // Otherwise the body has statements in it. If this position has
+        // somewhere to put them -- see hoistTarget -- run them there, ahead of
+        // the value.
+        //
+        // This is the shape most GNU macros actually have: a local bound to
+        // the argument so it is evaluated once, a check on it, then the
+        // result. FunOS's ROUND_UP is exactly that, and so are DIV_ROUND_UP
+        // and the hw_info accessors.
+        //
+        // Sound because hoistTarget is set only where the statements'
+        // new position and their old one are separated by nothing that C
+        // evaluates: a declaration's initializer and an assignment
+        // statement's right-hand side have no other operands to cross, and
+        // both are evaluated exactly once. Every conditionally-evaluated
+        // operand clears it again. What is NOT attempted is hoisting out of
+        // an operand with siblings -- `f(g(), ({...}))` -- where the
+        // statements would move across `g()`.
+        if (hoistTarget != nullptr && comp->size() > 0) {
+          auto *last = *(comp->body_end() - 1);
+          if (auto *lastValue = dyn_cast<Expr>(last)) {
+            for (auto *s : comp->body()) {
+              if (s == last) {
+                break;
+              }
+              trStmt(*hoistTarget, s);
+            }
+            return trRValue(lastValue);
+          }
+        }
+      }
     }
 
     // Last resort, before giving up: an expression that asks a question about
@@ -2866,9 +3042,17 @@ public:
                 vd->getType(), vd->getSourceRange());
             stmts.push(mk_var_decl(dloc.clone(), id.clone(), std::move(ty)));
             if (vd->hasInit()) {
+              // The initializer is evaluated exactly once, with nothing else
+              // in the expression to cross, so a statement expression in it
+              // may put its statements here -- between the declaration and
+              // the assignment.
+              auto savedHoist = hoistTarget;
+              hoistTarget = &stmts;
+              auto init = trRValue(vd->getInit());
+              hoistTarget = savedHoist;
               stmts.push(mk_assign(dloc.clone(),
                                    mk_lvalue_var(dloc.clone(), id.clone()),
-                                   trRValue(vd->getInit())));
+                                   std::move(init)));
             }
           }
         } else if (auto fd = dyn_cast<FunctionDecl>(d); fd && !fd->hasBody()) {
@@ -2940,6 +3124,18 @@ public:
           }
         }
       }
+      // Any other statement expression, used where its value is discarded.
+      //
+      // `({ s1; s2; e; });` as a statement is exactly `{ s1; s2; e; }`: the
+      // only thing a statement expression adds over a compound statement is
+      // that it has a value, and in statement position that value is thrown
+      // away.  So this arm is general -- it needs no restriction on the body
+      // at all -- and it is where the GNU idiom mostly appears:
+      // do-something-and-check macros expanded for their effect.
+      //
+      // The value-carrying case is handled in trRValue, where it does need a
+      // restriction, because an rvalue has nowhere to put s1 and s2.
+      return trStmt(stmts, se->getSubStmt());
     } else if (auto *cse = dyn_cast<CStyleCastExpr>(stmt)) {
       if (cse->getType()->isVoidType()) {
         // (void)expr — translate the sub-expression as a statement to
@@ -2947,8 +3143,42 @@ public:
         // ((void)0) will naturally produce no IR.
         return trStmt(stmts, cse->getSubExpr());
       }
+    } else if (auto *co = dyn_cast<ConditionalOperator>(stmt)) {
+      // `c ? a : b;` as a statement: the value is discarded, but a and b may
+      // still do something, so this is an if/else -- not a no-op, and not an
+      // rvalue, which is why it cannot go through trRValue.
+      //
+      // C code writes this when both arms are calls, which is how FunOS's
+      // assert() expands.  Each arm is translated in statement position, so an
+      // arm that computes a discarded pure value drops out on its own.
+      auto thenStmts = Vec<Rc<ir::Stmt>>::new_();
+      trStmt(thenStmts, co->getTrueExpr());
+      auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
+      trStmt(elseStmts, co->getFalseExpr());
+      return stmts.push(mk_if(std::move(loc), trRValue(co->getCond()),
+                              std::move(thenStmts), std::move(elseStmts),
+                              Vec<Rc<ir::Expr>>::new_()));
     } else if (dyn_cast<NullStmt>(stmt) || dyn_cast<IntegerLiteral>(stmt)) {
       return rust::Unit();
+    }
+
+    // An expression evaluated for a value that is then discarded, where
+    // computing the value does nothing observable, is a no-op -- so drop it
+    // rather than reporting it unsupported.
+    //
+    // C admits such statements (with a warning), and the GNU statement
+    // expression makes them unavoidable: `({ s1; e; });` in statement
+    // position *always* ends in one, because `e` is the construct's value and
+    // the surrounding statement throws it away.  Without this, the general
+    // statement-position arm above could not translate anything.
+    //
+    // `HasSideEffects` is clang's own answer, and it is conservative: a call,
+    // an assignment, an increment, or a volatile read all count, and any of
+    // them still reaches the diagnostic below.
+    if (auto *ex = dyn_cast<Expr>(stmt)) {
+      if (!ex->HasSideEffects(*astCtx)) {
+        return rust::Unit();
+      }
     }
 
     reportUnsupported(stmt->getSourceRange(), loc, "unsupported statement ",

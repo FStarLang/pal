@@ -403,6 +403,13 @@ impl<'a> Checker<'a> {
                 for arg in args {
                     self.check_rvalue(env, arg)
                 }
+                if crate::prims::is_prim(&f.val) {
+                    // A PAL primitive stands for a Pulse library function, so
+                    // there is no C declaration to look up and no argument
+                    // types to check against one. The front end only ever emits
+                    // these at the arity the library function has.
+                    return;
+                }
                 let Some(fn_decl) = env.lookup_fn(f) else {
                     self.report(format!("unknown function {}", f.val), &rval.loc);
                     return;

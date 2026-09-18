@@ -26,6 +26,10 @@ open Pulse.Lib.C.Inhabited
      - call            : indirect call of a TOTAL pointer (returns `stt`)
      - call_div        : indirect call of a DIVERGENT pointer (returns `stt_div`)
      - is_null         : decidable null test
+     - func_ptr_to_u64 : the pointer's numeric address, for C's `(uint64_t)fn`
+                         (one-way: there is no u64_to_func_ptr, so an address
+                         cannot be turned back into something callable)
+     - func_ptr_to_u64_null : `null` is at address 0
 
    DERIVABLE (defined/proven from the axioms above -- nothing new is assumed):
      - is_valid        : `let`-definition, `pure (valid ..)`
@@ -219,6 +223,28 @@ val call_div (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased
 
 (* Decidable null test, for C `if (fp)` / `fp == NULL`. *)
 val is_null (#a #b: Type0) (f: func_ptr a b) : (r: bool { r <==> f == null a b })
+
+(* The pointer's numeric address, for C's `(uint64_t)fn`.
+
+   A function has an address, and low-level C reads it: FunOS installs an
+   exception vector base with `(uint64_t)&__start_trap_base` and switches
+   stacks with `(uint64_t)fn`, in both cases handing the value to hardware
+   rather than to C.
+
+   Deliberately weak. This says only that every function pointer HAS an
+   address and that the address is determined by the pointer -- nothing about
+   distinctness, nothing about alignment, and, in the other direction,
+   nothing at all: there is no `u64_to_func_ptr`, so an address cannot be
+   turned back into something callable. The two facts that are stated are the
+   ones a program reading an address for hardware needs, and neither can be
+   used to fabricate a call.
+
+   `null` is at address 0, matching `Pulse.Lib.C.CoreRef`'s treatment of the
+   null data pointer, so `(uint64_t)fp == 0` and `fp == NULL` agree. *)
+val func_ptr_to_u64 (#a #b: Type0) (f: func_ptr a b) : FStar.UInt64.t
+val func_ptr_to_u64_null (a b: Type0)
+  : Lemma (FStar.UInt64.v (func_ptr_to_u64 (null a b)) == 0)
+          [SMTPat (func_ptr_to_u64 (null a b))]
 
 instance inhabited_func_ptr (a b: Type0) : inhabited (func_ptr a b) = { witness = null a b }
 instance has_zero_default_func_ptr (a b: Type0) : has_zero_default (func_ptr a b) = { zero_default = null a b }

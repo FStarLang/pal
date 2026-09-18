@@ -3043,6 +3043,22 @@ impl<'a> Emitter<'a> {
                             };
                             unaryfn(Doc::text("not"), unaryfn(Doc::text(is_null_fn), val_doc))
                         }
+                        (TypeT::FixedArray(..), TypeT::Bool) => {
+                            // An array in a boolean context decays to a pointer
+                            // to its first element, and an array object always
+                            // has one -- so the test is `true`, statically. This
+                            // is not an approximation: C has no array whose
+                            // decay is null.
+                            //
+                            // FunOS reaches this through the idiomatic
+                            // `assert(false && "message")` and
+                            // `assert(!"UNIMPLEMENTED")`, where the string
+                            // literal is there to name the failure in the
+                            // assertion text and the truthiness is incidental.
+                            // Without this arm the whole enclosing function was
+                            // an `(admit())`.
+                            Doc::text("true")
+                        }
                         (TypeT::FnPtr { .. }, TypeT::Bool) => {
                             // `if (fp)` truthiness: read the pointer value and
                             // test it against null. The ref keeps ordinary
@@ -3238,6 +3254,41 @@ impl<'a> Emitter<'a> {
                             let addr = self.emit_ptr_as_core(env, from_kind, val_doc);
                             let u64 =
                                 unaryfn(Doc::text("Pulse.Lib.C.CoreRef.core_ref_to_u64"), addr);
+                            if !*signed && *width == 64 {
+                                u64
+                            } else if get_int_mod(signed, width).is_some() {
+                                unaryfn_with_type(
+                                    Doc::text(format!(
+                                        "Int.Cast.uint64_to_{}int{}",
+                                        if *signed { "" } else { "u" },
+                                        width
+                                    )),
+                                    u64,
+                                    self.emit_type(env, &to_ty),
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                Doc::text("(admit())")
+                            }
+                        }
+                        // Function pointer → integer: the address of code.
+                        //
+                        // FunOS reaches this where it hands an address to
+                        // hardware rather than to C: installing the exception
+                        // vector base with `(uint64_t)&__start_trap_base`, and
+                        // switching stacks with `(uint64_t)fn`.
+                        //
+                        // `func_ptr_to_u64` is one-way by construction -- there
+                        // is no inverse in Pulse.Lib.C.FuncPtr -- so the result
+                        // is an opaque number. It cannot be called, and it
+                        // carries no ownership, exactly as for the data-pointer
+                        // arm above. Translating rather than refusing matters
+                        // for the same reason it does there: a refused cast
+                        // turns the whole enclosing function into `(admit())`
+                        // and takes every other obligation in it down as well.
+                        (TypeT::FnPtr { .. }, TypeT::Int { signed, width }) => {
+                            let u64 =
+                                unaryfn(Doc::text("Pulse.Lib.C.FuncPtr.func_ptr_to_u64"), val_doc);
                             if !*signed && *width == 64 {
                                 u64
                             } else if get_int_mod(signed, width).is_some() {
@@ -3526,11 +3577,16 @@ impl<'a> Emitter<'a> {
                             Doc::line(),
                         )
                     };
-                    parens(
-                        self.emit_name(Name::Fn(f.val.clone()))
-                            .append(Doc::line())
-                            .append(args),
-                    )
+                    // A PAL primitive: a compiler builtin with no C declaration
+                    // to translate, whose meaning is a function in PAL's Pulse
+                    // library. The front end emits an ordinary FnCall under a
+                    // reserved `__pal_` name; here that name is replaced by the
+                    // library function it stands for. See `pal_prim_target`.
+                    let callee = match crate::prims::target(&f.val) {
+                        Some(target) => Doc::text(target),
+                        None => self.emit_name(Name::Fn(f.val.clone())),
+                    };
+                    parens(callee.append(Doc::line()).append(args))
                 }
                 ExprT::FnRef(g) => {
                     // A function-to-pointer decay (`add` / `&add`): the concrete
