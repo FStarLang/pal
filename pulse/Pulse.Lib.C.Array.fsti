@@ -552,6 +552,24 @@ ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
 /// but `i`.
 val array_spec_borrow (#a: Type u#a) (s: array_spec a) (i: nat) : array_spec a
 
+/// Borrowing lends out one cell and changes nothing else, so the length is
+/// preserved. `array_spec_borrow` is abstract here, so without this a client
+/// cannot see the length survive a borrow -- and a struct field typed
+/// `full_array_lspec t n` stops being one the moment a cell of it is borrowed,
+/// which is exactly the common case (`&s->field[i]`).
+val array_spec_borrow_len (#a: Type u#a) (s: array_spec a) (i: nat)
+  : Lemma (array_spec_len (array_spec_borrow s i) == array_spec_len s)
+    [SMTPat (array_spec_len (array_spec_borrow s i))]
+
+/// Cell `i` is out of the mask after borrowing; every other cell keeps its
+/// mask, initialization and value. Needed alongside the length for a borrowed
+/// spec to still be recognised as `full_array_lspec` at cells other than `i`.
+val array_spec_borrow_mask (#a: Type u#a) (s: array_spec a) (i: nat) (k: nat)
+  : Lemma (requires k <> i)
+          (ensures (array_spec_mask (array_spec_borrow s i) k <==> array_spec_mask s k) /\
+                   (array_spec_initd (array_spec_borrow s i) k <==> array_spec_initd s k))
+    [SMTPat (array_spec_mask (array_spec_borrow s i) k)]
+
 /// Ghost ref aliasing cell `i` of `a` (defaulted so it is well-typed without a
 /// `i < length a` hypothesis). Used to name the borrowed cell across the
 /// borrow/return boundary.

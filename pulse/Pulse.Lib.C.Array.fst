@@ -696,6 +696,19 @@ let array_spec_borrow_index #t (s: array_spec t) (i: nat) (k: nat { k < Seq.leng
 = if k = i then Seq.lemma_index_upd1 s i OutOfMask
   else Seq.lemma_index_upd2 s i OutOfMask k
 
+// The mask/initd view of the above, stated without a `k < length` hypothesis
+// so a client can use it before it has established one. Both sides are False
+// when `k` is out of range, and `array_spec_borrow` is the identity when `i`
+// is, so the only real case is the in-range one handled by `lemma_index_upd2`.
+let array_spec_borrow_mask #t (s: array_spec t) (i: nat) (k: nat)
+  : Lemma (requires k <> i)
+          (ensures (array_spec_mask (array_spec_borrow s i) k <==> array_spec_mask s k) /\
+                   (array_spec_initd (array_spec_borrow s i) k <==> array_spec_initd s k))
+          [SMTPat (array_spec_mask (array_spec_borrow s i) k)]
+= if i < Seq.length s && k < Seq.length s
+  then Seq.lemma_index_upd2 s i OutOfMask k
+  else ()
+
 // The backing sequence of a borrowed spec: cell `i` reads back as `None`
 // (unowned), the rest unchanged.
 let to_seq_borrow #t (s: array_spec t) (i: nat)
