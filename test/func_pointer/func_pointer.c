@@ -3,7 +3,6 @@
 #include <stdlib.h>
 
 /* Function-pointer tests against the axiomatized Pulse.Lib.C.FuncPtr library.
- * The global_live ghost-snapshot examples currently fail verification.
  * `rec_via_ptr` remains disabled (`#if 0` at the end).
  *
  * Divergence: every function is `divergent fn` unless `_total`. A pointer to
@@ -1301,15 +1300,14 @@ void fp_frame_adapt(
       Fp_frame_spec.framed_pre Fp_frame_spec.framed_post);
 }
 
-/* Ghost snapshots relate entry and exit values without `_old`.
- * Witness hints resolve inference, but generated postcondition guards still
- * prevent verification of the callers' final-value guarantees. */
 uint32_t global_live_counter;
 
+/* Ghost-indexed ownership relates entry and exit values without `_old` or
+ * mutable entry equalities in the function-pointer postcondition guard. */
 _ghost_arg(uint32_t before)
 void global_live_bump(void)
-    _requires(_live(global_live_counter))
-    _requires(global_live_counter == before && before < 100)
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_counter) $(before)))
+    _requires(before < 100)
     _ensures(_live(global_live_counter))
     _ensures(global_live_counter == before + 1)
 {
@@ -1318,15 +1316,34 @@ void global_live_bump(void)
 
 _ghost_arg(uint32_t before)
 void global_live_call(void)
-    _requires(_live(global_live_counter))
-    _requires(global_live_counter == before && before < 100)
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_counter) $(before)))
+    _requires(before < 100)
     _ensures(_live(global_live_counter))
     _ensures(global_live_counter == before + 1)
 {
     void (*fp)(void) = global_live_bump;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_bump.func_global_live_bump__fp);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_leaf #(erased (UInt32.t & UInt32.t))
-        (hide (reveal $(before), reveal $(before))));
+    fp();
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Keep direct _live coverage with a fixed-value postcondition. */
+void global_live_set(void)
+    _requires(_live(global_live_counter))
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == 42)
+{
+    global_live_counter = 42;
+}
+
+void global_live_set_call(void)
+    _requires(_live(global_live_counter))
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == 42)
+{
+    global_live_counter = 10;
+    void (*fp)(void) = global_live_set;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_set.func_global_live_set__fp);
     fp();
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -1340,12 +1357,15 @@ _ghost_arg(uint32_t before_right)
 _ghost_arg(uint32_t before_p)
 _ghost_arg(uint32_t saved)
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(saved)))
-void global_live_mixed(uint32_t *p, _plain uint32_t *q)
-    _requires(_live(global_live_left) && _live(global_live_right))
-    _requires(global_live_left == before_left && before_left < 100)
-    _requires(global_live_right == before_right && before_right < 100)
-    _requires(*p == before_p && before_p < 100)
+void global_live_mixed(_plain uint32_t *p, _plain uint32_t *q)
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_left) $(before_left)))
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_right) $(before_right)))
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) $(before_p)))
+    _requires(before_left < 100)
+    _requires(before_right < 100)
+    _requires(before_p < 100)
     _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(_live(*p))
     _ensures(global_live_left == before_left + 1)
     _ensures(global_live_right == before_right + 1)
     _ensures(*p == before_p + 1)
@@ -1360,21 +1380,21 @@ _ghost_arg(uint32_t before_right)
 _ghost_arg(uint32_t before_p)
 _ghost_arg(uint32_t saved)
 _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(saved)))
-void global_live_mixed_call(uint32_t *p, _plain uint32_t *q)
-    _requires(_live(global_live_left) && _live(global_live_right))
-    _requires(global_live_left == before_left && before_left < 100)
-    _requires(global_live_right == before_right && before_right < 100)
-    _requires(*p == before_p && before_p < 100)
+void global_live_mixed_call(_plain uint32_t *p, _plain uint32_t *q)
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_left) $(before_left)))
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_right) $(before_right)))
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) $(before_p)))
+    _requires(before_left < 100)
+    _requires(before_right < 100)
+    _requires(before_p < 100)
     _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(_live(*p))
     _ensures(global_live_left == before_left + 1)
     _ensures(global_live_right == before_right + 1)
     _ensures(*p == before_p + 1)
 {
-    void (*fp)(uint32_t *, _plain uint32_t *) = global_live_mixed;
+    void (*fp)(_plain uint32_t *, _plain uint32_t *) = global_live_mixed;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_leaf
-        (hide ((reveal $(before_p), (reveal $(before_left), reveal $(before_right))),
-            (reveal $(before_left), (reveal $(before_right), (reveal $(before_p), reveal $(saved)))))));
     fp(p, q);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -1389,10 +1409,8 @@ void global_live_distinct(void)
     global_live_right = 20;
     uint32_t p = 30;
     uint32_t q = 40;
-    void (*fp)(uint32_t *, _plain uint32_t *) = global_live_mixed;
+    void (*fp)(_plain uint32_t *, _plain uint32_t *) = global_live_mixed;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_leaf
-        (hide ((30ul, (10ul, 20ul)), (10ul, (20ul, (30ul, 40ul))))));
     fp(&p, &q);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     _assert(p == 31 && q == 40);
