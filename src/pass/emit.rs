@@ -7055,12 +7055,21 @@ impl<'a> Emitter<'a> {
         // `let`-bound copy) keeps the argument *definitionally* the tuple
         // component, which the prover needs to match ownership (`pts_to`)
         // preconditions carried by pointer-parameter callees.
-        let call_body = match projs.len() {
-            0 => callee.append(" ()"),
-            _ => callee
-                .append(" ")
-                .append(Doc::intersperse(projs.iter().cloned(), Doc::text(" "))),
-        };
+        // Ghost values must come from the wrapper's witness, not fresh holes.
+        let ghost_args = (0..decl.ghost_args.len()).map(|i| {
+            Doc::text("#").append(parens(unaryfn(
+                Doc::text("hide"),
+                nested_pair_proj(Doc::text("(snd (reveal y_fp))"), i, decl.ghost_args.len()),
+            )))
+        });
+        let args = ghost_args.chain(if projs.is_empty() {
+            vec![Doc::text("()")]
+        } else {
+            projs
+        });
+        let call_body = callee
+            .append(" ")
+            .append(Doc::intersperse(args, Doc::text(" ")));
         let fst = Doc::hardline()
             .append(Doc::hardline())
             .append(wrap_sig)
@@ -7235,7 +7244,8 @@ impl<'a> Emitter<'a> {
             }
         }
 
-        if params.is_empty() {
+        // Empty C argument lists still take unit when ghost parameters exist.
+        if args.is_empty() {
             params.push(Doc::text("()"));
         }
 
@@ -7682,7 +7692,7 @@ impl<'a> Emitter<'a> {
             env.push_arg(arg, LocalDeclKind::RValue);
         }
 
-        if params.is_empty() {
+        if decl.args.is_empty() {
             params.push(Doc::text("()"));
         }
 

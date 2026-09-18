@@ -151,8 +151,14 @@ The record-level and field-level forms differ in scope: record-level binds `this
 
 PAL exposes two ghost constructs for proof assistance that have no runtime effect:
 
-- `_ghost_arg(T)` — extra parameter erased at runtime; usable only in specs and ghost statements.
+- `_ghost_arg(T name)` — extra parameter erased at runtime; usable only in specs and ghost statements.
 - `_ghost_stmt(expr)` — Pulse statement executed only during verification (e.g. applying a lemma).
+
+Ghost arguments do not change C function-pointer signatures. Generated
+wrappers forward them through erased witnesses. If inference cannot determine
+a call's ghost arguments, supply a witness with a ghost statement; the callee's
+precondition must still hold. Taking a function's address requires no witness.
+See `test/func_pointer/func_pointer.c` for examples.
 
 ## Pulse interop
 
