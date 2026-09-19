@@ -7587,6 +7587,54 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// A path into a value the body holds directly rather than in storage.
+    ///
+    /// A structure parameter passed by value is an F\* record, and a fixed
+    /// array inside one is a sequence, so `s.b[i]` is two projections: no
+    /// address, no ownership, and no focus to open or close. C agrees that
+    /// this reads nothing -- the copy is the parameter -- and the obligation
+    /// a subscript carries is the sequence's own pinned length rather than
+    /// anything the contract has to say.
+    fn value_read(&mut self, e: &Expr) -> Option<String> {
+        match &strip_vattr(e).val {
+            // Only a name with no storage behind it. A local, an allocated
+            // block, an array parameter and an alias all have somewhere the
+            // value lives, and reading through that is the access this is
+            // not.
+            ExprT::Var(v) => {
+                let v = v.val.to_string();
+                if !self.params.contains(&v) {
+                    return None;
+                }
+                if self.slots.iter().any(|s| s.name == v)
+                    || self.blocks.iter().any(|b| b.var == v)
+                    || self.arrays.contains_key(&v)
+                    || self.aliases.contains_key(&v)
+                    || self.is_array_alias(&v)
+                {
+                    return None;
+                }
+                Some(format!("var_{}", v))
+            }
+            ExprT::Member(base, f) => {
+                self.struct_of(base).ok()?;
+                self.field_ty(base, f).ok()?;
+                let b = self.value_read(base)?;
+                Some(format!("({}).fld_{}", b, f.val))
+            }
+            ExprT::Index(base, idx) => {
+                let bty = self.ty_of(base).ok()?;
+                if !matches!(peel(self.tds, &bty).val, TypeT::FixedArray(..)) {
+                    return None;
+                }
+                let b = self.value_read(base)?;
+                let i = self.index(idx).ok()?;
+                Some(format!("(Seq.index {} (SizeT.v {}))", b, i))
+            }
+            _ => None,
+        }
+    }
+
     /// The published length of an array global, if it has one.
     fn global_array_len(&self, v: &Ident) -> Option<u64> {
         let gv = self.env.lookup_global_var(v)?;
@@ -9529,6 +9577,32 @@ impl<'a> Body<'a> {
                 // ownership, no sequencing, and usable inside an assertion.
                 if let Some(x) = self.const_read(e) {
                     return Ok(x);
+                }
+                // A path into a parameter passed by value is a projection out
+                // of a record this function already holds, not a read of
+                // memory.
+                if let Some(x) = self.value_read(e) {
+                    return Ok(x);
+                }
+                // A subscript of a constant table whose index is not itself a
+                // constant. The table is a closed term, so the read is
+                // `Seq.index` of it -- no ownership, no sequencing, and
+                // usable inside an assertion, exactly like the scalar case
+                // above. `const_seq_with_len` keeps that affordable: its
+                // length and its indexing are SMT patterns, so the solver
+                // never walks the list.
+                if let ExprT::Index(base, idx) = &e.val
+                    && let Some((bty, Some(binit))) = self.const_path(base)
+                    && let Some((_, n, term)) = const_array(self.tds, &bty, &binit)
+                {
+                    let literal = const_index(&strip_vattr(idx).val).is_some_and(|k| k < n);
+                    if !literal && !self.signed_ok {
+                        return Err("a subscript of a constant table, whose bounds obligation \
+                                    needs the untranslated `_requires`"
+                            .to_string());
+                    }
+                    let i = self.rvalue(idx)?;
+                    return Ok(format!("(Seq.index {} (SizeT.v {}))", term, i));
                 }
                 // A field whose type is an array decays to a pointer to its
                 // first element, exactly as a whole array does, and Palow

@@ -3172,8 +3172,20 @@ new facts about memory.
    array cell and through an `_out` cell without a ghost step of its own,
    where PAL needs four.
 
-   As of this milestone: **918 specifications, 861 of them with real bodies,
-   41 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   Reading something that is not in memory. A structure passed by value is an
+   F\* record and a fixed array inside one is a sequence, so `s.c` and
+   `s.b[i]` are projections: no address, no focus, and nothing to give back.
+   The emitter was reaching for storage anyway, and refusing when the
+   structure had none it could name -- which is how a plain scalar field of a
+   by-value parameter came to be admitted. The same holds one step further
+   out: a constant table reached through a field of an immutable global is a
+   closed term, and indexing it is `Seq.index` of that term rather than a
+   read. `const_seq_with_len` is what keeps the second one affordable, since
+   its length and its indexing are the SMT patterns the solver needs and the
+   list is never walked.
+
+   As of this milestone: **919 specifications, 864 of them with real bodies,
+   39 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

@@ -95,3 +95,10 @@ struct twodim {
 int access(const struct twodim *m) {
     return m->arr[2][3];
 }
+// A scalar field of a structure passed by value. There is no storage to read
+// from: the parameter is the record, so the access is a projection.
+int read_c_by_value(_plain struct mixed s)
+ _ensures(s.c == return)
+{
+    return s.c;
+}
