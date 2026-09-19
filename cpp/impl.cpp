@@ -1341,6 +1341,9 @@ public:
         return mk_rvalue_unop(std::move(loc), ir::UnOp::BitNot(),
                               trRValue(uo->getSubExpr()));
 
+      case UO_Plus:
+        return trRValue(uo->getSubExpr());
+
       case UO_Minus:
         return mk_rvalue_unop(std::move(loc), ir::UnOp::Neg(),
                               trRValue(uo->getSubExpr()));
