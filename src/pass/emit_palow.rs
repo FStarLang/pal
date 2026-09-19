@@ -5961,6 +5961,9 @@ struct Touched {
     aliases: HashMap<String, Rc<Expr>>,
     /// The globals a contract asks to hold, named in `_live(g)`.
     lived: HashSet<String>,
+    /// The named objects whose own address the body takes. Each of them needs
+    /// storage, wherever in the body the `&` happens to appear.
+    addressed: HashSet<String>,
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -6086,6 +6089,9 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         // An address that escapes may be stored through, so the object it
         // names counts as written.
         ExprT::Ref(x) => {
+            if let Some(n) = lvalue_name(strip_vattr(x)) {
+                t.addressed.insert(n);
+            }
             touch_write(x, t);
             touch_expr(x, t);
         }
@@ -7795,6 +7801,40 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// Give a named object storage of its own, and copy its value in.
+    ///
+    /// A C parameter is an ordinary mutable object, but Palow passes it by
+    /// value, so it only acquires storage if the body asks for it -- which it
+    /// does by taking its address, directly or through an alias.
+    fn give_storage(&mut self, name: &str, ty: &Type) -> Result<String, String> {
+        if let Some(s) = self.slots.iter().rev().find(|s| s.name == *name) {
+            return Ok(s.addr.clone());
+        }
+        if !has_repr(self.tds, ty) {
+            return Err(format!("`{}` is {}", name, describe(self.tds.resolve(ty))));
+        }
+        let pn = palow_name(self.tds, ty)
+            .ok_or_else(|| format!("`{}` has an unsupported type", name))?;
+        let fstar_ty =
+            fstar_type(self.tds, ty).ok_or_else(|| format!("`{}` has no F* type", name))?;
+        self.lines
+            .push(format!("let loc_{} = {}_stack_alloc ();", name, pn));
+        self.lines
+            .push(format!("{}_write_uninit loc_{} var_{};", pn, name, name));
+        self.slots.push(Slot {
+            name: name.to_string(),
+            addr: format!("loc_{}", name),
+            palow_ty: pn,
+            fstar_ty,
+            init: true,
+            array: None,
+            global: false,
+            holds_fn: BTreeMap::new(),
+            scattered: BTreeSet::new(),
+        });
+        Ok(format!("loc_{}", name))
+    }
+
     /// The address of an lvalue, as an F* expression of type `ptr`.
     fn addr(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
@@ -7828,36 +7868,13 @@ impl<'a> Body<'a> {
                 if self.in_branch {
                     // The slot would be scoped to the arm, but uses of the
                     // parameter after the `if` would still read the value that
-                    // was passed in.
+                    // was passed in. `give_storage` runs at entry precisely so
+                    // that this is not reached for a parameter whose address
+                    // the body takes anywhere.
                     return Err(format!("`{}` is addressed inside an `if`", v.val));
                 }
                 let ty = self.ty_of(e)?;
-                if !has_repr(self.tds, &ty) {
-                    return Err(format!(
-                        "`{}` is {}",
-                        v.val,
-                        describe(self.tds.resolve(&ty))
-                    ));
-                }
-                let pn = palow_name(self.tds, &ty)
-                    .ok_or_else(|| format!("`{}` has an unsupported type", v.val))?;
-                self.lines
-                    .push(format!("let loc_{} = {}_stack_alloc ();", v.val, pn));
-                self.lines
-                    .push(format!("{}_write_uninit loc_{} var_{};", pn, v.val, v.val));
-                self.slots.push(Slot {
-                    name: v.val.to_string(),
-                    addr: format!("loc_{}", v.val),
-                    palow_ty: pn,
-                    fstar_ty: fstar_type(self.tds, &ty)
-                        .ok_or_else(|| format!("`{}` has no F* type", v.val))?,
-                    init: true,
-                    array: None,
-                    global: false,
-                    holds_fn: BTreeMap::new(),
-                    scattered: BTreeSet::new(),
-                });
-                Ok(format!("loc_{}", v.val))
+                self.give_storage(&v.val.to_string(), &ty)
             }
             // The address of `*e` is the value of `e`, but only ownership we
             // can name is ownership we have. A parameter or a local carries its
@@ -11219,6 +11236,63 @@ impl<'a> Body<'a> {
                 self.alloc_slot(name, ty)?;
                 Ok(())
             }
+            // A variable-length array. It is the same object a fixed-size
+            // local array is -- `n` elements of storage, each written on its
+            // own -- and the only difference is that `n` is a value rather
+            // than a constant, which the model's `array_stack_alloc` already
+            // takes. What C does not give is any guarantee that `n` elements
+            // fit in a `size_t`, so the byte count is a real obligation and
+            // the function's own `_requires` is the only thing that can
+            // discharge it.
+            StmtT::DeclStackArray {
+                name,
+                elem_type,
+                size,
+            } => {
+                let (Some(pn), Some(esize), Some(ety)) = (
+                    palow_name(self.tds, elem_type),
+                    palow_sizeof(self.tds, elem_type),
+                    fstar_type(self.tds, elem_type),
+                ) else {
+                    return Err(format!(
+                        "a stack array of {}",
+                        describe(self.tds.resolve(elem_type))
+                    ));
+                };
+                if !has_repr(self.tds, elem_type) {
+                    return Err(format!(
+                        "a stack array of {}",
+                        describe(self.tds.resolve(elem_type))
+                    ));
+                }
+                if !self.requires_ok {
+                    return Err(
+                        "a stack array, whose size obligation needs a `_requires` that is not \
+                         translated"
+                            .to_string(),
+                    );
+                }
+                let n = self.index(size)?;
+                self.lines.push(format!(
+                    "let loc_{} = array_stack_alloc {}_repr {}sz {} ({}sz `SizeT.mul` {});",
+                    name.val, pn, esize, n, esize, n
+                ));
+                self.slots.push(Slot {
+                    name: name.val.to_string(),
+                    addr: format!("loc_{}", name.val),
+                    palow_ty: pn,
+                    fstar_ty: format!(
+                        "(s: Seq.seq (option {}) {{ Seq.length s == SizeT.v {} }})",
+                        ety, n
+                    ),
+                    init: true,
+                    array: Some((format!("{}sz", esize), true)),
+                    global: false,
+                    holds_fn: BTreeMap::new(),
+                    scattered: BTreeSet::new(),
+                });
+                Ok(())
+            }
             StmtT::Let(name, ty, init) => {
                 let v = match (self.alloc_of(init), self.array_alloc_of(init)) {
                     (Some((which, pointee, z)), _) => self.allocate(name, which, &pointee, z)?,
@@ -12962,6 +13036,31 @@ fn emit_body(
             .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
             .collect(),
     };
+
+    // A parameter whose address the body takes needs storage, and it needs it
+    // for the whole call rather than from the `&` onwards: an `if` arm that
+    // writes through the address is writing the object the code after the
+    // `if` reads. Doing it here rather than at the first `&` is also what
+    // makes that case translatable at all, since a slot allocated inside an
+    // arm would be released at the end of it.
+    let addressed = {
+        let mut t = Touched::default();
+        touch_stmts(&defn.body, &mut t);
+        t.addressed
+    };
+    for a in &defn.decl.args {
+        let Some(name) = a.name.as_ref() else {
+            continue;
+        };
+        let n = name.val.to_string();
+        if a.mode == ParamMode::Out || !addressed.contains(&n) || b.arrays.contains_key(&n) {
+            continue;
+        }
+        // A refusal here is not a refusal of the body: the `&` may sit
+        // somewhere the translation gives up on anyway, and where it does not
+        // the ordinary path reports it with the same words.
+        let _ = b.give_storage(&n, &a.ty);
+    }
 
     b.rest(&defn.body)?;
     Ok(TranslatedBody {

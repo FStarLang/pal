@@ -3184,8 +3184,22 @@ new facts about memory.
    its length and its indexing are the SMT patterns the solver needs and the
    list is never walked.
 
-   As of this milestone: **919 specifications, 864 of them with real bodies,
-   39 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   Two ways of getting storage at the right moment. A parameter is passed by
+   value, so it only acquires storage when the body takes its address -- and
+   the emitter was allocating it at the `&`, which is too late if the `&` is
+   inside an `if`: the arm would release storage the code after the `if` still
+   reads through. The object exists for the whole call whatever the source
+   happens to look like, so the allocation moves to entry for any parameter
+   the body addresses anywhere, and `issue39`'s last case stops being a
+   refusal. In the other direction, a variable-length array is the same object
+   a fixed-size local array is -- `n` elements of storage written one at a
+   time -- and the model's `array_stack_alloc` already takes a value for `n`.
+   What C does not give is any guarantee that `n` of them fit in a `size_t`,
+   so the byte count is a real obligation, discharged by the function's own
+   `_requires` exactly as an array allocation's is.
+
+   As of this milestone: **919 specifications, 866 of them with real bodies,
+   37 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
