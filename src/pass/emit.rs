@@ -717,6 +717,17 @@ struct Emitter<'a> {
     current_fn_total: bool,
     tmp_counter: usize,
     string_literal_ids: HashMap<*const Expr, usize>,
+    /// Bindings that must be emitted as `let`s *before* the statement currently
+    /// being emitted. Pulse resolves a stateful call's implicits against the
+    /// resource context, and for a NESTED stateful call it resolves them
+    /// against the enclosing call's post-state -- so a nested borrow sees the
+    /// spec it is itself about to produce. Anything that consumes or rewrites
+    /// a resource therefore has to be bound to a name first. (A nested call
+    /// that merely `preserves` its resource, such as `array_read`, is
+    /// unaffected, which is why this only appeared with row borrows.)
+    /// Flushed by `emit_stmt`, and saved/restored around it so that a borrow
+    /// inside an `if` or `while` body stays inside that body.
+    pending_prelude: Vec<Doc>,
 }
 
 impl<'a> Emitter<'a> {
@@ -2348,6 +2359,19 @@ impl<'a> Emitter<'a> {
                 // read with `array_read`/`arrayptr_read` like any other live array.
                 let arr_kind = self.emit_expr(env, arr);
                 let use_spec_idx = is_fixed_array && matches!(arr_kind, ExprKind::RValue(_));
+                // A live (not by-value) array whose ELEMENT is itself a fixed
+                // array -- i.e. the outer index of a multidimensional access.
+                // `is_arrayptr` is excluded: an arrayptr into a 2-D array is a
+                // different lowering and is not yet handled (L30).
+                let is_multidim_live_array = !use_spec_idx
+                    && !is_arrayptr
+                    && arr_ty.as_ref().is_some_and(|ty| match &ty.val {
+                        TypeT::FixedArray(elem, _) => matches!(
+                            &env.vtype_whnf(elem.clone().into()).val,
+                            TypeT::FixedArray(_, _)
+                        ),
+                        _ => false,
+                    });
                 let arr_doc = match arr_kind {
                     ExprKind::ArrayLValue(arr_doc) => arr_doc,
                     other => other.to_rvalue(),
@@ -2364,6 +2388,40 @@ impl<'a> Emitter<'a> {
                             parens(Doc::text("SizeT.v").append(Doc::line()).append(idx_doc)),
                         ]))
                     }))
+                } else if is_multidim_live_array {
+                    // Indexing a LIVE multidimensional array yields a ROW, and
+                    // a row is memory, not a value: in C, `a[i]` of a
+                    // `T a[M][N]` is the array of N elements at `a + i*N`.
+                    //
+                    // Neither of the two branches around this one can express
+                    // that. `array_read` would read the entire row out by
+                    // value, and `array_spec_idx` yields a pure `array_spec`
+                    // where the *next* index needs a live handle -- which is
+                    // what PAL used to emit, producing an ill-typed term that
+                    // surfaced only as an unprovable Pulse resource
+                    // (PAL_LIMITATIONS.md L30).
+                    //
+                    // Borrow the row out of its parent's mask instead. The
+                    // result is a real `array` handle, so the next index reads,
+                    // subscripts or borrows a cell from it exactly as it would
+                    // for a one-dimensional array, and the parent demonstrably
+                    // no longer owns the row.
+                    let tmp = self.fresh_tmp("row");
+                    self.pending_prelude.push(
+                        Doc::text("let ")
+                            .append(tmp.clone())
+                            .append(Doc::text(" ="))
+                            .append(Doc::line())
+                            .append(naryfn([
+                                Doc::text("array_borrow_row"),
+                                arr_doc,
+                                idx_doc,
+                            ]))
+                            .append(";")
+                            .nest(2)
+                            .group(),
+                    );
+                    ExprKind::ArrayLValue(annotated(v, || tmp.clone()))
                 } else {
                     let fn_name = if is_arrayptr {
                         "arrayptr_read"
@@ -4111,7 +4169,21 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// Emit a statement, flushing any `let` bindings that emitting its
+    /// expressions hoisted out (see `pending_prelude`). The buffer is
+    /// saved and restored so that a nested statement's hoists land in the
+    /// nested block rather than escaping to the enclosing one.
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
+        let saved = std::mem::take(&mut self.pending_prelude);
+        let doc = self.emit_stmt_inner(env, stmt);
+        let prelude = std::mem::replace(&mut self.pending_prelude, saved);
+        prelude
+            .into_iter()
+            .fold(Doc::nil(), |acc, p| acc.append(p).append(Doc::line()))
+            .append(doc)
+    }
+
+    fn emit_stmt_inner(&mut self, env: &Env, stmt: &Stmt) -> Doc {
         annotated(stmt, || {
             match &stmt.val {
                 StmtT::Call(v) => {
@@ -8655,6 +8727,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         typedef_override_map,
         current_fn_total: false,
         tmp_counter: 0,
+        pending_prelude: Vec::new(),
         string_literal_ids: HashMap::new(),
     };
 
