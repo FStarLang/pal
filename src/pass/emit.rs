@@ -3930,6 +3930,61 @@ impl<'a> Emitter<'a> {
                 ExprT::ArrayInit { elem_ty, elems, .. } => {
                     let elem_ty_doc = self.emit_type(env, elem_ty);
                     let elem_ty_arg = Doc::text("#").append(elem_ty_doc);
+                    // An initializer all of whose elements are one and the
+                    // same literal -- overwhelmingly `T buf[n] = {0};` --
+                    // gets the constant-fill spec instead of a list of `n`
+                    // `Cons` cells. This is not merely tidier: the length of
+                    // an `array_spec_of_list_with_len` application does not
+                    // reach the solver at all (its typing axiom is guarded on
+                    // an erased proof implicit), so an obligation such as
+                    // `64 <= array_spec_len (...)`, which every use of the
+                    // buffer as an `_array` argument raises, is unprovable
+                    // from about 32 elements up. See the comment on
+                    // `array_spec_const` in Pulse.Lib.C.Array.fsti.
+                    //
+                    // Restricted to cases where every element provably
+                    // denotes the same value:
+                    //   * every element is zero, possibly under casts -- zero
+                    //     is zero under any cast between integer types, and
+                    //     this is the `= {0}` idiom itself. Note the elements
+                    //     are not syntactically equal even there: the `0` the
+                    //     programmer wrote arrives as a cast of an `int`
+                    //     literal while the zeros clang pads with do not.
+                    //   * every element is one and the same literal,
+                    //     syntactically. `IntLit`/`BoolLit`/`FloatLit` carry
+                    //     no nested expressions, hence no source locations,
+                    //     so the equality test is exact.
+                    // Anything else falls back to the list form below.
+                    fn strip_casts(e: &Rc<Expr>) -> &Rc<Expr> {
+                        match &e.val {
+                            ExprT::Cast(inner, _) | ExprT::VAttr(_, inner) => strip_casts(inner),
+                            _ => e,
+                        }
+                    }
+                    let all_zero = !elems.is_empty()
+                        && elems.iter().all(|e| {
+                            matches!(&strip_casts(e).val,
+                                ExprT::IntLit(v, _) if **v == BigInt::ZERO)
+                        });
+                    let all_same_literal = match elems.split_first() {
+                        Some((first, rest))
+                            if matches!(
+                                first.val,
+                                ExprT::IntLit(..) | ExprT::BoolLit(..) | ExprT::FloatLit(..)
+                            ) =>
+                        {
+                            rest.iter().all(|e| e.val == first.val)
+                        }
+                        _ => false,
+                    };
+                    if all_zero || all_same_literal {
+                        return naryfn([
+                            Doc::text("array_spec_const"),
+                            elem_ty_arg.clone(),
+                            self.emit_rvalue(env, &elems[0]),
+                            Doc::text(elems.len().to_string()),
+                        ]);
+                    }
                     naryfn([
                         Doc::text("array_spec_of_list_with_len"),
                         elem_ty_arg.clone(),

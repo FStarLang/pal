@@ -153,6 +153,14 @@ let array_spec_of_list_len xs = ()
 
 let array_spec_of_list_idx xs i = ()
 
+let array_spec_const #a v n =
+  Seq.init n (fun _ -> Val v)
+
+let array_spec_const_idx #a v n i = ()
+
+let array_spec_const_eq #a v n xs =
+  Seq.lemma_eq_intro (array_spec_const v n) (array_spec_of_list xs)
+
 private let rec mk_list (#a: Type) (s: full_array_spec a) (i: nat { i <= Seq.length s }) : Tot (list a)
   (decreases (Seq.length s - i))
 =

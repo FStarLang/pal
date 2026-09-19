@@ -186,6 +186,49 @@ let array_spec_of_list_with_len (#a: Type) (xs: list a) (n: nat) (#_: normalize_
     full_array_lspec a n =
   array_spec_of_list xs
 
+/// The spec of an array initializer all of whose elements are the same
+/// literal, i.e. `T buf[n] = {0};` and friends.
+///
+/// This exists because `array_spec_of_list_with_len` is unusable from the
+/// solver above a handful of elements. Its length lives in the refinement of
+/// its return type, and the typing axiom F* emits for an application of it
+/// carries a guard `HasType <p> (Tm_refine ... normalize_term (List.length
+/// xs) == n ...)` for its erased proof implicit `#_`. F* erases that implicit,
+/// so no such `HasType` fact ever appears in a goal and the axiom is dead.
+/// Measured with `--log_queries`: the guard was on the axiom and the
+/// `Tm_refine` symbol occurred nowhere else in the query. The consequence was
+/// that
+///
+///     char buf[64] = {0};   ->   64 <= array_spec_len (array_spec_of_list_with_len [...] 64)
+///
+/// was unprovable, blocking every use of such a buffer as an `_array`
+/// argument. It happened to go through at n <= 16 by another route and to
+/// fail from n = 32, which made it look like a fuel or rlimit problem. It is
+/// not: neither `--z3rlimit 200`, `--fuel 70` nor `--fuel 0 --ifuel 0` moves
+/// it, and Z3 cannot prove even the bare `List.length [<32 literals>] == 32`
+/// at `--fuel 70`. Do not try to repair that definition by strengthening the
+/// list-length reasoning; the length of a literal initializer is not
+/// something a caller should pay recursion depth for at all.
+///
+/// Here both arguments are ordinary terms, the length is in the return type
+/// with no side condition, and so the fact reaches the solver unguarded.
+/// `emit.rs` prefers this form whenever every element of an array
+/// initializer is one and the same literal.
+val array_spec_const (#a: Type) (v: a) (n: nat) : full_array_lspec a n
+
+val array_spec_const_idx (#a: Type) (v: a) (n: nat) (i: nat) :
+  Lemma
+    (requires i < n)
+    (ensures array_spec_idx (array_spec_const v n) i == v)
+    [SMTPat (array_spec_idx (array_spec_const v n) i)]
+
+/// `array_spec_const` agrees with the list form, so a proof may still reason
+/// through the list when it wants to.
+val array_spec_const_eq (#a: Type) (v: a) (n: nat) (xs: list a) :
+  Lemma
+    (requires List.length xs == n /\ (forall (i: nat). i < n ==> List.Tot.index xs i == v))
+    (ensures array_spec_const v n == array_spec_of_list xs)
+
 val array_spec_to_list #a (s: full_array_spec a) : list a
 val array_spec_to_list_len #a s : Lemma (List.length (array_spec_to_list #a s) == array_spec_len s) [SMTPat (List.length (array_spec_to_list #a s))]
 val array_spec_to_list_idx #a (s: full_array_spec a) (i: nat) :
