@@ -91,3 +91,20 @@ void init_field(pair *p)
     init_cell(&p->hi);
 }
 #endif
+
+#ifdef PALOW
+// Palow: a local array handed to an `_out _array` parameter. PAL's model has
+// no uninitialised-array view, so the whole `_out _array` mode is Palow's.
+void fill_two(_out _array int *a)
+  _preserves(a._length == 2)
+{
+  a[0] = 1;
+  a[1] = 2;
+}
+
+void use_fill_two(void)
+{
+  int buf[2];
+  fill_two(buf);
+}
+#endif

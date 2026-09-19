@@ -940,6 +940,10 @@ fn is_shared(mode: ParamMode) -> bool {
 }
 
 struct FnSurface {
+    /// `_out` array parameters: base name -> the term for the sequence of
+    /// cells handed in. Their length is the one thing about them a contract
+    /// -- including a loop invariant -- can talk about.
+    olens: HashMap<String, String>,
     decl: String,
     /// The ownership the contract grants over what the parameters point to.
     /// A function body never has to restate this -- Pulse carries it -- except
@@ -1062,6 +1066,12 @@ struct Spec<'a> {
     olds: HashMap<String, String>,
     /// Parameters whose `pointees` entry is a sequence rather than a value.
     arrays: HashSet<String>,
+    /// Array parameters whose length is known even where their *contents* are
+    /// not. An `_out` array has no incoming value, so its `pointees` entry is
+    /// `None` on entry -- but it does have a length, because the storage the
+    /// caller handed over is a fixed number of cells, and a precondition that
+    /// talks about `a._length` is talking about exactly that.
+    olens: HashMap<String, String>,
     /// C object -> the term naming its *address*, where it has one. A
     /// parameter is passed by value and a pointer parameter is already an
     /// address, but a local lives in a slot, and `$&(x)` means that slot.
@@ -1216,6 +1226,7 @@ impl<'a> Spec<'a> {
                         pointees: self.pointees.clone(),
                         olds: self.olds.clone(),
                         arrays: self.arrays.clone(),
+                        olens: self.olens.clone(),
                         owns: self.owns.clone(),
                         addrs: self.addrs.clone(),
                         guarded: self.guarded.clone(),
@@ -1341,7 +1352,7 @@ impl<'a> Spec<'a> {
                     When::Post => post,
                     When::Pre | When::Old => pre,
                 };
-                match chosen {
+                match chosen.as_ref().or_else(|| self.olens.get(&*v.val)) {
                     Some(s) => Ok(format!("(Seq.length {})", s)),
                     None => Err(format!("`{}._length` is not available here", v.val)),
                 }
@@ -2090,6 +2101,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         pointees: HashMap::new(),
         olds: HashMap::new(),
         arrays: HashSet::new(),
+        olens: HashMap::new(),
         owns: HashMap::new(),
         addrs: HashMap::new(),
         guarded: HashSet::new(),
@@ -2185,6 +2197,7 @@ fn emit_pure_fn(
         pointees: HashMap::new(),
         olds: HashMap::new(),
         arrays: HashSet::new(),
+        olens: HashMap::new(),
         owns: HashMap::new(),
         addrs: HashMap::new(),
         guarded: HashSet::new(),
@@ -2385,6 +2398,7 @@ fn emit_fn(
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut owned: Vec<OwnedParam> = Vec::new();
     let mut arrays: HashSet<String> = HashSet::new();
+    let mut olens: HashMap<String, String> = HashMap::new();
     let mut owns: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     // The `_refine`s on each parameter's pointee, to be translated once the
     // pointee terms for the whole signature are known.
@@ -2648,12 +2662,31 @@ fn emit_fn(
                     })?;
                     let pn = pn.clone();
                     let p = pname.clone();
-                    (
-                        format!("Seq.seq {}", vty),
-                        Box::new(move |perm: &str, v: &str| {
-                            format!("array_pts_to {}_repr {} {} {} {}", pn, esize, p, perm, v)
-                        }),
-                    )
+                    // `_out` says the callee is handed storage rather than a
+                    // value, and storage is the `option` view: the length is
+                    // fixed -- it is what the caller allocated -- but no
+                    // element is promised to hold anything. Keeping the
+                    // sequence as a binder rather than hiding it behind
+                    // `array_pts_to_uninit` is what lets `a._length` go on
+                    // meaning `Seq.length` of it.
+                    if arg.mode == ParamMode::Out {
+                        (
+                            format!("Seq.seq (option ({}))", vty),
+                            Box::new(move |perm: &str, v: &str| {
+                                format!(
+                                    "array_pts_to (maybe_repr {pn}_repr {esize}) {esize} {p} \
+                                     {perm} {v}"
+                                )
+                            }),
+                        )
+                    } else {
+                        (
+                            format!("Seq.seq {}", vty),
+                            Box::new(move |perm: &str, v: &str| {
+                                format!("array_pts_to {}_repr {} {} {} {}", pn, esize, p, perm, v)
+                            }),
+                        )
+                    }
                 }
             };
         // The deep half of the parameter's ownership. A struct pointer in C
@@ -2731,7 +2764,27 @@ fn emit_fn(
                 ));
                 pointees.insert(base, (None, Some(format!("{}'", vname))));
             }
-            ParamMode::Out => return Err(format!("parameter {} is an `_out` array", pname)),
+            // An `_out` array leaves fully initialised: that is the whole of
+            // what the mode promises, and it is what every caller wants back.
+            // The `option` view goes in, the plain one comes out, and the
+            // length is the same storage either way.
+            ParamMode::Out => {
+                let esize = palow_sizeof(tds, pt).unwrap();
+                ghosts.push(format!("(#{}: erased ({}))", vname, vty));
+                wits.push((vname.clone(), vty.clone(), true));
+                req.push(pts_to("1.0R", &vname));
+                let plain = fstar_type(tds, pt).unwrap();
+                fresh.push((
+                    format!("{}'", vname),
+                    format!("Seq.seq {}", plain),
+                    format!(
+                        "array_pts_to {pn}_repr {esize} {pname} 1.0R {vname}' ** \
+                         pure (Seq.length {vname}' == Seq.length (reveal {vname}))"
+                    ),
+                ));
+                olens.insert(base.clone(), format!("(reveal {})", vname));
+                pointees.insert(base, (None, Some(format!("{}'", vname))));
+            }
             ParamMode::Const => {
                 let perm = format!("perm_{}", base);
                 perms.push(format!("(#{}: perm)", perm));
@@ -3047,6 +3100,7 @@ fn emit_fn(
         pointees,
         olds: HashMap::new(),
         arrays,
+        olens: olens.clone(),
         owns,
         addrs: HashMap::new(),
         guarded: guarded.clone(),
@@ -3184,6 +3238,7 @@ fn emit_fn(
             pointees,
             olds: spec.olds.clone(),
             arrays,
+            olens: spec.olens.clone(),
             owns: spec.owns.clone(),
             addrs: spec.addrs.clone(),
             guarded: spec.guarded.clone(),
@@ -3960,6 +4015,7 @@ fn emit_fn(
     }
 
     Ok(FnSurface {
+        olens,
         ret_spliced: contract_ok && !(ret_slprops.is_empty() && ret_valued.is_empty()),
         req_props,
         post_valid,
@@ -6727,6 +6783,11 @@ pub fn emit_palow(
                     .map(|a| a.mode == ParamMode::Out)
                     .collect(),
                 plain_ptrs: fndecl.args.iter().map(|a| is_plain(&tds, &a.ty)).collect(),
+                arr_args: fndecl
+                    .args
+                    .iter()
+                    .map(|a| extent(&tds, &a.ty) == Some(Extent::Array))
+                    .collect(),
                 consumes: fndecl
                     .args
                     .iter()
@@ -7239,6 +7300,9 @@ struct Callee {
     /// Which parameters are `_plain`, by position. A literal has no ownership
     /// to give, so its address may only be passed to one of these.
     plain_ptrs: Vec<bool>,
+    /// Which parameters are `_array`s, and so want a whole sequence's
+    /// ownership rather than a single pointee's.
+    arr_args: Vec<bool>,
     /// Which parameters are `_consumes`, by position. The argument's ownership
     /// does not come back, so the caller stops accounting for it.
     consumes: Vec<bool>,
@@ -7292,6 +7356,9 @@ struct Body<'a> {
     ret_binding: Option<String>,
     /// Array-kind pointer parameters, by C name.
     arrays: HashMap<String, ArrayParam>,
+    /// `_out` array parameters and the term for the cells handed in; see
+    /// `FnSurface::olens`.
+    olens: HashMap<String, String>,
     /// The function's parameters, by C name. Ownership of what a pointer points
     /// to is granted by the contract, and the contract only names parameters.
     params: HashSet<String>,
@@ -10113,6 +10180,7 @@ impl<'a> Body<'a> {
         }
         let outs = c.outs.clone();
         let plain_ptrs = c.plain_ptrs.clone();
+        let arr_args = c.arr_args.clone();
         let consumes = c.consumes.clone();
         let mut out = format!("func_{}", name.val);
         for (i, a) in args.iter().enumerate() {
@@ -10121,6 +10189,21 @@ impl<'a> Body<'a> {
             // cannot be handed one. Saying so here rather than emitting the
             // address keeps the refusal visible instead of leaving F* to fail
             // on a missing points-to.
+            // The array behind a *pointer field* is owned by the struct's
+            // deep predicate, which is one opaque slprop about the whole
+            // record: there is no step that takes the one field's sequence
+            // out of it and puts it back. Handing it over would need that
+            // step, so the call is refused rather than left to F*.
+            if arr_args.get(i) == Some(&true)
+                && let ExprT::Member(..) = &strip_vattr(a).val
+                && let Ok(aty) = self.ty_of(a)
+                && matches!(peel(self.tds, &aty).val, TypeT::Pointer(..))
+            {
+                return Err(
+                    "an array behind a struct field, whose ownership its deep predicate keeps"
+                        .to_string(),
+                );
+            }
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
             } else if is_literal(a) && plain_ptrs.get(i) != Some(&true) {
@@ -10204,10 +10287,44 @@ impl<'a> Body<'a> {
             self.slots[i].init = true;
             return Ok(self.slots[i].addr.clone());
         }
+        // A local array decays to its own address, and its storage view is
+        // already the `option` one the callee asks for, so handing it over
+        // costs nothing going in. It does cost a step coming back: the callee
+        // returns the array full, and the slot has to be released in the view
+        // it was allocated with.
+        if let ExprT::Cast(inner, _) = &strip_vattr(a).val
+            && let Some(v) = lvalue_name(inner)
+            && let Ok(fty) = self.ty_of(inner)
+            && matches!(peel(self.tds, &fty).val, TypeT::FixedArray(..))
+            && let Some(i) = self.slots.iter().rposition(|s| s.name == v)
+            && let Some((esize, true)) = self.slots[i].array.clone()
+        {
+            let (pn, at) = (self.slots[i].palow_ty.clone(), self.slots[i].addr.clone());
+            self.pending_close
+                .push(format!("array_unsomes {}_repr {} {};", pn, at, esize));
+            return Ok(at);
+        }
+        // An array parameter this function holds a *value* for, handed on as
+        // storage. Giving up what is in it is all that is needed going in --
+        // the callee promises to fill it again, so the plain view it returns
+        // is the one this function goes on holding.
+        if let ExprT::Var(v) = &strip_vattr(a).val
+            && !self.out_params.iter().any(|n| *n == *v.val)
+            && let Some(ap) = self.arrays.get(&*v.val)
+            && !ap.maybe
+        {
+            let (pn, at, esize) = (ap.pn.clone(), ap.addr.clone(), ap.esize.clone());
+            self.lines
+                .push(format!("array_unsomes {}_repr {} {};", pn, at, esize));
+            return Ok(at);
+        }
         if let ExprT::Var(v) = &strip_vattr(a).val
             && let Some(i) = self.out_params.iter().position(|n| *n == *v.val)
         {
             self.out_params.remove(i);
+            // Dropping it from `out_params` is also what records that the
+            // callee filled it: the array leaves in the plain view, so this
+            // function has nothing left to prove about it on the way out.
             return Ok(format!("var_{}", v.val));
         }
         // A place rather than a whole object: a field, an array element, or an
@@ -11025,6 +11142,7 @@ impl<'a> Body<'a> {
             pointees,
             olds,
             arrays,
+            olens: self.olens.clone(),
             // A loop invariant binds a fresh value for every struct it
             // carries, and the deep ownership of a fresh value is not
             // something the invariant has a name for yet, so a clause that
@@ -12148,6 +12266,25 @@ impl<'a> Body<'a> {
                 });
             }
         }
+        // An `_out` array was handed over as storage and has to leave as a
+        // value: that is what the mode promises the caller. The step is pure
+        // bookkeeping, but its obligation is not -- `array_somes` asks that
+        // every cell was written, which is the honest reading of C's rule
+        // against handing back an object that is partly indeterminate.
+        if mark == 0 {
+            for base in self.olens.keys().cloned().collect::<Vec<_>>() {
+                // Still an `_out` parameter means nothing else has taken it
+                // over; one handed on to a callee comes back already filled.
+                if !self.out_params.contains(&base) {
+                    continue;
+                }
+                let Some(a) = self.arrays.get(&base) else {
+                    continue;
+                };
+                self.lines
+                    .push(format!("array_somes {}_repr {} {};", a.pn, a.addr, a.esize));
+            }
+        }
         for i in (mark..self.slots.len()).rev() {
             let (addr, pn, init, array, global, scattered) = {
                 let s = &self.slots[i];
@@ -12952,7 +13089,10 @@ fn emit_body(
                 pn,
                 esize: format!("{}sz", esize),
                 addr: format!("var_{}", name.val),
-                maybe: false,
+                // An `_out` array arrives as storage, so its elements are
+                // `option`s: writing one needs no value to have been there,
+                // and reading one is the obligation C says it is.
+                maybe: a.mode == ParamMode::Out,
                 known_len: false,
             },
         );
@@ -12983,6 +13123,7 @@ fn emit_body(
         spec_binders: HashMap::new(),
         ret_binding: None,
         arrays,
+        olens: sig.olens.clone(),
         requires_ok: sig.req_props,
         owned: &sig.owned,
         granted: &sig.granted,

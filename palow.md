@@ -3198,8 +3198,43 @@ new facts about memory.
    so the byte count is a real obligation, discharged by the function's own
    `_requires` exactly as an array allocation's is.
 
-   As of this milestone: **919 specifications, 866 of them with real bodies,
-   37 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   An `_out` array is storage the callee is handed and a value it gives
+   back. Both halves are the same bytes and the same length; what changes is
+   what is known about the cells, so the contract asks for the `option` view
+   going in and promises the plain one coming out, with a `pure` clause
+   tying the two lengths together. Keeping the incoming sequence as an
+   ordinary binder rather than hiding it behind `array_pts_to_uninit` is what
+   lets `a._length` in a precondition go on meaning `Seq.length` of it, which
+   is the only thing a caller can say about storage whose contents are
+   indeterminate. The obligation that the promise is kept is `array_somes`,
+   emitted on the way out: it asks that every cell was written, which is the
+   honest reading of C's rule against handing back an object that is partly
+   indeterminate. It is discharged, and not assumed -- a function that leaves
+   a cell alone fails, as it should.
+
+   Getting an array *to* such a parameter is three cases and they are all
+   cheap. A local array is already held in the `option` view, so handing it
+   over costs nothing going in and one `array_unsomes` coming back, because
+   the slot has to be released in the view it was allocated with. An array
+   parameter this function holds a value for gives that value up with a
+   single `array_unsomes` and needs nothing afterwards, since what the callee
+   returns is the plain view it was already holding. And an `_out` array
+   passed straight on needs neither: dropping it from the list of unwritten
+   parameters is also what records that the callee filled it, so the exit has
+   nothing left to prove about it.
+
+   The array behind a *pointer field* is the one case that stays out of
+   reach, and it is the same wall as before: deep ownership is one opaque
+   slprop about the whole record, and there is no step that takes a single
+   field's sequence out of it and puts it back. Handing one to a callee is
+   refused by name rather than left to F\* -- which is worth saying because
+   the refusal was latent until now. The `_out` work made those call sites
+   reachable for the first time, and they emitted code that could not be
+   proved; an honest `admit()` with a reason is the only acceptable form of a
+   gap.
+
+   As of this milestone: **930 specifications, 871 of them with real bodies,
+   41 admitted, 18 external, 64 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
