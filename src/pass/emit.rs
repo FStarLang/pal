@@ -728,6 +728,19 @@ struct Emitter<'a> {
     /// Flushed by `emit_stmt`, and saved/restored around it so that a borrow
     /// inside an `if` or `while` body stays inside that body.
     pending_prelude: Vec<Doc>,
+    /// Non-zero while emitting an array operand that has to be a live handle
+    /// -- the target of a write, or the array a cell is borrowed out of. Only
+    /// then does an intermediate subscript of a multidimensional array have to
+    /// borrow a row: `a[i][j]` read as a value is `array_spec_idx (array_read a
+    /// i) j`, which needs no ownership beyond what reading `a` already needs
+    /// and works at a fractional permission, so a `const` 2-D read stays
+    /// provable. See the `ExprT::Index` arm.
+    want_live_row: usize,
+    /// The parent array of each row borrow currently held in
+    /// `pending_prelude`, innermost last. A statement that provably retains
+    /// nothing pointing into the rows it borrowed -- a complete array write --
+    /// gives them straight back, in reverse order. See `emit_row_returns`.
+    pending_rows: Vec<Doc>,
 }
 
 impl<'a> Emitter<'a> {
@@ -2363,7 +2376,8 @@ impl<'a> Emitter<'a> {
                 // array -- i.e. the outer index of a multidimensional access.
                 // `is_arrayptr` is excluded: an arrayptr into a 2-D array is a
                 // different lowering and is not yet handled (L30).
-                let is_multidim_live_array = !use_spec_idx
+                let is_multidim_live_array = self.want_live_row > 0
+                    && !use_spec_idx
                     && !is_arrayptr
                     && arr_ty.as_ref().is_some_and(|ty| match &ty.val {
                         TypeT::FixedArray(elem, _) => matches!(
@@ -2376,7 +2390,12 @@ impl<'a> Emitter<'a> {
                     ExprKind::ArrayLValue(arr_doc) => arr_doc,
                     other => other.to_rvalue(),
                 };
-                let idx_doc = self.emit_rvalue(env, idx);
+                let idx_doc = {
+                    let saved = std::mem::take(&mut self.want_live_row);
+                    let d = self.emit_rvalue(env, idx);
+                    self.want_live_row = saved;
+                    d
+                };
 
                 if use_spec_idx {
                     // Pure FixedArray value (e.g., global pure array or by-value struct field);
@@ -2407,20 +2426,18 @@ impl<'a> Emitter<'a> {
                     // for a one-dimensional array, and the parent demonstrably
                     // no longer owns the row.
                     let tmp = self.fresh_tmp("row");
+                    let arr_doc_for_return = arr_doc.clone();
                     self.pending_prelude.push(
                         Doc::text("let ")
                             .append(tmp.clone())
                             .append(Doc::text(" ="))
                             .append(Doc::line())
-                            .append(naryfn([
-                                Doc::text("array_borrow_row"),
-                                arr_doc,
-                                idx_doc,
-                            ]))
+                            .append(naryfn([Doc::text("array_borrow_row"), arr_doc, idx_doc]))
                             .append(";")
                             .nest(2)
                             .group(),
                     );
+                    self.pending_rows.push(arr_doc_for_return);
                     ExprKind::ArrayLValue(annotated(v, || tmp.clone()))
                 } else {
                     let fn_name = if is_arrayptr {
@@ -2842,6 +2859,40 @@ impl<'a> Emitter<'a> {
                         if let ExprT::IntLit(n, _) = &val.val {
                             return emit_sizet_literal(n);
                         }
+                    }
+                    // A plain `ref t` used where an `array t` is wanted.
+                    // `vtype_eq` ignores the pointer kind, so without this the
+                    // cast is dropped as a no-op and the `ref` is left standing
+                    // in a position that wants an `array`: the same handle, a
+                    // different F* type, and an ill-typed term reported as
+                    // `refl_core_check_term failed` against the whole enclosing
+                    // statement rather than as a proof obligation.
+                    //
+                    // C has no syntax for `_array`, so this is not an unusual
+                    // shape -- a store into an `_array uint8_t *` field can only
+                    // be written `(uint8_t *)addr`, and PAL's typer retypes the
+                    // assignment's right-hand side to the field's type, leaving
+                    // the kind change to be realised here.
+                    //
+                    // `ref_to_array` is the identity coercion: it carries no
+                    // ownership and, in particular, asserts nothing about the
+                    // resulting array's length, so this adds no assumption. The
+                    // opposite direction is handled by the arms below.
+                    //
+                    // A null pointer constant is excluded: `null` is emitted
+                    // for it directly and already types at either kind, and
+                    // `ref_to_array` is abstract, so wrapping it would hide the
+                    // nullness a `_nullable` return has to expose.
+                    if let (TypeT::Pointer(_, from_kind), TypeT::Pointer(_, to_kind)) =
+                        (&from_ty.val, &to_ty.val)
+                        && matches!(from_kind, PointerKind::Ref | PointerKind::Unknown)
+                        && matches!(to_kind, PointerKind::Array | PointerKind::ArrayPtr)
+                        && !is_null_ptr_literal(val)
+                    {
+                        return parens(naryfn([
+                            Doc::text("Pulse.Lib.C.Array.ref_to_array"),
+                            val_doc,
+                        ]));
                     }
                     if env.vtype_eq(from_ty.clone(), to_ty.clone()) {
                         // Same underlying type, no cast necessary.
@@ -4102,7 +4153,7 @@ impl<'a> Emitter<'a> {
                         } else {
                             "array_assign_ret"
                         };
-                        let arr_doc = match self.emit_expr(env, arr) {
+                        let arr_doc = match self.emit_array_operand(env, arr) {
                             ExprKind::ArrayLValue(arr_doc) => arr_doc,
                             arr_doc => arr_doc.to_rvalue(),
                         };
@@ -4169,14 +4220,51 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// Emit an array operand in a position that requires a live handle, so an
+    /// intermediate subscript borrows a row rather than reading one out by
+    /// value. The flag is a counter rather than a bool because these positions
+    /// nest: `a[i][j][k]` as a write target needs `a[i]` and `a[i][j]` live.
+    fn emit_array_operand(&mut self, env: &Env, arr: &Expr) -> ExprKind {
+        self.want_live_row += 1;
+        let r = self.emit_expr(env, arr);
+        self.want_live_row -= 1;
+        r
+    }
+
+    /// `emit_array_operand` for the sites that want the operand as a plain
+    /// rvalue document -- the two `array_borrow_cell` paths, where the array a
+    /// cell is carved out of must be a live handle for the same reason.
+    fn emit_array_rvalue(&mut self, env: &Env, arr: &Expr) -> Doc {
+        self.want_live_row += 1;
+        let d = self.emit_rvalue(env, arr);
+        self.want_live_row -= 1;
+        d
+    }
+
+    /// Give back every row borrowed since `mark`, innermost first. The rows
+    /// are dropped from `pending_rows` so a later statement in the same block
+    /// can borrow them again; the `let` bindings themselves stay in
+    /// `pending_prelude`, since the returns refer to the row handles by name.
+    fn emit_row_returns(&mut self, mark: usize) -> Doc {
+        let parents = self.pending_rows.split_off(mark);
+        parents.into_iter().rev().fold(Doc::nil(), |acc, parent| {
+            acc.append(Doc::line())
+                .append(naryfn([Doc::text("array_return_row"), parent]))
+                .append(";")
+                .group()
+        })
+    }
+
     /// Emit a statement, flushing any `let` bindings that emitting its
     /// expressions hoisted out (see `pending_prelude`). The buffer is
     /// saved and restored so that a nested statement's hoists land in the
     /// nested block rather than escaping to the enclosing one.
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
         let saved = std::mem::take(&mut self.pending_prelude);
+        let saved_rows = std::mem::take(&mut self.pending_rows);
         let doc = self.emit_stmt_inner(env, stmt);
         let prelude = std::mem::replace(&mut self.pending_prelude, saved);
+        self.pending_rows = saved_rows;
         prelude
             .into_iter()
             .fold(Doc::nil(), |acc, p| acc.append(p).append(Doc::line()))
@@ -4287,7 +4375,7 @@ impl<'a> Emitter<'a> {
                             };
                             if let Some((arr, idx)) = borrow_cell {
                                 let tmp = self.fresh_tmp("borrow");
-                                let arr_doc = self.emit_rvalue(env, &arr);
+                                let arr_doc = self.emit_array_rvalue(env, &arr);
                                 let idx_doc = self.emit_rvalue(env, &idx);
                                 let borrow = Doc::text("let ")
                                     .append(tmp.clone())
@@ -4521,7 +4609,7 @@ impl<'a> Emitter<'a> {
                         // not describe, so leave it to the generic path.
                         && elems.len() as u64 == length
                     {
-                        let arr_doc = match self.emit_expr(env, x) {
+                        let arr_doc = match self.emit_array_operand(env, x) {
                             ExprKind::ArrayLValue(arr_doc) => arr_doc,
                             arr_doc => arr_doc.to_rvalue(),
                         };
@@ -4566,7 +4654,7 @@ impl<'a> Emitter<'a> {
                             .map(|ty| env.vtype_whnf(ty))
                             .is_some_and(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Ref)))
                     {
-                        let arr_doc = self.emit_rvalue(env, arr);
+                        let arr_doc = self.emit_array_rvalue(env, arr);
                         let idx_doc = self.emit_rvalue(env, idx);
                         return self
                             .emit_lvalue(env, x)
@@ -4666,7 +4754,16 @@ impl<'a> Emitter<'a> {
                                 } else {
                                     "array_update"
                                 };
-                                let arr_doc = match self.emit_expr(env, arr) {
+                                // A complete write to `a[i][j].f`. Any row
+                                // borrows the subscripts hoist are used only by
+                                // this statement -- nothing here retains a
+                                // pointer into them -- so give them straight
+                                // back, innermost first. Otherwise a second
+                                // write to the same row fails to borrow it,
+                                // correctly but uselessly: the first statement
+                                // still holds it.
+                                let rows_mark = self.pending_rows.len();
+                                let arr_doc = match self.emit_array_operand(env, arr) {
                                     ExprKind::ArrayLValue(arr_doc) => arr_doc,
                                     arr_doc => arr_doc.to_rvalue(),
                                 };
@@ -4681,16 +4778,19 @@ impl<'a> Emitter<'a> {
                                 let upd_fn = Doc::text("(fun __v __y -> { __v with ")
                                     .append(field_name)
                                     .append(Doc::text(" = __y })"));
+                                let rhs_doc = self.emit_rvalue(env, t);
+                                let returns = self.emit_row_returns(rows_mark);
                                 return naryfn([
                                     Doc::text(fn_name),
                                     arr_doc,
                                     idx_doc,
                                     upd_fn,
-                                    self.emit_rvalue(env, t),
+                                    rhs_doc,
                                 ])
                                 .append(";")
                                 .nest(2)
-                                .group();
+                                .group()
+                                .append(returns);
                             }
                         }
                     }
@@ -4709,7 +4809,7 @@ impl<'a> Emitter<'a> {
                         } else {
                             "array_write"
                         };
-                        let arr_doc = match self.emit_expr(env, arr) {
+                        let arr_doc = match self.emit_array_operand(env, arr) {
                             ExprKind::ArrayLValue(arr_doc) => arr_doc,
                             arr_doc => arr_doc.to_rvalue(),
                         };
@@ -5285,6 +5385,18 @@ fn mk_attrs(attrs: Vec<Doc>) -> Doc {
 /// the integer literal `0` once `<stdbool.h>` has had its way, and it may be
 /// wrapped in whatever casts the surrounding macro applied. Look through casts
 /// and accept either spelling.
+/// A null pointer constant, possibly behind casts -- `NULL`, `(void *)0`,
+/// `(struct foo *)0`. C lets any of these stand for a null pointer of any
+/// type, and PAL emits the null of whichever kind the context wants, so a
+/// pointer-kind coercion must not be applied on top of one.
+fn is_null_ptr_literal(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::IntLit(n, _) => **n == BigInt::ZERO,
+        ExprT::Cast(inner, _) => is_null_ptr_literal(inner),
+        _ => false,
+    }
+}
+
 fn is_statically_false(e: &Rc<Expr>) -> bool {
     match &e.val {
         ExprT::BoolLit(b) => !b,
@@ -8728,6 +8840,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_fn_total: false,
         tmp_counter: 0,
         pending_prelude: Vec::new(),
+        pending_rows: Vec::new(),
+        want_live_row: 0,
         string_literal_ids: HashMap::new(),
     };
 
