@@ -108,3 +108,20 @@ void use_fill_two(void)
   fill_two(buf);
 }
 #endif
+
+// The array behind a struct's `_array` pointer field. Its ownership lives in
+// the struct's deep predicate, so handing it to a callee borrows that
+// predicate for the length of the statement.
+struct holder {
+  _array int *cells;
+  size_t n;
+};
+
+int sum_cells(_array const int *c, size_t n)
+  _requires(c._length == n);
+
+int sum_holder(const struct holder *h)
+  _requires(h->cells._length == h->n)
+{
+  return sum_cells(h->cells, h->n);
+}

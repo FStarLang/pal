@@ -10190,19 +10190,27 @@ impl<'a> Body<'a> {
             // address keeps the refusal visible instead of leaving F* to fail
             // on a missing points-to.
             // The array behind a *pointer field* is owned by the struct's
-            // deep predicate, which is one opaque slprop about the whole
-            // record: there is no step that takes the one field's sequence
-            // out of it and puts it back. Handing it over would need that
-            // step, so the call is refused rather than left to F*.
+            // deep predicate, so handing it to a callee means unfolding that
+            // predicate for the length of the statement -- the same borrow a
+            // dereference through such a field already takes, and put back by
+            // the same gather. Where the field is not one the contract owns
+            // deeply there is nothing to unfold and the call is refused,
+            // rather than left to F* to fail on a points-to that was never
+            // granted.
             if arr_args.get(i) == Some(&true)
+                && outs.get(i) != Some(&true)
                 && let ExprT::Member(..) = &strip_vattr(a).val
                 && let Ok(aty) = self.ty_of(a)
                 && matches!(peel(self.tds, &aty).val, TypeT::Pointer(..))
             {
-                return Err(
-                    "an array behind a struct field, whose ownership its deep predicate keeps"
-                        .to_string(),
-                );
+                let Some((pv, sn, _)) = self.own_item(a) else {
+                    return Err(
+                        "an array behind a struct field, whose ownership the contract does not \
+                         state"
+                            .to_string(),
+                    );
+                };
+                self.open_own(&pv, &sn);
             }
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
@@ -11935,9 +11943,11 @@ impl<'a> Body<'a> {
                         None => None,
                     };
                     // A `return` is not routed through `stmt`, so anything the
-                    // returned expression unfolded has to be folded back here
-                    // -- before the frame is released, since the frame is
-                    // stated in terms of the folded predicate.
+                    // returned expression borrowed or unfolded has to be given
+                    // back here -- before the frame is released, since the
+                    // frame is stated in terms of what was borrowed from.
+                    let close = std::mem::take(&mut self.pending_close);
+                    self.lines.extend(close);
                     self.close_own();
                     // Ghost statements after a `return` are the only way to
                     // establish a postcondition that talks about the returned

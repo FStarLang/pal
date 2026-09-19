@@ -3223,18 +3223,28 @@ new facts about memory.
    parameters is also what records that the callee filled it, so the exit has
    nothing left to prove about it.
 
-   The array behind a *pointer field* is the one case that stays out of
-   reach, and it is the same wall as before: deep ownership is one opaque
-   slprop about the whole record, and there is no step that takes a single
-   field's sequence out of it and puts it back. Handing one to a callee is
-   refused by name rather than left to F\* -- which is worth saying because
-   the refusal was latent until now. The `_out` work made those call sites
-   reachable for the first time, and they emitted code that could not be
-   proved; an honest `admit()` with a reason is the only acceptable form of a
-   gap.
+   The array behind a *pointer field* turned out not to be the wall it
+   looked like. Deep ownership is one slprop about the whole record, but it
+   is a `let`, and the generated `_own_scatter` and `_own_gather` already
+   take it apart into one points-to per field and put it back -- which is
+   how a dereference through such a field has always worked. Handing the
+   field's array to a callee is the same borrow, held for the length of the
+   statement and given back by the same gather. Where the field is not one
+   the contract owns deeply there is nothing to unfold, and the call is
+   refused by name rather than left to F\* to fail on a points-to that was
+   never granted.
 
-   As of this milestone: **930 specifications, 871 of them with real bodies,
-   41 admitted, 18 external, 64 functions skipped**, plus **18 `_pure`
+   The `_out` work made those call sites reachable for the first time, which
+   is also how it surfaced a stale corner: a `return` is not routed through
+   the statement path, so a borrow taken by the returned expression was never
+   given back before the frame was released. Nothing had reached it before,
+   because every function that could was admitted for an earlier reason.
+   That is the recurring shape of this port -- each gap closed exposes the
+   next one, and the count is only honest because every one of them is
+   written into the generated file.
+
+   As of this milestone: **932 specifications, 874 of them with real bodies,
+   39 admitted, 19 external, 64 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
