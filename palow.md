@@ -3160,8 +3160,20 @@ new facts about memory.
    therefore keeps what it was given, rather than dropping a validity the
    caller's `_ensures` promises.
 
-   As of this milestone: **917 specifications, 858 of them with real bodies,
-   43 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   Handing over a piece of an object. `&a[i]` and `&p->f` are addresses the
+   emitter could already compute, but handing one to a callee is handing over
+   the storage behind it, and nothing said which storage that was. It is the
+   same focus a subscript or a field access opens, held for the length of the
+   statement instead of for the length of one read -- so an argument that
+   names a place now opens it, hands the address over, and closes it after the
+   call returns. An `_out` parameter wants the write-only view, and a place
+   that already holds a value gives that value up on the way in, which is the
+   step a written local was already taking. `array_to_ref` writes through an
+   array cell and through an `_out` cell without a ghost step of its own,
+   where PAL needs four.
+
+   As of this milestone: **918 specifications, 861 of them with real bodies,
+   41 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

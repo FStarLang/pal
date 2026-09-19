@@ -69,3 +69,25 @@ void fill_first(_out _array int *a)
     _ghost_stmt(array_return_cell $(a));
 }
 
+
+typedef struct {
+  int lo;
+  int hi;
+} pair;
+
+// Handing a *field* to an `_out` parameter. The field is opened for the
+// length of the call exactly as an array element is, and since `p` already
+// holds a value the field gives it up before the callee writes through it.
+//
+// Palow only: PAL models a field of a live struct as something that has to be
+// unfolded to raw storage by hand before it can be handed out as a write-only
+// `ref`, so the same source needs explicit unfold/fold ghost steps there.
+// Palow's field focus is that step, so the call stands on its own.
+#ifdef PALOW
+void init_field(pair *p)
+  _requires(_live(*p))
+  _ensures(p->hi == 42)
+{
+    init_cell(&p->hi);
+}
+#endif

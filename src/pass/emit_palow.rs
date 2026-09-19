@@ -7912,12 +7912,34 @@ impl<'a> Body<'a> {
                 let a = self.addr(base)?;
                 Ok(format!("({} +! {}_offsetof_{})", a, sn, f.val))
             }
+            // `&a[i]` is the array's address plus `i` elements -- but unlike
+            // `&s.f`, handing it out is handing out the element, because the
+            // only thing that can be done with it is an access. So the element
+            // is focused out for the length of the statement and put back
+            // afterwards, exactly as a subscript does; the difference is that
+            // the access happens in the callee rather than here.
+            ExprT::Index(base, idx) => {
+                let f = self.focus_elem(base, Some(idx))?;
+                self.lines.extend(f.open_read.iter().cloned());
+                self.pending_close.extend(f.close_write);
+                Ok(f.at)
+            }
             ExprT::VAttr(_, inner) => self.addr(inner),
             other => Err(format!(
                 "{}, which is not an lvalue Palow can address",
                 expr_kind_of(other)
             )),
         }
+    }
+
+    /// The place an `_out` argument names, looking through an alias and
+    /// through the `&` C writes in front of it.
+    fn out_place(&self, a: &Expr) -> Option<Rc<Expr>> {
+        if let ExprT::Ref(inner) = &strip_vattr(a).val {
+            return Some(inner.clone());
+        }
+        let v = lvalue_name(strip_vattr(a))?;
+        self.aliases.get(&v).cloned()
     }
 
     /// The address an lvalue denotes, computed by arithmetic alone.
@@ -10096,6 +10118,21 @@ impl<'a> Body<'a> {
         {
             self.out_params.remove(i);
             return Ok(format!("var_{}", v.val));
+        }
+        // A place rather than a whole object: a field, an array element, or an
+        // element of a field's array. The callee writes through it, so it is
+        // opened for the length of the statement and closed afterwards, and
+        // opening gives back whatever view the place has -- so one that
+        // already holds a value gives it up first, which is the same step a
+        // written local takes on its way to an `_out` parameter.
+        if let Some(p) = self.out_place(a) {
+            let f = self.place(&p, true)?;
+            self.lines.extend(f.open_write.iter().cloned());
+            if f.write_fn == format!("{}_write", f.pn) {
+                self.lines.push(format!("{}_forget {};", f.pn, f.at));
+            }
+            self.pending_close.extend(f.close_write);
+            return Ok(f.at);
         }
         Err("an `_out` argument that is not unwritten storage here".to_string())
     }
