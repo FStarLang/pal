@@ -3141,8 +3141,27 @@ new facts about memory.
    is unchanged. The fact is the same and only the module it lives in differs,
    which is what a `const_seq` was meant to buy.
 
-   As of this milestone: **917 specifications, 857 of them with real bodies,
-   44 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
+   A freshly allocated block is filled in the same way a local struct is.
+   Scatter/gather already existed for stack variables: a struct whose fields
+   are written one at a time is taken apart into per-field uninitialised
+   storage, each field is written on its own, and the pieces are put back
+   together as a whole value at the last write. `malloc`ed storage wants
+   exactly the same treatment -- the only difference was that the mechanism
+   was keyed on a slot -- so the target is now either a slot or a block, and
+   `mk_itemx` builds its two-field object in place instead of admitting.
+
+   That exposed a bookkeeping question about who owns a returned validity.
+   On the way out of a function, the emitter puts down every `is_valid` it
+   seeded for a function pointer, unless the postcondition hands it to the
+   caller -- which it recognises by reading the assembled `ensures` text for
+   the wrapper's name. When the return's ownership is the author's own Pulse,
+   as `Itemx_spec.itemx_valid` is, there is no name to find: the validity is
+   inside a definition the emitter cannot see through. A spliced return
+   therefore keeps what it was given, rather than dropping a validity the
+   caller's `_ensures` promises.
+
+   As of this milestone: **917 specifications, 858 of them with real bodies,
+   43 admitted, 16 external, 73 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

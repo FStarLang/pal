@@ -1001,6 +1001,12 @@ struct FnSurface {
     /// Whether the emitted `requires` carries pure facts about the arguments,
     /// from any source. See `Body::requires_ok`.
     req_props: bool,
+    /// Whether the return's ownership is the author's own Pulse rather than
+    /// the emitter's. Such a clause may enclose anything, including a function
+    /// pointer's validity, and the emitter cannot read it to find out -- so
+    /// nothing seeded is put down on the way out, and a validity the clause
+    /// did not want shows up as a leftover rather than as a missing fact.
+    ret_spliced: bool,
     /// The functions whose `__fp` wrapper is named anywhere in the emitted
     /// `ensures`. A validity the postcondition talks about is a validity the
     /// caller receives, so the body must not put it down on the way out.
@@ -3954,6 +3960,7 @@ fn emit_fn(
     }
 
     Ok(FnSurface {
+        ret_spliced: contract_ok && !(ret_slprops.is_empty() && ret_valued.is_empty()),
         req_props,
         post_valid,
         decl: out,
@@ -7154,10 +7161,23 @@ struct Block {
     init: bool,
     /// Whether `free` has already taken the block back.
     freed: bool,
+    /// The fields written so far, while the block is in pieces -- the same
+    /// bookkeeping a local struct gets, for the same reason: C fills a
+    /// `malloc`ed object one field at a time, and the object only becomes a
+    /// value again once every field has been written.
+    scattered: BTreeSet<String>,
     /// For `malloc(sizeof(T) * n)`, what makes the block an array: the element
     /// count, the element size, and -- for `calloc` -- the value the zero bytes
     /// stand for at the element type.
     array: Option<ArrayBlock>,
+}
+
+/// Which piece of storage is currently in pieces: a local's slot, or an
+/// allocated block.
+#[derive(Clone, Copy)]
+enum Scattering {
+    Slot(usize),
+    Block(usize),
 }
 
 /// The array shape of an allocated block.
@@ -7311,6 +7331,8 @@ struct Body<'a> {
     /// The functions whose validity this function's `ensures` hands on. One of
     /// these is not the body's to put down on the way out.
     post_valid: &'a HashSet<String>,
+    /// Whether the return's ownership is spliced; see `FnSurface`.
+    ret_spliced: bool,
     /// The labels in scope, innermost last, each with the statements that run
     /// when control reaches it. A `goto` is translated by translating its
     /// label's continuation there and then: Pulse has no jump, and every path
@@ -8033,6 +8055,7 @@ impl<'a> Body<'a> {
                 if let Some(focus) = self.scattered_field(&ff, f, &pn, writing) {
                     return Ok(focus);
                 }
+                self.no_value_yet(&ff.a)?;
                 self.lines
                     .push(format!("{}_focus_{} {};", ff.sn, f.val, ff.a));
                 let mut close_read = vec![format!("{}_unfocus_read_{} {};", ff.sn, f.val, ff.a)];
@@ -8233,12 +8256,21 @@ impl<'a> Body<'a> {
         if !names.iter().any(|n| n == &*f.val) {
             return None;
         }
-        let i = self
+        // A local's storage and an allocated block's differ in where they came
+        // from and in nothing else: both are uninitialised until every field
+        // has been written, and both are filled the same way.
+        let target = match self
             .slots
             .iter()
-            .rposition(|s| s.addr == ff.a && !s.init && s.array.is_none())?;
+            .rposition(|s| s.addr == ff.a && !s.init && s.array.is_none())
+        {
+            Some(i) => Scattering::Slot(i),
+            None => Scattering::Block(self.blocks.iter().rposition(|b| {
+                b.tmp == ff.a && b.checked && !b.freed && !b.init && b.array.is_none()
+            })?),
+        };
         if !writing {
-            if !self.slots[i].scattered.contains(&*f.val) {
+            if !self.scattered_set(target).contains(&*f.val) {
                 return None;
             }
             return Some(Focus {
@@ -8251,16 +8283,19 @@ impl<'a> Body<'a> {
                 close_write: Vec::new(),
             });
         }
-        if self.slots[i].scattered.is_empty() {
+        if self.scattered_set(target).is_empty() {
             self.lines
                 .push(format!("{}_scatter_uninit {};", ff.sn, ff.a));
         }
-        self.slots[i].scattered.insert(f.val.to_string());
+        self.scattered_set_mut(target).insert(f.val.to_string());
         let mut close_write = Vec::new();
-        if names.iter().all(|n| self.slots[i].scattered.contains(n)) {
+        if names.iter().all(|n| self.scattered_set(target).contains(n)) {
             close_write.push(format!("{}_gather {};", ff.sn, ff.a));
-            self.slots[i].scattered.clear();
-            self.slots[i].init = true;
+            self.scattered_set_mut(target).clear();
+            match target {
+                Scattering::Slot(i) => self.slots[i].init = true,
+                Scattering::Block(i) => self.blocks[i].init = true,
+            }
         }
         Some(Focus {
             write_fn: format!("{}_write_uninit", pn),
@@ -8273,22 +8308,24 @@ impl<'a> Body<'a> {
         })
     }
 
+    /// The fields written so far into whichever of the two kinds of storage is
+    /// being filled.
+    fn scattered_set(&self, t: Scattering) -> &BTreeSet<String> {
+        match t {
+            Scattering::Slot(i) => &self.slots[i].scattered,
+            Scattering::Block(i) => &self.blocks[i].scattered,
+        }
+    }
+
+    fn scattered_set_mut(&mut self, t: Scattering) -> &mut BTreeSet<String> {
+        match t {
+            Scattering::Slot(i) => &mut self.slots[i].scattered,
+            Scattering::Block(i) => &mut self.blocks[i].scattered,
+        }
+    }
+
     /// Everything `focus_field` does except emitting the focus itself.
     fn open_field(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<FieldFocus, String> {
-        // A field focus splits a points-to, and freshly allocated storage has
-        // none: it holds bytes, not a value. C that fills a `malloc`ed object
-        // one field at a time is perfectly ordinary, but the model has no
-        // partial view of an uninitialised aggregate to hand the field out of,
-        // so say so rather than focus something that is not there.
-        if let ExprT::Deref(inner) = &strip_vattr(base).val
-            && let ExprT::Var(v) = &strip_vattr(inner).val
-            && self
-                .blocks
-                .iter()
-                .any(|b| b.var == *v.val && b.checked && !b.freed && !b.init)
-        {
-            return Err(format!("a field of `{}`, which holds no value yet", v.val));
-        }
         let (sn, _) = self.struct_of(base)?;
         let (a, close_read, close_write) = self.base_addr(base, writing)?;
         let at = format!("({} +! {}_offsetof_{})", a, sn, f.val);
@@ -8303,9 +8340,25 @@ impl<'a> Body<'a> {
 
     fn focus_field(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<FieldFocus, String> {
         let ff = self.open_field(base, f, writing)?;
+        self.no_value_yet(&ff.a)?;
         self.lines
             .push(format!("{}_focus_{} {};", ff.sn, f.val, ff.a));
         Ok(ff)
+    }
+
+    /// A field focus splits a points-to, and freshly allocated storage has
+    /// none: it holds bytes, not a value. Where the struct has an
+    /// uninitialised view the object is scattered into its fields instead --
+    /// see `scattered_field` -- but a focus proper has nothing to split.
+    fn no_value_yet(&self, at: &str) -> Result<(), String> {
+        match self
+            .blocks
+            .iter()
+            .find(|b| b.tmp == *at && b.checked && !b.freed && !b.init)
+        {
+            Some(b) => Err(format!("a field of `{}`, which holds no value yet", b.var)),
+            None => Ok(()),
+        }
     }
 
     /// The address of the object a field belongs to. Usually just `addr`, but
@@ -10237,6 +10290,7 @@ impl<'a> Body<'a> {
             checked: rb.guarded.is_none(),
             init: true,
             freed: false,
+            scattered: BTreeSet::new(),
             zero: None,
             taken: rb.guarded.map(|g| g.replace(PTR_HOLE, v)),
             array: None,
@@ -10401,6 +10455,7 @@ impl<'a> Body<'a> {
             checked: false,
             init: false,
             freed: false,
+            scattered: BTreeSet::new(),
             zero: None,
             taken: None,
             array: Some(ArrayBlock {
@@ -10444,6 +10499,7 @@ impl<'a> Body<'a> {
             checked: false,
             init: zero.is_some(),
             freed: false,
+            scattered: BTreeSet::new(),
             zero,
             taken: None,
             array: None,
@@ -11893,7 +11949,7 @@ impl<'a> Body<'a> {
         // Leaving the function: anything still held has to go, including a
         // validity seeded for a use that did not consume it -- storing a
         // decayed function in a slot, say.
-        if mark == 0 {
+        if mark == 0 && !self.ret_spliced {
             for (addr, pre, post, g) in self.seeded.clone() {
                 // ...unless the contract promised it to the caller, which is
                 // what a field-level `_refine` on a returned block does.
@@ -12757,6 +12813,7 @@ fn emit_body(
         seeded: Vec::new(),
         laundered: HashSet::new(),
         post_valid: &sig.post_valid,
+        ret_spliced: sig.ret_spliced,
         gotos: Vec::new(),
         in_loop: false,
         pending_close: Vec::new(),
