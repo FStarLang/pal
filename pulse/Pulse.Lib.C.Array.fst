@@ -832,6 +832,29 @@ fn array_return_cell u#a (#t: Type u#a) (a: array t)
   fold (array_pts_to a 1.0R y);
 }
 
+let array_spec_set_get #a s i =
+  // Cell `i` is masked, so it is `Val x` or `Uninit`; `array_spec_get` maps
+  // those to `Some x` / `None` and `opt_cell` maps them straight back, so the
+  // `Seq.upd` writes the value the cell already had.
+  assert (array_spec_mask s i);
+  array_spec_get_spec s i;
+  assert (opt_cell (array_spec_get s i) == Seq.index s i);
+  Seq.lemma_eq_elim (array_spec_set s i (array_spec_get s i)) s
+
+ghost
+fn array_return_cell_unchanged u#a (#t: Type u#a) (a: array t)
+  (#i: nat)
+  (#s: erased (array_spec t) { array_spec_mask s i })
+  requires MU.pts_to_maybe_uninit (array_cell_ref a i) (array_spec_get s i)
+  requires array_pts_to a 1.0R (array_spec_borrow s i)
+  ensures array_pts_to a 1.0R s
+{
+  array_return_cell a #i #(array_spec_get s i) #s;
+  array_spec_set_get s i;
+  rewrite (array_pts_to a 1.0R (array_spec_set s i (array_spec_get s i)))
+       as (array_pts_to a 1.0R s);
+}
+
 // Borrow the cell an arrayptr `x` points at, out of its live parent array `y`.
 // The runtime carve is the same mask reshape as `array_borrow_cell`, only keyed
 // on the arrayptr's own offset (`arrayptr_off x y`) instead of an explicit
