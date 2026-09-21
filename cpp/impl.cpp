@@ -228,15 +228,19 @@ public:
                         astCtx->getTypeAlignInChars(qt).getQuantity());
   }
 
-  // Report the byte offset of every field of `decl`. Bit-fields are skipped:
-  // their offsets are not byte-aligned, and PAL has no byte-level model for
-  // them yet.
+  // Report the offset of every field of `decl`. A bit-field has no byte
+  // offset of its own -- several of them share one storage unit -- so it is
+  // reported in bits instead, and the emitter works out which bytes the unit
+  // covers.
   void recordFieldOffsets(uint32_t kind, StringRef name, RecordDecl *decl) {
     auto const &layout = astCtx->getASTRecordLayout(decl);
     for (auto *f : decl->fields()) {
-      if (f->isBitField())
-        continue;
       auto bitOffset = layout.getFieldOffset(f->getFieldIndex());
+      if (f->isBitField()) {
+        ctx.set_field_bit_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                                 bitOffset);
+        continue;
+      }
       if (bitOffset % astCtx->getCharWidth() != 0)
         continue;
       ctx.set_field_offset(kind, toStr(name), toStr(fieldNameStr(f)),

@@ -217,6 +217,7 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     size: l.size,
                     align: l.align,
                     field_offsets: vec![(info.named_field.val.name().val.clone(), 0)],
+                    field_bit_offsets: Vec::new(),
                 },
             ));
         }

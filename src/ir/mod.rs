@@ -869,6 +869,10 @@ pub struct TypeLayout {
     pub size: u64,
     pub align: u64,
     pub field_offsets: Vec<(Rc<str>, u64)>,
+    /// Bit offsets of the bit-fields, which have no byte offset of their own.
+    /// A bit-field is addressed by the byte range its storage unit occupies
+    /// plus its position inside it, and this is the second half of that.
+    pub field_bit_offsets: Vec<(Rc<str>, u64)>,
 }
 
 /// Target-specific layout of every named C type in the translation unit.

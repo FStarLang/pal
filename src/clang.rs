@@ -124,6 +124,15 @@ impl<'a> Ctx<'a> {
         entry.field_offsets.push((field, offset));
     }
 
+    /// Record the clang-computed *bit* offset of bit-field `field` within the
+    /// named type `name`. See [`Ctx::set_type_layout`] for the `kind` encoding.
+    fn set_field_bit_offset(&mut self, kind: u32, name: &str, field: &str, offset: u64) {
+        let field = self.intern_str(field);
+        let key = layout_key(kind, self.intern_str(name));
+        let entry = self.translation_unit.layouts.entry(key).or_default();
+        entry.field_bit_offsets.push((field, offset));
+    }
+
     fn intern_str(&mut self, s: &str) -> Rc<str> {
         match self.interned_strs.get(s) {
             Some(s) => s.clone(),

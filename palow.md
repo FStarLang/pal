@@ -3307,8 +3307,45 @@ new facts about memory.
    remains storage until every element has been written, and that is a fact
    which would have to be carried from one statement to the next.
 
-   As of this milestone: **942 specifications, 884 of them with real bodies,
-   39 admitted, 19 external, 52 functions skipped**, plus **18 `_pure`
+   A bit-field is not an object, and that is the whole of what the model has
+   to say about one. It has no address, no size and no storage of its own:
+   what it has is a position inside the storage unit it shares with its
+   neighbours. So a bit-field gets no points-to. The *unit* is an ordinary
+   unsigned integer object with an ordinary byte representation, and the
+   bit-field is a function of its value -- the `w` bits at offset `o`,
+   `(u / 2^o) % 2^w`. The struct's record accordingly holds one field per
+   unit and none per bit-field, and a member access is not a projection but
+   an application of that function. Everything the byte-level view already
+   does -- the representation, the padding, the focus and unfocus pair, the
+   scatter and gather into storage -- then goes through with no idea that
+   bit-fields were involved, because by the time it looks there is only an
+   unsigned integer field at a byte offset.
+
+   Which bytes the unit covers is not something C says; the ABI says it, and
+   clang has already decided, so the frontend now reports a bit-field's *bit*
+   offset instead of skipping it, and the emitter reconstructs the unit as
+   the byte range from the first bit-field of a run to the start of whatever
+   comes next, narrowed to a width an unsigned object can have. `unsigned a:3;
+   unsigned b:5; unsigned full;` comes out as `{ fld_bits0: UInt32.t;
+   fld_full: UInt32.t }` with the unit at offset 0 and `full` at 4 -- the
+   three bytes the two bit-fields do not reach are part of the unit, which is
+   the only thing that can own them.
+
+   Reads and writes are then what a C compiler emits. A read is a read of the
+   unit and an extraction; a write is a read of the unit, a substitution and
+   a write back, because the neighbours have to survive the store. The
+   masking C does on a narrowing store is the model's -- `put` takes `x % 2^w`
+   -- so `s->a = v` on a three-bit field provably leaves `v % 8` there, which
+   is what the test's `_ensures` says. The supporting arithmetic is one small
+   module, `Pulse.Lib.C.Palow.Bits`, with no slprop in it at all: `get`,
+   `put`, that a `put` is read back, that a unit stays inside its width, and
+   that writing one field leaves the others alone. The bits of a unit that
+   belong to no bit-field are carried along in its value, untouched and
+   unconstrained -- which is exactly what C says about them, and is a thing
+   the field-wise model could not have expressed.
+
+   As of this milestone: **954 specifications, 896 of them with real bodies,
+   39 admitted, 19 external, 37 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -3729,8 +3766,9 @@ new facts about memory.
    per-field focus/unfocus -- and translates field access in bodies and field
    projection in contracts. What remains is the byte-level `_repr` per struct,
    which arrays of structs and whole-object copies need, and unions.
-   Fixed-size array fields are covered; bit-fields are not, since the model has
-   no sub-byte addressing to give them a byte offset.
+   Fixed-size array fields are covered, and so are bit-fields: the model gives
+   them no address, because C does not, and makes the storage unit they share
+   the object instead.
 5. **Done for single objects.** `malloc`/`calloc`/`free` are ordinary
    specifications and the translator emits calls to them: `malloc(sizeof(T))`
    is a `malloc t_sizeof` and nothing about `T` reaches the emitter except its

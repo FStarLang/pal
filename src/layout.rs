@@ -91,4 +91,15 @@ impl<'a> LayoutCtx<'a> {
             .find(|(n, _)| &**n == field)
             .map(|(_, o)| *o)
     }
+
+    /// Bit offset of bit-field `field` within the named type `kind`, counted
+    /// from the start of the object. A bit-field has no byte offset: the
+    /// storage unit it shares with its neighbours does.
+    pub fn bit_offset_of(&self, kind: &TypeRefKind, field: &str) -> Option<u64> {
+        self.named(kind)?
+            .field_bit_offsets
+            .iter()
+            .find(|(n, _)| &**n == field)
+            .map(|(_, o)| *o)
+    }
 }

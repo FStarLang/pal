@@ -196,6 +196,7 @@ mod crate::clang {
 
         fn set_type_layout(&mut self, u32, &str, u64, u64);
         fn set_field_offset(&mut self, u32, &str, &str, u64);
+        fn set_field_bit_offset(&mut self, u32, &str, &str, u64);
 
         fn intern_str(&mut self, &str) -> Rc<str>;
 
