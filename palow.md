@@ -631,6 +631,7 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus |
 | `Pulse.Lib.C.Palow.Union` | proved | `union U { uint32_t x; struct T t; }`, member views, the type-punning acceptance test |
 | `Pulse.Lib.C.Palow.Pool` | proved | bump allocator handing out `uint32_t`s from a byte range |
+| `Pulse.Lib.C.Palow.Float` | axiomatized | the injective map from a `float`/`double` to its object representation, and the two conversions between the widths |
 
 Eight results are worth calling out, because they are the ones that would have
 sunk the design:
@@ -3371,8 +3372,39 @@ new facts about memory.
    + n * sizeof(int))` needs a sized allocation in the model, which is a
    separate piece of work.
 
-   As of this milestone: **956 specifications, 898 of them with real bodies,
-   39 admitted, 19 external, 34 functions skipped**, plus **18 `_pure`
+   Floating point was the last C scalar Palow could not store. F* already
+   has IEEE-754 arithmetic on `Float32.t` and `Float64.t` -- addition,
+   comparison, literals -- and that was never the problem; what F* does not
+   say is what a `double` *looks like*, and a byte-level memory model cannot
+   do without that. `float_pair.d` sits eight bytes into its struct with four
+   bytes of padding before it, and those eight bytes are an object like any
+   other. So Palow adds exactly one thing per width: an injective map from a
+   value to the `w`-bit pattern that represents it. Injectivity is the whole
+   assumption, and it is the right one -- C keeps distinct object
+   representations distinct, which is precisely the case of `+0.0` against
+   `-0.0`, or one NaN payload against another. The converse is *not* assumed:
+   nothing says every bit pattern is a value, because C allows trap
+   representations and no part of Palow needs it.
+
+   With that in place a float is an ordinary scalar. The points-to, the
+   `_repr`, the eight resource lemmas, reads and writes, arrays of floats and
+   floats as struct fields are the same construction every other scalar gets,
+   with `float32_bits` sitting where a signed integer has `Encoding.to_bits`
+   -- the two blocks were generated from the `int32_t` and `int64_t` ones by
+   substitution, which is the clearest evidence that nothing about floating
+   point is special *to the memory model*. The translator side is the
+   arithmetic: literals go to `of_literal`, the operators to F\*'s, and the
+   conversions say what C says -- widening `float` to `double` is exact and
+   narrowing rounds, so they are two functions and only one is invertible,
+   where a model without them would have to route the conversion through an
+   integer and get a different answer. `==` is `ieee_eq` and not F\*
+   equality, since C's `==` identifies the two zeros and makes a NaN unequal
+   to itself. The whole of `test/float_double` -- four functions and a struct
+   with padding between a `float` and a `double` -- now translates with no
+   skip, no dropped contract and no admit.
+
+   As of this milestone: **961 specifications, 903 of them with real bodies,
+   38 admitted, 20 external, 27 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

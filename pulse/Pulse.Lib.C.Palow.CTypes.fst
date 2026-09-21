@@ -31,6 +31,7 @@ open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 open Pulse.Lib.C.Palow.Scalar
+open Pulse.Lib.C.Palow.Float
 
 module SZ = FStar.SizeT
 module U8 = FStar.UInt8
@@ -1299,3 +1300,293 @@ ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
   elem_conceal size_t_repr a #p #_ #x;
 }
 
+(* ---------------------------------------------------------------------------
+   Floating point
+
+   A C floating-point value is an object like any other: it has a size, an
+   alignment and an object representation. `Pulse.Lib.C.Palow.Float` supplies
+   the one thing F* does not already say -- the injective map from a value to
+   its bits -- and these two blocks are then the same construction as every
+   scalar above, with `float32_bits` where a signed integer has
+   `Encoding.to_bits`.
+   --------------------------------------------------------------------------- *)
+
+(* ------------------------------ float32_t ------------------------------ *)
+
+
+
+let float32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float32) : slprop =
+  mem_pts_to a p (encode (SZ.v float32_t_sizeof) None (float32_bits x))
+
+let float32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
+  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float32_t_sizeof)
+
+let float32_t_repr_no_prov (x: float32) (b: bytes)
+  : Lemma (requires float32_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v float32_t_sizeof)
+  = ()
+
+let float32_t_repr_injective (x y: float32) (b: bytes)
+  : Lemma (requires float32_t_repr x b /\ float32_t_repr y b)
+          (ensures  x == y)
+  = assert_norm (pow2 (8 * 4) == pow2 32);
+    encode_injective (SZ.v float32_t_sizeof) None (float32_bits x) (float32_bits y);
+    float32_bits_injective x y
+
+ghost fn float32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: float32)
+  preserves float32_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold float32_t_pts_to a p x;
+  mem_pts_to_not_null a;
+  fold float32_t_pts_to a p x;
+}
+
+ghost fn float32_t_pts_to_uninit_not_null (a: ptr)
+  preserves float32_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold float32_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold float32_t_pts_to_uninit a;
+}
+
+[@@allow_ambiguous]
+ghost fn float32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: float32)
+  preserves float32_t_pts_to a p1 x
+  preserves float32_t_pts_to a p2 y
+  ensures   pure (x == y)
+{
+  unfold float32_t_pts_to a p1 x;
+  unfold float32_t_pts_to a p2 y;
+  mem_pts_to_injective a;
+  float32_t_repr_injective x y (encode (SZ.v float32_t_sizeof) None (float32_bits x));
+  fold float32_t_pts_to a p1 x;
+  fold float32_t_pts_to a p2 y;
+}
+
+ghost fn float32_t_share (a: ptr) (#p: perm) (#x: float32)
+  requires float32_t_pts_to a p x
+  ensures  float32_t_pts_to a (p /. 2.0R) x ** float32_t_pts_to a (p /. 2.0R) x
+{
+  unfold float32_t_pts_to a p x;
+  mem_share a;
+  fold float32_t_pts_to a (p /. 2.0R) x;
+  fold float32_t_pts_to a (p /. 2.0R) x;
+}
+
+[@@allow_ambiguous]
+ghost fn float32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: float32)
+  requires float32_t_pts_to a p1 x ** float32_t_pts_to a p2 y
+  ensures  float32_t_pts_to a (p1 +. p2) x ** pure (x == y)
+{
+  unfold float32_t_pts_to a p1 x;
+  unfold float32_t_pts_to a p2 y;
+  mem_gather a;
+  float32_t_repr_injective x y (encode (SZ.v float32_t_sizeof) None (float32_bits x));
+  fold float32_t_pts_to a (p1 +. p2) x;
+}
+
+ghost fn float32_t_reveal (a: ptr) (#p: perm) (#x: float32)
+  requires float32_t_pts_to a p x
+  ensures  exists* b. mem_pts_to a p b ** pure (float32_t_repr x b)
+{
+  unfold float32_t_pts_to a p x;
+}
+
+ghost fn float32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: float32)
+  requires mem_pts_to a p b
+  requires pure (float32_t_repr x b)
+  ensures  float32_t_pts_to a p x
+{
+  fold float32_t_pts_to a p x;
+}
+
+ghost fn float32_t_forget (a: ptr) (#x: float32)
+  requires float32_t_pts_to a 1.0R x
+  ensures  float32_t_pts_to_uninit a
+{
+  unfold float32_t_pts_to a 1.0R x;
+  fold float32_t_pts_to_uninit a;
+}
+
+ghost fn float32_t_claim (a: ptr) (#b: bytes) (x: float32)
+  requires mem_pts_to a 1.0R b
+  requires pure (float32_t_repr x b)
+  ensures  float32_t_pts_to a 1.0R x
+{
+  fold float32_t_pts_to a 1.0R x;
+}
+
+ghost fn float32_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v float32_t_sizeof)
+  ensures  float32_t_pts_to_uninit a
+{
+  fold float32_t_pts_to_uninit a;
+}
+
+ghost fn float32_t_reveal_uninit (a: ptr)
+  requires float32_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float32_t_sizeof)
+{
+  unfold float32_t_pts_to_uninit a;
+}
+
+(* ------------------------------ float64_t ------------------------------ *)
+
+
+
+let float64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float64) : slprop =
+  mem_pts_to a p (encode (SZ.v float64_t_sizeof) None (float64_bits x))
+
+let float64_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
+  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float64_t_sizeof)
+
+let float64_t_repr_no_prov (x: float64) (b: bytes)
+  : Lemma (requires float64_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v float64_t_sizeof)
+  = ()
+
+let float64_t_repr_injective (x y: float64) (b: bytes)
+  : Lemma (requires float64_t_repr x b /\ float64_t_repr y b)
+          (ensures  x == y)
+  = assert_norm (pow2 (8 * 8) == pow2 64);
+    encode_injective (SZ.v float64_t_sizeof) None (float64_bits x) (float64_bits y);
+    float64_bits_injective x y
+
+ghost fn float64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: float64)
+  preserves float64_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold float64_t_pts_to a p x;
+  mem_pts_to_not_null a;
+  fold float64_t_pts_to a p x;
+}
+
+ghost fn float64_t_pts_to_uninit_not_null (a: ptr)
+  preserves float64_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold float64_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold float64_t_pts_to_uninit a;
+}
+
+[@@allow_ambiguous]
+ghost fn float64_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: float64)
+  preserves float64_t_pts_to a p1 x
+  preserves float64_t_pts_to a p2 y
+  ensures   pure (x == y)
+{
+  unfold float64_t_pts_to a p1 x;
+  unfold float64_t_pts_to a p2 y;
+  mem_pts_to_injective a;
+  float64_t_repr_injective x y (encode (SZ.v float64_t_sizeof) None (float64_bits x));
+  fold float64_t_pts_to a p1 x;
+  fold float64_t_pts_to a p2 y;
+}
+
+ghost fn float64_t_share (a: ptr) (#p: perm) (#x: float64)
+  requires float64_t_pts_to a p x
+  ensures  float64_t_pts_to a (p /. 2.0R) x ** float64_t_pts_to a (p /. 2.0R) x
+{
+  unfold float64_t_pts_to a p x;
+  mem_share a;
+  fold float64_t_pts_to a (p /. 2.0R) x;
+  fold float64_t_pts_to a (p /. 2.0R) x;
+}
+
+[@@allow_ambiguous]
+ghost fn float64_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: float64)
+  requires float64_t_pts_to a p1 x ** float64_t_pts_to a p2 y
+  ensures  float64_t_pts_to a (p1 +. p2) x ** pure (x == y)
+{
+  unfold float64_t_pts_to a p1 x;
+  unfold float64_t_pts_to a p2 y;
+  mem_gather a;
+  float64_t_repr_injective x y (encode (SZ.v float64_t_sizeof) None (float64_bits x));
+  fold float64_t_pts_to a (p1 +. p2) x;
+}
+
+ghost fn float64_t_reveal (a: ptr) (#p: perm) (#x: float64)
+  requires float64_t_pts_to a p x
+  ensures  exists* b. mem_pts_to a p b ** pure (float64_t_repr x b)
+{
+  unfold float64_t_pts_to a p x;
+}
+
+ghost fn float64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: float64)
+  requires mem_pts_to a p b
+  requires pure (float64_t_repr x b)
+  ensures  float64_t_pts_to a p x
+{
+  fold float64_t_pts_to a p x;
+}
+
+ghost fn float64_t_forget (a: ptr) (#x: float64)
+  requires float64_t_pts_to a 1.0R x
+  ensures  float64_t_pts_to_uninit a
+{
+  unfold float64_t_pts_to a 1.0R x;
+  fold float64_t_pts_to_uninit a;
+}
+
+ghost fn float64_t_claim (a: ptr) (#b: bytes) (x: float64)
+  requires mem_pts_to a 1.0R b
+  requires pure (float64_t_repr x b)
+  ensures  float64_t_pts_to a 1.0R x
+{
+  fold float64_t_pts_to a 1.0R x;
+}
+
+ghost fn float64_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v float64_t_sizeof)
+  ensures  float64_t_pts_to_uninit a
+{
+  fold float64_t_pts_to_uninit a;
+}
+
+ghost fn float64_t_reveal_uninit (a: ptr)
+  requires float64_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float64_t_sizeof)
+{
+  unfold float64_t_pts_to_uninit a;
+}
+
+
+ghost fn float32_t_of_elem (a: ptr) (#p: perm) (#x: float32)
+  requires elem_pts_to float32_t_repr a p x
+  ensures  float32_t_pts_to a p x
+{
+  elem_reveal float32_t_repr a;
+  float32_t_conceal a #p #_ #x;
+}
+
+ghost fn float32_t_to_elem (a: ptr) (#p: perm) (#x: float32)
+  requires float32_t_pts_to a p x
+  ensures  elem_pts_to float32_t_repr a p x
+{
+  float32_t_reveal a;
+  elem_conceal float32_t_repr a #p #_ #x;
+}
+
+
+ghost fn float64_t_of_elem (a: ptr) (#p: perm) (#x: float64)
+  requires elem_pts_to float64_t_repr a p x
+  ensures  float64_t_pts_to a p x
+{
+  elem_reveal float64_t_repr a;
+  float64_t_conceal a #p #_ #x;
+}
+
+ghost fn float64_t_to_elem (a: ptr) (#p: perm) (#x: float64)
+  requires float64_t_pts_to a p x
+  ensures  elem_pts_to float64_t_repr a p x
+{
+  float64_t_reveal a;
+  elem_conceal float64_t_repr a #p #_ #x;
+}

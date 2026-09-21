@@ -750,6 +750,12 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
             Some(format!("{}int{}_t", if *signed { "" } else { "u" }, width))
         }
         TypeT::SizeT => Some("size_t".to_string()),
+        // A float is an object with a size and an object representation, like
+        // any other scalar; what is special about it lives in the arithmetic,
+        // not in the storage.
+        TypeT::Float {
+            width: w @ (32 | 64),
+        } => Some(format!("float{}_t", w)),
         // On the LP64 target Palow fixes, `ptrdiff_t` *is* `int64_t`, so it
         // shares its storage rather than getting a layer of its own.
         TypeT::PtrdiffT => Some("int64_t".to_string()),
@@ -789,6 +795,9 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         }
         TypeT::SizeT => Some("SizeT.t".to_string()),
         TypeT::PtrdiffT => Some("Int64.t".to_string()),
+        TypeT::Float {
+            width: w @ (32 | 64),
+        } => Some(format!("float{}", w)),
         // A specification integer is unbounded, which is what `_let` needs to
         // state a range condition without first having to prove it.
         TypeT::SpecInt => Some("int".to_string()),
@@ -2189,6 +2198,7 @@ impl<'a> Spec<'a> {
                 }),
                 _ => int_literal(self.tds, n, ty),
             },
+            ExprT::FloatLit(text, ty) => float_literal(self.tds, text, ty),
             ExprT::BinOp(op, l, r) => {
                 // A `_Bool`-valued expression in *value* position -- the body
                 // of a `_let`, say -- has to come out as an F* `bool`, not as a
@@ -7506,6 +7516,7 @@ open Pulse.Lib.C.Palow.Bytes\n\
 open Pulse.Lib.C.Palow.Ptr\n\
 open Pulse.Lib.C.Palow\n\
 open Pulse.Lib.C.Palow.Scalar\n\
+open Pulse.Lib.C.Palow.Float\n\
 open Pulse.Lib.C.Palow.CTypes\n\
 open Pulse.Lib.C.Palow.Machine\n\
 open Pulse.Lib.C.Palow.Array\n\
@@ -7524,7 +7535,9 @@ module UInt8 = FStar.UInt8\n\
 module UInt16 = FStar.UInt16\n\
 module UInt32 = FStar.UInt32\n\
 module UInt64 = FStar.UInt64\n\
-module SizeT = FStar.SizeT\n\n";
+module SizeT = FStar.SizeT\n\
+module Float32 = FStar.Float32\n\
+module Float64 = FStar.Float64\n\n";
 
 /// The top-level names a chunk defines. F* has no way to ask this of a string,
 /// so it is read off the generated text -- which is safe to do only because
@@ -10505,6 +10518,7 @@ impl<'a> Body<'a> {
                 Ok(format!("(Union_{}_{} {})", n.val, m.val, v))
             }
             ExprT::IntLit(n, ty) => int_literal(self.tds, n, ty),
+            ExprT::FloatLit(text, ty) => float_literal(self.tds, text, ty),
             ExprT::Cast(inner, to) => {
                 let from = self.ty_of(inner)?;
                 // An array in an rvalue context is its first element's
@@ -10638,6 +10652,15 @@ impl<'a> Body<'a> {
                         "signed arithmetic, whose overflow obligation needs the untranslated `_requires`"
                             .to_string(),
                     ),
+                    // C's unary minus on a float flips the sign bit and has no
+                    // obligation attached; `0 - x` is the same value for every
+                    // input but one, and `-0.0` is not a value this program
+                    // can tell apart from `0.0` without `bit_eq`.
+                    TypeT::Float { .. } => {
+                        let m = float_mod(self.tds, &ty)
+                            .ok_or_else(|| format!("a negation of {}", describe(&ty)))?;
+                        Ok(format!("({}.sub {}.zero {})", m, m, a))
+                    }
                     _ => Err(format!("a negation of {}", describe(&ty))),
                 }
             }
@@ -13221,12 +13244,81 @@ fn convert(from: &Type, to: &Type, v: &str) -> Result<String, String> {
         // is not part of the value: it is settled where the pointer is used,
         // not here.
         (TypeT::FixedArray(..), TypeT::Pointer(..)) => Ok(v.to_string()),
+        // Widening a `float` to a `double` is exact and narrowing rounds, so
+        // the two directions are separate functions and only the exact one is
+        // invertible. Routing either through an integer -- which is what a
+        // model without them has to do -- would not be the conversion C
+        // performs.
+        (TypeT::Float { width: 32 }, TypeT::Float { width: 64 }) => {
+            Ok(format!("(float64_of_float32 {})", v))
+        }
+        (TypeT::Float { width: 64 }, TypeT::Float { width: 32 }) => {
+            Ok(format!("(float32_of_float64 {})", v))
+        }
+        (TypeT::Float { width: a }, TypeT::Float { width: b }) if a == b => Ok(v.to_string()),
+        // An integer converts to the nearest representable value, and every
+        // integer C has fits in an `int64_t`, which is what `of_int` takes.
+        (
+            TypeT::Int { signed, width },
+            TypeT::Float {
+                width: w @ (32 | 64),
+            },
+        ) => {
+            let widen = if *width == 64 && *signed {
+                v.to_string()
+            } else if *signed {
+                format!("(FStar.Int.Cast.int{}_to_int64 {})", width, v)
+            } else {
+                format!("(FStar.Int.Cast.uint{}_to_int64 {})", width, v)
+            };
+            Ok(format!("(Float{}.of_int {})", w, widen))
+        }
+        // A float is true when it is unequal to zero, which is C's rule and
+        // also `ieee_eq`'s: a NaN is not equal to zero, and so is true.
+        (
+            TypeT::Float {
+                width: w @ (32 | 64),
+            },
+            TypeT::Bool,
+        ) => Ok(format!("(not (Float{}.ieee_eq {} Float{}.zero))", w, v, w)),
+        (
+            TypeT::Bool,
+            TypeT::Float {
+                width: w @ (32 | 64),
+            },
+        ) => Ok(format!(
+            "(if {} then Float{}.one else Float{}.zero)",
+            v, w, w
+        )),
         _ => Err(format!(
             "a conversion from {} to {}",
             describe(from),
             describe(to)
         )),
     }
+}
+
+/// The F* module a float of this width is spelled in, if Palow has one.
+fn float_mod(tds: &Typedefs, ty: &Type) -> Option<String> {
+    match &peel(tds, ty).val {
+        TypeT::Float {
+            width: w @ (32 | 64),
+        } => Some(format!("Float{}", w)),
+        _ => None,
+    }
+}
+
+/// A C floating-point literal. F* takes one as a string and replaces it with
+/// the corresponding C constant at extraction, so the only work here is to
+/// drop C's width suffix -- which is already in the type, and which F* would
+/// not recognise.
+fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String> {
+    let m = float_mod(tds, ty).ok_or_else(|| format!("a literal of {}", describe(ty)))?;
+    let digits = text.trim_end_matches(['f', 'F', 'l', 'L']);
+    if digits.is_empty() || digits.contains('"') {
+        return Err("a float literal that is not a plain constant".to_string());
+    }
+    Ok(format!("({}.of_literal \"{}\")", m, digits))
 }
 
 fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
@@ -13386,6 +13478,28 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
                 // could take, a pointer's value not being a number.
                 BinOp::Elvis => Ok("`elvis_ptr`".to_string()),
                 _ => Err("an operator on a pointer".to_string()),
+            };
+        }
+        // F* already has IEEE-754 arithmetic on `Float32.t`/`Float64.t`, so a
+        // C floating-point operator is the corresponding F* one and nothing
+        // else: there is no overflow obligation to discharge, because C gives
+        // floating-point overflow a value rather than taking the meaning away.
+        // `==` is `ieee_eq` and not F* equality: C's `==` identifies `+0.0`
+        // with `-0.0` and makes a NaN unequal to itself, and F* equality
+        // does neither.
+        TypeT::Float {
+            width: w @ (32 | 64),
+        } => {
+            let m = format!("Float{}", w);
+            return match op {
+                BinOp::Add => Ok(format!("`{}.add`", m)),
+                BinOp::Sub => Ok(format!("`{}.sub`", m)),
+                BinOp::Mul => Ok(format!("`{}.mul`", m)),
+                BinOp::Div => Ok(format!("`{}.div`", m)),
+                BinOp::Lt => Ok(format!("`{}.lt`", m)),
+                BinOp::LEq => Ok(format!("`{}.lte`", m)),
+                BinOp::Eq => Ok(format!("`{}.ieee_eq`", m)),
+                _ => Err(format!("an operator on {}", describe(t))),
             };
         }
         _ => return Err(format!("an operator on {}", describe(t))),

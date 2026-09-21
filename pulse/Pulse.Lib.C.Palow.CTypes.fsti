@@ -31,6 +31,7 @@ open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 open Pulse.Lib.C.Palow.Scalar
+open Pulse.Lib.C.Palow.Float
 
 module SZ = FStar.SizeT
 module U8 = FStar.UInt8
@@ -1000,3 +1001,222 @@ let uint64_t_repr_len (x: U64.t) (b: bytes)
 let size_t_repr_len (x: SZ.t) (b: bytes)
   : Lemma (requires size_t_repr x b) (ensures len b == SZ.v size_t_sizeof)
   = size_t_repr_no_prov x b
+
+(* ---------------------------------------------------------------------------
+   Floating point
+
+   A C floating-point value is an object like any other: it has a size, an
+   alignment and an object representation. `Pulse.Lib.C.Palow.Float` supplies
+   the one thing F* does not already say -- the injective map from a value to
+   its bits -- and these two blocks are then the same construction as every
+   scalar above, with `float32_bits` where a signed integer has
+   `Encoding.to_bits`.
+   --------------------------------------------------------------------------- *)
+
+(* ------------------------------ float32_t ------------------------------ *)
+
+let float32_t_sizeof : SZ.t = 4sz
+let float32_t_alignof : SZ.t = 4sz
+
+let float32_t_repr (x: float32) (b: bytes) : prop =
+  b == encode (SZ.v float32_t_sizeof) None (float32_bits x)
+
+val float32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float32) : slprop
+
+
+val float32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop
+
+
+val float32_t_repr_no_prov (x: float32) (b: bytes)
+  : Lemma (requires float32_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v float32_t_sizeof)
+
+
+val float32_t_repr_injective (x y: float32) (b: bytes)
+  : Lemma (requires float32_t_repr x b /\ float32_t_repr y b)
+          (ensures  x == y)
+
+
+ghost fn float32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: float32)
+  preserves float32_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+(* Unwritten storage is still storage: it occupies float32_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn float32_t_pts_to_uninit_not_null (a: ptr)
+  preserves float32_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+[@@allow_ambiguous]
+ghost fn float32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: float32)
+  preserves float32_t_pts_to a p1 x
+  preserves float32_t_pts_to a p2 y
+  ensures   pure (x == y)
+
+
+ghost fn float32_t_share (a: ptr) (#p: perm) (#x: float32)
+  requires float32_t_pts_to a p x
+  ensures  float32_t_pts_to a (p /. 2.0R) x ** float32_t_pts_to a (p /. 2.0R) x
+
+
+[@@allow_ambiguous]
+ghost fn float32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: float32)
+  requires float32_t_pts_to a p1 x ** float32_t_pts_to a p2 y
+  ensures  float32_t_pts_to a (p1 +. p2) x ** pure (x == y)
+
+
+ghost fn float32_t_reveal (a: ptr) (#p: perm) (#x: float32)
+  requires float32_t_pts_to a p x
+  ensures  exists* b. mem_pts_to a p b ** pure (float32_t_repr x b)
+
+
+ghost fn float32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: float32)
+  requires mem_pts_to a p b
+  requires pure (float32_t_repr x b)
+  ensures  float32_t_pts_to a p x
+
+
+ghost fn float32_t_forget (a: ptr) (#x: float32)
+  requires float32_t_pts_to a 1.0R x
+  ensures  float32_t_pts_to_uninit a
+
+
+ghost fn float32_t_claim (a: ptr) (#b: bytes) (x: float32)
+  requires mem_pts_to a 1.0R b
+  requires pure (float32_t_repr x b)
+  ensures  float32_t_pts_to a 1.0R x
+
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn float32_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v float32_t_sizeof)
+  ensures  float32_t_pts_to_uninit a
+
+
+ghost fn float32_t_reveal_uninit (a: ptr)
+  requires float32_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float32_t_sizeof)
+
+
+
+(* ------------------------------ float64_t ------------------------------ *)
+
+let float64_t_sizeof : SZ.t = 8sz
+let float64_t_alignof : SZ.t = 8sz
+
+let float64_t_repr (x: float64) (b: bytes) : prop =
+  b == encode (SZ.v float64_t_sizeof) None (float64_bits x)
+
+val float64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float64) : slprop
+
+
+val float64_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop
+
+
+val float64_t_repr_no_prov (x: float64) (b: bytes)
+  : Lemma (requires float64_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v float64_t_sizeof)
+
+
+val float64_t_repr_injective (x y: float64) (b: bytes)
+  : Lemma (requires float64_t_repr x b /\ float64_t_repr y b)
+          (ensures  x == y)
+
+
+ghost fn float64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: float64)
+  preserves float64_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+(* Unwritten storage is still storage: it occupies float64_t_sizeof bytes at a real
+   address, so the pointer to it cannot be NULL. This is what makes an `_out`
+   parameter refined to be NULL vacuous rather than merely unprovable. *)
+ghost fn float64_t_pts_to_uninit_not_null (a: ptr)
+  preserves float64_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+[@@allow_ambiguous]
+ghost fn float64_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: float64)
+  preserves float64_t_pts_to a p1 x
+  preserves float64_t_pts_to a p2 y
+  ensures   pure (x == y)
+
+
+ghost fn float64_t_share (a: ptr) (#p: perm) (#x: float64)
+  requires float64_t_pts_to a p x
+  ensures  float64_t_pts_to a (p /. 2.0R) x ** float64_t_pts_to a (p /. 2.0R) x
+
+
+[@@allow_ambiguous]
+ghost fn float64_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: float64)
+  requires float64_t_pts_to a p1 x ** float64_t_pts_to a p2 y
+  ensures  float64_t_pts_to a (p1 +. p2) x ** pure (x == y)
+
+
+ghost fn float64_t_reveal (a: ptr) (#p: perm) (#x: float64)
+  requires float64_t_pts_to a p x
+  ensures  exists* b. mem_pts_to a p b ** pure (float64_t_repr x b)
+
+
+ghost fn float64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: float64)
+  requires mem_pts_to a p b
+  requires pure (float64_t_repr x b)
+  ensures  float64_t_pts_to a p x
+
+
+ghost fn float64_t_forget (a: ptr) (#x: float64)
+  requires float64_t_pts_to a 1.0R x
+  ensures  float64_t_pts_to_uninit a
+
+
+ghost fn float64_t_claim (a: ptr) (#b: bytes) (x: float64)
+  requires mem_pts_to a 1.0R b
+  requires pure (float64_t_repr x b)
+  ensures  float64_t_pts_to a 1.0R x
+
+(* Raw storage of the right size is write-only ownership at this type, and back
+   again: the two directions an allocation and a deallocation take. *)
+ghost fn float64_t_claim_uninit (a: ptr) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v float64_t_sizeof)
+  ensures  float64_t_pts_to_uninit a
+
+
+ghost fn float64_t_reveal_uninit (a: ptr)
+  requires float64_t_pts_to_uninit a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float64_t_sizeof)
+
+
+ghost fn float32_t_of_elem (a: ptr) (#p: perm) (#x: float32)
+  requires elem_pts_to float32_t_repr a p x
+  ensures  float32_t_pts_to a p x
+
+
+ghost fn float32_t_to_elem (a: ptr) (#p: perm) (#x: float32)
+  requires float32_t_pts_to a p x
+  ensures  elem_pts_to float32_t_repr a p x
+
+
+let float32_t_repr_len (x: float32) (b: bytes)
+  : Lemma (requires float32_t_repr x b) (ensures len b == SZ.v float32_t_sizeof)
+  = float32_t_repr_no_prov x b
+
+
+ghost fn float64_t_of_elem (a: ptr) (#p: perm) (#x: float64)
+  requires elem_pts_to float64_t_repr a p x
+  ensures  float64_t_pts_to a p x
+
+
+ghost fn float64_t_to_elem (a: ptr) (#p: perm) (#x: float64)
+  requires float64_t_pts_to a p x
+  ensures  elem_pts_to float64_t_repr a p x
+
+
+let float64_t_repr_len (x: float64) (b: bytes)
+  : Lemma (requires float64_t_repr x b) (ensures len b == SZ.v float64_t_sizeof)
+  = float64_t_repr_no_prov x b

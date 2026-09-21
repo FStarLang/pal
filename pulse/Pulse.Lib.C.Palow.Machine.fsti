@@ -22,6 +22,7 @@ open Pulse.Lib.C.Palow.Bytes
 open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Scalar
+open Pulse.Lib.C.Palow.Float
 open Pulse.Lib.C.Palow.CTypes
 
 module SZ = FStar.SizeT
@@ -337,3 +338,43 @@ fn size_t_stack_alloc ()
 
 fn size_t_stack_free (a: ptr)
   requires size_t_pts_to_uninit a
+
+fn float32_t_read (a: ptr) (#p: perm) (#x: erased float32)
+  preserves float32_t_pts_to a p x
+  returns  y : float32
+  ensures  rewrites_to y (reveal x)
+
+fn float32_t_write (a: ptr) (y: float32) (#x: erased float32)
+  requires float32_t_pts_to a 1.0R x
+  ensures  float32_t_pts_to a 1.0R y
+
+fn float32_t_write_uninit (a: ptr) (y: float32)
+  requires float32_t_pts_to_uninit a
+  ensures  float32_t_pts_to a 1.0R y
+
+fn float32_t_stack_alloc ()
+  returns  a : ptr
+  ensures  float32_t_pts_to_uninit a
+
+fn float32_t_stack_free (a: ptr)
+  requires float32_t_pts_to_uninit a
+
+fn float64_t_read (a: ptr) (#p: perm) (#x: erased float64)
+  preserves float64_t_pts_to a p x
+  returns  y : float64
+  ensures  rewrites_to y (reveal x)
+
+fn float64_t_write (a: ptr) (y: float64) (#x: erased float64)
+  requires float64_t_pts_to a 1.0R x
+  ensures  float64_t_pts_to a 1.0R y
+
+fn float64_t_write_uninit (a: ptr) (y: float64)
+  requires float64_t_pts_to_uninit a
+  ensures  float64_t_pts_to a 1.0R y
+
+fn float64_t_stack_alloc ()
+  returns  a : ptr
+  ensures  float64_t_pts_to_uninit a
+
+fn float64_t_stack_free (a: ptr)
+  requires float64_t_pts_to_uninit a
