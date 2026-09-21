@@ -69,7 +69,9 @@ fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
         TypeT::TypeRef(TypeRefKind::Union(_)) => false,
         // An array field is read element by element, by the recursion the
         // struct's own module generates beside the one that fills it.
-        TypeT::FixedArray(t, _) => palow_name(tds, t).is_some(),
+        TypeT::FixedArray(..) => {
+            flat_array(tds, ty).is_some_and(|(t, _)| palow_name(tds, t).is_some())
+        }
         _ => palow_name(tds, ty).is_some(),
     }
 }
@@ -132,18 +134,18 @@ impl FieldShape {
 
 /// How a struct field is owned, or `None` if the model does not cover it.
 fn field_shape(tds: &Typedefs, ty: &Type) -> Option<FieldShape> {
-    match &tds.resolve(ty).val {
-        TypeT::FixedArray(t, n) => {
+    match flat_array(tds, ty) {
+        Some((t, n)) => {
             if !has_repr(tds, t) {
                 return None;
             }
             Some(FieldShape::Array {
                 pn: palow_name(tds, t)?,
                 esize: palow_sizeof(tds, t)?,
-                len: *n,
+                len: n,
             })
         }
-        _ => Some(FieldShape::One {
+        None => Some(FieldShape::One {
             pn: palow_name(tds, ty)?,
         }),
     }
@@ -151,9 +153,9 @@ fn field_shape(tds: &Typedefs, ty: &Type) -> Option<FieldShape> {
 
 /// The F* type of a struct field's value.
 fn field_type(tds: &Typedefs, ty: &Type) -> Option<String> {
-    let elem = match &tds.resolve(ty).val {
-        TypeT::FixedArray(t, _) => fstar_type(tds, t)?,
-        _ => fstar_type(tds, ty)?,
+    let elem = match flat_array(tds, ty) {
+        Some((t, _)) => fstar_type(tds, t)?,
+        None => fstar_type(tds, ty)?,
     };
     Some(field_shape(tds, ty)?.value_type(&elem))
 }
@@ -377,6 +379,23 @@ impl<'a> Typedefs<'a> {
 /// `_plain int32_t *` and an `int32_t *` have the same predicate but are not
 /// the same C declaration. An *operator*, though, is chosen by the underlying
 /// scalar type alone, and `_plain` says nothing about it.
+/// The element type and total length of an array type, flattened.
+///
+/// At byte level a `T[3][4]` *is* twelve contiguous `T`s. C lays the rows out
+/// end to end with no padding between them, so a nested representation would
+/// describe exactly the same bytes as the flat one at the cost of a second
+/// notion of element. The flat one is the truth this model is built on, and
+/// `arr[i][j]` is then the ordinary subscript `arr[i * 4 + j]`.
+fn flat_array<'b>(tds: &'b Typedefs, ty: &'b Type) -> Option<(&'b Type, u64)> {
+    let TypeT::FixedArray(t, n) = &peel(tds, ty).val else {
+        return None;
+    };
+    Some(match flat_array(tds, t) {
+        Some((e, m)) => (e, m * n),
+        None => (t, *n),
+    })
+}
+
 fn peel<'b>(tds: &'b Typedefs, ty: &'b Type) -> &'b Type {
     let mut ty = tds.resolve(ty);
     for _ in 0..64 {
@@ -1645,6 +1664,46 @@ impl<'a> Spec<'a> {
         flatten_fragment(&out)
     }
 
+    /// The sequence a subscript looks in, and the index it looks at.
+    ///
+    /// A multidimensional array field is one flat sequence in the record,
+    /// exactly as it is one flat run of bytes in memory. `m->arr[1][2]` on an
+    /// `int[3][4]` therefore picks element `1 * 4 + 2` of a twelve-element
+    /// sequence; the outer subscript is a stride and not a lookup, because
+    /// the row it names is not an object of its own.
+    fn flat_subscript(&self, e: &Expr, w: When) -> Result<(String, String), String> {
+        let ExprT::Index(base, idx) = &strip_vattr(e).val else {
+            return Err(format!("a contract that indexes {}", expr_kind_of(&e.val)));
+        };
+        let i = self.num(idx, w)?;
+        let bty = self.ty_of(base)?;
+        if matches!(&strip_vattr(base).val, ExprT::Index(..)) {
+            let Some((_, width)) = flat_array(self.tds, &bty) else {
+                return Err("a contract that indexes an array element".to_string());
+            };
+            let (seq, outer) = self.flat_subscript(base, w)?;
+            // The stride has to be folded away rather than written down: a
+            // contract module has no multiplication in scope, and the body
+            // that has to agree with this index only translates a constant
+            // row for the same reason its arithmetic would otherwise need a
+            // `fits` obligation.
+            let (Ok(k), Ok(j)) = (outer.parse::<u64>(), i.parse::<u64>()) else {
+                return Err(
+                    "a contract that indexes a multidimensional array at a variable row"
+                        .to_string(),
+                );
+            };
+            return Ok((seq, format!("{}", k * width + j)));
+        }
+        if !matches!(self.tds.resolve(&bty).val, TypeT::FixedArray(..)) {
+            return Err(format!(
+                "a contract that indexes {}",
+                describe(self.tds.resolve(&bty))
+            ));
+        }
+        Ok((self.value(base, w)?, i))
+    }
+
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
@@ -1801,16 +1860,8 @@ impl<'a> Spec<'a> {
             // A fixed-size array *field* is a sequence in the struct's record,
             // so indexing it is `Seq.index` of a projection rather than a
             // lookup in a parameter's own sequence.
-            ExprT::Index(base, idx) => {
-                let bty = self.ty_of(base)?;
-                if !matches!(self.tds.resolve(&bty).val, TypeT::FixedArray(..)) {
-                    return Err(format!(
-                        "a contract that indexes {}",
-                        describe(self.tds.resolve(&bty))
-                    ));
-                }
-                let seq = self.value(base, w)?;
-                let i = self.num(idx, w)?;
+            ExprT::Index(..) => {
+                let (seq, i) = self.flat_subscript(e, w)?;
                 self.guards
                     .borrow_mut()
                     .push(format!("{} < Seq.length {}", i, seq));
@@ -5400,10 +5451,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             let name = fill_name(pn, *esize, *len);
             if !fills.contains(&name) {
                 fills.push(name);
-                let elem = match &tds.resolve(&f.ty).val {
-                    TypeT::FixedArray(t, _) => fstar_type(tds, t).unwrap(),
-                    _ => unreachable!(),
-                };
+                let elem = fstar_type(tds, flat_array(tds, &f.ty).unwrap().0).unwrap();
                 c += &emit_fill(pn, &elem, *esize, *len);
             }
         }
@@ -5474,9 +5522,9 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             .fields
             .iter()
             .map(|f| {
-                let elem = match &tds.resolve(&f.ty).val {
-                    TypeT::FixedArray(t, _) => fstar_type(tds, t),
-                    _ => fstar_type(tds, &f.ty),
+                let elem = match flat_array(tds, &f.ty) {
+                    Some((t, _)) => fstar_type(tds, t),
+                    None => fstar_type(tds, &f.ty),
                 }
                 .unwrap_or_else(|| "unit".to_string());
                 format!("(#val_{}: {})", f.name, f.shape.value_type(&elem))
@@ -8719,6 +8767,7 @@ impl<'a> Body<'a> {
                         addr: b.tmp.clone(),
                         pn: b.pn.clone(),
                         esize: a.esize,
+                        base: 0,
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: true,
@@ -8734,6 +8783,7 @@ impl<'a> Body<'a> {
                         addr: s.addr.clone(),
                         pn: s.palow_ty.clone(),
                         esize: esize.0,
+                        base: 0,
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: esize.1,
@@ -8761,6 +8811,7 @@ impl<'a> Body<'a> {
                     addr: ap.addr.clone(),
                     pn: ap.pn.clone(),
                     esize: ap.esize.clone(),
+                    base: 0,
                     close_read: Vec::new(),
                     close_write: Vec::new(),
                     maybe: ap.maybe,
@@ -8784,6 +8835,7 @@ impl<'a> Body<'a> {
                         addr,
                         pn: i.pn,
                         esize: format!("{}sz", i.esize.unwrap()),
+                        base: 0,
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: false,
@@ -8810,10 +8862,29 @@ impl<'a> Body<'a> {
                     addr: ff.at,
                     pn,
                     esize: format!("{}sz", esize),
+                    base: 0,
                     close_read,
                     close_write,
                     maybe: false,
                 })
+            }
+            // `m->arr[2][3]`: the outer subscript of a multidimensional array
+            // picks a row, and a row is not an object of its own. C lays the
+            // rows out end to end, so the place is still the whole flat field
+            // and the row contributes nothing but an offset to the index.
+            ExprT::Index(inner, j) => {
+                let ity = self.ty_of(e)?;
+                let Some((_, rowlen)) = flat_array(self.tds, &ity) else {
+                    return Err("a subscript of an array element".to_string());
+                };
+                let Some(k) = const_index(&strip_vattr(j).val) else {
+                    return Err(
+                        "a row of a multidimensional array chosen at a variable index".to_string(),
+                    );
+                };
+                let mut ap = self.array_place(inner)?;
+                ap.base += k * rowlen;
+                Ok(ap)
             }
             other => Err(format!("a subscript of {}", expr_kind_of(other))),
         }
@@ -8847,10 +8918,27 @@ impl<'a> Body<'a> {
             close_read: cl_read,
             close_write: cl_write,
             maybe,
+            base: elem_base,
         } = self.array_place(base)?;
         let i = match idx {
             Some(e) => self.index(e)?,
             None => "0sz".to_string(),
+        };
+        // A row offset is only usable if it can be folded into the index: the
+        // flat index is `row * width + i`, and an addition of two `size_t`s
+        // carries a `fits` obligation that nothing here is in a position to
+        // discharge. A literal index needs no addition at all.
+        let i = if elem_base == 0 {
+            i
+        } else {
+            match i.strip_suffix("sz").and_then(|d| d.parse::<u64>().ok()) {
+                Some(k) => format!("{}sz", k + elem_base),
+                None => {
+                    return Err(
+                        "a subscript of a multidimensional array at a variable index".to_string(),
+                    );
+                }
+            }
         };
         let off = format!("({} `SizeT.mul` {})", esize, i);
         let at = format!("({} +! {})", arr, off);
@@ -9532,24 +9620,50 @@ impl<'a> Body<'a> {
     /// four-element sequence, and only the target type says four. C's rule
     /// that the elements not given are zeroed is applied here, by padding.
     fn init_value(&mut self, ty: &Type, e: &Expr) -> Result<String, String> {
+        if flat_array(self.tds, ty).is_none() {
+            return self.rvalue(e);
+        }
+        if !matches!(strip_vattr(e).val, ExprT::ArrayInit { .. }) {
+            return self.rvalue(e);
+        }
+        let mut vs = Vec::new();
+        self.init_flat(ty, e, &mut vs)?;
+        Ok(format!("(Seq.seq_of_list [{}])", vs.join("; ")))
+    }
+
+    /// The leaves of an array initialiser, in storage order. A
+    /// multidimensional array is one flat sequence, so `{{1, 2}}` for a
+    /// `uint32_t[3][4]` contributes twelve elements and not three rows: the
+    /// nesting in the source says where a row ends, and C11 6.7.9p21 says
+    /// what fills the rest of it.
+    fn init_flat(&mut self, ty: &Type, e: &Expr, out: &mut Vec<String>) -> Result<(), String> {
         let TypeT::FixedArray(elem, n) = &peel(self.tds, ty).val else {
-            return self.rvalue(e);
+            out.push(self.rvalue(e)?);
+            return Ok(());
         };
-        let ExprT::ArrayInit { elems, .. } = &strip_vattr(e).val else {
-            return self.rvalue(e);
-        };
+        let elem = elem.clone();
         let n = usize::try_from(*n).map_err(|_| "an array too long to initialise".to_string())?;
+        let ExprT::ArrayInit { elems, .. } = &strip_vattr(e).val else {
+            return Err("an array initialised by something that is not a list".to_string());
+        };
         if elems.len() > n {
             return Err("an initialiser with more elements than the array".to_string());
         }
-        let mut vs = Vec::new();
+        let start = out.len();
         for x in elems {
-            vs.push(self.init_value(elem, x)?);
+            self.init_flat(&elem, x, out)?;
         }
-        while vs.len() < n {
-            vs.push(zero_value(self.tds, elem)?);
+        // How many leaves one element of this array is worth, which is the
+        // unit the zero padding has to be counted in.
+        let (leaf, per) = match flat_array(self.tds, &elem) {
+            Some((t, k)) => (t, usize::try_from(k).unwrap_or(1)),
+            None => (elem.as_ref(), 1),
+        };
+        let z = zero_value(self.tds, leaf)?;
+        while out.len() < start + n * per {
+            out.push(z.clone());
         }
-        Ok(format!("(Seq.seq_of_list [{}])", vs.join("; ")))
+        Ok(())
     }
 
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
@@ -12633,7 +12747,7 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
                     // An array field's own type is the array, so the zero has
                     // to be built at the element type and then replicated.
                     FieldShape::Array { len, .. } => {
-                        let TypeT::FixedArray(elem, _) = &peel(tds, &f.ty).val else {
+                        let Some((elem, _)) = flat_array(tds, &f.ty) else {
                             return Err(format!("a zeroed field `{}`", f.name));
                         };
                         format!(
@@ -12779,6 +12893,11 @@ struct ArrayPlace {
     addr: String,
     pn: String,
     esize: String,
+    /// A constant element offset into the flat array the address names. Only
+    /// a multidimensional array field has one: its outer subscript selects a
+    /// row, and a row is not an object of its own but a run of elements of
+    /// the same flat sequence.
+    base: u64,
     close_read: Vec<String>,
     close_write: Vec<String>,
     maybe: bool,

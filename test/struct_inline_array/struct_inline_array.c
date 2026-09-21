@@ -95,6 +95,23 @@ struct twodim {
 int access(const struct twodim *m) {
     return m->arr[2][3];
 }
+
+// A write through a multidimensional field, and a contract that names the
+// element it changed. C lays `int arr[3][4]` out as twelve consecutive ints,
+// so `arr[1][2]` is the sixth of them and the outer subscript is an offset
+// rather than a separate object.
+//
+// Palow-only: PAL's array model gives the outer subscript its own `array`
+// handle, and the inner write is then applied to a `full_array_lspec` rather
+// than to an array (Error 189). The flat view has no such intermediate to get
+// wrong, which is the point of stating it flat.
+#ifdef PALOW
+void set_cell(struct twodim *m, int v)
+  _ensures(m->arr[1][2] == v)
+{
+    m->arr[1][2] = v;
+}
+#endif
 // A scalar field of a structure passed by value. There is no storage to read
 // from: the parameter is the record, so the access is a projection.
 int read_c_by_value(_plain struct mixed s)

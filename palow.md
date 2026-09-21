@@ -3265,8 +3265,29 @@ new facts about memory.
    and it is the first place where erasing the pointer-kind distinction pays
    for itself in the surface language rather than in the emitter.
 
-   As of this milestone: **936 specifications, 879 of them with real bodies,
-   38 admitted, 19 external, 60 functions skipped**, plus **18 `_pure`
+   A multidimensional array field is where the byte-level view stops being a
+   reformulation and starts being a simplification. C lays `int arr[3][4]` out
+   as twelve consecutive `int`s with nothing between the rows, so at byte
+   level there is no such thing as a row: there is one flat run of storage,
+   and `arr[i][j]` names element `i * 4 + j` of it. The old model gives the
+   outer subscript an array handle of its own and then has to explain what the
+   inner subscript does to it -- which it does not manage for a write, where
+   the element turns out to be a `full_array_lspec` rather than an array. The
+   flat view has no intermediate object to get wrong. It costs one
+   restriction, which is that the row has to be a constant: the flat index is
+   an addition, and an addition of two `size_t`s carries a `fits` obligation
+   that neither the body nor the contract is in a position to discharge, so a
+   variable row is refused by name rather than emitted and hoped for.
+
+   The same flattening settles the initialiser. `grid g = {{{1, 2}}}` has
+   nesting that says where a row ends and C11 6.7.9p21 says what fills the
+   rest of it; once the target is one sequence of twelve, both rules are read
+   off in a single pass and what comes out is the twelve-element literal the
+   field's type asks for, rather than a three-element sequence of
+   four-element sequences that no longer has anywhere to go.
+
+   As of this milestone: **939 specifications, 882 of them with real bodies,
+   38 admitted, 19 external, 56 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
