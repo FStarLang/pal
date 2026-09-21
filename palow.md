@@ -3403,6 +3403,26 @@ new facts about memory.
    with padding between a `float` and a `double` -- now translates with no
    skip, no dropped contract and no admit.
 
+   A `_refine` written on a struct *field* is an invariant of the struct
+   type, not of any one function's arguments, so stating it in a contract was
+   always the wrong place: it reached parameters and nothing else, and a
+   value that arrived as a return, a local or a global did not have it. It
+   now goes on the field's type in the generated record --
+   `fld_n: (v: Int32.t { 0 < Int32.v v /\ Int32.v v < 100 })` -- where
+   nothing can construct a value of the struct without it, and every ghost
+   binder that builds such a record (`unfocus_n`'s `#y`, `gather`'s `#val_n`)
+   is widened to match. A refinement about an `_array` field is about the
+   extent behind the pointer rather than about the address, so it goes on the
+   ownership record's field instead, which is the same idea one level down.
+   The one visible consequence is that `{sn}_repr_zero` disappears for such a
+   struct: a zeroed `struct box` is not a `struct box`, so there is no lemma
+   to state, and the `calloc` that wanted one has to fail. That is the
+   invariant working, not a gap. Two kinds stay dropped and say so: a
+   `_refine((_slprop) ...)`, which is not a property of the value at all, and
+   a clause naming a *sibling* field, which is sayable in the record type but
+   would also put a proof obligation on every write to the sibling. Dropped
+   contracts fall from 31 to 23.
+
    As of this milestone: **961 specifications, 903 of them with real bodies,
    38 admitted, 20 external, 27 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is

@@ -57,6 +57,16 @@ struct StructField {
     /// the padding is.
     size: u64,
     shape: FieldShape,
+    /// A `_refine` written on the field, rendered as an F\* proposition about
+    /// a binder named `v`, when the translation covers it.
+    ///
+    /// A field refinement is an invariant of the struct *type*: every value of
+    /// it, anywhere, has the property. Stating it in a contract only reaches
+    /// parameters, so instead it goes on the field's type in the generated
+    /// record, where nothing can construct a value without it. `None` means
+    /// there is none, or that it is one of the kinds this does not cover --
+    /// an ownership refinement, or one naming a sibling field.
+    inv: Option<String>,
 }
 
 /// Whether a value of this type can be read out of memory in one step, which
@@ -4580,7 +4590,73 @@ fn bit_unit(
     Ok((format!("bits{}", start), ty, start, members))
 }
 
-fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
+/// A field's `_refine` as a proposition about a single binder named `v`.
+///
+/// `seq` says what `v` stands for: an `_array` field's refinement is almost
+/// always about its length, and a length is not part of the field's value --
+/// the value is an address and the sequence lives in the struct's ownership
+/// record -- so there `v` is the sequence and `this._length` reads it. For
+/// every other field `v` is simply the value.
+///
+/// A clause naming a *sibling* field is deliberately not covered. It is
+/// sayable in the record type, where an earlier field is in scope, but it
+/// would also put an obligation on the write to the sibling, and that is a
+/// separate piece of work. Returning `None` leaves the honest note in place.
+fn field_invariant(tds: &Typedefs, env: &Env, fty: &Type, seq: bool) -> Option<String> {
+    let (ps, _, _) = refinements(tds, fty).ok()?;
+    let ps: Vec<_> = ps
+        .into_iter()
+        .filter(|p| slprop_refine(tds, p).is_none())
+        .collect();
+    let first = ps.first()?;
+    let mut env = env.clone();
+    env.push_var_decl(
+        &Rc::<str>::from("this").with_loc(first.loc.clone()),
+        Rc::new(peel(tds, fty).clone()),
+        crate::env::LocalDeclKind::RValue,
+    );
+    let mut pointees = HashMap::new();
+    let mut arrays = HashSet::new();
+    let mut locals = HashMap::new();
+    locals.insert("this".to_string(), "v".to_string());
+    if seq {
+        pointees.insert(
+            "this".to_string(),
+            (Some("v".to_string()), Some("v".to_string())),
+        );
+        arrays.insert("this".to_string());
+    }
+    let spec = Spec {
+        tds,
+        env: &env,
+        pointees,
+        olds: HashMap::new(),
+        arrays,
+        olens: HashMap::new(),
+        owns: HashMap::new(),
+        addrs: HashMap::new(),
+        guarded: HashSet::new(),
+        guards: RefCell::new(Vec::new()),
+        ret: "v".to_string(),
+        locals,
+        uses: RefCell::new(HashSet::new()),
+        signed_ok: false,
+        valued: RefCell::new(Vec::new()),
+    };
+    let mut out = Vec::new();
+    for p in &ps {
+        // A clause the translation cannot state is no invariant at all: the
+        // record type has to hold for *every* value, so half of one would be
+        // worse than none.
+        out.push(spec.prop(p, When::Pre).ok()?);
+        if !spec.guards.borrow().is_empty() {
+            return None;
+        }
+    }
+    Some(out.join(" /\\ "))
+}
+
+fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<Chunk> {
     let layouts = crate::layout::LayoutCtx::of_tu(tu);
     let mut code: Vec<Chunk> = Vec::new();
     for decl in &tu.decls {
@@ -4697,12 +4773,17 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs) -> Vec<Chunk> {
                 bad = format!("field `{}` has no size", fname);
                 break;
             };
+            // An `_array` field's refinement is about the sequence in the
+            // ownership record; every other field's is about its value.
+            let seq = extent(tds, &fty) == Some(Extent::Array) || flex_elem(tds, &fty).is_some();
+            let inv = field_invariant(tds, env, &fty, seq);
             fields.push(StructField {
                 name: fname,
                 ty: fty,
                 offset: off,
                 size: fsize,
                 shape,
+                inv,
             });
         }
         if !ok || fields.is_empty() {
@@ -5146,6 +5227,11 @@ struct OwnItem {
     /// predicate would be saying the same thing twice, in a place where a
     /// struct without such a refinement could not follow.
     esize: Option<u64>,
+    /// The `_refine` written on the field, as a proposition about a binder
+    /// named `v`. An `_array` field's refinement is about the extent behind
+    /// the pointer, which is this sequence and nothing else, so this is where
+    /// it can be made true of every value rather than only of parameters.
+    inv: Option<String>,
 }
 
 impl OwnItem {
@@ -5207,6 +5293,7 @@ fn own_chain(tds: &Typedefs, at: String, name: String, ty: &Type, out: &mut Vec<
         pn,
         at,
         esize: None,
+        inv: None,
     });
     if let Some(to) = owned_pointer(tds, ty) {
         let to = to.clone();
@@ -5246,6 +5333,7 @@ fn own_items(tds: &Typedefs, si: &StructInfo, self_name: &str) -> Vec<OwnItem> {
                 pn,
                 at: format!("((x).fld_{})", f.name),
                 esize: Some(es),
+                inv: f.inv.clone(),
             });
             continue;
         }
@@ -5301,7 +5389,7 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
         sn,
         items
             .iter()
-            .map(|i| format!("own_{}: {}", i.name, i.ty))
+            .map(|i| format!("own_{}: {}", i.name, refined_ty(&i.ty, i.inv.as_ref())))
             .collect::<Vec<_>>()
             .join("; ")
     );
@@ -5350,7 +5438,7 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
         sn = sn,
         binders = items
             .iter()
-            .map(|i| format!("(#{}: {})", arg(i), i.ty))
+            .map(|i| format!("(#{}: {})", arg(i), refined_ty(&i.ty, i.inv.as_ref())))
             .collect::<Vec<_>>()
             .join(" "),
         req = items
@@ -5367,22 +5455,40 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
     c
 }
 
+/// Whether a field's `_refine` is about the sequence in the struct's ownership
+/// record rather than about the value the struct itself holds. An `_array`
+/// field is the case: its value is an address, and the only thing anyone
+/// writes a refinement about is how long the extent behind it is.
+fn own_kind(tds: &Typedefs, ty: &Type) -> bool {
+    extent(tds, ty) == Some(Extent::Array) && flex_elem(tds, ty).is_none()
+}
+
+/// An F\* type with a field's invariant attached, when there is one. The
+/// refinement's own binder is always `v`, which is what lets the same rendered
+/// text serve at every site that has to produce such a value.
+fn refined_ty(ty: &str, inv: Option<&String>) -> String {
+    match inv {
+        Some(p) => format!("(v: {} {{ {} }})", ty, p),
+        None => ty.to_string(),
+    }
+}
+
 fn emit_struct(tds: &Typedefs, name: &str) -> String {
     let si = &tds.structs[name];
     let sn = format!("struct_{}", name);
     let mut c = String::new();
 
-    // A `_refine` written on a *field* is an invariant of the struct type. A
-    // function that takes such a struct, or a pointer to one, states it in its
-    // contract like any other refinement -- but the generated ownership does
-    // not carry it, so a value of the type that arrives any other way (a
-    // return, a local, a global) does not have it. Saying so here keeps the
-    // remaining half out of the silent-weakening bucket.
+    // A `_refine` written on a *field* is an invariant of the struct type, so
+    // it goes on the field's type in the record below and every value of the
+    // type has it. What cannot go there says so here: a clause about
+    // separation logic rather than about the value, and a clause naming a
+    // sibling field -- which is sayable in the record but would also put an
+    // obligation on every write to the sibling, and that is not yet done.
     for f in &si.fields {
-        if refined(tds, &f.ty) {
+        if refined(tds, &f.ty) && f.inv.is_none() {
             c += &format!(
-                "(* contract dropped: the `_refine` on field `{}` reaches a \
-                 parameter of this type but is not carried by its ownership *)\n",
+                "(* contract dropped: the `_refine` on field `{}` is not a \
+                 property of the field's value alone *)\n",
                 f.name
             );
         }
@@ -5393,7 +5499,19 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         sn,
         si.fields
             .iter()
-            .map(|f| format!("fld_{}: {}", f.name, field_type(tds, &f.ty).unwrap()))
+            .map(|f| {
+                format!(
+                    "fld_{}: {}",
+                    f.name,
+                    // An `_array` field's invariant is about the sequence, not
+                    // about the address the value holds, so it belongs on the
+                    // ownership record instead; see `emit_struct_own`.
+                    refined_ty(
+                        &field_type(tds, &f.ty).unwrap(),
+                        f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty))
+                    )
+                )
+            })
             .collect::<Vec<_>>()
             .join("; ")
     );
@@ -5501,14 +5619,14 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             owned = owned(&format!("x.fld_{}", f.name))
         );
         c += &format!(
-            "ghost fn {sn}_unfocus_{f} (a: ptr) (#p: perm) (#x: {sn}) (#y: {fty})\n\
+            "ghost fn {sn}_unfocus_{f} (a: ptr) (#p: perm) (#x: {sn}) (#y: {rfty})\n\
              \x20 requires {sn}_hole_{f} a p x\n\
              \x20 requires {owned}\n\
              \x20 ensures  {sn}_pts_to a p {upd}\n\
              {{\n  unfold {sn}_hole_{f} a p x;\n  fold {sn}_pts_to a p {upd};\n}}\n\n",
             sn = sn,
             f = f.name,
-            fty = fty,
+            rfty = refined_ty(&fty, f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty))),
             owned = owned("y"),
             upd = upd
         );
@@ -5631,11 +5749,20 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     // object is one. Each field contributes its own reason, and the padding
     // contributes nothing -- the representation says nothing about it, which
     // is why an all-zero object is representable at all.
-    if let Some(proofs) = si
+    // A field invariant can rule the all-zero object out -- `_refine(this > 0)`
+    // does -- and then there is no such value to state the lemma about. That
+    // is not a gap: it is the invariant doing its job, and the `calloc` that
+    // wanted it has to fail instead.
+    let zeroable = si
         .fields
         .iter()
-        .map(|f| zero_repr_proof(tds, &f.ty))
-        .collect::<Option<Vec<_>>>()
+        .all(|f| f.inv.is_none() || own_kind(tds, &f.ty));
+    if zeroable
+        && let Some(proofs) = si
+            .fields
+            .iter()
+            .map(|f| zero_repr_proof(tds, &f.ty))
+            .collect::<Option<Vec<_>>>()
     {
         let zero = si
             .fields
@@ -6021,7 +6148,14 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
                     None => fstar_type(tds, &f.ty),
                 }
                 .unwrap_or_else(|| "unit".to_string());
-                format!("(#val_{}: {})", f.name, f.shape.value_type(&elem))
+                format!(
+                    "(#val_{}: {})",
+                    f.name,
+                    refined_ty(
+                        &f.shape.value_type(&elem),
+                        f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty))
+                    )
+                )
             })
             .collect();
         let value = if si.fields.is_empty() {
@@ -7070,11 +7204,11 @@ pub fn emit_palow(
     model_specific: bool,
 ) -> Vec<PalowModule> {
     let mut tds = Typedefs::new(tu, splice_inline, model_specific);
-    let structs = collect_structs(tu, &mut tds);
     let mut base = Env::new();
     for decl in &tu.decls {
         base.push_decl(decl);
     }
+    let structs = collect_structs(tu, &mut tds, &base);
     let mut chunks: Vec<Chunk> = structs;
     chunks.extend(emit_globals(&tds, tu));
 
