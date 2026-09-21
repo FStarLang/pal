@@ -38,7 +38,20 @@ int32_t roundtrip(struct counter *c) _ensures(return == 1) {
   return back == c;
 }
 
-/* Write through a recovered pointer; the caller supplies ownership by hand. */
+/* Write through a recovered pointer; the caller supplies ownership by hand.
+ *
+ * The two models spell the hand-written ownership differently, and the
+ * difference is the point: PAL has to *convert* the `core_ref` to a typed
+ * `ref` before it can state a points-to, while in Palow a `void *` is already
+ * the same `ptr` a `struct counter *` is, so the predicate applies to it
+ * directly. */
+#ifdef PALOW
+void implicit(void *p)
+  _requires(_inline_pulse(
+    exists* (cv: $type(struct counter)). struct_counter_pts_to $(p) 1.0R cv))
+  _ensures(_inline_pulse(
+    exists* (cv: $type(struct counter)). struct_counter_pts_to $(p) 1.0R cv))
+#else
 void implicit(void *p)
   _requires(_inline_pulse(
     exists* (cv: $type(struct counter)).
@@ -46,6 +59,7 @@ void implicit(void *p)
   _ensures(_inline_pulse(
     exists* (cv: $type(struct counter)).
       pts_to (Pulse.Lib.C.CoreRef.core_to_ref $type(struct counter) $(p)) cv))
+#endif
 {
   struct counter *c = p;
   c->n = 0;

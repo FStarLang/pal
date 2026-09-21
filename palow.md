@@ -3243,8 +3243,30 @@ new facts about memory.
    next one, and the count is only honest because every one of them is
    written into the generated file.
 
-   As of this milestone: **932 specifications, 874 of them with real bodies,
-   39 admitted, 19 external, 64 functions skipped**, plus **18 `_pure`
+   Two smaller gaps close on the same observation from opposite ends. A
+   `_refine_always` clause is one the caller may rely on before it has written
+   anything -- it is a fact about the storage, not about a value living in it
+   -- so it belongs in the uninitialised view of an `_out` array, where until
+   now nothing at all was stated. The old reasoning asked whether the
+   parameter had a precondition to hang the refinement on, which an `_out`
+   parameter by construction does not, and so silently dropped the one kind of
+   clause that does not need one. Stating it against the `option`-valued view
+   makes an `_out unsigned arr[4]` carry its own length inward, which is what
+   a body needs before it may subscript it.
+
+   A `void *` closes the same gap from the other side: it is an address about
+   which nothing is known, which is exactly what this model's `ptr` already
+   is. The old emitter had to reach for a `core_ref` and convert it before a
+   points-to could even be spelled, and Palow's translator had inherited the
+   habit of asking what a pointer's target looks like before it would accept
+   the parameter at all. Asking that question of `void` has no answer, so it
+   refused. Treating a `void *` as a pointer that simply owns nothing -- the
+   same treatment `_plain` already gets -- is both less code and more honest,
+   and it is the first place where erasing the pointer-kind distinction pays
+   for itself in the surface language rather than in the emitter.
+
+   As of this milestone: **936 specifications, 879 of them with real bodies,
+   38 admitted, 19 external, 60 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

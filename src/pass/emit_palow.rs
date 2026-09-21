@@ -721,6 +721,25 @@ fn uninit_below_pointer(tds: &Typedefs, ty: &Type) -> bool {
     }
 }
 
+/// The `_refine_always` clauses on a type, which are the only ones that say
+/// anything about a parameter whose storage holds no value yet.
+fn always_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
+    match &tds.resolve(ty).val {
+        TypeT::RefineAlways(t, p) => {
+            let mut v = always_refines(tds, t);
+            v.push(p.clone());
+            v
+        }
+        TypeT::Refine(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, _, _, _)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t)
+        | TypeT::Pointer(t, _) => always_refines(tds, t),
+        _ => Vec::new(),
+    }
+}
+
 fn refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
     match &tds.resolve(ty).val {
         TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
@@ -904,6 +923,13 @@ fn refined(tds: &Typedefs, ty: &Type) -> bool {
 /// See `is_nullable`.
 fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
     match &tds.resolve(ty).val {
+        // `void *` points at no object: C gives it no size and no
+        // representation, so there is nothing for a contract to own through
+        // it. That is exactly what `_plain` says about a typed pointer, and
+        // it costs nothing here -- in this model every pointer is a `ptr`
+        // whatever it points at, so a `void *` needs no conversion in either
+        // direction, only the ownership the author supplies by hand.
+        TypeT::Pointer(to, _) if matches!(tds.resolve(to).val, TypeT::Void) => None,
         TypeT::Pointer(to, _) => Some(to),
         TypeT::Nullable(t)
         | TypeT::Refine(t, _)
@@ -1346,7 +1372,10 @@ impl<'a> Spec<'a> {
             return Some(Ok(format!("(Seq.length {})", t)));
         }
         Some(match self.pointees.get(&*v.val) {
-            None => Err(format!("`{}._length` in a contract", v.val)),
+            None => match self.olens.get(&*v.val) {
+                Some(t) => Ok(format!("(Seq.length {})", t)),
+                None => Err(format!("`{}._length` in a contract", v.val)),
+            },
             Some((pre, post)) => {
                 let chosen = match w {
                     When::Post => post,
@@ -2618,6 +2647,18 @@ fn emit_fn(
                         .map(|(f, fty, p)| (base.clone(), f, fty, p, true)),
                 );
                 refines_uninit.extend(us.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+                // `_refine_always` means what it says: it holds of the storage
+                // as much as of the value. For an `_out` array that is the
+                // only thing the precondition can state -- the cells hold
+                // nothing, but there are still as many of them as the
+                // refinement says.
+                if arg.mode == ParamMode::Out && extent(tds, &arg.ty) == Some(Extent::Array) {
+                    refines_uninit.extend(
+                        always_refines(tds, &arg.ty)
+                            .into_iter()
+                            .map(|p| (base.clone(), arg.ty.clone(), p)),
+                    );
+                }
                 collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
             }
             Err(why) => {
@@ -3156,7 +3197,16 @@ fn emit_fn(
      -> Result<String, String> {
         let mut pointees = spec.pointees.clone();
         let mut arrays = spec.arrays.clone();
+        let mut olens = spec.olens.clone();
         let mut locals = HashMap::new();
+        // A refinement read against the *storage* rather than the value --
+        // which is the only reading an `_out` parameter has on the way in --
+        // can still ask how much storage there is. `this._length` is then the
+        // length of the cells the caller handed over.
+        if as_value && let Some(t) = olens.get(base).cloned() {
+            olens.insert("this".to_string(), t);
+            arrays.insert("this".to_string());
+        }
         if let Some((n, spelling, _)) = &bind {
             locals.insert(n.val.to_string(), spelling.clone());
         }
@@ -3238,7 +3288,7 @@ fn emit_fn(
             pointees,
             olds: spec.olds.clone(),
             arrays,
-            olens: spec.olens.clone(),
+            olens,
             owns: spec.owns.clone(),
             addrs: spec.addrs.clone(),
             guarded: spec.guarded.clone(),
