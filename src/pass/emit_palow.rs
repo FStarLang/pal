@@ -117,6 +117,85 @@ impl FieldShape {
         }
     }
 
+    /// The predicate relating a value of the field's type to the bytes under
+    /// it. A scalar publishes one under its own name; an array has no single
+    /// name for it, so the same thing is spelled with the array combinator
+    /// applied to its element's.
+    fn repr_of(&self, v: &str, b: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_repr {} {}", pn, v, b),
+            FieldShape::Array { pn, esize, .. } => {
+                format!("array_repr {}_repr {} {} {}", pn, esize, v, b)
+            }
+        }
+    }
+
+    /// `_pts_to` at an explicit permission.
+    fn pts_to_at(&self, a: &str, p: &str, v: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_pts_to {} {} {}", pn, a, p, v),
+            FieldShape::Array { pn, esize, .. } => {
+                format!("array_pts_to {}_repr {} {} {} {}", pn, esize, a, p, v)
+            }
+        }
+    }
+
+    fn uninit_at(&self, a: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_pts_to_uninit {}", pn, a),
+            FieldShape::Array { pn, esize, len } => {
+                format!("array_pts_to_uninit {}_repr {} {} {}", pn, esize, len, a)
+            }
+        }
+    }
+
+    /// Bytes in, ownership out.
+    fn conceal(&self, a: &str, p: &str, b: &str, v: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_conceal {} #{} #{} #{};", pn, a, p, b, v),
+            FieldShape::Array { pn, esize, .. } => format!(
+                "array_conceal {}_repr {} {}sz #{} #{} #{};",
+                pn, a, esize, p, b, v
+            ),
+        }
+    }
+
+    /// Ownership in, bytes out.
+    fn reveal(&self, a: &str, p: &str, v: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_reveal {} #{} #{};", pn, a, p, v),
+            FieldShape::Array { pn, esize, .. } => {
+                format!("array_reveal {}_repr {} {}sz #{} #{};", pn, a, esize, p, v)
+            }
+        }
+    }
+
+    /// Bytes of the right length in, storage out.
+    fn claim_uninit(&self, a: &str, b: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_claim_uninit {} #{};", pn, a, b),
+            FieldShape::Array { pn, esize, len } => format!(
+                "array_claim_all_uninit {}_repr {} {}sz {}sz #{};",
+                pn, a, esize, len, b
+            ),
+        }
+    }
+
+    /// Storage in, a value out. An array is filled element by element, by the
+    /// recursion the enclosing module already generates for its fields.
+    fn write_fn(&self) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_write_uninit", pn),
+            FieldShape::Array { pn, esize, len } => {
+                format!("{}_fill", fill_name(pn, *esize, *len))
+            }
+        }
+    }
+
+    fn write_uninit(&self, a: &str, v: &str) -> String {
+        format!("{} {} {};", self.write_fn(), a, v)
+    }
+
     /// The write-only view of the field's storage. An array's is the whole
     /// array as storage: `array_pts_to_uninit` hides the element sequence, so
     /// that like every other field's view it is a predicate on the address
@@ -184,6 +263,10 @@ struct StructInfo {
 struct UnionMember {
     name: String,
     ty: Rc<Type>,
+    /// How the member is owned. An array arm is the type-punning idiom --
+    /// `union { uint8_t bytes[4]; uint32_t word; }` -- so it is not an odd
+    /// corner but the reason a union has a byte-level representation at all.
+    shape: FieldShape,
     /// The member's own size, which is where the bytes it does not cover
     /// begin. C says a union is as large as its largest member, so every
     /// shorter member leaves a tail that ownership still has to account for.
@@ -4335,14 +4418,23 @@ fn collect_union(
     for f in &ud.fields {
         let mname = f.val.name().val.to_string();
         let mty = f.val.logical_type(&f.loc);
-        if !has_repr(tds, &mty) {
+        // A member's own ownership has to be defined over *bytes*: the
+        // members overlap, so the union's representation is a case split on
+        // the same bytes and a member whose ownership is field-wise has
+        // nothing to contribute to it. An array of such a member is fine --
+        // `field_shape` has already asked the question of its element.
+        let shape = match field_shape(tds, &mty) {
+            Some(FieldShape::One { .. }) if !has_repr(tds, &mty) => None,
+            other => other,
+        };
+        let (Some(shape), Some(_)) = (shape, field_type(tds, &mty)) else {
             return skip(format!(
                 "member `{}` is {}, which has no byte-level `_repr`",
                 mname,
                 describe(tds.resolve(&mty))
             ));
-        }
-        let (Some(msize), Some(_)) = (palow_sizeof(tds, &mty), fstar_type(tds, &mty)) else {
+        };
+        let Some(msize) = shape.size(tds, &mty) else {
             return skip(format!("member `{}` has no size", mname));
         };
         if msize > size {
@@ -4351,6 +4443,7 @@ fn collect_union(
         members.push(UnionMember {
             name: mname,
             ty: mty,
+            shape,
             size: msize,
         });
     }
@@ -4395,13 +4488,26 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     c += &format!("noeq type {} =\n", un);
     for m in &ui.members {
         c += &format!(
-            "  | {} : {} -> {}\n",
+            "  | {} : v: ({}) -> {}\n",
             ctor(m),
-            fstar_type(tds, &m.ty).unwrap(),
+            field_type(tds, &m.ty).unwrap(),
             un
         );
     }
     c += "\n";
+    // An array arm is filled element by element, exactly as an array field
+    // of a structure is, so the same recursion has to be in scope here.
+    let mut fills: Vec<String> = Vec::new();
+    for m in &ui.members {
+        if let FieldShape::Array { pn, esize, len } = &m.shape {
+            let name = fill_name(pn, *esize, *len);
+            if !fills.contains(&name) {
+                fills.push(name);
+                let elem = fstar_type(tds, flat_array(tds, &m.ty).unwrap().0).unwrap();
+                c += &emit_fill(pn, &elem, *esize, *len);
+            }
+        }
+    }
     c += &format!("let {}_sizeof : SizeT.t = {}sz\n", un, ui.size);
     c += &format!("let {}_alignof : SizeT.t = {}sz\n\n", un, ui.align);
 
@@ -4413,10 +4519,9 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     );
     for m in &ui.members {
         c += &format!(
-            "     | {} v -> {}_repr v (slice b 0 {})\n",
+            "     | {} v -> {}\n",
             ctor(m),
-            palow_name(tds, &m.ty).unwrap(),
-            m.size
+            m.shape.repr_of("v", &format!("(slice b 0 {})", m.size))
         );
     }
     c += "    ))\n\n";
@@ -4441,10 +4546,12 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     );
 
     for m in &ui.members {
-        let pn = palow_name(tds, &m.ty).unwrap();
-        let mty = fstar_type(tds, &m.ty).unwrap();
+        let mty = field_type(tds, &m.ty).unwrap();
         let k = ctor(m);
         let f = &m.name;
+        let at = "a";
+        let mem_pts_to = |p: &str, v: &str| m.shape.pts_to_at(at, p, v);
+        let mem_uninit = m.shape.uninit_at(at);
         // The bytes past the member. A member as wide as the union still gets
         // one, of length zero: `mem_split` hands back a suffix either way and
         // a resource cannot simply be dropped, so treating the two cases alike
@@ -4460,29 +4567,32 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         c += &format!(
             "ghost fn {un}_focus_{f} (a: ptr) (#p: perm) (#v: {mty})\n\
              \x20 requires {un}_pts_to a p ({k} v)\n\
-             \x20 ensures  {pn}_pts_to a p v\n\
+             \x20 ensures  {pts}\n\
              \x20 ensures  {un}_rest_{f} a p\n\
              {{\n  \
              unfold {un}_pts_to a p ({k} v);\n  \
              with b. assert (mem_pts_to a p b ** pure ({un}_repr ({k} v) b));\n  \
              mem_split a {msz}sz;\n  \
-             {pn}_conceal a #p #(slice b 0 {msz}) #v;\n  \
+             {conceal}\n  \
              fold {un}_rest_{f} a p;\n}}\n\n",
             un = un,
             f = f,
             k = k,
-            pn = pn,
+            pts = mem_pts_to("p", "v"),
+            conceal = m
+                .shape
+                .conceal("a", "p", &format!("(slice b 0 {})", m.size), "v"),
             mty = mty,
             msz = m.size
         );
         c += &format!(
             "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#v: {mty})\n\
-             \x20 requires {pn}_pts_to a p v\n\
+             \x20 requires {pts}\n\
              \x20 requires {un}_rest_{f} a p\n\
              \x20 ensures  {un}_pts_to a p ({k} v)\n\
              {{\n  \
-             {pn}_reveal a #p #v;\n  \
-             with bx. assert (mem_pts_to a p bx ** pure ({pn}_repr v bx));\n  \
+             {reveal}\n  \
+             with bx. assert (mem_pts_to a p bx ** pure ({repr}));\n  \
              unfold {un}_rest_{f} a p;\n  \
              with r. assert (mem_pts_to (a +! {msz}sz) p r);\n  \
              mem_join a #p #bx #r {msz}sz;\n  \
@@ -4491,7 +4601,9 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             un = un,
             f = f,
             k = k,
-            pn = pn,
+            pts = mem_pts_to("p", "v"),
+            reveal = m.shape.reveal("a", "p", "v"),
+            repr = m.shape.repr_of("v", "bx"),
             mty = mty,
             msz = m.size
         );
@@ -4501,17 +4613,20 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         c += &format!(
             "ghost fn {un}_switch_{f} (a: ptr) (#u: {un})\n\
              \x20 requires {un}_pts_to a 1.0R u\n\
-             \x20 ensures  {pn}_pts_to_uninit a\n\
+             \x20 ensures  {uninit}\n\
              \x20 ensures  {un}_rest_{f} a 1.0R\n\
              {{\n  \
              unfold {un}_pts_to a 1.0R u;\n  \
              with b. assert (mem_pts_to a 1.0R b ** pure ({un}_repr u b));\n  \
              mem_split a {msz}sz;\n  \
-             {pn}_claim_uninit a #(slice b 0 {msz});\n  \
+             {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
             f = f,
-            pn = pn,
+            uninit = mem_uninit,
+            claim = m
+                .shape
+                .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
             msz = m.size
         );
         // The same step from storage that has never held anything. A local
@@ -4523,17 +4638,20 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         c += &format!(
             "ghost fn {un}_switch_uninit_{f} (a: ptr)\n\
              \x20 requires {un}_pts_to_uninit a\n\
-             \x20 ensures  {pn}_pts_to_uninit a\n\
+             \x20 ensures  {uninit}\n\
              \x20 ensures  {un}_rest_{f} a 1.0R\n\
              {{\n  \
              unfold {un}_pts_to_uninit a;\n  \
              with b. assert (mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof));\n  \
              mem_split a {msz}sz;\n  \
-             {pn}_claim_uninit a #(slice b 0 {msz});\n  \
+             {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
             f = f,
-            pn = pn,
+            uninit = mem_uninit,
+            claim = m
+                .shape
+                .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
             msz = m.size
         );
     }
@@ -4591,19 +4709,21 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         un = un
     );
     for m in &ui.members {
-        let pn = palow_name(tds, &m.ty).unwrap();
         c += &format!(
             "    {k} v -> {{\n      \
              with b. assert (mem_pts_to a 1.0R b);\n      \
              mem_split a {msz}sz;\n      \
-             {pn}_claim_uninit a #(slice b 0 {msz});\n      \
-             {pn}_write_uninit a v;\n      \
+             {claim}\n      \
+             {write}\n      \
              fold {un}_rest_{f} a 1.0R;\n      \
              {un}_unfocus_{f} a;\n      \
              rewrite ({un}_pts_to a 1.0R ({k} v)) as ({un}_pts_to a 1.0R x);\n    }}\n",
             k = ctor(m),
             f = m.name,
-            pn = pn,
+            claim = m
+                .shape
+                .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
+            write = m.shape.write_uninit("a", "v"),
             un = un,
             msz = m.size
         );
@@ -8372,12 +8492,22 @@ impl<'a> Body<'a> {
             .union_of(base)
             .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
         let fty = self.field_ty(base, f)?;
-        let pn = palow_name(self.tds, &fty).ok_or_else(|| {
-            format!(
+        // An array arm has no single Palow name -- its ownership is the array
+        // combinator applied to its element's -- so the whole shape is what
+        // the focus has to be spelled with.
+        let shape = match field_shape(self.tds, &fty) {
+            Some(FieldShape::One { .. }) if palow_name(self.tds, &fty).is_none() => None,
+            other => other,
+        };
+        let Some(shape) = shape else {
+            return Err(format!(
                 "a union member of type {}",
                 describe(self.tds.resolve(&fty))
-            )
-        })?;
+            ));
+        };
+        let pn = match &shape {
+            FieldShape::One { pn } | FieldShape::Array { pn, .. } => pn.clone(),
+        };
         let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
             // The other way to know is the contract. There the union's value
@@ -8410,7 +8540,7 @@ impl<'a> Body<'a> {
                 vp, vu, un, a, vp, vu
             ));
             self.lines.push(format!(
-                "rewrite ({}_pts_to {} {} {}) as ({}_pts_to {} {} ({} ({}?._0 {})));",
+                "rewrite ({}_pts_to {} {} {}) as ({}_pts_to {} {} ({} ({}?.v {})));",
                 un, a, vp, vu, un, a, vp, ctor, ctor, vu
             ));
             self.active.insert(a.clone(), f.val.to_string());
@@ -8435,7 +8565,7 @@ impl<'a> Body<'a> {
         };
         Ok(Focus {
             pn: pn.clone(),
-            write_fn: format!("{}_write_uninit", pn),
+            write_fn: shape.write_fn(),
             at: a.clone(),
             open_read: focus,
             open_write: vec![format!("{}_switch{}_{} {};", un, uninit_suffix, f.val, a)],
@@ -8815,6 +8945,32 @@ impl<'a> Body<'a> {
                     close_read: Vec::new(),
                     close_write: Vec::new(),
                     maybe: ap.maybe,
+                })
+            }
+            // An array arm of a union. The arm has to be the live one
+            // already: focusing it hands back the whole sequence, so writing
+            // an element and handing it back is an ordinary update, while
+            // *activating* a dead arm yields storage that stays storage until
+            // every element has been written -- which is a fact that would
+            // have to be carried across statements, and is not.
+            ExprT::Member(b2, f) if self.union_of(b2).is_some() => {
+                let fty = self.field_ty(b2, f)?;
+                let Some(FieldShape::Array { pn, esize, .. }) = field_shape(self.tds, &fty) else {
+                    return Err(format!(
+                        "a subscript of a union member of type {}",
+                        describe(self.tds.resolve(&fty))
+                    ));
+                };
+                let uf = self.union_member(b2, f, false)?;
+                self.lines.extend(uf.open_read.iter().cloned());
+                Ok(ArrayPlace {
+                    addr: uf.at,
+                    pn,
+                    esize: format!("{}sz", esize),
+                    close_read: uf.close_read,
+                    close_write: uf.close_write,
+                    maybe: false,
+                    base: 0,
                 })
             }
             ExprT::Member(base, f) => {
@@ -13579,7 +13735,7 @@ fn declared_expr(
             let bt = declared_type(tds, declared, b)?;
             Ok(match &peel(tds, &bt).val {
                 TypeT::TypeRef(TypeRefKind::Union(u)) => format!(
-                    "Union_{}_{}?._0 {}",
+                    "Union_{}_{}?.v {}",
                     u.val,
                     f.val,
                     declared_expr(tds, declared, b)?

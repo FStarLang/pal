@@ -45,3 +45,15 @@ void write_bytes(union addr *a)
     a->bytes[2] = 3;
     a->bytes[3] = 4;
 }
+
+// Reading an element of the array arm, where the contract says that arm is
+// the live one. Focusing a live arm hands back the whole sequence, so an
+// element of it is reached exactly as an element of an array field of a
+// struct is -- the difference between a union and a struct is which bytes the
+// member covers, and a subscript does not care.
+uint8_t byte_at(union addr *a, unsigned i)
+    _requires(a->bytes._active)
+    _requires(i < 4)
+{
+    return a->bytes[i];
+}

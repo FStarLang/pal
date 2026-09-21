@@ -51,6 +51,28 @@ let array_pts_to (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
                  ([@@@mkey] a: ptr) (p: perm) (xs: Seq.seq t) : slprop =
   exists* b. mem_pts_to a p b ** pure (array_repr t_repr esize xs b)
 
+(* The two directions between an array's ownership and the bytes under it.
+   Every scalar type publishes this pair under its own name, and a union arm
+   or a structure field has to be able to ask for it without knowing which
+   kind of thing it is holding. `array_pts_to` is a definition, so both are
+   a fold. *)
+ghost fn array_conceal (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                       (#p: perm) (#b: bytes) (#xs: Seq.seq t)
+  requires mem_pts_to a p b
+  requires pure (array_repr t_repr (SZ.v esize) xs b)
+  ensures  array_pts_to t_repr (SZ.v esize) a p xs
+{
+  fold (array_pts_to t_repr (SZ.v esize) a p xs);
+}
+
+ghost fn array_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                      (#p: perm) (#xs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a p xs
+  ensures  exists* b. mem_pts_to a p b ** pure (array_repr t_repr (SZ.v esize) xs b)
+{
+  unfold (array_pts_to t_repr (SZ.v esize) a p xs);
+}
+
 (* ---------------------------------------------------------------------------
    Arithmetic helpers
 

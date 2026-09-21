@@ -3286,8 +3286,29 @@ new facts about memory.
    field's type asks for, rather than a three-element sequence of
    four-element sequences that no longer has anywhere to go.
 
-   As of this milestone: **939 specifications, 882 of them with real bodies,
-   38 admitted, 19 external, 56 functions skipped**, plus **18 `_pure`
+   A union arm of array type is not a corner case but the whole point of
+   giving unions a byte-level representation: `union { uint8_t bytes[4];
+   uint32_t word; }` is the type-punning idiom, and the array arm is the side
+   of it that looks at the bytes. It was skipped only because every arm was
+   spelled with a single `_repr` name, which an array does not have -- its
+   ownership is the array combinator applied to its element's. Giving a union
+   arm the same shape a struct field already has makes the whole arm-by-arm
+   machinery go through unchanged: the case split in the representation, the
+   focus and unfocus pair, the step that makes an arm live, and the
+   element-by-element fill that a whole-union write needs. What the model says
+   about such a union is then exactly the interesting thing -- that the four
+   bytes and the `uint32_t` are the same storage, and that nothing in memory
+   records which of the two it currently is.
+
+   Subscripting a live arm follows from the same shape, and needs nothing
+   new: focusing a live arm hands back the whole sequence, so `a->bytes[i]` is
+   reached exactly as an element of an array field of a struct is. Activating
+   a *dead* arm is the case that stays out, because the storage it yields
+   remains storage until every element has been written, and that is a fact
+   which would have to be carried from one statement to the next.
+
+   As of this milestone: **942 specifications, 884 of them with real bodies,
+   39 admitted, 19 external, 52 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
