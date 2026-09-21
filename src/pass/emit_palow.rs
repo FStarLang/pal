@@ -83,8 +83,22 @@ const MAX_BYTE_LEVEL_FIELDS: usize = 16;
 /// points-to; a fixed-size array field is a whole `array_pts_to`, because in C
 /// `T f[N]` inside a struct is N elements of storage and not a pointer.
 enum FieldShape {
-    One { pn: String },
-    Array { pn: String, esize: u64, len: u64 },
+    One {
+        pn: String,
+    },
+    Array {
+        pn: String,
+        esize: u64,
+        len: u64,
+    },
+    /// A flexible array member: owned exactly as an array field is, but with
+    /// the length in the value instead of in the type. That is the whole of
+    /// what makes it flexible -- the object is larger than its type says, and
+    /// nothing but the value records by how much.
+    Flex {
+        pn: String,
+        esize: u64,
+    },
 }
 
 impl FieldShape {
@@ -97,13 +111,14 @@ impl FieldShape {
             FieldShape::Array { len, .. } => {
                 format!("(s: Seq.seq {} {{ Seq.length s == {} }})", elem, len)
             }
+            FieldShape::Flex { .. } => format!("Seq.seq {}", elem),
         }
     }
 
     fn pts_to(&self, at: &str, value: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} p {}", pn, at, value),
-            FieldShape::Array { pn, esize, .. } => {
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!("array_pts_to {}_repr {} {} p {}", pn, esize, at, value)
             }
         }
@@ -114,6 +129,10 @@ impl FieldShape {
         match self {
             FieldShape::One { .. } => palow_sizeof(tds, ty),
             FieldShape::Array { esize, len, .. } => Some(esize * len),
+            // A flexible array member contributes no bytes to the type: the
+            // object it belongs to is larger than `sizeof` says, and by how
+            // much is not a fact about the type at all.
+            FieldShape::Flex { .. } => Some(0),
         }
     }
 
@@ -124,7 +143,7 @@ impl FieldShape {
     fn repr_of(&self, v: &str, b: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_repr {} {}", pn, v, b),
-            FieldShape::Array { pn, esize, .. } => {
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!("array_repr {}_repr {} {} {}", pn, esize, v, b)
             }
         }
@@ -134,7 +153,7 @@ impl FieldShape {
     fn pts_to_at(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} {} {}", pn, a, p, v),
-            FieldShape::Array { pn, esize, .. } => {
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!("array_pts_to {}_repr {} {} {} {}", pn, esize, a, p, v)
             }
         }
@@ -146,6 +165,7 @@ impl FieldShape {
             FieldShape::Array { pn, esize, len } => {
                 format!("array_pts_to_uninit {}_repr {} {} {}", pn, esize, len, a)
             }
+            FieldShape::Flex { .. } => NO_FLEX_STORAGE.to_string(),
         }
     }
 
@@ -153,7 +173,7 @@ impl FieldShape {
     fn conceal(&self, a: &str, p: &str, b: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_conceal {} #{} #{} #{};", pn, a, p, b, v),
-            FieldShape::Array { pn, esize, .. } => format!(
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => format!(
                 "array_conceal {}_repr {} {}sz #{} #{} #{};",
                 pn, a, esize, p, b, v
             ),
@@ -164,7 +184,7 @@ impl FieldShape {
     fn reveal(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_reveal {} #{} #{};", pn, a, p, v),
-            FieldShape::Array { pn, esize, .. } => {
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!("array_reveal {}_repr {} {}sz #{} #{};", pn, a, esize, p, v)
             }
         }
@@ -178,6 +198,7 @@ impl FieldShape {
                 "array_claim_all_uninit {}_repr {} {}sz {}sz #{};",
                 pn, a, esize, len, b
             ),
+            FieldShape::Flex { .. } => format!("{} {} {};", NO_FLEX_STORAGE, a, b),
         }
     }
 
@@ -189,6 +210,7 @@ impl FieldShape {
             FieldShape::Array { pn, esize, len } => {
                 format!("{}_fill", fill_name(pn, *esize, *len))
             }
+            FieldShape::Flex { .. } => NO_FLEX_STORAGE.to_string(),
         }
     }
 
@@ -207,12 +229,40 @@ impl FieldShape {
                 "array_pts_to_uninit {}_repr {} {} {}",
                 pn, esize, len, at
             )),
+            // No storage view, so the struct as a whole gets none either:
+            // there is no such thing as an uninitialised `struct vec`,
+            // because how much storage that would be is not known.
+            FieldShape::Flex { .. } => None,
         }
+    }
+}
+
+/// The name a flexible array member's missing storage operations are
+/// spelled with. None of them is reachable -- a struct with one has no
+/// byte-level view and no uninitialised view, which is what gates them --
+/// and if one ever became reachable this is a name F* will not resolve,
+/// which is the loud failure such a hole deserves.
+const NO_FLEX_STORAGE: &str = "flexible_array_member_has_no_storage_view";
+
+/// The element type of a flexible array member.
+fn flex_elem<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Type> {
+    match &peel(tds, ty).val {
+        TypeT::FlexArray(t) => Some(t),
+        _ => None,
     }
 }
 
 /// How a struct field is owned, or `None` if the model does not cover it.
 fn field_shape(tds: &Typedefs, ty: &Type) -> Option<FieldShape> {
+    if let Some(t) = flex_elem(tds, ty) {
+        if !has_repr(tds, t) {
+            return None;
+        }
+        return Some(FieldShape::Flex {
+            pn: palow_name(tds, t)?,
+            esize: palow_sizeof(tds, t)?,
+        });
+    }
     match flat_array(tds, ty) {
         Some((t, n)) => {
             if !has_repr(tds, t) {
@@ -232,9 +282,10 @@ fn field_shape(tds: &Typedefs, ty: &Type) -> Option<FieldShape> {
 
 /// The F* type of a struct field's value.
 fn field_type(tds: &Typedefs, ty: &Type) -> Option<String> {
-    let elem = match flat_array(tds, ty) {
-        Some((t, _)) => fstar_type(tds, t)?,
-        None => fstar_type(tds, ty)?,
+    let elem = match (flex_elem(tds, ty), flat_array(tds, ty)) {
+        (Some(t), _) => fstar_type(tds, t)?,
+        (None, Some((t, _))) => fstar_type(tds, t)?,
+        (None, None) => fstar_type(tds, ty)?,
     };
     Some(field_shape(tds, ty)?.value_type(&elem))
 }
@@ -1862,7 +1913,10 @@ impl<'a> Spec<'a> {
             };
             return Ok((seq, format!("{}", k * width + j)));
         }
-        if !matches!(self.tds.resolve(&bty).val, TypeT::FixedArray(..)) {
+        if !matches!(
+            peel(self.tds, &bty).val,
+            TypeT::FixedArray(..) | TypeT::FlexArray(..)
+        ) {
             return Err(format!(
                 "a contract that indexes {}",
                 describe(self.tds.resolve(&bty))
@@ -2677,11 +2731,12 @@ fn emit_fn(
     // ownership cannot carry it -- it is built from representations and has no
     // hook for a clause -- so it is stated in the contract of every function
     // that holds such a struct, at whichever ends the struct itself is stated.
-    let field_refines = |ty: &Type| -> Vec<(String, Rc<Type>, Rc<Expr>)> {
+    let field_refines = |ty: &Type| -> Vec<(String, String, Rc<Type>, Rc<Expr>)> {
         let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
             return Vec::new();
         };
-        let Some(si) = tds.structs.get(&*n.val.to_string()) else {
+        let sname = n.val.to_string();
+        let Some(si) = tds.structs.get(&sname) else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -2690,7 +2745,7 @@ fn emit_fn(
                 continue;
             };
             for cl in ps {
-                out.push((f.name.clone(), f.ty.clone(), cl));
+                out.push((sname.clone(), f.name.clone(), f.ty.clone(), cl));
             }
         }
         out
@@ -2723,7 +2778,7 @@ fn emit_fn(
     /// points at: the parameter, the field's name and type, the clause, and
     /// whether the struct is behind a pointer (so that `this` is the pointee's
     /// value) or is the parameter itself.
-    let mut refines_field: Vec<(String, String, Rc<Type>, Rc<Expr>, bool)> = Vec::new();
+    let mut refines_field: Vec<(String, String, String, Rc<Type>, Rc<Expr>, bool)> = Vec::new();
     // `_refine_uninit` clauses, kept apart because they are stated only where
     // the unwritten points-to is: on the way in, for an `_out` parameter.
     let mut refines_uninit: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
@@ -2788,7 +2843,7 @@ fn emit_fn(
             refines_field.extend(
                 field_refines(&arg.ty)
                     .into_iter()
-                    .map(|(f, fty, p)| (base.clone(), f, fty, p, false)),
+                    .map(|(sn, f, fty, p)| (base.clone(), sn, f, fty, p, false)),
             );
             collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
         }
@@ -2868,7 +2923,7 @@ fn emit_fn(
                 refines_field.extend(
                     field_refines(pt)
                         .into_iter()
-                        .map(|(f, fty, p)| (base.clone(), f, fty, p, true)),
+                        .map(|(sn, f, fty, p)| (base.clone(), sn, f, fty, p, true)),
                 );
                 refines_uninit.extend(us.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
                 // `_refine_always` means what it says: it holds of the storage
@@ -3300,7 +3355,7 @@ fn emit_fn(
                     refines_field.extend(
                         field_refines(pt)
                             .into_iter()
-                            .map(|(f, fty, p)| ("return".to_string(), f, fty, p, true)),
+                            .map(|(sn, f, fty, p)| ("return".to_string(), sn, f, fty, p, true)),
                     );
                     ret_guard = Some((pn, binders, inner));
                 }
@@ -3339,7 +3394,7 @@ fn emit_fn(
                     refines_field.extend(
                         field_refines(pt)
                             .into_iter()
-                            .map(|(f, fty, p)| ("return".to_string(), f, fty, p, true)),
+                            .map(|(sn, f, fty, p)| ("return".to_string(), sn, f, fty, p, true)),
                     );
                 }
                 _ => {
@@ -3410,6 +3465,12 @@ fn emit_fn(
     // value rather than the parameter. A refinement written on a struct
     // declaration needs it -- the declaration says `this.x`, meaning the
     // struct, and that is the pointee when the parameter is a pointer to one.
+    // `siblings` are the other fields of the struct a *field* refinement is
+    // written on, as (C name, term, type). A clause written on a field names
+    // its siblings without any qualification -- `_refines(this._length == len)`
+    // is the whole point of a flexible array member -- so they have to be in
+    // scope both as terms and as types, and there is no function whose
+    // environment could have put them there.
     let with_this = |base: &str,
                      this_value: Option<(&str, Option<&str>)>,
                      ty: &Rc<Type>,
@@ -3417,6 +3478,7 @@ fn emit_fn(
                      w: When,
                      as_value: bool,
                      bind: Option<(&Rc<Ident>, String, &Rc<Type>)>,
+                     siblings: &[(String, String, Rc<Type>)],
                      how: &dyn Fn(&Spec, When) -> Result<String, String>|
      -> Result<String, String> {
         let mut pointees = spec.pointees.clone();
@@ -3506,6 +3568,14 @@ fn emit_fn(
         if let Some((n, _, vty)) = &bind {
             env.push_var_decl(n, (*vty).clone(), crate::env::LocalDeclKind::RValue);
         }
+        for (n, term, sty) in siblings {
+            env.push_var_decl(
+                &Rc::<str>::from(n.as_str()).with_loc(p.loc.clone()),
+                sty.clone(),
+                crate::env::LocalDeclKind::RValue,
+            );
+            locals.insert(n.clone(), term.clone());
+        }
         let inner = Spec {
             tds,
             env: &env,
@@ -3534,7 +3604,8 @@ fn emit_fn(
                          ty: &Rc<Type>,
                          p: &Rc<Expr>,
                          w: When,
-                         as_value: bool| {
+                         as_value: bool,
+                         siblings: &[(String, String, Rc<Type>)]| {
         with_this(
             base,
             this_value,
@@ -3543,6 +3614,7 @@ fn emit_fn(
             w,
             as_value,
             None,
+            siblings,
             &|sp: &Spec, w| sp.prop(p, w),
         )
     };
@@ -3564,11 +3636,12 @@ fn emit_fn(
     // parameter is the struct or points at it, and it exists only at the ends
     // of the contract where the struct's own ownership is stated.
     let field_this = |base: &str,
+                      sname: &str,
                       fname: &str,
                       fty: &Rc<Type>,
                       via: bool,
                       w: When|
-     -> Option<(String, Option<String>)> {
+     -> Option<(String, Option<String>, Vec<(String, String, Rc<Type>)>)> {
         let this = if via {
             let (pre, post) = spec.pointees.get(base)?;
             match w {
@@ -3581,9 +3654,14 @@ fn emit_fn(
             }
             format!("var_{}", base)
         };
-        // For an array field the struct's ownership record holds the sequence,
-        // and that is what `this` points at.
-        let own = if matches!(extent(tds, fty), Some(Extent::Array)) {
+        // A flexible array member is the one array field whose value is the
+        // sequence itself, because there is nothing else it could be: the
+        // elements are inside the object and their number is not in the type.
+        // So `this` and the sequence behind it are the same term, which is
+        // what makes `this._length == len` sayable at all.
+        let own = if flex_elem(tds, fty).is_some() {
+            Some(format!("({}).fld_{}", this, fname))
+        } else if matches!(extent(tds, fty), Some(Extent::Array)) {
             spec.owns.get(&this).and_then(|(pre, post)| {
                 let o = match w {
                     When::Post => post.as_deref(),
@@ -3594,7 +3672,24 @@ fn emit_fn(
         } else {
             None
         };
-        Some((format!("({}).fld_{}", this, fname), own))
+        let siblings = tds
+            .structs
+            .get(sname)
+            .map(|si| {
+                si.fields
+                    .iter()
+                    .filter(|g| g.name != fname)
+                    .map(|g| {
+                        (
+                            g.name.clone(),
+                            format!("(({}).fld_{})", this, g.name),
+                            g.ty.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((format!("({}).fld_{}", this, fname), own, siblings))
     };
     let refine_props = |w: When| -> Result<Vec<String>, String> {
         if let Some(why) = &refine_err {
@@ -3606,7 +3701,7 @@ fn emit_fn(
                 continue;
             }
             if stated(base, w) {
-                out.push(refine_clause(base, None, ty, p, w, false)?);
+                out.push(refine_clause(base, None, ty, p, w, false, &[])?);
             }
         }
         for (base, ty, p) in &refines_struct {
@@ -3618,14 +3713,22 @@ fn emit_fn(
                 _ => pre.as_deref(),
             };
             if let Some(this) = this {
-                out.push(refine_clause(base, Some((this, None)), ty, p, w, false)?);
+                out.push(refine_clause(
+                    base,
+                    Some((this, None)),
+                    ty,
+                    p,
+                    w,
+                    false,
+                    &[],
+                )?);
             }
         }
-        for (base, fname, fty, p, via) in &refines_field {
+        for (base, sname, fname, fty, p, via) in &refines_field {
             if slprop_refine(tds, p).is_some() {
                 continue;
             }
-            if let Some((this, own)) = field_this(base, fname, fty, *via, w) {
+            if let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w) {
                 out.push(refine_clause(
                     base,
                     Some((&this, own.as_deref())),
@@ -3633,6 +3736,7 @@ fn emit_fn(
                     p,
                     w,
                     false,
+                    &sibs,
                 )?);
             }
         }
@@ -3642,7 +3746,7 @@ fn emit_fn(
         // unnecessary there -- it is about a points-to that is gone.
         if matches!(w, When::Pre) {
             for (base, ty, p) in &refines_uninit {
-                out.push(refine_clause(base, None, ty, p, w, true)?);
+                out.push(refine_clause(base, None, ty, p, w, true, &[])?);
             }
         }
         Ok(out)
@@ -3698,9 +3802,10 @@ fn emit_fn(
                         t
                     }
                     None => {
-                        let t = with_this(base, None, ty, p, w, false, None, &|sp: &Spec, w| {
-                            sp.inline_pulse(code, w)
-                        })?;
+                        let t =
+                            with_this(base, None, ty, p, w, false, None, &[], &|sp: &Spec, w| {
+                                sp.inline_pulse(code, w)
+                            })?;
                         // A spliced ownership refinement on a function pointer
                         // is taken at its word: nothing else could be granting
                         // the validity an indirect call needs.
@@ -3713,11 +3818,11 @@ fn emit_fn(
                 },
             );
         }
-        for (base, fname, fty, p, via) in &refines_field {
+        for (base, sname, fname, fty, p, via) in &refines_field {
             let Some(code) = slprop_refine(tds, p) else {
                 continue;
             };
-            let Some((this, own)) = field_this(base, fname, fty, *via, w) else {
+            let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w) else {
                 continue;
             };
             out.push(with_this(
@@ -3728,6 +3833,7 @@ fn emit_fn(
                 w,
                 false,
                 None,
+                &sibs,
                 &|sp: &Spec, w| sp.inline_pulse(code, w),
             )?);
             if matches!(peel(tds, fty).val, TypeT::FnPtr { .. }) {
@@ -3798,6 +3904,7 @@ fn emit_fn(
             When::Pre,
             false,
             Some((ident, format!("(reveal {})", binder), vty)),
+            &[],
             &how,
         ) {
             Ok(t) => {
@@ -3832,6 +3939,7 @@ fn emit_fn(
             When::Post,
             false,
             Some((ident, format!("{}'", binder), vty)),
+            &[],
             &how,
         ) {
             Ok(t) => {
@@ -3871,6 +3979,7 @@ fn emit_fn(
             When::Post,
             false,
             None,
+            &[],
             &|sp: &Spec, w| sp.inline_pulse(code, w),
         ) {
             Ok(t) => ret_own.push(t),
@@ -3892,6 +4001,7 @@ fn emit_fn(
             When::Post,
             false,
             Some((ident, binder.clone(), vty)),
+            &[],
             &how,
         ) {
             Ok(t) => ret_fresh.push((
@@ -5790,6 +5900,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         let ok = match &f.shape {
             FieldShape::One { .. } => has_repr(tds, &f.ty),
             FieldShape::Array { .. } => true,
+            FieldShape::Flex { .. } => false,
         };
         let u = if ok {
             f.shape
@@ -5969,6 +6080,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
                     f = f.name
                 );
             }
+            FieldShape::Flex { .. } => alloc += NO_FLEX_STORAGE,
             FieldShape::Array { pn, esize, len } => {
                 alloc += &format!(
                     "  array_claim_all_uninit {}_repr {} {}sz {}sz;\n",
@@ -6034,6 +6146,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
                 );
                 free += &format!("  {}_reveal_uninit {};\n", pn, at(f.offset));
             }
+            FieldShape::Flex { .. } => free += NO_FLEX_STORAGE,
             FieldShape::Array { pn, esize, len } => {
                 free += &format!(
                     "  rewrite (array_pts_to_uninit {pn}_repr {es} {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {es} {n} {off});\n",
@@ -6081,6 +6194,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             FieldShape::One { pn } => {
                 forget += &format!("  {}_forget (a +! {}_offsetof_{});\n", pn, sn, f.name);
             }
+            FieldShape::Flex { .. } => forget += NO_FLEX_STORAGE,
             FieldShape::Array { pn, esize, len } => {
                 forget += &format!(
                     "  array_forget_all {}_repr (a +! {}_offsetof_{}) {}sz {}sz;\n",
@@ -6108,6 +6222,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
                     pn, sn, f.name, f.name
                 );
             }
+            FieldShape::Flex { .. } => write += NO_FLEX_STORAGE,
             FieldShape::Array { pn, esize, len } => {
                 write += &format!(
                     "  {}_fill (a +! {}_offsetof_{}) x.fld_{};\n",
@@ -6142,6 +6257,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             FieldShape::Array { pn, esize, len } => {
                 format!("{}_read", fill_name(pn, *esize, *len))
             }
+            FieldShape::Flex { .. } => NO_FLEX_STORAGE.to_string(),
         };
         read += &format!("  {}_focus_{} a;\n", sn, f.name);
         read += &format!(
@@ -6192,6 +6308,7 @@ fn storable_struct(tds: &Typedefs, ty: &Type) -> bool {
         Some(si) => si.fields.iter().all(|f| match &f.shape {
             FieldShape::One { .. } => has_repr(tds, &f.ty),
             FieldShape::Array { .. } => true,
+            FieldShape::Flex { .. } => false,
         }),
         None => false,
     }
@@ -8779,7 +8896,9 @@ impl<'a> Body<'a> {
             ));
         };
         let pn = match &shape {
-            FieldShape::One { pn } | FieldShape::Array { pn, .. } => pn.clone(),
+            FieldShape::One { pn } | FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => {
+                pn.clone()
+            }
         };
         let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
@@ -8905,6 +9024,7 @@ impl<'a> Body<'a> {
         if !si.fields.iter().all(|x| match &x.shape {
             FieldShape::One { .. } => has_repr(self.tds, &x.ty),
             FieldShape::Array { .. } => true,
+            FieldShape::Flex { .. } => false,
         }) {
             return None;
         }
@@ -9279,11 +9399,16 @@ impl<'a> Body<'a> {
                         maybe: false,
                     });
                 }
-                let Some(FieldShape::Array { pn, esize, .. }) = field_shape(self.tds, &fty) else {
-                    return Err(format!(
-                        "a subscript of a field of type {}",
-                        describe(self.tds.resolve(&fty))
-                    ));
+                let (pn, esize) = match field_shape(self.tds, &fty) {
+                    Some(FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize }) => {
+                        (pn, esize)
+                    }
+                    _ => {
+                        return Err(format!(
+                            "a subscript of a field of type {}",
+                            describe(self.tds.resolve(&fty))
+                        ));
+                    }
                 };
                 let ff = self.focus_field(base, f, false)?;
                 // A read goes back with the field's read-only unfocus, which
@@ -12882,7 +13007,7 @@ impl<'a> Body<'a> {
             .filter(|f| self.slots[i].scattered.contains(&f.name))
             .filter_map(|f| match &f.shape {
                 FieldShape::One { pn } => Some((f.name.clone(), pn.clone())),
-                FieldShape::Array { .. } => None,
+                FieldShape::Array { .. } | FieldShape::Flex { .. } => None,
             })
             .collect()
     }
@@ -13208,6 +13333,11 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
                 vals.push(match &f.shape {
                     FieldShape::One { .. } => {
                         format!("fld_{} = {}", f.name, zero_value(tds, &f.ty)?)
+                    }
+                    // There is no zero of a flexible array member: how many
+                    // elements there would be is not a fact about the type.
+                    FieldShape::Flex { .. } => {
+                        return Err(format!("a zeroed flexible array member `{}`", f.name));
                     }
                     // An array field's own type is the array, so the zero has
                     // to be built at the element type and then replicated.

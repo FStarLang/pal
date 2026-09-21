@@ -3344,8 +3344,35 @@ new facts about memory.
    unconstrained -- which is exactly what C says about them, and is a thing
    the field-wise model could not have expressed.
 
-   As of this milestone: **954 specifications, 896 of them with real bodies,
-   39 admitted, 19 external, 37 functions skipped**, plus **18 `_pure`
+   A flexible array member is the last field shape a C struct has, and the
+   only one whose size is not in its type. Palow gives it the shape its
+   meaning demands: the field's value *is* the sequence of elements, so
+   `struct vec { unsigned len; int data[]; }` becomes `{ fld_len: UInt32.t;
+   fld_data: Seq.seq Int32.t }` and the points-to holds `array_pts_to` over
+   however many cells the value says. The struct contributes no fixed bytes
+   for the member, which keeps `sizeof` and the padding computation exactly
+   what the C ABI says, and it has no automatic-storage view at all -- a
+   flexible array member cannot live on the stack, and the model now says so
+   by construction rather than by refusing the struct.
+
+   That much would still be useless without the invariant. The whole idiom is
+   that some *other* field says how long the array is, and in PAL that is
+   written `_refines(this._length == len)` on the member. Such a clause names
+   a sibling field with no qualification, which nothing in the translation
+   had ever had to do: a field refinement bound `this` and nothing else, so
+   `len` was a free variable and the clause was dropped for want of a type.
+   Field refinements now carry the struct they were written on, and the
+   sibling fields are put in scope -- as terms projected out of the same
+   struct value, and as types, so that the clause can be elaborated at all.
+   With that, `vec_get` and `vec_set` state `Seq.length data == len` at both
+   ends of their contracts and prove their own bounds from it, with no
+   annotation in the C source beyond the one a reader would write anyway.
+   What remains admitted is the *allocation* -- `calloc(1, sizeof(struct vec)
+   + n * sizeof(int))` needs a sized allocation in the model, which is a
+   separate piece of work.
+
+   As of this milestone: **956 specifications, 898 of them with real bodies,
+   39 admitted, 19 external, 34 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -3768,7 +3795,10 @@ new facts about memory.
    which arrays of structs and whole-object copies need, and unions.
    Fixed-size array fields are covered, and so are bit-fields: the model gives
    them no address, because C does not, and makes the storage unit they share
-   the object instead.
+   the object instead. Flexible array members are covered too, with the
+   length living in the value rather than in the type, and a `_refine` on the
+   member may name its sibling fields -- which is how the length relation
+   that makes the idiom usable gets stated.
 5. **Done for single objects.** `malloc`/`calloc`/`free` are ordinary
    specifications and the translator emits calls to them: `malloc(sizeof(T))`
    is a `malloc t_sizeof` and nothing about `T` reaches the emitter except its
