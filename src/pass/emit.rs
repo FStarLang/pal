@@ -3067,6 +3067,32 @@ impl<'a> Emitter<'a> {
                                 Doc::text("(admit())")
                             }
                         }
+                        (
+                            TypeT::Pointer(_, kind),
+                            TypeT::Int {
+                                signed,
+                                width: width @ (32 | 64),
+                            },
+                        ) => {
+                            let raw = match kind {
+                                PointerKind::Core => val_doc,
+                                PointerKind::Ref | PointerKind::Unknown => {
+                                    unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val_doc)
+                                }
+                                PointerKind::Array | PointerKind::ArrayPtr => unaryfn(
+                                    Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                                    unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
+                                ),
+                            };
+                            unaryfn(
+                                Doc::text(format!(
+                                    "Pulse.Lib.C.CoreRef.core_to_{}int{}",
+                                    if *signed { "" } else { "u" },
+                                    width
+                                )),
+                                raw,
+                            )
+                        }
                         // FixedArray → Pointer(Array): array-to-pointer decay (identity in Pulse)
                         (
                             TypeT::FixedArray(_, _),

@@ -30,6 +30,13 @@ val ref_to_core (#a: Type u#a) (r: ref a) : core_ref
 
 val core_to_ref (a: Type u#a) (r: core_ref) : ref a
 
+(* Implementation-defined pointer-to-long casts. Only the result type is
+   specified: there are no numeric encoding or round-trip guarantees. *)
+val core_to_int32 (r: core_ref) : FStar.Int32.t
+val core_to_uint32 (r: core_ref) : FStar.UInt32.t
+val core_to_int64 (r: core_ref) : FStar.Int64.t
+val core_to_uint64 (r: core_ref) : FStar.UInt64.t
+
 (* Round-trip: casting a `ref a` to raw and back yields the original pointer. *)
 val core_to_ref_to_core (#a: Type u#a) (r: ref a)
   : Lemma (core_to_ref a (ref_to_core r) == r)
