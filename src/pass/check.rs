@@ -198,7 +198,7 @@ impl<'a> Checker<'a> {
                     self.check_type(env, ty);
                     env.push_var_decl(ident, ty.clone(), LocalDeclKind::RValue);
                 }
-                InlinePulseToken::Verbatim(_) => {}
+                InlinePulseToken::Verbatim(_) | InlinePulseToken::Implicit(_) => {}
                 InlinePulseToken::FieldAntiquot { .. } => {
                     // TODO: check that field exists
                 }

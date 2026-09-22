@@ -141,7 +141,7 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
             InlinePulseToken::TypeAntiquot { ty, .. } | InlinePulseToken::Declare { ty, .. } => {
                 scan_type(deps, ty)
             }
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::Implicit(_) => {}
             InlinePulseToken::FieldAntiquot { ty, .. } => {
                 scan_type(deps, ty);
             }

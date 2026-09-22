@@ -721,6 +721,8 @@ impl AuxFnKind {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum InlinePulseToken {
     Verbatim(CodeToken),
+    /// A free standalone tick antiquotation (`$` followed by a backtick and a name).
+    Implicit(CodeToken),
     RValueAntiquot {
         before: &'static str,
         expr: Rc<Expr>,

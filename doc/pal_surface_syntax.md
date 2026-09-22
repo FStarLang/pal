@@ -177,6 +177,12 @@ Ghost arguments do not change C function-pointer signatures. Generated
 wrappers forward them through erased witnesses. If inference cannot determine
 a call's ghost arguments, supply a witness with a ghost statement; the callee's
 precondition must still hold. Taking a function's address requires no witness.
+Implicit ghosts introduced by tick antiquotation (for example, ``$`count`` in
+an `_inline_pulse` contract) also travel in the wrapper's erased witness,
+after any explicit `_ghost_arg` values. Their types are inferred from the
+contract by F*, and repeated references use the same witness component.
+Locally bound tick-names and primed identifiers such as `` saved$` `` do not
+introduce witness components.
 See `test/func_pointer/func_pointer.c` for examples.
 
 ## Pulse interop

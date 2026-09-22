@@ -184,7 +184,7 @@ fn rename_inline_pulse_in_place(code: &mut InlinePulseCode, renames: &HashMap<Rc
             | InlinePulseToken::Declare { ty, .. } => {
                 rename_type_in_place(Rc::make_mut(ty), renames);
             }
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::Implicit(_) => {}
         }
     }
 }
@@ -720,7 +720,7 @@ fn collect_refs_inline(code: &InlinePulseCode, out: &mut Vec<TypeKey>) {
             | InlinePulseToken::FieldAntiquot { ty, .. }
             | InlinePulseToken::AuxFnAntiquot { ty, .. }
             | InlinePulseToken::Declare { ty, .. } => collect_type_refs(ty, out),
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::Implicit(_) => {}
         }
     }
 }

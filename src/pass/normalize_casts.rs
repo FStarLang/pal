@@ -90,7 +90,7 @@ fn normalize_inline_pulse(env: &Env, code: &mut InlinePulseCode) {
             | InlinePulseToken::FieldAntiquot { ty, .. }
             | InlinePulseToken::AuxFnAntiquot { ty, .. }
             | InlinePulseToken::Declare { ty, .. } => normalize_type(env, ty),
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::Implicit(_) => {}
         }
     }
 }

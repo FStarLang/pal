@@ -4,7 +4,7 @@ use ::pretty::RcDoc;
 fn inline_pulse_code_to_doc<'a>(code: &'a InlinePulseCode) -> RcDoc<'a, ()> {
     RcDoc::concat(code.tokens.iter().map(|tok| {
         match tok {
-            InlinePulseToken::Verbatim(ct) => {
+            InlinePulseToken::Verbatim(ct) | InlinePulseToken::Implicit(ct) => {
                 RcDoc::text(ct.before).append(RcDoc::text(ct.text.val.to_string()))
             }
             InlinePulseToken::RValueAntiquot { before, expr } => RcDoc::text(*before)

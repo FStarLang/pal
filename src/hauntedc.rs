@@ -1603,6 +1603,241 @@ fn let_signature_parser<
         })
 }
 
+// Only free tick-names become implicit parameters. Keep locally bound ticks
+// verbatim, so lowering a function-pointer contract does not capture them.
+fn bound_pulse_ticks(tokens: &[(&str, bool)]) -> Vec<bool> {
+    struct Scopes<'a> {
+        tokens: &'a [(&'a str, bool)],
+        close: Vec<usize>,
+        bound: Vec<bool>,
+    }
+
+    impl Scopes<'_> {
+        fn find(&self, mut start: usize, end: usize, text: &str) -> Option<usize> {
+            while start < end {
+                if self.tokens[start].0 == text {
+                    return Some(start);
+                }
+                start = self.close[start] + 1;
+            }
+            None
+        }
+
+        fn binders(&mut self, mut start: usize, end: usize, names: &mut Vec<String>) {
+            while start < end {
+                let (text, tick) = self.tokens[start];
+                if text == ":" {
+                    self.visit(start + 1, end, names);
+                    return;
+                }
+                if self.close[start] > start {
+                    self.binders(start + 1, self.close[start], names);
+                } else if tick {
+                    self.bound[start] = true;
+                    names.push(text.to_owned());
+                }
+                start = self.close[start] + 1;
+            }
+        }
+
+        fn visit(&mut self, mut start: usize, end: usize, names: &[String]) {
+            while start < end {
+                let (text, tick) = self.tokens[start];
+                if self.close[start] > start {
+                    self.visit(start + 1, self.close[start], names);
+                    start = self.close[start] + 1;
+                    continue;
+                }
+                match text {
+                    "let" => {
+                        if let Some(eq) = self.find(start + 1, end, "=") {
+                            let mut at = eq + 1;
+                            let mut nested = 0;
+                            let mut body = None;
+                            while at < end {
+                                match self.tokens[at].0 {
+                                    "let" => nested += 1,
+                                    "in" if nested == 0 => {
+                                        body = Some(at);
+                                        break;
+                                    }
+                                    "in" => nested -= 1,
+                                    _ => {}
+                                }
+                                at = self.close[at] + 1;
+                            }
+                            if let Some(body) = body {
+                                let recursive = self.tokens[start + 1].0 == "rec";
+                                let first = start + 1 + usize::from(recursive);
+                                let after_first = self.close[first] + 1;
+                                // A let-function's parameters scope over its RHS,
+                                // not over the expression following `in`.
+                                let function = self.tokens[first]
+                                    .0
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_lowercase() || c == '\'' || c == '_')
+                                    && after_first < eq
+                                    && !matches!(self.tokens[after_first].0, ":" | ",");
+                                let mut locals = names.to_vec();
+                                self.binders(
+                                    first,
+                                    if function { after_first } else { eq },
+                                    &mut locals,
+                                );
+                                let mut rhs_names = if recursive {
+                                    locals.clone()
+                                } else {
+                                    names.to_vec()
+                                };
+                                if function {
+                                    self.binders(after_first, eq, &mut rhs_names);
+                                }
+                                self.visit(eq + 1, body, &rhs_names);
+                                self.visit(body + 1, end, &locals);
+                                return;
+                            }
+                        }
+                    }
+                    "fun" | "forall" | "exists" | "exists*" => {
+                        let separator = if text == "fun" { "->" } else { "." };
+                        if let Some(body) = self.find(start + 1, end, separator) {
+                            let mut locals = names.to_vec();
+                            self.binders(start + 1, body, &mut locals);
+                            self.visit(body + 1, end, &locals);
+                            return;
+                        }
+                    }
+                    "if" => {
+                        if let Some(then) = self.find(start + 1, end, "then") {
+                            let mut at = then + 1;
+                            let mut nested = 0;
+                            while at < end {
+                                match self.tokens[at].0 {
+                                    "if" => nested += 1,
+                                    "else" if nested == 0 => {
+                                        self.visit(start + 1, then, names);
+                                        self.visit(then + 1, at, names);
+                                        self.visit(at + 1, end, names);
+                                        return;
+                                    }
+                                    "else" => nested -= 1,
+                                    _ => {}
+                                }
+                                at = self.close[at] + 1;
+                            }
+                        }
+                    }
+                    "match" => {
+                        if let Some(with) = self.find(start + 1, end, "with") {
+                            self.visit(start + 1, with, names);
+                            let mut arm = with + 1;
+                            while arm < end {
+                                if self.tokens[arm].0 == "|" {
+                                    arm += 1;
+                                }
+                                let Some(arrow) = self.find(arm, end, "->") else {
+                                    break;
+                                };
+                                let next = self.find(arrow + 1, end, "|").unwrap_or(end);
+                                let mut locals = names.to_vec();
+                                let pattern_end = self.find(arm, arrow, "when").unwrap_or(arrow);
+                                self.binders(arm, pattern_end, &mut locals);
+                                self.visit(pattern_end + 1, arrow, &locals);
+                                self.visit(arrow + 1, next, &locals);
+                                arm = next;
+                            }
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+                if tick && names.iter().any(|name| name == text) {
+                    self.bound[start] = true;
+                }
+                start += 1;
+            }
+        }
+    }
+
+    let mut scopes = Scopes {
+        tokens,
+        close: (0..tokens.len()).collect(),
+        bound: vec![false; tokens.len()],
+    };
+    let mut opens = vec![];
+    for (i, (text, _)) in tokens.iter().enumerate() {
+        match *text {
+            "(" | "[" | "{" => opens.push(i),
+            ")" | "]" | "}" => {
+                if let Some(open) = opens.pop() {
+                    scopes.close[open] = i;
+                }
+            }
+            _ => {}
+        }
+    }
+    scopes.visit(0, tokens.len(), &[]);
+    scopes.bound
+}
+
+#[cfg(test)]
+mod tick_scope_tests {
+    use super::bound_pulse_ticks;
+
+    fn free_ticks(code: &str) -> Vec<&str> {
+        let tokens: Vec<_> = code
+            .split_whitespace()
+            .map(|text| (text, text.starts_with('\'')))
+            .collect();
+        tokens
+            .iter()
+            .zip(bound_pulse_ticks(&tokens))
+            .filter_map(|((text, tick), bound)| (*tick && !bound).then_some(*text))
+            .collect()
+    }
+
+    #[test]
+    fn let_scopes() {
+        assert_eq!(free_ticks("let 'x = 'x in 'x"), vec!["'x"],);
+        assert_eq!(
+            free_ticks("( let 'x = 42 in 'x ) ** pts_to p 'x"),
+            vec!["'x"],
+        );
+        assert_eq!(free_ticks("let 'x = let 'y = 'z in 'y in 'x"), vec!["'z"],);
+        assert_eq!(
+            free_ticks("let ( 'x , 'y ) = 'pair in 'x == 'y"),
+            vec!["'pair"],
+        );
+        assert_eq!(free_ticks("let Some 'x = 'option in 'x"), vec!["'option"],);
+        assert_eq!(free_ticks("let f 'x = 'x == 'y in f 'x"), vec!["'y", "'x"],);
+    }
+
+    #[test]
+    fn lambda_and_quantifier_scopes() {
+        assert_eq!(
+            free_ticks("( fun ( 'x : 'ty ) -> 'x ) 'x"),
+            vec!["'ty", "'x"],
+        );
+        assert_eq!(
+            free_ticks("forall ( 'x : int ) . exists * 'y . 'x == 'y /\\ 'z"),
+            vec!["'z"],
+        );
+    }
+
+    #[test]
+    fn branch_scopes() {
+        assert_eq!(
+            free_ticks("if 'b then let 'x = 0 in 'x else 'x"),
+            vec!["'b", "'x"],
+        );
+        assert_eq!(
+            free_ticks("match 'option with | Some 'x when 'x == 'v -> 'x | None -> 'x"),
+            vec!["'option", "'v", "'x"],
+        );
+    }
+}
+
 pub fn process_inline_pulse(
     diagnostics: &mut Diagnostics,
     fallback_loc: &Rc<SourceInfo>,
@@ -1650,6 +1885,7 @@ pub fn process_inline_pulse(
         TickAntiquot {
             first_span: SimpleSpan,
             result_text: String,
+            implicit: bool,
         },
     }
 
@@ -1770,6 +2006,7 @@ pub fn process_inline_pulse(
         .map(|(dollar_span, ident)| RawToken::TickAntiquot {
             first_span: dollar_span,
             result_text: format!("'{}", ident),
+            implicit: true,
         });
 
     // ident$`ident or ident$` → emits ident'ident or ident'
@@ -1780,6 +2017,7 @@ pub fn process_inline_pulse(
         .then(select! { Token::Ident(id) => id }.or_not())
         .map(|((prefix, first_span), suffix)| RawToken::TickAntiquot {
             first_span,
+            implicit: false,
             result_text: match suffix {
                 Some(s) => format!("{}'{}", prefix, s),
                 None => format!("{}'", prefix),
@@ -1816,7 +2054,7 @@ pub fn process_inline_pulse(
     let raw_tokens = parse_result.output().cloned().unwrap_or_default();
 
     // Post-process: convert RawTokens to InlinePulseTokens
-    let result = raw_tokens
+    let mut result: Vec<_> = raw_tokens
         .into_iter()
         .map(|raw| match raw {
             RawToken::Verbatim(span) => {
@@ -1992,18 +2230,43 @@ pub fn process_inline_pulse(
             RawToken::TickAntiquot {
                 first_span,
                 result_text,
+                implicit,
             } => {
                 let ct = &code.tokens[first_span.start];
-                InlinePulseToken::Verbatim(CodeToken {
+                let token = CodeToken {
                     before: ct.before,
                     text: Ast {
                         val: Rc::from(result_text.as_str()),
                         loc: ct.text.loc.clone(),
                     },
-                })
+                };
+                if implicit {
+                    InlinePulseToken::Implicit(token)
+                } else {
+                    InlinePulseToken::Verbatim(token)
+                }
             }
         })
         .collect();
 
+    if result
+        .iter()
+        .any(|token| matches!(token, InlinePulseToken::Implicit(_)))
+    {
+        let tokens: Vec<_> = result
+            .iter()
+            .map(|token| match token {
+                InlinePulseToken::Verbatim(ct) => (ct.text.val.as_ref(), false),
+                InlinePulseToken::Implicit(ct) => (ct.text.val.as_ref(), true),
+                _ => ("", false),
+            })
+            .collect();
+        let bound = bound_pulse_ticks(&tokens);
+        for (token, bound) in result.iter_mut().zip(bound) {
+            if bound && let InlinePulseToken::Implicit(ct) = token {
+                *token = InlinePulseToken::Verbatim(ct.clone());
+            }
+        }
+    }
     InlinePulseCode { tokens: result }
 }

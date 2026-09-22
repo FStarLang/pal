@@ -228,6 +228,7 @@ struct FnPtrSpecCore {
     /// the `match` the `requires`' witness pattern-`let` introduces; `nil` when
     /// there is no witness to bind.
     witness_rewrite: Doc,
+    ghost_arity: usize,
     ret_name: Doc,
     ret_ty_doc: Doc,
     projs: Vec<Doc>,
@@ -695,6 +696,8 @@ struct Emitter<'a> {
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
+    /// Tick-generated ghosts collected while lowering a function-pointer contract.
+    implicit_ghosts: Option<Vec<Rc<str>>>,
     tmp_counter: usize,
 }
 
@@ -1402,6 +1405,7 @@ impl<'a> Emitter<'a> {
         for tok in &mut val.tokens {
             match tok {
                 InlinePulseToken::Verbatim(_)
+                | InlinePulseToken::Implicit(_)
                 | InlinePulseToken::TypeAntiquot { .. }
                 | InlinePulseToken::FieldAntiquot { .. }
                 | InlinePulseToken::AuxFnAntiquot { .. }
@@ -1419,6 +1423,15 @@ impl<'a> Emitter<'a> {
             match tok {
                 InlinePulseToken::Verbatim(ct) => Doc::text(ct.before)
                     .append(annotated(&ct.text, || Doc::text(ct.text.val.to_string()))),
+                InlinePulseToken::Implicit(ct) => {
+                    if let Some(ghosts) = &mut self.implicit_ghosts {
+                        if !ghosts.contains(&ct.text.val) {
+                            ghosts.push(ct.text.val.clone());
+                        }
+                    }
+                    Doc::text(ct.before)
+                        .append(annotated(&ct.text, || Doc::text(ct.text.val.to_string())))
+                }
                 InlinePulseToken::RValueAntiquot { before, expr } => {
                     Doc::text(*before).append(self.emit_rvalue(env, expr))
                 }
@@ -6590,6 +6603,7 @@ impl<'a> Emitter<'a> {
     /// `pre: a->slprop`, `post: a->b->slprop` is non-relational).
     fn emit_fnptr_spec_core(&mut self, env: &Env, decl: &FnDecl) -> FnPtrSpecCore {
         let env = &mut env.clone();
+        let outer_implicit_ghosts = self.implicit_ghosts.replace(vec![]);
 
         let mut arg_names: Vec<Rc<Ident>> = vec![];
         let mut arg_ty_docs: Vec<Doc> = vec![];
@@ -6769,112 +6783,9 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        // Combine every requires-side existential group's bindings (in arg
-        // order) into the ELIMS half of the witness `c`, and bind them all by
-        // ONE pattern-`let` off the explicit `y_fp: erased c` wrapper parameter
-        // (see comment above).
-        //
-        // `c` is the pair `(ELIMS & GHOSTS)`: the existentials eliminated from
-        // the pointer arguments, paired with the `_ghost_arg`s. Both halves are
-        // right-nested binary pairs, and either may be `unit`.
-        let elim_ty_docs: Vec<Doc> = req_witness_groups
-            .iter()
-            .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
-            .collect();
-        let elim_name_docs: Vec<Doc> = req_witness_groups
-            .iter()
-            .flat_map(|(b, _)| b.iter().map(|eb| eb.name.clone()))
-            .collect();
-        let witness_domain = parens(
-            nested_pair_doc(elim_ty_docs)
-                .append(" & ")
-                .append(nested_pair_doc(ghost_ty_docs)),
-        );
-        // ONE prefix in front of the whole `requires` conjunction, rather than
-        // each group carrying its own. A `let` is a term-level binder, so it
-        // cannot appear as the right operand of `**`: emitting it per group
-        // parses only while there is a single group, and is a syntax error from
-        // two groups on. Hoisting also keeps every binding in scope for the
-        // trailing `pure` conjunct below.
-        //
-        // Destructured by PATTERN, not by `fst`/`snd`. Pulse solves a caller's
-        // witness by unification, and it recovers the individual leaves only
-        // through a pattern match; `pts_to x (fst ?w)` is inert, because F*
-        // does not reduce projectors. A pattern-`let` desugars to a single-
-        // branch match, which Pulse purifies into since FStarLang/FStar#4512.
-        let has_witness_bindings = !elim_name_docs.is_empty() || !ghost_name_docs.is_empty();
-        let elim_arity = elim_name_docs.len();
-        let ghost_arity = ghost_name_docs.len();
-        // The post needs the ghosts too: a `_preserves` conjunct mentioning one
-        // appears in both the pre and the post. It does NOT re-bind the elims,
-        // which the post quantifies existentially instead (their value may have
-        // changed).
-        //
-        // Bound by PROJECTION here, unlike the `requires`. The pattern form is
-        // needed only where a caller solves the witness by unification, which
-        // is the precondition; in the postcondition it would just put a stuck
-        // `match` in the goal, which the body's `witness_rewrite` -- acting on
-        // the context -- cannot reach.
-        let witness_post_prefix = if ghost_arity > 0 {
-            let ghost_base = parens(Doc::text("snd ").append(parens(Doc::text("reveal y_fp"))));
-            Doc::concat(ghost_name_docs.iter().enumerate().map(|(i, name)| {
-                Doc::text("let ")
-                    .append(name.clone())
-                    .append(" = ")
-                    .append(nested_pair_proj(ghost_base.clone(), i, ghost_arity))
-                    .append(" in")
-                    .append(Doc::hardline())
-            }))
-        } else {
-            Doc::nil()
-        };
-        let witness_let_prefix = {
-            let pat = parens(
-                nested_pair_pat(elim_name_docs)
-                    .append(", ")
-                    .append(nested_pair_pat(ghost_name_docs)),
-            );
-            for (_, props) in req_witness_groups {
-                requires_props.push(mk_star(props));
-            }
-            // With nothing to bind, emit no prefix at all. The `match` a
-            // pattern-`let` desugars to is not free: it would wrap the whole
-            // `requires` for no gain, and the pure conjuncts inside it (which
-            // here speak only of `x_fp`) would have to be dug back out of it.
-            if has_witness_bindings {
-                Doc::text("let ")
-                    .append(pat)
-                    .append(" = reveal y_fp in")
-                    .append(Doc::hardline())
-            } else {
-                Doc::nil()
-            }
-        };
-        // Its counterpart for the body. Both halves are eta-expanded in ONE
-        // rewrite of the whole witness, so a single equality obligation covers
-        // the entire spine.
-        let witness_rewrite = if has_witness_bindings {
-            let base = parens(Doc::text("reveal y_fp"));
-            Doc::text("rewrite each ")
-                .append(base.clone())
-                .append(" as ")
-                .append(parens(
-                    Doc::text("Mktuple2 ")
-                        .append(eta_expand_doc(
-                            parens(Doc::text("fst ").append(base.clone())),
-                            elim_arity,
-                        ))
-                        .append(" ")
-                        .append(eta_expand_doc(
-                            parens(Doc::text("snd ").append(base)),
-                            ghost_arity,
-                        )),
-                ))
-                .append(";")
-                .append(Doc::hardline())
-        } else {
-            Doc::nil()
-        };
+        for (_, props) in &req_witness_groups {
+            requires_props.push(mk_star(props.clone()));
+        }
         // `preserves` (const params) hold across the call, so they belong in
         // both the pre and the post.
         requires_props.extend(preserves_props.iter().cloned());
@@ -6973,6 +6884,118 @@ impl<'a> Emitter<'a> {
             ensures_props.push(unaryfn(Doc::text("pure"), implied));
         }
 
+        let implicit_ghosts = self
+            .implicit_ghosts
+            .take()
+            .expect("function-pointer ghost collection is active");
+        self.implicit_ghosts = outer_implicit_ghosts;
+        for name in implicit_ghosts {
+            ghost_ty_docs.push(Doc::text("_"));
+            ghost_name_docs.push(Doc::text(name.to_string()));
+        }
+        // Combine every requires-side existential group's bindings (in arg
+        // order) into the ELIMS half of the witness `c`, and bind them all by
+        // ONE pattern-`let` off the explicit `y_fp: erased c` wrapper parameter
+        // (see comment above).
+        //
+        // `c` is the pair `(ELIMS & GHOSTS)`: the existentials eliminated from
+        // the pointer arguments, paired with explicit and implicit ghosts.
+        // Both halves are right-nested binary pairs, and either may be `unit`.
+        let elim_ty_docs: Vec<Doc> = req_witness_groups
+            .iter()
+            .flat_map(|(b, _)| b.iter().map(|eb| eb.ty.clone()))
+            .collect();
+        let elim_name_docs: Vec<Doc> = req_witness_groups
+            .iter()
+            .flat_map(|(b, _)| b.iter().map(|eb| eb.name.clone()))
+            .collect();
+        let witness_domain = parens(
+            nested_pair_doc(elim_ty_docs)
+                .append(" & ")
+                .append(nested_pair_doc(ghost_ty_docs)),
+        );
+        // ONE prefix in front of the whole `requires` conjunction, rather than
+        // each group carrying its own. A `let` is a term-level binder, so it
+        // cannot appear as the right operand of `**`: emitting it per group
+        // parses only while there is a single group, and is a syntax error from
+        // two groups on. Hoisting also keeps every binding in scope for the
+        // trailing `pure` conjunct below.
+        //
+        // Destructured by PATTERN, not by `fst`/`snd`. Pulse solves a caller's
+        // witness by unification, and it recovers the individual leaves only
+        // through a pattern match; `pts_to x (fst ?w)` is inert, because F*
+        // does not reduce projectors. A pattern-`let` desugars to a single-
+        // branch match, which Pulse purifies into since FStarLang/FStar#4512.
+        let has_witness_bindings = !elim_name_docs.is_empty() || !ghost_name_docs.is_empty();
+        let elim_arity = elim_name_docs.len();
+        let ghost_arity = ghost_name_docs.len();
+        // The post needs the ghosts too: a `_preserves` conjunct mentioning one
+        // appears in both the pre and the post. It does NOT re-bind the elims,
+        // which the post quantifies existentially instead (their value may have
+        // changed).
+        //
+        // Bound by PROJECTION here, unlike the `requires`. The pattern form is
+        // needed only where a caller solves the witness by unification, which
+        // is the precondition; in the postcondition it would just put a stuck
+        // `match` in the goal, which the body's `witness_rewrite` -- acting on
+        // the context -- cannot reach.
+        let witness_post_prefix = if ghost_arity > 0 {
+            let ghost_base = parens(Doc::text("snd ").append(parens(Doc::text("reveal y_fp"))));
+            Doc::concat(ghost_name_docs.iter().enumerate().map(|(i, name)| {
+                Doc::text("let ")
+                    .append(name.clone())
+                    .append(" = ")
+                    .append(nested_pair_proj(ghost_base.clone(), i, ghost_arity))
+                    .append(" in")
+                    .append(Doc::hardline())
+            }))
+        } else {
+            Doc::nil()
+        };
+        let witness_let_prefix = {
+            let pat = parens(
+                nested_pair_pat(elim_name_docs)
+                    .append(", ")
+                    .append(nested_pair_pat(ghost_name_docs)),
+            );
+            // With nothing to bind, emit no prefix at all. The `match` a
+            // pattern-`let` desugars to is not free: it would wrap the whole
+            // `requires` for no gain, and the pure conjuncts inside it (which
+            // here speak only of `x_fp`) would have to be dug back out of it.
+            if has_witness_bindings {
+                Doc::text("let ")
+                    .append(pat)
+                    .append(" = reveal y_fp in")
+                    .append(Doc::hardline())
+            } else {
+                Doc::nil()
+            }
+        };
+        // Its counterpart for the body. Both halves are eta-expanded in ONE
+        // rewrite of the whole witness, so a single equality obligation covers
+        // the entire spine.
+        let witness_rewrite = if has_witness_bindings {
+            let base = parens(Doc::text("reveal y_fp"));
+            Doc::text("rewrite each ")
+                .append(base.clone())
+                .append(" as ")
+                .append(parens(
+                    Doc::text("Mktuple2 ")
+                        .append(eta_expand_doc(
+                            parens(Doc::text("fst ").append(base.clone())),
+                            elim_arity,
+                        ))
+                        .append(" ")
+                        .append(eta_expand_doc(
+                            parens(Doc::text("snd ").append(base)),
+                            ghost_arity,
+                        )),
+                ))
+                .append(";")
+                .append(Doc::hardline())
+        } else {
+            Doc::nil()
+        };
         let pre_body = mk_star(requires_props);
         let post_body = mk_star(ensures_props);
 
@@ -7008,6 +7031,7 @@ impl<'a> Emitter<'a> {
             domain,
             witness_domain,
             witness_rewrite,
+            ghost_arity,
             ret_name,
             ret_ty_doc,
             projs,
@@ -7026,6 +7050,7 @@ impl<'a> Emitter<'a> {
             domain,
             witness_domain,
             witness_rewrite,
+            ghost_arity,
             ret_name,
             ret_ty_doc,
             projs,
@@ -7075,7 +7100,7 @@ impl<'a> Emitter<'a> {
         let ghost_args = (0..decl.ghost_args.len()).map(|i| {
             Doc::text("#").append(parens(unaryfn(
                 Doc::text("hide"),
-                nested_pair_proj(Doc::text("(snd (reveal y_fp))"), i, decl.ghost_args.len()),
+                nested_pair_proj(Doc::text("(snd (reveal y_fp))"), i, ghost_arity),
             )))
         });
         let args = ghost_args.chain(if projs.is_empty() {
@@ -8345,6 +8370,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         typedef_override_map,
         force_qualify_types: false,
         current_fn_total: false,
+        implicit_ghosts: None,
         tmp_counter: 0,
     };
 

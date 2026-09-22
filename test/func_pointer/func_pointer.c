@@ -139,6 +139,90 @@ int32_t call_mixed_implicit_ghost_pointer(void)
     return result;
 }
 
+/* Explicit and implicit ghosts may share a spelling without sharing a value. */
+_total
+_ghost_arg(uint64_t count)
+uint64_t implicit_ghost_u64_read(_plain uint64_t *p, _plain uint64_t *q)
+    _preserves(_inline_pulse(pts_to $(p) $`count))
+    _preserves(_inline_pulse(pts_to $(q) $(count)))
+    _ensures(_inline_pulse(pure ($(return) == $`count)))
+{
+    return *p;
+}
+
+_total
+uint64_t call_implicit_ghost_u64_pointer(void)
+    _ensures(return == 4294967296ULL)
+{
+    uint64_t p = 4294967296ULL;
+    uint64_t q = 7;
+    uint64_t (*fp)(uint64_t *, uint64_t *) = implicit_ghost_u64_read;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Funcptr_implicit_ghost_u64_read.func_implicit_ghost_u64_read__fp);
+    uint64_t result = fp(&p, &q);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return result;
+}
+
+/* A primed local identifier is not another implicit ghost parameter. */
+int32_t implicit_ghost_primed_local(_plain int32_t *p)
+    _preserves(_inline_pulse(
+        let saved$` = $`count in (fun $`local -> pts_to $(p) $`local) saved$`))
+    _ensures(_inline_pulse(pure ($(return) == $`count)))
+{
+    return *p;
+}
+
+int32_t call_implicit_ghost_primed_local(void)
+    _ensures(return == 42)
+{
+    int32_t value = 42;
+    int32_t (*fp)(int32_t *) = implicit_ghost_primed_local;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_implicit_ghost_primed_local.func_implicit_ghost_primed_local__fp);
+    int32_t result = fp(&value);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return result;
+}
+
+/* Explicitly bound ticks are local, not additional witness components. */
+int32_t local_tick_read(_plain int32_t *p)
+    _preserves(_inline_pulse(let $`local = 42l in pts_to $(p) $`local))
+    _ensures(return == 42)
+{
+    return *p;
+}
+
+int32_t call_local_tick_pointer(void)
+    _ensures(return == 42)
+{
+    int32_t value = 42;
+    int32_t (*fp)(int32_t *) = local_tick_read;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_local_tick_read.func_local_tick_read__fp);
+    int32_t result = fp(&value);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return result;
+}
+
+/* Local shadowing must not hide the free ghost outside the let-expression. */
+int32_t shadowed_tick_read(_plain int32_t *p, _plain int32_t *q)
+    _preserves(_inline_pulse(
+        (let $`count = 7l in pts_to $(q) $`count) ** pts_to $(p) $`count))
+    _ensures(_inline_pulse(pure ($(return) == $`count)))
+{
+    return *p;
+}
+
+int32_t call_shadowed_tick_pointer(void)
+    _ensures(return == 42)
+{
+    int32_t p = 42;
+    int32_t q = 7;
+    int32_t (*fp)(int32_t *, int32_t *) = shadowed_tick_read;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_shadowed_tick_read.func_shadowed_tick_read__fp);
+    int32_t result = fp(&p, &q);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return result;
+}
+
 /* ---- shared type aliases ---- */
 
 typedef int32_t (*binop)(int32_t, int32_t);
