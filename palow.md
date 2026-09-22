@@ -3509,8 +3509,37 @@ new facts about memory.
    that is a real design question. The numbers, the experiment that isolates
    them and the annotation-overhead count are under "Evaluating the cost".
 
-   As of this milestone: **961 specifications, 903 of them with real bodies,
-   38 admitted, 20 external, 27 functions skipped**, plus **18 `_pure`
+   `packet_space_connection` -- MsQuic's packet-space/connection back-pointer
+   dance, the largest real-code example in the suite -- was then ported in
+   full: three functions, zero admits, zero dropped contracts, verifying under
+   both memory models from one C file. It had been marked as model-specific,
+   which was wrong: it *uses* `_core_ref`, it does not test it, and real code
+   is exactly what the new model has to carry. Two encodings vanish. A
+   back-pointer field holds a `ptr` rather than a `core_ref`, so
+   `struct_connection_pts_to (conn_of ps_v)` is directly sayable and the
+   `core_to_ref` conversions go; and a fixed array field is a length-refined
+   `Seq.seq`, so a slot is `Seq.index` and an install is `Seq.upd` instead of
+   an `option` under a mask. The helper module shrinks by a fifth.
+
+   Nothing in the C had to name a model predicate to get there. A test may now
+   ship a `helpers_palow/` directory beside `helpers/`, holding a second copy
+   of the same hand-written module written against this model; the include
+   path chooses. Annotation churn in the C is one of the things being
+   measured, so it should not be inflated by a module name.
+
+   Three translator changes came out of the port. A `requires` clause is now
+   emitted one per line rather than joined with `**`, because a spliced clause
+   may be a top-level `exists*`, which does not parse to the right of a `**`.
+   A single-object `_out` parameter is registered as an uninitialised slot, so
+   the field writes scatter into the caller's storage and gather at the end
+   exactly as they do for a local -- which deletes the last two ghost
+   statements from `PalPacketSpaceInitialize`. And such a parameter no longer
+   promises its points-to back when the author's `_ensures` states ownership
+   itself: the mode constrains what arrives, the contract says what leaves,
+   and promising the object twice is promising it once too often.
+
+   As of this milestone: **961 specifications, 906 of them with real bodies,
+   35 admitted, 20 external, 27 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

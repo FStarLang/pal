@@ -51,8 +51,17 @@ check_one() {
   # A test may ship hand-written F* beside its C. `verify.mk` looks for that
   # directory relative to the working directory, and this runs from the repo
   # root rather than from the test, so the include is passed explicitly.
+  #
+  # `helpers_palow` takes precedence when it exists. A helper module is written
+  # against the memory model, so a test whose helpers mention the old model's
+  # predicates needs a second copy -- but the *C* should not have to know which
+  # one it is getting, so the two copies use the same module name and the
+  # include path chooses. Annotation churn in the C is the thing being
+  # measured; moving it into the include path keeps the measurement honest.
   local helpers=""
-  if [[ -d $tdir/helpers ]]; then
+  if [[ -d $tdir/helpers_palow ]]; then
+    helpers=" --include $tdir/helpers_palow"
+  elif [[ -d $tdir/helpers ]]; then
     helpers=" --include $tdir/helpers"
   fi
 

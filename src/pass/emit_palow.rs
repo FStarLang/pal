@@ -2709,6 +2709,10 @@ fn emit_fn(
     // an address to a *flat* spec, so every one of them has to become a
     // component of the explicit witness the caller passes.
     let mut wits: Vec<(String, String, bool)> = Vec::new();
+    // Whether the author's `_ensures` states ownership rather than only
+    // propositions. Asked here, ahead of the parameter loop, because it
+    // changes what a parameter mode is allowed to promise back.
+    let ens_own = decl.ensures.iter().any(|e| is_slprop_clause(tds, e));
     let mut req: Vec<String> = Vec::new();
     // Hand-written ownership the contract hands back, which unlike the
     // generated kind binds no existential of its own -- the author names
@@ -3097,11 +3101,18 @@ fn emit_fn(
             // uninitialised points-to.
             ParamMode::Out if extent(tds, &arg.ty) == Some(Extent::One) => {
                 req.push(format!("{}_pts_to_uninit {}", pn, pname));
-                fresh.push((
-                    format!("{}'", vname),
-                    vty,
-                    pts_to("1.0R", &format!("{}'", vname)),
-                ));
+                // The mode is a statement about the *pre*condition: what
+                // arrives is storage. What leaves is the initialised object,
+                // unless the author wrote an `_ensures` that states ownership
+                // itself -- then the object has been handed somewhere, and
+                // promising it back as well would be promising it twice.
+                if !ens_own {
+                    fresh.push((
+                        format!("{}'", vname),
+                        vty,
+                        pts_to("1.0R", &format!("{}'", vname)),
+                    ));
+                }
                 pointees.insert(base, (None, Some(format!("{}'", vname))));
             }
             // An `_out` array leaves fully initialised: that is the whole of
@@ -4206,7 +4217,14 @@ fn emit_fn(
     if req.is_empty() {
         out += "  requires emp\n";
     } else {
-        out += &format!("  requires {}\n", req.join(" **\n           "));
+        // One `requires` per clause rather than one `requires` joining them
+        // with `**`. Pulse conjoins repeated `requires` itself, and a spliced
+        // clause may be a top-level `exists*`, which does not parse to the
+        // right of a `**`. Separate clauses also read better when one of them
+        // is a page of hand-written ownership.
+        for clause in &req {
+            out += &format!("  requires {}\n", clause);
+        }
     }
     out += &format!("  returns  {} : {}\n", ret_name, ret);
 
@@ -14243,7 +14261,34 @@ fn emit_body(
             continue;
         };
         let n = name.val.to_string();
-        if a.mode == ParamMode::Out || !addressed.contains(&n) || b.arrays.contains_key(&n) {
+        if a.mode == ParamMode::Out {
+            // A single-object `_out` is storage the caller allocated, so it
+            // behaves exactly like an uninitialised local: the field writes
+            // scatter into it and the last one gathers it back up. The only
+            // difference is that the address is the parameter rather than a
+            // stack allocation, and that nothing here frees it.
+            if extent(tds, &a.ty) == Some(Extent::One)
+                && let TypeT::Pointer(pt, _) = &peel(tds, &a.ty).val
+                && let Some(pn) = palow_name(tds, pt)
+                && let Some(fty) = fstar_type(tds, pt)
+                && storable_struct(tds, pt)
+            {
+                b.slots.push(Slot {
+                    name: format!("*{}", n),
+                    addr: format!("var_{}", n),
+                    palow_ty: pn,
+                    fstar_ty: fty,
+                    init: false,
+                    array: None,
+                    // Not ours to release: the caller allocated it.
+                    global: true,
+                    holds_fn: BTreeMap::new(),
+                    scattered: BTreeSet::new(),
+                });
+            }
+            continue;
+        }
+        if !addressed.contains(&n) || b.arrays.contains_key(&n) {
             continue;
         }
         // A refusal here is not a refusal of the body: the `&` may sit
