@@ -936,6 +936,24 @@ public:
         }
         return mk_rvalue_lvalue(std::move(loc), trLValue(ic->getSubExpr()));
       }
+      case CK_PointerToIntegral: {
+        auto *target = ic->getType()->getAs<BuiltinType>();
+        auto source = ic->getSubExpr()->getType();
+        if (target &&
+            (target->getKind() == BuiltinType::Long ||
+             target->getKind() == BuiltinType::ULong) &&
+            source->isPointerType() &&
+            !source->getPointeeType()->isFunctionType()) {
+          return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                                trQualType(ic->getType(), e->getSourceRange()));
+        }
+        reportUnsupported(e->getSourceRange(), loc,
+                          "unsupported pointer-to-integer cast",
+                          "only object or void pointers to long or unsigned "
+                          "long are supported");
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
+      }
       case CK_IntegralCast:
       case CK_IntegralToBoolean:
       case CK_PointerToBoolean:
