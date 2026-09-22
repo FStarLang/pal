@@ -75,6 +75,70 @@ uint32_t ghost_next(uint32_t value)
     return value + 1;
 }
 
+/* Tick antiquotation introduces an implicit Pulse ghost, not a _ghost_arg. */
+int32_t implicit_ghost_read(_plain int32_t *p)
+    _preserves(_inline_pulse(pts_to $(p) $`count))
+    _ensures(_inline_pulse(pure ($(return) == $`count)))
+{
+    return *p;
+}
+
+_ghost_arg(int32_t saved_q)
+_ghost_arg(int32_t saved_s)
+int32_t mixed_implicit_ghost_read(_plain int32_t *p, _plain int32_t *q,
+                                _plain int32_t *r, _plain int32_t *s)
+    _preserves(_inline_pulse(pts_to $(p) $`count))
+    _preserves(_inline_pulse(pts_to $(q) $(saved_q)))
+    _preserves(_inline_pulse(pts_to $(r) $`other))
+    _preserves(_inline_pulse(pts_to $(s) $(saved_s)))
+    _ensures(_inline_pulse(pure ($(return) == $`count)))
+{
+    return *p;
+}
+
+int32_t call_implicit_ghost_direct(void)
+    _ensures(return == 42)
+{
+    int32_t value = 42;
+    return implicit_ghost_read(&value);
+}
+
+int32_t call_mixed_implicit_ghost_direct(void)
+    _ensures(return == 42)
+{
+    int32_t p = 42;
+    int32_t q = 7;
+    int32_t r = 11;
+    int32_t s = 19;
+    return mixed_implicit_ghost_read(&p, &q, &r, &s);
+}
+
+int32_t call_implicit_ghost_pointer(void)
+    _ensures(return == 42)
+{
+    int32_t value = 42;
+    int32_t (*fp)(int32_t *) = implicit_ghost_read;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_implicit_ghost_read.func_implicit_ghost_read__fp);
+    int32_t result = fp(&value);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return result;
+}
+
+int32_t call_mixed_implicit_ghost_pointer(void)
+    _ensures(return == 42)
+{
+    int32_t p = 42;
+    int32_t q = 7;
+    int32_t r = 11;
+    int32_t s = 19;
+    int32_t (*fp)(int32_t *, int32_t *, int32_t *, int32_t *) =
+        mixed_implicit_ghost_read;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_mixed_implicit_ghost_read.func_mixed_implicit_ghost_read__fp);
+    int32_t result = fp(&p, &q, &r, &s);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return result;
+}
+
 /* ---- shared type aliases ---- */
 
 typedef int32_t (*binop)(int32_t, int32_t);
