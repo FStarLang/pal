@@ -14,6 +14,14 @@ module N = Struct_list_node
 module I = Struct_item3
 
 unfold let item_ref = ref I.struct_item3
+(* The item points-to under whatever name the memory model gives it, so that
+   one set of C annotations serves both models. *)
+unfold let item_pts_to (r: item_ref) (v: I.struct_item3) : slprop = R.pts_to r v
+
+(* The link field's address, under whatever name the memory model gives it. *)
+unfold let item_link (r: item_ref) : GTot U.lref = I.struct_item3__link_1 r
+
+
 unfold let owner (node: U.lref) : item_ref = I.struct_item3__link_container node
 
 (* A queued item owns a true flag, not an existentially chosen flag value. *)

@@ -106,18 +106,18 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
         IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R (reveal $(entries)) **
         (exists* (link: Struct_list_node.struct_list_node).
-            Pulse.Lib.Reference.pts_to $(item)
+            IntrusiveListExample.item_pts_to $(item)
                 (IntrusiveListExample.item_record (reveal $(description)) link)) **
         pure (IntrusiveListIndexed.sorted IntrusiveListExample.value_le (reveal $(entries)))))
     _ensures(_inline_pulse(
         IntrusiveListIndexed.is_list_ring_ix IntrusiveListExample.item_ipl
             $(head) 1.0R
             (IntrusiveListIndexed.insert IntrusiveListExample.value_le
-                (Struct_item.struct_item__link_1 $(item))
+                (IntrusiveListExample.item_link $(item))
                 (reveal $(description)) (reveal $(entries))) **
         pure (IntrusiveListIndexed.sorted IntrusiveListExample.value_le
             (IntrusiveListIndexed.insert IntrusiveListExample.value_le
-                (Struct_item.struct_item__link_1 $(item))
+                (IntrusiveListExample.item_link $(item))
                 (reveal $(description)) (reveal $(entries))))))
 {
     _ghost_stmt(IntrusiveListExample.value_order ());
@@ -143,7 +143,7 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
                 (reveal $(description)) (reveal $(entries))
                 (Pulse.Lib.GhostReference.op_Bang stopped) **
             IntrusiveListExample.item_ipl $(entry) (reveal $(description)) **
-            Pulse.Lib.Reference.pts_to_uninit $(entry)))
+            IntrusiveListIndexed.lpts_to_uninit $(entry)))
         _ensures(_inline_pulse(
             (Pulse.Lib.GhostReference.op_Bang stopped) == (0 = 0) \/
             $(node) == $(head))) {

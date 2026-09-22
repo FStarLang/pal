@@ -8305,6 +8305,43 @@ impl<'a> Body<'a> {
             .map_err(|_| "the type of a subexpression could not be inferred".to_string())
     }
 
+    /// Record that a pointed-to struct is storage this body owns whose
+    /// contents are not yet valid.
+    ///
+    /// This is the same slot an `_out` parameter gets: the address is a
+    /// value the body already has rather than a stack allocation, the field
+    /// writes scatter into it and the last one gathers it back up, and
+    /// nothing here frees it. Saying nothing is always safe -- a body that
+    /// then writes a field will simply fail to find the ownership and be
+    /// admitted with a reason -- so every step below just gives up quietly.
+    fn note_uninit(&mut self, e: &Expr) {
+        let Ok(ty) = self.ty_of(e) else { return };
+        let TypeT::Pointer(pt, _) = &peel(self.tds, &ty).val else {
+            return;
+        };
+        let (Some(pn), Some(fty)) = (palow_name(self.tds, pt), fstar_type(self.tds, pt)) else {
+            return;
+        };
+        if !storable_struct(self.tds, pt) {
+            return;
+        }
+        let Ok(addr) = self.inline(e) else { return };
+        if self.slots.iter().any(|s| s.addr == addr) {
+            return;
+        }
+        self.slots.push(Slot {
+            name: format!("*{}", addr),
+            addr,
+            palow_ty: pn,
+            fstar_ty: fty,
+            init: false,
+            array: None,
+            global: true,
+            holds_fn: BTreeMap::new(),
+            scattered: BTreeSet::new(),
+        });
+    }
+
     /// Whether a global has a value published as an F* constant: it is
     /// immutable, this file initialises it, and the initialiser is a literal.
     /// Whether `v` names an array global this file published as a sequence
@@ -12610,7 +12647,19 @@ impl<'a> Body<'a> {
                 self.lines.push("continue;".to_string());
                 Ok(())
             }
-            StmtT::GhostStmt(code) if ghost_replaced(code) => Ok(()),
+            StmtT::GhostStmt(code) if ghost_replaced(code) => {
+                // `$unfold-uninit` is the one member of the pair that says
+                // something Palow cannot see for itself: that the object is
+                // storage the function owns but whose contents are not yet
+                // valid. Palow spells that as an uninitialised slot -- the
+                // field writes scatter into it and the last one gathers it
+                // back up -- so the statement turns into a note rather than
+                // into code.
+                if let Some(e) = uninit_open_arg(code) {
+                    self.note_uninit(e);
+                }
+                Ok(())
+            }
             StmtT::GhostStmt(_) if !self.tds.splice_inline => Err(self.tds.no_splice()),
             StmtT::GhostStmt(code) => {
                 let t = self.inline_pulse(code)?;
@@ -12755,6 +12804,20 @@ impl<'a> Body<'a> {
                         }
                         self.rvalue(cond)?
                     }
+                };
+                // Pulse joins an `if` by matching on the condition, and it can
+                // only reduce that match inside an arm if the condition is a
+                // name. A call is not: two `if`s on the same call nest into a
+                // join whose arms differ, and the outer one is then
+                // unprovable. Binding the call first costs nothing -- C
+                // evaluates the condition once anyway -- and makes the
+                // branch hypothesis usable.
+                let c = if nt.is_none() && matches!(strip_vattr(cond).val, ExprT::FnCall(..)) {
+                    let t = self.fresh("cond");
+                    self.lines.push(format!("let {} = {};", t, c));
+                    t
+                } else {
+                    c
                 };
 
                 // Whether a slot holds a value or still holds uninitialised
@@ -14585,6 +14648,21 @@ fn ghost_head(code: &InlinePulseCode) -> String {
     head
 }
 
+/// The object a `$unfold-uninit` opens, if that is what this statement is.
+///
+/// The old model's uninitialised-open takes exactly one argument, the object,
+/// and it arrives as the first antiquotation after the head.
+fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
+    if !ghost_head(code).contains("__aux_raw_unfold_uninit") {
+        return None;
+    }
+    code.tokens.iter().find_map(|t| match t {
+        InlinePulseToken::RValueAntiquot { expr, .. }
+        | InlinePulseToken::LValueAntiquot { expr, .. } => Some(&**expr),
+        _ => None,
+    })
+}
+
 /// Whether a ghost statement is about a part of the *old* memory model that
 /// Palow replaces with something the emitter writes itself.
 ///
@@ -14602,7 +14680,12 @@ fn ghost_head(code: &InlinePulseCode) -> String {
 ///     `forget` where the initialisation state changes;
 ///   * acquiring a global's storage, and the `drop_` that releases it again --
 ///     in Palow a global's ownership arrives in the contract, so there is
-///     nothing to acquire and nothing to give back.
+///     nothing to acquire and nothing to give back;
+///   * opening a struct into one reference per field, which the old model
+///     needs before it can touch a field at all -- Palow addresses a field as
+///     the object's address plus an offset, and the emitter writes the
+///     `focus`/`unfocus` pair around each access itself, so there is nothing
+///     to open.
 ///
 /// Every other ghost statement says something Palow has no other way to learn,
 /// and is still refused rather than silently discarded.
@@ -14617,6 +14700,11 @@ fn ghost_replaced(code: &InlinePulseCode) -> bool {
         "Pulse.Lib.C.MaybeUninit.",
     ];
     if REPLACED.iter().any(|p| head.starts_with(p)) {
+        return true;
+    }
+    // `$unfold`/`$fold` and their uninitialised variants, however they were
+    // written: the generated name is the only thing both spellings share.
+    if head.contains("__aux_raw_unfold") || head.contains("__aux_raw_fold") {
         return true;
     }
     if head.starts_with("Global_") && head.contains(".acquire_var_") {

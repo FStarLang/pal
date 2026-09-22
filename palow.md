@@ -3538,8 +3538,50 @@ new facts about memory.
    itself: the mode constrains what arrives, the contract says what leaves,
    and promising the object twice is promising it once too often.
 
-   As of this milestone: **961 specifications, 906 of them with real bodies,
-   35 admitted, 20 external, 27 functions skipped**, plus **18 `_pure`
+   The second real-code example, `intrusive_list`, went the same way. The
+   first surprise was that removing its backlog marker did not add work but
+   removed it: the marker sets `splice_inline = false` and clears the opaque
+   types, and *that* was what produced all 26 of the suite's remaining
+   skips. Unmarked, the generated code has four admits and no dropped
+   contracts, and the whole job was making 6100 lines of hand-written theory
+   verify against the new model. That theory touches memory in very few
+   places, so it was enough to write two shims -- `IntrusiveListNodeRef`,
+   which presents Palow's node in the shape of `Pulse.Lib.Reference`, and
+   `IntrusiveListItemRefs`, which does the same for the three client structs
+   -- and to change a `module R = ...` line in each of the eleven helpers.
+
+   Two things had to become explicit that the old model assumed. Recovering an
+   item from its embedded link is arithmetic in Palow rather than an axiom, so
+   `(a -? n) +! n == a` holds only when `n <= addr_of a`; stating that as a
+   `pure` conjunct of each payload predicate is no loss, because it says
+   exactly "this address is a link field inside an item". And a local struct
+   is freed as *storage*, so a list's head gives up its value when the list is
+   released, where the old model can free a local that still holds one.
+
+   The larger difference is that most of the theory's open/close pairs turned
+   into nothing. The old model has to open a struct into one reference per
+   field before it can touch a field at all; Palow addresses a field as the
+   object's address plus an offset and writes the `focus`/`unfocus` pair
+   around each access itself. So `$unfold` and `$fold` join the list of
+   ghost statements the emitter replaces, and several helpers became
+   identities that survive only because the C names them. `$unfold-uninit` is
+   the one member of the pair that still says something: that the object is
+   storage the function owns whose contents are not yet valid, which is the
+   uninitialised slot an `_out` parameter already gets.
+
+   The last translator change was a joining bug rather than a memory one.
+   Pulse joins an `if` by matching on the condition and can only reduce that
+   match inside an arm when the condition is a name -- so two `if`s on the
+   same call, which is what `assert` inside `if (assert_enabled)` compiles to,
+   produced a join the outer one could not prove. Binding the call first costs
+   nothing, because C evaluates the condition once anyway.
+
+   The C itself needed no model-specific spelling: where it named a model's
+   own predicate it now names a helper that each `helpers` tree defines for
+   itself. Both models verify from one source.
+
+   As of this milestone: **987 specifications, 931 of them with real bodies,
+   36 admitted, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
