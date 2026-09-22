@@ -6208,42 +6208,57 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     bounds.sort_unstable();
     bounds.dedup();
 
+    // Each split has to be followed immediately by the claim of the piece it
+    // just cut off, rather than running all the splits and then all the
+    // claims. Both orders are correct; they cost very differently. `mem_split`
+    // describes its halves as `slice` of what it was given, so splitting the
+    // same chunk `n` times leaves the last piece under `n` nested slices, and
+    // doing all the splits first means the context holds all `n` of those at
+    // once -- quadratic in the number of fields, and it is the single most
+    // expensive thing the emitter produces for a wide struct. Claiming a piece
+    // consumes its byte term, so interleaving keeps exactly one live at a
+    // time. On a forty-field struct this alone is 40.7s to 10.1s.
+    let claim_at = |f: &StructField, alloc: &mut String| match &f.shape {
+        FieldShape::One { pn } => {
+            *alloc += &format!("  {}_claim_uninit {};\n", pn, at(f.offset));
+            *alloc += &format!(
+                "  rewrite ({pn}_pts_to_uninit {off})\n    as ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}));\n",
+                pn = pn,
+                off = at(f.offset),
+                sn = sn,
+                f = f.name
+            );
+        }
+        FieldShape::Flex { .. } => *alloc += NO_FLEX_STORAGE,
+        FieldShape::Array { pn, esize, len } => {
+            *alloc += &format!(
+                "  array_claim_all_uninit {}_repr {} {}sz {}sz;\n",
+                pn,
+                at(f.offset),
+                esize,
+                len
+            );
+            *alloc += &format!(
+                "  rewrite (array_pts_to_uninit {pn}_repr {es} {n} {off})\n    as (array_pts_to_uninit {pn}_repr {es} {n} (a +! {sn}_offsetof_{f}));\n",
+                pn = pn,
+                es = esize,
+                n = len,
+                off = at(f.offset),
+                sn = sn,
+                f = f.name
+            );
+        }
+    };
+    let field_at = |off: u64| si.fields.iter().find(|f| f.offset == off);
     let mut alloc = String::new();
     for off in bounds.iter().rev() {
         alloc += &format!("  mem_split a {}sz;\n", off);
-    }
-    for f in &si.fields {
-        match &f.shape {
-            FieldShape::One { pn } => {
-                alloc += &format!("  {}_claim_uninit {};\n", pn, at(f.offset));
-                alloc += &format!(
-                    "  rewrite ({pn}_pts_to_uninit {off})\n    as ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}));\n",
-                    pn = pn,
-                    off = at(f.offset),
-                    sn = sn,
-                    f = f.name
-                );
-            }
-            FieldShape::Flex { .. } => alloc += NO_FLEX_STORAGE,
-            FieldShape::Array { pn, esize, len } => {
-                alloc += &format!(
-                    "  array_claim_all_uninit {}_repr {} {}sz {}sz;\n",
-                    pn,
-                    at(f.offset),
-                    esize,
-                    len
-                );
-                alloc += &format!(
-                    "  rewrite (array_pts_to_uninit {pn}_repr {es} {n} {off})\n    as (array_pts_to_uninit {pn}_repr {es} {n} (a +! {sn}_offsetof_{f}));\n",
-                    pn = pn,
-                    es = esize,
-                    n = len,
-                    off = at(f.offset),
-                    sn = sn,
-                    f = f.name
-                );
-            }
+        if let Some(f) = field_at(*off) {
+            claim_at(f, &mut alloc);
         }
+    }
+    if let Some(f) = field_at(0) {
+        claim_at(f, &mut alloc);
     }
     // Claiming raw storage at this type is the carve on its own; a stack
     // allocation is that plus the allocation. Separating them is what lets a
@@ -6275,43 +6290,51 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // Freeing runs the carve backwards. `mem_join a n` needs the two halves
     // adjacent, so the joins go left to right, which is the reverse of the
     // order the splits ran in.
+    // As with the carve, each reveal is paired with the join that immediately
+    // consumes it rather than revealing everything first: `mem_join` describes
+    // its result as `append` of the two halves, so `n` reveals held at once is
+    // the same quadratic context the splits had.
+    let reveal_at = |f: &StructField, free: &mut String| match &f.shape {
+        FieldShape::One { pn } => {
+            *free += &format!(
+                "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n",
+                pn = pn,
+                sn = sn,
+                f = f.name,
+                off = at(f.offset)
+            );
+            *free += &format!("  {}_reveal_uninit {};\n", pn, at(f.offset));
+        }
+        FieldShape::Flex { .. } => *free += NO_FLEX_STORAGE,
+        FieldShape::Array { pn, esize, len } => {
+            *free += &format!(
+                "  rewrite (array_pts_to_uninit {pn}_repr {es} {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {es} {n} {off});\n",
+                pn = pn,
+                es = esize,
+                n = len,
+                sn = sn,
+                f = f.name,
+                off = at(f.offset)
+            );
+            *free += &format!(
+                "  array_reveal_all_uninit {}_repr {} {}sz {}sz;\n",
+                pn,
+                at(f.offset),
+                esize,
+                len
+            );
+        }
+    };
     let mut free = String::new();
     free += &format!("  unfold {}_pts_to_uninit a;\n", sn);
     free += &format!("  unfold {}_padding a 1.0R;\n", sn);
-    for f in &si.fields {
-        match &f.shape {
-            FieldShape::One { pn } => {
-                free += &format!(
-                    "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n",
-                    pn = pn,
-                    sn = sn,
-                    f = f.name,
-                    off = at(f.offset)
-                );
-                free += &format!("  {}_reveal_uninit {};\n", pn, at(f.offset));
-            }
-            FieldShape::Flex { .. } => free += NO_FLEX_STORAGE,
-            FieldShape::Array { pn, esize, len } => {
-                free += &format!(
-                    "  rewrite (array_pts_to_uninit {pn}_repr {es} {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {es} {n} {off});\n",
-                    pn = pn,
-                    es = esize,
-                    n = len,
-                    sn = sn,
-                    f = f.name,
-                    off = at(f.offset)
-                );
-                free += &format!(
-                    "  array_reveal_all_uninit {}_repr {} {}sz {}sz;\n",
-                    pn,
-                    at(f.offset),
-                    esize,
-                    len
-                );
-            }
-        }
+    if let Some(f) = field_at(0) {
+        reveal_at(f, &mut free);
     }
     for off in bounds.iter() {
+        if let Some(f) = field_at(*off) {
+            reveal_at(f, &mut free);
+        }
         free += &format!("  mem_join a {}sz;\n", off);
     }
     c += &format!(

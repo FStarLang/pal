@@ -533,12 +533,9 @@ but we should know what we are paying.
 
 ### First measurements
 
-Taken with the port at the state described under "Implementation status":
-specifications for every function whose types the model covers, and bodies for
-straight-line scalar code. The Palow side is therefore *partial*, and the
-numbers below are not a verdict. What they are good for is ruling out the
-failure mode we were most worried about — that a byte-level model would be
-ruinously slow — and identifying what actually dominates the cost today.
+Taken when the port had specifications for every function whose types the
+model covered and bodies only for straight-line scalar code. They are kept
+here because the second round contradicts two of them.
 
 Whole `test/` suite, from a clean cache:
 
@@ -549,62 +546,141 @@ Whole `test/` suite, from a clean cache:
 | generated modules | 2358 | 158 |
 | generated lines | 53 350 | 10 556 |
 
-Two comparable single tests, controlling for what is actually being verified:
+Two comparable single tests:
 
 | | current model | Palow |
 | --- | --- | --- |
 | `swap` (1 function) | 1.75 s, 3 modules, 31 lines | 0.70 s, 1 module, 52 lines |
 | `issue51_test` (60 functions) | 89.7 s, 137 modules, 1762 lines | 1.34 s, 1 module, 513 lines |
 
-`issue51_test` is the useful one: all 60 of its functions are translated with
-real bodies and none are skipped, so the two columns verify the same program.
+The conclusions drawn at the time were that verification cost is dominated by
+module granularity rather than by the memory model — F\* spends 0.65–0.85 s on
+a generated module regardless of its contents, and an empty module with no
+Pulse in scope still takes 238 ms — and that byte-level reasoning did not show
+up as a cost at all. The first still holds. The second was an artefact of
+measuring a port that had no aggregate bodies in it.
 
-### What the numbers say
+### Second measurements
 
-**Verification cost is dominated by module granularity, not by the memory
-model.** F\* spends about 0.65–0.85 s on a generated module regardless of its
-contents: an eleven-line `Func_cmp1.fst` from `issue51_test` takes 844 ms on
-its own, and an empty module with no Pulse in scope still takes 238 ms. PAL
-emits one module per declaration, so `issue51_test`'s 89.7 s is roughly
-137 × 0.65 s of fixed cost. The Palow emitter happens to produce one module per
-translation unit, which is why it looks 67× faster; almost all of that is
-packaging. Anyone repeating this measurement later must control for it, and it
-is worth asking separately whether the current one-module-per-declaration
-scheme is paying for itself.
+Taken at 961 specifications, 903 of them with real bodies. Both columns now
+emit one module per declaration and both were run at `-j256` on the same
+256-core machine from a clean cache, so the packaging cost that dominated the
+first round is paid on both sides and cancels.
 
-**Byte-level reasoning did not show up as a cost.** The scalar layer folds to a
-single `mem_pts_to` with a concrete `encode`, and the derived lemmas discharge
-without visible solver effort. The `pulse/` library itself — including the
-proved `Encoding`, `Aggregate`, `Union`, `Etype` and `Provenance` modules —
-verifies as part of the ordinary build.
+| | current model | Palow |
+| --- | --- | --- |
+| wall time | 1 m 16 s | 6 m 29 s |
+| CPU time | 1 h 59 m 45 s | 43 m 30 s |
 
-**Generated code is smaller per function**, though not by as much as the table
-suggests. `issue51_test` is 29 lines per function today against about 8 for
-Palow. Some of that is real — no pointer-kind-specific predicate, one `ptr`
-type instead of a family — and some is the untranslated contracts. Now that
-Palow also emits one module per declaration it pays the same module preamble
-the old translator does, so that part of the saving is gone.
+**Palow uses 2.75x less CPU and 5x more wall time.** The two numbers disagree
+because Palow's work is far less evenly spread: the old model's slowest test is
+243 s and Palow's is 391 s, but Palow's *second* slowest is 101 s, so at high
+parallelism one test sets the wall clock. Per-test, with the same parallelism:
 
-**Verification time is about 2.5x better, not thirtyfold.** `issue51_test`:
-1m30 old against 35s Palow, over the same 60 functions and the same 60
-modules. An earlier measurement of 1.2s was comparing 139 F\* invocations
-against one, and measured startup rather than proof.
+| test | current model | Palow |
+| --- | --- | --- |
+| `dpe` | 85 s | **391 s** |
+| `intrusive_list` | 243 s | 43 s |
+| `func_pointer` | 205 s | 101 s |
+| `issue51_test` | 103 s | 42 s |
+| `merge_specs_multifile` | 81 s | 42 s |
+| `sizeof` | 72 s | 40 s |
+| `ghost_fnptr` | 59 s | 33 s |
+| `switch_stmt` | 58 s | 32 s |
+| `global_purity` | 57 s | 34 s |
+| `palow_struct` | 41 s | 33 s |
+
+So the shape of the result is: **Palow is about twice as fast as the current
+model on everything except wide structs, where it is several times slower.**
+That is the answer to the question "Still to measure" asked about aggregates,
+and it is worth stating plainly rather than averaging away.
+
+### Wide structs are the cost, and the cost is quadratic
+
+`dpe` is 391 s, and 91% of that is a single generated module,
+`Struct__profile_descriptor_t` — the byte-level view of a 69-field struct that
+nothing in `dpe` ever uses. Reducing that to a controlled experiment (a struct
+of `n` `uint32_t` fields and one function reading the first):
+
+| fields | generated lines | verification |
+| --- | --- | --- |
+| 5 | 536 | 6 s |
+| 20 | 1510 | 20 s |
+| 40 | 3670 | 110 s |
+| 69 | 8223 | 528 s |
+
+Doubling the field count costs roughly five times as much. Two separate
+quadratics produce that, and F\*'s `--timing` separates them cleanly.
+
+The first was in `{sn}_claim_uninit`, which carves raw storage into per-field
+cells: 222.9 s of the 69-field module's 528 s. `mem_split` describes its two
+halves as `slice` of the chunk it was given, so splitting the same chunk `n`
+times leaves the last piece under `n` nested slices — and because the emitter
+ran *all* the splits and only then all the claims, the context held all `n` of
+those terms at once. Claiming a piece consumes its byte term, so interleaving
+the two loops keeps exactly one live at a time. This is purely a reordering of
+emitted lines, it changes no proof and no model definition, and it takes
+`claim_uninit` on a 40-field struct from 40.7 s to 10.1 s. The same reordering
+applies to `{sn}_reveal_uninit`, which runs the carve backwards through
+`mem_join` and had the same shape with `append` in place of `slice`. Together
+they take the 69-field module from 528 s to 308 s, `dpe` from 694 s to 391 s,
+and the whole Palow suite from 11 m 29 s to 6 m 29 s of wall time, with no
+change to what is proved.
+
+The second quadratic is still there and is a design question rather than an
+oversight. Field focus is stated with one `{sn}_hole_f` slprop per field,
+naming the other `n-1` fields, and each of the three ghost functions that use
+it has to fold or unfold that slprop. After the reordering fix the 69-field
+module spends 232 s of its 308 s in exactly those: 122.6 s in the 69
+`unfocus_f`, 55.5 s in `unfocus_read_f` and 53.6 s in `focus_f`, against 28.0 s
+now in `claim_uninit`. So the remaining cost is `O(n^2)` in *generated text*,
+not just in solver time, and no amount of reordering will move it. Three ways
+out suggest themselves, in increasing order of ambition: emit the focus
+machinery only for fields something actually focuses; replace the `n`
+predicates with one `{sn}_pts_to_except a p x i` indexed by field; or give
+layer 2 a generic aggregate description and prove focus once, generically, in
+the model. Only the last removes the quadratic from the *text* as well as from
+the proof.
+
+None of this touches the scalar layer. The first measurement's claim that
+byte-level reasoning is cheap was right about scalars and wrong to generalise:
+a `uint32_t` still folds to a single `mem_pts_to` with a concrete `encode` and
+costs nothing measurable. It is the aggregate *decomposition* that is
+expensive, and it is expensive in proportion to how wide the aggregate is, not
+to how many bytes it has.
+
+### Annotation overhead
+
+The suite's C and headers, excluding symlinks and generated output, are 192
+files and 14 933 lines, of which 2769 (18.5%) mention a PAL annotation. Because
+the port keeps both models building from the same sources, the divergence is
+directly countable: **689 lines are compiled only under `PALOW` and 756 only
+under the old model.** Palow needs slightly *fewer* annotation lines than the
+current model on the same C, at 903 of 961 functions translated.
+
+That number should be read with two cautions. It counts only the tests that
+have a divergence at all, and the 27 remaining skipped functions and 38
+admitted bodies are concentrated in the tests whose annotations have not been
+ported, so the Palow figure will grow as those land. What it does rule out is
+the failure mode where a lower-level model needs systematically more
+annotation per line of C.
+
+The escape hatch tells the same story. Of 312 `_include_pulse` and
+`_inline_pulse` uses, 178 are shared between the two models, 76 are old-model
+only and 58 are Palow only — so Palow is not currently buying its coverage by
+dropping into hand-written Pulse more often.
 
 ### Still to measure
 
-These need the port to be further along to mean anything:
-
  - Z3 queries and rlimit consumed. `--query_stats` reports nothing on a
-   successful run in this build, so this needs a different harness.
- - Annotation lines in the `.c` inputs. Today's suite has 28 829 lines of C
-   and headers, 4092 of which mention a PAL annotation, and 341
-   `_include_pulse` uses. The question the refactor has to answer is whether
-   those numbers go up, and the `_include_pulse` count is the one to watch: it
-   is the escape hatch, and every use is a place the model was not expressive
-   enough. All 341 are currently untranslated, so we do not know yet.
- - Verification time for aggregates, which is where a byte-level model is most
-   likely to hurt — a struct's points-to unfolds to a `mem_pts_to` over a
-   concrete byte layout, and nothing in the suite exercises that at scale yet.
+   successful run in this build, but `--timing` with
+   `--profile_group_by_decl` does give per-declaration wall time, and that is
+   what the aggregate numbers above are based on.
+ - Whether the one-module-per-declaration scheme is paying for itself. It is
+   now the dominant cost on both sides for every test that is not
+   aggregate-heavy, and it is a choice, not a consequence of either model.
+ - The cost of the three remedies for the focus quadratic, which needs at
+   least the first of them implemented to compare against.
 
 ## Implementation status
 
@@ -3422,6 +3498,16 @@ new facts about memory.
    a clause naming a *sibling* field, which is sayable in the record type but
    would also put a proof obligation on every write to the sibling. Dropped
    contracts fall from 31 to 23.
+
+   With enough of the port in place to mean something, the suite was measured
+   against the current model on equal terms for the first time -- same
+   machine, same parallelism, same one-module-per-declaration packaging on
+   both sides. Palow uses 2.75x less CPU and is about twice as fast per test,
+   except on wide structs, where it is several times slower and the cost grows
+   quadratically with the field count. Chasing that found a pure emission-order
+   bug worth 42% of a wide struct's verification time, and a second quadratic
+   that is a real design question. The numbers, the experiment that isolates
+   them and the annotation-overhead count are under "Evaluating the cost".
 
    As of this milestone: **961 specifications, 903 of them with real bodies,
    38 admitted, 20 external, 27 functions skipped**, plus **18 `_pure`
