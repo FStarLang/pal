@@ -4,6 +4,20 @@
 #include "DPE.h"
 #include "EngineCore.h"
 
+#ifdef PALOW
+// Palow spelling. An array's value in Palow is the sequence of the elements
+// themselves; `option` is how the old model records which cells are still
+// uninitialised, and Palow says that with a separate `maybe_repr` view of the
+// same storage rather than inside the value.
+_include_pulse(DPE_context_full_data,
+  $declare(context_t s)
+  [@@erasable]
+  noeq type context_full_data =
+    | PL_Engine of (Seq.seq UInt8.t)
+    | PL_L0 of (Seq.seq UInt8.t)
+    | PL_L1 // tbd
+)
+#else
 _include_pulse(DPE_context_full_data,
   $declare(context_t s)
   [@@erasable]
@@ -12,6 +26,7 @@ _include_pulse(DPE_context_full_data,
     | PL_L0 of (Seq.seq (option UInt8.t))
     | PL_L1 // tbd
 )
+#endif
 
 _type(context_full_data, DPE_context_full_data.context_full_data)
 
@@ -24,6 +39,29 @@ _let(bool tag_relation(context_t s, context_full_data h),
     | 2uy -> $(s.payload.l1_context._active) /\ PL_L1? $(h)
     | _ -> False))
 
+#ifdef PALOW
+// The same two predicates in Palow. A `_array uint8_t *` is a `ptr`, its
+// ownership is `array_pts_to` over the byte representation, and `freeable`
+// names how much storage has to be handed back -- which the old model's
+// `freeable_array` leaves to the array object to remember.
+_include_pulse(DPE_predicates0,
+  $declare(context_t s)
+  $declare(context_full_data h)
+  open DPE_context_full_data
+
+  [@@pulse_eager_unfold]
+  let uds_pred (uds: $type(uds_array)) (uds_data: Seq.seq UInt8.t) : slprop =
+    array_pts_to uint8_t_repr 1 uds 1.0R uds_data **
+    pure (Seq.length uds_data == 32) **
+    freeable uds 32sz
+
+  [@@pulse_eager_unfold]
+  let cdi_pred (cdi: $type(dice_digest)) (cdi_data: Seq.seq UInt8.t) : slprop =
+    array_pts_to uint8_t_repr 1 cdi 1.0R cdi_data **
+    pure (Seq.length cdi_data == 64) **
+    freeable cdi 64sz
+)
+#else
 _include_pulse(DPE_predicates0,
   $declare(context_t s)
   $declare(context_full_data h)
@@ -43,6 +81,7 @@ _include_pulse(DPE_predicates0,
       pure (array_spec_seq aspec == cdi_data) **
       freeable_array cdi
 )
+#endif
 
 _let(_slprop context_full_pred(context_t s, context_full_data h),
   _inline_pulse((
@@ -114,10 +153,22 @@ _include_pulse(DPE_predicates,
   }
 )
 
+#ifdef PALOW
+// Palow: same story as `compare` in EngineCore.c -- the value of an array is a
+// binder in the contract rather than something read off the pointer, so the
+// ownership is spelled by hand and `a2` ends up holding `a1`'s sequence.
+void memcpy_(size_t len, _plain _array const uint8_t *a1, _plain _out _array uint8_t *a2)
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 $(a1) $`p_a1 $`v_a1))
+  _requires(_inline_pulse(array_pts_to (maybe_repr uint8_t_repr 1) 1 $(a2) 1.0R $`v_a2))
+  _requires((bool) _inline_pulse(Seq.length $`v_a1 == SizeT.v $(len)))
+  _requires((bool) _inline_pulse(Seq.length $`v_a2 == SizeT.v $(len)))
+  _ensures(_inline_pulse(array_pts_to uint8_t_repr 1 $(a2) 1.0R $`v_a1))
+#else
 void memcpy_(size_t len, _array const uint8_t *a1, _out _array uint8_t *a2)
   _preserves(a1._length == len)
   _preserves(a2._length == len)
   _ensures((bool) _inline_pulse(array_value_of $(a2) == array_value_of $(a1)))
+#endif
 {
   _ghost_stmt(admit());
 }
@@ -143,12 +194,16 @@ _allocated context_obj init_engine_context(const uds_array uds)
   return ctx;
 }
 
+#ifndef PALOW
+// `maybe` is how the old model guards an `_ensures` behind a boolean result.
+// Palow spells that differently, and nothing here calls this, so it stays.
 _include_pulse (DPE_ghost_helpers,
   ghost fn elim_maybe_true (p:slprop)
   requires maybe _true_ p
   ensures p
   { unfold maybe; }
 )
+#endif
 
 _let(bool is_pl_engine(context_full_data state), _inline_pulse(DPE_context_full_data.PL_Engine? $(state)))
 _let(bool is_pl_l0(context_full_data state), _inline_pulse(DPE_context_full_data.PL_L0? $(state)))

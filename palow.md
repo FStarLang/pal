@@ -3610,8 +3610,39 @@ new facts about memory.
    spells its address is computed and then withdrawn again; an alias *passed
    to a callee* still hands the focus out.
 
-   As of this milestone: **987 specifications, 936 of them with real bodies,
-   31 admitted, 20 external, 1 function skipped**, plus **18 `_pure`
+   With `arrayptrs`, `dpe` and `antiquot` the backlog of tests still written
+   against the old model's predicates is **empty**. Only `core_ref_struct`
+   stays marked, and it stays marked because `_core_ref` is a thing Palow
+   deliberately does not have.
+
+   `arrayptrs` is the sharpest illustration of what the model buys. The old
+   model carries an array pointer's parent in a separate `arrayptr_pts_to`
+   claim, threaded through every loop invariant, because an array pointer
+   there is an index into a value and the value has to be found again. A Palow
+   pointer already *is* an address plus a provenance tag, so the claim is `emp`
+   and the offsets the old model reads off an `arrayptr` are arithmetic on the
+   address. Both models now read from one source: the four places where they
+   genuinely differ are behind names -- `off`, `span`, `claim`, `found` -- that
+   each `_include_pulse` block defines for itself.
+
+   `dpe` needed the same treatment one level up. Its ghost state records the
+   *contents* of the UDS and CDI buffers, which the old model reads off the
+   array object with `array_value_of`. A Palow array pointer has no value to
+   read, so the value is a binder in the contract and the parameter is
+   `_plain`: ownership spelled by hand is exactly the escape hatch for a
+   contract that needs to name the sequence. Everything else in `dpe` --
+   `uds_pred`, `cdi_pred`, the `context_full_data` tags -- is a one-line
+   translation, because `array_pts_to` over the byte representation *is* what
+   the old model's `full_array_spec` was standing in for.
+
+   `antiquot` turned out not to be model-specific after all. Only one of its
+   assertions named a model -- `|->`, which is a typeclass the old model has
+   on `ref` and Palow does not have on `ptr`, since every C type publishes its
+   own points-to. Spelling that one line twice took the test from four
+   `admit()`s and a dropped contract to one.
+
+   As of this milestone: **987 specifications, 941 of them with real bodies,
+   26 admitted, 12 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
