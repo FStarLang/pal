@@ -75,12 +75,32 @@ void pass_arrayptr_as_ref(_array int* a)
 // index, and no named arrayptr handle needs to survive the borrow.
 // ---------------------------------------------------------------------------
 
+/*
+ * The two models part company here, and this is the one place in the file
+ * where that shows. In the current model an arrayptr is a value of its own,
+ * linked to its parent array by the `arrayptr_pts_to` resource and pinned to
+ * an offset within it. In Palow a pointer into an array is just an address,
+ * so the link is an equation between addresses and carries no ownership at
+ * all -- and the array's storage view is one `option` cell per element rather
+ * than an `array_spec` with a mask. Neither spelling can be made to stand for
+ * the other, so both are written out.
+ */
+#ifdef PALOW
+_arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
+  _requires(_inline_pulse(array_pts_to
+    (maybe_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr 16) 16 $(a) 1.0R $`v))
+  _ensures(_inline_pulse(
+    array_pts_to
+      (maybe_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr 16) 16 $(a) 1.0R $`v **
+    pure ($(return) == $(a))))
+#else
 _arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
   _requires(_inline_pulse(array_pts_to_uninit $(a) $`v))
   _ensures(_inline_pulse(
     array_pts_to_uninit $(a) $`v **
     arrayptr_pts_to $(return) $(a) **
     pure (offset_of $(return) == offset_of $(a))))
+#endif
 {
     return &a[0];
 }

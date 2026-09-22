@@ -36,6 +36,27 @@ union u2 {
     int y;
 };
 
+/*
+ * The two models say the same thing here in different words. The current one
+ * owns each field through its own reference, so a half-written arm is one
+ * `pts_to` and one `pts_to_uninit` on two references reached from the union.
+ * Palow addresses a field as base+offset, so the same state is the two cells
+ * at those offsets, plus the arm's padding and the bytes of the union that
+ * the arm does not cover (`union_u2_rest_x`). That last conjunct has no
+ * counterpart in the current model, which has nothing to say about the bytes
+ * outside the live member; it is the price of the byte-level view, and the
+ * reason the two spellings cannot be shared.
+ */
+#ifdef PALOW
+int write_subfield(union u2 *u _consumes, int v)
+    _ensures(_inline_pulse(
+        exists* a_val.
+          (int32_t_pts_to ($(u) +! Struct_inner.struct_inner_offsetof_a) 1.0R a_val **
+           int32_t_pts_to_uninit ($(u) +! Struct_inner.struct_inner_offsetof_b) **
+           Struct_inner.struct_inner_padding $(u) 1.0R **
+           Union_u2.union_u2_rest_x $(u) 1.0R)))
+    _ensures(return == v)
+#else
 int write_subfield(union u2 *u _consumes, int v)
     _ensures(_inline_pulse(
         exists* a_val.
@@ -44,6 +65,7 @@ int write_subfield(union u2 *u _consumes, int v)
            Pulse.Lib.Reference.pts_to (Struct_inner.struct_inner__a_1 (Union_u2.union_u2__x $(u))) #1.0R a_val **
            Pulse.Lib.Reference.pts_to_uninit (Struct_inner.struct_inner__b_1 (Union_u2.union_u2__x $(u))))))
     _ensures(return == v)
+#endif
 {
     _ghost_stmt($activate(union u2::x) $(u));
     _ghost_stmt($unfold-uninit(struct inner) $&(u->x));

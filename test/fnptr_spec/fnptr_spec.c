@@ -66,7 +66,7 @@ int32_t call_dep(struct dep *d)
    contributes more than one leaf. */
 _ghost_arg(int32_t v)
 _requires(*a > 0 && *a < 100)
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(v)))
+_preserves(_inline_pulse(FnptrSpecRefs.plain_pts_to $(q) $(v)))
 int32_t impl_mixed(struct dep *d, int32_t *a, _plain int32_t *q)
 {
   return *a;
@@ -88,7 +88,7 @@ static const struct ops_mixed o_m = {.m = impl_mixed};
    nothing to reintroduce: `o_m.m` is definitionally `of_fn_div .. impl_mixed`,
    so `of_fn_div_valid` supplies the `is_valid` from `emp`. */
 _requires(*a > 0 && *a < 100)
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
+_preserves(_inline_pulse(FnptrSpecRefs.plain_pts_to $(q) 0l))
 int32_t call_mixed(struct dep *d, int32_t *a, _plain int32_t *q)
 {
   _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);

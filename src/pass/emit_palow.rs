@@ -7135,6 +7135,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     init: true,
                     array: Some((format!("{}sz", esize), false)),
                     global: true,
+                    union_arm: None,
                     holds_fn: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 }
@@ -7160,6 +7161,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     init: true,
                     array: None,
                     global: true,
+                    union_arm: None,
                     holds_fn: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 }
@@ -7910,6 +7912,11 @@ struct Slot {
     /// function, so the ownership arrives in the contract and must not be
     /// allocated on entry or released on exit.
     global: bool,
+    /// Set when the slot is a union arm made live by `$activate`: the union's
+    /// Palow name and the arm's. Filling the arm's last field completes a
+    /// value of the arm's type, and it is the union that holds it, so the
+    /// gather has to be followed by the arm's `unfocus`.
+    union_arm: Option<(String, String)>,
     /// The C functions whose addresses were last stored in this slot, keyed
     /// by the path within it: the empty string for the slot itself, `op` for
     /// the field of that name, `inner.op` for a field of a field. A code
@@ -8201,6 +8208,13 @@ struct Body<'a> {
     /// handed to a callee is converted to the view the callee asks for and
     /// back again, and the way back cannot be emitted until the call has been.
     pending_close: Vec<String>,
+    /// Array elements opened by `$unfold-uninit` and not yet closed, as the
+    /// element's address and the steps that put it back. An element whose
+    /// fields are written one statement at a time cannot be closed between
+    /// them -- there is no value to put back until the last field is written
+    /// -- so the open has to outlive the statement that made it. The author
+    /// says where it ends, with the matching `$fold`.
+    open_elems: Vec<(String, Vec<String>)>,
     /// Parameters whose `_own` is currently unfolded. Deep ownership is held
     /// folded, because that is the form a contract states and a call passes;
     /// a statement that reaches through a pointer field scatters it, uses the
@@ -8305,6 +8319,91 @@ impl<'a> Body<'a> {
             .map_err(|_| "the type of a subexpression could not be inferred".to_string())
     }
 
+    /// Make a union arm the live one, leaving its storage uninitialised.
+    ///
+    /// C says the member you last wrote is the one you may read, and the
+    /// emitter usually sees that write. It cannot when the write fills the
+    /// arm a *sub-field* at a time: there is no point at which the arm is a
+    /// value, so there is no store to see. `$activate` is the author saying
+    /// so, and Palow spells it `switch`: the union's value is given up and
+    /// the arm's storage handed back, to be filled field by field from here.
+    fn activate_arm(&mut self, ty: &Type, arm: &Ident, obj: &Expr) -> Result<(), String> {
+        let TypeT::TypeRef(TypeRefKind::Union(uname)) = &peel(self.tds, ty).val else {
+            return Err("`$activate` of something that is not a union".to_string());
+        };
+        let un = format!("union_{}", uname.val);
+        let Some(ui) = self.tds.unions.get(&*uname.val.to_string()) else {
+            return Err(format!(
+                "`$activate` of union {}, which has no Palow type",
+                uname.val
+            ));
+        };
+        let Some(m) = ui.members.iter().find(|m| m.name == *arm.val.to_string()) else {
+            return Err(format!(
+                "`$activate` of `{}`, which is not a member",
+                arm.val
+            ));
+        };
+        // `$activate` names the union through a pointer to it, so the
+        // address is the pointer's value.
+        let a = self.inline(obj)?;
+        // Storage that has never held a value switches from the storage view
+        // rather than from a value, exactly as a whole-member write does.
+        let from_uninit = self
+            .slots
+            .iter()
+            .rposition(|s| s.addr == a && !s.init)
+            .is_some()
+            || self
+                .blocks
+                .iter()
+                .any(|b| b.tmp == a && b.checked && !b.freed && !b.init);
+        self.lines.push(format!(
+            "{}_switch{}_{} {};",
+            un,
+            if from_uninit { "_uninit" } else { "" },
+            arm.val,
+            a
+        ));
+        self.active.insert(a.clone(), arm.val.to_string());
+        let (Some(pn), Some(fty)) = (palow_name(self.tds, &m.ty), fstar_type(self.tds, &m.ty))
+        else {
+            return Err(format!(
+                "`$activate` of member `{}`, which has no Palow type",
+                arm.val
+            ));
+        };
+        // The arm's storage is now what is held at that address, and it is
+        // uninitialised. Anything already recorded there described the union
+        // and no longer does.
+        self.slots.retain(|s| s.addr != a);
+        self.slots.push(Slot {
+            name: format!("*{}.{}", a, arm.val),
+            addr: a,
+            palow_ty: pn,
+            fstar_ty: fty,
+            init: false,
+            array: None,
+            // The union's own storage is released by whoever owns it; this
+            // slot only records what is in it.
+            global: true,
+            union_arm: Some((un, arm.val.to_string())),
+            holds_fn: BTreeMap::new(),
+            scattered: BTreeSet::new(),
+        });
+        Ok(())
+    }
+
+    /// Close whichever array element a `$fold` ends the bracket of. The most
+    /// recent open is the one it closes: the brackets nest.
+    fn close_open_elem(&mut self, _code: &InlinePulseCode) {
+        let Some((at, close)) = self.open_elems.pop() else {
+            return;
+        };
+        self.lines.extend(close);
+        self.slots.retain(|s| s.addr != at);
+    }
+
     /// Record that a pointed-to struct is storage this body owns whose
     /// contents are not yet valid.
     ///
@@ -8325,7 +8424,61 @@ impl<'a> Body<'a> {
         if !storable_struct(self.tds, pt) {
             return;
         }
-        let Ok(addr) = self.inline(e) else { return };
+        // Naming the address must cost nothing: this is bookkeeping, not an
+        // access. An address that takes steps to reach -- an array element,
+        // say -- is one the access through it will reach for itself, so the
+        // steps are rolled back and the note is dropped.
+        // `$unfold-uninit($(p))` where `p` names an array element. The
+        // element has to be focused out of the array to be addressed at all,
+        // and -- unlike every other access -- that focus has to outlive the
+        // statement, because the fields are written one statement at a time
+        // and there is no value to put back until the last of them. So the
+        // open is emitted here and the close is owed to the matching `$fold`.
+        let deref = ExprT::Deref(Rc::new(e.clone())).with_loc(e.loc.clone()) as Rc<Expr>;
+        if let Some(pl) = self.unalias(&deref)
+            && let ExprT::Index(base, idx) = &strip_vattr(&pl).val
+            && self.is_array_place(base)
+        {
+            let (base, idx) = (base.clone(), idx.clone());
+            let mark = self.lines.len();
+            let Ok(f) = self.focus_elem(&base, Some(&idx)) else {
+                self.lines.truncate(mark);
+                return;
+            };
+            if self.slots.iter().any(|s| s.addr == f.at) {
+                self.lines.truncate(mark);
+                return;
+            }
+            self.lines.extend(f.open_write.iter().cloned());
+            self.open_elems.push((f.at.clone(), f.close_write.clone()));
+            self.slots.push(Slot {
+                name: format!("*{}", f.at),
+                addr: f.at,
+                palow_ty: pn,
+                fstar_ty: fty,
+                init: false,
+                array: None,
+                global: true,
+                union_arm: None,
+                holds_fn: BTreeMap::new(),
+                scattered: BTreeSet::new(),
+            });
+            return;
+        }
+        let mark = self.lines.len();
+        let closing = self.pending_close.len();
+        let mut rollback = |me: &mut Self| {
+            me.lines.truncate(mark);
+            me.pending_close.truncate(closing);
+        };
+        let Ok(addr) = self.inline(e) else {
+            rollback(self);
+            return;
+        };
+        if self.lines.len() != mark || self.pending_close.len() != closing {
+            rollback(self);
+            return;
+        }
         if self.slots.iter().any(|s| s.addr == addr) {
             return;
         }
@@ -8337,6 +8490,7 @@ impl<'a> Body<'a> {
             init: false,
             array: None,
             global: true,
+            union_arm: None,
             holds_fn: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
@@ -8716,6 +8870,7 @@ impl<'a> Body<'a> {
             init: true,
             array: None,
             global: false,
+            union_arm: None,
             holds_fn: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
@@ -9236,12 +9391,6 @@ impl<'a> Body<'a> {
         pn: &str,
         writing: bool,
     ) -> Option<Focus> {
-        // A nested field -- `s.inner.f` -- reaches its object through a focus
-        // that is already open, so there is no slot at that address and this
-        // is not the case being handled.
-        if !ff.close_read.is_empty() || !ff.close_write.is_empty() {
-            return None;
-        }
         let sname = ff.sn.strip_prefix("struct_")?;
         let si = self.tds.structs.get(sname)?;
         // The scatter and gather operations only exist when the struct got an
@@ -9281,8 +9430,10 @@ impl<'a> Body<'a> {
                 at: ff.at.clone(),
                 open_read: Vec::new(),
                 open_write: Vec::new(),
-                close_read: Vec::new(),
-                close_write: Vec::new(),
+                // Whatever had to be opened to reach the storage is still
+                // open: scattering happens *inside* that, not instead of it.
+                close_read: ff.close_read.clone(),
+                close_write: ff.close_write.clone(),
             });
         }
         if self.scattered_set(target).is_empty() {
@@ -9293,12 +9444,23 @@ impl<'a> Body<'a> {
         let mut close_write = Vec::new();
         if names.iter().all(|n| self.scattered_set(target).contains(n)) {
             close_write.push(format!("{}_gather {};", ff.sn, ff.a));
+            // An arm that is complete is a value of the arm's type, and what
+            // holds it is the union: putting it back is what turns the last
+            // field write into a whole-member write after the fact.
+            if let Scattering::Slot(i) = target
+                && let Some((un, arm)) = self.slots[i].union_arm.clone()
+            {
+                close_write.push(format!("{}_unfocus_{} {};", un, arm, ff.a));
+            }
             self.scattered_set_mut(target).clear();
             match target {
                 Scattering::Slot(i) => self.slots[i].init = true,
                 Scattering::Block(i) => self.blocks[i].init = true,
             }
         }
+        // Whatever had to be opened to reach the storage is still open:
+        // scattering happens *inside* that, not instead of it.
+        close_write.extend(ff.close_write.iter().cloned());
         Some(Focus {
             bits: None,
             write_fn: format!("{}_write_uninit", pn),
@@ -9382,6 +9544,23 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(base) {
             return self.base_addr(&p, writing);
         }
+        // A struct-typed union arm that has been activated is storage at the
+        // union's own address: every arm starts there, and activation gave up
+        // the union's value in exchange for the arm's uninitialised storage.
+        // A field of it is therefore reached by address, with nothing open
+        // around it -- which is what lets the fields be filled one at a time.
+        if let ExprT::Member(b2, f2) = &strip_vattr(base).val
+            && let Ok(bty) = self.ty_of(b2)
+            && matches!(
+                &peel(self.tds, &bty).val,
+                TypeT::TypeRef(TypeRefKind::Union(_))
+            )
+            && let Ok(a) = self.addr(b2)
+            && self.active.get(&a).map(String::as_str) == Some(&*f2.val.to_string())
+            && self.slots.iter().any(|s| s.addr == a && !s.init)
+        {
+            return Ok((a, Vec::new(), Vec::new()));
+        }
         if let ExprT::Member(b2, f2) = &strip_vattr(base).val {
             let fty = self.field_ty(b2, f2)?;
             // A union-typed field is reached the same way: the aggregate
@@ -9429,7 +9608,16 @@ impl<'a> Body<'a> {
         if let ExprT::Index(arr, idx) = &strip_vattr(base).val
             && self.is_array_place(arr)
         {
+            let mark = self.lines.len();
             let f = self.focus_elem(arr, Some(idx))?;
+            // An element `$unfold-uninit` already opened stays open: the
+            // focus is standing, so taking it again would be taking the
+            // ownership twice. There is no way to ask for the address without
+            // computing it, so the focus is emitted and then withdrawn.
+            if self.open_elems.iter().any(|(a, _)| *a == f.at) {
+                self.lines.truncate(mark);
+                return Ok((f.at, Vec::new(), Vec::new()));
+            }
             self.lines.extend(if writing {
                 f.open_write.clone()
             } else {
@@ -10309,8 +10497,18 @@ impl<'a> Body<'a> {
     /// anything: C measures a pointer offset in elements, and the model in
     /// bytes.
     fn elem_size(&self, ty: &Type) -> Option<u64> {
-        let pt = pointee(self.tds, ty)?;
-        palow_sizeof(self.tds, pt).filter(|n| *n > 0)
+        // `pointee` stops at `_plain`, because that annotation says the
+        // translation grants no ownership through the pointer. Arithmetic on
+        // it is still arithmetic on a C pointer, and how far one step moves is
+        // a question about the type and not about who owns what.
+        let pt = match pointee(self.tds, ty) {
+            Some(pt) => pt.clone(),
+            None => match &peel(self.tds, ty).val {
+                TypeT::Pointer(pt, _) => pt.clone(),
+                _ => return None,
+            },
+        };
+        palow_sizeof(self.tds, &pt).filter(|n| *n > 0)
     }
 
     /// An offset in bytes, as a `size_t`, for a subscript-like operand.
@@ -10335,6 +10533,28 @@ impl<'a> Body<'a> {
     ///
     /// Returns `None` when neither operand is a pointer, which leaves the
     /// ordinary integer path alone.
+    /// A pointer read purely for its address: compared, subtracted or
+    /// offset from. An alias naming an array element normally hands out the
+    /// focus that reaches the element, but arithmetic on the address needs no
+    /// ownership at all, so the focus is computed for its spelling and then
+    /// withdrawn again.
+    fn ptr_val(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(v) = lvalue_name(e)
+            && self.alias_addr(&v).is_none()
+            && let Some(place) = self.aliases.get(&v).cloned()
+            && let ExprT::Index(arr, idx) = &strip_vattr(&place).val
+            && self.is_array_place(arr)
+        {
+            let (arr, idx) = (arr.clone(), idx.clone());
+            self.uses.insert(v);
+            let mark = self.lines.len();
+            let f = self.focus_elem(&arr, Some(&idx));
+            self.lines.truncate(mark);
+            return f.map(|f| f.at);
+        }
+        self.rvalue(e)
+    }
+
     fn ptr_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) -> Result<Option<String>, String> {
         let (lt, rt) = (self.ty_of(l)?, self.ty_of(r)?);
         let lp = self.elem_size(&lt);
@@ -10344,19 +10564,19 @@ impl<'a> Body<'a> {
         }
         match (op, lp, rp) {
             (BinOp::Add, Some(n), None) => {
-                let a = self.rvalue(l)?;
+                let a = self.ptr_val(l)?;
                 let off = self.byte_offset(n, r)?;
                 Ok(Some(format!("({} +! {})", a, off)))
             }
             // `n + p` is `p + n`; C says so, and neither side has an effect
             // the other can observe.
             (BinOp::Add, None, Some(n)) => {
-                let b = self.rvalue(r)?;
+                let b = self.ptr_val(r)?;
                 let off = self.byte_offset(n, l)?;
                 Ok(Some(format!("({} +! {})", b, off)))
             }
             (BinOp::Sub, Some(n), None) => {
-                let a = self.rvalue(l)?;
+                let a = self.ptr_val(l)?;
                 let off = self.byte_offset(n, r)?;
                 Ok(Some(format!("({} -! {})", a, off)))
             }
@@ -10364,21 +10584,21 @@ impl<'a> Body<'a> {
             // works in bytes, so it is a byte difference divided by the
             // element size -- exactly the identity C states.
             (BinOp::Sub, Some(n), Some(_)) => {
-                let a = self.rvalue(l)?;
-                let b = self.rvalue(r)?;
+                let a = self.ptr_val(l)?;
+                let b = self.ptr_val(r)?;
                 Ok(Some(format!(
                     "(FStar.Int64.div (ptr_diff {} {}) {}L)",
                     a, b, n
                 )))
             }
             (BinOp::Lt, Some(_), Some(_)) => {
-                let a = self.rvalue(l)?;
-                let b = self.rvalue(r)?;
+                let a = self.ptr_val(l)?;
+                let b = self.ptr_val(r)?;
                 Ok(Some(format!("({} `ptr_lt` {})", a, b)))
             }
             (BinOp::LEq, Some(_), Some(_)) => {
-                let a = self.rvalue(l)?;
-                let b = self.rvalue(r)?;
+                let a = self.ptr_val(l)?;
+                let b = self.ptr_val(r)?;
                 Ok(Some(format!("({} `ptr_le` {})", a, b)))
             }
             // `==` is the model's own decidable equality, which is
@@ -11434,6 +11654,7 @@ impl<'a> Body<'a> {
                 init: true,
                 array: Some((format!("{}sz", esize), true)),
                 global: false,
+                union_arm: None,
                 holds_fn: BTreeMap::new(),
                 scattered: BTreeSet::new(),
             });
@@ -11462,6 +11683,7 @@ impl<'a> Body<'a> {
             init: false,
             array: None,
             global: false,
+            union_arm: None,
             holds_fn: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
@@ -12403,6 +12625,7 @@ impl<'a> Body<'a> {
                     init: true,
                     array: Some((format!("{}sz", esize), true)),
                     global: false,
+                    union_arm: None,
                     holds_fn: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 });
@@ -12645,6 +12868,17 @@ impl<'a> Body<'a> {
             }
             StmtT::Continue => {
                 self.lines.push("continue;".to_string());
+                Ok(())
+            }
+            StmtT::GhostStmt(code) if aux_activate(code).is_some() => {
+                let (ty, arm, obj) = aux_activate(code).unwrap();
+                self.activate_arm(ty, arm, obj)
+            }
+            StmtT::GhostStmt(code) if matches!(aux_fn_kind(code), Some(AuxFnKind::Fold)) => {
+                // The end of the bracket `$unfold-uninit` opened: the fields
+                // have all been written and gathered, so the element is a
+                // value again and goes back into the array.
+                self.close_open_elem(code);
                 Ok(())
             }
             StmtT::GhostStmt(code) if ghost_replaced(code) => {
@@ -13149,6 +13383,7 @@ impl<'a> Body<'a> {
         let outer_out = self.out_params.clone();
         let outer_slots = self.slots.clone();
         let outer_seeded = self.seeded.clone();
+        let outer_open = self.open_elems.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
 
         let out = self
@@ -13156,6 +13391,7 @@ impl<'a> Body<'a> {
             .map(|v| (std::mem::take(&mut self.lines), v));
 
         self.in_branch = outer_in_branch;
+        self.open_elems = outer_open;
         self.seeded = outer_seeded;
         self.slots = outer_slots;
         self.out_params = outer_out;
@@ -13184,6 +13420,7 @@ impl<'a> Body<'a> {
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
         let outer_seeded = self.seeded.clone();
+        let outer_open = self.open_elems.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
 
         let result = (|| -> Result<(), String> {
@@ -13223,6 +13460,7 @@ impl<'a> Body<'a> {
             })
         })();
 
+        self.open_elems = outer_open;
         self.slots.truncate(mark);
         for (slot, (init, holds, scattered)) in self.slots.iter_mut().zip(outer_state) {
             slot.init = init;
@@ -14077,19 +14315,35 @@ fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
         if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) || out.contains_key(&q) {
             continue;
         }
+        // `p = a + i` names the element `a[i]`: pointer arithmetic on an array
+        // is the index written another way, and a local that holds the result
+        // stands for that element as long as nothing rebinds what it was
+        // computed from. Spelling it as an index is what lets an access
+        // through `p` go down the same path a direct `a[i]` does, instead of
+        // needing a dereference rule of its own.
+        if let ExprT::BinOp(BinOp::Add, base, idx) = &strip_vattr(rhs).val
+            && lvalue_name(base).is_some()
+            && stable_names(rhs, &out, &locals, &t)
+        {
+            out.insert(
+                q,
+                ExprT::Index(base.clone(), idx.clone()).with_loc(st.loc.clone()) as Rc<Expr>,
+            );
+            continue;
+        }
+        // `q = p` where `p` is itself an alias: a second name for the same
+        // place. Copying the place rather than pointing at `p` is what keeps
+        // the two names interchangeable.
+        if let ExprT::Var(v) = &strip_casts(rhs).val
+            && let Some(place) = out.get(&*v.val.to_string()).cloned()
+        {
+            out.insert(q, place);
+            continue;
+        }
         if !derived_ptr(rhs) {
             continue;
         }
-        let mut used = Touched::default();
-        touch_expr(rhs, &mut used);
-        // A name the expression is built from must denote the same object
-        // for the whole call: a parameter the body never rebinds, or another
-        // alias, which is a name for a place and not an object that can be
-        // written.
-        if !used.vars.iter().all(|v| {
-            out.contains_key(v)
-                || (!locals.contains(v) && t.rebound.get(v).copied().unwrap_or(0) == 0)
-        }) {
+        if !stable_names(rhs, &out, &locals, &t) {
             continue;
         }
         out.insert(
@@ -14098,6 +14352,32 @@ fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
         );
     }
     out
+}
+
+/// An expression with its virtual attributes and conversions removed. A
+/// pointer that changes type -- `_arrayptr int *` to `int *`, or a cast that
+/// only adds `const` -- still names the same place.
+fn strip_casts(e: &Expr) -> &Expr {
+    match &strip_vattr(e).val {
+        ExprT::Cast(inner, _) => strip_casts(inner),
+        _ => strip_vattr(e),
+    }
+}
+
+/// Whether every name an expression is built from denotes the same object for
+/// the whole call: a parameter the body never rebinds, or another alias, which
+/// is a name for a place and not an object that can be written.
+fn stable_names(
+    e: &Expr,
+    out: &HashMap<String, Rc<Expr>>,
+    locals: &HashSet<String>,
+    t: &Touched,
+) -> bool {
+    let mut used = Touched::default();
+    touch_expr(e, &mut used);
+    used.vars.iter().all(|v| {
+        out.contains_key(v) || (!locals.contains(v) && t.rebound.get(v).copied().unwrap_or(0) == 0)
+    })
 }
 
 /// Whether an expression names an address by arithmetic alone -- no load, no
@@ -14273,6 +14553,7 @@ fn emit_body(
         gotos: Vec::new(),
         in_loop: false,
         pending_close: Vec::new(),
+        open_elems: Vec::new(),
         own_open: Vec::new(),
         loop_mark: None,
         divergent_fns,
@@ -14345,6 +14626,7 @@ fn emit_body(
                     array: None,
                     // Not ours to release: the caller allocated it.
                     global: true,
+                    union_arm: None,
                     holds_fn: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 });
@@ -14648,12 +14930,47 @@ fn ghost_head(code: &InlinePulseCode) -> String {
     head
 }
 
+/// The aux-function antiquotation a ghost statement applies, if it is one.
+///
+/// Only a statement that *opens* with the antiquotation counts: one that
+/// merely mentions it somewhere in an argument is saying something else.
+fn aux_fn_kind(code: &InlinePulseCode) -> Option<AuxFnKind> {
+    match code.tokens.first() {
+        Some(InlinePulseToken::AuxFnAntiquot { kind, before, .. }) if before.trim().is_empty() => {
+            Some(*kind)
+        }
+        _ => None,
+    }
+}
+
+/// The union type, arm and object of an `$activate`, if that is what this
+/// statement is.
+fn aux_activate(code: &InlinePulseCode) -> Option<(&Type, &Ident, &Expr)> {
+    let (ty, arm) = match code.tokens.first() {
+        Some(InlinePulseToken::AuxFnAntiquot {
+            kind: AuxFnKind::Activate,
+            before,
+            ty,
+            field_name: Some(arm),
+        }) if before.trim().is_empty() => (ty, arm),
+        _ => return None,
+    };
+    let obj = code.tokens.iter().find_map(|t| match t {
+        InlinePulseToken::RValueAntiquot { expr, .. }
+        | InlinePulseToken::LValueAntiquot { expr, .. } => Some(&**expr),
+        _ => None,
+    })?;
+    Some((ty, arm, obj))
+}
+
 /// The object a `$unfold-uninit` opens, if that is what this statement is.
 ///
 /// The old model's uninitialised-open takes exactly one argument, the object,
 /// and it arrives as the first antiquotation after the head.
 fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
-    if !ghost_head(code).contains("__aux_raw_unfold_uninit") {
+    if !matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
+        && !ghost_head(code).contains("__aux_raw_unfold_uninit")
+    {
         return None;
     }
     code.tokens.iter().find_map(|t| match t {
@@ -14702,9 +15019,15 @@ fn ghost_replaced(code: &InlinePulseCode) -> bool {
     if REPLACED.iter().any(|p| head.starts_with(p)) {
         return true;
     }
-    // `$unfold`/`$fold` and their uninitialised variants, however they were
-    // written: the generated name is the only thing both spellings share.
+    // `$unfold`/`$fold` and their uninitialised variants, whether the source
+    // wrote the antiquotation or the generated name it stands for.
     if head.contains("__aux_raw_unfold") || head.contains("__aux_raw_fold") {
+        return true;
+    }
+    if matches!(
+        aux_fn_kind(code),
+        Some(AuxFnKind::Unfold | AuxFnKind::UnfoldUninit | AuxFnKind::Fold | AuxFnKind::FoldUninit)
+    ) {
         return true;
     }
     if head.starts_with("Global_") && head.contains(".acquire_var_") {

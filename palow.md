@@ -3580,8 +3580,38 @@ new facts about memory.
    own predicate it now names a helper that each `helpers` tree defines for
    itself. Both models verify from one source.
 
-   As of this milestone: **987 specifications, 931 of them with real bodies,
-   36 admitted, 20 external, 1 function skipped**, plus **18 `_pure`
+   Three more of the backlogged tests came off the list together, because
+   they turned out to be three views of one question: what does a *name for a
+   place* mean when the place is bytes?
+
+   `union_test3` writes a union arm field by field, which C says activates the
+   arm. Palow's generated union module already had the step -- `switch_uninit_m`
+   gives up the union's value for the arm's uninitialised storage -- so the
+   translator only had to recognise `$activate` and then notice that an arm
+   lives at the union's own address, which makes it plain storage that the
+   field-scatter machinery can fill. The last field write gathers the arm and
+   `unfocus`es it back into the union.
+
+   `arrayptr_ref` writes two fields of an array element, and there is no point
+   between the two writes at which the element is a value -- so the
+   per-statement focus/unfocus bracket cannot work. The author's
+   `$unfold-uninit` ... `$fold` pair *is* the bracket, and the emitter now
+   keeps the element focus standing across the statements between them.
+
+   `fnptr_spec` needed no translator change at all: its one model-specific
+   line was `Pulse.Lib.Reference.pts_to` on a `_plain` pointer, which each
+   `helpers` tree now defines for itself under one name.
+
+   Pointer arithmetic that names an element -- `int *p = a + 3` -- is now an
+   alias for `a[3]`, which is what lets `*p = 42` stand without the contract
+   having to grant `p` separately. The distinction that took a second attempt
+   to get right is that an alias used *as a pointer value* -- compared,
+   subtracted, offset again -- needs no ownership at all, so the focus that
+   spells its address is computed and then withdrawn again; an alias *passed
+   to a callee* still hands the focus out.
+
+   As of this milestone: **987 specifications, 936 of them with real bodies,
+   31 admitted, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
