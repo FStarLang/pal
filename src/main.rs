@@ -223,7 +223,7 @@ fn main() {
     }
 
     let t = Instant::now();
-    pass::merge::merge(&mut diags, &mut combined_tu);
+    pass::merge::merge(&mut diags, &mut combined_tu, cli.palow);
     if cli.time_passes {
         eprintln!(
             "  merge ({} decls): {:.3}s",

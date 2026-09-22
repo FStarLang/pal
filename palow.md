@@ -515,7 +515,7 @@ are already flattened into `bytes`.
    and then hands out pointers into that range, and it is usable just like
    `malloc` today. The allocator exposes its own `pool_freeable` predicate, so
    passing a `pool_malloc`'d pointer to `free` does not verify.
- - `_core_ref` is deleted, and the recursive-struct tests that motivated it
+ - **Done.** `_core_ref` is deleted, and the recursive-struct tests that motivated it
    still verify.
  - We can write `memcpy` between two objects of different types and relate the
    results at both types, including transporting a stored pointer's provenance
@@ -3640,6 +3640,25 @@ new facts about memory.
    on `ref` and Palow does not have on `ptr`, since every C type publishes its
    own points-to. Spelling that one line twice took the test from four
    `admit()`s and a dropped contract to one.
+
+   And then the floor went too. `core_ref_struct` was the last marked test,
+   kept because it is *about* `_core_ref` -- a mutually recursive pair of
+   structs where the back-pointer has to be marked so that the two F\* modules
+   do not refer to each other. In Palow there is nothing to break: a pointer
+   field's F\* type is `ptr` whatever it points at, so the two type
+   declarations are already acyclic. What survives is the *ownership* cycle,
+   parent owning child owning parent, and that is a fact about the C rather
+   than about the model -- the back-pointer is non-owning, which is what
+   `_plain` says and what `_core_ref` was standing in for. The one translator
+   change is that a `_plain` pointer field no longer forces the struct it
+   points at to be emitted first, because in Palow the only reason for that
+   order is the ownership predicate, and a `_plain` pointer has none. Without
+   it the emitter broke the cycle by dropping one side's ownership *silently*,
+   which is the one thing this development is not allowed to do.
+
+   So **no test carries a marker any more**: every one of the 60 tests is
+   translated in both memory models from a single C source, and every
+   remaining weakness is a counted `admit()` or a counted dropped contract.
 
    As of this milestone: **987 specifications, 941 of them with real bodies,
    26 admitted, 12 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
