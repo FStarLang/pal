@@ -119,18 +119,21 @@ fn fold_item (item: item_ref) (#v: I.struct_item)
 }
 
 ghost
+(* The caller still owns the item whole -- it was handed one, and has not
+   given any of it away -- so what has to be split off here is the link. *)
 fn prepare_item (item: item_ref) (node: X.lref)
                 (#value: Int32.t) (#link: N.struct_list_node)
-  requires IR.item_unfolded item 1.0R **
-    IR.item_value (item) value ** R.pts_to node link **
+  requires IR.item_pts_to item (item_record value link) **
     pure (node == IR.item_link_1 item)
   ensures item_ipl node value ** R.pts_to_uninit node
 {
+  IR.item_unfold item (item_record value link);
   rewrite (IR.item_unfolded item 1.0R)
     as (IR.item_unfolded (owner node) 1.0R);
   rewrite (IR.item_value (item) value)
     as (IR.item_value ((owner node)) value);
   fold (item_ipl node value);
+  rewrite (IR.item_link (item) link) as (R.pts_to node link);
   R.forget node;
 }
 

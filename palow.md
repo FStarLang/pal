@@ -3861,6 +3861,40 @@ new facts about memory.
    would have taken. Two spellings of one place, and only one of them says
    what is owned.
 
+   The two intrusive-list `find`s took three more corrections, and each was a
+   place where the generated code had been right about Palow and wrong about
+   the shim. `mid_repack` exists because the current model's `$unfold`/`$fold`
+   hands a node back rebuilt field by field rather than as the value that went
+   in, so the cursor has to be moved to the rebuilt spelling; Palow's focus
+   and unfocus give back what they took, so in the Palow shim it is the
+   identity. A loop invariant that mentions a local which is a *name* for a
+   place -- `struct list_node *entry = &item->link;` -- was printing
+   `var_entry`, a name nothing declares, because the invariant is rendered by
+   the specification machinery and only the body knew the alias; it is the
+   address of the place in both, and now says so. And `assert (pure p)` was
+   emitted without parentheses around `p`, which is fine until `p` is a
+   disjunction.
+
+   Two of the C sources moved a read. Reading `node->next` after the payload
+   has been opened is reading a field of an object that no longer exists
+   separately -- the link is *inside* the item now -- so the successor is read
+   first, while the node is still a node. Reading the new item's own value
+   inside the insertion loop has the same shape one step further on: from
+   `prepare_item` onwards the item's link belongs to the list, so the value is
+   read before that, once, which is where a loop-invariant read belongs
+   anyway. Both are reorderings the current model accepts unchanged.
+
+   `break` past a local allocated in the loop stays admitted, and the reason
+   is worth recording because it is not the one the message gives. Releasing
+   the locals on the way out is easy -- it is what falling off the end does.
+   What a `break` costs is Pulse's promise that the loop condition is false on
+   the way out, which has to be given up for the whole loop, and the invariant
+   that is left binds every local existentially. So a loop that breaks and
+   then claims something about a local at its exit is claiming something that
+   rests on nothing, and no test on the shape of the claim separates the ones
+   that survive on the invariant alone -- `break_continue/count_to_limit`
+   does -- from the ones that do not.
+
    As of this milestone: **987 specifications, 952 of them with real bodies,
    15 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is

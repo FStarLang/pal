@@ -45,19 +45,21 @@ _plain struct item *items_find(_plain struct list_node *head, int value)
             (IntrusiveListExample.matches_value $(value)) $(head) $(node) (reveal $(entries)));
         _ghost_stmt(with description. assert IntrusiveListExample.item_ipl $(node) description);
         _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
+        /* The successor is read while the node is still a node: opening the
+           payload joins the link back into the item it belongs to, and there
+           is no reading `node->next` once it is a field of that. */
+        _plain struct list_node *next = node->next;
+        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
         _plain struct item *item = containing_record(node, struct item, link);
         _ghost_stmt(IntrusiveListExample.value_open $(node) $(item));
         int current_value = item->value;
         if (current_value == value) {
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
             _ghost_stmt(IntrusiveListExample.value_close $(node) $(item));
             _ghost_stmt(IntrusiveListItems.find_found IntrusiveListExample.item_ipl
                 (IntrusiveListExample.matches_value $(value))
                 $(head) $(node) (reveal $(entries)) description);
             return item;
         }
-        _plain struct list_node *next = node->next;
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
         _ghost_stmt(IntrusiveListExample.value_close $(node) $(item));
         _ghost_stmt(IntrusiveListItems.find_step IntrusiveListExample.item_ipl
             (IntrusiveListExample.matches_value $(value))
@@ -122,6 +124,10 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
 {
     _ghost_stmt(IntrusiveListExample.value_order ());
     _ghost_stmt(Struct_item.struct_item__aux_raw_unfold $(item));
+    /* The item's own value does not change, so it is read once, while the
+       item is still whole: from `prepare_item` on, its link belongs to the
+       list machinery and the item is no longer an object one can read. */
+    int new_value = item->value;
     _plain struct list_node *entry = &item->link;
     _ghost_stmt(IntrusiveListExample.prepare_item $(item) $(entry));
     _ghost_stmt(IntrusiveListIndexed.head_open IntrusiveListExample.item_ipl
@@ -136,6 +142,8 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
     _ghost_stmt(let stopped = Pulse.Lib.GhostReference.alloc (0 = 1));
     while (node != head)
         _invariant(_live(node))
+        /* Read before the loop, so the loop has to be told it still holds. */
+        _invariant(new_value == description)
         _invariant(_inline_pulse(live stopped))
         _invariant(_inline_pulse(
             IntrusiveListInsert.inv IntrusiveListExample.item_ipl
@@ -152,11 +160,8 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
             (reveal $(description)) (reveal $(entries)));
         _plain struct item *current = containing_record(node, struct item, link);
         _ghost_stmt(IntrusiveListExample.value_open $(node) $(current));
-        _ghost_stmt(IntrusiveListExample.value_open $(entry) $(item));
         int current_value = current->value;
-        int new_value = item->value;
         _ghost_stmt(IntrusiveListExample.value_close $(node) $(current));
-        _ghost_stmt(IntrusiveListExample.value_close $(entry) $(item));
         if (current_value > new_value) {
             _ghost_stmt(IntrusiveListInsert.unexpose IntrusiveListExample.item_ipl
                 IntrusiveListExample.value_le $(head) $(node) $(entry)

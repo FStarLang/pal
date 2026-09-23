@@ -234,38 +234,35 @@ fn close_detached (item: item_ref) (d: description) (#link: N.struct_list_node)
 }
 
 ghost
+(* The item stays whole: Palow reads `item->priority` from the object, and
+   the only thing the insertion needs apart is the link, which `prepare_item`
+   takes. *)
 fn open_for_insert (item: item_ref) (d: description)
   requires detached item d
   ensures exists* (link: N.struct_list_node).
-    IR.item2_unfolded item 1.0R **
-    IR.item2_priority (item) d.priority **
-    IR.item2_used (item) d.used **
-    IR.item2_samples item d.samples **
-    IR.item2_processed (item) d.counter **
-    IR.item2_link (item) link **
+    IR.item2_pts_to item (item_record d link) **
     IR.u32_pts_to d.counter d.count ** pure (UInt32.v d.used <= 4)
 {
   unfold (detached item d);
   with link. assert (owned item d link);
   unfold (owned item d link);
-  IR.item2_unfold item (item_record d link);
 }
 
 ghost
+(* The caller still owns the item whole, so what has to be split off here is
+   the link. *)
 fn prepare_item (item: item_ref) (entry: X.lref) (d: description)
                 (#link: N.struct_list_node)
-  requires IR.item2_unfolded item 1.0R **
-    IR.item2_priority (item) d.priority **
-    IR.item2_used (item) d.used **
-    IR.item2_samples item d.samples **
-    IR.item2_processed (item) d.counter **
-    R.pts_to entry link ** IR.u32_pts_to d.counter d.count **
+  requires IR.item2_pts_to item (item_record d link) **
+    IR.u32_pts_to d.counter d.count **
     pure (UInt32.v d.used <= 4 /\ entry == node item)
   ensures item_ipl entry d ** R.pts_to_uninit entry
 {
+  IR.item2_unfold item (item_record d link);
   fold (fields item d);
   rewrite (fields item d) as (fields (owner entry) d);
   fold (item_ipl entry d);
+  rewrite (IR.item2_link (item) link) as (R.pts_to entry link);
   R.forget entry;
 }
 

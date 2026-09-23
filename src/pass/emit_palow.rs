@@ -8493,11 +8493,6 @@ struct Body<'a> {
     /// Local pointers loaded once out of memory, with what they were loaded
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
-    /// Pointer variables the body has recovered an enclosing object from --
-    /// `struct item *item = _container_of(node, struct item, link);` records
-    /// `node`. From there on `node` is not an object of its own but a member
-    /// of that one, so an access through it has to open the container first.
-    containers: HashMap<String, (String, String)>,
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
@@ -9938,25 +9933,6 @@ impl<'a> Body<'a> {
                 f.open_read.clone()
             });
             return Ok((f.at, f.close_read, f.close_write));
-        }
-        // `node->next` where the body has recovered `item` from `node` is
-        // `item->link.next`: the list node is a member of the item, so what is
-        // owned is the item, and the member has to be focused out of it. The
-        // C says the same thing twice -- once as a pointer to the member, once
-        // as the recovery -- and only the second spelling says where the
-        // ownership is.
-        if let ExprT::Deref(inner) = &strip_vattr(base).val
-            && let Some(q) = lvalue_name(inner)
-            && let Some((sn, f)) = self.containers.get(&q).cloned()
-        {
-            let v = self.addr(base)?;
-            let a = sub_offset(v, &format!("struct_{}_offsetof_{}", sn, f));
-            self.lines.push(format!("struct_{}_focus_{} {};", sn, f, a));
-            return Ok((
-                format!("({} +! struct_{}_offsetof_{})", a, sn, f),
-                vec![format!("struct_{}_unfocus_read_{} {};", sn, f, a)],
-                vec![format!("struct_{}_unfocus_{} {};", sn, f, a)],
-            ));
         }
         Ok((self.addr(base)?, Vec::new(), Vec::new()))
     }
@@ -12836,6 +12812,24 @@ impl<'a> Body<'a> {
             owns.push(s.pts_to(&b));
             locals.insert(s.name.clone(), b);
         }
+        // A local that is a name for a place rather than storage of its own
+        // has no binder to stand for it, and needs none: its value is the
+        // address of the place, which an invariant can spell exactly as the
+        // body does. Without this `struct list_node *entry = &item->link;`
+        // would come out as `var_entry` in the invariant -- a name nothing
+        // declares -- while the body says `var_item +! ...`.
+        for (q, place) in self.aliases.clone() {
+            if locals.contains_key(&q) {
+                continue;
+            }
+            let before = self.lines.len();
+            let a = self.addr(&place);
+            let quiet = self.lines.len() == before;
+            self.lines.truncate(before);
+            if let (Ok(a), true) = (a, quiet) {
+                locals.insert(q, a);
+            }
+        }
         let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
         // A global array is named in an invariant the way it is named in a
         // contract -- `g[i]`, not `g` -- so the binder standing for its
@@ -13050,7 +13044,7 @@ impl<'a> Body<'a> {
         for e in ensures.iter() {
             let p = self.prop(e)?;
             if p != "True" {
-                self.lines.push(format!("assert (pure {});", p));
+                self.lines.push(format!("assert (pure ({}));", p));
             }
         }
         Ok(())
@@ -13161,16 +13155,6 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
-                // Recovering the enclosing object from a member pointer says
-                // what that pointer is: not an object of its own, but a place
-                // inside the one just named. See `containers`.
-                if let ExprT::ContainerOf(inner, ty, field) = &strip_casts(rhs).val
-                    && let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(ty).val
-                    && let Some(q) = lvalue_name(inner)
-                {
-                    self.containers
-                        .insert(q, (sname.val.to_string(), field.val.to_string()));
-                }
                 // The alias itself: nothing is stored, because the pointer is
                 // a name and not an object.
                 if let Some(v) = lvalue_name(lhs) {
@@ -13367,7 +13351,7 @@ impl<'a> Body<'a> {
             }
             StmtT::Assert(e) => {
                 let p = self.prop(e)?;
-                self.lines.push(format!("assert (pure {});", p));
+                self.lines.push(format!("assert (pure ({}));", p));
                 Ok(())
             }
             // See `ghost_replaced`.
@@ -13375,7 +13359,13 @@ impl<'a> Body<'a> {
             // What they do not have is a way to leave a *slot* behind: a local
             // allocated inside the loop body would have to be released on the
             // way out, and neither statement runs the releases between it and
-            // the end of the body.
+            // the end of the body. Releasing them here is easy enough; what is
+            // not is what a `break` does to the *exit condition*. Pulse's
+            // `while` promises the condition is false on the way out, a loop
+            // with a `break` has to give that promise up, and the invariant --
+            // which is all that is left -- binds every local existentially. So
+            // a loop that breaks past a local is one whose `_ensures` about
+            // that local would rest on nothing.
             StmtT::Break | StmtT::Continue if self.loop_mark != Some(self.slots.len()) => Err(
                 format!("{} past a local allocated in the loop", stmt_kind(s)),
             ),
@@ -13874,7 +13864,7 @@ impl<'a> Body<'a> {
                             continue;
                         }
                         let p = self.prop(e)?;
-                        self.lines.push(format!("assert (pure {});", p));
+                        self.lines.push(format!("assert (pure ({}));", p));
                     }
                     // Labels inside the one being jumped to are out of scope
                     // at its continuation, and so is the label itself: a
@@ -15171,7 +15161,6 @@ fn emit_body(
         aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
         array_aliases: array_alias_map(&defn.body),
-        containers: HashMap::new(),
         active: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
