@@ -7469,26 +7469,6 @@ pub fn emit_palow(
     let mut chunks: Vec<Chunk> = structs;
     chunks.extend(emit_globals(&tds, tu));
 
-    // Hand-written Pulse comes first of all: an include block is a module of
-    // the author's own definitions, and everything below may name them.
-    for decl in &tu.decls {
-        let DeclT::IncludeDecl(id) = &decl.val else {
-            continue;
-        };
-        if !splice_inline {
-            continue;
-        }
-        let text = match include_pulse(&tds, &id.code) {
-            Ok(t) => format!("{}\n\n", t.trim_end()),
-            Err(why) => format!("(* `{}` is not translated: {} *)\n\n", id.module_name, why),
-        };
-        chunks.push(Chunk {
-            module: id.module_name.to_string(),
-            code: text,
-            origin: origin_of(decl),
-        });
-    }
-
     // A `_type` is a hand-written F* type expression with a C name attached.
     // Nothing about it is the memory model's business -- it never describes
     // storage, only a value a specification talks about -- so it is passed
@@ -7559,6 +7539,30 @@ pub fn emit_palow(
         };
         chunks.push(Chunk {
             module: format!("Let_{}", ld.name.val),
+            code: text,
+            origin: origin_of(decl),
+        });
+    }
+
+    // Hand-written Pulse comes after the `_let`s rather than before them. An
+    // include block is a module of the author's own definitions, and a ghost
+    // helper written there is usually stated in terms of the same `_let` the
+    // contracts use -- which means it has to be able to name it. Nothing in a
+    // `_let` can name an include block's *definitions* except textually, so
+    // putting the includes second costs nothing.
+    for decl in &tu.decls {
+        let DeclT::IncludeDecl(id) = &decl.val else {
+            continue;
+        };
+        if !splice_inline {
+            continue;
+        }
+        let text = match include_pulse(&tds, &id.code) {
+            Ok(t) => format!("{}\n\n", t.trim_end()),
+            Err(why) => format!("(* `{}` is not translated: {} *)\n\n", id.module_name, why),
+        };
+        chunks.push(Chunk {
+            module: id.module_name.to_string(),
             code: text,
             origin: origin_of(decl),
         });
@@ -10253,7 +10257,21 @@ impl<'a> Body<'a> {
             }
         }
         let before = self.lines.len();
-        let mut v = self.rvalue(e)?;
+        let mut v = match self.rvalue(e) {
+            Ok(v) => v,
+            // A ghost fragment wants the *value* of an object, and a load is
+            // only one way to get one -- the expensive way, which needs the
+            // object to have a whole-value read at all. The ownership in hand
+            // already determines the value, so where a load is impossible the
+            // witness of the points-to is named instead. That is what makes a
+            // struct with a union member mentionable in a ghost statement:
+            // there is no reading such an object, but there is a value, and
+            // the proof is about the value.
+            Err(why) => {
+                self.lines.truncate(before);
+                return self.ghost_value(e).ok_or(why);
+            }
+        };
         let added: Vec<String> = self.lines[before..].to_vec();
         let mut bound = Vec::new();
         for l in &added {
@@ -10293,6 +10311,33 @@ impl<'a> Body<'a> {
             ));
         }
         Ok(v)
+    }
+
+    /// The ghost value of an object, named rather than read.
+    ///
+    /// `with x. assert (S_pts_to a p x)` binds the witness the ownership
+    /// already has. It costs nothing -- no permission beyond what is held, no
+    /// load -- and unlike a read it works for an object whose type has no
+    /// whole-value read, which is exactly the case a ghost statement about a
+    /// tagged union runs into.
+    fn ghost_value(&mut self, e: &Expr) -> Option<String> {
+        let ty = self.ty_of(e).ok()?;
+        if !matches!(
+            peel(self.tds, &ty).val,
+            TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
+        ) {
+            return None;
+        }
+        let pn = palow_name(self.tds, &ty)?;
+        let (a, close_read, _) = self.base_addr(e, false).ok()?;
+        let vp = self.fresh("perm");
+        let vv = self.fresh("val");
+        self.lines.push(format!(
+            "with {} {}. assert ({}_pts_to {} {} {});",
+            vp, vv, pn, a, vp, vv
+        ));
+        self.lines.extend(close_read);
+        Some(vv)
     }
 
     /// A specification proposition in *statement* position, as in `_assert`.
@@ -15028,8 +15073,21 @@ fn returns(stmts: &Stmts) -> bool {
 /// -- a binder the fragment introduces itself and then uses as if it were a C
 /// value -- and the generated names for types and fields.
 fn include_pulse(tds: &Typedefs, code: &InlinePulseCode) -> Result<String, String> {
-    let mut out = String::new();
     let mut declared: HashMap<String, Rc<Type>> = HashMap::new();
+    include_pulse_scoped(tds, &mut declared, code)
+}
+
+/// The same, with the `$declare`d binders of an enclosing fragment already in
+/// scope. A fragment nested inside an antiquotation -- the `PL_Engine uds` in
+/// `$(context_full_pred(s, _inline_pulse(PL_Engine uds)))` -- is written in
+/// the enclosing fragment's vocabulary, so it is spliced in the enclosing
+/// fragment's scope.
+fn include_pulse_scoped(
+    tds: &Typedefs,
+    declared: &mut HashMap<String, Rc<Type>>,
+    code: &InlinePulseCode,
+) -> Result<String, String> {
+    let mut out = String::new();
     for tok in &code.tokens {
         match tok {
             InlinePulseToken::Verbatim(ct) => {
@@ -15041,9 +15099,16 @@ fn include_pulse(tds: &Typedefs, code: &InlinePulseCode) -> Result<String, Strin
             }
             InlinePulseToken::RValueAntiquot { before, expr }
             | InlinePulseToken::LValueAntiquot { before, expr } => {
-                let v = declared_expr(tds, &declared, expr)?;
+                let v = declared_expr(tds, declared, expr)?;
                 out.push_str(before);
-                out.push_str(&format!("({})", v));
+                // A bare name needs no parentheses, and in a *binder* --
+                // `($(s): $type(context_t))` -- it must not have any: F*
+                // reads `((s): t)` as a pattern, not as a binding.
+                if v.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    out.push_str(&v);
+                } else {
+                    out.push_str(&format!("({})", v));
+                }
             }
             InlinePulseToken::TypeAntiquot { before, ty } => {
                 let t =
@@ -15131,6 +15196,25 @@ fn declared_expr(
         }
         // `u.m._active` asks which member is live, which for a tagged value is
         // simply which constructor it was built with.
+        ExprT::Cast(inner, _) => declared_expr(tds, declared, inner),
+        // A `_let` is an ordinary F* definition, so a hand-written fragment
+        // can name it just as a contract can. That is what lets the ghost
+        // helpers of a model be stated in terms of the same predicate the
+        // contracts use, instead of restating it.
+        ExprT::FnCall(name, args) if tds.pure_fns.contains(&*name.val.to_string()) => {
+            let mut out = format!("func_{}", name.val);
+            for a in args.iter() {
+                out += &format!(" ({})", declared_expr(tds, declared, a)?);
+            }
+            if args.is_empty() {
+                out += " ()";
+            }
+            Ok(out)
+        }
+        ExprT::InlinePulse(code, _) => {
+            let mut d = declared.clone();
+            flatten_fragment(&include_pulse_scoped(tds, &mut d, code)?)
+        }
         ExprT::VAttr(a, b) => {
             let VAttr::Active(m) = a else {
                 return Err("a `_length` outside a function".to_string());
@@ -15146,7 +15230,10 @@ fn declared_expr(
                 declared_expr(tds, declared, b)?
             ))
         }
-        _ => Err("an antiquotation that is not a `$declare`d name".to_string()),
+        _ => Err(format!(
+            "{}, which an antiquotation cannot stand for here",
+            expr_kind(e)
+        )),
     }
 }
 

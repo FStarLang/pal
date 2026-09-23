@@ -3740,8 +3740,42 @@ new facts about memory.
    what such a callee needs is not a separate ownership to unfold but a view of
    part of this object.
 
-   As of this milestone: **987 specifications, 943 of them with real bodies,
-   24 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   `dpe`'s hand-written ghost helpers were the next thing to fall, and the
+   reason they had not translated was smaller than it looked: an antiquotation
+   inside an `_include_pulse` block could name a `$declare`d binder and a field
+   of one, but not a `_let`. A `_let` is an ordinary F\* definition, so there
+   is no reason a hand-written fragment should not name it -- and every reason
+   it should, since the whole point of the helpers is to manipulate the same
+   predicate the contracts are written in. Two further pieces went with it: an
+   include block is now emitted *after* the `_let`s rather than before, because
+   nothing in a `_let` can name an include block's definitions except
+   textually; and a fragment nested inside an antiquotation is spliced in the
+   enclosing fragment's scope, which is what
+   `$(context_full_pred(s, _inline_pulse(PL_Engine uds)))` needs.
+   `DPE_predicates`, previously dropped whole, now translates and verifies.
+
+   A ghost statement wants the *value* of an object, and a load is only one way
+   to get one -- the expensive way, which needs the object's type to have a
+   whole-value read at all. The ownership in hand already determines the value,
+   so where a load is impossible the witness of the points-to is named instead:
+   `with x. assert (S_pts_to a p x)` costs nothing and works for an object
+   whose type has no read, which is exactly the case a ghost statement about a
+   tagged union runs into. That is `antiquot/test_union`'s body, and it is what
+   lets `dpe`'s `elim_context_full_pred_uds` be applied at all.
+
+   `dpe`'s three bodies are still admitted, but for later reasons than before,
+   and the reasons are worth recording: reading the live union member, freeing
+   a block whose `freeable` came from a ghost helper, and handing a callee an
+   array reached through a union member. All three are the same shape -- the
+   emitter's refusals assume it is the only source of ownership, and a contract
+   that splices ownership in can have granted anything. `Body::spliced_own`
+   already exists for exactly this and is already trusted by dereferences;
+   extending that trust to `free`, to a call argument and to a union tag is the
+   next step, and it needs care, because the point of the trust is that F\*
+   rejects the access if the splice did not in fact grant it.
+
+   As of this milestone: **987 specifications, 944 of them with real bodies,
+   23 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
