@@ -8492,6 +8492,14 @@ struct Body<'a> {
     /// Local pointers loaded once out of memory, with what they were loaded
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
+    /// Locals bound once from a call. A code pointer carries no
+    /// ownership, so the only thing that can make a call through one
+    /// possible is an `is_valid` fact, and a callee that returns a
+    /// function pointer has to have stated one about its result. That
+    /// fact is in context here, written in the callee's own words, so
+    /// the call is left to slprop matching exactly as a contract-stated
+    /// one is: if nothing granted the validity, F* rejects it.
+    fp_from_call: HashSet<String>,
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
@@ -11609,7 +11617,9 @@ impl<'a> Body<'a> {
                 // here would mean parsing those words.
                 if let Some(base) = fp_base(f)
                     && self.target_of(f).is_none()
-                    && (self.valid_fps.contains(&base) || self.local_valid_fps.contains(&base))
+                    && (self.valid_fps.contains(&base)
+                        || self.local_valid_fps.contains(&base)
+                        || self.fp_from_call.contains(&base))
                 {
                     // The pointer itself, when the contract named it, and
                     // otherwise a load of the field holding it. A load is
@@ -11660,7 +11670,11 @@ impl<'a> Body<'a> {
                     // postcondition along with it; where the caller handed
                     // that ownership over for good, nothing wants it and it
                     // has to be put down or it is left over at the end.
-                    if self.consumed.contains(&base) {
+                    // A validity that came back from a callee's
+                    // postcondition belongs to nobody once the call through it
+                    // is done: this body never owned the pointer, so there is
+                    // no ownership for the fact to travel out with.
+                    if self.consumed.contains(&base) || self.fp_from_call.contains(&base) {
                         self.lines.push("drop_is_valid _ _ _;".to_string());
                     }
                     return Ok(t);
@@ -15055,6 +15069,41 @@ fn ptr_source_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
     out
 }
 
+/// Locals bound exactly once, from a call. What the call returned is what
+/// the name holds, so anything the callee's contract said about its result is
+/// a fact about this name.
+fn call_bound_map(body: &Stmts) -> HashSet<String> {
+    let mut t = Touched::default();
+    touch_stmts(body, &mut t);
+    let locals: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut out = HashSet::new();
+    for st in body.iter() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
+            continue;
+        }
+        if !matches!(
+            &strip_vattr(rhs).val,
+            ExprT::FnCall(..) | ExprT::FnPtrCall(..)
+        ) {
+            continue;
+        }
+        out.insert(q);
+    }
+    out
+}
+
 fn derived_ptr(e: &Expr) -> bool {
     match &strip_vattr(e).val {
         ExprT::ContainerOf(inner, _, _) => derived_ptr(inner) || lvalue_name(inner).is_some(),
@@ -15159,6 +15208,7 @@ fn emit_body(
         blocks: Vec::new(),
         aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
+        fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(&defn.body),
         active: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a

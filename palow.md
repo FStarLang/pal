@@ -3905,8 +3905,22 @@ new facts about memory.
    would have to escape. Counting the decrement as the write it is gives `p`
    an ordinary pointer slot, and `array_ptr_arith/pre_decr` translates.
 
-   As of this milestone: **987 specifications, 953 of them with real bodies,
-   14 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   A code pointer returned by a call is callable. Calling through a pointer
+   needs an `is_valid` fact, which no points-to carries -- the bytes of a code
+   pointer say where the code is, not what it does -- so the emitter either
+   knows which function the pointer holds and seeds the fact itself, or the
+   contract stated one. A third source was missing: a callee that returns a
+   function pointer has to have said something about its result, and that
+   statement is in context at the call site. So a local bound exactly once,
+   from a call, is now callable, on the same terms as a contract-stated one:
+   the pre- and post-conditions are left to slprop matching, in the callee's
+   own words, and if nothing granted the validity F\* rejects the call. The
+   fact that comes back belongs to nobody -- this body never owned the
+   pointer, so there is no ownership for it to travel out with -- and is put
+   down. `func_pointer/return_fp` translates.
+
+   As of this milestone: **987 specifications, 954 of them with real bodies,
+   13 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
