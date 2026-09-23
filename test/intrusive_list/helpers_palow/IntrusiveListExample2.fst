@@ -146,34 +146,47 @@ fn resource_roundtrip (item: item_ref) (d: description) (link: N.struct_list_nod
   rewrite (owned (owner (IR.item2_link_1 item)) d link) as (owned item d link);
 }
 
-let value_rest ([@@@mkey] item: item_ref) (d: description) : slprop =
-  IR.item2_used (item) d.used **
-  IR.item2_samples item d.samples **
-  IR.item2_processed (item) d.counter **
+(* What is left of the payload once the item itself has been joined back up:
+   the counter is a separate cell rather than a field, so it stays out here. *)
+let value_rest (d: description) : slprop =
   IR.u32_pts_to d.counter d.count ** pure (UInt32.v d.used <= 4)
 
 ghost
+(* The payload owns the item apart from its link, and the list owns the link;
+   Palow reads `item->priority` from the item as a whole, so opening the
+   payload means joining the two back up rather than handing out a field
+   reference. This is `IntrusiveListExample.value_open` with a record for a
+   payload. *)
 fn value_open (node: X.lref) (item: item_ref) (#d: description)
-  requires item_ipl node d ** pure (item == owner node)
-  ensures IR.item2_unfolded item 1.0R **
-    IR.item2_priority (item) d.priority ** value_rest item d
+              (#link: N.struct_list_node)
+  requires item_ipl node d ** R.pts_to node link ** pure (item == owner node)
+  ensures IR.item2_pts_to item (item_record d link) ** value_rest d **
+    (* Carried out so that closing the payload again can recover the item
+       from its link; see `IntrusiveListItemRefs.item2_embedded`. *)
+    pure (IR.item2_embedded node)
 {
   unfold (item_ipl node d);
-  rewrite (fields (owner node) d) as (fields item d);
-  unfold (fields item d);
-  fold (value_rest item d);
+  unfold (fields (owner node) d);
+  rewrite (R.pts_to node link) as (IR.item2_link ((owner node)) link);
+  IR.item2_fold (owner node) d.priority d.used d.samples d.counter link;
+  fold (value_rest d);
+  rewrite (IR.item2_pts_to (owner node) (item_record d link))
+    as (IR.item2_pts_to item (item_record d link));
 }
 
 ghost
 fn value_close (node: X.lref) (item: item_ref) (#d: description)
-  requires IR.item2_unfolded item 1.0R **
-    IR.item2_priority (item) d.priority ** value_rest item d **
+               (#link: N.struct_list_node)
+  requires IR.item2_pts_to item (item_record d link) ** value_rest d **
     pure (item == owner node /\ IR.item2_embedded node)
-  ensures item_ipl node d
+  ensures item_ipl node d ** R.pts_to node link
 {
-  unfold (value_rest item d);
-  fold (fields item d);
-  rewrite (fields item d) as (fields (owner node) d);
+  rewrite (IR.item2_pts_to item (item_record d link))
+    as (IR.item2_pts_to (owner node) (item_record d link));
+  IR.item2_unfold (owner node) (item_record d link);
+  unfold (value_rest d);
+  rewrite (IR.item2_link ((owner node)) link) as (R.pts_to node link);
+  fold (fields (owner node) d);
   fold (item_ipl node d);
 }
 

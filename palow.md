@@ -3831,8 +3831,38 @@ new facts about memory.
    is the model's answer -- a sequence all of whose cells are `Some` is a
    sequence of values, and which values it is need never be said.
 
-   As of this milestone: **987 specifications, 949 of them with real bodies,
-   18 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   A `return` from inside a loop is no longer a blocker, and the reason is
+   embarrassing: Pulse has a `return`, and it works in a `while` body. The
+   emitter had assumed otherwise and rejected four functions on that ground.
+   What an early return has to do is what falling off the end does -- flush
+   whatever is pending, close what the frame opened, give back every local it
+   allocated -- and then say `return v;`; whether what is left implies the
+   postcondition is the loop invariant's business, not the emitter's. The one
+   thing the C had to supply is a length: the old model's array ownership
+   carries `Seq.length`, Palow's does not, so a loop that subscripts an array
+   parameter needs `_invariant(a._length == len)` spelled out. That is an
+   unconditional addition both models accept, not a divergence.
+
+   `ptrdiff_t` is `int64_t` on the target Palow fixes, so it converts like
+   one; a difference that came out negative and is added back to an address
+   still lands in the right place, because `( +! )` is modular.
+
+   The two intrusive-list `find`s were the interesting case, and they were
+   failing for a reason the admits had been hiding. A payload predicate hands
+   the client the item minus its link, and the list owns the link; Palow reads
+   `item->value` from the item *as a whole*, so opening the payload has to
+   join the two back up. Both example shims now do that. But then `node->next`
+   -- read through the pointer to the link, while the item is whole -- had
+   nothing to read: the link is inside the item. The C says where the
+   ownership is, just not in that expression: `_container_of(node, struct
+   item, link)` is the body announcing that `node` is not an object of its own
+   but a member of one. From that point on an access through `node` opens the
+   container first, which is the same nested-field focus `item->link.next`
+   would have taken. Two spellings of one place, and only one of them says
+   what is owned.
+
+   As of this milestone: **987 specifications, 952 of them with real bodies,
+   15 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

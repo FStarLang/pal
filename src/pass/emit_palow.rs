@@ -8493,6 +8493,11 @@ struct Body<'a> {
     /// Local pointers loaded once out of memory, with what they were loaded
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
+    /// Pointer variables the body has recovered an enclosing object from --
+    /// `struct item *item = _container_of(node, struct item, link);` records
+    /// `node`. From there on `node` is not an object of its own but a member
+    /// of that one, so an access through it has to open the container first.
+    containers: HashMap<String, (String, String)>,
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
@@ -9401,6 +9406,16 @@ impl<'a> Body<'a> {
                 signed: false,
                 width,
             } if *width != 8 => Ok(format!("(sizet_of_uint{} {})", width, v)),
+            // A `ptrdiff_t` is an `int64_t` on this target, and a negative one
+            // wraps to the `size_t` whose *addition* is the subtraction C
+            // means: `( +! )` is modular, so the address that comes out is the
+            // right one either way. Where the index is a subscript rather than
+            // an offset it is the array's own bound that rules a negative one
+            // out, which is where that obligation belongs.
+            TypeT::PtrdiffT => Ok(format!(
+                "(sizet_of_uint64 (FStar.Int.Cast.int64_to_uint64 {}))",
+                v
+            )),
             _ => Err(format!("a subscript indexed by {}", describe(&ty))),
         }
     }
@@ -9923,6 +9938,25 @@ impl<'a> Body<'a> {
                 f.open_read.clone()
             });
             return Ok((f.at, f.close_read, f.close_write));
+        }
+        // `node->next` where the body has recovered `item` from `node` is
+        // `item->link.next`: the list node is a member of the item, so what is
+        // owned is the item, and the member has to be focused out of it. The
+        // C says the same thing twice -- once as a pointer to the member, once
+        // as the recovery -- and only the second spelling says where the
+        // ownership is.
+        if let ExprT::Deref(inner) = &strip_vattr(base).val
+            && let Some(q) = lvalue_name(inner)
+            && let Some((sn, f)) = self.containers.get(&q).cloned()
+        {
+            let v = self.addr(base)?;
+            let a = sub_offset(v, &format!("struct_{}_offsetof_{}", sn, f));
+            self.lines.push(format!("struct_{}_focus_{} {};", sn, f, a));
+            return Ok((
+                format!("({} +! struct_{}_offsetof_{})", a, sn, f),
+                vec![format!("struct_{}_unfocus_read_{} {};", sn, f, a)],
+                vec![format!("struct_{}_unfocus_{} {};", sn, f, a)],
+            ));
         }
         Ok((self.addr(base)?, Vec::new(), Vec::new()))
     }
@@ -13127,6 +13161,16 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
+                // Recovering the enclosing object from a member pointer says
+                // what that pointer is: not an object of its own, but a place
+                // inside the one just named. See `containers`.
+                if let ExprT::ContainerOf(inner, ty, field) = &strip_casts(rhs).val
+                    && let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(ty).val
+                    && let Some(q) = lvalue_name(inner)
+                {
+                    self.containers
+                        .insert(q, (sname.val.to_string(), field.val.to_string()));
+                }
                 // The alias itself: nothing is stored, because the pointer is
                 // a name and not an object.
                 if let Some(v) = lvalue_name(lhs) {
@@ -13899,31 +13943,49 @@ impl<'a> Body<'a> {
         let outer_open = self.open_elems.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
 
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<bool, String> {
             for s in stmts.iter() {
-                if matches!(s.val, StmtT::Return(_)) {
+                if let StmtT::Return(e) = &s.val {
                     // A Pulse block is an expression: leaving early means
                     // being the tail of what encloses you, which `rest`
                     // arranges by folding the statements after an `if` into
                     // the arm that falls through. A loop body has no tail to
-                    // be, so a `return` out of one needs a different shape
-                    // than this -- a flag, a `break`, and a test after.
-                    return Err(if self.in_loop {
-                        "a `return` inside a loop".to_string()
-                    } else {
-                        "a `return` that is not in tail position".to_string()
+                    // be -- but Pulse has a `return` of its own, and this is
+                    // the one place worth spending it. Everything the frame
+                    // holds is given back first, because nothing after this
+                    // runs; whether what is left implies the postcondition is
+                    // the loop invariant's business, which is where it
+                    // belongs.
+                    if !self.in_loop {
+                        return Err("a `return` that is not in tail position".to_string());
+                    }
+                    let v = match e {
+                        Some(e) => Some(self.rvalue(e)?),
+                        None => None,
+                    };
+                    let close = std::mem::take(&mut self.pending_close);
+                    self.lines.extend(close);
+                    self.close_own();
+                    self.release_from(0);
+                    self.lines.push(match v {
+                        Some(v) => format!("return {};", v),
+                        None => "return ();".to_string(),
                     });
+                    // Anything after it in this arm is unreachable, and so is
+                    // the arm's own release: the frame is already gone.
+                    return Ok(true);
                 }
                 self.env.push_stmt(s);
                 self.stmt(s)?;
             }
-            Ok(())
+            Ok(false)
         })();
 
         self.in_branch = outer_in_branch;
         let out = (|| {
-            result?;
-            self.release_from(mark);
+            if !result? {
+                self.release_from(mark);
+            }
             self.seeded = outer_seeded;
             Ok(BranchResult {
                 lines: std::mem::take(&mut self.lines),
@@ -14103,7 +14165,23 @@ fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> 
 /// A C scalar conversion. The integer cases go through `FStar.Int.Cast`,
 /// which is total and reduces modulo the target width -- what C says for an
 /// unsigned target, and what PAL already emits for every narrowing cast.
+/// On the LP64 target Palow fixes, `ptrdiff_t` *is* `int64_t`: it shares that
+/// type's storage, so it shares its conversions too.
 fn convert(from: &Type, to: &Type, v: &str) -> Result<String, String> {
+    let lp64 = |t: &Type| match &t.val {
+        TypeT::PtrdiffT => Ast {
+            val: TypeT::Int {
+                signed: true,
+                width: 64,
+            },
+            loc: t.loc.clone(),
+        },
+        _ => t.clone(),
+    };
+    convert_scalar(&lp64(from), &lp64(to), v)
+}
+
+fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
     let name = |signed: bool, width: u32| format!("{}int{}", if signed { "" } else { "u" }, width);
     match (&from.val, &to.val) {
         (
@@ -15093,6 +15171,7 @@ fn emit_body(
         aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
         array_aliases: array_alias_map(&defn.body),
+        containers: HashMap::new(),
         active: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
