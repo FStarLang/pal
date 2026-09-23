@@ -578,6 +578,23 @@ ghost fn array_forget_all (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
   fold array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a;
 }
 
+(* The same, without being told how long the array is. Giving storage up is
+   the one operation whose length the caller usually does not have to hand:
+   the ownership being given up says how long it is, and the `freeable` that
+   goes with it says how much storage goes back. This is what a `free` of a
+   pointer whose ownership a hand-written helper supplied needs, since there
+   is no allocation site nearby to have remembered a length. *)
+ghost fn array_forget_full (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                           (esize: SZ.t) (#xs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a 1.0R xs
+  ensures  exists* b. mem_pts_to a 1.0R b
+                      ** pure (len b == SZ.v esize * Seq.length xs)
+{
+  unfold array_pts_to t_repr (SZ.v esize) a 1.0R xs;
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R (somes xs);
+  array_forget t_repr a esize;
+}
+
 (* And the other way, once every element has been written. This is what the
    loop that fills an array field ends with. *)
 ghost fn array_claim_all (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)

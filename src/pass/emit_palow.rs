@@ -4148,6 +4148,10 @@ fn emit_fn(
                 // code at them does.
                 if refine_states_own(tds, p) {
                     valid_fps.borrow_mut().insert(base.clone());
+                    // And it is ownership the emitter cannot read, which is
+                    // what `spliced_own` is for: the body may reach things
+                    // this clause grants and nothing generated does.
+                    *refine_own_spliced.borrow_mut() = true;
                 }
             }
             Err(why) => {
@@ -9521,10 +9525,17 @@ impl<'a> Body<'a> {
             // place, and the contract names the place: `payload->uds` after
             // `payload = &ctx.payload` is `ctx.payload.uds`.
             let named = self.unalias_place(base);
-            if !self
-                .live_arms
-                .iter()
-                .any(|(obj, m)| *m == *f.val && same_lvalue(obj, &named))
+            // A contract that spliced its own ownership in can have said
+            // which member is live too, in words the emitter does not read --
+            // `tag_relation` tying the tag to the constructor is exactly
+            // that. So the re-statement is emitted and the obligation left to
+            // F*, which is where the honesty is: if nothing in the contract
+            // implies the tag, the `rewrite` fails.
+            if !self.spliced_own
+                && !self
+                    .live_arms
+                    .iter()
+                    .any(|(obj, m)| *m == *f.val && same_lvalue(obj, &named))
             {
                 return Err(format!(
                     "a read of union member `{}`, which is not known to be the live one here",
@@ -11663,14 +11674,21 @@ impl<'a> Body<'a> {
                 && let Ok(aty) = self.ty_of(a)
                 && matches!(peel(self.tds, &aty).val, TypeT::Pointer(..))
             {
-                let Some((pv, sn, _)) = self.own_item(a) else {
-                    return Err(
-                        "an array behind a struct field, whose ownership the contract does not \
-                         state"
-                            .to_string(),
-                    );
-                };
-                self.open_own(&pv, &sn);
+                match self.own_item(a) {
+                    Some((pv, sn, _)) => self.open_own(&pv, &sn),
+                    // Nothing in the generated model owns it -- but a
+                    // contract that spliced its own ownership in may, and the
+                    // emitter cannot read those words. It says nothing and
+                    // lets slprop matching decide.
+                    None if self.spliced_own => {}
+                    None => {
+                        return Err(
+                            "an array behind a struct field, whose ownership the contract does \
+                             not state"
+                                .to_string(),
+                        );
+                    }
+                }
             }
             // An *inline* array field is different: the elements are inside
             // the struct, so what the callee needs is not a separate
@@ -12396,16 +12414,35 @@ impl<'a> Body<'a> {
             self.lines.push(format!("free var_{};", name));
             return Ok(());
         }
-        let i = self
+        let found = self
             .blocks
             .iter()
-            .position(|b| b.var == name && b.checked && !b.freed)
-            .ok_or_else(|| {
-                format!(
-                    "a `free` of `{}`, which does not hold a checked block",
-                    name
-                )
-            })?;
+            .position(|b| b.var == name && b.checked && !b.freed);
+        // No allocation here holds it -- but a contract that spliced its own
+        // ownership in can be holding both the extent and the `freeable`, in
+        // words the emitter does not read. It cannot say how long the extent
+        // is either, which is why this goes through the step that asks the
+        // ownership rather than the caller; and if the splice did not in fact
+        // grant it, F* rejects the `free`.
+        let Some(i) = found else {
+            if self.spliced_own
+                && !self.blocks.iter().any(|b| b.var == name)
+                && let Ok(ty) = self.ty_of(arg)
+                && let Some(pt) = pointee(self.tds, &ty)
+                && let Some(pn) = palow_name(self.tds, &pt)
+                && let Some(es) = palow_sizeof(self.tds, &pt)
+            {
+                let v = self.rvalue(arg)?;
+                self.lines
+                    .push(format!("array_forget_full {}_repr {} {}sz;", pn, v, es));
+                self.lines.push(format!("free {};", v));
+                return Ok(());
+            }
+            return Err(format!(
+                "a `free` of `{}`, which does not hold a checked block",
+                name
+            ));
+        };
         let (tmp, pn, init) = {
             let b = &self.blocks[i];
             (b.tmp.clone(), b.pn.clone(), b.init)

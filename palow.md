@@ -3763,19 +3763,36 @@ new facts about memory.
    tagged union runs into. That is `antiquot/test_union`'s body, and it is what
    lets `dpe`'s `elim_context_full_pred_uds` be applied at all.
 
-   `dpe`'s three bodies are still admitted, but for later reasons than before,
-   and the reasons are worth recording: reading the live union member, freeing
-   a block whose `freeable` came from a ghost helper, and handing a callee an
-   array reached through a union member. All three are the same shape -- the
-   emitter's refusals assume it is the only source of ownership, and a contract
-   that splices ownership in can have granted anything. `Body::spliced_own`
-   already exists for exactly this and is already trusted by dereferences;
-   extending that trust to `free`, to a call argument and to a union tag is the
-   next step, and it needs care, because the point of the trust is that F\*
-   rejects the access if the splice did not in fact grant it.
+   That left `dpe`'s bodies failing for three later reasons -- reading the live
+   union member, freeing a block whose `freeable` came from a ghost helper, and
+   handing a callee an array reached through a union member -- and all three
+   turned out to be one thing. The emitter's refusals assume it is the only
+   source of ownership, and a contract that splices ownership in can have
+   granted anything, in words the emitter does not read. `spliced_own` already
+   said exactly that and was already trusted by dereferences; it is now trusted
+   by a call argument, by a union tag and by `free` as well. The honesty is
+   unchanged: the emitter says nothing and slprop matching decides, so if the
+   splice did not in fact grant it, F\* rejects the access. `spliced_own` was
+   also not being set by the path that actually carries `dpe`'s ownership -- a
+   `_refine_value` whose clause is ownership -- which is why the trust had
+   nowhere to apply.
 
-   As of this milestone: **987 specifications, 944 of them with real bodies,
-   23 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   Freeing needed one library step. Giving storage up is the one operation
+   whose length the caller usually does not have to hand: the ownership being
+   given up says how long the extent is, and the `freeable` beside it says how
+   much storage goes back. `array_forget_full` asks the ownership rather than
+   the caller, which is what a `free` of a pointer read out of a union member
+   needs, there being no allocation site nearby to have remembered a length.
+   Two of `dpe`'s three admits go, and `destroy_uds_context` and
+   `mk_l0_context` now verify with real bodies.
+
+   What is left in `dpe` is the C rather than the model: `derive_child_from_context`
+   never checks what `calloc` returned, and `init_engine_context` and
+   `init_l0_context` pass storage to an `_out` parameter that has already been
+   written. Palow models allocation as fallible, and says so.
+
+   As of this milestone: **987 specifications, 946 of them with real bodies,
+   21 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
