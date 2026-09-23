@@ -7121,15 +7121,14 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::MallocFlex(_, x)
         | ExprT::CallocFlex(_, x)
         | ExprT::MemsetZero(_, x)
-        | ExprT::Free(x)
-        | ExprT::PreDecr(x) => go(x),
+        | ExprT::Free(x) => go(x),
         ExprT::Live(x) => {
             if let ExprT::Var(v) = &strip_vattr(x).val {
                 t.lived.insert(v.val.to_string());
             }
             touch_expr(x, t);
         }
-        ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PostDecr(x) => {
+        ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
             touch_write(x, t);
             touch_expr(x, t);
         }

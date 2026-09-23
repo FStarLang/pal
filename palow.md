@@ -3895,8 +3895,18 @@ new facts about memory.
    that survive on the invariant alone -- `break_continue/count_to_limit`
    does -- from the ones that do not.
 
-   As of this milestone: **987 specifications, 952 of them with real bodies,
-   15 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   `--p` is a write. The emitter's record of which names a body rebinds had
+   `PreDecr` grouped with the expressions that only read their operand, next
+   to `Free` and `Old`, while `PreIncr`, `PostIncr` and `PostDecr` all counted
+   as writes. A name that is rebound exactly once and never otherwise written
+   is treated as an alias -- a second name for a place, with no storage of its
+   own -- so `_arrayptr int32_t *p = a + 1; --p;` made `p` an alias for `a[1]`
+   and then asked for the address of the alias itself, which is a place that
+   would have to escape. Counting the decrement as the write it is gives `p`
+   an ordinary pointer slot, and `array_ptr_arith/pre_decr` translates.
+
+   As of this milestone: **987 specifications, 953 of them with real bodies,
+   14 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
