@@ -3714,8 +3714,34 @@ new facts about memory.
    a sibling field, which the record could carry but which would put an
    obligation on every write to the sibling.
 
-   As of this milestone: **987 specifications, 941 of them with real bodies,
-   26 admitted, 4 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   The two remaining guarded cases fell to the observation that `unless_null`
+   distributes over `**`. A `_nullable` parameter's refinements used to be
+   dropped wholesale, because the generated grant is one
+   `unless_null p (pts_to ** clause)` and a refinement arrives as a separate
+   clause with nowhere to put the guard. But
+   `unless_null p (a ** b) == unless_null p a ** unless_null p b`, so a guarded
+   refinement is just an ordinary ownership conjunct with the guard wrapped
+   back around it -- the same slprop the old model states, reached from the
+   other direction. A value refinement behind a guard is still refused, and now
+   says why.
+
+   `inline_array_aliasing` was the last one, and it was the *test* that was
+   wrong rather than the translator. The struct has a pointer field that is
+   deliberately aimed at the struct's own inline buffer; the generated deep
+   predicate would then claim that buffer twice, once through the struct's
+   points-to and once through the pointer, which is unprovable and rightly so.
+   Marking the field `_plain` says what the C means -- this is a bare address,
+   not an owned extent -- and the contract can then be stated in the ordinary
+   way. Saying it needed two small pieces: a contract can now take the address
+   of a place, so `&s->inline_buf[0]` is `s +! offsetof_inline_buf`, with a
+   member folding into an offset and a constant subscript into an element
+   stride; and passing an inline array field to a callee now opens the field
+   focus for the statement and gives it back with the matching unfocus, since
+   what such a callee needs is not a separate ownership to unfold but a view of
+   part of this object.
+
+   As of this milestone: **987 specifications, 943 of them with real bodies,
+   24 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

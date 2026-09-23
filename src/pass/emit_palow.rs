@@ -1754,6 +1754,56 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The address of a place, as a specification term.
+    ///
+    /// A contract can say where an object *is* without owning it, which is
+    /// what an aliasing claim needs: `s->p == &s->inline_buf[0]` is a fact
+    /// about two addresses. In this model an address is arithmetic on the
+    /// pointer the caller passed, so the whole thing is `var_s` plus the
+    /// offsets -- no ownership is consulted and none is needed.
+    fn addr_of(&self, e: &Expr, w: When) -> Result<String, String> {
+        match &strip_vattr(e).val {
+            // `&*p` is `p`, and `p->f` is `(*p).f`, so this is where the
+            // recursion bottoms out at the pointer the contract already names.
+            ExprT::Deref(inner) => self.value(inner, w),
+            ExprT::Member(base, f) => {
+                let bty = self.ty_of(base)?;
+                let sn = palow_name(self.tds, &bty)
+                    .ok_or_else(|| "an address inside something with no layout".to_string())?;
+                Ok(format!(
+                    "({} +! {}_offsetof_{})",
+                    self.addr_of(base, w)?,
+                    sn,
+                    f.val
+                ))
+            }
+            // Only a literal index: the offset is a byte count, and nothing
+            // multiplies in a generated module, so a computed one would have
+            // to be folded and cannot be.
+            ExprT::Index(base, i) => {
+                let ExprT::IntLit(n, _) = &strip_casts(i).val else {
+                    return Err("an address at a computed index in a contract".to_string());
+                };
+                let a = self.addr_of(base, w)?;
+                let bty = self.ty_of(base)?;
+                let es = match &peel(self.tds, &bty).val {
+                    TypeT::FixedArray(el, _) | TypeT::FlexArray(el) => palow_sizeof(self.tds, el),
+                    _ => pointee(self.tds, &bty)
+                        .as_deref()
+                        .and_then(|el| palow_sizeof(self.tds, el)),
+                }
+                .ok_or_else(|| "an address inside a non-array in a contract".to_string())?;
+                let off: u64 = u64::try_from(&**n)
+                    .map_err(|_| "an address at an index that is not a number".to_string())?;
+                match off * es {
+                    0 => Ok(a),
+                    k => Ok(format!("({} +! {}sz)", a, k)),
+                }
+            }
+            _ => Err(format!("an address of {} in a contract", expr_kind(e))),
+        }
+    }
+
     /// `*p` and `p[i]`. For a scalar parameter the pointee *is* the ghost
     /// value; for an array parameter it is an index into the ghost sequence,
     /// which is why the two cannot share a translation.
@@ -2219,6 +2269,7 @@ impl<'a> Spec<'a> {
             }
             // A struct value is an F* record, so a field of one is a
             // projection. `s->f` reaches here as `(*s).f`.
+            ExprT::Ref(place) => self.addr_of(place, w),
             ExprT::Member(base, f) => {
                 let bty = self.ty_of(base)?;
                 if palow_name(self.tds, &bty).is_none() {
@@ -2914,6 +2965,11 @@ fn emit_fn(
     /// whether the struct is behind a pointer (so that `this` is the pointee's
     /// value) or is the parameter itself.
     let mut refines_field: Vec<(String, String, String, Rc<Type>, Rc<Expr>, bool)> = Vec::new();
+    /// The parameters whose refinements sit behind a nullness guard, and the
+    /// pointer the guard tests. `unless_null p (a ** b)` and
+    /// `unless_null p a ** unless_null p b` are the same slprop, so a guarded
+    /// refinement is an ordinary conjunct with the guard put back around it.
+    let mut null_wrap: HashMap<String, String> = HashMap::new();
     // `_refine_uninit` clauses, kept apart because they are stated only where
     // the unwritten points-to is: on the way in, for an `_out` parameter.
     let mut refines_uninit: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
@@ -3167,14 +3223,37 @@ fn emit_fn(
         // pointee map is what makes those say so rather than quietly succeed
         // against a precondition the caller never granted.
         if null_guard {
-            if refinements(tds, &arg.ty)
-                .map(|(ps, us, bs)| !ps.is_empty() || !us.is_empty() || !bs.is_empty())
-                .unwrap_or(true)
-            {
-                refine_err.get_or_insert(format!(
-                    "parameter {} carries a refinement behind a nullness guard",
-                    pname
-                ));
+            match refinements(tds, &arg.ty) {
+                // Ownership survives the guard: it is stated where the
+                // points-to is stated, inside it. A *proposition* does not --
+                // it would have to become an implication rather than a
+                // conjunct, and nothing yet writes one.
+                Ok((ps, us, bs)) if us.is_empty() && bs.is_empty() => {
+                    for cl in ps {
+                        if slprop_refine(tds, &cl).is_none() {
+                            refine_err.get_or_insert(format!(
+                                "parameter {} carries a value refinement behind a nullness guard",
+                                pname
+                            ));
+                            continue;
+                        }
+                        null_wrap.insert(base.clone(), pname.clone());
+                        // A parameter with no pointee -- an `_arrayptr`, say --
+                        // had its refinements collected above already.
+                        if !refines
+                            .iter()
+                            .any(|(b, _, q)| *b == base && Rc::ptr_eq(q, &cl))
+                        {
+                            refines.push((base.clone(), arg.ty.clone(), cl));
+                        }
+                    }
+                }
+                _ => {
+                    refine_err.get_or_insert(format!(
+                        "parameter {} carries a refinement behind a nullness guard",
+                        pname
+                    ));
+                }
             }
             match arg.mode {
                 ParamMode::Out => return Err(format!("parameter {} is a nullable `_out`", pname)),
@@ -3940,36 +4019,37 @@ fn emit_fn(
             // own Pulse -- a function pointer's `is_valid`, say -- so it is
             // spliced under the same rule as an `_inline_pulse` contract
             // clause, and refused with the same words when that rule says no.
-            out.push(
-                match allocated_own(tds, ty, &format!("var_{}", base), code)? {
-                    Some(t) => {
-                        // Only if the caller is giving it up: freeing what the
-                        // `ensures` still promises back would be a body that
-                        // cannot be proved.
-                        if consumed.contains(base)
-                            && let Some(pt) = pointee(tds, ty)
-                            && let Some(pn) = palow_name(tds, &pt)
-                        {
-                            freeables.borrow_mut().insert(base.clone(), pn);
-                        }
-                        t
+            let stated_own = match allocated_own(tds, ty, &format!("var_{}", base), code)? {
+                Some(t) => {
+                    // Only if the caller is giving it up: freeing what the
+                    // `ensures` still promises back would be a body that
+                    // cannot be proved.
+                    if consumed.contains(base)
+                        && let Some(pt) = pointee(tds, ty)
+                        && let Some(pn) = palow_name(tds, &pt)
+                    {
+                        freeables.borrow_mut().insert(base.clone(), pn);
                     }
-                    None => {
-                        let t =
-                            with_this(base, None, ty, p, w, false, None, &[], &|sp: &Spec, w| {
-                                sp.inline_pulse(code, w)
-                            })?;
-                        // A spliced ownership refinement on a function pointer
-                        // is taken at its word: nothing else could be granting
-                        // the validity an indirect call needs.
-                        if matches!(peel(tds, ty).val, TypeT::FnPtr { .. }) {
-                            valid_fps.borrow_mut().insert(base.clone());
-                        }
-                        *refine_own_spliced.borrow_mut() = true;
-                        t
+                    t
+                }
+                None => {
+                    let t = with_this(base, None, ty, p, w, false, None, &[], &|sp: &Spec, w| {
+                        sp.inline_pulse(code, w)
+                    })?;
+                    // A spliced ownership refinement on a function pointer
+                    // is taken at its word: nothing else could be granting
+                    // the validity an indirect call needs.
+                    if matches!(peel(tds, ty).val, TypeT::FnPtr { .. }) {
+                        valid_fps.borrow_mut().insert(base.clone());
                     }
-                },
-            );
+                    *refine_own_spliced.borrow_mut() = true;
+                    t
+                }
+            };
+            out.push(match null_wrap.get(base) {
+                Some(p) => format!("unless_null {} ({})", p, stated_own),
+                None => stated_own,
+            });
         }
         for (base, sname, fname, fty, p, via) in &refines_field {
             let Some(code) = slprop_refine(tds, p) else {
@@ -11546,6 +11626,25 @@ impl<'a> Body<'a> {
                     );
                 };
                 self.open_own(&pv, &sn);
+            }
+            // An *inline* array field is different: the elements are inside
+            // the struct, so what the callee needs is not a separate
+            // ownership to unfold but a view of part of this object. That is
+            // the field focus, held open for the statement and given back by
+            // the same unfocus a write through the field would use -- the
+            // callee may have changed the elements, which is exactly what the
+            // implicit value argument is for.
+            if arr_args.get(i) == Some(&true)
+                && outs.get(i) != Some(&true)
+                && let ExprT::Member(base, f) = &strip_casts(a).val
+                && let Ok(aty) = self.ty_of(strip_casts(a))
+                && matches!(peel(self.tds, &aty).val, TypeT::FixedArray(..))
+            {
+                let (sn, _) = self.struct_of(base)?;
+                let at = self.addr_only(base)?;
+                self.lines.push(format!("{}_focus_{} {};", sn, f.val, at));
+                self.pending_close
+                    .push(format!("{}_unfocus_{} {};", sn, f.val, at));
             }
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
