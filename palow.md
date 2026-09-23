@@ -3690,8 +3690,32 @@ new facts about memory.
    this model does not translate. `dpe` now verifies in both models with **no
    dropped contracts at all**.
 
+   Two of the remaining drops turned out to be the census being wrong rather
+   than the translation being weak, which is its own kind of failure. A
+   `_letimpure` accessor was only readable when some `_refine_value` already
+   quantified over its value; but an accessor has a *definition*, and
+   `_letimpure` exists because the value cannot be **computed**, not because it
+   cannot be **named**. Where that definition is something a contract can say
+   -- `letimpure`'s `first_byte(h)` is `h[0]`, which is `Seq.index` of the
+   sequence the contract already owns -- the actual argument is substituted
+   into it and the clause is read directly. The substitution covers only the
+   forms a specification is written in and gives up on anything else, spliced
+   Pulse above all: inlining a definition the emitter does not fully
+   understand would be exactly the silent weakening this is built to avoid.
+
+   And an *ownership* `_refine` written on a struct field was reported as a
+   dropped contract because it could not go on the field's type in the
+   generated record. It never could have: an F\* type cannot hold an slprop.
+   The contract states it instead, at every position a contract has -- a
+   parameter that is such a struct, a parameter that points at one, and a
+   result -- which is the same place the old model puts it, in the struct
+   predicate rather than in the struct type. Nothing was lost, so nothing is
+   reported. What is still reported is the case that *is* lost: a clause naming
+   a sibling field, which the record could carry but which would put an
+   obligation on every write to the sibling.
+
    As of this milestone: **987 specifications, 941 of them with real bodies,
-   26 admitted, 7 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   26 admitted, 4 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
@@ -4134,3 +4158,12 @@ new facts about memory.
    `access_ok` and the store rule, with the union, array and integer/pointer
    punning theorems. The index is reserved in layer 0 as `mem_pts_to_at` but is
    not yet enforced by the typed loads and stores.
+9. **Not started.** Make a weakening a hard error. Every `admit()`, dropped
+   contract and skipped function the emitter produces today is a *deliberate*
+   escape hatch, so that a partially finished port still typechecks and the
+   count of them is the coverage measurement. That is right while the port is
+   in progress and wrong the moment it is finished: silently emitting a
+   specification weaker than the C source asked for is exactly the failure
+   this whole development exists to avoid. So the last milestone is to turn
+   `--palow` strict -- every one of these becomes a diagnostic and a non-zero
+   exit -- with the escape hatch retained behind a flag for measurement runs.

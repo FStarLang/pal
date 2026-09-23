@@ -471,6 +471,11 @@ struct Typedefs<'a> {
     /// `_pure` functions that were successfully emitted as F* definitions, and
     /// so may appear in a specification and in a body without being sequenced.
     pure_fns: HashSet<String>,
+    /// The definition of each single-argument `_letimpure` accessor: the
+    /// formal's name and the expression it stands for. An accessor whose
+    /// value the contract does not already bind can still be read by
+    /// substituting the actual argument into that expression.
+    impure_bodies: HashMap<String, (String, Rc<Expr>)>,
     /// The globals this module publishes an `addr_var_<name>` for. A global's
     /// address is a closed term, so it may appear in another global's
     /// initialiser -- `uint32_t *const p = &g;` -- and that is the only way a
@@ -558,6 +563,7 @@ impl<'a> Typedefs<'a> {
                 })
                 .collect(),
             pure_fns: HashSet::new(),
+            impure_bodies: HashMap::new(),
             opaque_types: tu
                 .decls
                 .iter()
@@ -2432,10 +2438,27 @@ impl<'a> Spec<'a> {
                         When::Post => format!("{}'", binder),
                         _ => format!("(reveal {})", binder),
                     }),
-                    None => Err(format!(
-                        "`{}` of `{}`, which carries no matching `_refine_value`",
-                        name.val, base
-                    )),
+                    // No binder quantifies over it -- but the accessor has a
+                    // definition, and if that definition is something a
+                    // contract can say, saying it is both what the author
+                    // wrote and the only reading there is. `_letimpure` exists
+                    // because the value cannot be *computed*, not because it
+                    // cannot be *named*.
+                    None => match self.tds.impure_bodies.get(&*name.val.to_string()) {
+                        Some((formal, body)) => {
+                            let inlined = subst_var(body, formal, &args[0]).ok_or_else(|| {
+                                format!(
+                                    "`{}` of `{}`, which carries no matching `_refine_value`",
+                                    name.val, base
+                                )
+                            })?;
+                            self.value(&inlined, w)
+                        }
+                        None => Err(format!(
+                            "`{}` of `{}`, which carries no matching `_refine_value`",
+                            name.val, base
+                        )),
+                    },
                 }
             }
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
@@ -5572,6 +5595,16 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
 /// record rather than about the value the struct itself holds. An `_array`
 /// field is the case: its value is an address, and the only thing anyone
 /// writes a refinement about is how long the extent behind it is.
+/// Whether a type carries a `_refine` that is a proposition about its value,
+/// as opposed to one that is ownership. Only the first kind is something a
+/// generated record type could have carried.
+fn has_pure_refine(tds: &Typedefs, ty: &Type) -> bool {
+    match refinements(tds, ty) {
+        Ok((ps, us, _)) => !us.is_empty() || ps.iter().any(|p| slprop_refine(tds, p).is_none()),
+        Err(_) => true,
+    }
+}
+
 fn own_kind(tds: &Typedefs, ty: &Type) -> bool {
     extent(tds, ty) == Some(Extent::Array) && flex_elem(tds, ty).is_none()
 }
@@ -5593,12 +5626,18 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
 
     // A `_refine` written on a *field* is an invariant of the struct type, so
     // it goes on the field's type in the record below and every value of the
-    // type has it. What cannot go there says so here: a clause about
-    // separation logic rather than about the value, and a clause naming a
-    // sibling field -- which is sayable in the record but would also put an
+    // type has it. What cannot go there says so here: a clause naming a
+    // sibling field, which is sayable in the record but would also put an
     // obligation on every write to the sibling, and that is not yet done.
+    //
+    // An *ownership* clause on a field is a different matter and is not
+    // dropped. It could never have gone on the record type -- an F\* type
+    // cannot hold an slprop -- so the contract states it instead, at every
+    // position a contract has: a parameter that is such a struct, a parameter
+    // that points at one, and a result. That is the same place the old model
+    // puts it, in the struct predicate rather than in the struct type.
     for f in &si.fields {
-        if refined(tds, &f.ty) && f.inv.is_none() {
+        if refined(tds, &f.ty) && f.inv.is_none() && has_pure_refine(tds, &f.ty) {
             c += &format!(
                 "(* contract dropped: the `_refine` on field `{}` is not a \
                  property of the field's value alone *)\n",
@@ -7413,6 +7452,14 @@ pub fn emit_palow(
         if ld.is_impure {
             if let Some(f) = fstar_type(&tds, &ld.ret_type) {
                 tds.impure_lets.insert(ld.name.val.to_string(), f);
+            }
+            if let [a] = &ld.params[..]
+                && let Some(n) = &a.name
+            {
+                tds.impure_bodies.insert(
+                    ld.name.val.to_string(),
+                    (n.val.to_string(), ld.body.clone()),
+                );
             }
         }
         let slprop = matches!(tds.resolve(&ld.ret_type).val, TypeT::SLProp);
@@ -14231,6 +14278,42 @@ fn deref_of(p: &Rc<Expr>) -> Rc<Expr> {
 }
 
 /// Peel the virtual attributes `elab` wraps around an expression.
+/// Substitute an argument for a `_letimpure` accessor's formal in its body.
+///
+/// Only the forms a specification is written in are covered. Anything else --
+/// spliced Pulse above all, whose antiquotations have their own binding rules
+/// -- gives `None`, and the caller keeps the error it already had. Inlining a
+/// definition the emitter does not fully understand would be exactly the
+/// silent weakening this translation is built to avoid.
+fn subst_var(e: &Rc<Expr>, from: &str, to: &Rc<Expr>) -> Option<Rc<Expr>> {
+    let go = |x: &Rc<Expr>| subst_var(x, from, to);
+    let at = |v: ExprT| Some(v.with_loc(e.loc.clone()));
+    match &e.val {
+        ExprT::Var(v) if &*v.val == from => Some(to.clone()),
+        ExprT::Var(_) | ExprT::IntLit(..) | ExprT::BoolLit(_) | ExprT::FloatLit(..) => {
+            Some(e.clone())
+        }
+        ExprT::Deref(x) => at(ExprT::Deref(go(x)?)),
+        ExprT::Ref(x) => at(ExprT::Ref(go(x)?)),
+        ExprT::Live(x) => at(ExprT::Live(go(x)?)),
+        ExprT::Old(x) => at(ExprT::Old(go(x)?)),
+        ExprT::Member(x, f) => at(ExprT::Member(go(x)?, f.clone())),
+        ExprT::Index(x, i) => at(ExprT::Index(go(x)?, go(i)?)),
+        ExprT::VAttr(a, x) => at(ExprT::VAttr(a.clone(), go(x)?)),
+        ExprT::UnOp(o, x) => at(ExprT::UnOp(*o, go(x)?)),
+        ExprT::BinOp(o, l, r) => at(ExprT::BinOp(*o, go(l)?, go(r)?)),
+        ExprT::Cast(x, t) => at(ExprT::Cast(go(x)?, t.clone())),
+        ExprT::FnCall(n, xs) => {
+            let mut out = Vec::new();
+            for x in xs.iter() {
+                out.push(go(x)?);
+            }
+            at(ExprT::FnCall(n.clone(), out.into()))
+        }
+        _ => None,
+    }
+}
+
 fn strip_vattr(e: &Expr) -> &Expr {
     match &e.val {
         ExprT::VAttr(_, inner) => strip_vattr(inner),
