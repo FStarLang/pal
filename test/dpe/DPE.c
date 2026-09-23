@@ -186,14 +186,33 @@ _letimpure(context_full_data engine_state(const context_obj ctx),
 // binder the handle's own `_refine_value` quantifies over -- rather than
 // through a ghost function. The array's value is a binder too, which is why
 // `uds` is spelled out with `_plain`.
-_allocated context_obj init_engine_context(_plain const _array uint8_t *uds)
+// Two allocations, either of which can fail, so the Palow spelling returns a
+// `_nullable` handle and the grant it makes is under that guard.
+_nullable _allocated context_obj init_engine_context(_plain const _array uint8_t *uds)
   _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 $(uds) $`p_uds $`v_uds))
   _requires((bool) _inline_pulse(Seq.length $`v_uds == 32))
   _ensures((bool) _inline_pulse($(engine_state(return)) == DPE_context_full_data.PL_Engine $`v_uds))
+{
+  uint8_t *uds_buf = (uint8_t*)malloc(UDS_LEN * sizeof(uint8_t));
+  if (uds_buf == NULL) {
+    return NULL;
+  }
+  memcpy_(UDS_LEN, uds, uds_buf);
+  context_t *ctx = (context_t*)malloc(sizeof(context_t));
+  if (ctx == NULL) {
+    free(uds_buf);
+    return NULL;
+  }
+  *ctx = (context_t) {
+    .tag = ENGINE_CONTEXT,
+    .payload = (u_context_t) { .uds = uds_buf },
+  };
+  _ghost_stmt(DPE_predicates.intro_context_full_pred_uds $(*ctx));
+  return ctx;
+}
 #else
 _allocated context_obj init_engine_context(const uds_array uds)
   _ensures((bool) _inline_pulse(DPE_predicates.engine_state $(*return) == DPE_context_full_data.PL_Engine (array_value_of $(uds))))
-#endif
 {
   uint8_t *uds_buf = (uint8_t*)malloc(UDS_LEN * sizeof(uint8_t));
   memcpy_(UDS_LEN, uds, uds_buf);
@@ -205,6 +224,7 @@ _allocated context_obj init_engine_context(const uds_array uds)
   _ghost_stmt(DPE_predicates.intro_context_full_pred_uds $(*ctx));
   return ctx;
 }
+#endif
 
 #ifndef PALOW
 // `maybe` is how the old model guards an `_ensures` behind a boolean result.
@@ -221,16 +241,33 @@ _let(bool is_pl_engine(context_full_data state), _inline_pulse(DPE_context_full_
 _let(bool is_pl_l0(context_full_data state), _inline_pulse(DPE_context_full_data.PL_L0? $(state)))
 
 #ifdef PALOW
-void init_l0_context(context_obj ctx, _plain const _array uint8_t *cdi)
+// Palow's allocator can fail, and a `void` function has no way to say so, so
+// the Palow spelling reports the failure the way `derive_child_from_context`
+// does: a boolean result, with the state left alone when it is false.
+bool init_l0_context(context_obj ctx, _plain const _array uint8_t *cdi)
   _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 $(cdi) $`p_cdi $`v_cdi))
   _requires((bool) _inline_pulse(Seq.length $`v_cdi == 64))
   _requires(is_pl_engine(engine_state(ctx)))
-  _ensures((bool) _inline_pulse($(engine_state(ctx)) == DPE_context_full_data.PL_L0 $`v_cdi))
+  _ensures(return ==> (bool) _inline_pulse($(engine_state(ctx)) == DPE_context_full_data.PL_L0 $`v_cdi))
+  _ensures(!return ==> (bool) _inline_pulse($(engine_state(ctx)) == $(_old(engine_state(ctx)))))
+{
+  uint8_t *cdi_buf = (uint8_t*)malloc(DICE_DIGEST_LEN * sizeof(uint8_t));
+  if (cdi_buf == NULL) {
+    return false;
+  }
+  memcpy_(DICE_DIGEST_LEN, cdi, cdi_buf);
+  _ghost_stmt(DPE_predicates.elim_context_full_pred_uds $(*ctx));
+  uint8_t* uds_buf = ctx->payload.uds;
+  free(uds_buf);
+  ctx->tag = 1;
+  ctx->payload.cdi = cdi_buf;
+  _ghost_stmt(DPE_predicates.intro_context_full_pred_cdi $(*ctx));
+  return true;
+}
 #else
 void init_l0_context(context_obj ctx, const dice_digest cdi)
   _requires(is_pl_engine(engine_state(ctx)))
   _ensures((bool) _inline_pulse(DPE_predicates.engine_state $(*ctx) == DPE_context_full_data.PL_L0 (array_value_of $(cdi))))
-#endif
 {
   uint8_t *cdi_buf = (uint8_t*)malloc(DICE_DIGEST_LEN * sizeof(uint8_t));
   memcpy_(DICE_DIGEST_LEN, cdi, cdi_buf);
@@ -242,6 +279,7 @@ void init_l0_context(context_obj ctx, const dice_digest cdi)
   _ghost_stmt(DPE_predicates.intro_context_full_pred_cdi $(*ctx));
   return;
 }
+#endif
 
 void destroy_uds_context(_consumes _allocated context_obj ctx)
   _requires(ctx->tag == 0)

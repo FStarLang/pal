@@ -8381,6 +8381,12 @@ struct Body<'a> {
     /// Whether we are translating the arm of an `if`, where a slot introduced
     /// now would not outlive the arm.
     in_branch: bool,
+    /// Whether that branch is the tail of the function -- the shape an
+    /// early `return` is lowered into, where each arm is everything that
+    /// is left and nothing follows the `if` at all. There is no join to
+    /// reconcile, so the things a branch cannot do because the other path
+    /// would disagree are fine here.
+    tail_branch: bool,
     /// Whether the expression being translated is a loop guard rather than a
     /// specification. A guard is real code, so a call may stay in it.
     in_guard: bool,
@@ -12015,6 +12021,24 @@ impl<'a> Body<'a> {
             self.pending_close.extend(f.close_write);
             return Ok(f.at);
         }
+        // A heap block handed to an `_out` array parameter. What `malloc`
+        // returns is exactly the storage view such a parameter asks for, so
+        // there is nothing to give up going in; the call is what fills it,
+        // which is the step the block has been waiting for.
+        if let Some(v) = lvalue_name(strip_casts(a))
+            && let Some(i) = self.blocks.iter().rposition(|b| b.var == v && !b.freed)
+            && self.blocks[i].checked
+            && !self.blocks[i].init
+        {
+            self.blocks[i].init = true;
+            // An `_out` array comes back full, so the block's view is the
+            // plain one from here on -- which is what a later `free` has to
+            // give up, and what a read of it is allowed to see.
+            if let Some(a) = self.blocks[i].array.as_mut() {
+                a.filled = true;
+            }
+            return Ok(self.blocks[i].tmp.clone());
+        }
         Err("an `_out` argument that is not unwritten storage here".to_string())
     }
 
@@ -12292,7 +12316,7 @@ impl<'a> Body<'a> {
         ty: &Type,
         count: &Expr,
     ) -> Result<String, String> {
-        if self.in_branch {
+        if self.in_branch && !self.tail_branch {
             return Err("an allocation inside a branch".to_string());
         }
         let (Some(pn), Some(esize)) = (palow_name(self.tds, ty), palow_sizeof(self.tds, ty)) else {
@@ -12403,7 +12427,7 @@ impl<'a> Body<'a> {
         pn: &str,
         zero: Option<(String, Vec<String>)>,
     ) -> Result<String, String> {
-        if self.in_branch {
+        if self.in_branch && !self.tail_branch {
             return Err("an allocation inside a branch".to_string());
         }
         let tmp = self.fresh(&var.val);
@@ -12979,6 +13003,7 @@ impl<'a> Body<'a> {
         let outer = std::mem::take(&mut self.lines);
         let was_branch = self.in_branch;
         self.in_branch = true;
+        let was_tail_branch = std::mem::replace(&mut self.tail_branch, false);
         let was_loop = self.in_loop;
         self.in_loop = true;
         let was_mark = self.loop_mark.replace(self.slots.len());
@@ -13003,6 +13028,7 @@ impl<'a> Body<'a> {
         self.env = outer_env;
         self.slots.truncate(mark);
         self.in_branch = was_branch;
+        self.tail_branch = was_tail_branch;
         self.in_loop = was_loop;
         self.loop_mark = was_mark;
         let body_lines = std::mem::replace(&mut self.lines, outer);
@@ -13908,11 +13934,13 @@ impl<'a> Body<'a> {
         let outer_seeded = self.seeded.clone();
         let outer_open = self.open_elems.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
+        let outer_tail_branch = std::mem::replace(&mut self.tail_branch, true);
 
         let out = self
             .rest(stmts)
             .map(|v| (std::mem::take(&mut self.lines), v));
 
+        self.tail_branch = outer_tail_branch;
         self.in_branch = outer_in_branch;
         self.open_elems = outer_open;
         self.seeded = outer_seeded;
@@ -13945,6 +13973,7 @@ impl<'a> Body<'a> {
         let outer_seeded = self.seeded.clone();
         let outer_open = self.open_elems.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
+        let outer_tail_branch = std::mem::replace(&mut self.tail_branch, false);
 
         let result = (|| -> Result<bool, String> {
             for s in stmts.iter() {
@@ -13984,6 +14013,7 @@ impl<'a> Body<'a> {
             Ok(false)
         })();
 
+        self.tail_branch = outer_tail_branch;
         self.in_branch = outer_in_branch;
         let out = (|| {
             if !result? {
@@ -15177,6 +15207,7 @@ fn emit_body(
         signed_ok: sig.contract,
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
+        tail_branch: false,
         in_guard: false,
         spec_binders: HashMap::new(),
         ret_binding: None,

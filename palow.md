@@ -3919,8 +3919,30 @@ new facts about memory.
    pointer, so there is no ownership for it to travel out with -- and is put
    down. `func_pointer/return_fp` translates.
 
-   As of this milestone: **987 specifications, 954 of them with real bodies,
-   13 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   An early `return` leaves no join to reconcile. The lowering of an early
+   return makes each arm of the `if` everything that is left of the function,
+   so nothing follows it -- and the things the emitter refuses inside a branch
+   are refused because the *other* path would have to agree about them at the
+   join. An allocation is one: a block allocated on one path is not a block on
+   the other, and the state after the `if` cannot say which. In a tail branch
+   there is no after, so the refusal is lifted there, which is what lets a C
+   function test one allocation, use it, and then allocate again.
+
+   `dpe` is now translated whole. Two of its initialisers allocated without
+   testing the result, which Palow's fallible allocator does not allow, and
+   neither could report the failure: `init_l0_context` returns `void` and
+   `init_engine_context` returns a handle that its contract said was always
+   good. Under Palow they say what actually happens -- a boolean, with the
+   context left alone when it is false, and a `_nullable _allocated` handle
+   whose grant is under the nullness guard -- which is the same shape
+   `derive_child_from_context` already had. The last piece was on the emitter
+   side: a heap block handed to an `_out` array parameter. What `malloc`
+   returns is exactly the storage view such a parameter asks for, so there is
+   nothing to do going in; coming back it is full, and the block's view has to
+   become the plain one or the `free` would give up the wrong thing.
+
+   As of this milestone: **987 specifications, 956 of them with real bodies,
+   11 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
