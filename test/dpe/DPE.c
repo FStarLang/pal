@@ -180,8 +180,20 @@ typedef context_t *context_obj;
 _letimpure(context_full_data engine_state(const context_obj ctx),
   _inline_pulse(observe (fun h -> $(context_full_pred(*ctx, _inline_pulse(h))))))
 
+#ifdef PALOW
+// Palow: `DPE_predicates` is hand-written Pulse this model does not translate,
+// so the state of a context is named through the `_letimpure` accessor -- the
+// binder the handle's own `_refine_value` quantifies over -- rather than
+// through a ghost function. The array's value is a binder too, which is why
+// `uds` is spelled out with `_plain`.
+_allocated context_obj init_engine_context(_plain const _array uint8_t *uds)
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 $(uds) $`p_uds $`v_uds))
+  _requires((bool) _inline_pulse(Seq.length $`v_uds == 32))
+  _ensures((bool) _inline_pulse($(engine_state(return)) == DPE_context_full_data.PL_Engine $`v_uds))
+#else
 _allocated context_obj init_engine_context(const uds_array uds)
   _ensures((bool) _inline_pulse(DPE_predicates.engine_state $(*return) == DPE_context_full_data.PL_Engine (array_value_of $(uds))))
+#endif
 {
   uint8_t *uds_buf = (uint8_t*)malloc(UDS_LEN * sizeof(uint8_t));
   memcpy_(UDS_LEN, uds, uds_buf);
@@ -208,9 +220,17 @@ _include_pulse (DPE_ghost_helpers,
 _let(bool is_pl_engine(context_full_data state), _inline_pulse(DPE_context_full_data.PL_Engine? $(state)))
 _let(bool is_pl_l0(context_full_data state), _inline_pulse(DPE_context_full_data.PL_L0? $(state)))
 
+#ifdef PALOW
+void init_l0_context(context_obj ctx, _plain const _array uint8_t *cdi)
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 $(cdi) $`p_cdi $`v_cdi))
+  _requires((bool) _inline_pulse(Seq.length $`v_cdi == 64))
+  _requires(is_pl_engine(engine_state(ctx)))
+  _ensures((bool) _inline_pulse($(engine_state(ctx)) == DPE_context_full_data.PL_L0 $`v_cdi))
+#else
 void init_l0_context(context_obj ctx, const dice_digest cdi)
   _requires(is_pl_engine(engine_state(ctx)))
   _ensures((bool) _inline_pulse(DPE_predicates.engine_state $(*ctx) == DPE_context_full_data.PL_L0 (array_value_of $(cdi))))
+#endif
 {
   uint8_t *cdi_buf = (uint8_t*)malloc(DICE_DIGEST_LEN * sizeof(uint8_t));
   memcpy_(DICE_DIGEST_LEN, cdi, cdi_buf);
@@ -233,11 +253,21 @@ void destroy_uds_context(_consumes _allocated context_obj ctx)
   return;
 }
 
+#ifdef PALOW
+void mk_l0_context(context_obj ctx, _plain _consumes _array uint8_t *cdi)
+  _requires(_inline_pulse(array_pts_to uint8_t_repr 1 $(cdi) 1.0R $`v_cdi ** freeable $(cdi) 64sz))
+  _requires((bool) _inline_pulse(Seq.length $`v_cdi == 64))
+  _requires(ctx->tag == 0)
+  _ensures((bool) _inline_pulse($(engine_state(ctx)) == DPE_context_full_data.PL_L0 $`v_cdi))
+#else
 void mk_l0_context(context_obj ctx, _consumes _allocated_array dice_digest cdi)
   _requires(ctx->tag == 0)
   _ensures((bool) _inline_pulse(DPE_predicates.engine_state $(*ctx) == DPE_context_full_data.PL_L0 (old (array_value_of $(cdi)))))
+#endif
 {
+#ifndef PALOW
   _assert(cdi._length == DICE_DIGEST_LEN);
+#endif
   _ghost_stmt(DPE_predicates.elim_context_full_pred_uds $(*ctx));
   uint8_t* uds_buf = ctx->payload.uds;
   free(uds_buf);
@@ -249,7 +279,11 @@ void mk_l0_context(context_obj ctx, _consumes _allocated_array dice_digest cdi)
 bool derive_child_from_context(context_obj ctx, const engine_record_t *record)
   _requires(ctx->tag == 0)
   _ensures(return ==> is_pl_l0(engine_state(ctx)))
+#ifdef PALOW
+  _ensures(!return ==> (bool) _inline_pulse($(engine_state(ctx)) == $(_old(engine_state(ctx)))))
+#else
   _ensures(!return ==> (bool) _inline_pulse(DPE_predicates.engine_state $(*ctx) == old (DPE_predicates.engine_state $(*ctx))))
+#endif
 {
   _ghost_stmt(DPE_predicates.elim_context_full_pred_uds $(*ctx));
   uint8_t *cdi_buf = (uint8_t*)calloc(DICE_DIGEST_LEN, sizeof(uint8_t));

@@ -3660,8 +3660,38 @@ new facts about memory.
    translated in both memory models from a single C source, and every
    remaining weakness is a counted `admit()` or a counted dropped contract.
 
+   The five dropped contracts left in `dpe` turned out to be one question
+   asked five times: **a refinement is not required to be all ownership or all
+   proposition.** `context_obj`'s `_refine_value` says
+   `tag_relation(*this, state) && context_full_pred(*this, state)` -- the tag
+   agrees with the ghost state, *and* here is the ghost state -- and C has one
+   conjunction to write both with. The emitter used to decide which of the two
+   a clause was by looking at the whole clause, so a conjunction of the two was
+   neither and was dropped. It now splits the clause on `&&`, reads each
+   conjunct as whichever it is, and puts the result back together the way Pulse
+   writes it: the ownership side by side, the propositions gathered under one
+   `pure`. An `_slprop`-valued `_let` counts as ownership, which is what lets
+   the author name a predicate once and use it in several contracts.
+
+   Two smaller things fell out of the same clause. A refinement written on a
+   *return* type bound `this` by value, so `*this` had nowhere to go; it now
+   keeps the pointee entry the `ensures` grants and only overrides the
+   *spelling* of `this`, which is the result binder rather than `var_return`.
+   And the ghost value a return's `_refine_value` quantifies over is now what a
+   `_letimpure` accessor applied to the result denotes, so `init_engine_context`
+   can say what state the context it returns is in.
+
+   `dpe`'s own source needed four contracts rewritten for Palow, all for the
+   same reason: they named the value of an array with the old model's
+   `array_value_of`, and a Palow array pointer is just an address. They use the
+   `_plain` idiom `compare` already used -- the ownership spelled by hand, the
+   value a binder -- and the state of a context through the `_letimpure`
+   accessor rather than through `DPE_predicates`, which is hand-written Pulse
+   this model does not translate. `dpe` now verifies in both models with **no
+   dropped contracts at all**.
+
    As of this milestone: **987 specifications, 941 of them with real bodies,
-   26 admitted, 12 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   26 admitted, 7 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

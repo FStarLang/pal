@@ -1073,6 +1073,53 @@ fn collect_valued(
 
 /// A refinement predicate that is an `_slprop`-typed fragment of hand-written
 /// Pulse, rather than a proposition about the value.
+/// Whether a refinement conjunct is ownership rather than a proposition.
+///
+/// Spliced Pulse says so by its type, and so does a call to an `_slprop`
+/// `_let` -- which is the same thing named once and used in several
+/// contracts rather than written out at each of them.
+fn is_own_refine(tds: &Typedefs, p: &Expr) -> bool {
+    match &strip_vattr(p).val {
+        ExprT::Cast(inner, to) if matches!(tds.resolve(to).val, TypeT::SLProp) => {
+            is_own_refine(tds, inner)
+        }
+        ExprT::InlinePulse(_, t) => matches!(tds.resolve(t).val, TypeT::SLProp),
+        ExprT::FnCall(name, _) => tds.slprop_lets.contains(&*name.val.to_string()),
+        _ => false,
+    }
+}
+
+/// Split a refinement clause into its ownership conjuncts and its
+/// propositional ones. Only `&&` is split: a disjunction of ownership is not
+/// something this model can state, and it would be dishonest to pretend the
+/// conjuncts stood alone.
+fn split_refine<'e>(
+    tds: &Typedefs,
+    p: &'e Expr,
+    own: &mut Vec<&'e Expr>,
+    props: &mut Vec<&'e Expr>,
+) {
+    let inner = strip_vattr(p);
+    match &inner.val {
+        ExprT::Cast(x, to) if matches!(tds.resolve(to).val, TypeT::SLProp) => {
+            split_refine(tds, x, own, props)
+        }
+        ExprT::BinOp(BinOp::LogAnd, l, r) => {
+            split_refine(tds, l, own, props);
+            split_refine(tds, r, own, props);
+        }
+        _ if is_own_refine(tds, inner) => own.push(inner),
+        _ => props.push(inner),
+    }
+}
+
+/// Whether a refinement clause states any ownership at all.
+fn refine_states_own(tds: &Typedefs, p: &Expr) -> bool {
+    let (mut own, mut props) = (Vec::new(), Vec::new());
+    split_refine(tds, p, &mut own, &mut props);
+    !own.is_empty()
+}
+
 fn slprop_refine<'e>(tds: &Typedefs, p: &'e Expr) -> Option<&'e InlinePulseCode> {
     match &strip_vattr(p).val {
         ExprT::Cast(inner, to) if matches!(tds.resolve(to).val, TypeT::SLProp) => {
@@ -1452,6 +1499,42 @@ impl<'a> Spec<'a> {
             ExprT::Member(b, _) | ExprT::Deref(b) | ExprT::Index(b, _) => self.live_base(b),
             _ => None,
         }
+    }
+
+    /// A whole refinement clause: the ownership it states, and the
+    /// proposition it states, in the one slprop that is both.
+    ///
+    /// A refinement is not required to be entirely one or entirely the other.
+    /// The natural way to say what a handle is is a conjunction of the two --
+    /// "the tag agrees with the ghost state, *and* here is the state" -- and
+    /// C has only one conjunction to write it with. So the clause is split on
+    /// `&&`, each conjunct is read as whichever of the two it is, and the
+    /// result is put back together the way Pulse writes it: the ownership
+    /// side by side, the propositions gathered under a single `pure`.
+    fn refinement(&self, e: &Expr, w: When) -> Result<String, String> {
+        let (mut own, mut props) = (Vec::new(), Vec::new());
+        split_refine(self.tds, e, &mut own, &mut props);
+        let mut parts = Vec::new();
+        for o in own {
+            parts.push(match slprop_refine(self.tds, o) {
+                Some(code) => self.inline_pulse(code, w)?,
+                None => self.value(o, w)?,
+            });
+        }
+        let mut cs = Vec::new();
+        for c in props {
+            let t = self.prop(c, w)?;
+            if t != "True" {
+                cs.push(t);
+            }
+        }
+        if !cs.is_empty() {
+            parts.push(format!("pure ({})", cs.join(r" /\ ")));
+        }
+        if parts.is_empty() {
+            parts.push("pure True".to_string());
+        }
+        Ok(parts.join(" ** "))
     }
 
     /// A specification expression in proposition position.
@@ -2340,6 +2423,11 @@ impl<'a> Spec<'a> {
                     })
                     .map(|(_, _, binder, _)| binder.clone());
                 match hit {
+                    // The result's ghost value is bound by the `ensures`
+                    // itself. There is no earlier state for it to be the
+                    // later version of, and nothing to reveal: the
+                    // existential is not erased.
+                    Some(binder) if base == "return" => Ok(binder),
                     Some(binder) => Ok(match w {
                         When::Post => format!("{}'", binder),
                         _ => format!("(reveal {})", binder),
@@ -3496,6 +3584,12 @@ fn emit_fn(
     // value rather than the parameter. A refinement written on a struct
     // declaration needs it -- the declaration says `this.x`, meaning the
     // struct, and that is the pointee when the parameter is a pointer to one.
+    // Its third component says the override is only about the *spelling*: the
+    // clause still reads `*this` through the pointee entry `base` has. That is
+    // what a refinement on a *return* type needs -- `this` is the returned
+    // pointer, which is spelled with the result binder rather than
+    // `var_return`, but a clause about what it points at is still a clause
+    // about the value the `ensures` grants.
     // `siblings` are the other fields of the struct a *field* refinement is
     // written on, as (C name, term, type). A clause written on a field names
     // its siblings without any qualification -- `_refines(this._length == len)`
@@ -3503,7 +3597,7 @@ fn emit_fn(
     // scope both as terms and as types, and there is no function whose
     // environment could have put them there.
     let with_this = |base: &str,
-                     this_value: Option<(&str, Option<&str>)>,
+                     this_value: Option<(&str, Option<&str>, bool)>,
                      ty: &Rc<Type>,
                      p: &Rc<Expr>,
                      w: When,
@@ -3537,7 +3631,7 @@ fn emit_fn(
         let by_value = match pointees
             .get(base)
             .cloned()
-            .filter(|_| !as_value && this_value.is_none())
+            .filter(|_| !as_value && matches!(this_value, None | Some((_, _, true))))
         {
             Some(entry) => {
                 pointees.insert("this".to_string(), entry);
@@ -3547,14 +3641,19 @@ fn emit_fn(
                 // `*this` reads through the entry; bare `$(this)` is still the
                 // pointer itself, and without this it would come out as the
                 // name of a binder nobody declared.
-                locals.insert("this".to_string(), format!("var_{}", base));
+                locals.insert(
+                    "this".to_string(),
+                    this_value
+                        .map(|(v, _, _)| v.to_string())
+                        .unwrap_or_else(|| format!("var_{}", base)),
+                );
                 false
             }
             None => {
                 locals.insert(
                     "this".to_string(),
                     this_value
-                        .map(|(v, _)| v.to_string())
+                        .map(|(v, _, _)| v.to_string())
                         .unwrap_or_else(|| format!("var_{}", base)),
                 );
                 // A `this` bound to a *field* is the field's value, which for
@@ -3563,7 +3662,7 @@ fn emit_fn(
                 // in the struct's ownership record, so the caller hands it
                 // over here: without it the only refinement anyone writes on
                 // an array field -- its length -- could not be stated.
-                if let Some((_, Some(pt))) = this_value {
+                if let Some((_, Some(pt), _)) = this_value {
                     pointees.insert(
                         "this".to_string(),
                         (Some(pt.to_string()), Some(pt.to_string())),
@@ -3631,7 +3730,7 @@ fn emit_fn(
         r
     };
     let refine_clause = |base: &str,
-                         this_value: Option<(&str, Option<&str>)>,
+                         this_value: Option<(&str, Option<&str>, bool)>,
                          ty: &Rc<Type>,
                          p: &Rc<Expr>,
                          w: When,
@@ -3746,7 +3845,7 @@ fn emit_fn(
             if let Some(this) = this {
                 out.push(refine_clause(
                     base,
-                    Some((this, None)),
+                    Some((this, None, false)),
                     ty,
                     p,
                     w,
@@ -3762,7 +3861,7 @@ fn emit_fn(
             if let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w) {
                 out.push(refine_clause(
                     base,
-                    Some((&this, own.as_deref())),
+                    Some((&this, own.as_deref(), false)),
                     fty,
                     p,
                     w,
@@ -3858,7 +3957,7 @@ fn emit_fn(
             };
             out.push(with_this(
                 base,
-                Some((&this, own.as_deref())),
+                Some((&this, own.as_deref(), false)),
                 fty,
                 p,
                 w,
@@ -3919,14 +4018,8 @@ fn emit_fn(
     let mut value_err: Option<String> = None;
     for (base, ty, ident, vty, binder, fty, p) in &refines_value {
         let both = spec.pointees.get(base).is_none() && !consumed.contains(base);
-        let wrap = |t: String| match slprop_refine(tds, p) {
-            Some(_) => t,
-            None => format!("pure ({})", t),
-        };
-        let how = |sp: &Spec, w: When| match slprop_refine(tds, p) {
-            Some(code) => sp.inline_pulse(code, w),
-            None => sp.prop(p, w),
-        };
+        let wrap = |t: String| t;
+        let how = |sp: &Spec, w: When| sp.refinement(p, w);
         match with_this(
             base,
             None,
@@ -3950,7 +4043,7 @@ fn emit_fn(
                 // dispatch table: the struct's fields include code pointers,
                 // and nothing but the author's own clause can say what the
                 // code at them does.
-                if slprop_refine(tds, p).is_some() {
+                if refine_states_own(tds, p) {
                     valid_fps.borrow_mut().insert(base.clone());
                 }
             }
@@ -4004,7 +4097,7 @@ fn emit_fn(
         let code = slprop_refine(tds, p).unwrap();
         match with_this(
             "return",
-            Some((&ret_name, None)),
+            Some((&ret_name, None, true)),
             &decl.ret_type,
             p,
             When::Post,
@@ -4020,13 +4113,10 @@ fn emit_fn(
         }
     }
     for (_, ty, ident, vty, binder, fty, p) in &ret_valued {
-        let how = |sp: &Spec, w: When| match slprop_refine(tds, p) {
-            Some(code) => sp.inline_pulse(code, w),
-            None => sp.prop(p, w),
-        };
+        let how = |sp: &Spec, w: When| sp.refinement(p, w);
         match with_this(
             "return",
-            Some((&ret_name, None)),
+            Some((&ret_name, None, true)),
             ty,
             p,
             When::Post,
@@ -4035,14 +4125,19 @@ fn emit_fn(
             &[],
             &how,
         ) {
-            Ok(t) => ret_fresh.push((
-                binder.clone(),
-                fty.clone(),
-                match slprop_refine(tds, p) {
-                    Some(_) => t,
-                    None => format!("pure ({})", t),
-                },
-            )),
+            Ok(t) => {
+                // The binder is also what a `_letimpure` accessor applied to
+                // the result denotes, exactly as it is for a parameter: the
+                // author named the ghost state once, and `_ensures` clauses
+                // about the returned handle are written in terms of it.
+                spec.valued.borrow_mut().push((
+                    "return".to_string(),
+                    fty.clone(),
+                    binder.clone(),
+                    true,
+                ));
+                ret_fresh.push((binder.clone(), fty.clone(), t))
+            }
             Err(why) => {
                 value_err.get_or_insert(why);
             }
