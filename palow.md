@@ -3815,8 +3815,24 @@ new facts about memory.
    unavailable it leaves the alias alone, since the question is asked to
    reject a sum of integers and not to second-guess the rest.
 
-   As of this milestone: **987 specifications, 948 of them with real bodies,
-   19 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   A union's *array* arm can now be `$activate`d. The model already had the
+   step -- `switch` hands back the arm's storage as an array of `option`s, and
+   `union_array_member` was written to check exactly that -- but the emitter
+   only knew how to record a scalar arm, because an array arm has no single
+   Palow name: its ownership is the array combinator applied to its element's.
+   An activated array arm is now the same kind of slot a local array is, and
+   the element writes go down the path they already went down. What is new is
+   knowing when it is over: an arm is storage until every one of its elements
+   holds a value, so the indices written are counted, and the write that fills
+   the last one is the one that hands the arm back to the union -- the same
+   step a struct arm's last *field* write takes, counted by index instead of
+   by name. That last step needs to name the arm's value, and nothing does:
+   the elements were written one statement at a time. `array_claim_all_somes`
+   is the model's answer -- a sequence all of whose cells are `Some` is a
+   sequence of values, and which values it is need never be said.
+
+   As of this milestone: **987 specifications, 949 of them with real bodies,
+   18 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

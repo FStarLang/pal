@@ -609,6 +609,29 @@ ghost fn array_claim_all (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
   fold array_pts_to t_repr (SZ.v esize) a 1.0R vs;
 }
 
+(* Every element has been written, but nothing has said *which* values were
+   written. That is enough: a sequence all of whose elements are `Some` is a
+   sequence of values, and which values it is need never be named. This is the
+   step a union's array arm takes when the last of its elements is filled --
+   the values were written one statement at a time and no term names them all
+   at once. *)
+let all_some (#t: Type0) (xs: Seq.seq (option t)) : prop =
+  forall (i: nat). i < Seq.length xs ==> Some? (Seq.index xs i)
+
+let unsomes (#t: Type0) (xs: Seq.seq (option t) { all_some xs }) : Seq.seq t =
+  Seq.init (Seq.length xs) (fun (i: nat { i < Seq.length xs }) -> Some?.v (Seq.index xs i))
+
+ghost fn array_claim_all_somes (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                               (esize: SZ.t) (#xs: Seq.seq (option t))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs
+  requires pure (all_some xs)
+  ensures  exists* (vs: Seq.seq t).
+             array_pts_to t_repr (SZ.v esize) a 1.0R vs **
+             pure (Seq.length vs == Seq.length xs)
+{
+  array_claim_all t_repr a esize (unsomes xs);
+}
+
 let somes_length (#t: Type0) (xs: Seq.seq t)
   : Lemma (Seq.length (somes xs) == Seq.length xs)
           [SMTPat (Seq.length (somes xs))] = ()

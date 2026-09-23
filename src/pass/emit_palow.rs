@@ -7354,6 +7354,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     array: Some((format!("{}sz", esize), false)),
                     global: true,
                     union_arm: None,
+                    filling: None,
                     holds_fn: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 }
@@ -7380,6 +7381,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     array: None,
                     global: true,
                     union_arm: None,
+                    filling: None,
                     holds_fn: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 }
@@ -8151,6 +8153,13 @@ struct Slot {
     /// value of the arm's type, and it is the union that holds it, so the
     /// gather has to be followed by the arm's `unfocus`.
     union_arm: Option<(String, String)>,
+    /// Set when the slot is an *array* arm made live by `$activate`: the arm's
+    /// static length, and the element indices written so far. An array arm is
+    /// storage until every element of it holds a value, and the write that
+    /// completes it is the one that makes the union hold the arm again --
+    /// which is the same bookkeeping a struct arm's fields get, indexed
+    /// rather than named.
+    filling: Option<(u64, BTreeSet<u64>)>,
     /// The C functions whose addresses were last stored in this slot, keyed
     /// by the path within it: the empty string for the slot itself, `op` for
     /// the field of that name, `inner.op` for a field of a field. A code
@@ -8606,6 +8615,45 @@ impl<'a> Body<'a> {
             a
         ));
         self.active.insert(a.clone(), arm.val.to_string());
+        // An array arm has no single Palow name -- its ownership is the array
+        // combinator applied to its element's -- so it gets a slot of the same
+        // shape a local array has: storage whose cells are `option`s, written
+        // one at a time. The switch hands it over folded, with the length
+        // pinned in the slprop; every access wants it unfolded, which is the
+        // form the elements are focused out of.
+        if let Some(FieldShape::Array { pn, esize, len }) = field_shape(self.tds, &m.ty) {
+            let TypeT::FixedArray(elem, _) = &peel(self.tds, &m.ty).val else {
+                return Err(format!(
+                    "`$activate` of member `{}`, which is not a fixed-size array",
+                    arm.val
+                ));
+            };
+            let Some(ety) = fstar_type(self.tds, elem) else {
+                return Err(format!(
+                    "`$activate` of member `{}`, whose elements have no Palow type",
+                    arm.val
+                ));
+            };
+            self.lines.push(format!(
+                "unfold array_pts_to_uninit {}_repr {} {} {};",
+                pn, esize, len, a
+            ));
+            self.slots.retain(|s| s.addr != a);
+            self.slots.push(Slot {
+                name: format!("*{}.{}", a, arm.val),
+                addr: a,
+                palow_ty: pn,
+                fstar_ty: ety,
+                init: false,
+                array: Some((format!("{}sz", esize), true)),
+                global: true,
+                union_arm: Some((un, arm.val.to_string())),
+                holds_fn: BTreeMap::new(),
+                scattered: BTreeSet::new(),
+                filling: Some((len, BTreeSet::new())),
+            });
+            return Ok(());
+        }
         let (Some(pn), Some(fty)) = (palow_name(self.tds, &m.ty), fstar_type(self.tds, &m.ty))
         else {
             return Err(format!(
@@ -8630,6 +8678,7 @@ impl<'a> Body<'a> {
             union_arm: Some((un, arm.val.to_string())),
             holds_fn: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            filling: None,
         });
         Ok(())
     }
@@ -8681,7 +8730,7 @@ impl<'a> Body<'a> {
         {
             let (base, idx) = (base.clone(), idx.clone());
             let mark = self.lines.len();
-            let Ok(f) = self.focus_elem(&base, Some(&idx)) else {
+            let Ok(f) = self.focus_elem(&base, Some(&idx), false) else {
                 self.lines.truncate(mark);
                 return;
             };
@@ -8700,6 +8749,7 @@ impl<'a> Body<'a> {
                 array: None,
                 global: true,
                 union_arm: None,
+                filling: None,
                 holds_fn: BTreeMap::new(),
                 scattered: BTreeSet::new(),
             });
@@ -8731,6 +8781,7 @@ impl<'a> Body<'a> {
             array: None,
             global: true,
             union_arm: None,
+            filling: None,
             holds_fn: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
@@ -9111,6 +9162,7 @@ impl<'a> Body<'a> {
             array: None,
             global: false,
             union_arm: None,
+            filling: None,
             holds_fn: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
@@ -9266,7 +9318,7 @@ impl<'a> Body<'a> {
             // afterwards, exactly as a subscript does; the difference is that
             // the access happens in the callee rather than here.
             ExprT::Index(base, idx) => {
-                let f = self.focus_elem(base, Some(idx))?;
+                let f = self.focus_elem(base, Some(idx), false)?;
                 self.lines.extend(f.open_read.iter().cloned());
                 self.pending_close.extend(f.close_write);
                 Ok(f.at)
@@ -9454,7 +9506,7 @@ impl<'a> Body<'a> {
                     close_write,
                 })
             }
-            ExprT::Index(base, idx) => self.focus_elem(base, Some(idx)),
+            ExprT::Index(base, idx) => self.focus_elem(base, Some(idx), writing),
             _ => Err(format!("a place that is {}", expr_kind_of(&e.val))),
         }
     }
@@ -9835,7 +9887,7 @@ impl<'a> Body<'a> {
             && self.arrays.contains_key(&v.val.to_string())
         {
             let inner = inner.clone();
-            let f = self.focus_elem(&inner, None)?;
+            let f = self.focus_elem(&inner, None, false)?;
             // The element has to be *opened* as well as focused: a block whose
             // elements may be uninitialised is owned at the `maybe` view, and
             // a field of one cannot be reached until the element has been
@@ -9856,7 +9908,7 @@ impl<'a> Body<'a> {
             && self.is_array_place(arr)
         {
             let mark = self.lines.len();
-            let f = self.focus_elem(arr, Some(idx))?;
+            let f = self.focus_elem(arr, Some(idx), false)?;
             // An element `$unfold-uninit` already opened stays open: the
             // focus is standing, so taking it again would be taking the
             // ownership twice. There is no way to ask for the address without
@@ -10016,6 +10068,28 @@ impl<'a> Body<'a> {
             // every element has been written -- which is a fact that would
             // have to be carried across statements, and is not.
             ExprT::Member(b2, f) if self.union_of(b2).is_some() => {
+                // An arm a `$activate` handed over is not the union's value
+                // any more: it is storage held directly at the union's own
+                // address, so there is nothing to focus out of and nothing to
+                // put back until it is full.
+                if let Ok(a) = self.addr_only(b2)
+                    && let Some(sl) = self.slots.iter().rev().find(|s| {
+                        s.addr == a
+                            && s.filling.is_some()
+                            && s.union_arm.as_ref().map(|(_, m)| m.as_str())
+                                == Some(&*f.val.to_string())
+                    })
+                {
+                    return Ok(ArrayPlace {
+                        addr: a.clone(),
+                        pn: sl.palow_ty.clone(),
+                        esize: sl.array.clone().unwrap().0,
+                        base: 0,
+                        close_read: Vec::new(),
+                        close_write: Vec::new(),
+                        maybe: true,
+                    });
+                }
                 let fty = self.field_ty(b2, f)?;
                 let Some(FieldShape::Array { pn, esize, .. }) = field_shape(self.tds, &fty) else {
                     return Err(format!(
@@ -10114,7 +10188,12 @@ impl<'a> Body<'a> {
     }
 
     /// Open one element of an array for a single access.
-    fn focus_elem(&mut self, base: &Expr, idx: Option<&Expr>) -> Result<Focus, String> {
+    fn focus_elem(
+        &mut self,
+        base: &Expr,
+        idx: Option<&Expr>,
+        writing: bool,
+    ) -> Result<Focus, String> {
         // `array_focus` demands `i < Seq.length xs`. A constant index of an
         // array whose extent is in its type carries that bound with it;
         // anything else is the function's own `_requires` saying so, and
@@ -10224,6 +10303,34 @@ impl<'a> Body<'a> {
         ];
         let mut close_write = both.clone();
         let mut close_read = both;
+        // A union arm handed over by `$activate` is storage until every one of
+        // its elements holds a value. The write that fills the last one is
+        // what turns the arm back into a value of the arm's type, and the
+        // union is what holds it -- the same step a struct arm's last field
+        // write takes, counted by index instead of by name.
+        if writing
+            && let Some(k) = i.strip_suffix("sz").and_then(|d| d.parse::<u64>().ok())
+            && let Some(si) = self
+                .slots
+                .iter()
+                .rposition(|s| s.addr == arr && s.filling.is_some())
+        {
+            let full = {
+                let (n, set) = self.slots[si].filling.as_mut().unwrap();
+                set.insert(k);
+                let n = *n;
+                (0..n).all(|j| set.contains(&j))
+            };
+            if full {
+                let (un, arm) = self.slots[si].union_arm.clone().unwrap();
+                close_write.push(format!(
+                    "array_claim_all_somes {}_repr {} {};",
+                    pn, arr, esize
+                ));
+                close_write.push(format!("{}_unfocus_{} {};", un, arm, arr));
+                self.slots.remove(si);
+            }
+        }
         close_read.extend(cl_read);
         close_write.extend(cl_write);
         Ok(Focus {
@@ -10836,7 +10943,7 @@ impl<'a> Body<'a> {
             let (arr, idx) = (arr.clone(), idx.clone());
             self.uses.insert(v);
             let mark = self.lines.len();
-            let f = self.focus_elem(&arr, Some(&idx));
+            let f = self.focus_elem(&arr, Some(&idx), false);
             self.lines.truncate(mark);
             return f.map(|f| f.at);
         }
@@ -11059,7 +11166,7 @@ impl<'a> Body<'a> {
                     // `*p` on an array parameter is `p[0]`: the ownership is a
                     // sequence either way, so the access has to be focused.
                     if self.arrays.contains_key(&*v.val.to_string()) {
-                        let f = self.focus_elem(inner, None)?;
+                        let f = self.focus_elem(inner, None, false)?;
                         self.lines.extend(f.open_read.iter().cloned());
                         let t = self.fresh("elem");
                         self.lines
@@ -11997,6 +12104,7 @@ impl<'a> Body<'a> {
                 array: Some((format!("{}sz", esize), true)),
                 global: false,
                 union_arm: None,
+                filling: None,
                 holds_fn: BTreeMap::new(),
                 scattered: BTreeSet::new(),
             });
@@ -12026,6 +12134,7 @@ impl<'a> Body<'a> {
             array: None,
             global: false,
             union_arm: None,
+            filling: None,
             holds_fn: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
@@ -12560,7 +12669,7 @@ impl<'a> Body<'a> {
         if let ExprT::Deref(inner) = &lhs.val {
             if let ExprT::Var(v) = &inner.val {
                 if self.arrays.contains_key(&*v.val.to_string()) {
-                    let f = self.focus_elem(inner, None)?;
+                    let f = self.focus_elem(inner, None, true)?;
                     self.lines.extend(f.open_write.iter().cloned());
                     self.lines
                         .push(format!("{} {} {};", f.write_fn, f.at, value));
@@ -12992,6 +13101,7 @@ impl<'a> Body<'a> {
                     array: Some((format!("{}sz", esize), true)),
                     global: false,
                     union_arm: None,
+                    filling: None,
                     holds_fn: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 });
@@ -15049,6 +15159,7 @@ fn emit_body(
                     // Not ours to release: the caller allocated it.
                     global: true,
                     union_arm: None,
+                    filling: None,
                     holds_fn: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 });
