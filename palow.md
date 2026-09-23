@@ -3786,13 +3786,24 @@ new facts about memory.
    Two of `dpe`'s three admits go, and `destroy_uds_context` and
    `mk_l0_context` now verify with real bodies.
 
-   What is left in `dpe` is the C rather than the model: `derive_child_from_context`
-   never checks what `calloc` returned, and `init_engine_context` and
-   `init_l0_context` pass storage to an `_out` parameter that has already been
-   written. Palow models allocation as fallible, and says so.
+   What was left in `dpe` was the C rather than the model. Palow treats
+   allocation as fallible and says so, and `derive_child_from_context` never
+   checked what `calloc` returned. Checking it is a one-line C fix and costs
+   the contract nothing -- the context is untouched when allocation fails,
+   which is exactly what the `!return` postcondition already promised. It did
+   need one thing of the model: a `calloc`ed extent lands in the uninitialised
+   view, every cell a `Some` but a `Some` all the same, and a callee that takes
+   an ordinary array wants the other view. The claim across is exact, since
+   the values are the zeros the allocator promised, and which view a block is
+   in now decides how `free` gives it back.
 
-   As of this milestone: **987 specifications, 946 of them with real bodies,
-   21 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   The two `dpe` admits that remain are the same story one step further on:
+   `init_engine_context` and `init_l0_context` hand a `malloc` nobody checked
+   to an `_out` parameter. Fixing that means letting those functions fail,
+   which is a change to their signatures rather than to their bodies.
+
+   As of this milestone: **987 specifications, 947 of them with real bodies,
+   20 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

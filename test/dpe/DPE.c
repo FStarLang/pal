@@ -287,6 +287,12 @@ bool derive_child_from_context(context_obj ctx, const engine_record_t *record)
 {
   _ghost_stmt(DPE_predicates.elim_context_full_pred_uds $(*ctx));
   uint8_t *cdi_buf = (uint8_t*)calloc(DICE_DIGEST_LEN, sizeof(uint8_t));
+  // Allocation can fail, and the context is untouched when it does, which is
+  // exactly what the `!return` postcondition promises.
+  if (cdi_buf == NULL) {
+    _ghost_stmt(DPE_predicates.intro_context_full_pred_uds $(*ctx));
+    return false;
+  }
   _assert(cdi_buf._length == DICE_DIGEST_LEN);
   bool ok = engine_main(cdi_buf, ctx->payload.uds, record);
   if (ok) {

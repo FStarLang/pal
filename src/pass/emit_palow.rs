@@ -8280,6 +8280,12 @@ struct ArrayBlock {
     /// promised zeros and the element type has such a value, together with the
     /// lemma calls that say so.
     zero: Option<(String, Vec<String>)>,
+    /// Whether the block has been claimed into the *initialised* view. A
+    /// `calloc`ed extent starts in the uninitialised one -- every cell a
+    /// `Some`, but a `Some` all the same -- and a callee that takes an
+    /// ordinary array wants the other view. Which one it is in decides how it
+    /// is given back.
+    filled: bool,
 }
 
 /// What one arm of an `if` produced: its statements, and the state it leaves
@@ -11690,6 +11696,34 @@ impl<'a> Body<'a> {
                     }
                 }
             }
+            // A `calloc`ed extent is in the uninitialised view -- every cell
+            // a `Some`, but a `Some` all the same -- and a callee that takes
+            // an ordinary array wants the other one. The values are known, so
+            // the claim is exact: nothing is assumed about what is there, only
+            // that zeros are what the allocator promised.
+            if arr_args.get(i) == Some(&true)
+                && outs.get(i) != Some(&true)
+                && let ExprT::Var(v) = &strip_casts(a).val
+                && let Some(bi) = self.blocks.iter().position(|b| {
+                    b.var == *v.val.to_string()
+                        && b.checked
+                        && !b.freed
+                        && b.array
+                            .as_ref()
+                            .is_some_and(|x| !x.filled && x.zero.is_some())
+                })
+            {
+                let (pn, tmp) = (self.blocks[bi].pn.clone(), self.blocks[bi].tmp.clone());
+                let ab = self.blocks[bi].array.clone().unwrap();
+                let (z, _) = ab.zero.clone().unwrap();
+                self.lines.push(format!(
+                    "array_claim_all {}_repr {} {} (Seq.create (SizeT.v {}) {});",
+                    pn, tmp, ab.esize, ab.n, z
+                ));
+                if let Some(x) = self.blocks[bi].array.as_mut() {
+                    x.filled = true;
+                }
+            }
             // An *inline* array field is different: the elements are inside
             // the struct, so what the callee needs is not a separate
             // ownership to unfold but a view of part of this object. That is
@@ -12215,6 +12249,7 @@ impl<'a> Body<'a> {
                 esize: format!("{}sz", esize),
                 nbytes,
                 zero,
+                filled: false,
             }),
         });
         Ok(tmp)
@@ -12448,6 +12483,10 @@ impl<'a> Body<'a> {
             (b.tmp.clone(), b.pn.clone(), b.init)
         };
         match &self.blocks[i].array.clone() {
+            Some(a) if a.filled => self.lines.push(format!(
+                "array_forget_full {}_repr {} {};",
+                pn, tmp, a.esize
+            )),
             Some(a) => self
                 .lines
                 .push(format!("array_forget {}_repr {} {};", pn, tmp, a.esize)),
