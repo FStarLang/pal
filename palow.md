@@ -3802,8 +3802,21 @@ new facts about memory.
    to an `_out` parameter. Fixing that means letting those functions fail,
    which is a change to their signatures rather than to their bodies.
 
-   As of this milestone: **987 specifications, 947 of them with real bodies,
-   20 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   `c_assert/checked_add` was refusing a body that contains no subscript at
+   all, and the reason turned out to be a rule that is right about pointers
+   and silent about anything else. A local assigned once from `a + i` is a
+   name for the element `a[i]`: that is how C spells an interior pointer, and
+   recognising it is what lets an access through the local take the same path
+   a direct subscript does. But the rule was stated on the shape of the
+   expression alone, so `int result = a + b;` -- two integers, a sum -- was
+   read as a name for `a[b]`, and the next mention of `result` went looking
+   for an array parameter called `a`. Addition is only pointer arithmetic when
+   something is a pointer, so the rule now asks; where the type is genuinely
+   unavailable it leaves the alias alone, since the question is asked to
+   reject a sum of integers and not to second-guess the rest.
+
+   As of this milestone: **987 specifications, 948 of them with real bodies,
+   19 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

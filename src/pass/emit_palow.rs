@@ -7644,7 +7644,11 @@ pub fn emit_palow(
             continue;
         };
         let mut t = Touched {
-            aliases: alias_map(&d.body),
+            aliases: {
+                let mut e = base.clone();
+                e.push_fn_decl_args_for_body(&d.decl);
+                alias_map(&d.body, &|x| ptr_base(&tds, &e, x))
+            },
             ..Touched::default()
         };
         touch_stmts(&d.body, &mut t);
@@ -14611,7 +14615,22 @@ fn array_alias_map(body: &Stmts) -> HashMap<String, String> {
     out
 }
 
-fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
+/// Whether an expression is a pointer or an array, so that adding to it is
+/// pointer arithmetic rather than ordinary addition. A type that cannot be
+/// inferred here -- a local declared in the body, which this env does not
+/// have -- is left alone: the question is only asked to *reject* a sum of
+/// two integers, and rejecting more than that would lose real aliases.
+fn ptr_base(tds: &Typedefs, env: &Env, e: &Expr) -> bool {
+    let Ok(t) = env.infer_expr(e) else {
+        return true;
+    };
+    matches!(
+        peel(tds, &t.to_rc()).val,
+        TypeT::Pointer(..) | TypeT::FixedArray(..) | TypeT::FlexArray(..)
+    )
+}
+
+fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, Rc<Expr>> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
@@ -14719,8 +14738,12 @@ fn alias_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
         // computed from. Spelling it as an index is what lets an access
         // through `p` go down the same path a direct `a[i]` does, instead of
         // needing a dereference rule of its own.
+        // The base has to be a pointer or an array for any of that to be
+        // true: `int r = a + b;` is addition, and reading `r` as `a[b]` turns
+        // a sum into a subscript of something that is not even an object.
         if let ExprT::BinOp(BinOp::Add, base, idx) = &strip_vattr(rhs).val
             && lvalue_name(base).is_some()
+            && ptr_base(base)
             && stable_names(rhs, &out, &locals, &t)
         {
             out.insert(
@@ -14877,6 +14900,7 @@ fn emit_body(
     // An array parameter's ownership is a sequence, so every access through it
     // goes through `array_focus` rather than a plain read. Record what each one
     // needs to be focused: the element's Palow type and its size.
+    let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
     let mut arrays = HashMap::new();
     for a in &defn.decl.args {
         if extent(tds, &a.ty) != Some(Extent::Array) {
@@ -14956,7 +14980,7 @@ fn emit_body(
         loop_mark: None,
         divergent_fns,
         blocks: Vec::new(),
-        aliases: alias_map(&defn.body),
+        aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
         array_aliases: array_alias_map(&defn.body),
         active: HashMap::new(),
