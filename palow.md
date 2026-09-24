@@ -4119,8 +4119,24 @@ new facts about memory.
 
    With that, **every contract in the test suite is translated in full.**
 
-   As of this milestone: **987 specifications, 967 of them with real bodies,
-   0 admitted, 0 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   The one function the emitter still refused outright took a pointer to a
+   type that was only ever declared -- `struct opaque;`, with no body in the
+   translation unit. The refusal was mechanical: the emitter asked for the
+   pointee's storage layer and there was none. But C says the same thing
+   about an incomplete type that it says about `void`: no size, no members,
+   nothing to dereference. An opaque pointer is therefore the case Palow
+   already handles best, since here every pointer is a `ptr` whatever it
+   points at, and the address survives being passed around and handed back
+   without anyone having to say what is at the other end. So a pointer to an
+   incomplete type now simply has no pointee, and the ownership such a
+   parameter needs is whatever the author writes by hand -- which is the
+   honest answer, because a caller who knows what the type really is is the
+   only one in a position to say.
+
+   With that, **every function in the test suite is translated.**
+
+   As of this milestone: **988 specifications, 968 of them with real bodies,
+   0 admitted, 0 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

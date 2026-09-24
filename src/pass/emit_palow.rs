@@ -1297,6 +1297,18 @@ fn refined(tds: &Typedefs, ty: &Type) -> bool {
 /// is what lets a caller pass `NULL`. `_nullable` is: it says the pointer may
 /// be null, which changes *whether* the ownership is there, not what it is of.
 /// See `is_nullable`.
+/// Whether a type was declared but never defined, so that C calls it
+/// *incomplete*: `struct opaque;` with no body anywhere in the translation
+/// unit. Such a type has no size and no members, so there is no storage layer
+/// for it and nothing for a points-to to be stated at.
+fn is_incomplete(tds: &Typedefs, ty: &Type) -> bool {
+    match &tds.resolve(ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => !tds.structs.contains_key(&*n.val),
+        TypeT::TypeRef(TypeRefKind::Union(n)) => !tds.unions.contains_key(&*n.val),
+        _ => false,
+    }
+}
+
 fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
     match &tds.resolve(ty).val {
         // `void *` points at no object: C gives it no size and no
@@ -1306,6 +1318,12 @@ fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
         // whatever it points at, so a `void *` needs no conversion in either
         // direction, only the ownership the author supplies by hand.
         TypeT::Pointer(to, _) if matches!(tds.resolve(to).val, TypeT::Void) => None,
+        // A pointer to a type that was only ever declared is in exactly the
+        // same position. C gives an incomplete type no size and no members,
+        // so it cannot be dereferenced, copied or laid out; the address is
+        // all there is, and all a contract can say about it is what the
+        // author says by hand.
+        TypeT::Pointer(to, _) if is_incomplete(tds, to) => None,
         TypeT::Pointer(to, _) => Some(to),
         TypeT::Nullable(t)
         | TypeT::Refine(t, _)
