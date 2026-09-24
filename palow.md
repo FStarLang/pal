@@ -4006,8 +4006,23 @@ new facts about memory.
    second name for that array whatever its declared type, so a pointer
    deliberately spelled as a pointer was read as an element.
 
-   As of this milestone: **987 specifications, 960 of them with real bodies,
-   7 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   `binary_search` itself then follows, and it is the first function whose
+   loop assigns to its own parameters. That needs entry-time storage for a
+   parameter the body *writes*, for the same reason one whose address is taken
+   needs it: `lo = mid + 1` inside an arm cannot allocate a slot scoped to the
+   arm. It also surfaced a clause that had never been checked, because an
+   admitted body checks nothing: the monotonicity invariant spelled with
+   Pulse's `old`. `old` is a marker the checker resolves against a
+   dereference in the precondition state, and in Palow the invariant's
+   pointers are pure binders, so there is nothing for it to resolve against
+   and it elaborates to `unit`. What `_old(p)` means in a loop invariant is
+   the value the *function* was called with, and Palow has that value in
+   scope under its own name -- the parameter. The emitter now says so rather
+   than silently handing back this iteration's binder, which is what it had
+   been doing.
+
+   As of this milestone: **987 specifications, 961 of them with real bodies,
+   6 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

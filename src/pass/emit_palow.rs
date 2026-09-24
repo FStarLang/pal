@@ -1418,6 +1418,12 @@ struct Spec<'a> {
     /// `None` on entry means an `_out` parameter, which has no incoming value;
     /// `None` on exit means ownership the function does not give back.
     pointees: HashMap<String, (Option<String>, Option<String>)>,
+    /// Where `_old` names a *parameter's own value* rather than its pointee.
+    /// A loop invariant binds a fresh name for what each slot holds now, and
+    /// a parameter the body assigns to has such a slot -- but `_old(p)` still
+    /// means the value the function was called with, which is the parameter
+    /// itself.
+    old_vals: HashMap<String, String>,
     /// Where `_old` names something other than the entry term in `pointees`.
     /// A loop invariant is the case that needs it: the invariant binds a fresh
     /// value for the current iteration, but `_old` still means the state the
@@ -1619,6 +1625,7 @@ impl<'a> Spec<'a> {
                         tds: self.tds,
                         env: &env,
                         pointees: self.pointees.clone(),
+                        old_vals: self.old_vals.clone(),
                         olds: self.olds.clone(),
                         arrays: self.arrays.clone(),
                         olens: self.olens.clone(),
@@ -2196,6 +2203,9 @@ impl<'a> Spec<'a> {
                     }
                 }
             }
+            ExprT::Var(v) if w == When::Old && self.old_vals.contains_key(&*v.val.to_string()) => {
+                Ok(self.old_vals[&*v.val.to_string()].clone())
+            }
             ExprT::Var(v) => {
                 if let Some(l) = self.locals.get(&*v.val.to_string()) {
                     Ok(l.clone())
@@ -2612,6 +2622,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         tds,
         env,
         pointees: HashMap::new(),
+        old_vals: HashMap::new(),
         olds: HashMap::new(),
         arrays: HashSet::new(),
         olens: HashMap::new(),
@@ -2708,6 +2719,7 @@ fn emit_pure_fn(
         tds,
         env,
         pointees: HashMap::new(),
+        old_vals: HashMap::new(),
         olds: HashMap::new(),
         arrays: HashSet::new(),
         olens: HashMap::new(),
@@ -3663,6 +3675,7 @@ fn emit_fn(
         tds,
         env,
         pointees,
+        old_vals: HashMap::new(),
         olds: HashMap::new(),
         arrays,
         olens: olens.clone(),
@@ -3836,6 +3849,7 @@ fn emit_fn(
             tds,
             env: &env,
             pointees,
+            old_vals: spec.old_vals.clone(),
             olds: spec.olds.clone(),
             arrays,
             olens,
@@ -4874,6 +4888,7 @@ fn field_invariant(tds: &Typedefs, env: &Env, fty: &Type, seq: bool) -> Option<S
         tds,
         env: &env,
         pointees,
+        old_vals: HashMap::new(),
         olds: HashMap::new(),
         arrays,
         olens: HashMap::new(),
@@ -13009,6 +13024,14 @@ impl<'a> Body<'a> {
         // value. The invariant is a contract about one point in the body, and
         // the two should not need different words for the same object.
         let mut olds: HashMap<String, String> = HashMap::new();
+        // A parameter the body assigns to gets a slot, and the invariant binds
+        // what the slot holds *now*. `_old(p)` asks for what it held on entry,
+        // which Palow still has in scope: the parameter.
+        let old_vals: HashMap<String, String> = locals
+            .keys()
+            .filter(|n| self.params.contains(*n))
+            .map(|n| (n.clone(), format!("var_{}", n)))
+            .collect();
         let mut arrays: HashSet<String> = self.arrays.keys().cloned().collect();
         for s in &self.slots {
             if s.global && s.array.is_some() {
@@ -13034,6 +13057,7 @@ impl<'a> Body<'a> {
             tds: self.tds,
             env: &self.env,
             pointees,
+            old_vals,
             olds,
             arrays,
             olens: self.olens.clone(),
@@ -15300,7 +15324,10 @@ fn emit_body(
     let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
     let mut arrays = HashMap::new();
     for a in &defn.decl.args {
-        if extent(tds, &a.ty) != Some(Extent::Array) {
+        // An `_arrayptr` is not an array here: Palow grants it nothing, so
+        // there is no sequence to focus an element out of, and the parameter
+        // is an ordinary pointer-valued object like any other.
+        if extent(tds, &a.ty) != Some(Extent::Array) || is_arrayptr(tds, &a.ty) {
             continue;
         }
         let (Some(name), Some(pt)) = (a.name.as_ref(), pointee(tds, &a.ty)) else {
@@ -15422,10 +15449,18 @@ fn emit_body(
     // `if` reads. Doing it here rather than at the first `&` is also what
     // makes that case translatable at all, since a slot allocated inside an
     // arm would be released at the end of it.
+    //
+    // Assigning to a parameter needs the same storage for the same reason. C
+    // parameters are ordinary mutable objects and a loop that walks one --
+    // `lo = mid + 1` in a binary search -- writes it from inside an `if`,
+    // where a slot could not be allocated at all.
     let addressed = {
         let mut t = Touched::default();
         touch_stmts(&defn.body, &mut t);
         t.addressed
+            .union(&t.written)
+            .cloned()
+            .collect::<HashSet<_>>()
     };
     for a in &defn.decl.args {
         let Some(name) = a.name.as_ref() else {

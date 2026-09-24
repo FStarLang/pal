@@ -23,13 +23,6 @@ _include_pulse(Arrayptrs_include1,
     if is_null x then emp else p
 
   [@@pulse_intro]
-  ghost fn intro_unless_null_null p
-    ensures unless_null null p
-  {
-    rewrite emp as unless_null null p
-  }
-
-  [@@pulse_intro]
   ghost fn intro_unless_null_nonnull (x: ptr) p
     requires p
     ensures unless_null x p
@@ -40,6 +33,16 @@ _include_pulse(Arrayptrs_include1,
     } else {
       rewrite p as unless_null x p;
     }
+  }
+
+  // Declared last so that the matcher reaches for it first: `is_null null` is
+  // `ptr_eq null null` and `ptr_eq` is abstract, so the `if` in `unless_null`
+  // does not reduce and a null return has no other way in.
+  [@@pulse_intro]
+  ghost fn intro_unless_null_null p
+    ensures unless_null null p
+  {
+    rewrite emp as unless_null null p
   }
 
   ghost fn elim_unless_null_null (x: ptr) p
@@ -250,16 +253,42 @@ _arrayptr const int *binary_search(_arrayptr const int *lo, _arrayptr const int 
     _invariant(_inline_pulse(Arrayptrs_include2.claim $(lo) $`arr))
     _invariant(_inline_pulse(Arrayptrs_include2.claim $(hi) $`arr))
     _invariant((bool) _inline_pulse(Arrayptrs_include2.is_slice_prop $(lo) $(hi) $`arr $`v_arr))
+#ifdef PALOW
+    // Pulse's `old` is a marker the checker resolves against a dereference in
+    // the precondition state; in Palow the invariant's pointers are pure
+    // binders and there is nothing for it to resolve against, so the entry
+    // values are named directly.
+    _invariant((bool) _inline_pulse(Arrayptrs_include2.off $(_old(lo)) $`arr <= Arrayptrs_include2.off $(lo) $`arr && Arrayptrs_include2.off $(hi) $`arr <= Arrayptrs_include2.off $(_old(hi)) $`arr))
+#else
     _invariant((bool) _inline_pulse(old (Arrayptrs_include2.off $(lo) $`arr) <= Arrayptrs_include2.off $(lo) $`arr && Arrayptrs_include2.off $(hi) $`arr <= old (Arrayptrs_include2.off $(hi) $`arr)))
+#endif
+#ifdef PALOW
+    // The array itself. In the current model the loop reaches it through the
+    // `arrayptr_pts_to` claims; in Palow the claims are empty and the
+    // ownership has to be carried across the loop explicitly.
+    _invariant(_inline_pulse(array_pts_to int32_t_repr 4 $`arr $`p_arr $`v_arr))
+#endif
   {
       _arrayptr const int *mid = lo + (hi - lo) / 2;
-      if (*mid == target)
+      // Read once, so that the element is carved out of the array and put
+      // back exactly once as well.
+#ifdef PALOW
+      _ghost_stmt(Arrayptrs_include2.focus_at $`arr $(mid));
+#endif
+      int probe = *mid;
+#ifdef PALOW
+      _ghost_stmt(Arrayptrs_include2.unfocus_at $`arr $(mid));
+#endif
+      if (probe == target)
         return mid;
-      else if (*mid < target)
+      else if (probe < target)
         lo = mid + 1;
       else
         hi = mid;
   }
+  // Which arm of `unless_null` the null return takes cannot be worked out by
+  // unification: `is_null null` is `ptr_eq null null`, and `ptr_eq` is
+  // abstract, so the `if` does not reduce. Say it.
   return NULL;
 }
 
