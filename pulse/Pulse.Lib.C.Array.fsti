@@ -565,6 +565,16 @@ val arrayptr_lt (#t: Type) (x z: array t) :
 /// non-owning arrayptr may be converted.
 val array_to_ref (#t: Type u#a) (r: array t) : R.ref t
 
+/// `array_to_ref` preserves nullness in both directions. It is the identity
+/// on the shared handle, so this is a theorem, not an assumption. It is what
+/// lets `_ensures(return != NULL)` hold of a function returning an array
+/// (for example an array field of a struct) once `array_pts_to_not_null` has
+/// put `not (array_is_null a)` in context; `ref_to_core_is_null` carries the
+/// fact on to the `core_ref` a `void *` return erases to (coco L78).
+val array_to_ref_is_null (#t: Type u#a) (r: array t)
+  : Lemma (R.is_null (array_to_ref r) == array_is_null r)
+          [SMTPat (R.is_null (array_to_ref r))]
+
 /// The inverse coercion. `array t` and `ref t` are the same handle, so this is
 /// the identity too. PAL emits it for an integer-to-pointer cast whose target
 /// is an array pointer: the raw address becomes a `ref` via
