@@ -4021,8 +4021,21 @@ new facts about memory.
    than silently handing back this iteration's binder, which is what it had
    been doing.
 
-   As of this milestone: **987 specifications, 961 of them with real bodies,
-   6 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   A code address stored in the heap can be called too. The rule for an
+   indirect call has not changed -- the emitter translates one exactly when it
+   can say which function is being called -- but until now the only places it
+   tracked were the ones with names of their own. A heap cell has no name;
+   the pointer standing in front of it does, so the note is keyed on that
+   pointer's place with a `*` step appended. Repointing the pointer clears
+   the whole subtree underneath, which is what keeps the note honest. The
+   same step also disambiguates `(*p)(...)`: where `p` is itself a code
+   address this is C's older spelling of `p(...)` and the dereference means
+   nothing, and where `p` points at storage holding one it is a load. Looking
+   for the stored note first and falling back to the dereference separates the
+   two without needing the type.
+
+   As of this milestone: **987 specifications, 962 of them with real bodies,
+   5 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

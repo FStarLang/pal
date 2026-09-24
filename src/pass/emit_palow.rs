@@ -10844,20 +10844,32 @@ impl<'a> Body<'a> {
             return Some(g);
         }
         match &e.val {
-            ExprT::Deref(inner) => self.target_of(inner),
+            // `*p` is two different things depending on what `p` is. Where
+            // `p` is itself a code address, `(*p)(...)` is C's older spelling
+            // of `p(...)` and the dereference means nothing. Where `p` points
+            // at storage holding a code address, the dereference is a load
+            // and what matters is what was last stored there -- which the
+            // place note records. Try the load first; a code address has no
+            // note under it, so the two do not collide.
+            ExprT::Deref(inner) => self.place_note(e).or_else(|| self.target_of(inner)),
             _ => {
                 // Storage this body owns: what it holds is what was last
                 // stored, which is in view here. Anything else -- a global,
                 // an initialised constant -- is reached by reading the
                 // declaration it was written in.
-                if let Some((slot, path)) = self.place_key(e)
-                    && let Some(s) = self.slots.iter().rev().find(|s| s.name == slot)
-                {
-                    return s.holds_fn.get(&path).cloned();
+                if let Some(g) = self.place_note(e) {
+                    return Some(g);
                 }
                 self.fn_ref_of(self.const_path(e)?.1?.as_ref())
             }
         }
+    }
+
+    /// The function a place is known to hold, if this body stored one there.
+    fn place_note(&self, e: &Expr) -> Option<String> {
+        let (slot, path) = self.place_key(e)?;
+        let s = self.slots.iter().rev().find(|s| s.name == slot)?;
+        s.holds_fn.get(&path).cloned()
     }
 
     /// A fragment of hand-written Pulse, spliced in as written.
@@ -10941,10 +10953,16 @@ impl<'a> Body<'a> {
     }
 
     /// Which slot an lvalue lives in, and where within it: the empty path for
-    /// the slot itself, `op` for its field of that name. Only storage this
-    /// body owns outright is reachable this way -- a dereference leads
-    /// somewhere else and stops the walk -- which is exactly the storage whose
-    /// stores are all in view here.
+    /// the slot itself, `op` for its field of that name, `*` for what it
+    /// points at.
+    ///
+    /// The walk starts at storage this body owns outright, which is the
+    /// storage whose stores are all in view here. It may step *through* a
+    /// pointer that lives in such storage -- `*pp` is as much a place this
+    /// body knows the history of as `pp` is, as long as `pp` itself was never
+    /// repointed, and repointing it clears the whole subtree underneath. That
+    /// is what lets a code address stored in the heap be called: the cell has
+    /// no name of its own, but the pointer standing in front of it does.
     fn place_key(&self, e: &Expr) -> Option<(String, String)> {
         if let Some(p) = self.unalias(e) {
             return self.place_key(&p);
@@ -10952,6 +10970,10 @@ impl<'a> Body<'a> {
         match &strip_vattr(e).val {
             ExprT::Var(v) if self.slots.iter().any(|s| s.name == *v.val) => {
                 Some((v.val.to_string(), String::new()))
+            }
+            ExprT::Deref(inner) => {
+                let (slot, path) = self.place_key(inner)?;
+                Some((slot, join_path(&path, "*")))
             }
             ExprT::Member(base, f) => {
                 let (slot, path) = self.place_key(base)?;
