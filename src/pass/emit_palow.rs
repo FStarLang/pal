@@ -420,6 +420,14 @@ struct StructInfo {
     /// byte offset, which is what lets the proof carve the object into its
     /// fields and the padding between them and put it back together.
     has_bytes: bool,
+    /// A `_refine` on a field that names a *sibling*, rendered as a
+    /// proposition about a binder `x` of the struct's own type.
+    ///
+    /// Such a clause is not a property of the field's value, so it cannot go
+    /// on the field's type in the record -- but it is a property of the
+    /// object, and the object is what `_pts_to` is about. So it goes there,
+    /// and every operation that produces a `_pts_to` has to say it holds.
+    inv: Option<String>,
 }
 
 /// One member of a union the emitter generated a Palow type for.
@@ -4897,6 +4905,21 @@ fn bit_unit(
 /// would also put an obligation on the write to the sibling, and that is a
 /// separate piece of work. Returning `None` leaves the honest note in place.
 fn field_invariant(tds: &Typedefs, env: &Env, fty: &Type, seq: bool) -> Option<String> {
+    refine_prop(tds, env, fty, seq, "v", &[])
+}
+
+/// The same, with the field's value spelled by `this_term` and the struct's
+/// other fields in scope. A clause naming a sibling is not a property of the
+/// field's value, so it cannot go on the field's type -- but it is a property
+/// of the struct's, and `struct_invariant` uses this to say so.
+fn refine_prop(
+    tds: &Typedefs,
+    env: &Env,
+    fty: &Type,
+    seq: bool,
+    this_term: &str,
+    siblings: &[(String, Rc<Type>, String)],
+) -> Option<String> {
     let (ps, _, _) = refinements(tds, fty).ok()?;
     let ps: Vec<_> = ps
         .into_iter()
@@ -4912,13 +4935,21 @@ fn field_invariant(tds: &Typedefs, env: &Env, fty: &Type, seq: bool) -> Option<S
     let mut pointees = HashMap::new();
     let mut arrays = HashSet::new();
     let mut locals = HashMap::new();
-    locals.insert("this".to_string(), "v".to_string());
+    locals.insert("this".to_string(), this_term.to_string());
     if seq {
         pointees.insert(
             "this".to_string(),
-            (Some("v".to_string()), Some("v".to_string())),
+            (Some(this_term.to_string()), Some(this_term.to_string())),
         );
         arrays.insert("this".to_string());
+    }
+    for (n, ty, term) in siblings {
+        env.push_var_decl(
+            &Rc::<str>::from(&**n).with_loc(first.loc.clone()),
+            ty.clone(),
+            crate::env::LocalDeclKind::RValue,
+        );
+        locals.insert(n.clone(), term.clone());
     }
     let spec = Spec {
         tds,
@@ -4947,6 +4978,49 @@ fn field_invariant(tds: &Typedefs, env: &Env, fty: &Type, seq: bool) -> Option<S
         if !spec.guards.borrow().is_empty() {
             return None;
         }
+    }
+    Some(out.join(" /\\ "))
+}
+
+/// The conjunction of the field refinements that name a sibling, as a
+/// proposition about a binder `x` of the struct's type.
+///
+/// A field whose refinement is a property of its own value has it on the
+/// field's type already, where nothing can construct a value without it.
+/// This is for the other kind, which the record type has nowhere to put:
+/// `int data[]` refined by `this._length == len` is a relation between two
+/// fields, and the only thing that can hold it is the object.
+fn struct_invariant(tds: &Typedefs, env: &Env, fields: &[StructField]) -> Option<String> {
+    let siblings: Vec<(String, Rc<Type>, String)> = fields
+        .iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.ty.clone(),
+                format!("((x).fld_{})", f.name),
+            )
+        })
+        .collect();
+    let mut out = Vec::new();
+    for f in fields {
+        if f.inv.is_some() || !refined(tds, &f.ty) || !has_pure_refine(tds, &f.ty) {
+            continue;
+        }
+        let seq = extent(tds, &f.ty) == Some(Extent::Array) || flex_elem(tds, &f.ty).is_some();
+        // A clause that still does not render is one this does not cover
+        // either, and the note that says so stays where it was.
+        let p = refine_prop(
+            tds,
+            env,
+            &f.ty,
+            seq,
+            &format!("((x).fld_{})", f.name),
+            &siblings,
+        )?;
+        out.push(p);
+    }
+    if out.is_empty() {
+        return None;
     }
     Some(out.join(" /\\ "))
 }
@@ -5111,6 +5185,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 .iter()
                 .all(|f| matches!(f.shape, FieldShape::One { .. }) && has_repr(tds, &f.ty));
         let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
+        let inv = struct_invariant(tds, env, &fields);
         tds.structs.insert(
             name.clone(),
             StructInfo {
@@ -5120,6 +5195,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 align,
                 has_read,
                 has_bytes,
+                inv,
             },
         );
         code.push(Chunk {
@@ -5771,6 +5847,15 @@ fn own_kind(tds: &Typedefs, ty: &Type) -> bool {
 /// An F\* type with a field's invariant attached, when there is one. The
 /// refinement's own binder is always `v`, which is what lets the same rendered
 /// text serve at every site that has to produce such a value.
+/// The obligation a struct's own invariant puts on anything that produces a
+/// points-to at a value: it has to hold. Empty when the struct has none.
+fn struct_inv_req(si: &StructInfo, sn: &str, v: &str) -> String {
+    match &si.inv {
+        Some(_) => format!("  requires pure ({}_invariant {})\n", sn, v),
+        None => String::new(),
+    }
+}
+
 fn refined_ty(ty: &str, inv: Option<&String>) -> String {
     match inv {
         Some(p) => format!("(v: {} {{ {} }})", ty, p),
@@ -5796,7 +5881,8 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     // that points at one, and a result. That is the same place the old model
     // puts it, in the struct predicate rather than in the struct type.
     for f in &si.fields {
-        if refined(tds, &f.ty) && f.inv.is_none() && has_pure_refine(tds, &f.ty) {
+        if refined(tds, &f.ty) && f.inv.is_none() && si.inv.is_none() && has_pure_refine(tds, &f.ty)
+        {
             c += &format!(
                 "(* contract dropped: the `_refine` on field `{}` is not a \
                  property of the field's value alone *)\n",
@@ -5898,12 +5984,26 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         }
     );
 
+    // A relation between two fields is a property of the object, and the
+    // object is what a points-to is about. Putting it here rather than on the
+    // record type is what lets a write to one field be checked against the
+    // other: the write goes through an `unfocus`, and the `unfocus` has to
+    // say the relation still holds.
+    let invariant = match &si.inv {
+        Some(p) => {
+            c += &format!("let {}_invariant (x: {}) : prop =\n  {}\n\n", sn, sn, p);
+            format!(" **\n  pure ({}_invariant x)", sn)
+        }
+        None => String::new(),
+    };
+    let inv_at = |v: &str| struct_inv_req(si, &sn, v);
     c += &format!(
-        "let {}_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {}) : slprop =\n  {} **\n  {}_padding a p\n\n",
+        "let {}_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {}) : slprop =\n  {} **\n  {}_padding a p{}\n\n",
         sn,
         sn,
         conj("x", None),
-        sn
+        sn,
+        invariant
     );
 
     for f in &si.fields {
@@ -5911,13 +6011,18 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         let at = format!("(a +! {}_offsetof_{})", sn, f.name);
         let upd = format!("({{ x with fld_{} = y }})", f.name);
         let owned = |v: &str| f.shape.pts_to(&at, v);
+        // The hole carries the object's own invariant too: what is missing
+        // is one field's storage, not the fact that the object is well
+        // formed, and a read-only unfocus has to be able to put the
+        // points-to back without being told again.
         c += &format!(
-            "let {}_hole_{} (a: ptr) (p: perm) (x: {}) : slprop =\n  {} **\n  {}_padding a p\n\n",
+            "let {}_hole_{} (a: ptr) (p: perm) (x: {}) : slprop =\n  {} **\n  {}_padding a p{}\n\n",
             sn,
             f.name,
             sn,
             conj("x", Some(&f.name)),
-            sn
+            sn,
+            invariant
         );
         c += &format!(
             "ghost fn {sn}_focus_{f} (a: ptr) (#p: perm) (#x: {sn})\n\
@@ -5932,9 +6037,10 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         c += &format!(
             "ghost fn {sn}_unfocus_{f} (a: ptr) (#p: perm) (#x: {sn}) (#y: {rfty})\n\
              \x20 requires {sn}_hole_{f} a p x\n\
-             \x20 requires {owned}\n\
+             \x20 requires {owned}\n{iv}\
              \x20 ensures  {sn}_pts_to a p {upd}\n\
              {{\n  unfold {sn}_hole_{f} a p x;\n  fold {sn}_pts_to a p {upd};\n}}\n\n",
+            iv = inv_at(&upd),
             sn = sn,
             f = f.name,
             rfty = refined_ty(&fty, f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty))),
@@ -6208,10 +6314,11 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     c += &format!(
         "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: {sn})\n\
          \x20 requires mem_pts_to a p b\n\
-         \x20 requires pure ({sn}_repr x b)\n\
+         \x20 requires pure ({sn}_repr x b)\n{iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
          {{\n{w}  fold {sn}_padding a p;\n  fold {sn}_pts_to a p x;\n}}\n\n",
         sn = sn,
+        iv = struct_inv_req(si, &sn, "x"),
         w = w
     );
 
@@ -6222,12 +6329,14 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     c += &format!(
         "ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires elem_pts_to {sn}_repr a p x\n\
+         {iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
          {{\n  elem_reveal {sn}_repr a;\n  {sn}_conceal a #p #_ #x;\n}}\n\n\
          ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
          \x20 ensures  elem_pts_to {sn}_repr a p x\n\
          {{\n  {sn}_reveal a;\n  elem_conceal {sn}_repr a #p #_ #x;\n}}\n\n",
+        iv = struct_inv_req(si, &sn, "x"),
         sn = sn
     );
     c
@@ -6474,7 +6583,8 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
             })
             .collect();
         c += &format!(
-            "ghost fn {sn}_gather (a: ptr) (#p: perm) {b}\n  requires {r}\n  requires {sn}_padding a p\n  ensures  {sn}_pts_to a p {v}\n{{\n  fold {sn}_pts_to a p {v};\n}}\n\n",
+            "ghost fn {sn}_gather (a: ptr) (#p: perm) {b}\n  requires {r}\n  requires {sn}_padding a p\n{iv}  ensures  {sn}_pts_to a p {v}\n{{\n  fold {sn}_pts_to a p {v};\n}}\n\n",
+            iv = struct_inv_req(si, &sn, &value),
             sn = sn,
             b = binders.join(" "),
             r = reqs.join("\n  requires "),
@@ -6783,8 +6893,10 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             "ghost fn {sn}_gather (a: ptr) (#p: perm) {b}\n\
              \x20 requires {r}\n\
              \x20 requires {sn}_padding a p\n\
+             {iv}\
              \x20 ensures  {sn}_pts_to a p {v}\n\
              {{\n  fold {sn}_pts_to a p {v};\n}}\n\n",
+            iv = struct_inv_req(si, &sn, &value),
             sn = sn,
             b = binders.join(" "),
             r = if reqs.is_empty() {
@@ -7003,8 +7115,10 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     c += &format!(
         "fn {sn}_write_uninit (a: ptr) (x: {sn})\n\
          \x20 requires {sn}_pts_to_uninit a\n\
+         {iv}\
          \x20 ensures  {sn}_pts_to a 1.0R x\n\
          {{\n{write}  fold {sn}_pts_to a 1.0R x;\n}}\n\n",
+        iv = struct_inv_req(si, &sn, "x"),
         sn = sn,
         write = write
     );
@@ -7056,8 +7170,10 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     c += &format!(
         "fn {sn}_write (a: ptr) (x: {sn}) (#y: erased {sn})\n\
          \x20 requires {sn}_pts_to a 1.0R y\n\
+         {iv}\
          \x20 ensures  {sn}_pts_to a 1.0R x\n\
          {{\n  {sn}_forget a;\n  {sn}_write_uninit a x;\n}}\n\n",
+        iv = struct_inv_req(si, &sn, "x"),
         sn = sn
     );
     c

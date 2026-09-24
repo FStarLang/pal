@@ -4104,8 +4104,23 @@ new facts about memory.
 
    With that, **every function in the test suite has a real body.**
 
+   The last dropped contract was a `_refine` that named a *sibling* field:
+   `struct vec`'s flexible tail is only as long as the `len` next to it says.
+   That is not a property of the field's value, so it cannot live on the
+   record type -- F\* records relate no two fields -- and the emitter had
+   until now simply dropped it. It belongs on the *object*: one
+   `{sn}_invariant` per struct, conjoined into `{sn}_pts_to` and into every
+   `{sn}_hole_f`, so that a field can be focused and unfocused without the
+   fact ever being lost, and required of every function that produces a
+   points-to at a value it was handed. `focus` gets it for free by unfolding;
+   `unfocus` has to be told, because the value it puts back is a field
+   update, and whether an update preserves a relation between fields is
+   precisely what the caller has to know.
+
+   With that, **every contract in the test suite is translated in full.**
+
    As of this milestone: **987 specifications, 967 of them with real bodies,
-   0 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   0 admitted, 0 contracts dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
