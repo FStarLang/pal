@@ -88,10 +88,9 @@ void pass_arrayptr_as_ref(_array int* a)
 #ifdef PALOW
 _arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
   _requires(_inline_pulse(array_pts_to
-    (maybe_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr 16) 16 $(a) 1.0R $`v))
+    Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr 16 $(a) 1.0R $`v))
   _ensures(_inline_pulse(
-    array_pts_to
-      (maybe_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr 16) 16 $(a) 1.0R $`v **
+    array_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr 16 $(a) 1.0R $`v **
     pure ($(return) == $(a))))
 #else
 _arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
@@ -105,6 +104,31 @@ _arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
     return &a[0];
 }
 
+/*
+ * The caller parts company with the other model for the same reason the
+ * callee does, plus one more: Palow reaches a field through the object's
+ * `pts_to`, which names a value, so there is no way to write one field of
+ * storage that is still raw. The uninitialised half of this test is covered
+ * elsewhere (an `_out` array is filled whole); what is left here, and what
+ * this test is actually about, is the pointer that came back from a call --
+ * it is focused out of the array, written through field by field, and put
+ * back, all under a name no contract ever granted.
+ */
+#ifdef PALOW
+void consume_returned_arrayptr_as_ref(_array SUBRANGE* a)
+  _requires(a._length == 1)
+{
+    SUBRANGE* Sub = get_uninit(a);
+    _ghost_stmt(array_focus Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr $(a) 16sz 0sz 0sz);
+    _ghost_stmt(with x. rewrite (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr ($(a) +! 0sz) 1.0R x) as (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr $(Sub) 1.0R x));
+    _ghost_stmt(Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_of_elem $(Sub));
+    Sub->Low = 10;
+    Sub->Count = 5;
+    _ghost_stmt(Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_to_elem $(Sub));
+    _ghost_stmt(with x. rewrite (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr $(Sub) 1.0R x) as (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr ($(a) +! 0sz) 1.0R x));
+    _ghost_stmt(array_unfocus Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr $(a) 16sz 0sz 0sz);
+}
+#else
 void consume_returned_arrayptr_as_ref(_out _array SUBRANGE* a)
   _requires(a._length == 1)
 {
@@ -117,6 +141,7 @@ void consume_returned_arrayptr_as_ref(_out _array SUBRANGE* a)
     _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some $(Sub));
     _ghost_stmt(array_return_cell $(a));
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // (3) An equality comparison between an arrayptr and a ref.

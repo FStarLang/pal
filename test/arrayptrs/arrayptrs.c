@@ -87,7 +87,88 @@ _include_pulse(Arrayptrs_include2,
   let found (r lo hi x: ptr) : slprop =
     pure (prov_of r == prov_of x
       /\ addr_of lo <= addr_of r
-      /\ addr_of r < addr_of hi)
+      /\ addr_of r < addr_of hi
+      /\ (addr_of r - addr_of x) % 4 == 0)
+
+  // Reading through the returned pointer.
+  //
+  // In this model the pointer carries no ownership -- `claim` is `emp`, and
+  // an `_arrayptr` parameter owns nothing either -- so `*result` is a read of
+  // an element of the parent array, and the caller has to say which one.
+  // `found` says exactly enough to work that out: same provenance, inside the
+  // bounds, on a multiple of the element size. The element is carved out of
+  // the array, read, and put back; what is left over meanwhile is bundled
+  // into `rest` so that each of the caller's ghost statements is one step.
+  //
+  // `idx`, `clamp` and `nth` are clamped so that they are total: an slprop's
+  // arguments are typed with none of the surrounding `requires` in scope, so
+  // `Seq.index` and `Seq.slice` cannot be written under a bound that only a
+  // precondition establishes. Under `in_array` every clamp is the identity.
+  let idx (r x: ptr) : GTot nat =
+    if addr_of x <= addr_of r then (addr_of r - addr_of x) / 4 else 0
+  let clamp (i n: nat) : nat = if i <= n then i else n
+  let nth (v: Seq.seq Int32.t) (i: nat) : GTot Int32.t =
+    if i < Seq.length v then Seq.index v i else 0l
+
+  let rest (x r: ptr) (p: perm) (v: Seq.seq Int32.t) : slprop =
+    array_pts_to int32_t_repr 4 x p (Seq.slice v 0 (clamp (idx r x) (Seq.length v))) **
+    array_pts_to int32_t_repr 4 (r +! 4sz) p
+                 (Seq.slice v (clamp (idx r x + 1) (Seq.length v)) (Seq.length v))
+
+  let in_array (x r: ptr) (v: Seq.seq Int32.t) : prop =
+    prov_of r == prov_of x /\ addr_of x <= addr_of r
+/\ addr_of r + 4 <= addr_of x + 4 * Seq.length v
+/\ (addr_of r - addr_of x) % 4 == 0
+
+  ghost fn focus_at (x r: ptr) (#p: perm) (#v: Seq.seq Int32.t)
+    requires array_pts_to int32_t_repr 4 x p v
+    requires pure (in_array x r v)
+    ensures int32_t_pts_to r p (nth v (idx r x))
+    ensures rest x r p v
+  {
+    let off = SizeT.uint_to_t (addr_of r - addr_of x);
+    let i = SizeT.uint_to_t (idx r x);
+    array_focus int32_t_repr x 4sz i off;
+    ptr_ext (x +! off) r;
+    rewrite (elem_pts_to int32_t_repr (x +! off) p (Seq.index v (SizeT.v i)))
+         as (elem_pts_to int32_t_repr r p (nth v (idx r x)));
+    int32_t_of_elem r;
+    rewrite (array_pts_to int32_t_repr 4 x p (Seq.slice v 0 (SizeT.v i)))
+         as (array_pts_to int32_t_repr 4 x p
+                          (Seq.slice v 0 (clamp (idx r x) (Seq.length v))));
+    rewrite (array_pts_to int32_t_repr 4 ((x +! off) +! 4sz) p
+                          (Seq.slice v (SizeT.v i + 1) (Seq.length v)))
+         as (array_pts_to int32_t_repr 4 (r +! 4sz) p
+                          (Seq.slice v (clamp (idx r x + 1) (Seq.length v)) (Seq.length v)));
+    fold rest x r p v;
+  }
+
+  ghost fn unfocus_at (x r: ptr) (#p: perm) (#v: Seq.seq Int32.t)
+    requires int32_t_pts_to r p (nth v (idx r x))
+    requires rest x r p v
+    requires pure (in_array x r v)
+    ensures array_pts_to int32_t_repr 4 x p v
+  {
+    let off = SizeT.uint_to_t (addr_of r - addr_of x);
+    let i = SizeT.uint_to_t (idx r x);
+    unfold rest x r p v;
+    ptr_ext (x +! off) r;
+    int32_t_to_elem r;
+    rewrite (elem_pts_to int32_t_repr r p (nth v (idx r x)))
+         as (elem_pts_to int32_t_repr (x +! off) p (Seq.index v (SizeT.v i)));
+    rewrite (array_pts_to int32_t_repr 4 x p
+                          (Seq.slice v 0 (clamp (idx r x) (Seq.length v))))
+         as (array_pts_to int32_t_repr 4 x p (Seq.slice v 0 (SizeT.v i)));
+    rewrite (array_pts_to int32_t_repr 4 (r +! 4sz) p
+                          (Seq.slice v (clamp (idx r x + 1) (Seq.length v)) (Seq.length v)))
+         as (array_pts_to int32_t_repr 4 ((x +! off) +! 4sz) p
+                          (Seq.slice v (SizeT.v i + 1) (Seq.length v)));
+    array_unfocus int32_t_repr x 4sz i off;
+    Seq.lemma_eq_intro (Seq.upd v (SizeT.v i) (Seq.index v (SizeT.v i))) v;
+    rewrite (array_pts_to int32_t_repr 4 x p
+                          (Seq.upd v (SizeT.v i) (Seq.index v (SizeT.v i))))
+         as (array_pts_to int32_t_repr 4 x p v);
+  }
 )
 #else
 _include_pulse(Arrayptrs_include1,
@@ -192,6 +273,12 @@ void use_binary_search(_array const int *arr, int target, size_t length)
     _ghost_stmt(Arrayptrs_include1.elim_unless_null_null _ _);
   } else {
     _ghost_stmt(Arrayptrs_include1.elim_unless_null_nonnull _ _);
+#ifdef PALOW
+    _ghost_stmt(Arrayptrs_include2.focus_at $(arr) $(result));
     int val = *result;
+    _ghost_stmt(Arrayptrs_include2.unfocus_at $(arr) $(result));
+#else
+    int val = *result;
+#endif
   }
 }

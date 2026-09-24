@@ -3977,8 +3977,37 @@ new facts about memory.
    `read_selected` -- which recovers a typed pointer from a `void *` and hands
    ownership back and forth across the recovery -- translates and verifies.
 
-   As of this milestone: **987 specifications, 958 of them with real bodies,
-   9 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   What an `_arrayptr` *parameter* owns was the last thing the two models
+   disagreed about in the contract, and Palow's answer is: nothing. In the
+   current model an arrayptr is a value of its own, linked to its parent array
+   by an `arrayptr_pts_to` resource; Palow has no such link, because a pointer
+   is an address with a provenance and carries no ownership at all. Giving
+   each such parameter an `array_pts_to` of its own was an invention, and an
+   unusable one -- its length was an existential nothing related to the
+   parent, and a caller holding a pointer one past the end had no element to
+   produce one from, so `binary_search`'s caller was asked to focus an element
+   that does not exist. Under Palow the ownership such a function works
+   against belongs in its own contract, where it names the parent array
+   directly, and that is where `binary_search` already had it. The argument
+   side follows: a name standing for an array element is passed to an
+   `_arrayptr` parameter for its address alone, the focus computed for its
+   spelling and withdrawn again, exactly as pointer arithmetic already did.
+   Nothing else in the suite moved, which is the evidence that the grant was
+   never load-bearing.
+
+   Two tests whose pointer came back from a call are then only a matter of
+   saying which element it names. `consume_returned_arrayptr_as_ref` focuses
+   the element out of the array, writes its fields through the returned
+   pointer and puts it back; `use_binary_search` does the same around a read,
+   with the index computed from the address difference that `found` already
+   bounds. Both spell the ghost steps in their own `_include_pulse` module,
+   which is where a fact that only the author knows belongs. One emitter bug
+   fell out along the way: a local bound once from an array was treated as a
+   second name for that array whatever its declared type, so a pointer
+   deliberately spelled as a pointer was read as an element.
+
+   As of this milestone: **987 specifications, 960 of them with real bodies,
+   7 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

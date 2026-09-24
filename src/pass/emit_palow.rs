@@ -870,6 +870,30 @@ enum Extent {
     Array,
 }
 
+/// Whether a pointer was declared `_arrayptr`: a pointer *into* an array
+/// somebody else owns.
+///
+/// In the current model that is a kind of its own, linked to its parent by an
+/// `arrayptr_pts_to` resource. Palow has no such link -- a pointer is an
+/// address with a provenance and owns nothing at all -- so an `array_pts_to`
+/// per `_arrayptr` parameter would be an invention, and an unusable one: its
+/// length is an existential nothing relates to the parent, and a caller
+/// holding a pointer one past the end has no element to produce it from. The
+/// ownership such a function works against belongs in its own contract, where
+/// it can name the parent array directly.
+fn is_arrayptr(tds: &Typedefs, ty: &Type) -> bool {
+    match &tds.resolve(ty).val {
+        TypeT::Pointer(_, PointerKind::ArrayPtr) => true,
+        TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t) => is_arrayptr(tds, t),
+        _ => false,
+    }
+}
+
 fn extent(tds: &Typedefs, ty: &Type) -> Option<Extent> {
     match &tds.resolve(ty).val {
         TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => Some(Extent::Array),
@@ -3039,7 +3063,7 @@ fn emit_fn(
             collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
         }
 
-        let Some(pt) = pointee(tds, &arg.ty) else {
+        let Some(pt) = pointee(tds, &arg.ty).filter(|_| !is_arrayptr(tds, &arg.ty)) else {
             // A struct passed by value still owns what its pointers reach.
             // The value is the parameter itself, so the deep half attaches
             // to it directly with no points-to to hang from -- which is the
@@ -7845,6 +7869,11 @@ pub fn emit_palow(
                     .map(|a| a.mode == ParamMode::Out)
                     .collect(),
                 plain_ptrs: fndecl.args.iter().map(|a| is_plain(&tds, &a.ty)).collect(),
+                arrayptr_args: fndecl
+                    .args
+                    .iter()
+                    .map(|a| is_arrayptr(&tds, &a.ty))
+                    .collect(),
                 arr_args: fndecl
                     .args
                     .iter()
@@ -8393,6 +8422,11 @@ struct Callee {
     /// Which parameters are `_array`s, and so want a whole sequence's
     /// ownership rather than a single pointee's.
     arr_args: Vec<bool>,
+    /// Which parameters are `_arrayptr`s. In Palow such a parameter owns
+    /// nothing, so the argument is wanted for its address alone: a name that
+    /// stands for an array element must not hand over the element's
+    /// ownership, and a pointer one past the end has no element to hand.
+    arrayptr_args: Vec<bool>,
     /// Which parameters are `_consumes`, by position. The argument's ownership
     /// does not come back, so the caller stops accounting for it.
     consumes: Vec<bool>,
@@ -11896,6 +11930,7 @@ impl<'a> Body<'a> {
         let outs = c.outs.clone();
         let plain_ptrs = c.plain_ptrs.clone();
         let arr_args = c.arr_args.clone();
+        let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
         let mut out = format!("func_{}", name.val);
         for (i, a) in args.iter().enumerate() {
@@ -11985,6 +12020,8 @@ impl<'a> Body<'a> {
                 self.out_arg(a)?
             } else if is_literal(a) && plain_ptrs.get(i) != Some(&true) {
                 self.literal_arg(a)?
+            } else if arrayptr_args.get(i) == Some(&true) {
+                self.ptr_val(a)?
             } else {
                 self.rvalue(a)?
             };
@@ -14907,13 +14944,17 @@ struct TranslatedBody {
 /// are the same object. Treating `p` as a slot would mean owning a pointer
 /// whose pointee is an element of `a`, which is ownership the contract never
 /// granted and never had to: it granted the array.
-fn array_alias_map(body: &Stmts) -> HashMap<String, String> {
+fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
+    // Only a local that is itself an array view can be a second name for an
+    // array. A plain pointer bound from an array is a pointer *value* -- it
+    // has been deliberately spelled as one -- and reading it has to read the
+    // object it names, not the array it happened to come from.
     let locals: HashSet<String> = body
         .iter()
         .filter_map(|s| match &s.val {
-            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            StmtT::Decl(n, ty) if extent(tds, ty) == Some(Extent::Array) => Some(n.val.to_string()),
             _ => None,
         })
         .collect();
@@ -15346,7 +15387,7 @@ fn emit_body(
         aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
-        array_aliases: array_alias_map(&defn.body),
+        array_aliases: array_alias_map(tds, &defn.body),
         active: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
