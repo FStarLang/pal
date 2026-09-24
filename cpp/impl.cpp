@@ -894,23 +894,59 @@ public:
     return builder.build();
   }
 
+  // Recognize a `sizeof` operand in an allocation size expression. Both
+  // spellings are accepted: a type operand (`sizeof(T)`) and an expression
+  // operand (`sizeof(*p)`, `sizeof *p`), the latter being the common C idiom
+  // `p = malloc(sizeof(*p))`. The operand type is read off with
+  // `getTypeOfArgument()`, which covers both. Returns nullptr if `e` is not a
+  // `sizeof`.
+  static const UnaryExprOrTypeTraitExpr *asSizeof(Expr *e) {
+    auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(e->IgnoreParenImpCasts());
+    if (!s || s->getKind() != UETT_SizeOf)
+      return nullptr;
+    // A VLA operand has no static size, so it does not denote an allocation
+    // unit; an incomplete operand type cannot be translated either.
+    auto argTy = s->getTypeOfArgument();
+    if (argTy->isIncompleteType() || argTy->isDependentType() ||
+        argTy->isVariableArrayType())
+      return nullptr;
+    return s;
+  }
+
   // For a flexible-array-member allocation's trailing size term, return the
   // count operand `n` of `n * sizeof(elem)` or `sizeof(elem) * n` (the
   // non-sizeof multiplicand). Returns nullptr if the term is not a recognized
-  // product with a type-sizeof factor.
+  // product with a sizeof factor.
   static Expr *flexArrayCountSide(Expr *e) {
     auto *mul = dyn_cast<BinaryOperator>(e->IgnoreParenImpCasts());
     if (!mul || mul->getOpcode() != BO_Mul)
       return nullptr;
-    auto isTypeSizeof = [](Expr *x) {
-      auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(x->IgnoreParenImpCasts());
-      return s && s->getKind() == UETT_SizeOf && s->isArgumentType();
-    };
-    if (isTypeSizeof(mul->getLHS()))
+    if (asSizeof(mul->getLHS()))
       return mul->getRHS();
-    if (isTypeSizeof(mul->getRHS()))
+    if (asSizeof(mul->getRHS()))
       return mul->getLHS();
     return nullptr;
+  }
+
+  bool canOmitVariadicArgument(Expr *e) {
+    if (e->HasSideEffects(*astCtx))
+      return false;
+    e = e->IgnoreParenImpCasts();
+    if (isa<IntegerLiteral, CharacterLiteral, FloatingLiteral>(e))
+      return true;
+    bool address = false;
+    if (auto *op = dyn_cast<UnaryOperator>(e);
+        op && op->getOpcode() == UO_AddrOf) {
+      address = true;
+      e = op->getSubExpr()->IgnoreParens();
+    }
+    auto *ref = dyn_cast<DeclRefExpr>(e);
+    auto *var = ref ? dyn_cast<VarDecl>(ref->getDecl()) : nullptr;
+    if (!var || (!isa<ParmVarDecl>(var) && !var->hasLocalStorage()))
+      return false;
+    auto ty = var->getType();
+    return !ty.isVolatileQualified() && !ty->isAtomicType() &&
+           (address || ty->isScalarType());
   }
 
   Rc<ir::Expr> trRValue(Expr *e) {
@@ -944,6 +980,24 @@ public:
         }
         return mk_rvalue_lvalue(std::move(loc), trLValue(ic->getSubExpr()));
       }
+      case CK_PointerToIntegral: {
+        auto *target = ic->getType()->getAs<BuiltinType>();
+        auto source = ic->getSubExpr()->getType();
+        if (target &&
+            (target->getKind() == BuiltinType::Long ||
+             target->getKind() == BuiltinType::ULong) &&
+            source->isPointerType() &&
+            !source->getPointeeType()->isFunctionType()) {
+          return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                                trQualType(ic->getType(), e->getSourceRange()));
+        }
+        reportUnsupported(e->getSourceRange(), loc,
+                          "unsupported pointer-to-integer cast",
+                          "only object or void pointers to long or unsigned "
+                          "long are supported");
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
+      }
       case CK_IntegralCast:
       case CK_IntegralToBoolean:
       case CK_PointerToBoolean:
@@ -966,14 +1020,11 @@ public:
           if (auto *callee = call->getDirectCallee()) {
             if (callee->getName() == "malloc" && call->getNumArgs() == 1) {
               auto *arg = call->getArg(0)->IgnoreParenImpCasts();
-              // Single element: malloc(sizeof(T))
-              if (auto *sizeofExpr = dyn_cast<UnaryExprOrTypeTraitExpr>(arg)) {
-                if (sizeofExpr->getKind() == UETT_SizeOf &&
-                    sizeofExpr->isArgumentType()) {
-                  auto allocTy = trQualType(sizeofExpr->getArgumentType(),
-                                            sizeofExpr->getSourceRange());
-                  return mk_malloc(std::move(loc), std::move(allocTy));
-                }
+              // Single element: malloc(sizeof(T)) or malloc(sizeof(*p))
+              if (auto *sizeofExpr = asSizeof(arg)) {
+                auto allocTy = trQualType(sizeofExpr->getTypeOfArgument(),
+                                          sizeofExpr->getSourceRange());
+                return mk_malloc(std::move(loc), std::move(allocTy));
               }
               // Flexible array member allocation:
               //   malloc(sizeof(struct foo) + n * sizeof(elem))
@@ -984,11 +1035,8 @@ public:
                 if (binOp->getOpcode() == BO_Add) {
                   auto structSizeofSide =
                       [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
-                    auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
-                        e->IgnoreParenImpCasts());
-                    if (s && s->getKind() == UETT_SizeOf &&
-                        s->isArgumentType() &&
-                        s->getArgumentType()->isRecordType())
+                    auto *s = asSizeof(e);
+                    if (s && s->getTypeOfArgument()->isRecordType())
                       return s;
                     return nullptr;
                   };
@@ -1000,7 +1048,7 @@ public:
                     arrayTerm = binOp->getLHS();
                   }
                   if (structSide) {
-                    auto allocTy = trQualType(structSide->getArgumentType(),
+                    auto allocTy = trQualType(structSide->getTypeOfArgument(),
                                               structSide->getSourceRange());
                     // Extract `n` from the trailing array term `n *
                     // sizeof(elem)` or `sizeof(elem) * n`, so the flexible tail
@@ -1019,26 +1067,17 @@ public:
               // Array: malloc(sizeof(T) * n) or malloc(n * sizeof(T))
               if (auto *binOp = dyn_cast<BinaryOperator>(arg)) {
                 if (binOp->getOpcode() == BO_Mul) {
-                  auto *lhs = binOp->getLHS()->IgnoreParenImpCasts();
-                  auto *rhs = binOp->getRHS()->IgnoreParenImpCasts();
                   const UnaryExprOrTypeTraitExpr *sizeofSide = nullptr;
                   Expr *countSide = nullptr;
-                  if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(lhs)) {
-                    if (s->getKind() == UETT_SizeOf && s->isArgumentType()) {
-                      sizeofSide = s;
-                      countSide = binOp->getRHS();
-                    }
-                  }
-                  if (!sizeofSide) {
-                    if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(rhs)) {
-                      if (s->getKind() == UETT_SizeOf && s->isArgumentType()) {
-                        sizeofSide = s;
-                        countSide = binOp->getLHS();
-                      }
-                    }
+                  if (auto *s = asSizeof(binOp->getLHS())) {
+                    sizeofSide = s;
+                    countSide = binOp->getRHS();
+                  } else if (auto *s = asSizeof(binOp->getRHS())) {
+                    sizeofSide = s;
+                    countSide = binOp->getLHS();
                   }
                   if (sizeofSide && countSide) {
-                    auto allocTy = trQualType(sizeofSide->getArgumentType(),
+                    auto allocTy = trQualType(sizeofSide->getTypeOfArgument(),
                                               sizeofSide->getSourceRange());
                     auto countExpr = trRValue(countSide);
                     return mk_malloc_array(std::move(loc), std::move(allocTy),
@@ -1051,23 +1090,19 @@ public:
             if (callee->getName() == "calloc" && call->getNumArgs() == 2) {
               auto *countArg = call->getArg(0)->IgnoreParenImpCasts();
               auto *sizeArg = call->getArg(1)->IgnoreParenImpCasts();
-              if (auto *sizeofExpr =
-                      dyn_cast<UnaryExprOrTypeTraitExpr>(sizeArg)) {
-                if (sizeofExpr->getKind() == UETT_SizeOf &&
-                    sizeofExpr->isArgumentType()) {
-                  auto allocTy = trQualType(sizeofExpr->getArgumentType(),
-                                            sizeofExpr->getSourceRange());
-                  // calloc(1, sizeof(T)) → single ref
-                  if (auto *intLit = dyn_cast<IntegerLiteral>(countArg)) {
-                    if (intLit->getValue() == 1) {
-                      return mk_calloc(std::move(loc), std::move(allocTy));
-                    }
+              if (auto *sizeofExpr = asSizeof(sizeArg)) {
+                auto allocTy = trQualType(sizeofExpr->getTypeOfArgument(),
+                                          sizeofExpr->getSourceRange());
+                // calloc(1, sizeof(T)) → single ref
+                if (auto *intLit = dyn_cast<IntegerLiteral>(countArg)) {
+                  if (intLit->getValue() == 1) {
+                    return mk_calloc(std::move(loc), std::move(allocTy));
                   }
-                  // calloc(n, sizeof(T)) → array
-                  auto countExpr = trRValue(countArg);
-                  return mk_calloc_array(std::move(loc), std::move(allocTy),
-                                         std::move(countExpr));
                 }
+                // calloc(n, sizeof(T)) → array
+                auto countExpr = trRValue(countArg);
+                return mk_calloc_array(std::move(loc), std::move(allocTy),
+                                       std::move(countExpr));
               }
               // Flexible array member allocation:
               //   calloc(1, sizeof(struct foo) + n * sizeof(elem))
@@ -1082,11 +1117,8 @@ public:
                     if (binOp->getOpcode() == BO_Add) {
                       auto structSizeofSide =
                           [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
-                        auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
-                            e->IgnoreParenImpCasts());
-                        if (s && s->getKind() == UETT_SizeOf &&
-                            s->isArgumentType() &&
-                            s->getArgumentType()->isRecordType())
+                        auto *s = asSizeof(e);
+                        if (s && s->getTypeOfArgument()->isRecordType())
                           return s;
                         return nullptr;
                       };
@@ -1098,8 +1130,9 @@ public:
                         arrayTerm = binOp->getLHS();
                       }
                       if (structSide) {
-                        auto allocTy = trQualType(structSide->getArgumentType(),
-                                                  structSide->getSourceRange());
+                        auto allocTy =
+                            trQualType(structSide->getTypeOfArgument(),
+                                       structSide->getSourceRange());
                         // Extract `n` from the trailing array term so the
                         // zeroed flexible tail is sized `n`.
                         if (Expr *countSide = flexArrayCountSide(arrayTerm)) {
@@ -1123,29 +1156,19 @@ public:
                 if (intLit->getValue() == 1) {
                   if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
                     if (binOp->getOpcode() == BO_Mul) {
-                      auto *lhs = binOp->getLHS()->IgnoreParenImpCasts();
-                      auto *rhs = binOp->getRHS()->IgnoreParenImpCasts();
                       const UnaryExprOrTypeTraitExpr *sizeofSide = nullptr;
                       Expr *countSide = nullptr;
-                      if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(lhs)) {
-                        if (s->getKind() == UETT_SizeOf &&
-                            s->isArgumentType()) {
-                          sizeofSide = s;
-                          countSide = binOp->getRHS();
-                        }
-                      }
-                      if (!sizeofSide) {
-                        if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(rhs)) {
-                          if (s->getKind() == UETT_SizeOf &&
-                              s->isArgumentType()) {
-                            sizeofSide = s;
-                            countSide = binOp->getLHS();
-                          }
-                        }
+                      if (auto *s = asSizeof(binOp->getLHS())) {
+                        sizeofSide = s;
+                        countSide = binOp->getRHS();
+                      } else if (auto *s = asSizeof(binOp->getRHS())) {
+                        sizeofSide = s;
+                        countSide = binOp->getLHS();
                       }
                       if (sizeofSide && countSide) {
-                        auto allocTy = trQualType(sizeofSide->getArgumentType(),
-                                                  sizeofSide->getSourceRange());
+                        auto allocTy =
+                            trQualType(sizeofSide->getTypeOfArgument(),
+                                       sizeofSide->getSourceRange());
                         auto countExpr = trRValue(countSide);
                         return mk_calloc_array(std::move(loc),
                                                std::move(allocTy),
@@ -1379,6 +1402,9 @@ public:
       case UO_Not:
         return mk_rvalue_unop(std::move(loc), ir::UnOp::BitNot(),
                               trRValue(uo->getSubExpr()));
+
+      case UO_Plus:
+        return trRValue(uo->getSubExpr());
 
       case UO_Minus:
         return mk_rvalue_unop(std::move(loc), ir::UnOp::Neg(),
@@ -1682,7 +1708,21 @@ public:
         auto fn = ctx.mk_ident(toStr(fd->getName()),
                                getRange(c->getCallee()->getSourceRange()));
         auto args = Vec<Rc<ir::Expr>>::new_();
-        for (auto arg : c->arguments()) {
+        for (unsigned i = 0; i < c->getNumArgs(); ++i) {
+          auto *arg = c->getArg(i);
+          if (fd->isVariadic() && i >= fd->getNumParams()) {
+            if (!canOmitVariadicArgument(arg)) {
+              reportUnsupported(
+                  arg->getSourceRange(), getRange(arg->getSourceRange()),
+                  "unsupported ignored variadic argument: expected a scalar "
+                  "literal, a non-volatile local value, or a local address",
+                  "");
+              return mk_rvalue_err(
+                  std::move(loc),
+                  trQualType(c->getType(), c->getSourceRange()));
+            }
+            continue;
+          }
           args.push(trRValue(arg));
         }
         return mk_rvalue_fncall(std::move(loc), std::move(fn), std::move(args));
@@ -1690,6 +1730,15 @@ public:
         // Indirect call through a function-pointer value: `fptr(a, b, ...)`.
         // Clang gives no direct callee; the callee is an rvalue of
         // function-pointer type.
+        if (auto *ptr = c->getCallee()->getType()->getAs<PointerType>()) {
+          if (auto *proto = ptr->getPointeeType()->getAs<FunctionProtoType>();
+              proto && proto->isVariadic()) {
+            reportUnsupported(c->getSourceRange(), loc,
+                              "indirect variadic calls are not supported", "");
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
+          }
+        }
         auto callee = trRValue(c->getCallee());
         auto args = Vec<Rc<ir::Expr>>::new_();
         for (auto arg : c->arguments()) {
@@ -2318,6 +2367,11 @@ public:
             currentGroup->caseValues.push_back(innerCs->getLHS());
             caseBody = innerCs->getSubStmt();
           }
+          if (auto *ds = dyn_cast_or_null<DefaultStmt>(caseBody)) {
+            seenDefault = true;
+            currentGroup->isDefault = true;
+            caseBody = ds->getSubStmt();
+          }
           if (caseBody)
             currentGroup->body.push_back(caseBody);
         } else if (auto *ds = dyn_cast<DefaultStmt>(child)) {
@@ -2715,6 +2769,8 @@ public:
           }
         }
       }
+    } else if (auto *attr = dyn_cast<AttributedStmt>(stmt)) {
+      return trStmt(stmts, attr->getSubStmt());
     } else if (auto *cse = dyn_cast<CStyleCastExpr>(stmt)) {
       if (cse->getType()->isVoidType()) {
         // (void)expr — translate the sub-expression as a statement to

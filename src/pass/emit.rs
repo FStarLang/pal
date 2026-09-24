@@ -681,6 +681,9 @@ struct Emitter<'a> {
     fn_module_map: HashMap<Rc<str>, String>,
     /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
     typedef_override_map: HashMap<Rc<str>, String>,
+    /// When set, `emit_name` fully qualifies type names even inside their owning
+    /// module. Used for type docs that get cached and re-emitted in other modules.
+    force_qualify_types: bool,
     /// Whether the function body currently being emitted is `_total`. Set at body
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
@@ -744,7 +747,9 @@ impl<'a> Emitter<'a> {
             }
         };
         if let Some(owner_module) = owner_module {
-            if owner_module == self.current_module {
+            if owner_module == self.current_module
+                && !(self.force_qualify_types && matches!(name, Name::TypeRef(_)))
+            {
                 Doc::text(mangled)
             } else {
                 Doc::text(format!("{}.{}", owner_module, mangled))
@@ -1040,6 +1045,17 @@ fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
 }
 
 impl<'a> Emitter<'a> {
+    /// Emit a type whose rendering may be cached and re-used from another module
+    /// (e.g. predicate val-parameter types), so type names must always carry
+    /// their module qualifier.
+    fn emit_type_qualified(&mut self, env: &Env, ty: &Type) -> Doc {
+        let saved = self.force_qualify_types;
+        self.force_qualify_types = true;
+        let doc = self.emit_type(env, ty);
+        self.force_qualify_types = saved;
+        doc
+    }
+
     fn emit_type(&mut self, env: &Env, ty: &Type) -> Doc {
         annotated(ty, || {
             match &ty.val {
@@ -1679,7 +1695,7 @@ impl<'a> Emitter<'a> {
                 match kind {
                     PointerKind::Ref | PointerKind::Unknown => match variant {
                         SLPropVariant::Init { perm } => {
-                            let pointee_type_doc = self.emit_type(env, pointee_ty);
+                            let pointee_type_doc = self.emit_type_qualified(env, pointee_ty);
                             let val_name = self.push_val_binding(naming, this, pointee_type_doc);
                             let slprop = annotated(ty, || {
                                 naryfn([
@@ -1717,7 +1733,7 @@ impl<'a> Emitter<'a> {
                         }
                     },
                     PointerKind::Array => {
-                        let pointee_type_doc = self.emit_type(env, pointee_ty);
+                        let pointee_type_doc = self.emit_type_qualified(env, pointee_ty);
                         let val_type_doc = match variant {
                             SLPropVariant::Init { .. } => {
                                 unaryfn(Doc::text("full_array_spec"), pointee_type_doc)
@@ -1862,7 +1878,7 @@ impl<'a> Emitter<'a> {
                     resolving_struct,
                 );
                 if let SLPropVariant::Init { .. } = variant {
-                    let binding_type_doc = self.emit_type(env, binding_ty);
+                    let binding_type_doc = self.emit_type_qualified(env, binding_ty);
                     // RefineValue uses an explicit binding name from the user annotation
                     let raw_name = Doc::text(binding_name.val.to_string());
                     let val_name =
@@ -3064,6 +3080,32 @@ impl<'a> Emitter<'a> {
                                 self.report(default_msg.clone(), &v.loc);
                                 Doc::text("(admit())")
                             }
+                        }
+                        (
+                            TypeT::Pointer(_, kind),
+                            TypeT::Int {
+                                signed,
+                                width: width @ (32 | 64),
+                            },
+                        ) => {
+                            let raw = match kind {
+                                PointerKind::Core => val_doc,
+                                PointerKind::Ref | PointerKind::Unknown => {
+                                    unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val_doc)
+                                }
+                                PointerKind::Array | PointerKind::ArrayPtr => unaryfn(
+                                    Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                                    unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
+                                ),
+                            };
+                            unaryfn(
+                                Doc::text(format!(
+                                    "Pulse.Lib.C.CoreRef.core_to_{}int{}",
+                                    if *signed { "" } else { "u" },
+                                    width
+                                )),
+                                raw,
+                            )
                         }
                         // FixedArray → Pointer(Array): array-to-pointer decay (identity in Pulse)
                         (
@@ -7020,12 +7062,21 @@ impl<'a> Emitter<'a> {
         // `let`-bound copy) keeps the argument *definitionally* the tuple
         // component, which the prover needs to match ownership (`pts_to`)
         // preconditions carried by pointer-parameter callees.
-        let call_body = match projs.len() {
-            0 => callee.append(" ()"),
-            _ => callee
-                .append(" ")
-                .append(Doc::intersperse(projs.iter().cloned(), Doc::text(" "))),
-        };
+        // Ghost values must come from the wrapper's witness, not fresh holes.
+        let ghost_args = (0..decl.ghost_args.len()).map(|i| {
+            Doc::text("#").append(parens(unaryfn(
+                Doc::text("hide"),
+                nested_pair_proj(Doc::text("(snd (reveal y_fp))"), i, decl.ghost_args.len()),
+            )))
+        });
+        let args = ghost_args.chain(if projs.is_empty() {
+            vec![Doc::text("()")]
+        } else {
+            projs
+        });
+        let call_body = callee
+            .append(" ")
+            .append(Doc::intersperse(args, Doc::text(" ")));
         let fst = Doc::hardline()
             .append(Doc::hardline())
             .append(wrap_sig)
@@ -7200,7 +7251,8 @@ impl<'a> Emitter<'a> {
             }
         }
 
-        if params.is_empty() {
+        // Empty C argument lists still take unit when ghost parameters exist.
+        if args.is_empty() {
             params.push(Doc::text("()"));
         }
 
@@ -7647,7 +7699,7 @@ impl<'a> Emitter<'a> {
             env.push_arg(arg, LocalDeclKind::RValue);
         }
 
-        if params.is_empty() {
+        if decl.args.is_empty() {
             params.push(Doc::text("()"));
         }
 
@@ -8282,6 +8334,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_module: String::new(),
         fn_module_map,
         typedef_override_map,
+        force_qualify_types: false,
         current_fn_total: false,
         tmp_counter: 0,
         layouts: crate::layout::LayoutCtx::of_tu(tu),

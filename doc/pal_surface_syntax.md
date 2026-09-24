@@ -15,6 +15,25 @@ In the following, we differentiate between two kinds of annotations:
 
 To suppress the default ownership for one parameter, prefix it with `_plain`. -->
 
+## Variadic calls with an ignored tail
+
+PAL supports direct calls to variadic functions whose bodies do not access
+the variadic arguments. The generated function and its calls contain only
+the fixed parameters; extra arguments do not transfer ownership to the
+callee.
+
+For this initial support, ignored arguments must be scalar literals,
+non-volatile/non-atomic scalar or pointer local/parameter values, or addresses
+of ordinary local variables or parameters. Parentheses and implicit value
+conversions (including default promotions) are allowed. Computations,
+dereferences, member/subscript reads, side effects, and other unsupported
+extra expressions are rejected rather than silently skipping their evaluation.
+Indirect variadic calls and variadic argument extraction are not supported.
+
+For example, `read_first(int *first, ...)` may return `*first`, and a caller
+may use `read_first(&a, &b, &c)`. Only `&a` is passed in the generated Pulse
+call. See `test/variadic_call/variadic_call.c`.
+
 ## Syntax for specifications
 
 ### Annotating function arguments
@@ -151,8 +170,14 @@ The record-level and field-level forms differ in scope: record-level binds `this
 
 PAL exposes two ghost constructs for proof assistance that have no runtime effect:
 
-- `_ghost_arg(T)` — extra parameter erased at runtime; usable only in specs and ghost statements.
+- `_ghost_arg(T name)` — extra parameter erased at runtime; usable only in specs and ghost statements.
 - `_ghost_stmt(expr)` — Pulse statement executed only during verification (e.g. applying a lemma).
+
+Ghost arguments do not change C function-pointer signatures. Generated
+wrappers forward them through erased witnesses. If inference cannot determine
+a call's ghost arguments, supply a witness with a ghost statement; the callee's
+precondition must still hold. Taking a function's address requires no witness.
+See `test/func_pointer/func_pointer.c` for examples.
 
 ## Pulse interop
 
@@ -197,19 +222,30 @@ A global is either **pure** (immutable) or **mutable**, and the two are modeled
 very differently. A global is pure when *either*:
 
 - it is annotated `_pure`, or
-- it is `const`-qualified **and has an initializer** — this is implicit, no
-  annotation needed (`cpp/impl.cpp`: `isConstQualified() && hasInit()`).
+- it is `const`-qualified — this is implicit, no annotation needed
+  (`cpp/impl.cpp`: `isConstQualified()`). An initializer is *not* required.
 
-Anything else — including a `const` global *without* an initializer, which has
-no value for a definition to take — is mutable, and is handled by the
-bring-your-own-permission model below.
+A global with no initializer is still pure if it is `const` or `_pure`: with no
+initializer anywhere in the translation unit it is a *tentative definition*
+(C11 6.9.2p2) and is initialized as if by `0` (6.7.9p10) — arithmetic types to
+zero, pointers to null, aggregates field- and element-wise. That zero is the
+value the emitted definition takes, so such a global reads as `0` and PAL can
+prove it. An incomplete initializer is filled out the same way, so
+`const struct point s = {.x = 1};` reads as `{1, 0}`.
+
+Mutable means a global that is neither `const` nor `_pure`; those are handled by
+the bring-your-own-permission model below.
 
 ```c
 _pure uint32_t g_a = 42;      /* pure, explicit  */
 const uint32_t g_b = 7;       /* pure, implicit — same treatment as g_a */
-const uint32_t g_c;           /* mutable: const but no initializer */
+const uint32_t g_c;           /* pure: tentative definition, reads as 0 */
 uint32_t       g_d = 1;       /* mutable: not const, not _pure */
 ```
+
+Because a pure global is immutable, it is not an lvalue: writing it is a
+constraint violation in C (6.5.16p2 with 6.3.2.1p1, "not a modifiable lvalue")
+and PAL rejects it, as does `_live(g)` — there is no permission to thread.
 
 A pure global lowers to a plain top-level F* value, and every read of it
 is **ownership-free** — the read just evaluates to `var_g`, with nothing in the
@@ -217,7 +253,18 @@ is **ownership-free** — the read just evaluates to `var_g`, with nothing in th
 
 ```fstar
 let var_g_b : ty_uint32_t = 7ul
+let var_g_c : ty_uint32_t = zero_default     // tentative definition
 ```
+
+Aggregates are zeroed the same way, element- and field-wise, so
+`const uint32_t a[3];` emits
+`array_spec_zeroed ty_uint32_t (SizeT.v 3sz) zero_default`.
+
+`extern` is the one case where no value may be assumed. `extern const T g;`
+without a definition in this translation unit is a *declaration*, not a
+tentative definition: the object lives elsewhere and C constrains its value not
+at all. PAL emits `assume val var_g` instead of a zero, so nothing about its
+value is provable here.
 
 **Address-of (`&g`)** is supported for scalar and struct globals (pure or
 mutable). For a pure global, because reads are ownership-free, any pointer to it
