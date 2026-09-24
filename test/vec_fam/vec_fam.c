@@ -32,7 +32,15 @@ void vec_set(struct vec *v, unsigned i, int x)
     v->data[i] = x;
 }
 
+/* Palow's allocators may fail, so the honest return type says so: everything
+   the contract promises about the object holds only when there is one. PAL's
+   FAM allocators are infallible, so the nullable spelling -- and the test that
+   goes with it -- is Palow's alone. */
+#ifdef PALOW
+_allocated _nullable typedef struct vec *vec_ptr;
+#else
 _allocated typedef struct vec *vec_ptr;
+#endif
 
 // Allocate and zero-initialize a vec using the idiomatic flexible-array-member
 // calloc: `calloc(1, sizeof(struct vec) + n * sizeof(int))`. This is the
@@ -49,6 +57,11 @@ _allocated typedef struct vec *vec_ptr;
 vec_ptr vec_new(unsigned n)
 {
     struct vec *v = calloc(1, sizeof(struct vec) + n * sizeof(int));
+#ifdef PALOW
+    if (v == NULL) {
+        return NULL;
+    }
+#endif
     v->len = n;
     return v;
 }
@@ -69,6 +82,11 @@ vec_ptr vec_new(unsigned n)
 vec_ptr vec_new_filled(unsigned n, int x)
 {
     struct vec *v = malloc(sizeof(struct vec) + n * sizeof(int));
+#ifdef PALOW
+    if (v == NULL) {
+        return NULL;
+    }
+#endif
     v->len = n;
     for (unsigned i = 0; i < n; i = i + 1)
         _invariant(_live(i))

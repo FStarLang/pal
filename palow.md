@@ -4069,8 +4069,25 @@ new facts about memory.
    none of this survives extraction. Both of the intrusive list's sorted
    inserts now translate.
 
-   As of this milestone: **987 specifications, 965 of them with real bodies,
-   2 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   A struct that ends in a flexible array member is the one shape whose
+   storage is not a fact about its type. Everything the general struct
+   module is written in terms of -- `X_sizeof`, `X_claim_uninit`,
+   `X_claim_zeroed` -- has nowhere to get the tail's length from, which is
+   why the emitter used to give such a struct no storage layer at all and
+   `admit` every function that allocated one. It now emits a separate one:
+   the claims take the length as an argument, `X_flex_sizeof` reads it back
+   out of the value (clamped, because an slprop's arguments are typed with
+   none of the surrounding `requires` in scope), and the `freeable` a
+   constructor's `_allocated` return type promises is spelled in terms of
+   that rather than a constant. What arrives from `calloc` is then a struct
+   already in pieces -- the tail holding the zeros, the fixed fields still
+   storage -- which is exactly the state a partially written struct is in, so
+   the ordinary field-by-field machinery finishes it, `gather` included. The
+   one thing Palow insists on that PAL does not is that the allocation may
+   fail: `vec_new` tests its result, and its return type says `_nullable`.
+
+   As of this milestone: **987 specifications, 966 of them with real bodies,
+   1 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

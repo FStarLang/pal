@@ -254,6 +254,24 @@ impl FieldShape {
 /// which is the loud failure such a hole deserves.
 const NO_FLEX_STORAGE: &str = "flexible_array_member_has_no_storage_view";
 
+/// A struct type's Palow name, its flexible array member, and that member's
+/// element size -- when the type is a struct whose last field is one.
+///
+/// A flexible struct is the one shape whose storage is not determined by its
+/// type, so everything about it has to be asked for rather than looked up,
+/// and both ends of the translation ask here.
+fn flex_tail<'a>(tds: &'a Typedefs, ty: &Type) -> Option<(String, &'a StructField, u64)> {
+    let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &peel(tds, ty).val else {
+        return None;
+    };
+    let si = tds.structs.get(&*sname.val.to_string())?;
+    let f = si.fields.last()?;
+    let FieldShape::Flex { esize, .. } = &f.shape else {
+        return None;
+    };
+    Some((format!("struct_{}", sname.val), f, *esize))
+}
+
 /// The element type of a flexible array member.
 fn flex_elem<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Type> {
     match &peel(tds, ty).val {
@@ -1169,10 +1187,17 @@ fn slprop_refine<'e>(tds: &Typedefs, p: &'e Expr) -> Option<&'e InlinePulseCode>
 /// much, and a nullary macro has nowhere to put a `sizeof`. The size is the
 /// pointee's, which is exactly what `_allocated` on a `T *` typedef means.
 /// Anything else is hand-written and is spliced as written.
+///
+/// A struct with a flexible array member has no size to look up: the object is
+/// as big as the allocation asked for, and the only record of that is the
+/// tail's length, which lives in the value. `val` is the name the contract
+/// gave that value; without one there is nothing to say how much memory the
+/// right to free covers, and saying it wrong would be worse than refusing.
 fn allocated_own(
     tds: &Typedefs,
     ty: &Type,
     ptr: &str,
+    val: Option<&str>,
     code: &InlinePulseCode,
 ) -> Result<Option<String>, String> {
     let verbatim: Vec<&str> = code
@@ -1194,6 +1219,16 @@ fn allocated_own(
         return Ok(None);
     }
     let pt = pointee(tds, ty).ok_or("`_allocated` on something that is not a pointer")?;
+    if let Some((sn, _, _)) = flex_tail(tds, pt) {
+        let val = val.ok_or(
+            "`_allocated` on a pointer to a struct with a flexible array member, in a position \
+             whose value the contract does not name",
+        )?;
+        return Ok(Some(format!(
+            "freeable {} ({}_flex_sizeof {})",
+            ptr, sn, val
+        )));
+    }
     let n = palow_sizeof(tds, pt).ok_or_else(|| {
         format!(
             "`_allocated` on a pointer to {}, whose size is not known",
@@ -1226,7 +1261,7 @@ fn allocated_return(tds: &Typedefs, ty: &Type) -> Option<String> {
     let (ps, _, _) = refinements(tds, ty).ok()?;
     ps.iter().find_map(|p| {
         let code = slprop_refine(tds, p)?;
-        allocated_own(tds, ty, "_", code).ok().flatten()
+        allocated_own(tds, ty, "_", Some("_"), code).ok().flatten()
     })?;
     if extent(tds, ty) != Some(Extent::One) {
         return None;
@@ -3545,7 +3580,7 @@ fn emit_fn(
     if let Ok((ps, _, bs)) = refinements(tds, &decl.ret_type) {
         let alloc = ps.iter().find_map(|p| {
             let code = slprop_refine(tds, p)?;
-            allocated_own(tds, &decl.ret_type, &ret_name, code)
+            allocated_own(tds, &decl.ret_type, &ret_name, Some("val_return"), code)
                 .ok()
                 .flatten()
         });
@@ -3557,6 +3592,7 @@ fn emit_fn(
                             tds,
                             &decl.ret_type,
                             &ret_name,
+                            Some("val_return"),
                             slprop_refine(tds, p).unwrap(),
                         )
                         .ok()
@@ -4057,7 +4093,7 @@ fn emit_fn(
             // own Pulse -- a function pointer's `is_valid`, say -- so it is
             // spliced under the same rule as an `_inline_pulse` contract
             // clause, and refused with the same words when that rule says no.
-            let stated_own = match allocated_own(tds, ty, &format!("var_{}", base), code)? {
+            let stated_own = match allocated_own(tds, ty, &format!("var_{}", base), None, code)? {
                 Some(t) => {
                     // Only if the caller is giving it up: freeing what the
                     // `ensures` still promises back would be a body that
@@ -6297,9 +6333,290 @@ fn {f}_read (a: ptr) (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs =
         .replace("}}", "}")
 }
 
+/// The storage operations for a struct whose last field is a flexible array
+/// member.
+///
+/// Such a struct has no storage view of its own -- how big an object of the
+/// type is is not a fact about the type -- so the general set above, which is
+/// all written in terms of `{sn}_sizeof`, does not apply. What does apply is
+/// the same set with the tail's length threaded through: the object only ever
+/// comes from an allocation that named that length, and the length is the one
+/// thing the allocation site does know.
+///
+/// The fixed prefix is carved exactly as it is for an ordinary struct. The
+/// tail is claimed at the length the caller passes, which is why every
+/// operation here takes an `n` the general ones do not.
+fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
+    let si = &tds.structs[name];
+    let sn = format!("struct_{}", name);
+    let flex = si.fields.last().unwrap();
+    let FieldShape::Flex {
+        pn: fpn,
+        esize: fes,
+    } = &flex.shape
+    else {
+        unreachable!()
+    };
+    // The prefix is claimed as storage, not at the values `calloc` put there,
+    // so a fixed field the source never writes leaves the object ungatherable.
+    // That is honest: it is the same C that leaves a `malloc`ed field unset.
+    for f in &si.fields {
+        let ok = match &f.shape {
+            FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::Array { .. } => true,
+            FieldShape::Flex { .. } => std::ptr::eq(f, flex),
+        };
+        if !ok || (!std::ptr::eq(f, flex) && f.shape.uninit("a").is_none()) {
+            return format!(
+                "(* struct {}: no sized storage, field `{}` has no uninitialised view *)\n\n",
+                name, f.name
+            );
+        }
+    }
+    let at = |off: u64| {
+        if off == 0 {
+            "a".to_string()
+        } else {
+            format!("(a +! {}sz)", off)
+        }
+    };
+    let fixed: Vec<&StructField> = si
+        .fields
+        .iter()
+        .filter(|f| !std::ptr::eq(*f, flex))
+        .collect();
+    let flex_at = format!("(a +! {}_offsetof_{})", sn, flex.name);
+    let flex_uninit = format!(
+        "array_pts_to_uninit {}_repr {} (SizeT.v n) {}",
+        fpn, fes, flex_at
+    );
+
+    let mut c = String::new();
+    // How much storage an object of this type actually occupies, as a
+    // function of the value it holds: the fixed part plus the tail, whose
+    // length only the value records. A `freeable` has to say how much goes
+    // back, and for a flexible struct this is the only way to say it.
+    // Total, because an slprop's arguments are typed with none of the
+    // surrounding `requires` in scope, so there is nowhere to put the
+    // obligation that the arithmetic fits.
+    c += &format!(
+        "let {sn}_flex_sizeof (x: {sn}) : SizeT.t =\n  let n = SizeT.v {sn}_sizeof + {es} * Seq.length x.fld_{f} in\n  if n < pow2 64 then SizeT.uint_to_t n else 0sz\n\n",
+        sn = sn,
+        es = fes,
+        f = flex.name
+    );
+
+    // A pointer to an object is a pointer to its first field; see the
+    // general case.
+    if let Some(first) = si.fields.iter().find(|f| f.offset == 0)
+        && let FieldShape::One { pn } = &first.shape
+        && !matches!(
+            tds.resolve(&first.ty).val,
+            TypeT::TypeRef(..) | TypeT::FixedArray(..)
+        )
+    {
+        c += &format!(
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {pn}_pts_to_not_null (a +! {sn}_offsetof_{f});\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
+            sn = sn,
+            pn = pn,
+            f = first.name
+        );
+    }
+
+    // Putting the object together out of fields that hold values, exactly as
+    // the general `gather` does: nothing about it depends on the tail's
+    // length, because the length is in the value.
+    {
+        let binders: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| {
+                let elem = match flat_array(tds, &f.ty) {
+                    Some((t, _)) => fstar_type(tds, t),
+                    None => match flex_elem(tds, &f.ty) {
+                        Some(t) => fstar_type(tds, t),
+                        None => fstar_type(tds, &f.ty),
+                    },
+                }
+                .unwrap_or_else(|| "unit".to_string());
+                format!(
+                    "(#val_{}: {})",
+                    f.name,
+                    refined_ty(
+                        &f.shape.value_type(&elem),
+                        f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty))
+                    )
+                )
+            })
+            .collect();
+        let value = format!(
+            "({{ {} }})",
+            si.fields
+                .iter()
+                .map(|f| format!("fld_{} = val_{}", f.name, f.name))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        let reqs: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| {
+                f.shape.pts_to(
+                    &format!("(a +! {}_offsetof_{})", sn, f.name),
+                    &format!("val_{}", f.name),
+                )
+            })
+            .collect();
+        c += &format!(
+            "ghost fn {sn}_gather (a: ptr) (#p: perm) {b}\n  requires {r}\n  requires {sn}_padding a p\n  ensures  {sn}_pts_to a p {v}\n{{\n  fold {sn}_pts_to a p {v};\n}}\n\n",
+            sn = sn,
+            b = binders.join(" "),
+            r = reqs.join("\n  requires "),
+            v = value
+        );
+    }
+
+    // The carve, as in the general case, except that the tail is claimed at
+    // the length that was asked for rather than at one the type fixed.
+    let mut bounds: Vec<u64> = si
+        .fields
+        .iter()
+        .map(|f| f.offset)
+        .chain(gaps.iter().map(|(off, _)| *off))
+        .filter(|off| *off != 0)
+        .collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+    let claim_fixed = |f: &StructField, alloc: &mut String| match &f.shape {
+        FieldShape::One { pn } => {
+            *alloc += &format!("  {}_claim_uninit {};\n", pn, at(f.offset));
+            *alloc += &format!(
+                "  rewrite ({pn}_pts_to_uninit {off})\n    as ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}));\n",
+                pn = pn,
+                off = at(f.offset),
+                sn = sn,
+                f = f.name
+            );
+        }
+        FieldShape::Array { pn, esize, len } => {
+            *alloc += &format!(
+                "  array_claim_all_uninit {}_repr {} {}sz {}sz;\n",
+                pn,
+                at(f.offset),
+                esize,
+                len
+            );
+            *alloc += &format!(
+                "  rewrite (array_pts_to_uninit {pn}_repr {es} {n} {off})\n    as (array_pts_to_uninit {pn}_repr {es} {n} (a +! {sn}_offsetof_{f}));\n",
+                pn = pn,
+                es = esize,
+                n = len,
+                off = at(f.offset),
+                sn = sn,
+                f = f.name
+            );
+        }
+        FieldShape::Flex { .. } => unreachable!(),
+    };
+    let field_at = |off: u64| si.fields.iter().find(|f| f.offset == off);
+    // Two claims, differing only in what the tail arrives holding: `malloc`
+    // gives storage, `calloc` gives storage that already holds the element
+    // type's zero. Everything before the tail is claimed as storage either
+    // way -- the source writes those fields, and a field it does not write is
+    // a field the object cannot be gathered from.
+    let carve = |zeroed: bool| {
+        let mut alloc = String::new();
+        for off in bounds.iter().rev() {
+            alloc += &format!("  mem_split a {}sz;\n", off);
+            match field_at(*off) {
+                Some(f) if std::ptr::eq(f, flex) => {
+                    if zeroed {
+                        alloc += &format!(
+                            "  array_claim_zeroed {pn}_repr {off} {es}sz n #z;\n  array_claim_all {pn}_repr {off} {es}sz (Seq.create (SizeT.v n) z);\n",
+                            pn = fpn,
+                            off = at(f.offset),
+                            es = fes
+                        );
+                        alloc += &format!(
+                            "  rewrite (array_pts_to {pn}_repr {es} {off} 1.0R (Seq.create (SizeT.v n) z))\n    as (array_pts_to {pn}_repr {es} (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z));\n",
+                            pn = fpn,
+                            es = fes,
+                            off = at(f.offset),
+                            sn = sn,
+                            f = f.name
+                        );
+                    } else {
+                        alloc += &format!(
+                            "  array_claim_all_uninit {pn}_repr {off} {es}sz n;\n",
+                            pn = fpn,
+                            off = at(f.offset),
+                            es = fes
+                        );
+                        alloc += &format!(
+                            "  rewrite (array_pts_to_uninit {pn}_repr {es} (SizeT.v n) {off})\n    as (array_pts_to_uninit {pn}_repr {es} (SizeT.v n) (a +! {sn}_offsetof_{f}));\n",
+                            pn = fpn,
+                            es = fes,
+                            off = at(f.offset),
+                            sn = sn,
+                            f = f.name
+                        );
+                    }
+                }
+                Some(f) => claim_fixed(f, &mut alloc),
+                None => {}
+            }
+        }
+        if let Some(f) = field_at(0) {
+            claim_fixed(f, &mut alloc);
+        }
+        alloc
+    };
+    let fixed_uninit: Vec<String> = fixed
+        .iter()
+        .map(|f| {
+            f.shape
+                .uninit(&format!("(a +! {}_offsetof_{})", sn, f.name))
+                .unwrap()
+        })
+        .collect();
+    let mut ensures_fixed = String::new();
+    for u in &fixed_uninit {
+        ensures_fixed += &format!("  ensures  {}\n", u);
+    }
+    c += &format!(
+        "ghost fn {sn}_claim_uninit_flex (a: ptr) (n: SizeT.t) (#b: bytes)\n  requires mem_pts_to a 1.0R b\n  requires pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es})\n{ef}  ensures  {fu}\n  ensures  {sn}_padding a 1.0R\n{{\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        sn = sn,
+        es = fes,
+        ef = ensures_fixed,
+        fu = flex_uninit,
+        alloc = carve(false)
+    );
+    let elem = fstar_type(tds, flex_elem(tds, &flex.ty).unwrap()).unwrap();
+    c += &format!(
+        "ghost fn {sn}_claim_zeroed_flex (a: ptr) (n: SizeT.t) (#z: {el}) (#b: bytes)\n  requires mem_pts_to a 1.0R b\n  requires pure (b == zeroed (SizeT.v {sn}_sizeof + SizeT.v n * {es}))\n  requires pure ({pn}_repr z (zeroed {es}))\n{ef}  ensures  array_pts_to {pn}_repr {es} (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z)\n  ensures  {sn}_padding a 1.0R\n{{\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        sn = sn,
+        el = elem,
+        es = fes,
+        pn = fpn,
+        f = flex.name,
+        ef = ensures_fixed,
+        alloc = carve(true)
+    );
+    c
+}
+
 fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
     let si = &tds.structs[name];
     let sn = format!("struct_{}", name);
+    // A flexible array member is not a hole in the storage layer, it is a
+    // different storage layer: everything is parameterised by the tail's
+    // length instead of by `sizeof`.
+    if matches!(
+        si.fields.last().map(|f| &f.shape),
+        Some(FieldShape::Flex { .. })
+    ) {
+        return emit_struct_flex_storage(tds, name, gaps);
+    }
     // A field with no write-only view keeps the whole struct out of automatic
     // storage: there would be no way to hand back what was never claimed.
     let mut uninit = Vec::new();
@@ -8400,6 +8717,23 @@ struct Block {
     /// count, the element size, and -- for `calloc` -- the value the zero bytes
     /// stand for at the element type.
     array: Option<ArrayBlock>,
+    /// For `calloc(1, sizeof(struct S) + n * sizeof(E))`: what makes the block
+    /// a *flexible* struct. How much storage it is is not a fact about the
+    /// type, so the length has to be carried from the allocation site to
+    /// everything that asks how big the object is.
+    flex: Option<FlexBlock>,
+}
+
+/// The tail of a flexible-array-member allocation.
+#[derive(Clone)]
+struct FlexBlock {
+    /// The tail's element count, as a `SizeT.t` term.
+    n: String,
+    /// The whole object's size in bytes, as a `SizeT.t` term.
+    nbytes: String,
+    /// The element value an all-zero range represents, and the lemma calls
+    /// that say so.
+    zero: Option<(String, Vec<String>)>,
 }
 
 /// Which piece of storage is currently in pieces: a local's slot, or an
@@ -9912,10 +10246,18 @@ impl<'a> Body<'a> {
         let si = self.tds.structs.get(sname)?;
         // The scatter and gather operations only exist when the struct got an
         // uninitialised view, which needs every field to have one.
+        let mut flex = false;
         if !si.fields.iter().all(|x| match &x.shape {
             FieldShape::One { .. } => has_repr(self.tds, &x.ty),
             FieldShape::Array { .. } => true,
-            FieldShape::Flex { .. } => false,
+            // A flexible struct has no whole-object uninitialised view --
+            // there is no such thing as an object of the type -- but it does
+            // have a `gather`, and an allocation hands it over already in
+            // pieces. So it can be *finished* here, never started.
+            FieldShape::Flex { .. } => {
+                flex = true;
+                true
+            }
         }) {
             return None;
         }
@@ -9954,6 +10296,9 @@ impl<'a> Body<'a> {
             });
         }
         if self.scattered_set(target).is_empty() {
+            if flex {
+                return None;
+            }
             self.lines
                 .push(format!("{}_scatter_uninit {};", ff.sn, ff.a));
         }
@@ -12537,9 +12882,11 @@ impl<'a> Body<'a> {
         if let Some(t) = &b.taken {
             return t.clone();
         }
-        let n = match &b.array {
-            Some(a) => a.nbytes.clone(),
-            None => format!("{}_sizeof", b.pn),
+        let n = match (&b.array, &b.flex) {
+            (Some(a), _) => a.nbytes.clone(),
+            // How big a flexible struct is is not a fact about its type.
+            (_, Some(fx)) => fx.nbytes.clone(),
+            _ => format!("{}_sizeof", b.pn),
         };
         format!(
             "(mem_pts_to {t} 1.0R ({f} (SizeT.v {n})) ** freeable {t} {n})",
@@ -12578,6 +12925,7 @@ impl<'a> Body<'a> {
             zero: None,
             taken: rb.guarded.map(|g| g.replace(PTR_HOLE, v)),
             array: None,
+            flex: None,
         });
         Ok(())
     }
@@ -12639,6 +12987,100 @@ impl<'a> Body<'a> {
             ExprT::CallocArray(ty, n) => Some(("calloc", ty.clone(), n.clone())),
             _ => None,
         }
+    }
+
+    /// `calloc(1, sizeof(struct S) + n * sizeof(E))`, with the struct type and
+    /// the tail's length.
+    fn flex_alloc_of(&self, e: &Expr) -> Option<(&'static str, Rc<Type>, Rc<Expr>)> {
+        let e = strip_vattr(e);
+        let e = match &e.val {
+            ExprT::Cast(inner, _) => strip_vattr(inner),
+            _ => e,
+        };
+        match &e.val {
+            ExprT::MallocFlex(ty, n) => Some(("malloc", ty.clone(), n.clone())),
+            ExprT::CallocFlex(ty, n) => Some(("calloc", ty.clone(), n.clone())),
+            _ => None,
+        }
+    }
+
+    /// `p = calloc(1, sizeof(struct S) + n * sizeof(E))` for a struct with a
+    /// flexible array member.
+    ///
+    /// What is different from every other allocation is that the type does not
+    /// say how big the object is: the allocation site does, and the length has
+    /// to be carried from here to the claim, to the `freeable`, and into the
+    /// value the tail holds. What is the *same* is everything else -- raw
+    /// bytes under a nullness guard, claimed once the source has tested the
+    /// pointer.
+    ///
+    /// The object arrives in pieces rather than whole: the tail already holds
+    /// the zeros `calloc` wrote, and the fixed fields are still storage. That
+    /// is exactly the state a partially-written struct is in, so the tail is
+    /// recorded as a field already written and the ordinary field-by-field
+    /// machinery finishes the job -- including the `gather` that makes the
+    /// object a value again once the last fixed field has been stored.
+    fn allocate_flex(
+        &mut self,
+        var: &Ident,
+        which: &str,
+        ty: &Type,
+        count: &Expr,
+    ) -> Result<String, String> {
+        if self.in_branch && !self.tail_branch {
+            return Err("an allocation inside a branch".to_string());
+        }
+        let Some((sn, f, esize)) = flex_tail(self.tds, ty) else {
+            return Err(format!(
+                "a flexible-array allocation of {}",
+                describe(self.tds.resolve(ty))
+            ));
+        };
+        let fname = f.name.clone();
+        // `malloc` leaves the tail uninitialised, so the object cannot become
+        // a value until every element of it has been written -- which is a
+        // loop over storage the emitter does not yet carry through an
+        // invariant.
+        let Some(elem) = flex_elem(self.tds, &f.ty) else {
+            return Err("a flexible array member with no element type".to_string());
+        };
+        let zero = match which {
+            "calloc" => zero_value(self.tds, elem)
+                .ok()
+                .zip(zero_repr_proof(self.tds, elem)),
+            _ => None,
+        };
+        let Some(zero) = zero else {
+            return Err(
+                "a flexible-array allocation whose tail does not arrive holding a value"
+                    .to_string(),
+            );
+        };
+        let n = self.index(count)?;
+        let nbytes = format!("({sn}_sizeof `SizeT.add` ({esize}sz `SizeT.mul` {n}))");
+        let tmp = self.fresh(&var.val);
+        self.lines
+            .push(format!("let {} = {} {};", tmp, which, nbytes));
+        self.blocks.retain(|b| b.var != *var.val);
+        self.blocks.push(Block {
+            var: var.val.to_string(),
+            tmp: tmp.clone(),
+            pn: sn,
+            fill: "zeroed",
+            checked: false,
+            init: false,
+            freed: false,
+            scattered: BTreeSet::from([fname]),
+            zero: None,
+            taken: None,
+            array: None,
+            flex: Some(FlexBlock {
+                n,
+                nbytes,
+                zero: Some(zero),
+            }),
+        });
+        Ok(tmp)
     }
 
     /// `p = malloc(sizeof(T) * n)` for a local pointer `p`.
@@ -12749,6 +13191,7 @@ impl<'a> Body<'a> {
                 zero,
                 filled: false,
             }),
+            flex: None,
         });
         Ok(tmp)
     }
@@ -12788,6 +13231,7 @@ impl<'a> Body<'a> {
             zero,
             taken: None,
             array: None,
+            flex: None,
         });
         Ok(tmp)
     }
@@ -12872,6 +13316,24 @@ impl<'a> Body<'a> {
                 // Nothing to claim: what the guard held is the points-to
                 // itself, so spending the guard is the whole step.
                 _ if b.taken.is_some() => vec![format!("elim_unless_null {} {};", b.tmp, sl)],
+                // A flexible struct is claimed at the length the allocation
+                // asked for, and comes back in pieces: the tail holding the
+                // zeros, the fixed fields still storage.
+                _ if b.flex.is_some() => {
+                    let fx = b.flex.as_ref().unwrap();
+                    let (z, why) = fx.zero.as_ref().unwrap();
+                    vec![
+                        format!("elim_unless_null {} {};", b.tmp, sl),
+                        format!(
+                            "{} {}_claim_zeroed_flex {} {} #{};",
+                            why.join(" "),
+                            b.pn,
+                            b.tmp,
+                            fx.n,
+                            z
+                        ),
+                    ]
+                }
                 None => vec![
                     format!("elim_unless_null {} {};", b.tmp, sl),
                     match &b.zero {
@@ -13608,8 +14070,15 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Let(name, ty, init) => {
-                let v = match (self.alloc_of(init), self.array_alloc_of(init)) {
+                let v = match (
+                    self.alloc_of(init),
+                    self.array_alloc_of(init)
+                        .or_else(|| self.flex_alloc_of(init)),
+                ) {
                     (Some((which, pointee, z)), _) => self.allocate(name, which, &pointee, z)?,
+                    (_, Some((which, ty, n))) if self.flex_alloc_of(init).is_some() => {
+                        self.allocate_flex(name, which, &ty, &n)?
+                    }
                     (_, Some((which, ty, n))) => self.allocate_array(name, which, &ty, &n)?,
                     _ => {
                         let v = self.rvalue(init)?;
@@ -13672,6 +14141,10 @@ impl<'a> Body<'a> {
                     }
                     if let Some((which, ty, n)) = self.array_alloc_of(rhs) {
                         let value = self.allocate_array(v, which, &ty, &n)?;
+                        return self.store(lhs, &pn, &value);
+                    }
+                    if let Some((which, ty, n)) = self.flex_alloc_of(rhs) {
+                        let value = self.allocate_flex(v, which, &ty, &n)?;
                         return self.store(lhs, &pn, &value);
                     }
                 }
