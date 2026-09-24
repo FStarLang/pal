@@ -62,6 +62,12 @@ enum DeclName {
     Typedef(Rc<str>),
     GlobalVar(Rc<str>),
     Include(Rc<SourceInfo>),
+    /// Not a declaration: the F* module an `_include_pulse(M, ...)` block
+    /// contributes to, reached by a verbatim `M.x` in inline Pulse and
+    /// leading to every block of that module. Without it, a block in a header
+    /// is dropped however much main-file code names it, because verbatim F*
+    /// otherwise contributes no dependency at all.
+    IncludeModule(Rc<str>),
 }
 
 fn in_main_file(main_files: &[Rc<str>], loc: &SourceInfo) -> bool {
@@ -141,7 +147,13 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
             InlinePulseToken::TypeAntiquot { ty, .. } | InlinePulseToken::Declare { ty, .. } => {
                 scan_type(deps, ty)
             }
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(tok) => {
+                // Any capitalized identifier may be a module qualifier; the
+                // node is inert unless an `_include_pulse` defines it.
+                if tok.text.val.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    deps.insert(DeclName::IncludeModule(tok.text.val.clone()));
+                }
+            }
             InlinePulseToken::FieldAntiquot { ty, .. } => {
                 scan_type(deps, ty);
             }
@@ -442,8 +454,10 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 }
             }
             DeclT::IncludeDecl(code) => {
-                let ds = deps.deps_for(n);
+                let ds = deps.deps_for(n.clone());
                 scan_inline_pulse_code(ds, &code.code);
+                deps.deps_for(DeclName::IncludeModule(code.module_name.clone()))
+                    .insert(n);
             }
             DeclT::LetDecl(let_decl) => {
                 let ds = deps.deps_for(n);
