@@ -4204,7 +4204,11 @@ fn emit_fn(
                 _ => spec.value(e, w),
             };
             match r {
-                Ok(t) => into.push(t),
+                // A spliced clause lands beside others with `**`, and an
+                // author is entitled to write one whose top level is an `if`
+                // or an `exists*`. Without parentheses such a clause would
+                // swallow everything stated after it, or be refused outright.
+                Ok(t) => into.push(format!("({})", t)),
                 Err(why) => {
                     slprop_err.get_or_insert(why);
                 }
@@ -4690,10 +4694,49 @@ fn emit_fn(
                 }
             )])
         };
+        // A ghost argument appears only inside a `pure`, so there is nothing
+        // in the slprops for Pulse to read it off; the wrapper has to hand it
+        // over by hand. Implicits apply positionally, so every implicit the
+        // callee declares before the last one that needs a value has to be
+        // written too, as `#_` where the wrapper has nothing to say. The
+        // witness is where the values come from: that is what it is for.
+        let wmap: HashMap<&str, String> = wits
+            .iter()
+            .zip(wprojs.iter())
+            .map(|((nm, _, erased), pj)| {
+                (
+                    nm.as_str(),
+                    if *erased {
+                        format!("(hide {})", pj)
+                    } else {
+                        pj.clone()
+                    },
+                )
+            })
+            .collect();
+        let mut imps: Vec<String> = perms
+            .iter()
+            .chain(ghosts.iter())
+            .map(|b| {
+                let nm = b.trim_start_matches("(#");
+                let nm = &nm[..nm.find(':').unwrap_or(nm.len())].trim();
+                wmap.get(*nm)
+                    .map(|v| format!("#{}", v))
+                    .unwrap_or_else(|| "#_".to_string())
+            })
+            .collect();
+        while imps.last().is_some_and(|i| i == "#_") {
+            imps.pop();
+        }
         let call = if n == 0 {
             format!("func_{} ()", decl.name.val)
         } else {
             format!("func_{} {}", decl.name.val, aprojs.join(" "))
+        };
+        let call = if imps.is_empty() {
+            call
+        } else {
+            format!("{} {}", call, imps.join(" "))
         };
         Some(format!(
             "divergent\n\
@@ -9058,6 +9101,16 @@ struct Body<'a> {
     /// names the value it is there to say something about, and it only has a
     /// name at all because those statements exist.
     ret_binding: Option<String>,
+    /// The witness an `eta_expanded_erased` hint supplies for the next
+    /// indirect call.
+    ///
+    /// A ghost argument shows up in the wrapper's precondition only inside a
+    /// `pure`, so there is nothing in the slprops for Pulse to read it off,
+    /// and the eager-intro rule that is supposed to expand the witness fires
+    /// on a bare uvar and solves it with another one. The call site therefore
+    /// has to name the value, and the author already says it -- in the hint
+    /// written for the old model, whose whole purpose was the same thing.
+    fp_witness: Option<String>,
     /// Array-kind pointer parameters, by C name.
     arrays: HashMap<String, ArrayParam>,
     /// `_out` array parameters and the term for the cells handed in; see
@@ -12544,12 +12597,13 @@ impl<'a> Body<'a> {
                             .count(),
                         _ => 0,
                     };
+                    let w = self
+                        .fp_witness
+                        .take()
+                        .unwrap_or_else(|| witness_holes(nwit));
                     self.lines.push(format!(
                         "let {} = call_div _ _ {} {} {};",
-                        t,
-                        callee,
-                        tuple,
-                        witness_holes(nwit)
+                        t, callee, tuple, w
                     ));
                     // The callee hands the validity back -- it is a fact, not
                     // a resource it uses up. Where the caller keeps the
@@ -12592,7 +12646,9 @@ impl<'a> Body<'a> {
                 // contract quantifies, and the emitter built that wrapper, so
                 // it knows how many. Which values they are is left to slprop
                 // matching against the ownership being handed over.
-                let w = witness_holes(self.callees.get(&g).map_or(0, |c| c.fp_wits));
+                let w = self.fp_witness.take().unwrap_or_else(|| {
+                    witness_holes(self.callees.get(&g).map_or(0, |c| c.fp_wits))
+                });
                 let (pre, post, addr) = Self::fp_spec(&g);
                 // `call_div` lives in the divergent effect, so its caller does
                 // too -- which every PAL function that is not `_total` already
@@ -14662,6 +14718,11 @@ impl<'a> Body<'a> {
                 if let Some(e) = uninit_open_arg(code) {
                     self.note_uninit(e);
                 }
+                if ghost_head(code).starts_with(ETA_HINT) {
+                    let t = self.inline_pulse(code)?;
+                    self.fp_witness =
+                        Some(t.trim().trim_start_matches(ETA_HINT).trim().to_string());
+                }
                 Ok(())
             }
             StmtT::GhostStmt(_) if !self.tds.splice_inline => Err(self.tds.no_splice()),
@@ -14669,7 +14730,12 @@ impl<'a> Body<'a> {
                 let was = std::mem::replace(&mut self.keep_reads, true);
                 let t = self.inline_pulse(code);
                 self.keep_reads = was;
-                self.lines.push(format!("{};", t?.trim()));
+                // Pulse reads indentation, and only the first line of an
+                // emitted fragment gets the statement's indent, so a hint the
+                // author wrote across several lines has to become one line
+                // before it lands somewhere its original column means nothing.
+                self.lines
+                    .push(format!("{};", flatten_fragment(t?.trim())?));
                 Ok(())
             }
             StmtT::Return(None) => Ok(()),
@@ -16467,6 +16533,7 @@ fn emit_body(
         in_guard: false,
         spec_binders: HashMap::new(),
         ret_binding: None,
+        fp_witness: None,
         arrays,
         olens: sig.olens.clone(),
         requires_ok: sig.req_props,
@@ -17060,6 +17127,12 @@ fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
 ///
 /// Every other ghost statement says something Palow has no other way to learn,
 /// and is still refused rather than silently discarded.
+/// The hint that names the witness of an indirect call. It is not code Palow
+/// emits -- it is the one thing at such a call site that only the author
+/// knows -- but it arrives spelled as a call to the old model's eager-intro
+/// rule, so it is read there and turned into the witness argument.
+const ETA_HINT: &str = "Pulse.Lib.C.FuncPtr.eta_expanded_erased";
+
 fn ghost_replaced(code: &InlinePulseCode) -> bool {
     let head = ghost_head(code);
     const REPLACED: &[&str] = &[

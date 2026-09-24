@@ -4154,8 +4154,29 @@ new facts about memory.
 
    **Nothing in the test suite is dropped, admitted or skipped any more.**
 
-   As of this milestone: **988 specifications, 968 of them with real bodies,
-   0 admitted, 0 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
+   That was true of the suite as it stood. Merging `main` then brought in
+   another hundred-odd specifications -- new tests for pointer/integer casts,
+   for `malloc` with a `sizeof` expression, for unreachable dereferences, and
+   a large extension to the function-pointer test -- and re-opened the
+   measurement, which is exactly what the measurement is for. Three of the
+   new failures were not gaps but bugs, and are fixed: a function-pointer
+   wrapper was calling its own target without instantiating the ghost
+   arguments, which only appear inside a `pure` and so cannot be read off any
+   slprop; the witness of an indirect call has the same problem one level up,
+   and is now taken from the author's `eta_expanded_erased` hint, which is
+   what that hint was always for; and a spliced contract clause was going in
+   unparenthesised, so an author who wrote one whose top level is an `if`
+   either had it refused or had it swallow everything stated after it. A
+   ghost statement written across several lines is now flattened for the same
+   reason a spliced clause always was.
+
+   What remains is three honest clusters: a conversion from a pointer to an
+   integer, which is where provenance has to be said out loud; a `malloc`
+   whose size is an expression rather than a `sizeof`; and a global reached
+   through a function pointer.
+
+   As of this milestone: **1083 specifications, 1037 of them with real bodies,
+   26 admitted, 4 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
