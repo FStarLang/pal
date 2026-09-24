@@ -126,3 +126,20 @@ uint8_t blob_decay_then_read(struct blobholder *h)
     }
     return h->blob[0];
 }
+
+/* The decayed address of an array field of a live object is not NULL.
+ * `array_pts_to_not_null` puts `not (array_is_null a)` in context, and
+ * `array_to_ref_is_null` carries it across the `array_to_ref` step of the
+ * decay, and `ref_to_core_is_null` carries it to the `core_ref`. Without
+ * `array_to_ref_is_null` the postcondition does not verify. */
+void *blob_addr(struct blobholder *h)
+    _ensures(return != NULL)
+{
+    void *raw = h->blob;
+    _ghost_stmt(Pulse.Lib.C.Array.array_pts_to_not_null
+        (Struct_blobholder.struct_blobholder__get_blob $(h)));
+    _ghost_stmt(Pulse.Lib.C.CoreRef.ref_to_core_is_null
+        (Pulse.Lib.C.Array.array_to_ref
+            (Struct_blobholder.struct_blobholder__get_blob $(h))));
+    return raw;
+}
