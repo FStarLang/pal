@@ -3078,6 +3078,8 @@ public:
                            /*is_enum_constant=*/true);
       }
       return {};
+    } else if (dyn_cast<EmptyDecl>(D)) {
+      return {};
     } else if (dyn_cast<StaticAssertDecl>(D)) {
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
