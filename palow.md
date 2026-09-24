@@ -3941,8 +3941,27 @@ new facts about memory.
    nothing to do going in; coming back it is full, and the block's view has to
    become the plain one or the `free` would give up the wrong thing.
 
-   As of this milestone: **987 specifications, 956 of them with real bodies,
-   11 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   A dispatch table that arrived from a call is callable, which closes the
+   last of the function-pointer gaps. `get_ops` hands back a `struct ops *`
+   whose `m` field carries its own validity in a field refinement, and calling
+   through `p->m` needed three things: the nullness guard spent, which is a C
+   fix now that the Palow spelling of `get_ops` is `_nullable`; the validity
+   taken as the author's, which the rule for a pointer bound from a call
+   already does; and not putting that validity down afterwards, since here it
+   goes back into the object rather than being this body's to drop.
+
+   The witness a call through a function pointer passes is the one place where
+   the emitter has to guess. How many components it has is the author's
+   choice -- the spec being called through is whatever the contract weakened
+   to, and two callbacks of the same C type can quantify over a unit and over
+   a four-tuple -- so the only signal is which parameters point at something.
+   `_plain` is the ambiguous case, and the two readings are split by where the
+   validity came from: a name the contract spoke for is read narrowly, a
+   pointer read out of an object widely. A wrong guess is a call F\* rejects,
+   not a body that verifies for the wrong reason.
+
+   As of this milestone: **987 specifications, 957 of them with real bodies,
+   10 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

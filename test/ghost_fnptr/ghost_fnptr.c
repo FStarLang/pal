@@ -474,8 +474,19 @@ int32_t call_via_returned_ops(int32_t *a, int32_t *b,
                               _plain int32_t *q, _plain int32_t *r)
 {
     struct ops *p = get_ops();
+#ifdef PALOW
+    /* `get_ops` is `_nullable` here, so the guard has to be spent before the
+       table can be read at all. Nothing is owed on this path: the function
+       promises nothing about its result. */
+    if (p == NULL) {
+        return 0;
+    }
+    int32_t res = p->m(a, b, q, r);
+    _ghost_stmt(Pulse.Lib.C.Palow.FnPtr.drop_is_valid _ _ _);
+#else
     int32_t res = p->m(a, b, q, r);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
     free(p);
     return res;
 }

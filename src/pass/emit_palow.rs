@@ -11650,16 +11650,34 @@ impl<'a> Body<'a> {
                     };
                     self.divergent = true;
                     let t = self.fresh(&base);
-                    // The witness the callee's wrapper takes is decided by
-                    // its parameters, and a function-pointer type says what
-                    // those are: a parameter with a pointee contributes the
-                    // value the callee owns at it, and one without
-                    // contributes nothing.
+                    // How many components the witness has is the author's
+                    // choice, not the type's: the spec being called through is
+                    // whatever the contract weakened to, and two callbacks of
+                    // the same C type can quantify over a unit and over a
+                    // four-tuple. So this is a guess, and the one signal in
+                    // the type is which parameters point at something. A
+                    // `_plain` pointer is the ambiguous case -- it says the
+                    // ownership is stated by hand, which may or may not have
+                    // put a binder in the witness -- and the two readings are
+                    // split by where the validity came from. A name the
+                    // contract spoke for is read narrowly, which is what the
+                    // hand-weakened specs in `weaken_generalize` want; a
+                    // pointer read out of an object is read widely, which is
+                    // what a dispatch table's own spec wants. A wrong guess is
+                    // a call F* rejects, not a body that verifies for the
+                    // wrong reason.
+                    let wide = !matches!(&strip_vattr(f).val, ExprT::Var(_));
                     let fty = self.ty_of(f)?;
                     let nwit = match &peel(self.tds, &fty).val {
                         TypeT::FnPtr { args, .. } => args
                             .iter()
-                            .filter(|a| pointee(self.tds, a).is_some())
+                            .filter(|a| {
+                                if wide {
+                                    matches!(peel(self.tds, a).val, TypeT::Pointer(..))
+                                } else {
+                                    pointee(self.tds, a).is_some()
+                                }
+                            })
                             .count(),
                         _ => 0,
                     };
@@ -11680,7 +11698,10 @@ impl<'a> Body<'a> {
                     // postcondition belongs to nobody once the call through it
                     // is done: this body never owned the pointer, so there is
                     // no ownership for the fact to travel out with.
-                    if self.consumed.contains(&base) || self.fp_from_call.contains(&base) {
+                    if self.consumed.contains(&base)
+                        || (self.fp_from_call.contains(&base)
+                            && matches!(&strip_vattr(f).val, ExprT::Var(_)))
+                    {
                         self.lines.push("drop_is_valid _ _ _;".to_string());
                     }
                     return Ok(t);
