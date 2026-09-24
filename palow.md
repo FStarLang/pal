@@ -3884,8 +3884,9 @@ new facts about memory.
    read before that, once, which is where a loop-invariant read belongs
    anyway. Both are reorderings the current model accepts unchanged.
 
-   `break` past a local allocated in the loop stays admitted, and the reason
-   is worth recording because it is not the one the message gives. Releasing
+   `break` past a local allocated in the loop stayed admitted for a while,
+   and the reason is worth recording because it is not the one the message
+   gave (it is resolved below). Releasing
    the locals on the way out is easy -- it is what falling off the end does.
    What a `break` costs is Pulse's promise that the loop condition is false on
    the way out, which has to be given up for the whole loop, and the invariant
@@ -4048,8 +4049,28 @@ new facts about memory.
    cleared by an overwrite and survive a join only where every arm agrees,
    which is what stops a stale name from outliving the thing it named.
 
-   As of this milestone: **987 specifications, 963 of them with real bodies,
-   4 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   A `break` leaves a loop from the middle, and two things have to follow it
+   out. The first is the releases: the storage a local declared inside the
+   body holds has to be given back at the jump, exactly as it is at the
+   closing brace, and that is what the `break` now emits. The second is
+   harder. Pulse's `while` carries, implicitly, that the condition is false
+   on the way out; a loop that breaks has to give that promise up, and what
+   the author puts in its place is an `_ensures`. Pulse takes one too -- but
+   it is a *prop* over the enclosing scope, and every local a loop invariant
+   talks about is bound existentially inside the invariant, so out there
+   there is no name for it. A ghost reference is such a name. For each local
+   the `_ensures` mentions, the emitter allocates one before the loop, pins
+   it to the local's invariant binder, writes it wherever the local is
+   written, and spells the `_ensures` in terms of it. Pulse then has to prove
+   the claim at the ordinary exit, where the negated condition is still in
+   hand, and at every `break`, where the body has just established it -- and
+   after the loop the claim is restated in terms of the locals themselves,
+   which is the form the code that follows can use. The mirrors are ghost, so
+   none of this survives extraction. Both of the intrusive list's sorted
+   inserts now translate.
+
+   As of this milestone: **987 specifications, 965 of them with real bodies,
+   2 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

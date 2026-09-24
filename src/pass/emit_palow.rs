@@ -7307,6 +7307,34 @@ fn spliced_names(e: &Expr, out: &mut HashSet<String>) {
     }
 }
 
+/// The C objects a clause's spliced fragments *read*.
+///
+/// `spliced_names` collects only `$&(x)`, because what it is for is deciding
+/// who states an object's ownership. This is the other half: the values a
+/// fragment names, which is what decides whether the fragment can be written
+/// out where the loop's binders are gone.
+fn spliced_reads(e: &Expr, out: &mut HashSet<String>) {
+    match &strip_vattr(e).val {
+        ExprT::InlinePulse(code, _) => {
+            for tok in &code.tokens {
+                let InlinePulseToken::RValueAntiquot { expr: x, .. } = tok else {
+                    continue;
+                };
+                let mut t = Touched::default();
+                touch_expr(x, &mut t);
+                out.extend(t.vars);
+            }
+        }
+        ExprT::Cast(inner, _) => spliced_reads(inner, out),
+        ExprT::FnCall(_, args) => {
+            for a in args.iter() {
+                spliced_reads(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn touch_exprs(es: &Exprs, t: &mut Touched) {
     for e in es.iter() {
         touch_expr(e, t);
@@ -8597,6 +8625,20 @@ struct Body<'a> {
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
+    /// Ghost mirrors of the locals an enclosing loop's `_ensures` talks about,
+    /// keyed by the local's name. Pulse's `while` takes an `ensures` that is a
+    /// *prop* over the enclosing scope, and every local a loop invariant binds
+    /// is existentially bound inside the invariant, so there is no name for it
+    /// out there. A ghost reference is such a name: the invariant pins it to
+    /// the slot's binder, every write to the slot writes it too, and the
+    /// `ensures` reads it. It costs nothing at run time.
+    mirrors: HashMap<String, String>,
+    /// Whether a read of a mirrored local should be spelled by its mirror.
+    /// Set only while the loop's `ensures` is written out: inside the body
+    /// the locals themselves are in scope and are what the author meant.
+    mirror_reads: bool,
+    /// The slots the last `frame` gave a binder to, in order.
+    frame_slots: Vec<String>,
     /// Functions already known to be divergent. Calling one makes this body
     /// divergent too, which is why the whole set is reached by a fixpoint
     /// rather than in one pass.
@@ -8680,6 +8722,28 @@ fn has_break(body: &Stmts) -> bool {
                 ..
             } => branches.iter().any(|b| has_break(&b.body)) || has_break(default_branch),
             StmtT::GotoBlock { body, .. } => has_break(body),
+            _ => false,
+        }
+    }
+    body.iter().any(|s| in_stmt(s))
+}
+
+/// Whether this statement list contains a loop of its own.
+fn has_loop(body: &Stmts) -> bool {
+    fn in_stmt(s: &Stmt) -> bool {
+        match &s.val {
+            StmtT::While { .. } => true,
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => has_loop(then_branch) || has_loop(else_branch),
+            StmtT::Match {
+                branches,
+                default_branch,
+                ..
+            } => branches.iter().any(|b| has_loop(&b.body)) || has_loop(default_branch),
+            StmtT::GotoBlock { body, .. } => has_loop(body),
             _ => false,
         }
     }
@@ -10664,6 +10728,15 @@ impl<'a> Body<'a> {
     /// the loads out of the `assert` itself, so most of them need no name --
     /// see `read`.
     fn prop(&mut self, e: &Expr) -> Result<String, String> {
+        // Inside a `break`ing loop's `ensures`, a mirrored local is spelled by
+        // its ghost reference: the prop is checked out where the loop's own
+        // binders are not in scope, and the mirror is the name that is.
+        if self.mirror_reads
+            && let ExprT::Var(v) = &strip_vattr(e).val
+            && let Some(gm) = self.mirrors.get(&v.val.to_string())
+        {
+            return Ok(format!("(Pulse.Lib.GhostReference.op_Bang {})", gm));
+        }
         match &e.val {
             // Which member of a union is live. The contract can read the tag
             // straight off a value it has a binder for; a body has no such
@@ -10933,6 +11006,18 @@ impl<'a> Body<'a> {
                     // is refused because splicing one would run it.
                     let v = match (&strip_vattr(expr).val, &self.ret_binding) {
                         (ExprT::Var(n), Some(r)) if &*n.val == "return" => r.clone(),
+                        // Inside a `break`ing loop's `ensures`, a mirrored
+                        // local is spelled by its ghost reference: see
+                        // `mirrors`.
+                        (ExprT::Var(n), _)
+                            if self.mirror_reads
+                                && self.mirrors.contains_key(&n.val.to_string()) =>
+                        {
+                            format!(
+                                "Pulse.Lib.GhostReference.op_Bang {}",
+                                self.mirrors[&n.val.to_string()]
+                            )
+                        }
                         _ => self.inline(expr)?,
                     };
                     out.push_str(before);
@@ -12943,6 +13028,12 @@ impl<'a> Body<'a> {
                 self.slots[i].init = true;
                 let a = self.slots[i].addr.clone();
                 self.lines.push(format!("{}_{} {} {};", pn, op, a, value));
+                // A mirrored slot's ghost reference holds what the slot holds,
+                // which is only true if it is written whenever the slot is.
+                if let Some(gm) = self.mirrors.get(&v.val.to_string()).cloned() {
+                    self.lines
+                        .push(format!("Pulse.Lib.GhostReference.write {} {};", gm, value));
+                }
                 return Ok(());
             }
         }
@@ -13043,6 +13134,7 @@ impl<'a> Body<'a> {
     ) -> Result<(Vec<String>, Vec<String>, Vec<String>), String> {
         let mut binders: Vec<String> = Vec::new();
         let mut owns: Vec<String> = Vec::new();
+        let mut bound: Vec<String> = Vec::new();
         let mut locals: HashMap<String, String> = HashMap::new();
         // A loop invariant rebinds every value it mentions, which is the point
         // for a local the body changes and a disaster for one it does not: a
@@ -13099,6 +13191,7 @@ impl<'a> Body<'a> {
             let b = format!("inv_{}", s.name);
             binders.push(format!("({}: {})", b, s.fstar_ty));
             owns.push(s.pts_to(&b));
+            bound.push(s.name.clone());
             locals.insert(s.name.clone(), b);
         }
         // A local that is a name for a place rather than storage of its own
@@ -13210,6 +13303,7 @@ impl<'a> Body<'a> {
             });
         }
         self.uses.extend(spec.uses.borrow().iter().cloned());
+        self.frame_slots = bound;
         Ok((binders, owns, props))
     }
 
@@ -13249,7 +13343,8 @@ impl<'a> Body<'a> {
             return Err("a loop in a function with an `_out` parameter".to_string());
         }
 
-        let (binders, owns, props) = self.frame(inv, "a loop", Some(body))?;
+        let (binders, mut owns, props) = self.frame(inv, "a loop", Some(body))?;
+        let bound = std::mem::take(&mut self.frame_slots);
 
         let before = self.lines.len();
         self.in_guard = true;
@@ -13260,6 +13355,52 @@ impl<'a> Body<'a> {
             self.lines.truncate(before);
             return Err("a loop whose condition needs a focused access".to_string());
         }
+
+        // What the author claims about the exit of a `break`ing loop needs a
+        // name for each local it mentions that survives the loop. A ghost
+        // reference is that name; see `mirrors`. Only a loop that actually
+        // breaks needs them (an ordinary exit keeps the negated condition),
+        // and only a body with no loop of its own can have them, because a
+        // nested loop's invariant would have to carry the mirror through an
+        // iteration that writes it, and it does not know to.
+        let mut mirrors: Vec<(String, String)> = Vec::new();
+        if breaks && !ensures.is_empty() && !has_loop(body) {
+            let mut named = Touched::default();
+            touch_exprs(ensures, &mut named);
+            // An `_ensures` is usually spliced Pulse, and `touch_expr` looks
+            // past a splice on purpose; the C objects it speaks about are in
+            // its antiquotations.
+            let mut spliced: HashSet<String> = HashSet::new();
+            for e in ensures.iter() {
+                spliced_reads(e, &mut spliced);
+            }
+            for n in bound.iter() {
+                if !named.vars.contains(n) && !spliced.contains(n) {
+                    continue;
+                }
+                let Some(sl) = self.slots.iter().rev().find(|s| s.name == *n) else {
+                    continue;
+                };
+                if sl.array.is_some() || sl.global || !sl.scattered.is_empty() {
+                    continue;
+                }
+                let (pty, addr) = (sl.palow_ty.clone(), sl.addr.clone());
+                let tmp = self.fresh("mirror");
+                let gm = format!("gm_{}", n);
+                self.lines
+                    .push(format!("let {} = {}_read {};", tmp, pty, addr));
+                self.lines.push(format!(
+                    "let {} = Pulse.Lib.GhostReference.alloc {};",
+                    gm, tmp
+                ));
+                owns.push(format!("Pulse.Lib.GhostReference.pts_to {} inv_{}", gm, n));
+                mirrors.push((n.clone(), gm));
+            }
+        }
+        let outer_mirrors = std::mem::replace(
+            &mut self.mirrors,
+            mirrors.iter().cloned().collect::<HashMap<_, _>>(),
+        );
 
         let outer = std::mem::take(&mut self.lines);
         let was_branch = self.in_branch;
@@ -13324,23 +13465,53 @@ impl<'a> Body<'a> {
         // and what the author does claim arrives as `_ensures`, asserted
         // below. A loop without a `break` keeps the negated condition.
         if breaks {
-            self.lines.push("  ensures true".to_string());
+            // With a mirror for every local the author's `_ensures` names, the
+            // claim *can* be said out here, and saying it to Pulse is what
+            // makes it available after the loop: Pulse has to prove it at the
+            // ordinary exit (where the negated condition is still in hand) and
+            // at every `break` (where the body has just established it).
+            let mut ens: Vec<String> = Vec::new();
+            if !mirrors.is_empty() {
+                self.mirror_reads = true;
+                for e in ensures.iter() {
+                    let before = self.lines.len();
+                    let p = self.prop(e);
+                    let quiet = self.lines.len() == before;
+                    self.lines.truncate(before);
+                    match p {
+                        Ok(p) if quiet && p != "True" => ens.push(p),
+                        _ => {
+                            ens.clear();
+                            break;
+                        }
+                    }
+                }
+                self.mirror_reads = false;
+            }
+            if ens.is_empty() {
+                self.lines.push("  ensures true".to_string());
+            } else {
+                self.lines
+                    .push(format!("  ensures ({})", ens.join(" /\\ ")));
+            }
         }
         self.divergent = true;
         self.lines.push("{".to_string());
         self.lines.extend(body_lines.iter().map(|l| indent(l)));
         self.lines.push("};".to_string());
+        // The mirrors have done their work at the exit; from here the locals
+        // are read the ordinary way again.
+        self.mirrors = outer_mirrors;
+        for (_, gm) in mirrors.iter() {
+            self.lines
+                .push(format!("Pulse.Lib.GhostReference.free {};", gm));
+        }
         // A loop's `_ensures` is what holds when it exits, and a `break` is
         // the reason it needs saying: the ordinary exit is covered by the
         // invariant and the negated condition, but a `break` leaves from the
-        // middle, where the condition still holds.
-        //
-        // Pulse's `while` takes an `ensures` too, but it is a *prop* over the
-        // enclosing scope, and every local a loop invariant talks about is
-        // existentially bound inside the invariant, so there is no name for it
-        // there. Here the same claim is an assertion after the loop instead,
-        // which costs the reads it names and means exactly what the source
-        // says. What holds at the exit is what holds just after it.
+        // middle, where the condition still holds. Restating it here, in terms
+        // of the locals themselves rather than their mirrors, is what makes it
+        // usable by the code that follows.
         for e in ensures.iter() {
             let p = self.prop(e)?;
             if p != "True" {
@@ -13658,30 +13829,32 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("assert (pure ({}));", p));
                 Ok(())
             }
-            // See `ghost_replaced`.
-            // Pulse has `break` and `continue`, and they mean what C means.
-            // What they do not have is a way to leave a *slot* behind: a local
-            // allocated inside the loop body would have to be released on the
-            // way out, and neither statement runs the releases between it and
-            // the end of the body. Releasing them here is easy enough; what is
-            // not is what a `break` does to the *exit condition*. Pulse's
-            // `while` promises the condition is false on the way out, a loop
-            // with a `break` has to give that promise up, and the invariant --
-            // which is all that is left -- binds every local existentially. So
-            // a loop that breaks past a local is one whose `_ensures` about
-            // that local would rest on nothing.
-            StmtT::Break | StmtT::Continue if self.loop_mark != Some(self.slots.len()) => Err(
-                format!("{} past a local allocated in the loop", stmt_kind(s)),
-            ),
             StmtT::Break | StmtT::Continue if !self.in_loop => {
                 Err(format!("{} outside a loop", stmt_kind(s)))
             }
-            StmtT::Break => {
-                self.lines.push("break;".to_string());
-                Ok(())
-            }
-            StmtT::Continue => {
-                self.lines.push("continue;".to_string());
+            // Pulse has `break` and `continue`, and they mean what C means.
+            // What they do not do is run the releases between them and the end
+            // of the body, so a local allocated inside the loop has to be given
+            // back here: C says its lifetime ends at the jump just as surely as
+            // it does at the closing brace.
+            //
+            // What a `break` costs is the *exit condition*. Pulse's `while`
+            // promises the condition is false on the way out; a loop with a
+            // `break` leaves from the middle, so that promise is given up and
+            // what is left is the invariant, which binds every local
+            // existentially. An author who needs more says it as the loop's
+            // own `_ensures`, which is asserted just after the loop.
+            StmtT::Break | StmtT::Continue => {
+                let close = std::mem::take(&mut self.pending_close);
+                self.lines.extend(close);
+                self.release_from(self.loop_mark.unwrap_or(self.slots.len()));
+                self.lines.push(
+                    match &s.val {
+                        StmtT::Break => "break;",
+                        _ => "continue;",
+                    }
+                    .to_string(),
+                );
                 Ok(())
             }
             StmtT::GhostStmt(code) if aux_activate(code).is_some() => {
@@ -15529,6 +15702,9 @@ fn emit_body(
         open_elems: Vec::new(),
         own_open: Vec::new(),
         loop_mark: None,
+        mirrors: HashMap::new(),
+        mirror_reads: false,
+        frame_slots: Vec::new(),
         divergent_fns,
         blocks: Vec::new(),
         aliases: aliases,
