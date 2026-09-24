@@ -4034,8 +4034,22 @@ new facts about memory.
    for the stored note first and falling back to the dereference separates the
    two without needing the type.
 
-   As of this milestone: **987 specifications, 962 of them with real bodies,
-   5 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   Two arrays in a struct is the last thing an allocation was refused for
+   outside the flexible-array case, and it needed the test to change as well
+   as the emitter. An allocation that fails returns null, and a struct built
+   out of two of them in a single brace initialiser has nowhere to put the
+   check -- nor anywhere to undo the first allocation when the second fails.
+   Written out one at a time and checked, it translates. What was then
+   missing is that storing a block's address into a field does not move the
+   block's ownership: it only gives the block a second way to be named. So
+   places now carry a note saying which block they hold, alongside the one
+   saying which function they hold, and a subscript or a `free` reached
+   through such a field resolves to the block it names. Both notes are
+   cleared by an overwrite and survive a join only where every arm agrees,
+   which is what stops a stale name from outliving the thing it named.
+
+   As of this milestone: **987 specifications, 963 of them with real bodies,
+   4 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

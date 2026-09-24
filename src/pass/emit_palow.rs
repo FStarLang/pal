@@ -7446,6 +7446,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     union_arm: None,
                     filling: None,
                     holds_fn: BTreeMap::new(),
+                    holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 }
             }
@@ -7473,6 +7474,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     union_arm: None,
                     filling: None,
                     holds_fn: BTreeMap::new(),
+                    holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 }
             }
@@ -8265,6 +8267,11 @@ struct Slot {
     /// dispatch table is exactly a struct whose fields are code pointers, so
     /// the record has to be per-field rather than per-slot.
     holds_fn: BTreeMap<String, String>,
+    /// Which allocated block a place is known to hold, keyed the same way.
+    /// A block's ownership is tracked under the name of the local the
+    /// allocation was bound to; storing that pointer somewhere else does not
+    /// move the ownership, it only gives the block a second way to be named.
+    holds_block: BTreeMap<String, String>,
     /// The fields already written, while the slot holds a struct that is being
     /// built one field at a time. Empty means the slot is whole: either
     /// storage or a value, according to `init`. Non-empty means it is neither
@@ -8401,8 +8408,9 @@ struct ArrayBlock {
 struct BranchResult {
     lines: Vec<String>,
     inits: Vec<bool>,
-    /// Which function each enclosing slot is known to hold on this path.
-    holds: Vec<BTreeMap<String, String>>,
+    /// Which function, and which allocated block, each enclosing slot is
+    /// known to hold on this path.
+    holds: Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>,
     out_params: Vec<String>,
 }
 
@@ -8772,6 +8780,7 @@ impl<'a> Body<'a> {
                 global: true,
                 union_arm: Some((un, arm.val.to_string())),
                 holds_fn: BTreeMap::new(),
+                holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
                 filling: Some((len, BTreeSet::new())),
             });
@@ -8800,6 +8809,7 @@ impl<'a> Body<'a> {
             global: true,
             union_arm: Some((un, arm.val.to_string())),
             holds_fn: BTreeMap::new(),
+            holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
             filling: None,
         });
@@ -8874,6 +8884,7 @@ impl<'a> Body<'a> {
                 union_arm: None,
                 filling: None,
                 holds_fn: BTreeMap::new(),
+                holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
             });
             return;
@@ -8906,6 +8917,7 @@ impl<'a> Body<'a> {
             union_arm: None,
             filling: None,
             holds_fn: BTreeMap::new(),
+            holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
     }
@@ -9287,6 +9299,7 @@ impl<'a> Body<'a> {
             union_arm: None,
             filling: None,
             holds_fn: BTreeMap::new(),
+            holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
         Ok(format!("loc_{}", name))
@@ -10252,6 +10265,28 @@ impl<'a> Body<'a> {
             }
             ExprT::Member(base, f) => {
                 let fty = self.field_ty(base, f)?;
+                // A field this body stored an allocated block into. The block
+                // is still owned under the name it was allocated as -- storing
+                // the pointer copied an address and nothing else -- so the
+                // subscript is the same one it would have been through that
+                // name.
+                if let Some(n) = self.block_name(e)
+                    && let Some(b) = self
+                        .blocks
+                        .iter()
+                        .find(|b| b.var == n && b.checked && !b.freed && b.array.is_some())
+                {
+                    let a = b.array.clone().unwrap();
+                    return Ok(ArrayPlace {
+                        addr: b.tmp.clone(),
+                        pn: b.pn.clone(),
+                        esize: a.esize,
+                        base: 0,
+                        close_read: Vec::new(),
+                        close_write: Vec::new(),
+                        maybe: true,
+                    });
+                }
                 // An `_array` field holds a pointer, not the elements, so its
                 // storage is not inside the struct at all: it is what the
                 // struct's deep ownership claims. The address still has to be
@@ -11002,10 +11037,14 @@ impl<'a> Body<'a> {
         };
         if path.is_empty() {
             self.slots[i].holds_fn.clear();
+            self.slots[i].holds_block.clear();
         } else {
             let under = format!("{}.", path);
             self.slots[i]
                 .holds_fn
+                .retain(|k, _| *k != path && !k.starts_with(&under));
+            self.slots[i]
+                .holds_block
                 .retain(|k, _| *k != path && !k.starts_with(&under));
         }
     }
@@ -11029,6 +11068,42 @@ impl<'a> Body<'a> {
         out
     }
 
+    /// The allocated blocks a stored value is known to contain, keyed by
+    /// their path within it. As for code addresses, a brace initialiser is
+    /// read out here rather than each field being a store of its own.
+    fn block_notes(&self, rhs: &Expr) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        if let ExprT::Var(v) = &strip_casts(rhs).val
+            && self
+                .blocks
+                .iter()
+                .any(|b| b.var == *v.val && b.checked && !b.freed)
+        {
+            out.insert(String::new(), v.val.to_string());
+        }
+        if let ExprT::StructInit(_, fields) = &strip_vattr(rhs).val {
+            for (f, e) in fields.iter() {
+                for (k, g) in self.block_notes(e) {
+                    out.insert(join_path(&f.val.to_string(), &k), g);
+                }
+            }
+        }
+        out
+    }
+
+    /// The local an allocated block is tracked under, given a way of naming
+    /// it: the local itself, or a place this body stored that pointer into.
+    /// Storing a block's address somewhere does not move its ownership, it
+    /// only gives the block a second name.
+    fn block_name(&self, e: &Expr) -> Option<String> {
+        if let ExprT::Var(v) = &strip_vattr(e).val {
+            return Some(v.val.to_string());
+        }
+        let (slot, path) = self.place_key(e)?;
+        let s = self.slots.iter().rev().find(|s| s.name == slot)?;
+        s.holds_block.get(&path).cloned()
+    }
+
     /// Record that a place now holds known functions' addresses.
     fn note_fn_store(&mut self, lhs: &Expr, rhs: &Expr) {
         let Some((slot, path)) = self.place_key(lhs) else {
@@ -11040,9 +11115,13 @@ impl<'a> Body<'a> {
         // the old one stand -- keeping it would be the one way this could go
         // wrong.
         let notes = self.fn_notes(rhs);
+        let blocks = self.block_notes(rhs);
         if let Some(i) = self.slots.iter().rposition(|s| s.name == slot) {
             for (k, g) in notes {
                 self.slots[i].holds_fn.insert(join_path(&path, &k), g);
+            }
+            for (k, g) in blocks {
+                self.slots[i].holds_block.insert(join_path(&path, &k), g);
             }
         }
     }
@@ -12325,6 +12404,7 @@ impl<'a> Body<'a> {
                 union_arm: None,
                 filling: None,
                 holds_fn: BTreeMap::new(),
+                holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
             });
             return Ok(pn);
@@ -12355,6 +12435,7 @@ impl<'a> Body<'a> {
             union_arm: None,
             filling: None,
             holds_fn: BTreeMap::new(),
+            holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
         });
         Ok(pn)
@@ -12762,9 +12843,8 @@ impl<'a> Body<'a> {
             self.lines.push(format!("free {};", tmp));
             return Ok(());
         }
-        let name = match &strip_vattr(arg).val {
-            ExprT::Var(v) => v.val.to_string(),
-            _ => return Err("a `free` of something other than a local".to_string()),
+        let Some(name) = self.block_name(arg) else {
+            return Err("a `free` of something other than a local".to_string());
         };
         // A block the caller handed over: the `_allocated` refinement put a
         // `freeable` in the precondition and `_consumes` says it is not wanted
@@ -13351,6 +13431,7 @@ impl<'a> Body<'a> {
                     union_arm: None,
                     filling: None,
                     holds_fn: BTreeMap::new(),
+                    holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 });
                 Ok(())
@@ -13369,9 +13450,11 @@ impl<'a> Body<'a> {
                 self.lines
                     .push(format!("{}_write_uninit loc_{} {};", pn, name.val, v));
                 let held = self.fn_notes(init);
+                let blocks = self.block_notes(init);
                 let slot = self.slots.last_mut().unwrap();
                 slot.init = true;
                 slot.holds_fn = held;
+                slot.holds_block = blocks;
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
@@ -13523,6 +13606,7 @@ impl<'a> Body<'a> {
                 for (i, slot) in self.slots.iter_mut().enumerate() {
                     if arms.iter().any(|(_, a)| a.holds.get(i) != holds.get(i)) {
                         slot.holds_fn.clear();
+                        slot.holds_block.clear();
                     }
                 }
 
@@ -13847,6 +13931,7 @@ impl<'a> Body<'a> {
                 for (i, slot) in self.slots.iter_mut().enumerate() {
                     if then.holds.get(i) != els.holds.get(i) {
                         slot.holds_fn.clear();
+                        slot.holds_block.clear();
                     }
                 }
 
@@ -14145,10 +14230,22 @@ impl<'a> Body<'a> {
         // path, so what it stores is only true on that path: the other arm has
         // to start where this one did, and what survives the join is what both
         // arms agree on.
-        let outer_state: Vec<(bool, BTreeMap<String, String>, BTreeSet<String>)> = self
+        let outer_state: Vec<(
+            bool,
+            BTreeMap<String, String>,
+            BTreeMap<String, String>,
+            BTreeSet<String>,
+        )> = self
             .slots
             .iter()
-            .map(|s| (s.init, s.holds_fn.clone(), s.scattered.clone()))
+            .map(|s| {
+                (
+                    s.init,
+                    s.holds_fn.clone(),
+                    s.holds_block.clone(),
+                    s.scattered.clone(),
+                )
+            })
             .collect();
         let outer_env = self.env.clone();
         let outer_lines = std::mem::take(&mut self.lines);
@@ -14208,7 +14305,7 @@ impl<'a> Body<'a> {
                 inits: self.slots[..mark].iter().map(|s| s.init).collect(),
                 holds: self.slots[..mark]
                     .iter()
-                    .map(|s| s.holds_fn.clone())
+                    .map(|s| (s.holds_fn.clone(), s.holds_block.clone()))
                     .collect(),
                 out_params: std::mem::take(&mut self.out_params),
             })
@@ -14216,9 +14313,10 @@ impl<'a> Body<'a> {
 
         self.open_elems = outer_open;
         self.slots.truncate(mark);
-        for (slot, (init, holds, scattered)) in self.slots.iter_mut().zip(outer_state) {
+        for (slot, (init, holds, blocks, scattered)) in self.slots.iter_mut().zip(outer_state) {
             slot.init = init;
             slot.holds_fn = holds;
+            slot.holds_block = blocks;
             slot.scattered = scattered;
         }
         self.env = outer_env;
@@ -15513,6 +15611,7 @@ fn emit_body(
                     union_arm: None,
                     filling: None,
                     holds_fn: BTreeMap::new(),
+                    holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
                 });
             }
