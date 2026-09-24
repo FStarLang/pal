@@ -4086,8 +4086,26 @@ new facts about memory.
    one thing Palow insists on that PAL does not is that the allocation may
    fail: `vec_new` tests its result, and its return type says `_nullable`.
 
-   As of this milestone: **987 specifications, 966 of them with real bodies,
-   1 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   `malloc` of a flexible struct is the same allocation with the tail left
+   as storage, and the source has to fill it before the object is anything.
+   That fill is a loop, and a loop over storage is the case the invariant
+   machinery had never had to face: what the tail holds changes on every
+   iteration, so it cannot ride along in Pulse's frame, and the sequence it
+   holds has to be named. So the claim hands the tail back at the `option`
+   view rather than hiding it, the author's `_invariant` says how far the
+   frontier has got, and a local holding a block is spelled in an invariant
+   by the block's own pointer -- pinned, not bound existentially, because
+   binding it would lose the connection to the pointer every statement in the
+   body is written against. When the loop ends, the object is about to be
+   used as a value, and that is where the emitter asks that every element was
+   written: `array_claim_all_somes` never names *which* values, only that
+   each one is there. Whether the loop really ran to the end is the
+   invariant's business, exactly as a subscript's bound is the `_requires`'s.
+
+   With that, **every function in the test suite has a real body.**
+
+   As of this milestone: **987 specifications, 967 of them with real bodies,
+   0 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

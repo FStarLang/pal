@@ -88,6 +88,26 @@ vec_ptr vec_new_filled(unsigned n, int x)
     }
 #endif
     v->len = n;
+#ifdef PALOW
+    /* Palow holds the unfilled tail as a sequence of `option`s at the address
+       the field starts at, so the frontier invariant is about that sequence:
+       it is as long as the allocation asked for, and everything below `i`
+       holds a value. When the loop ends `i == n`, which is what lets the
+       object be gathered. */
+    for (unsigned i = 0; i < n; i = i + 1)
+        _invariant(_live(i))
+        _invariant(_inline_pulse(
+            exists* (s: FStar.Seq.seq (option Int32.t)).
+              (array_pts_to (maybe_repr int32_t_repr (SizeT.v 4sz)) (SizeT.v 4sz)
+                 ($(v) +! Struct_vec.struct_vec_offsetof_data) 1.0R s) **
+              (pure (FStar.Seq.length s == UInt32.v $(n))) **
+              (pure (forall (k: nat). k < FStar.Seq.length s ==> k < UInt32.v $(i)
+                                      ==> Some? (FStar.Seq.index s k)))
+        ))
+    {
+        v->data[i] = x;
+    }
+#else
     for (unsigned i = 0; i < n; i = i + 1)
         _invariant(_live(i))
         _invariant(_inline_pulse(
@@ -101,5 +121,6 @@ vec_ptr vec_new_filled(unsigned n, int x)
     {
         v->data[i] = x;
     }
+#endif
     return v;
 }

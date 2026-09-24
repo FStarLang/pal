@@ -6386,9 +6386,15 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         .filter(|f| !std::ptr::eq(*f, flex))
         .collect();
     let flex_at = format!("(a +! {}_offsetof_{})", sn, flex.name);
+    // Storage the source is going to fill one element at a time, which is
+    // the `option` view: `array_pts_to_uninit` hides the sequence, and a
+    // loop's invariant has to name it.
     let flex_uninit = format!(
-        "array_pts_to_uninit {}_repr {} (SizeT.v n) {}",
-        fpn, fes, flex_at
+        "array_pts_to (maybe_repr {pn}_repr {es}) {es} {at} 1.0R (Seq.create (SizeT.v n) (None #{el}))",
+        pn = fpn,
+        es = fes,
+        at = flex_at,
+        el = fstar_type(tds, flex_elem(tds, &flex.ty).unwrap()).unwrap()
     );
 
     let mut c = String::new();
@@ -6547,18 +6553,19 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
                         );
                     } else {
                         alloc += &format!(
-                            "  array_claim_all_uninit {pn}_repr {off} {es}sz n;\n",
+                            "  array_claim_uninit {pn}_repr {off} {es}sz n;\n",
                             pn = fpn,
                             off = at(f.offset),
                             es = fes
                         );
                         alloc += &format!(
-                            "  rewrite (array_pts_to_uninit {pn}_repr {es} (SizeT.v n) {off})\n    as (array_pts_to_uninit {pn}_repr {es} (SizeT.v n) (a +! {sn}_offsetof_{f}));\n",
+                            "  rewrite (array_pts_to (maybe_repr {pn}_repr {es}) {es} {off} 1.0R (Seq.create (SizeT.v n) (None #{el})))\n    as (array_pts_to (maybe_repr {pn}_repr {es}) {es} (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) (None #{el})));\n",
                             pn = fpn,
                             es = fes,
                             off = at(f.offset),
                             sn = sn,
-                            f = f.name
+                            f = f.name,
+                            el = fstar_type(tds, flex_elem(tds, &flex.ty).unwrap()).unwrap()
                         );
                     }
                 }
@@ -8731,8 +8738,15 @@ struct FlexBlock {
     n: String,
     /// The whole object's size in bytes, as a `SizeT.t` term.
     nbytes: String,
+    /// The tail's element size, as a `SizeT.t` literal.
+    esize: String,
+    /// The tail's element Palow type name.
+    pn: String,
+    /// The tail field's C name.
+    field: String,
     /// The element value an all-zero range represents, and the lemma calls
-    /// that say so.
+    /// that say so. `None` when the allocator did not zero, in which case the
+    /// tail arrives as storage at the `option` view.
     zero: Option<(String, Vec<String>)>,
 }
 
@@ -10295,10 +10309,10 @@ impl<'a> Body<'a> {
                 close_write: ff.close_write.clone(),
             });
         }
-        if self.scattered_set(target).is_empty() {
-            if flex {
-                return None;
-            }
+        // A flexible struct arrives from its allocation already in pieces:
+        // the claim is what broke it up, and there is no whole-object
+        // uninitialised view to break up instead.
+        if self.scattered_set(target).is_empty() && !flex {
             self.lines
                 .push(format!("{}_scatter_uninit {};", ff.sn, ff.a));
         }
@@ -10716,6 +10730,29 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: false,
+                    });
+                }
+                // The flexible tail of a block that is still in pieces is
+                // held directly, at its own address: there is no struct value
+                // to focus out of, and nothing to put back afterwards.
+                if let Ok(a) = self.addr_only(base)
+                    && let Some(b) = self.blocks.iter().find(|b| {
+                        b.tmp == a
+                            && b.checked
+                            && !b.freed
+                            && !b.init
+                            && b.flex.as_ref().is_some_and(|fx| fx.field == *f.val)
+                    })
+                {
+                    let fx = b.flex.clone().unwrap();
+                    return Ok(ArrayPlace {
+                        addr: format!("({} +! {}_offsetof_{})", b.tmp, b.pn, fx.field),
+                        pn: fx.pn,
+                        esize: fx.esize,
+                        base: 0,
+                        close_read: Vec::new(),
+                        close_write: Vec::new(),
+                        maybe: !b.scattered.contains(&fx.field),
                     });
                 }
                 let (pn, esize) = match field_shape(self.tds, &fty) {
@@ -13037,6 +13074,10 @@ impl<'a> Body<'a> {
             ));
         };
         let fname = f.name.clone();
+        let FieldShape::Flex { pn: fpn, .. } = &f.shape else {
+            unreachable!()
+        };
+        let fpn = fpn.clone();
         // `malloc` leaves the tail uninitialised, so the object cannot become
         // a value until every element of it has been written -- which is a
         // loop over storage the emitter does not yet carry through an
@@ -13050,12 +13091,6 @@ impl<'a> Body<'a> {
                 .zip(zero_repr_proof(self.tds, elem)),
             _ => None,
         };
-        let Some(zero) = zero else {
-            return Err(
-                "a flexible-array allocation whose tail does not arrive holding a value"
-                    .to_string(),
-            );
-        };
         let n = self.index(count)?;
         let nbytes = format!("({sn}_sizeof `SizeT.add` ({esize}sz `SizeT.mul` {n}))");
         let tmp = self.fresh(&var.val);
@@ -13066,18 +13101,27 @@ impl<'a> Body<'a> {
             var: var.val.to_string(),
             tmp: tmp.clone(),
             pn: sn,
-            fill: "zeroed",
+            fill: if zero.is_some() { "zeroed" } else { "uninit" },
             checked: false,
             init: false,
             freed: false,
-            scattered: BTreeSet::from([fname]),
+            // `calloc`'s tail already holds a value, so the tail counts as a
+            // field that has been written; `malloc`'s does not, and the
+            // source has to fill it before the object can be gathered.
+            scattered: match zero {
+                Some(_) => BTreeSet::from([fname.clone()]),
+                None => BTreeSet::new(),
+            },
             zero: None,
             taken: None,
             array: None,
             flex: Some(FlexBlock {
                 n,
                 nbytes,
-                zero: Some(zero),
+                esize: format!("{}sz", esize),
+                pn: fpn,
+                field: fname,
+                zero,
             }),
         });
         Ok(tmp)
@@ -13321,17 +13365,21 @@ impl<'a> Body<'a> {
                 // zeros, the fixed fields still storage.
                 _ if b.flex.is_some() => {
                     let fx = b.flex.as_ref().unwrap();
-                    let (z, why) = fx.zero.as_ref().unwrap();
                     vec![
                         format!("elim_unless_null {} {};", b.tmp, sl),
-                        format!(
-                            "{} {}_claim_zeroed_flex {} {} #{};",
-                            why.join(" "),
-                            b.pn,
-                            b.tmp,
-                            fx.n,
-                            z
-                        ),
+                        match &fx.zero {
+                            Some((z, why)) => format!(
+                                "{} {}_claim_zeroed_flex {} {} #{};",
+                                why.join(" "),
+                                b.pn,
+                                b.tmp,
+                                fx.n,
+                                z
+                            ),
+                            None => {
+                                format!("{}_claim_uninit_flex {} {};", b.pn, b.tmp, fx.n)
+                            }
+                        },
                     ]
                 }
                 None => vec![
@@ -13367,6 +13415,60 @@ impl<'a> Body<'a> {
                 ],
             },
         )
+    }
+
+    /// Make a flexible struct a value again, when everything it needed has
+    /// been written.
+    ///
+    /// The tail of a `malloc`ed flexible struct is filled a loop at a time,
+    /// and a loop's invariant is the author's to write: nothing here knows
+    /// that the loop ran to the end, only that the object is about to be used
+    /// as a value. So this says what has to be true -- every element holds
+    /// something -- and leaves proving it to F\*, exactly as a subscript
+    /// leaves its bound to the `_requires` that claims it. Which values were
+    /// written is never named: `array_claim_all_somes` asks only that each
+    /// one was.
+    fn finish_flex(&mut self, e: &Expr) {
+        let Some(name) = self.block_name(e) else {
+            return;
+        };
+        let Some(i) = self
+            .blocks
+            .iter()
+            .position(|b| b.var == name && b.checked && !b.freed && !b.init && b.flex.is_some())
+        else {
+            return;
+        };
+        let b = &self.blocks[i];
+        let fx = b.flex.clone().unwrap();
+        if b.scattered.contains(&fx.field) {
+            return;
+        }
+        let sname = match b.pn.strip_prefix("struct_") {
+            Some(n) => n.to_string(),
+            None => return,
+        };
+        let Some(si) = self.tds.structs.get(&sname) else {
+            return;
+        };
+        // Every fixed field has to have been written already: the tail is the
+        // last thing missing, and gathering an object with a hole in it is
+        // not something to attempt on the author's behalf.
+        if !si
+            .fields
+            .iter()
+            .all(|f| f.name == fx.field || b.scattered.contains(&f.name))
+        {
+            return;
+        }
+        let (tmp, pn) = (b.tmp.clone(), b.pn.clone());
+        self.lines.push(format!(
+            "array_claim_all_somes {}_repr ({} +! {}_offsetof_{}) {};",
+            fx.pn, tmp, pn, fx.field, fx.esize
+        ));
+        self.lines.push(format!("{}_gather {};", pn, tmp));
+        self.blocks[i].scattered.clear();
+        self.blocks[i].init = true;
     }
 
     /// `free(p)`.
@@ -13634,13 +13736,36 @@ impl<'a> Body<'a> {
             let held: Vec<String> = self.seeded.iter().map(|s| s.3.clone()).collect();
             self.laundered.extend(held);
         }
-        for s in &self.slots {
+        let written: Option<HashSet<String>> = body.map(|b| {
+            let mut t = Touched::default();
+            touch_stmts(b, &mut t);
+            t.written
+        });
+        for s in self.slots.clone() {
+            let s = &s;
             if let Some(k) = &kept
                 && !k.contains(&s.name)
             {
                 continue;
             }
             if stated.contains(&s.name) {
+                continue;
+            }
+            // A local that holds an allocated block and is not reassigned in
+            // the body holds the *same* address throughout, and that address
+            // has a name out here. Binding it existentially instead would
+            // lose the connection between the invariant's pointer and the one
+            // the body's statements are written against, which is the pointer
+            // whatever the invariant says about the block is stated at.
+            if let Some(b) = self
+                .blocks
+                .iter()
+                .find(|b| b.var == s.name && b.checked && !b.freed)
+                && written.as_ref().is_some_and(|w| !w.contains(&s.name))
+            {
+                let tmp = b.tmp.clone();
+                owns.push(s.pts_to(&tmp));
+                locals.insert(s.name.clone(), tmp);
                 continue;
             }
             if !s.init {
@@ -13655,6 +13780,17 @@ impl<'a> Body<'a> {
             owns.push(s.pts_to(&b));
             bound.push(s.name.clone());
             locals.insert(s.name.clone(), b);
+        }
+        // A local holding an allocated block is a name for the block's
+        // pointer, which is in scope outside the loop and does not change
+        // while the block is tracked. An invariant that talks about what the
+        // block holds needs to say *which* block, and this is the name it
+        // says it with -- without it `$(v)` in an author's clause would be a
+        // parameter that does not exist.
+        for b in &self.blocks {
+            if b.checked && !b.freed && !locals.contains_key(&b.var) {
+                locals.insert(b.var.clone(), b.tmp.clone());
+            }
         }
         // A local that is a name for a place rather than storage of its own
         // has no binder to stand for it, and needs none: its value is the
@@ -13746,7 +13882,12 @@ impl<'a> Body<'a> {
                     what
                 ));
             };
-            owns.push(spec.inline_pulse(code, When::Pre)?);
+            // One clause is one conjunct. Without the parentheses a clause
+            // that binds something of its own -- `exists* s. ...`, which is
+            // how an author talks about storage the loop is filling -- would
+            // swallow everything the emitter states after it, and Pulse
+            // rejects it outright where it appears after a `**`.
+            owns.push(format!("({})", spec.inline_pulse(code, When::Pre)?));
         }
         let mut props: Vec<String> = Vec::new();
         for e in prop_clauses.iter() {
@@ -14650,6 +14791,9 @@ impl<'a> Body<'a> {
         for (i, s) in stmts.iter().enumerate() {
             match &s.val {
                 StmtT::Return(e) => {
+                    if let Some(e) = e {
+                        self.finish_flex(e);
+                    }
                     let mut v = match e {
                         Some(e) => Some(self.rvalue(e)?),
                         None => None,
@@ -14916,6 +15060,9 @@ impl<'a> Body<'a> {
                     // belongs.
                     if !self.in_loop {
                         return Err("a `return` that is not in tail position".to_string());
+                    }
+                    if let Some(e) = e {
+                        self.finish_flex(e);
                     }
                     let v = match e {
                         Some(e) => Some(self.rvalue(e)?),
