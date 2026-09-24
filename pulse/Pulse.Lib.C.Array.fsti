@@ -749,3 +749,76 @@ fn arrayptr_return_cell u#a (#t: Type u#a) (x: array t)
   requires array_pts_to y 1.0R (array_spec_borrow s (arrayptr_off x y))
   ensures arrayptr_pts_to x y
   ensures array_pts_to y 1.0R (array_spec_set s (arrayptr_off x y) w)
+
+(* ---------------------------------------------------------------------------
+   Element refinements
+
+   `array_spec_forall p s`: every INITIALIZED cell of `s` satisfies `p`. This
+   is how a pure `_refine` on an element type reaches the elements of an
+   `_array` of that type: the transpiler emits it next to `array_pts_to_full`,
+   with `p` the element type's named refinement predicate.
+
+   It is opaque to the SMT solver on purpose. A bare
+   `forall i. i < len s ==> p (idx s i)` sits in every query in its scope, one
+   copy per refined array, and without an explicit pattern Z3 chooses its own
+   trigger. Here the quantifier is never seen. The lemmas below expose exactly
+   what is needed, on patterns that bound instantiation:
+
+   - reading a cell: `array_spec_forall_elim` fires only when the predicate AND
+     a concrete read `array_spec_idx s i` are both present -- once per read;
+   - building a new spec: one introduction per constructor (`upd`, `set`,
+     `borrow`, `zeroed`, `uninit`), each firing only on the goal
+     `array_spec_forall p (<constructor> ...)`.
+
+   `array_spec_forall_reveal` is the manual escape hatch; it has no pattern.
+   --------------------------------------------------------------------------- *)
+
+[@@"opaque_to_smt"]
+let array_spec_forall (#a: Type u#a) (p: a -> prop) (s: array_spec a) : prop =
+  forall (i: nat). {:pattern (array_spec_initd s i)}
+    array_spec_initd s i ==> p (array_spec_idx s i)
+
+val array_spec_forall_reveal (#a: Type u#a) (p: a -> prop) (s: array_spec a)
+  : Lemma (array_spec_forall p s <==>
+           (forall (i: nat). array_spec_initd s i ==> p (array_spec_idx s i)))
+
+val array_spec_forall_elim (#a: Type u#a) (p: a -> prop) (s: array_spec a) (i: nat)
+  : Lemma (requires array_spec_forall p s /\ array_spec_initd s i)
+          (ensures p (array_spec_idx s i))
+    [SMTPat (array_spec_forall p s); SMTPat (array_spec_idx s i)]
+
+val array_spec_forall_upd (#a: Type u#a) (p: a -> prop) (s: array_spec a) (n: nat) (x: a)
+  : Lemma (requires array_spec_forall p s /\ p x)
+          (ensures array_spec_forall p (array_spec_upd s n x))
+    [SMTPat (array_spec_forall p (array_spec_upd s n x))]
+
+let option_forall (#a: Type u#a) (p: a -> prop) (w: option a) : prop =
+  match w with
+  | Some x -> p x
+  | None -> True
+
+val array_spec_forall_set (#a: Type u#a) (p: a -> prop) (s: array_spec a) (n: nat) (w: option a)
+  : Lemma (requires array_spec_forall p s /\ option_forall p w)
+          (ensures array_spec_forall p (array_spec_set s n w))
+    [SMTPat (array_spec_forall p (array_spec_set s n w))]
+
+val array_spec_forall_borrow (#a: Type u#a) (p: a -> prop) (s: array_spec a) (i: nat)
+  : Lemma (requires array_spec_forall p s)
+          (ensures array_spec_forall p (array_spec_borrow s i))
+    [SMTPat (array_spec_forall p (array_spec_borrow s i))]
+
+val array_spec_forall_zeroed (#a: Type) (p: a -> prop) (n: nat) (x: a)
+  : Lemma (requires p x)
+          (ensures array_spec_forall p (array_spec_zeroed a n x))
+    [SMTPat (array_spec_forall p (array_spec_zeroed a n x))]
+
+val array_spec_forall_uninit (#a: Type) (p: a -> prop) (n: nat)
+  : Lemma (array_spec_forall p (array_spec_uninit a n))
+    [SMTPat (array_spec_forall p (array_spec_uninit a n))]
+
+/// `live_array` for an array whose element type carries the refinement `p`:
+/// what `_live(*a)` means in a loop invariant when the elements are refined.
+/// Without the conjunct, re-existentializing the spec forgets the refinement.
+[@@pulse_eager_unfold]
+let live_array_forall (#t: Type u#a) (p: t -> prop) (a: array t) : slprop =
+  exists* (s: full_array_spec t). array_pts_to a 1.0R s ** pure (array_spec_forall p s)

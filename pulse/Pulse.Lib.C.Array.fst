@@ -896,3 +896,29 @@ fn arrayptr_return_cell u#a (#t: Type u#a) (x: array t)
 {
   array_return_cell y #(arrayptr_off x y) #w #s;
 }
+
+(* Element refinements: see the .fsti. *)
+
+let array_spec_forall_reveal #a p s =
+  reveal_opaque (`%array_spec_forall) (array_spec_forall p s)
+
+let array_spec_forall_elim #a p s i =
+  array_spec_forall_reveal p s
+
+let array_spec_forall_upd #a p s n x =
+  array_spec_forall_reveal p s;
+  array_spec_forall_reveal p (array_spec_upd s n x)
+
+let array_spec_forall_set #a p s n w =
+  array_spec_forall_reveal p s;
+  array_spec_forall_reveal p (array_spec_set s n w)
+
+let array_spec_forall_borrow #a p s i =
+  array_spec_forall_reveal p s;
+  array_spec_forall_reveal p (array_spec_borrow s i)
+
+let array_spec_forall_zeroed #a p n x =
+  array_spec_forall_reveal p (array_spec_zeroed a n x)
+
+let array_spec_forall_uninit #a p n =
+  array_spec_forall_reveal p (array_spec_uninit a n)

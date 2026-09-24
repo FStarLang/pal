@@ -125,6 +125,67 @@ pub fn decl_name(decl: &Decl) -> String {
     }
 }
 
+/// Whether a refinement condition depends only on the value of `this`: field
+/// projections of `this`, literals, arithmetic, comparisons and casts. Such a
+/// condition is a plain `prop` of the struct value, so it can be stated of the
+/// elements of an array, where there is no `this` to own. Anything that reads
+/// memory, mentions ownership or another variable is excluded, and a condition
+/// that is excluded is simply not propagated to array elements (it fails
+/// closed: the fact is missing, not wrong).
+fn expr_is_value_pure(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::Var(x) => &*x.val == "this",
+        ExprT::Member(base, _) => expr_is_value_pure(base),
+        ExprT::BoolLit(_) | ExprT::IntLit(..) => true,
+        ExprT::UnOp(_, a) => expr_is_value_pure(a),
+        ExprT::BinOp(_, a, b) => expr_is_value_pure(a) && expr_is_value_pure(b),
+        ExprT::Cast(a, ty) => !matches!(ty.val, TypeT::SLProp) && expr_is_value_pure(a),
+        // `(_Bool) _inline_pulse(M.p $(this.f))`: how a refinement names an F*
+        // predicate, typically an opaque one, so that the refinement is a
+        // single uninterpreted symbol to SMT in every context that carries
+        // it. The verbatim F* is the user's; only its antiquotations are
+        // checked here, and if the verbatim part is not a `prop` of the
+        // value, the emitted `__refine` definition fails to typecheck.
+        ExprT::InlinePulse(code, ty) => {
+            !matches!(ty.val, TypeT::SLProp)
+                && code.tokens.iter().all(|t| match t {
+                    InlinePulseToken::Verbatim(_)
+                    | InlinePulseToken::TypeAntiquot { .. }
+                    | InlinePulseToken::FieldAntiquot { .. } => true,
+                    InlinePulseToken::RValueAntiquot { expr, .. } => expr_is_value_pure(expr),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
+/// The value-pure boolean conditions of a struct's declaration refinements
+/// (`_refine(c)` elaborates to `Refine(_, Cast(c, SLProp))`), outermost last.
+fn struct_value_refinements(decl: &StructDefn) -> Vec<Rc<Expr>> {
+    let mut out = vec![];
+    let mut t: &Type = &decl.refines;
+    loop {
+        match &t.val {
+            TypeT::Refine(inner, p) => {
+                if let ExprT::Cast(b, to) = &p.val {
+                    if matches!(to.val, TypeT::SLProp) && expr_is_value_pure(b) {
+                        out.push(b.clone());
+                    }
+                }
+                t = inner;
+            }
+            TypeT::RefineAlways(inner, _)
+            | TypeT::RefineUninit(inner, _)
+            | TypeT::RefineValue(inner, ..)
+            | TypeT::Plain(inner) => t = inner,
+            _ => break,
+        }
+    }
+    out.reverse();
+    out
+}
+
 /// Determines the module name that would contain a given Name reference.
 fn module_for_name(name: &Name) -> Option<String> {
     match name {
@@ -170,6 +231,9 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::TypeRefSizeofPos(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
         Name::TypeRefSizeofPos(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefSizeofPos(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
+        Name::TypeRefRefine(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
+        Name::TypeRefRefine(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
+        Name::TypeRefRefine(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
         // Global address names live in the global's own module.
         Name::GlobalAddr(v) | Name::GlobalAddrNotNull(v) | Name::GlobalAcquire(v) => {
             Some(format!("Global_{}", v))
@@ -459,6 +523,10 @@ enum Name {
     TypeRefPredUnfold(TypeRef),
     TypeRefPredFold(TypeRef),
     TypeRefSizeofPos(TypeRef),
+    /// The value-level part of a struct's `_refine(..)`, as a named
+    /// `struct_T -> prop`. Used to state that every element of an `_array` of
+    /// the struct satisfies it (`Pulse.Lib.C.Array.array_spec_forall`).
+    TypeRefRefine(TypeRef),
 
     StructFieldProj(Rc<IdentT>, Rc<IdentT>),
     StructDirectFieldName(Rc<IdentT>, Rc<IdentT>),
@@ -534,6 +602,9 @@ impl Name {
             }
             Name::TypeRefSizeofPos(type_ref) => {
                 format!("{}__sizeof_pos", typeref_to_string(type_ref))
+            }
+            Name::TypeRefRefine(type_ref) => {
+                format!("{}__refine", typeref_to_string(type_ref))
             }
             Name::TypeRefSpec(type_ref) => format!("{}__spec", typeref_to_string(type_ref)),
             Name::TypeRefSpecField(type_ref, fld) => {
@@ -1738,6 +1809,21 @@ impl<'a> Emitter<'a> {
         self.emit_type_slprop_inner(env, ty, variant, naming, props, this, None);
     }
 
+    /// The named value refinement of an array element type, if it has one:
+    /// `Struct_T.struct_T__refine` for a struct `T` whose declaration carries a
+    /// value-pure `_refine(..)` (see `struct_value_refinements`).
+    fn elem_refine_pred(&mut self, env: &Env, elem_ty: &Rc<Type>) -> Option<Doc> {
+        let whnf = env.vtype_whnf(elem_ty.clone().into());
+        let TypeT::TypeRef(k @ TypeRefKind::Struct(name)) = &whnf.val else {
+            return None;
+        };
+        let decl = env.lookup_struct(name)?;
+        if struct_value_refinements(decl).is_empty() {
+            return None;
+        }
+        Some(self.emit_name(Name::TypeRefRefine(k.into())))
+    }
+
     fn emit_type_slprop_inner(
         &mut self,
         env: &Env,
@@ -1819,14 +1905,30 @@ impl<'a> Emitter<'a> {
                         };
                         let val_name = self.push_val_binding(naming, this, val_type_doc);
                         match variant {
-                            SLPropVariant::Init { perm } => props.push(annotated(ty, || {
-                                naryfn([
-                                    Doc::text("array_pts_to_full"),
-                                    this_doc,
-                                    perm.clone(),
-                                    val_name,
-                                ])
-                            })),
+                            SLPropVariant::Init { perm } => {
+                                let refine = self.elem_refine_pred(env, pointee_ty);
+                                let val_doc = val_name.clone();
+                                props.push(annotated(ty, || {
+                                    naryfn([
+                                        Doc::text("array_pts_to_full"),
+                                        this_doc,
+                                        perm.clone(),
+                                        val_name,
+                                    ])
+                                }));
+                                // L24: a pure refinement of the element type
+                                // holds of every initialized element.
+                                if let Some(refine) = refine {
+                                    props.push(unaryfn(
+                                        Doc::text("with_pure"),
+                                        naryfn([
+                                            Doc::text("Pulse.Lib.C.Array.array_spec_forall"),
+                                            refine,
+                                            val_doc,
+                                        ]),
+                                    ));
+                                }
+                            }
                             SLPropVariant::Uninit => props.push(annotated(ty, || {
                                 naryfn([Doc::text("array_pts_to_uninit"), this_doc, val_name])
                             })),
@@ -3821,10 +3923,27 @@ impl<'a> Emitter<'a> {
                         let ExprT::Deref(inner) = &v.val else {
                             unreachable!("is_array implies v is a Deref")
                         };
-                        unaryfn(
-                            Doc::text("Pulse.Lib.C.Array.live_array"),
-                            self.emit_rvalue(env, inner),
-                        )
+                        let refine = env.infer_expr(inner).ok().and_then(|ty| {
+                            match &env.vtype_whnf(ty).val {
+                                TypeT::Pointer(pointee, PointerKind::Array) => {
+                                    self.elem_refine_pred(env, pointee)
+                                }
+                                _ => None,
+                            }
+                        });
+                        match refine {
+                            // L24: re-existentializing the spec must not
+                            // forget the element refinement.
+                            Some(refine) => naryfn([
+                                Doc::text("Pulse.Lib.C.Array.live_array_forall"),
+                                refine,
+                                self.emit_rvalue(env, inner),
+                            ]),
+                            None => unaryfn(
+                                Doc::text("Pulse.Lib.C.Array.live_array"),
+                                self.emit_rvalue(env, inner),
+                            ),
+                        }
                     } else {
                         unaryfn(Doc::text("live"), self.emit_lvalue(env, v))
                     }
@@ -5864,6 +5983,42 @@ impl<'a> Emitter<'a> {
                 &[this_arg.clone(), parens(Doc::text("p: perm"))],
                 body,
             ));
+        }
+
+        // The value-level part of the declaration refinement, as a named
+        // predicate: what an `_array` of this struct asserts of its elements.
+        // A named top-level function rather than a lambda, so every use is the
+        // same term and the element lemmas' patterns match across modules.
+        let value_refines = struct_value_refinements(decl);
+        if !value_refines.is_empty() {
+            let conj = value_refines
+                .iter()
+                .map(|b| parens(self.emit_rvalue(env, b)))
+                .reduce(|a, b| {
+                    a.append(Doc::line())
+                        .append("/\\")
+                        .append(Doc::line())
+                        .append(b)
+                })
+                .unwrap();
+            ses.push(
+                Doc::text("let")
+                    .append(Doc::line())
+                    .append(self.emit_name(Name::TypeRefRefine(k.into())))
+                    .append(Doc::line())
+                    .append(parens(
+                        this_doc
+                            .clone()
+                            .append(":")
+                            .append(Doc::line())
+                            .append(struct_type_name.clone()),
+                    ))
+                    .append(Doc::line())
+                    .append(": prop =")
+                    .group()
+                    .append(Doc::line().append(conj).nest(2))
+                    .group(),
+            );
         }
 
         // Emit uninit pred (stays as [@@pulse_eager_unfold])
