@@ -2118,11 +2118,14 @@ impl<'a> Spec<'a> {
                     out.push_str(before);
                     out.push_str(&field_antiquot(self.tds, ty, field_name)?);
                 }
-                InlinePulseToken::AuxFnAntiquot { kind, .. } => {
-                    return Err(format!(
-                        "`${}`, which names a helper of the old memory model",
-                        kind.keyword()
-                    ));
+                InlinePulseToken::AuxFnAntiquot {
+                    before,
+                    ty,
+                    field_name,
+                    kind,
+                } => {
+                    out.push_str(before);
+                    out.push_str(&aux_fn_antiquot(self.tds, ty, field_name.as_ref(), *kind)?);
                 }
                 InlinePulseToken::Declare { .. } => {
                     return Err("`$declare` in a contract".to_string());
@@ -6924,6 +6927,35 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             },
             v = value
         );
+        // The way in: a whole object opened into its fields, the dual of
+        // `_gather`. Nothing the emitter produces needs it -- the emitter
+        // reaches a field through `focus`, which leaves the rest of the
+        // object sealed -- but a hand-written fragment that wants to take an
+        // object apart all at once has no other way to say it, and `$unfold`
+        // is exactly that request.
+        let ens: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| {
+                f.shape.pts_to(
+                    &format!("(a +! {}_offsetof_{})", sn, f.name),
+                    &format!("((x).fld_{})", f.name),
+                )
+            })
+            .collect();
+        c += &format!(
+            "ghost fn {sn}_scatter (a: ptr) (#p: perm) (#x: {sn})\n\
+             \x20 requires {sn}_pts_to a p x\n\
+             \x20 ensures  {e}\n\
+             \x20 ensures  {sn}_padding a p\n\
+             {{\n  unfold {sn}_pts_to a p x;\n}}\n\n",
+            sn = sn,
+            e = if ens.is_empty() {
+                "emp".to_string()
+            } else {
+                ens.join("\n\x20 ensures  ")
+            }
+        );
     }
 
     // Every boundary inside the object, in the order the splits have to run.
@@ -11559,11 +11591,14 @@ impl<'a> Body<'a> {
                     out.push_str(before);
                     out.push_str(&n);
                 }
-                InlinePulseToken::AuxFnAntiquot { kind, .. } => {
-                    return Err(format!(
-                        "`${}`, which names a helper of the old memory model",
-                        kind.keyword()
-                    ));
+                InlinePulseToken::AuxFnAntiquot {
+                    before,
+                    ty,
+                    field_name,
+                    kind,
+                } => {
+                    out.push_str(before);
+                    out.push_str(&aux_fn_antiquot(self.tds, ty, field_name.as_ref(), *kind)?);
                 }
                 InlinePulseToken::Declare { .. } => {
                     return Err("`$declare` in a statement".to_string());
@@ -16716,11 +16751,14 @@ fn include_pulse_scoped(
                 out.push_str(before);
                 out.push_str(&field_antiquot(tds, ty, field_name)?);
             }
-            InlinePulseToken::AuxFnAntiquot { kind, .. } => {
-                return Err(format!(
-                    "`${}`, which names a helper of the old memory model",
-                    kind.keyword()
-                ));
+            InlinePulseToken::AuxFnAntiquot {
+                before,
+                ty,
+                field_name,
+                kind,
+            } => {
+                out.push_str(before);
+                out.push_str(&aux_fn_antiquot(tds, ty, field_name.as_ref(), *kind)?);
             }
         }
     }
@@ -16751,6 +16789,66 @@ fn flatten_fragment(s: &str) -> Result<String, String> {
         out.push_str(line);
     }
     Ok(out)
+}
+
+/// The generated name a `$unfold`/`$fold`/`$activate` stands for.
+///
+/// These antiquotations were written for the old model's raw fold/unfold
+/// helpers, but what they *ask for* is model-independent: take an object
+/// apart into its fields, or put it back. Palow has the same two operations
+/// under different names, so the antiquotation keeps working and a fragment
+/// that uses it does not have to know which model it was compiled against.
+/// A union arm is reached by focusing rather than by scattering, because a
+/// union has only ever one arm at a time; `$activate` is the ghost step that
+/// chooses which.
+fn aux_fn_antiquot(
+    tds: &Typedefs,
+    ty: &Type,
+    field_name: Option<&Rc<Ident>>,
+    kind: AuxFnKind,
+) -> Result<String, String> {
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
+            let sn = format!("struct_{}", n.val);
+            // A flexible struct has no whole-object uninitialised view: how
+            // long its tail is, is not a fact about its type, so there is
+            // nothing for `$unfold-uninit` to name.
+            let flex = tds.structs[&*n.val.to_string()]
+                .fields
+                .last()
+                .is_some_and(|f| matches!(f.shape, FieldShape::Flex { .. }));
+            match kind {
+                AuxFnKind::Unfold => Ok(format!("{}_scatter", sn)),
+                AuxFnKind::Fold => Ok(format!("{}_gather", sn)),
+                AuxFnKind::UnfoldUninit if !flex => Ok(format!("{}_scatter_uninit", sn)),
+                AuxFnKind::FoldUninit if !flex => Ok(format!("{}_gather_uninit", sn)),
+                AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit => Err(format!(
+                    "`${}` of `struct {}`, which has a flexible array member",
+                    kind.keyword(),
+                    n.val
+                )),
+                AuxFnKind::Activate => {
+                    Err("`$activate` of a struct, which has no arms".to_string())
+                }
+            }
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) if tds.unions.contains_key(&*n.val) => {
+            let un = format!("union_{}", n.val);
+            let Some(f) = field_name else {
+                return Err(format!("`${}` of a union without an arm", kind.keyword()));
+            };
+            match kind {
+                AuxFnKind::Unfold => Ok(format!("{}_focus_{}", un, f.val)),
+                AuxFnKind::Fold => Ok(format!("{}_unfocus_{}", un, f.val)),
+                AuxFnKind::Activate => Ok(format!("{}_switch_uninit_{}", un, f.val)),
+                AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit => Err(format!(
+                    "`${}` of a union, which is uninitialised as a whole",
+                    kind.keyword()
+                )),
+            }
+        }
+        _ => Err(format!("`${}` of {}", kind.keyword(), describe(ty))),
+    }
 }
 
 fn field_antiquot(tds: &Typedefs, ty: &Type, field_name: &Ident) -> Result<String, String> {

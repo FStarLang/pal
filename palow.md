@@ -4135,6 +4135,25 @@ new facts about memory.
 
    With that, **every function in the test suite is translated.**
 
+   One thing was still being thrown away above the level of functions. The
+   `$unfold`, `$fold` and `$activate` antiquotations name the ghost helper
+   that takes an object apart or puts it back, and the emitter had been
+   refusing them on the grounds that they name helpers of the old memory
+   model. But that confuses the name with the request. What an author writing
+   `$unfold(my_pair)` asks for is to open the object into its fields, and
+   Palow has that operation too -- it is just called `scatter`, with `gather`
+   for the way back, and a union arm reached by `focus` rather than by
+   scattering because a union has only one arm at a time. So the
+   antiquotations now resolve to Palow's names, which is the whole point of
+   having an antiquotation instead of a literal name: a fragment does not
+   have to know which memory model it was compiled against. The one helper
+   Palow was missing is `{sn}_scatter`, the dual of the `gather` it already
+   had; the emitter itself never needs it, because it reaches a field by
+   focusing and leaves the rest of the object sealed, but a fragment that
+   wants the whole object open at once has no other way to say so.
+
+   **Nothing in the test suite is dropped, admitted or skipped any more.**
+
    As of this milestone: **988 specifications, 968 of them with real bodies,
    0 admitted, 0 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
