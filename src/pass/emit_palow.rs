@@ -7189,6 +7189,58 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
 /// speaks *about* C objects through its antiquotations, and which ones it
 /// speaks about is exactly what decides whether the author or the generated
 /// frame states them.
+/// The names a body's ghost statements speak about.
+///
+/// A ghost statement is hand-written Pulse, and what it does to the state is
+/// the author's business: the one thing the emitter can read off it is which
+/// C objects it names. A local that a ghost statement names may therefore
+/// have had ownership moved onto it, in words the emitter does not read --
+/// which is the same trust a spliced contract clause gets. If the splice did
+/// not in fact grant it, F* rejects the access.
+fn ghost_stmt_names(body: &Stmts, out: &mut HashSet<String>) {
+    fn code(c: &InlinePulseCode, out: &mut HashSet<String>) {
+        for tok in &c.tokens {
+            let (InlinePulseToken::LValueAntiquot { expr: x, .. }
+            | InlinePulseToken::RValueAntiquot { expr: x, .. }) = tok
+            else {
+                continue;
+            };
+            let mut t = Touched::default();
+            touch_expr(x, &mut t);
+            out.extend(t.vars);
+            out.extend(t.written);
+        }
+    }
+    fn go(body: &Stmts, out: &mut HashSet<String>) {
+        for s in body.iter() {
+            match &s.val {
+                StmtT::GhostStmt(c) if !ghost_replaced(c) => code(c, out),
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    go(then_branch, out);
+                    go(else_branch, out);
+                }
+                StmtT::Match {
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    for b in branches.iter() {
+                        go(&b.body, out);
+                    }
+                    go(default_branch, out);
+                }
+                StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => go(body, out),
+                _ => {}
+            }
+        }
+    }
+    go(body, out);
+}
+
 fn spliced_names(e: &Expr, out: &mut HashSet<String>) {
     match &strip_vattr(e).val {
         ExprT::InlinePulse(code, _) => {
@@ -8381,6 +8433,15 @@ struct Body<'a> {
     /// Whether we are translating the arm of an `if`, where a slot introduced
     /// now would not outlive the arm.
     in_branch: bool,
+    /// Whether an inlined fragment may leave the loads it needed standing
+    /// as statements of their own. A specification has to be a single
+    /// term, so there the loads are substituted in; a ghost *statement*
+    /// is a statement among statements, and a load in front of it is an
+    /// ordinary step -- which is the only way to name a local in one,
+    /// since a `ptr_read` cannot appear inside a ghost term.
+    keep_reads: bool,
+    /// The C objects this body's ghost statements name.
+    ghost_names: HashSet<String>,
     /// Whether that branch is the tail of the function -- the shape an
     /// early `return` is lowered into, where each arm is everything that
     /// is left and nothing follows the `if` at all. There is no join to
@@ -9288,6 +9349,14 @@ impl<'a> Body<'a> {
                     self.rvalue(inner)
                 }
                 ExprT::Var(v) if self.spliced_own => self.rvalue(inner),
+                // A local a ghost statement in this body speaks about. What
+                // that statement did to the state is the author's business,
+                // and moving ownership onto a recovered pointer is exactly
+                // what such a statement is for -- so the access is left to
+                // slprop matching, on the same terms a spliced contract gets.
+                ExprT::Var(v) if self.ghost_names.contains(&*v.val.to_string()) => {
+                    self.rvalue(inner)
+                }
                 ExprT::Var(v) => Err(format!(
                     "a dereference of local `{}`, whose target the contract does not grant",
                     v.val
@@ -10424,6 +10493,7 @@ impl<'a> Body<'a> {
             }
         };
         let added: Vec<String> = self.lines[before..].to_vec();
+        let v0 = v.clone();
         let mut bound = Vec::new();
         for l in &added {
             let Some(rest) = l.strip_prefix("let ").and_then(|r| r.strip_suffix(';')) else {
@@ -10449,6 +10519,13 @@ impl<'a> Body<'a> {
                     bound[j].1 = bound[j].1.replace(&n, &d);
                 }
             }
+        }
+        if self.keep_reads && bound.iter().all(|(_, _, i)| *i) {
+            // The names are still bound by the lines that were emitted, so
+            // nothing has to be substituted and nothing is thrown away.
+            self.lines.truncate(before);
+            self.lines.extend(added);
+            return Ok(v0);
         }
         self.lines.truncate(before);
         if let Some((_, d, _)) = bound.iter().find(|(_, _, i)| !*i) {
@@ -13466,8 +13543,10 @@ impl<'a> Body<'a> {
             }
             StmtT::GhostStmt(_) if !self.tds.splice_inline => Err(self.tds.no_splice()),
             StmtT::GhostStmt(code) => {
-                let t = self.inline_pulse(code)?;
-                self.lines.push(format!("{};", t.trim()));
+                let was = std::mem::replace(&mut self.keep_reads, true);
+                let t = self.inline_pulse(code);
+                self.keep_reads = was;
+                self.lines.push(format!("{};", t?.trim()));
                 Ok(())
             }
             StmtT::Return(None) => Ok(()),
@@ -15228,6 +15307,12 @@ fn emit_body(
         signed_ok: sig.contract,
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
+        keep_reads: false,
+        ghost_names: {
+            let mut out = HashSet::new();
+            ghost_stmt_names(&defn.body, &mut out);
+            out
+        },
         tail_branch: false,
         in_guard: false,
         spec_binders: HashMap::new(),

@@ -83,15 +83,31 @@ int32_t read_selected(_Bool flag, int32_t *ip, struct counter *sp)
   void *p = select_ptr(flag, ip, sp);
   if (flag) {
     int32_t *back = (int32_t *)p;
+#ifdef PALOW
+    _ghost_stmt(with v. rewrite (int32_t_pts_to $(ip) 1.0R v) as (int32_t_pts_to $(back) 1.0R v));
+#else
     _ghost_stmt(with v. rewrite (pts_to $(ip) v) as (pts_to $(back) v));
+#endif
     int32_t r = *back;
+#ifdef PALOW
+    _ghost_stmt(rewrite (int32_t_pts_to $(back) 1.0R $(r)) as (int32_t_pts_to $(ip) 1.0R $(r)));
+#else
     _ghost_stmt(rewrite (pts_to $(back) $(r)) as (pts_to $(ip) $(r)));
+#endif
     return r;
   } else {
     struct counter *back = (struct counter *)p;
+#ifdef PALOW
+    _ghost_stmt(with v. rewrite (struct_counter_pts_to $(sp) 1.0R v) as (struct_counter_pts_to $(back) 1.0R v));
+#else
     _ghost_stmt(with v. rewrite (pts_to $(sp) v) as (pts_to $(back) v));
+#endif
     struct counter sv = *back;
+#ifdef PALOW
+    _ghost_stmt(rewrite (struct_counter_pts_to $(back) 1.0R $(sv)) as (struct_counter_pts_to $(sp) 1.0R $(sv)));
+#else
     _ghost_stmt(rewrite (pts_to $(back) $(sv)) as (pts_to $(sp) $(sv)));
+#endif
     return sv.n;
   }
 }

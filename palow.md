@@ -3960,8 +3960,25 @@ new facts about memory.
    pointer read out of an object widely. A wrong guess is a call F\* rejects,
    not a body that verifies for the wrong reason.
 
-   As of this milestone: **987 specifications, 957 of them with real bodies,
-   10 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
+   A ghost statement is the author saying something about the state that the
+   emitter has no other way to learn, and until now the emitter listened to
+   only half of it. Two things were wrong. A ghost statement was *inlined* --
+   the reads it needed were folded into its term -- which is right for a
+   specification, a single term, and wrong for a statement, where a read in
+   front of it is an ordinary step; a `ptr_read` ended up inside a `rewrite`,
+   where it cannot go. And a local a ghost statement had just moved ownership
+   onto was still refused on the grounds that the contract never granted it.
+   Both are now fixed: reads a ghost statement needs stand as their own lines,
+   and a local a ghost statement names is accessed on the same terms a spliced
+   contract already gets -- if the statement did not in fact grant what the
+   access needs, F\* says so. The names are collected only from the statements
+   Palow keeps, not from the ones it replaces with machinery of its own, so a
+   hint about the old model cannot be mistaken for a grant. With that,
+   `read_selected` -- which recovers a typed pointer from a `void *` and hands
+   ownership back and forth across the recovery -- translates and verifies.
+
+   As of this milestone: **987 specifications, 958 of them with real bodies,
+   9 admitted, 1 contract dropped, 20 external, 1 function skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that
