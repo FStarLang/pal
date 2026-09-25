@@ -48,10 +48,10 @@ struct Cli {
     time_passes: bool,
 
     #[arg(
-        long = "palow",
-        help = "Emit the Palow specification surface instead of the current model (milestone 2, stage 1)"
+        long = "old-model",
+        help = "Emit against the previous memory model instead of Palow"
     )]
-    palow: bool,
+    old_model: bool,
 
     #[arg(
         long = "palow-permissive",
@@ -181,10 +181,10 @@ fn main() {
     // A source can be translated for either memory model, and hand-written
     // Pulse in it names predicates only one of them has. `PALOW` lets the
     // source say which fragment is which.
-    let defines: Vec<String> = if cli.palow {
-        vec!["PALOW".to_string()]
-    } else {
+    let defines: Vec<String> = if cli.old_model {
         vec![]
+    } else {
+        vec!["PALOW".to_string()]
     };
 
     let parse_start = Instant::now();
@@ -230,7 +230,7 @@ fn main() {
     }
 
     let t = Instant::now();
-    pass::merge::merge(&mut diags, &mut combined_tu, cli.palow);
+    pass::merge::merge(&mut diags, &mut combined_tu, !cli.old_model);
     if cli.time_passes {
         eprintln!(
             "  merge ({} decls): {:.3}s",
@@ -301,7 +301,7 @@ fn main() {
         return;
     }
 
-    if cli.palow {
+    if !cli.old_model {
         // A test whose hand-written Pulse is written against the *old* memory
         // model marks itself, and Palow leaves those fragments alone rather
         // than splicing text that names predicates it does not have.

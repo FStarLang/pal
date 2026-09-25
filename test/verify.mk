@@ -14,8 +14,12 @@ FSTAR = $(FSTAR_EXE) \
 	--already_cached Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore \
 	--include $(OUT_DIR)
 
-ifneq ($(wildcard helpers),)
-FSTAR += --include helpers
+# Which directory of hand-written F* this test ships, if any. The caller picks
+# it, because which one is right depends on the memory model being translated
+# for; the default is the one the old translator has always used.
+HELPERS ?= helpers
+ifneq ($(wildcard $(HELPERS)),)
+FSTAR += --include $(HELPERS)
 endif
 
 FST_FILES := $(wildcard $(OUT_DIR)/*.fst)

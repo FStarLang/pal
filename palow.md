@@ -4709,3 +4709,31 @@ new facts about memory.
    Two markers that look like gaps are deliberately not counted: `external:
    the contract is assumed` is a declaration with no body to translate, and
    `is not an F\* definition` is a `_let` the model passes through.
+
+   (`palow-check.sh` did stop using it, for one run. It uses
+   `--palow-permissive` again now that it is a census rather than a check --
+   see milestone 10.)
+
+10. **Done.** Make Palow the model. There is no longer a reason for it to be
+    the flag: it translates every test in the suite, with no admitted body, no
+    dropped contract, no skipped function and no dropped module, and it says so
+    loudly when it cannot. So `pal` emits Palow, `--old-model` asks for the
+    previous emitter, and a test built with `make -C test/foo` -- or opened in
+    an editor, which reads the same `out/` and `_cache/` -- is a Palow test.
+
+    The old model does not go away with the flag. It is still what PAL ships
+    to anyone who has not moved, and code that is not exercised stops working,
+    so the suite runs a second time against it: `make -C test MODEL=old`,
+    writing to `out_old/` and `_cache_old/` so that the two passes never
+    contend for a directory, and `make test` runs both. A test whose
+    annotations are written for Palow carries a `palow-only` marker and the
+    old pass skips it -- the marker used to mean the opposite, which is a fair
+    summary of what changed.
+
+    Two smaller things follow the default. A test that ships hand-written F\*
+    has it under `helpers/`, and one whose helpers name Palow's predicates
+    keeps a second copy under `helpers_palow/`; which one is on the include
+    path is now chosen by the model rather than by the caller, so the C never
+    has to know. And `palow-check.sh` becomes purely a census: the per-test
+    Makefiles already verify Palow, so what it adds is the count, which is why
+    it runs `--palow-permissive`.

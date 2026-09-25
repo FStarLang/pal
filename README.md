@@ -90,11 +90,16 @@ calls it to find LLVM libraries.
 ### Build & verify
 
 ```bash
-make               # Rust binary + Pulse support library
-make test -j8      # translate every test case, verify with F*
+make                    # Rust binary + Pulse support library
+make test -j8           # translate every test case, verify with F*
 cd test/swap && make                       # one test
+cd test/swap && make MODEL=old             # the same test, previous memory model
 cargo run -- --print-ir test/swap/swap.c   # just the IR
 ```
+
+PAL emits the [Palow](palow.md) memory model by default, into `out/`.
+`--old-model` selects the previous emitter, whose output goes to `out_old/`
+so the two never overwrite each other.
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
