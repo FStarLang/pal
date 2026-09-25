@@ -4685,7 +4685,7 @@ new facts about memory.
    `access_ok` and the store rule, with the union, array and integer/pointer
    punning theorems. The index is reserved in layer 0 as `mem_pts_to_at` but is
    not yet enforced by the typed loads and stores.
-9. **Not started.** Make a weakening a hard error. Every `admit()`, dropped
+9. **Done.** Make a weakening a hard error. Every `admit()`, dropped
    contract and skipped function the emitter produces today is a *deliberate*
    escape hatch, so that a partially finished port still typechecks and the
    count of them is the coverage measurement. That is right while the port is
@@ -4694,3 +4694,18 @@ new facts about memory.
    this whole development exists to avoid. So the last milestone is to turn
    `--palow` strict -- every one of these becomes a diagnostic and a non-zero
    exit -- with the escape hatch retained behind a flag for measurement runs.
+
+   What made this small is the discipline the measurement already imposed:
+   there is exactly one way for the emitter to fall short of a C declaration,
+   and it always prints, in the generated file, as one of four markers. The
+   generated text is therefore a complete record of the translation's gaps, so
+   the strict check reads the markers back and reports each as an error at the
+   C declaration the module came from. `TranslationErrors.fst` then carries
+   `assert False`, which is how PAL has always turned a translation failure
+   into a verification failure. `--palow-permissive` puts the comments back
+   without the errors, which is what a coverage run wants; `palow-check.sh`
+   does not use it, because with no gaps left the census and the check agree.
+
+   Two markers that look like gaps are deliberately not counted: `external:
+   the contract is assumed` is a declaration with no body to translate, and
+   `is not an F\* definition` is a `_let` the model passes through.

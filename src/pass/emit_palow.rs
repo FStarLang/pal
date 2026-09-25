@@ -712,6 +712,52 @@ pub struct PalowModule {
     pub origin: Option<Origin>,
 }
 
+/// Every weakening a generated module owns up to, as a sentence.
+///
+/// There is exactly one way for this emitter to fall short of a C
+/// declaration and it always prints: a dropped contract, an `admit()`ed body,
+/// a skipped declaration, a module that is not translated at all. That
+/// discipline is what makes the coverage number mean anything, and it means
+/// the generated text is a complete record -- so reading the markers back is
+/// the same check the census makes, in a place where it can stop a build
+/// rather than only count.
+///
+/// Two things that look similar are deliberately not here. `external: the
+/// contract is assumed` is a declaration with no body in the first place, and
+/// `is not an F* definition` is a `_let` the model passes through; neither
+/// weakens anything.
+pub fn weakenings(module: &PalowModule) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in module.code.lines() {
+        let t = line.trim_start();
+        let said = if let Some(r) = t.strip_prefix("admit() (* body: ") {
+            format!("its body is not translated: {}", r)
+        } else if let Some(r) = t.strip_prefix("(* contract dropped: ") {
+            format!("its contract is weakened: {}", r)
+        } else if let Some(r) = t.strip_prefix("(* skipped ") {
+            match r.split_once(": ") {
+                Some((what, why)) => format!("`{}` is skipped: {}", what, why),
+                None => format!("it is skipped: {}", r),
+            }
+        } else if let Some(r) = t
+            .strip_prefix("(* `")
+            .and_then(|r| r.split_once("` is not translated: "))
+            .map(|(_, why)| why)
+        {
+            format!("it is not translated: {}", r)
+        } else {
+            continue;
+        };
+        out.push(
+            said.trim_end()
+                .trim_end_matches("*)")
+                .trim_end()
+                .to_string(),
+        );
+    }
+    out
+}
+
 /// The C declaration a generated module stands for.
 fn origin_of(decl: &Decl) -> Option<Origin> {
     let loc = decl.loc.location();

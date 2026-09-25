@@ -5,7 +5,8 @@ use std::{
 };
 
 use crate::{
-    diag::{Diagnostic, Diagnostics},
+    diag::{Diagnostic, DiagnosticLevel, Diagnostics},
+    ir::Location,
     vfs::{OverlayFS, RealFS, VFS},
 };
 use clap::Parser;
@@ -51,6 +52,12 @@ struct Cli {
         help = "Emit the Palow specification surface instead of the current model (milestone 2, stage 1)"
     )]
     palow: bool,
+
+    #[arg(
+        long = "palow-permissive",
+        help = "Report Palow's untranslated constructs as comments only, not as errors"
+    )]
+    palow_permissive: bool,
 
     #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
     quiet: bool,
@@ -323,6 +330,43 @@ fn main() {
         let model_specific = marked("palow-model-specific");
         let splice_inline = !marked("palow-old-annotations") && !model_specific;
         let modules = pass::emit_palow::emit_palow(&combined_tu, splice_inline, model_specific);
+        // A gap the generated file owns up to is still a gap. While the
+        // translation was being built, saying so in a comment was the point:
+        // the comment is what made the coverage measurable, and turning a
+        // missing feature into a hard failure would have stopped the whole
+        // suite on the first one. There is nothing left to measure, so the
+        // comment becomes an error -- a specification that is quietly weaker
+        // than the one the user wrote is the failure mode this model exists to
+        // rule out, and it should not be possible to get one by accident.
+        // `--palow-permissive` is for a measurement run, which wants the
+        // comments and the count back.
+        if !cli.palow_permissive {
+            for module in &modules {
+                for why in pass::emit_palow::weakenings(module) {
+                    let loc = match &module.origin {
+                        Some(o) => Location {
+                            file_name: o.file.clone(),
+                            range: o.range,
+                        },
+                        None => {
+                            let z = crate::ir::Position {
+                                line: 1,
+                                character: 1,
+                            };
+                            Location {
+                                file_name: cli.files.first().cloned().unwrap_or_default().into(),
+                                range: crate::ir::Range { start: z, end: z },
+                            }
+                        }
+                    };
+                    diags.report(Diagnostic {
+                        loc,
+                        level: DiagnosticLevel::Error,
+                        msg: format!("`{}`: {}", module.module_name, why),
+                    });
+                }
+            }
+        }
         if let Some(outdir) = &cli.outdir {
             let outdir = Path::new(&outdir).to_path_buf();
             std::fs::create_dir_all(&outdir).unwrap();
