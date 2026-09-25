@@ -82,22 +82,32 @@ design from the start rather than something to retrofit.
 Core lemmas that everything else is built on:
 
 ```fstar
-val mem_pts_to_len (a: ptr) (p: perm) (b: bytes)
-  : Lemma (requires ...) (ensures v (len b) <= max_object_size)
+// Addresses of live storage fit in `size_t`, so offset computations inside an
+// object never overflow.
+ghost fn mem_pts_to_fits (a: ptr) (#p: perm) (#b: bytes)
+  preserves mem_pts_to a p b
+  ensures   pure (SZ.fits (addr_of a + len b))
 
-ghost fn mem_split (a: ptr) (#p: perm) (#b: bytes) (n: SizeT.t)
-  requires mem_pts_to a p b ** pure (v n <= v (len b))
-  ensures  mem_pts_to a p (slice b 0 n) ** mem_pts_to (a +! n) p (slice b n (len b))
+ghost fn mem_split (a: ptr) (#p: perm) (#b: bytes) (n: SZ.t { SZ.v n <= len b })
+  requires mem_pts_to a p b
+  ensures  mem_pts_to a p (slice b 0 (SZ.v n))
+  ensures  mem_pts_to (a +! n) p (slice b (SZ.v n) (len b))
 
-ghost fn mem_join (a: ptr) (#p: perm) (#b1 #b2: bytes) (n: SizeT.t)
-  requires mem_pts_to a p b1 ** mem_pts_to (a +! n) p b2 ** pure (len b1 == n)
+ghost fn mem_join (a: ptr) (#p: perm) (#b1 #b2: bytes) (n: SZ.t { SZ.v n == len b1 })
+  requires mem_pts_to a p b1
+  requires mem_pts_to (a +! n) p b2
   ensures  mem_pts_to a p (append b1 b2)
 
-// Two live ranges are disjoint (hence, distinct objects do not alias).
-ghost fn mem_pts_to_disjoint (a1 a2: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
-  requires mem_pts_to a1 p1 b1 ** mem_pts_to a2 p2 b2
-  ensures  mem_pts_to a1 p1 b1 ** mem_pts_to a2 p2 b2
-        ** pure (disjoint_ranges a1 (len b1) a2 (len b2))
+// Two ranges, at least one of them exclusively owned, cannot overlap -- so
+// distinct objects do not alias. Non-aliasing comes from separation rather
+// than from provenance, so it holds between two distinct `malloc`s and
+// equally between a `malloc`ed block and a local.
+[@@allow_ambiguous]
+ghost fn mem_pts_to_disjoint (a1 a2: ptr) (#p2: perm) (#b1 #b2: bytes)
+  preserves mem_pts_to a1 1.0R b1
+  preserves mem_pts_to a2 p2 b2
+  requires  pure (len b1 > 0 /\ len b2 > 0)
+  ensures   pure (disjoint_ranges a1 (len b1) a2 (len b2))
 ```
 
 `mem_split`/`mem_join` are what make custom allocators expressible: handing out
@@ -823,7 +833,10 @@ new facts about memory.
   only for in-bounds ranges. This is strictly more permissive than ISO C.
 - `mem_pts_to_disjoint` requires one side to be exclusively owned rather than
   the general `~(p1 +. p2 <=. 1.0R)`. Writes need full permission anyway, and
-  the restricted form is far easier for the prover to apply.
+  the restricted form is far easier for the prover to apply. Both ranges also
+  have to be non-empty, which is not a weakening but a fact: two zero-length
+  ranges at the same address are not disjoint, and a zero-length range carries
+  no ownership to separate them with.
 - Addresses are assumed to fit in 64 bits (`Ptr.addr_bound`), so that a stored
   pointer's address round-trips through `ptr_sizeof` bytes. This is a target
   property, and is the same LP64 assumption the scalar sizes already make.
