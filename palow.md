@@ -516,9 +516,26 @@ are already flattened into `bytes`.
 
  - **Done.** `malloc` is no longer a special built-in; we can give a spec to a
    custom `xmalloc` function and use it just like `malloc` today.
-   `Pulse.Lib.C.Palow.Alloc` is the model side and `test/xmalloc` is the C:
-   an allocator and a deallocator that are ordinary annotated C functions, and
-   a client that never names `malloc` or `free`.
+   `Pulse.Lib.C.Palow.Alloc` is the model side and there are two C tests.
+   `test/xmalloc` gives a spec to a *typed* constructor: an allocator and a
+   deallocator that are ordinary annotated C functions, and a client that never
+   names `malloc` or `free`. `test/xmalloc_generic` is the general form the
+   acceptance test asks for,
+   ```c
+   _ensures(_inline_pulse(Xm.block $(return) $(n)))
+   _allocated void *xmalloc(size_t n)
+   { void *p = malloc(n); if (p == NULL) { xabort(); } return p; }
+
+   void client(void)
+   { int *i = xmalloc(sizeof(int)); *i = 6; (*i)++; free(i); }
+   ```
+   where `Xm.block a n` is `mem_pts_to a 1.0R (uninit (SizeT.v n)) ** freeable
+   a n`. The old model cannot state this contract at all: there a block's
+   ownership predicate names the type stored in it, so there is no proposition
+   for "`n` bytes, contents unspecified, yours to free" -- the return type would
+   have to be `T *` for a `T` the allocator does not know. The client claims
+   the bytes at `int` on the spot, and frees them without ever unclaiming at a
+   type, because `free` spends `freeable` and bytes.
  - **Done.** We can prove
    ```c
    union { int x; struct { int y; int z; }; } a; a.x = 10;
@@ -4822,3 +4839,44 @@ new facts about memory.
     definition rather than to the contract: F\* rejects one in an interface,
     and the measure that justified a function's recursion is no business of
     its callers.
+
+13. **A custom allocator with no type in it.** Acceptance test 1 is
+    `void *xmalloc(size_t n)`: an allocator that does not know what its caller
+    will store, used exactly where the client would have written `malloc`. The
+    model already had everything it needed — `mem_pts_to` at `uninit n` plus
+    `freeable` *is* the contract — and three small pieces of the emitter did
+    not.
+
+    First, `malloc` was only recognised through the shape `(T *) malloc(sizeof
+    (T))`, so `void *p = malloc(n)` was translated as a call to an undeclared
+    C function and an assumed `Func_malloc` module was published beside it,
+    with an `emp` contract that said nothing and counted as one more assumed
+    function. A call to `malloc` with no type to claim at is now the model's
+    `malloc` returning bytes, and the `<stdlib.h>` declarations of `malloc`,
+    `calloc` and `free` no longer generate modules of their own: they are
+    primitives the model axiomatizes, not C functions this translation calls.
+
+    Second, `_allocated` on a `void *` return used to be an error, because it
+    is rendered as `freeable p (sizeof T)` and there is no `T`. It is now the
+    caller's business: the callee promises a block and says nothing about its
+    type, and the *caller* claims it at the type of the variable it is
+    assigning to, exactly as it would have claimed a `malloc`. A `void *`
+    return with `_allocated` and no `_ensures` is rejected, since nothing would
+    then say how much storage the caller gets.
+
+    Third, a call that does not come back. `if (p == NULL) xabort();` is a null
+    check and not a fork, but only if the emitter knows that the arm calling
+    `xabort` has no state to join — otherwise it demands that the surviving arm
+    free the block, which is right for `if (!p) return NULL;` and wrong here.
+    A function whose postcondition is false cannot return, since there is no
+    state it could return in; that is what `_Noreturn` means, and `_ensures(0)`
+    says it in the vocabulary a contract already has, so a caller learns it
+    from the contract rather than from an attribute the IR would have to carry.
+    A call to such a function is followed by Pulse's `unreachable ()`, which
+    turns the `pure False` it left behind into the right to go on — including
+    the right to keep whatever ownership that path was still holding, so a
+    diverging arm releases nothing and the join takes the other arm's state
+    whole.
+
+    The census is 1100 specifications, 1078 with bodies, 0 admitted, 22
+    external, 0 skipped.

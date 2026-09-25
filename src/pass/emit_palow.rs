@@ -1283,6 +1283,14 @@ fn allocated_own(
     if verbatim != ["freeable"] || antiquots != 1 {
         return Ok(None);
     }
+    // `_allocated void *` is raw storage: `freeable` still needs a size, and
+    // the only thing that knows it is the contract, which was handed the byte
+    // count as an argument. So the annotation states no ownership of its own
+    // here and says instead that the *caller* receives a block -- which is
+    // what `RAW_ALLOC` carries back.
+    if is_void_ptr(tds, ty) {
+        return Ok(Some(RAW_ALLOC.to_string()));
+    }
     let pt = pointee(tds, ty).ok_or("`_allocated` on something that is not a pointer")?;
     if let Some((sn, _, _)) = flex_tail(tds, pt) {
         let val = val.ok_or(
@@ -1303,6 +1311,27 @@ fn allocated_own(
     Ok(Some(format!("freeable {} {}sz", ptr, n)))
 }
 
+/// Whether a contract clause is the literal `false`.
+///
+/// A C function whose postcondition is false cannot return: there is no state
+/// it could return in. C spells this `_Noreturn`, which says nothing about
+/// what the function proves; `_ensures(0)` says exactly the same thing in the
+/// vocabulary a contract already has, so a caller learns it from the contract
+/// rather than from an attribute the IR would have to carry separately.
+/// (`_ensures(false)` is not accepted: a contract is captured before `false`
+/// is a macro, so it arrives as the name of a variable that does not exist.)
+fn is_false_lit(e: &Expr) -> bool {
+    match &strip_casts(e).val {
+        ExprT::IntLit(n, _) => n.to_string() == "0",
+        ExprT::BoolLit(b) => !b,
+        _ => false,
+    }
+}
+
+/// What `_allocated` on a `void *` yields instead of an ownership term: the
+/// block is real, but only the function's own contract can say how big it is.
+const RAW_ALLOC: &str = "$RAW$";
+
 /// Where the pointer goes in a slprop the caller has to restate at a name of
 /// its own. Nothing in generated F\* can contain it, so it cannot collide.
 const PTR_HOLE: &str = "$PTR$";
@@ -1310,8 +1339,13 @@ const PTR_HOLE: &str = "$PTR$";
 /// What a call hands the caller when the callee's return type grants a block.
 #[derive(Clone)]
 struct RetBlock {
-    /// The Palow type name of what the block holds.
+    /// The Palow type name of what the block holds. Empty when `raw`.
     pn: String,
+    /// Whether the block is untyped -- `_allocated void *`. The callee's
+    /// contract says how many bytes and grants them; what they are is the
+    /// caller's decision, taken from the type of the local it assigns the
+    /// result to, exactly as it is for `malloc`.
+    raw: bool,
     /// For a `_nullable` return, the slprop the guard encloses, with the
     /// pointer left as `PTR_HOLE`. The caller names it to get past its own
     /// nullness test; a non-nullable return has nothing to get past.
@@ -1362,6 +1396,24 @@ fn is_incomplete(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::TypeRef(TypeRefKind::Struct(n)) => !tds.structs.contains_key(&*n.val),
         TypeT::TypeRef(TypeRefKind::Union(n)) => !tds.unions.contains_key(&*n.val),
+        _ => false,
+    }
+}
+
+/// Whether a type is a pointer to `void`: storage of no type at all.
+///
+/// C has one vocabulary for "some bytes, you decide what they are", and this
+/// is it. `malloc` returns one and so does any allocator written to stand in
+/// for `malloc`, which is why the size of such a block is never a fact about
+/// its type -- it is whatever the caller asked for.
+fn is_void_ptr(tds: &Typedefs, ty: &Type) -> bool {
+    match &tds.resolve(ty).val {
+        TypeT::Pointer(to, _) => matches!(tds.resolve(to).val, TypeT::Void),
+        TypeT::Nullable(t)
+        | TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..) => is_void_ptr(tds, t),
         _ => false,
     }
 }
@@ -1424,6 +1476,9 @@ struct FnSurface {
     decl: String,
     /// The signature without its `decreases`, for the `.fsti`.
     iface: String,
+    /// Whether the function's postcondition is `false`, so a call to it does
+    /// not come back.
+    noreturn: bool,
     /// The ownership the contract grants over what the parameters point to.
     /// A function body never has to restate this -- Pulse carries it -- except
     /// at a loop, whose invariant Pulse cannot invent.
@@ -3712,7 +3767,28 @@ fn emit_fn(
             &decl.ret_type,
             bs,
         );
-        if let Some(freeable) = alloc {
+        if alloc.as_deref() == Some(RAW_ALLOC) {
+            // Raw storage. The annotation contributes nothing to the
+            // contract -- there is no type to state ownership at and no size
+            // to state it over -- so everything the caller gets, it gets from
+            // the `_ensures` the author wrote. What `_allocated` adds is the
+            // one thing that is not expressible there: that a caller may
+            // treat the result as a fresh block and decide its type, which is
+            // what `malloc` itself offers and what a stand-in for `malloc`
+            // has to offer too.
+            if !decl.ensures.iter().any(|e| is_slprop_clause(tds, e)) {
+                refine_err.get_or_insert(
+                    "`_allocated` on a `void *` return with no hand-written `_ensures`: \
+                     nothing says how much storage the caller gets"
+                        .to_string(),
+                );
+            }
+            ret_block = Some(RetBlock {
+                pn: String::new(),
+                raw: true,
+                guarded: None,
+            });
+        } else if let Some(freeable) = alloc {
             let pt = pointee(tds, &decl.ret_type).unwrap();
             match (
                 palow_name(tds, pt),
@@ -3781,7 +3857,11 @@ fn emit_fn(
                     // map like any parameter's dereference, and the pointee
                     // type's own refinements have somewhere to be stated.
                     pointees.insert("return".to_string(), (None, Some("val_return".to_string())));
-                    ret_block = Some(RetBlock { pn, guarded: None });
+                    ret_block = Some(RetBlock {
+                        pn,
+                        raw: false,
+                        guarded: None,
+                    });
                     refines_struct.extend(
                         struct_refines(pt)
                             .into_iter()
@@ -4265,7 +4345,18 @@ fn emit_fn(
     let is_slprop = |e: &Rc<Expr>| is_slprop_clause(tds, e);
     let split = |es: &Exprs| -> (Exprs, Exprs) { es.iter().cloned().partition(|e| is_slprop(e)) };
     let (req_slprops, req_props) = split(&decl.requires);
-    let (ens_slprops, ens_props) = split(&decl.ensures);
+    // `_ensures(false)` says the function does not return. It is taken out
+    // before translation because there is nothing to translate: a bare `false`
+    // has no C type, and the proposition it stands for is written by hand
+    // below.
+    let noreturn = decl.ensures.iter().any(|e| is_false_lit(e));
+    let ensures_rest: Exprs = decl
+        .ensures
+        .iter()
+        .filter(|e| !is_false_lit(e))
+        .cloned()
+        .collect();
+    let (ens_slprops, ens_props) = split(&ensures_rest);
     let mut slprop_err: Option<String> = None;
     let generated_req = req.len();
     for (es, w, into) in [
@@ -4465,7 +4556,7 @@ fn emit_fn(
             (
                 Vec::new(),
                 Vec::new(),
-                decl.requires.is_empty() && decl.ensures.is_empty(),
+                decl.requires.is_empty() && ensures_rest.is_empty(),
                 Some(why),
             )
         }
@@ -4545,6 +4636,7 @@ fn emit_fn(
             ));
             ret_block = Some(RetBlock {
                 pn,
+                raw: false,
                 guarded: Some(guard),
             });
         }
@@ -4613,6 +4705,12 @@ fn emit_fn(
 
     let mut bodies: Vec<String> = fresh.iter().map(|(_, _, s)| s.clone()).collect();
     bodies.extend(owned_post.iter().cloned());
+    // `_ensures(false)`. The clause is a literal, so nothing downstream would
+    // have produced a proposition from it; it is put in by hand, because it
+    // is the whole of what the declaration says.
+    if noreturn {
+        bodies.push("pure False".to_string());
+    }
     bodies.extend(post_props.iter().map(|p| format!("pure ({})", p)));
     // A postcondition that names a `__fp` wrapper is one that hands something
     // about that function on -- a validity, most of the time, and one the
@@ -4868,6 +4966,7 @@ fn emit_fn(
         post_valid,
         decl: out,
         iface,
+        noreturn,
         owned,
         guarded,
         granted,
@@ -8544,6 +8643,14 @@ pub fn emit_palow(
         if tds.pure_fns.contains(&*fndecl.name.val.to_string()) {
             continue;
         }
+        // The allocator is not a C function this translation calls; it is a
+        // primitive the model axiomatizes, and a call to it is emitted as
+        // that primitive. Emitting a module for the `<stdlib.h>` declaration
+        // as well would publish a second, contentless `malloc` and count it
+        // as an assumed function, neither of which is true.
+        if defn.is_none() && matches!(&*fndecl.name.val.to_string(), "malloc" | "calloc" | "free") {
+            continue;
+        }
         let mut env = base.clone();
         env.push_fn_decl_args_for_body(fndecl);
         let granted: Vec<Slot> = grants
@@ -8578,6 +8685,7 @@ pub fn emit_palow(
         callees.insert(
             fndecl.name.val.to_string(),
             Callee {
+                noreturn: sig.noreturn,
                 simple: if !fndecl.args.iter().all(|a| {
                     matches!(
                         a.mode,
@@ -9119,6 +9227,11 @@ struct Block {
     /// `malloc`ed object one field at a time, and the object only becomes a
     /// value again once every field has been written.
     scattered: BTreeSet<String>,
+    /// How many bytes the block is, when its type does not say -- `malloc(n)`
+    /// at `void *`. Such a block has no `pn` and nothing can be read or
+    /// written through it; all it can do is be tested for null, be handed
+    /// back to a caller, and be freed.
+    bytes: Option<String>,
     /// For `malloc(sizeof(T) * n)`, what makes the block an array: the element
     /// count, the element size, and -- for `calloc` -- the value the zero bytes
     /// stand for at the element type.
@@ -9182,6 +9295,8 @@ struct ArrayBlock {
 /// the enclosing scope in.
 struct BranchResult {
     lines: Vec<String>,
+    /// Whether the arm ends in a call that does not return.
+    diverged: bool,
     inits: Vec<bool>,
     /// Which function, and which allocated block, each enclosing slot is
     /// known to hold on this path.
@@ -9197,6 +9312,9 @@ fn indent(line: &str) -> String {
 /// order to call it: whether every parameter is one the call translation can
 /// pass, and whether the result is a value.
 struct Callee {
+    /// Whether a call to this function does not return. See `is_false_lit`.
+    noreturn: bool,
+
     /// Why a call to this function cannot be emitted, if it cannot. A call may
     /// only pass ownership it can name: a value, or a pointer to an object the
     /// caller holds and gets back unchanged.
@@ -9265,6 +9383,9 @@ struct Body<'a> {
     /// Whether we are translating the arm of an `if`, where a slot introduced
     /// now would not outlive the arm.
     in_branch: bool,
+    /// Whether the statements emitted so far on this path end in a call that
+    /// does not return, so nothing after them runs.
+    diverged: bool,
     /// Whether an inlined fragment may leave the loads it needed standing
     /// as statements of their own. A specification has to be a single
     /// term, so there the loads are substituted in; a ghost *statement*
@@ -13474,6 +13595,14 @@ impl<'a> Body<'a> {
         if let Some(t) = &b.taken {
             return t.clone();
         }
+        if let Some(n) = &b.bytes {
+            return format!(
+                "(mem_pts_to {t} 1.0R ({f} (SizeT.v {n})) ** freeable {t} {n})",
+                t = b.tmp,
+                f = b.fill,
+                n = n
+            );
+        }
         let n = match (&b.array, &b.flex) {
             (Some(a), _) => a.nbytes.clone(),
             // How big a flexible struct is is not a fact about its type.
@@ -13495,29 +13624,64 @@ impl<'a> Body<'a> {
     /// initialised -- the `ensures` names the value it holds -- and, unless the
     /// return type is `_nullable`, already past its nullness test, which is the
     /// difference between taking one over and allocating one.
-    fn take_block(&mut self, var: &Ident, init: &Expr, v: &str) -> Result<(), String> {
+    fn take_block(
+        &mut self,
+        var: &Ident,
+        ty: Option<&Type>,
+        init: &Expr,
+        v: &str,
+    ) -> Result<(), String> {
         let Some(rb) = self.allocating_call(init) else {
             return Ok(());
         };
         if self.in_branch {
             return Err("a call returning a block inside a branch".to_string());
         }
+        // A `void *` block arrives untyped, and the local it is assigned to is
+        // what decides what it holds -- `int *i = xmalloc(sizeof(int))` says
+        // `int` in the only place C has to say it. That is the same reading
+        // `malloc` gets, which is the point: nothing here knows the callee is
+        // an allocator except its annotation.
+        let (pn, init_done) = if rb.raw {
+            let Some(pt) = ty.and_then(|t| pointee(self.tds, t)) else {
+                return Err(
+                    "a `void *` block assigned to something that is not a pointer to a type"
+                        .to_string(),
+                );
+            };
+            let Some(pn) = palow_name(self.tds, pt) else {
+                return Err(format!(
+                    "a `void *` block claimed at {}, which the model does not cover",
+                    describe(self.tds.resolve(pt))
+                ));
+            };
+            // The bytes become an object here rather than at the nullness
+            // test, because there is nothing to test: a non-nullable return
+            // has already promised the block. If the size the callee was
+            // asked for is not this type's, the claim is what fails, and it
+            // fails at the call site where the mistake is.
+            self.lines.push(format!("{}_claim_uninit {};", pn, v));
+            (pn, false)
+        } else {
+            (rb.pn, true)
+        };
         self.blocks.retain(|b| b.var != *var.val);
         self.blocks.push(Block {
             var: var.val.to_string(),
             tmp: v.to_string(),
-            pn: rb.pn,
+            pn,
             fill: "uninit",
             // A `_nullable` return may have failed, and the block is behind
             // the same guard an allocation's is until the source tests it.
             checked: rb.guarded.is_none(),
-            init: true,
+            init: init_done,
             freed: false,
             scattered: BTreeSet::new(),
             zero: None,
             taken: rb.guarded.map(|g| g.replace(PTR_HOLE, v)),
             array: None,
             flex: None,
+            bytes: None,
         });
         Ok(())
     }
@@ -13561,6 +13725,48 @@ impl<'a> Body<'a> {
             }),
             _ => None,
         }
+    }
+
+    /// `malloc(n)` at `void *`: an allocation of bytes, with no type in sight.
+    ///
+    /// The typed forms above are recognised by the frontend, which reads the
+    /// `sizeof` in the argument and hands back a type. There is nothing to
+    /// read here -- the size is a runtime value -- so the call arrives as an
+    /// ordinary call to a declared function, and the only thing that makes it
+    /// an allocation is the name. That is the same thing C relies on.
+    fn raw_alloc_of(&self, e: &Expr) -> Option<Rc<Expr>> {
+        let e = strip_casts(e);
+        let ExprT::FnCall(name, args) = &e.val else {
+            return None;
+        };
+        if &*name.val.to_string() != "malloc" || args.len() != 1 {
+            return None;
+        }
+        Some(args[0].clone())
+    }
+
+    /// Start a block of `n` bytes of no type.
+    fn allocate_raw(&mut self, var: &Ident, n: &Expr) -> Result<String, String> {
+        let n = self.rvalue(n)?;
+        let tmp = self.fresh(&var.val);
+        self.lines.push(format!("let {} = malloc {};", tmp, n));
+        self.blocks.retain(|b| b.var != *var.val);
+        self.blocks.push(Block {
+            var: var.val.to_string(),
+            tmp: tmp.clone(),
+            pn: String::new(),
+            fill: "uninit",
+            checked: false,
+            init: false,
+            freed: false,
+            scattered: BTreeSet::new(),
+            zero: None,
+            taken: None,
+            array: None,
+            flex: None,
+            bytes: Some(n),
+        });
+        Ok(tmp)
     }
 
     /// `malloc(sizeof(T) * n)`, with the element type and the count.
@@ -13666,6 +13872,7 @@ impl<'a> Body<'a> {
             zero: None,
             taken: None,
             array: None,
+            bytes: None,
             flex: Some(FlexBlock {
                 n,
                 nbytes,
@@ -13787,6 +13994,7 @@ impl<'a> Body<'a> {
                 filled: false,
             }),
             flex: None,
+            bytes: None,
         });
         Ok(tmp)
     }
@@ -13827,6 +14035,7 @@ impl<'a> Body<'a> {
             taken: None,
             array: None,
             flex: None,
+            bytes: None,
         });
         Ok(tmp)
     }
@@ -13926,7 +14135,12 @@ impl<'a> Body<'a> {
             match &b.array {
                 // Nothing to claim: what the guard held is the points-to
                 // itself, so spending the guard is the whole step.
-                _ if b.taken.is_some() => vec![format!("elim_unless_null {} {};", b.tmp, sl)],
+                // Nothing to claim, for two different reasons: a block a call
+                // handed over arrives typed, and a `void *` block has no type
+                // to be claimed at until something decides on one.
+                _ if b.taken.is_some() || b.bytes.is_some() => {
+                    vec![format!("elim_unless_null {} {};", b.tmp, sl)]
+                }
                 // A flexible struct is claimed at the length the allocation
                 // asked for, and comes back in pieces: the tail holding the
                 // zeros, the fixed fields still storage.
@@ -14801,9 +15015,13 @@ impl<'a> Body<'a> {
                         self.allocate_flex(name, which, &ty, &n)?
                     }
                     (_, Some((which, ty, n))) => self.allocate_array(name, which, &ty, &n)?,
+                    _ if self.raw_alloc_of(init).is_some() => {
+                        let n = self.raw_alloc_of(init).unwrap();
+                        self.allocate_raw(name, &n)?
+                    }
                     _ => {
                         let v = self.rvalue(init)?;
-                        self.take_block(name, init, &v)?;
+                        self.take_block(name, Some(ty), init, &v)?;
                         v
                     }
                 };
@@ -14868,10 +15086,14 @@ impl<'a> Body<'a> {
                         let value = self.allocate_flex(v, which, &ty, &n)?;
                         return self.store(lhs, &pn, &value);
                     }
+                    if let Some(n) = self.raw_alloc_of(rhs) {
+                        let value = self.allocate_raw(v, &n)?;
+                        return self.store(lhs, &pn, &value);
+                    }
                 }
                 let v = self.rvalue(rhs)?;
                 if let ExprT::Var(n) = &strip_vattr(lhs).val {
-                    self.take_block(n, rhs, &v)?;
+                    self.take_block(n, Some(&ty), rhs, &v)?;
                 }
                 self.store(lhs, &pn, &v)?;
                 self.note_fn_store(lhs, rhs);
@@ -15096,16 +15318,24 @@ impl<'a> Body<'a> {
             StmtT::Return(None) => Ok(()),
             StmtT::Call(e) => match &e.val {
                 ExprT::FnCall(name, args) => {
-                    let void = self
-                        .callees
-                        .get(&*name.val.to_string())
-                        .is_some_and(|c| c.void);
+                    let callee = self.callees.get(&*name.val.to_string());
+                    let void = callee.is_some_and(|c| c.void);
+                    let noreturn = callee.is_some_and(|c| c.noreturn);
                     let call = self.call(name, args)?;
                     if void {
                         self.lines.push(format!("{};", call));
                     } else {
                         let t = self.fresh(&name.val);
                         self.lines.push(format!("let {} = {};", t, call));
+                    }
+                    // The call left `pure False` behind, so this point in the
+                    // program is not reached. `unreachable` turns that into
+                    // the fact that anything follows -- including whatever
+                    // ownership this path still holds, which is why nothing
+                    // has to be released here.
+                    if noreturn {
+                        self.lines.push("unreachable ();".to_string());
+                        self.diverged = true;
                     }
                     Ok(())
                 }
@@ -15278,7 +15508,24 @@ impl<'a> Body<'a> {
                 let els = self.branch(else_branch)?;
                 let els_blocks = self.blocks.clone();
                 self.blocks = entry_blocks;
-                if let Some((i, _)) = nt {
+                // An arm that does not come back has no state to join. What
+                // holds after the `if` is what the other arm left -- which is
+                // what makes `if (!p) abort();` a null check rather than a
+                // fork: the surviving path is the one where `p` is not null,
+                // and it keeps the block.
+                let surviving = match (then.diverged, els.diverged) {
+                    (true, false) => Some(&els_blocks),
+                    (false, true) => Some(&then_blocks),
+                    _ => None,
+                };
+                if let Some(blocks) = surviving {
+                    self.blocks = blocks.clone();
+                    if let Some((i, _)) = nt {
+                        // The test is settled on the path that survives, so
+                        // the block is no longer waiting to be checked.
+                        self.blocks[i].checked = false;
+                    }
+                } else if let Some((i, _)) = nt {
                     // The arm that owns the block has to give it back, or the
                     // two arms leave different frames behind and there is
                     // nothing to join.
@@ -15292,13 +15539,16 @@ impl<'a> Body<'a> {
                     self.blocks[i].freed = true;
                     self.blocks[i].checked = false;
                 }
-                if then.inits != els.inits || then.out_params != els.out_params {
+                let live_res = if then.diverged { &els } else { &then };
+                if surviving.is_none()
+                    && (then.inits != els.inits || then.out_params != els.out_params)
+                {
                     return Err(
                         "an `if` whose branches leave different variables initialised".to_string(),
                     );
                 }
-                self.out_params = then.out_params.clone();
-                for (slot, init) in self.slots.iter_mut().zip(&then.inits) {
+                self.out_params = live_res.out_params.clone();
+                for (slot, init) in self.slots.iter_mut().zip(&live_res.inits) {
                     slot.init = *init;
                 }
                 // Which function a slot holds is only known after the join if
@@ -15306,9 +15556,12 @@ impl<'a> Body<'a> {
                 // assigned different functions in the two arms would be called
                 // as whichever arm was translated last.
                 for (i, slot) in self.slots.iter_mut().enumerate() {
-                    if then.holds.get(i) != els.holds.get(i) {
+                    if surviving.is_none() && then.holds.get(i) != els.holds.get(i) {
                         slot.holds_fn.clear();
                         slot.holds_block.clear();
+                    } else if let Some((f, b)) = live_res.holds.get(i) {
+                        slot.holds_fn = f.clone();
+                        slot.holds_block = b.clone();
                     }
                 }
 
@@ -15634,6 +15887,7 @@ impl<'a> Body<'a> {
         let outer_open = self.open_elems.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
         let outer_tail_branch = std::mem::replace(&mut self.tail_branch, false);
+        let outer_diverged = std::mem::replace(&mut self.diverged, false);
 
         let result = (|| -> Result<bool, String> {
             for s in stmts.iter() {
@@ -15678,13 +15932,18 @@ impl<'a> Body<'a> {
 
         self.tail_branch = outer_tail_branch;
         self.in_branch = outer_in_branch;
+        let diverged = std::mem::replace(&mut self.diverged, outer_diverged);
         let out = (|| {
-            if !result? {
+            // A diverging arm has `pure False` in hand, which subsumes every
+            // frame it is still holding; releasing them would be emitting
+            // steps after the program has stopped.
+            if !result? && !diverged {
                 self.release_from(mark);
             }
             self.seeded = outer_seeded;
             Ok(BranchResult {
                 lines: std::mem::take(&mut self.lines),
+                diverged,
                 inits: self.slots[..mark].iter().map(|s| s.init).collect(),
                 holds: self.slots[..mark]
                     .iter()
@@ -16869,6 +17128,7 @@ fn emit_body(
         tds,
         env,
         callees,
+        diverged: false,
         lines: Vec::new(),
         // A granted global is a slot the function did not allocate and must
         // not release. Seeding them first means a local of the same name
