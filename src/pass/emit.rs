@@ -2465,10 +2465,15 @@ impl<'a> Emitter<'a> {
                     && !use_spec_idx
                     && !is_arrayptr
                     && arr_ty.as_ref().is_some_and(|ty| match &ty.val {
-                        TypeT::FixedArray(elem, _) => matches!(
-                            &env.vtype_whnf(elem.clone().into()).val,
-                            TypeT::FixedArray(_, _)
-                        ),
+                        // `T a[M][N]`, and the same array decayed to an
+                        // `array` of rows -- which is how a mutable array
+                        // global is seen (`Env::lookup_var_type`).
+                        TypeT::FixedArray(elem, _) | TypeT::Pointer(elem, PointerKind::Array) => {
+                            matches!(
+                                &env.vtype_whnf(elem.clone().into()).val,
+                                TypeT::FixedArray(_, _)
+                            )
+                        }
                         _ => false,
                     });
                 let arr_doc = match arr_kind {
@@ -5018,16 +5023,21 @@ impl<'a> Emitter<'a> {
                         } else {
                             "array_write"
                         };
+                        // As for `a[i][j].f = v` above: rows borrowed for
+                        // the target are used by this write alone.
+                        let rows_mark = self.pending_rows.len();
                         let arr_doc = match self.emit_array_operand(env, arr) {
                             ExprKind::ArrayLValue(arr_doc) => arr_doc,
                             arr_doc => arr_doc.to_rvalue(),
                         };
                         let idx_doc = self.emit_rvalue(env, idx);
                         let val_doc = self.emit_rvalue(env, t);
+                        let returns = self.emit_row_returns(rows_mark);
                         naryfn([Doc::text(fn_name), arr_doc, idx_doc, val_doc])
                             .append(";")
                             .nest(2)
                             .group()
+                            .append(returns)
                     } else if let ExprT::Deref(inner) = &x.val {
                         // *array     = val → array_write    p 0sz val
                         // *arrayptr  = val → arrayptr_write p 0sz val

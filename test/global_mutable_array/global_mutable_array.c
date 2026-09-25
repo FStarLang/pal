@@ -85,6 +85,29 @@ uint32_t first_via_ptr(void) _requires(_live(buf)) _ensures(_live(buf))
   return p[0];
 }
 
+/* 3.4 A two-dimensional global is an `array` of rows. Element reads and
+ * writes borrow the row, update it, and hand it back. */
+uint32_t grid[3][4];
+
+void grid_set(size_t i, size_t j, uint32_t v) _requires(_live(grid))
+    _requires(i < 3 && j < 4) _ensures(_live(grid)) _ensures(grid[i][j] == v) {
+  grid[i][j] = v;
+}
+
+uint32_t grid_get(size_t i, size_t j) _requires(_live(grid))
+    _requires(i < 3 && j < 4) _ensures(_live(grid))
+    _ensures(return == grid[i][j]) {
+  return grid[i][j];
+}
+
+/* 3.5 The same for rows of structs. */
+struct point pgrid[2][2];
+
+void pgrid_set_py(size_t i, size_t j, uint32_t v) _requires(_live(pgrid))
+    _requires(i < 2 && j < 2) _ensures(_live(pgrid)) {
+  pgrid[i][j].py = v;
+}
+
 /* 4.1 An entrypoint assumes the permissions for the globals it uses, and gives
  * them back on return. */
 int main(void) _requires(_live(buf)) _requires(_live(pts)) _ensures(_live(buf))
