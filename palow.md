@@ -4183,12 +4183,39 @@ new facts about memory.
    is what C promises, and a field of it can be read before anything has been
    written to it.
 
-   What remains is two honest clusters: a conversion from a pointer to an
-   integer, which is where provenance has to be said out loud; and a global
-   reached through a function pointer.
+   What remains is one honest cluster: a global reached through a function
+   pointer.
 
-   As of this milestone: **1083 specifications, 1045 of them with real bodies,
-   18 admitted, 4 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
+   **An address is observed, not written.** `(uintptr_t) p` looks like a
+   conversion, and in a model where a pointer is a number it is one. Here it
+   is not: `addr_of` is a `GTot` projection, deliberately unavailable to a
+   program, because a model that let a program compute with addresses would
+   have given up provenance before it started. So the cast is a *step* --
+   `ptr_to_uintptr` -- and the emitter binds its result to a temporary before
+   converting onwards to whatever integer type C asked for, which the ordinary
+   integer conversions then handle.
+
+   The question was what that step should cost. It was written to require
+   `exposed (prov_of a)`, following PNVI-ae, where casting a pointer to an
+   integer is exactly what exposes its allocation. That reading is right about
+   C and wrong about where the obligation belongs: `expose` needs ownership,
+   because ownership is how the model knows *which* allocation is meant and
+   that it is still live, and most pointers that get cast own nothing at all
+   -- a `_plain int32_t *`, a `void *`, an `_array` parameter. Requiring it
+   would have made a cast that C imposes no condition on into one only a
+   privileged pointer could perform.
+
+   So the requirement moved to where it is actually needed. `ptr_to_uintptr`
+   now asks for nothing and promises only the address; `expose` remains, and
+   the round trip back through `uintptr_to_ptr` still needs both `exposed` and
+   `in_footprint`, both of which still come from ownership. The cost is one
+   ghost statement in the rare program that makes the round trip, and the
+   benefit is that the twelve pointer-to-integer conversions in the test suite
+   -- through typedefs, through `void *`, off a local's address, off an array
+   parameter, off a call's result -- are all just code now.
+
+   As of this milestone: **1083 specifications, 1057 of them with real bodies,
+   6 admitted, 4 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

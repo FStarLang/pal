@@ -8596,6 +8596,7 @@ open Pulse.Lib.C.Palow.Local\n\
 open Pulse.Lib.C.Palow.Nullable\n\
 open Pulse.Lib.C.Palow.Alloc\n\
 open Pulse.Lib.C.Palow.FnPtr\n\
+open Pulse.Lib.C.Palow.Expose\n\
 module Seq = FStar.Seq\n\
 module Bits = Pulse.Lib.C.Palow.Bits\n\
 module Int8 = FStar.Int8\n\
@@ -12332,6 +12333,24 @@ impl<'a> Body<'a> {
                     return self.rvalue(inner);
                 }
                 let v = self.rvalue(inner)?;
+                // `(uintptr_t) p`. An address is a number, but in this model
+                // it is a ghost projection of a pointer, and observing it is a
+                // step the program takes rather than a term it writes: that is
+                // what makes the difference between a model where provenance
+                // means something and one where it does not. The step itself
+                // asks for nothing -- C puts no condition on the cast -- and
+                // the integer it yields converts onwards like any other.
+                if matches!(
+                    peel(self.tds, &from).val,
+                    TypeT::Pointer(..) | TypeT::FnPtr { .. }
+                ) && matches!(peel(self.tds, to).val, TypeT::Int { .. } | TypeT::SizeT)
+                {
+                    let t = self.fresh("addr");
+                    self.lines
+                        .push(format!("let {} = ptr_to_uintptr {};", t, v));
+                    let sz: Rc<Type> = TypeT::SizeT.with_loc(e.loc.clone());
+                    return convert(&sz, peel(self.tds, to), &t);
+                }
                 // `peel`, not `resolve`: a `_plain int32_t *` is a pointer as
                 // far as a conversion is concerned, and the annotation
                 // wrappers would otherwise hide that.

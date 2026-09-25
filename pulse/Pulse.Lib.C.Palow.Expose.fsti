@@ -80,13 +80,19 @@ ghost fn expose (a: ptr) (#p: perm) (#b: bytes)
   requires  pure (len b > 0)
   ensures   exposed (prov_of a)
 
-(* `(uintptr_t) a`. Yields the address and, as a side effect, exposes the
-   allocation. Note that it needs no ownership: taking the address of a dangling
-   pointer is not itself undefined, only using the result is. But it does need
-   the allocation to have been exposed already, which in practice comes from
-   `expose` on the same pointer. *)
+(* `(uintptr_t) a`. Yields the address.
+
+   It needs nothing: taking the address of a pointer is not itself undefined
+   whatever the pointer is, only using the result is, and C imposes no
+   condition on the cast. What the cast does *not* do here is expose the
+   allocation. PNVI-ae says it does, and that is the honest reading of the
+   standard, but exposure is what makes an integer usable as a pointer again,
+   and the step that makes it so -- `expose` -- needs ownership, which is how
+   the model knows which allocation is meant and that it is live. Requiring it
+   to be written down costs one ghost statement in the rare program that makes
+   the round trip, and buys a cast that is free everywhere else, including
+   through a `_plain` pointer that owns nothing at all. *)
 fn ptr_to_uintptr (a: ptr)
-  preserves exposed (prov_of a)
   returns   n : SZ.t
   ensures   pure (SZ.v n == addr_of a)
 
