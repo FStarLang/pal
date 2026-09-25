@@ -4170,13 +4170,25 @@ new facts about memory.
    ghost statement written across several lines is now flattened for the same
    reason a spliced clause always was.
 
-   What remains is three honest clusters: a conversion from a pointer to an
-   integer, which is where provenance has to be said out loud; a `malloc`
-   whose size is an expression rather than a `sizeof`; and a global reached
-   through a function pointer.
+   The `malloc(sizeof(*p))` cluster turned out to be about neither `malloc`
+   nor `sizeof`. Seven of its eight functions were failing only because they
+   did not test the allocation for null, which Palow has insisted on from the
+   start and which is a fix in the C, not in the emitter. The eighth was a
+   real gap: a `calloc`ed *struct* was being claimed as storage rather than as
+   a value, on the grounds that an aggregate has no `_claim`. It does -- the
+   byte layer calls it `_conceal`, and it is the same step under a different
+   name, bytes plus a representation fact becoming a value -- and the
+   representation fact is the `_repr_zero` the struct emitter has always
+   written. So `calloc` of a struct now hands back something readable, which
+   is what C promises, and a field of it can be read before anything has been
+   written to it.
 
-   As of this milestone: **1083 specifications, 1037 of them with real bodies,
-   26 admitted, 4 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
+   What remains is two honest clusters: a conversion from a pointer to an
+   integer, which is where provenance has to be said out loud; and a global
+   reached through a function pointer.
+
+   As of this milestone: **1083 specifications, 1045 of them with real bodies,
+   18 admitted, 4 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

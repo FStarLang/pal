@@ -13218,19 +13218,15 @@ impl<'a> Body<'a> {
         };
         match &e.val {
             ExprT::Malloc(ty) => palow_name(self.tds, ty).map(|pn| ("malloc", pn, None)),
-            // `calloc` of a *scalar* hands back a readable object: the storage
-            // is all zeros and the type says that is the encoding of zero.
-            // Only a scalar, because an aggregate's claim would be a generated
-            // `_claim` the struct emitter does not write.
+            // `calloc` hands back a readable object: the storage is all
+            // zeros and the type says that is the encoding of zero. A struct
+            // is no different -- its `_repr_zero` says exactly that, field by
+            // field -- and the step that turns bytes into a value is the one
+            // the struct already has, under the name `_conceal`.
             ExprT::Calloc(ty) => palow_name(self.tds, ty).map(|pn| {
-                let scalar = matches!(
-                    peel(self.tds, ty).val,
-                    TypeT::Int { .. } | TypeT::SizeT | TypeT::Bool
-                );
                 let z = zero_value(self.tds, ty)
                     .ok()
-                    .zip(zero_repr_proof(self.tds, ty))
-                    .filter(|_| scalar);
+                    .zip(zero_repr_proof(self.tds, ty));
                 ("calloc", pn, z)
             }),
             _ => None,
@@ -13576,6 +13572,22 @@ impl<'a> Body<'a> {
     /// pointer is non-null eliminates the guard and claims the bytes at the
     /// pointee's type, which is exactly the state a stack allocation would
     /// have left; the other arm discards the guard, which is `emp` there.
+    /// Record which side of a null test an arm is on.
+    ///
+    /// A `calloc`ed object is claimed at the zero value, not as storage, so
+    /// on the live side it holds a value from the moment the test is past --
+    /// which is what makes reading a field of it a focus rather than a
+    /// scatter. An array is different: its zeros are claimed at the option
+    /// view and become a plain one only when the whole range is accounted
+    /// for, so its `filled` flag stays where it is.
+    fn mark_checked(&mut self, i: usize, live: bool) {
+        let b = &mut self.blocks[i];
+        b.checked = live;
+        if live && b.zero.is_some() && b.array.is_none() && b.flex.is_none() {
+            b.init = true;
+        }
+    }
+
     fn null_test_arms(&self, i: usize) -> (Vec<String>, Vec<String>) {
         let b = &self.blocks[i];
         let sl = Self::block_slprop(b);
@@ -13610,6 +13622,19 @@ impl<'a> Body<'a> {
                 None => vec![
                     format!("elim_unless_null {} {};", b.tmp, sl),
                     match &b.zero {
+                        // A scalar's `_claim` and an aggregate's `_conceal`
+                        // are the same step -- bytes plus a representation
+                        // fact become a value -- under two names, because the
+                        // aggregate's is what the byte layer already called
+                        // it. The value is an implicit there, so it is given
+                        // as one.
+                        Some((z, why)) if is_aggregate(&b.pn) => format!(
+                            "{} {}_conceal {} #1.0R #_ #({});",
+                            why.join(" "),
+                            b.pn,
+                            b.tmp,
+                            z
+                        ),
                         Some((z, why)) => {
                             format!("{} {}_claim {} {};", why.join(" "), b.pn, b.tmp, z)
                         }
@@ -14908,7 +14933,7 @@ impl<'a> Body<'a> {
                 let entry_blocks = self.blocks.clone();
                 let live_then = matches!(nt, Some((_, false)));
                 if let Some((i, _)) = nt {
-                    self.blocks[i].checked = live_then;
+                    self.mark_checked(i, live_then);
                 }
                 let then = self.branch(then_branch)?;
                 let then_blocks = self.blocks.clone();
@@ -14918,7 +14943,7 @@ impl<'a> Body<'a> {
                     slot.init = *init;
                 }
                 if let Some((i, _)) = nt {
-                    self.blocks[i].checked = !live_then;
+                    self.mark_checked(i, !live_then);
                 }
                 let els = self.branch(else_branch)?;
                 let els_blocks = self.blocks.clone();
@@ -15131,12 +15156,12 @@ impl<'a> Body<'a> {
                     let live_then = matches!(nt, Some((_, false)));
                     let entry_blocks = self.blocks.clone();
                     if let Some((i, _)) = nt {
-                        self.blocks[i].checked = live_then;
+                        self.mark_checked(i, live_then);
                     }
                     let (then_lines, then_val) = self.tail_arm(&then_stmts)?;
                     self.blocks = entry_blocks.clone();
                     if let Some((i, _)) = nt {
-                        self.blocks[i].checked = !live_then;
+                        self.mark_checked(i, !live_then);
                     }
                     let (else_lines, else_val) = self.tail_arm(&else_stmts)?;
                     self.blocks = entry_blocks;
@@ -15753,6 +15778,14 @@ fn static_zero(tds: &Typedefs, ty: &Type) -> Result<String, String> {
 /// is not zeroable -- C says `calloc` gives a null pointer, but null's
 /// representation is not fixed to be all-zero, and the model does not pretend
 /// otherwise.
+/// Whether a Palow type name stands for a struct or a union rather than a
+/// scalar. The storage layer is generated per type and its names say which
+/// kind it is, which is the only place that distinction is recorded once a
+/// block is only a pointer and a name.
+fn is_aggregate(pn: &str) -> bool {
+    pn.starts_with("struct_") || pn.starts_with("union_")
+}
+
 fn zero_repr_proof(tds: &Typedefs, ty: &Type) -> Option<Vec<String>> {
     let t = peel(tds, ty);
     match &t.val {
