@@ -49,3 +49,16 @@ int32_t call_with_two_fixed_arguments(void)
     int32_t extra = 9;
     return read_second_pointer(&first, &second, &extra);
 }
+
+/* Arguments that read no memory beyond locals and cannot be undefined: string
+   literals, constant expressions, a decayed local array, integer conversions,
+   and wrapping (unsigned) arithmetic with in-range constant shifts. */
+int32_t call_with_inert_computations(uint32_t word, uint64_t hi, uint64_t lo)
+    _ensures(return == 42)
+{
+    int32_t first = 42;
+    char name[4] = {0};
+    return read_first_pointer(&first, "literal", sizeof(first) * 2, (1u << 3),
+                              name, (char)((word >> 24) & 0xff), hi - lo,
+                              ~word, word ^ 5u);
+}

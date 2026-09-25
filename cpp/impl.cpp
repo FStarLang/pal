@@ -958,12 +958,57 @@ public:
     return nullptr;
   }
 
+  // Whether an ignored variadic argument can be dropped without losing a
+  // proof obligation: evaluating it must have no side effects, read no memory
+  // other than non-volatile locals, and have no undefined behavior.
   bool canOmitVariadicArgument(Expr *e) {
     if (e->HasSideEffects(*astCtx))
       return false;
+    return isInertVariadicOperand(e);
+  }
+
+  bool isInertVariadicOperand(Expr *e) {
     e = e->IgnoreParenImpCasts();
-    if (isa<IntegerLiteral, CharacterLiteral, FloatingLiteral>(e))
+    if (isa<IntegerLiteral, CharacterLiteral, FloatingLiteral, StringLiteral>(
+            e))
       return true;
+    if (e->getType()->isIntegerType() && e->isIntegerConstantExpr(*astCtx))
+      return true;
+    // A conversion between integer types is never undefined.
+    if (auto *cast = dyn_cast<ExplicitCastExpr>(e);
+        cast && cast->getType()->isIntegerType() &&
+        cast->getSubExpr()->getType()->isIntegerType())
+      return isInertVariadicOperand(cast->getSubExpr());
+    if (auto *op = dyn_cast<UnaryOperator>(e);
+        op && op->getOpcode() == UO_Not && op->getType()->isIntegerType())
+      return isInertVariadicOperand(op->getSubExpr());
+    if (auto *bin = dyn_cast<BinaryOperator>(e)) {
+      auto ty = bin->getType();
+      bool operands = isInertVariadicOperand(bin->getLHS()) &&
+                      isInertVariadicOperand(bin->getRHS());
+      switch (bin->getOpcode()) {
+      case BO_And:
+      case BO_Or:
+      case BO_Xor:
+        return ty->isIntegerType() && operands;
+      // Unsigned arithmetic wraps. Division is excluded: a zero divisor is
+      // undefined whatever the type.
+      case BO_Add:
+      case BO_Sub:
+      case BO_Mul:
+        return ty->isUnsignedIntegerType() && operands;
+      case BO_Shl:
+      case BO_Shr: {
+        if (!ty->isUnsignedIntegerType() || !operands)
+          return false;
+        auto amount = bin->getRHS()->getIntegerConstantExpr(*astCtx);
+        return amount && amount->isNonNegative() &&
+               amount->getZExtValue() < astCtx->getTypeSize(ty);
+      }
+      default:
+        return false;
+      }
+    }
     bool address = false;
     if (auto *op = dyn_cast<UnaryOperator>(e);
         op && op->getOpcode() == UO_AddrOf) {
@@ -975,8 +1020,9 @@ public:
     if (!var || (!isa<ParmVarDecl>(var) && !var->hasLocalStorage()))
       return false;
     auto ty = var->getType();
+    // A local array passed to `...` has decayed to its address.
     return !ty.isVolatileQualified() && !ty->isAtomicType() &&
-           (address || ty->isScalarType());
+           (address || ty->isScalarType() || ty->isArrayType());
   }
 
   Rc<ir::Expr> trRValue(Expr *e) {
@@ -1852,8 +1898,9 @@ public:
             if (!canOmitVariadicArgument(arg)) {
               reportUnsupported(
                   arg->getSourceRange(), getRange(arg->getSourceRange()),
-                  "unsupported ignored variadic argument: expected a scalar "
-                  "literal, a non-volatile local value, or a local address",
+                  "unsupported ignored variadic argument: expected a literal, "
+                  "a non-volatile local value or address, or wrapping "
+                  "integer arithmetic over those",
                   "");
               return mk_rvalue_err(
                   std::move(loc),
