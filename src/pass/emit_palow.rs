@@ -5604,6 +5604,83 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         );
     }
 
+    // Type punning: reading a member that is *not* the live one.
+    //
+    // This is acceptance test 2 from `palow.md` --
+    //
+    //     union { int x; struct { int y; int z; }; } a;
+    //     a.x = 10; int b = a.y; assert(b == 10);
+    //
+    // -- and it is the program the old model cannot express at all, because
+    // there `a.x` and `a.y` are different F* fields of different types and
+    // nothing relates a store through one to a load through the other.
+    //
+    // Here they are the same bytes, so there is nothing to relate: when the
+    // live member is a scalar and the member being read is a struct whose
+    // *leading* field has that same scalar type, the resource for the one is
+    // literally the resource for the other, and the step is a `rewrite` of
+    // the address -- from `a` to `a +! 0`. Nothing is assumed and no value is
+    // invented, which matters here: bytes 4..8 of the union above have never
+    // been written, so there is no `struct` value to produce and a pun stated
+    // at the whole member would be unsound. Stating it at the field is what
+    // makes the program provable and `a.z` still unreadable, which is exactly
+    // what C promises.
+    for l in &ui.members {
+        let FieldShape::One { pn: lpn } = &l.shape else {
+            continue;
+        };
+        let lty = field_type(tds, &l.ty).unwrap();
+        for m in &ui.members {
+            if m.name == l.name {
+                continue;
+            }
+            let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &peel(tds, &m.ty).val else {
+                continue;
+            };
+            let Some(si) = tds.structs.get(&sname.val.to_string()) else {
+                continue;
+            };
+            let sn = format!("struct_{}", sname.val);
+            for fld in &si.fields {
+                if fld.offset != 0 {
+                    continue;
+                }
+                let FieldShape::One { pn: fpn } = &fld.shape else {
+                    continue;
+                };
+                if fpn != lpn {
+                    continue;
+                }
+                c += &format!(
+                    "ghost fn {un}_pun_{l}_{m}_{f} (a: ptr) (#p: perm) (#v: {lty})\n\
+                     \x20 requires {un}_pts_to a p ({k} v)\n\
+                     \x20 ensures  {pn}_pts_to (a +! {sn}_offsetof_{f}) p v\n\
+                     \x20 ensures  {un}_rest_{l} a p\n\
+                     {{\n  \
+                     {un}_focus_{l} a;\n  \
+                     rewrite ({pn}_pts_to a p v)\n    \
+                     as ({pn}_pts_to (a +! {sn}_offsetof_{f}) p v);\n}}\n\n\
+                     ghost fn {un}_unpun_{l}_{m}_{f} (a: ptr) (#p: perm) (#v: {lty})\n\
+                     \x20 requires {pn}_pts_to (a +! {sn}_offsetof_{f}) p v\n\
+                     \x20 requires {un}_rest_{l} a p\n\
+                     \x20 ensures  {un}_pts_to a p ({k} v)\n\
+                     {{\n  \
+                     rewrite ({pn}_pts_to (a +! {sn}_offsetof_{f}) p v)\n    \
+                     as ({pn}_pts_to a p v);\n  \
+                     {un}_unfocus_{l} a;\n}}\n\n",
+                    un = un,
+                    l = l.name,
+                    m = m.name,
+                    f = fld.name,
+                    k = ctor(l),
+                    lty = lty,
+                    pn = lpn,
+                    sn = sn,
+                );
+            }
+        }
+    }
+
     // The same three names the scalar layer publishes, so that a union can be
     // a struct field or an array element without anything downstream having to
     // know it is a union: storage in, storage out, and the loss of knowledge
@@ -10323,6 +10400,12 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(e) {
             return self.place(&p, writing);
         }
+        if !writing
+            && let ExprT::Member(base, f) = &strip_vattr(e).val
+            && let Some(focus) = self.punned_field(base, f)
+        {
+            return Ok(focus);
+        }
         match &strip_vattr(e).val {
             ExprT::Member(base, f) if self.union_of(base).is_some() => {
                 self.union_member(base, f, writing)
@@ -10503,6 +10586,97 @@ impl<'a> Body<'a> {
             // until a union nested in a struct reached here.
             close_read: close(base_close_read),
             close_write: close(base_close_write),
+        })
+    }
+
+    /// Type punning: a read of `u.m.f` where the live member is not `m`.
+    ///
+    /// C allows it and `palow.md`'s acceptance test 2 is exactly it. The
+    /// model's answer is that the two names denote the *same bytes*: when the
+    /// live member is a scalar and `f` is the leading field of the arm being
+    /// read, with the same type, the resource in hand already is the one the
+    /// read needs, and the generated `_pun_` step is a `rewrite` of the
+    /// address. Anything else -- a field further in, a different type, a live
+    /// member that is not a scalar -- is `None`, and the ordinary path reports
+    /// it as the access it could not make.
+    ///
+    /// Note what is deliberately *not* attempted: producing the arm's value.
+    /// The bytes past the live member may never have been written, so there is
+    /// no such value, and a pun stated at the whole member would be unsound.
+    /// Stating it at the field is what makes the program provable while
+    /// leaving the rest of the arm unreadable -- which is what C promises.
+    fn punned_field(&mut self, base: &Expr, f: &Ident) -> Option<Focus> {
+        let base = match self.unalias(base) {
+            Some(p) => (*p).clone(),
+            None => base.clone(),
+        };
+        let ExprT::Member(u, m) = &strip_vattr(&base).val else {
+            return None;
+        };
+        let (u, m) = (u.clone(), m.val.to_string());
+        let un = self.union_of(&u)?;
+        let uname = un.strip_prefix("union_")?.to_string();
+        let mty = self
+            .field_ty(
+                &u,
+                &Ast {
+                    val: m.clone().into(),
+                    loc: base.loc.clone(),
+                },
+            )
+            .ok()?;
+        let sname = match &peel(self.tds, &mty).val {
+            TypeT::TypeRef(TypeRefKind::Struct(n)) => n.val.to_string(),
+            _ => return None,
+        };
+        let fname = f.val.to_string();
+        let si = self.tds.structs.get(&sname)?;
+        let fld = si.fields.iter().find(|x| x.name == fname)?;
+        if fld.offset != 0 {
+            return None;
+        }
+        let FieldShape::One { pn } = &fld.shape else {
+            return None;
+        };
+        let (sn, pn) = (format!("struct_{}", sname), pn.clone());
+        // Everything below may emit, so anything that turns out not to be a
+        // pun has to leave the body as it found it.
+        let mark = self.lines.len();
+        let Ok((a, bcr, _)) = self.base_addr(&u, false) else {
+            self.lines.truncate(mark);
+            return None;
+        };
+        let give_up = |me: &mut Self| {
+            me.lines.truncate(mark);
+            None
+        };
+        let Some(live) = self.active.get(&a).cloned() else {
+            return give_up(self);
+        };
+        if live == m {
+            return give_up(self);
+        }
+        let Some(ui) = self.tds.unions.get(&uname) else {
+            return give_up(self);
+        };
+        let Some(lm) = ui.members.iter().find(|x| x.name == live) else {
+            return give_up(self);
+        };
+        match &lm.shape {
+            FieldShape::One { pn: lpn } if *lpn == pn => {}
+            _ => return give_up(self),
+        }
+        let mut close = vec![format!("{}_unpun_{}_{}_{} {};", un, live, m, fname, a)];
+        close.extend(bcr);
+        Some(Focus {
+            bits: None,
+            pn: pn.clone(),
+            write_fn: format!("{}_write", pn),
+            at: format!("({} +! {}_offsetof_{})", a, sn, fname),
+            open_read: vec![format!("{}_pun_{}_{}_{} {};", un, live, m, fname, a)],
+            open_write: Vec::new(),
+            close_read: close.clone(),
+            close_write: close,
         })
     }
 
@@ -10727,6 +10901,19 @@ impl<'a> Body<'a> {
             && self.slots.iter().any(|s| s.addr == a && !s.init)
         {
             return Ok((a, Vec::new(), Vec::new()));
+        }
+        // A field of a struct-typed union *arm*. The arm has to be focused out
+        // of the union before anything inside it can be named, which is the
+        // same shape as a nested struct field -- except that the step is a
+        // union member's, because every arm starts at the union's own address
+        // and which arm is live is a fact about the program.
+        if !writing
+            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
+            && self.union_of(b2).is_some()
+        {
+            let f = self.union_member(b2, f2, false)?;
+            self.lines.extend(f.open_read.iter().cloned());
+            return Ok((f.at, f.close_read, f.close_write));
         }
         if let ExprT::Member(b2, f2) = &strip_vattr(base).val {
             let fty = self.field_ty(b2, f2)?;

@@ -504,13 +504,19 @@ are already flattened into `bytes`.
 
 ## Acceptance tests
 
- - `malloc` is no longer a special built-in; we can give a spec to a custom
-   `xmalloc` function and use it just like `malloc` today.
- - We can prove
+ - **Done.** `malloc` is no longer a special built-in; we can give a spec to a
+   custom `xmalloc` function and use it just like `malloc` today.
+   `Pulse.Lib.C.Palow.Alloc` is the model side and `test/xmalloc` is the C:
+   an allocator and a deallocator that are ordinary annotated C functions, and
+   a client that never names `malloc` or `free`.
+ - **Done.** We can prove
    ```c
    union { int x; struct { int y; int z; }; } a; a.x = 10;
-   int b = a.y; _ghost_stmt(...); _assert(b == 10);
+   int b = a.y; _assert(b == 10);
    ```
+   `Pulse.Lib.C.Palow.Union` is the model side and `test/union_pun` is the C.
+   No ghost statement turned out to be needed: the step is generated with the
+   union.
  - We can write a custom allocator that first allocates some number of bytes
    and then hands out pointers into that range, and it is usable just like
    `malloc` today. The allocator exposes its own `pool_freeable` predicate, so
@@ -4735,6 +4741,7 @@ new facts about memory.
     has it under `helpers/`, and `helpers/` now means Palow's copy; a test
     whose helpers name the old model's predicates keeps *that* copy under
     `helpers_old/`. Which one is on the include path is chosen by the model
-    rather than by the caller, so the C never has to know. And `palow-check.sh` becomes purely a census: the per-test
-    Makefiles already verify Palow, so what it adds is the count, which is why
-    it runs `--palow-permissive`.
+    rather than by the caller, so the C never has to know. And
+    `palow-check.sh` becomes purely a census: the per-test Makefiles already
+    verify Palow, so what it adds is the count, which is why it runs
+    `--palow-permissive`.
