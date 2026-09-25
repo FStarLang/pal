@@ -421,7 +421,7 @@ A mutable array global (`T g[N]`, `extern T g[]`, or the `_array T *g` spelling)
 is the array *object*, so it is modeled as an assumed handle rather than a cell
 at an address, and behaves in every other respect like an `_array T *`
 parameter — `g[i]` is `array_read` / `array_write`, `g._length` is
-`reveal (length_of var_g)`, and `g` decays to an array pointer:
+`reveal #nat (length_of var_g)`, and `g` decays to an array pointer:
 
 ```fstar
 assume val var_g : (array t)

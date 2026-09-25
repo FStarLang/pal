@@ -121,7 +121,10 @@ let array_spec_upd (#a: Type) (s: array_spec a) (n: nat) (x: a) : array_spec a =
 
 let array_spec_upd_len #a s n x = ()
 let array_spec_upd_initd #a s n x i = ()
-let array_spec_upd_mask #a s n x i = ()
+let array_spec_upd_mask #a s n x i =
+  if n < Seq.length s && i < Seq.length s then
+    if i = n then Seq.lemma_index_upd1 s n (Val x)
+    else Seq.lemma_index_upd2 s n (Val x) i
 let array_spec_upd_idx1 #a s n x i = ()
 let array_spec_upd_idx2 #a s (n:nat) x = ()
 

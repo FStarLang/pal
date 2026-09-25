@@ -45,7 +45,7 @@ For `void foo(_array unsigned *a) _requires(a._length == 2) ...`, PAL emits in `
 ```
 fn func_foo (var_a: (array UInt32.t))
   requires exists* (val_a_0: (full_array_spec UInt32.t)). array_pts_to_full var_a 1.0R val_a_0
-  requires (with_pure ((reveal (length_of var_a)) = 2))
+  requires (with_pure ((reveal #nat (length_of var_a)) = 2))
   ...
 ```
 

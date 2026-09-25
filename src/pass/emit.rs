@@ -2203,8 +2203,10 @@ impl<'a> Emitter<'a> {
                         );
                     }
                 }
+                // `#nat` stops F* from inferring a refined type (e.g.
+                // `x:nat{SizeT.fits x}`) from the other side of an `=`.
                 unaryfn(
-                    Doc::text("reveal"),
+                    Doc::text("reveal #nat"),
                     unaryfn(Doc::text("length_of"), self.emit_rvalue(env, x)),
                 )
             })),
@@ -8133,7 +8135,7 @@ impl<'a> Emitter<'a> {
     /// The permission is a *named* slprop rather than plain `live_array var_g`
     /// because it also pins the extent: the length of an `array` lives in its
     /// spec, so `N` can only be stated by the spec binder in the existential.
-    /// That is what lets `g._length` (`reveal (length_of var_g)`) reduce to `N`
+    /// That is what lets `g._length` (`reveal #nat (length_of var_g)`) reduce to `N`
     /// wherever `_live(g)` is held. An incomplete `T g[]` has no extent to pin
     /// here, so it binds a plain `full_array_spec` and callers must state the
     /// length themselves.
