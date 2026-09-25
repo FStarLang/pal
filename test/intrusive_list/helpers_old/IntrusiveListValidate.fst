@@ -8,7 +8,7 @@ open Pulse.Lib.C
 open FStar.List.Tot
 #lang-pulse
 
-module R = IntrusiveListNodeRef
+module R = Pulse.Lib.Reference
 module N = Struct_list_node
 module X = IntrusiveListIndexed
 module T = Pulse.Lib.Trade
@@ -460,7 +460,7 @@ fn rec member_at (#a: Type0) (pl: X.ipayload a) (head node: X.lref)
   match back {
     Nil -> { unreachable (); }
     Cons e rest -> {
-      if (R.ref_eq node (fst e)) {
+      if (Pulse.Lib.C.Ref.ref_eq node (fst e)) {
         rewrite (X.is_list_ring_ix pl head 1.0R (front @ back))
           as (X.is_list_ring_ix pl head 1.0R (front @ ((node, snd e) :: rest)));
         member_view pl head node front (snd e) rest;
@@ -488,7 +488,7 @@ fn begin_validation (#a: Type0) (pl: X.ipayload a) (head node: X.lref) (es: X.en
   ensures exists* (w: witness).
     view node w ** T.trade (view node w) (X.is_list_ring_ix pl head 1.0R es)
 {
-  if (R.ref_eq node head) {
+  if (Pulse.Lib.C.Ref.ref_eq node head) {
     rewrite (X.is_list_ring_ix pl head 1.0R es) as (X.is_list_ring_ix pl node 1.0R es);
     sentinel_view pl node es;
     with w. assert (view node w);
@@ -552,29 +552,52 @@ fn restore_ring (#a: Type0) (pl: X.ipayload a) (head node: X.lref)
   end_validation pl head node es;
 }
 
-(* The three nodes the assertions read, handed over whole. Under the current
-   model this pair opened each node into one reference per field, because that
-   is what a field read needs there; Palow reads a field in place, so the
-   points-to itself is what crosses. *)
-let all_fields (node: X.lref) (w: witness) =
-  R.pts_to node #quarter w.focus_value **
-  R.pts_to (X.lnext w.focus_value) #quarter w.next_value **
-  R.pts_to (X.lprev w.focus_value) #quarter w.prev_value
+let fields (node: X.lref) (v: N.struct_list_node) : slprop =
+  N.struct_list_node__aux_raw_unfolded node quarter **
+  R.pts_to (N.struct_list_node__next_1 node) #quarter (X.lnext v) **
+  R.pts_to (N.struct_list_node__prev_1 node) #quarter (X.lprev v)
 
+let all_fields (node: X.lref) (w: witness) =
+  fields node w.focus_value **
+  fields (X.lnext w.focus_value) w.next_value **
+  fields (X.lprev w.focus_value) w.prev_value
+
+(* All reads stay inside the unchanged, conditionally evaluated assertions. *)
 ghost
 fn view_open_all (node: X.lref) (#w: witness)
   requires view node w
   ensures
-    R.pts_to node #quarter w.focus_value **
-    R.pts_to (X.lnext w.focus_value) #quarter w.next_value **
-    R.pts_to (X.lprev w.focus_value) #quarter w.prev_value **
+    N.struct_list_node__aux_raw_unfolded node quarter **
+    R.pts_to (N.struct_list_node__next_1 node) #quarter (X.lnext w.focus_value) **
+    R.pts_to (N.struct_list_node__prev_1 node) #quarter (X.lprev w.focus_value) **
+    N.struct_list_node__aux_raw_unfolded (X.lnext w.focus_value) quarter **
+    R.pts_to (N.struct_list_node__next_1 (X.lnext w.focus_value))
+      #quarter (X.lnext w.next_value) **
+    R.pts_to (N.struct_list_node__prev_1 (X.lnext w.focus_value))
+      #quarter (X.lprev w.next_value) **
+    N.struct_list_node__aux_raw_unfolded (X.lprev w.focus_value) quarter **
+    R.pts_to (N.struct_list_node__next_1 (X.lprev w.focus_value))
+      #quarter (X.lnext w.prev_value) **
+    R.pts_to (N.struct_list_node__prev_1 (X.lprev w.focus_value))
+      #quarter (X.lprev w.prev_value) **
     pure (X.lprev w.next_value == node /\ X.lnext w.prev_value == node) **
     T.trade (all_fields node w) (view node w)
 {
   unfold (view node w);
+  N.struct_list_node__aux_raw_unfold node w.focus_value;
+  N.struct_list_node__aux_raw_unfold (X.lnext w.focus_value) w.next_value;
+  N.struct_list_node__aux_raw_unfold (X.lprev w.focus_value) w.prev_value;
   intro (T.trade (all_fields node w) (view node w)) #emp
   fn _ {
     unfold (all_fields node w);
+    unfold (fields node w.focus_value);
+    unfold (fields (X.lnext w.focus_value) w.next_value);
+    unfold (fields (X.lprev w.focus_value) w.prev_value);
+    N.struct_list_node__aux_raw_fold node (X.lnext w.focus_value) (X.lprev w.focus_value);
+    N.struct_list_node__aux_raw_fold (X.lnext w.focus_value)
+      (X.lnext w.next_value) (X.lprev w.next_value);
+    N.struct_list_node__aux_raw_fold (X.lprev w.focus_value)
+      (X.lnext w.prev_value) (X.lprev w.prev_value);
     fold (view node w);
   };
 }
@@ -582,12 +605,25 @@ fn view_open_all (node: X.lref) (#w: witness)
 ghost
 fn view_close_all (node: X.lref) (#w: witness)
   requires
-    R.pts_to node #quarter w.focus_value **
-    R.pts_to (X.lnext w.focus_value) #quarter w.next_value **
-    R.pts_to (X.lprev w.focus_value) #quarter w.prev_value **
+    N.struct_list_node__aux_raw_unfolded node quarter **
+    R.pts_to (N.struct_list_node__next_1 node) #quarter (X.lnext w.focus_value) **
+    R.pts_to (N.struct_list_node__prev_1 node) #quarter (X.lprev w.focus_value) **
+    N.struct_list_node__aux_raw_unfolded (X.lnext w.focus_value) quarter **
+    R.pts_to (N.struct_list_node__next_1 (X.lnext w.focus_value))
+      #quarter (X.lnext w.next_value) **
+    R.pts_to (N.struct_list_node__prev_1 (X.lnext w.focus_value))
+      #quarter (X.lprev w.next_value) **
+    N.struct_list_node__aux_raw_unfolded (X.lprev w.focus_value) quarter **
+    R.pts_to (N.struct_list_node__next_1 (X.lprev w.focus_value))
+      #quarter (X.lnext w.prev_value) **
+    R.pts_to (N.struct_list_node__prev_1 (X.lprev w.focus_value))
+      #quarter (X.lprev w.prev_value) **
     T.trade (all_fields node w) (view node w)
   ensures view node w
 {
+  fold (fields node w.focus_value);
+  fold (fields (X.lnext w.focus_value) w.next_value);
+  fold (fields (X.lprev w.focus_value) w.prev_value);
   fold (all_fields node w);
   T.elim_trade (all_fields node w) (view node w);
 }

@@ -8,7 +8,9 @@ open Pulse.Lib.C
 open FStar.List.Tot
 #lang-pulse
 
-module R = Pulse.Lib.Reference
+module R = IntrusiveListNodeRef
+module PR = Pulse.Lib.Reference
+module IR = IntrusiveListItemRefs
 module N = Struct_list_node
 module I = Struct_item
 module Q = IntrusiveListItems
@@ -17,26 +19,27 @@ module C = IntrusiveListContext
 
 (* Concrete payload ownership belongs here; reusable list helpers do not import this module. *)
 unfold let entries = X.entries Int32.t
-unfold let item_ref = ref I.struct_item
+unfold let item_ref = R.ref I.struct_item
 (* The item points-to under whatever name the memory model gives it, so that
    one set of C annotations serves both models. *)
-unfold let item_pts_to (r: item_ref) (v: I.struct_item) : slprop = R.pts_to r v
+unfold let item_pts_to (r: item_ref) (v: I.struct_item) : slprop = IR.item_pts_to r v
 
 (* The link field's address, under whatever name the memory model gives it. *)
-unfold let item_link (r: item_ref) : GTot X.lref = I.struct_item__link_1 r
+unfold let item_link (r: item_ref) : X.lref = IR.item_link_1 r
 
 
 
 unfold let owner (node: X.lref) : item_ref =
-  I.struct_item__link_container node
+  IR.item_container node
 
 let item_ipl : X.ipayload Int32.t =
   fun node value ->
-    I.struct_item__aux_raw_unfolded (owner node) 1.0R **
-    R.pts_to (I.struct_item__value_1 (owner node)) value
+    IR.item_unfolded (owner node) 1.0R **
+    IR.item_value ((owner node)) value **
+    pure (IR.item_embedded node)
 
 unfold let item_record (value: Int32.t) (link: N.struct_list_node) =
-  { I.struct_item__value = value; I.struct_item__link = link; }
+  { I.fld_value = value; I.fld_link = link; }
 
 let matches_value (key: Int32.t) (_node: X.lref) (value: Int32.t) : GTot bool =
   value == key
@@ -47,99 +50,116 @@ let value_le (x y: Int32.t) : GTot bool =
 let value_order () : Lemma (X.total_preorder value_le) = ()
 
 ghost
+(* The payload owns the item apart from its link, and the list owns the link;
+   Palow reads `item->value` from the item as a whole, so opening the payload
+   means joining the two back up rather than handing out a field reference. *)
 fn value_open (node: X.lref) (item: item_ref) (#value: Int32.t)
-  requires item_ipl node value ** pure (item == owner node)
-  ensures I.struct_item__aux_raw_unfolded item 1.0R **
-    R.pts_to (I.struct_item__value_1 item) value
+              (#link: N.struct_list_node)
+  requires item_ipl node value ** R.pts_to node link **
+    pure (item == owner node)
+  ensures IR.item_pts_to item (item_record value link) **
+    (* Carried out so that closing the payload again can recover the item
+       from its link; see `IntrusiveListItemRefs.item_embedded`. *)
+    pure (IR.item_embedded node)
 {
   unfold (item_ipl node value);
-  rewrite (I.struct_item__aux_raw_unfolded (owner node) 1.0R)
-    as (I.struct_item__aux_raw_unfolded item 1.0R);
-  rewrite (R.pts_to (I.struct_item__value_1 (owner node)) value)
-    as (R.pts_to (I.struct_item__value_1 item) value);
+  rewrite (R.pts_to node link) as (IR.item_link ((owner node)) link);
+  IR.item_fold (owner node) value link;
+  rewrite (IR.item_pts_to (owner node) (item_record value link))
+    as (IR.item_pts_to item (item_record value link));
 }
 
 ghost
 fn value_close (node: X.lref) (item: item_ref) (#value: Int32.t)
-  requires I.struct_item__aux_raw_unfolded item 1.0R **
-    R.pts_to (I.struct_item__value_1 item) value **
-    pure (item == owner node)
-  ensures item_ipl node value
+               (#link: N.struct_list_node)
+  requires IR.item_pts_to item (item_record value link) **
+    pure (item == owner node /\ IR.item_embedded node)
+  ensures item_ipl node value ** R.pts_to node link
 {
-  rewrite (I.struct_item__aux_raw_unfolded item 1.0R)
-    as (I.struct_item__aux_raw_unfolded (owner node) 1.0R);
-  rewrite (R.pts_to (I.struct_item__value_1 item) value)
-    as (R.pts_to (I.struct_item__value_1 (owner node)) value);
+  rewrite (IR.item_pts_to item (item_record value link))
+    as (IR.item_pts_to (owner node) (item_record value link));
+  IR.item_unfold (owner node) (item_record value link);
+  rewrite (IR.item_link ((owner node)) link) as (R.pts_to node link);
   fold (item_ipl node value);
 }
 
 ghost
 fn payload_to_item (node: X.lref) (#value: Int32.t) (#link: N.struct_list_node)
   requires item_ipl node value ** R.pts_to node link
-  ensures R.pts_to (owner node) (item_record value link)
+  ensures IR.item_pts_to (owner node) (item_record value link)
 {
   unfold (item_ipl node value);
   rewrite (R.pts_to node link)
-    as (R.pts_to (I.struct_item__link_1 (owner node)) link);
-  I.struct_item__aux_raw_fold (owner node) value link;
+    as (IR.item_link ((owner node)) link);
+  IR.item_fold (owner node) value link;
 }
 
 ghost
 fn item_to_payload (item: item_ref) (#v: I.struct_item)
-  requires R.pts_to item v
-  ensures item_ipl (I.struct_item__link_1 item) v.I.struct_item__value **
-    R.pts_to (I.struct_item__link_1 item) v.I.struct_item__link
+  requires IR.item_pts_to item v
+  ensures item_ipl (IR.item_link_1 item) v.I.fld_value **
+    IR.item_link (item) v.I.fld_link
 {
-  I.struct_item__aux_raw_unfold item v;
-  value_close (I.struct_item__link_1 item) item;
+  IR.item_unfold item v;
+  rewrite (IR.item_unfolded item 1.0R)
+    as (IR.item_unfolded (owner (IR.item_link_1 item)) 1.0R);
+  rewrite (IR.item_value (item) v.I.fld_value)
+    as (IR.item_value ((owner (IR.item_link_1 item))) v.I.fld_value);
+  fold (item_ipl (IR.item_link_1 item) v.I.fld_value);
 }
 
 ghost
-fn fold_item (item: item_ref) (#value: Int32.t) (#link: N.struct_list_node)
-  requires I.struct_item__aux_raw_unfolded item 1.0R **
-    R.pts_to (I.struct_item__value_1 item) value **
-    R.pts_to (I.struct_item__link_1 item) link
-  ensures R.pts_to item (item_record value link)
+(* Palow initialises a local struct through its own points-to, so there is
+   nothing left to fold. The name stays because the C names it, and because
+   under the current model it is a real step. *)
+fn fold_item (item: item_ref) (#v: I.struct_item)
+  preserves IR.item_pts_to item v
 {
-  I.struct_item__aux_raw_fold item value link;
+  ()
 }
 
 ghost
+(* The caller still owns the item whole -- it was handed one, and has not
+   given any of it away -- so what has to be split off here is the link. *)
 fn prepare_item (item: item_ref) (node: X.lref)
                 (#value: Int32.t) (#link: N.struct_list_node)
-  requires I.struct_item__aux_raw_unfolded item 1.0R **
-    R.pts_to (I.struct_item__value_1 item) value ** R.pts_to node link **
-    pure (node == I.struct_item__link_1 item)
+  requires IR.item_pts_to item (item_record value link) **
+    pure (node == IR.item_link_1 item)
   ensures item_ipl node value ** R.pts_to_uninit node
 {
-  value_close node item;
-  Pulse.Lib.C.MaybeUninit.intro_maybe_some node;
-  Pulse.Lib.C.MaybeUninit.forget_maybe node;
+  IR.item_unfold item (item_record value link);
+  rewrite (IR.item_unfolded item 1.0R)
+    as (IR.item_unfolded (owner node) 1.0R);
+  rewrite (IR.item_value (item) value)
+    as (IR.item_value ((owner node)) value);
+  fold (item_ipl node value);
+  rewrite (IR.item_link (item) link) as (R.pts_to node link);
+  R.forget node;
 }
 
 let first_match (key: Int32.t) (es: entries) : GTot item_ref =
   match X.first_match_entry (matches_value key) es with
-  | None -> null
+  | None -> R.null
   | Some e -> owner (fst e)
 
 let pop_post (head: X.lref) (es: entries) (result: item_ref) : slprop =
   match es with
-  | [] -> X.is_list_ring_ix item_ipl head 1.0R [] ** pure (result == null)
+  | [] -> X.is_list_ring_ix item_ipl head 1.0R [] ** pure (result == R.null)
   | e :: rest ->
     X.is_list_ring_ix item_ipl head 1.0R rest **
     (exists* (link: N.struct_list_node).
-      R.pts_to (owner (fst e)) (item_record (snd e) link)) **
+      IR.item_pts_to (owner (fst e)) (item_record (snd e) link)) **
     pure (result == owner (fst e))
 
 ghost
 fn close_pop_empty (head: X.lref) (es: entries)
-  requires Q.pop_post item_ipl head es null ** pure (es == [])
-  ensures pop_post head es null
+  requires Q.pop_post item_ipl head es R.null ** pure (es == [])
+  ensures pop_post head es R.null
 {
-  rewrite (Q.pop_post item_ipl head es null) as (Q.pop_post item_ipl head [] null);
-  unfold (Q.pop_post item_ipl head [] null);
-  fold (pop_post head [] null);
-  rewrite (pop_post head [] null) as (pop_post head es null);
+  rewrite (Q.pop_post item_ipl head es R.null) as (Q.pop_post item_ipl head [] R.null);
+  unfold (Q.pop_post item_ipl head [] R.null);
+  fold (pop_post head [] R.null);
+  rewrite (pop_post head [] R.null) as (pop_post head es R.null);
 }
 
 ghost
@@ -163,7 +183,7 @@ let rec detached (es: entries) : Tot slprop (decreases es) =
   | [] -> emp
   | e :: rest ->
     (exists* (link: N.struct_list_node).
-      R.pts_to (owner (fst e)) (item_record (snd e) link)) **
+      IR.item_pts_to (owner (fst e)) (item_record (snd e) link)) **
     detached rest
 
 ghost
@@ -190,7 +210,7 @@ fn rec close_detached (es: entries)
 ghost
 fn pop_empty_result (head: X.lref) (result: item_ref)
   requires pop_post head [] result
-  ensures X.is_list_ring_ix item_ipl head 1.0R [] ** pure (result == null)
+  ensures X.is_list_ring_ix item_ipl head 1.0R [] ** pure (result == R.null)
 {
   unfold (pop_post head [] result);
 }
@@ -198,32 +218,32 @@ fn pop_empty_result (head: X.lref) (result: item_ref)
 ghost
 fn pop_one (head: X.lref) (item result: item_ref) (description: Int32.t)
            (rest: entries)
-  requires pop_post head ((I.struct_item__link_1 item, description) :: rest) result
+  requires pop_post head ((IR.item_link_1 item, description) :: rest) result
   ensures X.is_list_ring_ix item_ipl head 1.0R rest **
     (exists* (link: N.struct_list_node).
-      R.pts_to item (item_record description link)) **
+      IR.item_pts_to item (item_record description link)) **
     pure (result == item)
 {
-  unfold (pop_post head ((I.struct_item__link_1 item, description) :: rest) result);
-  with link. assert (R.pts_to (owner (I.struct_item__link_1 item))
+  unfold (pop_post head ((IR.item_link_1 item, description) :: rest) result);
+  with link. assert (IR.item_pts_to (owner (IR.item_link_1 item))
     (item_record description link));
-  rewrite (R.pts_to (owner (I.struct_item__link_1 item)) (item_record description link))
-    as (R.pts_to item (item_record description link));
+  rewrite (IR.item_pts_to (owner (IR.item_link_1 item)) (item_record description link))
+    as (IR.item_pts_to item (item_record description link));
 }
 
 ghost
 fn detached_one (item: item_ref) (description: Int32.t) (#es: entries)
-  requires detached es ** pure (es == [(I.struct_item__link_1 item, description)])
+  requires detached es ** pure (es == [(IR.item_link_1 item, description)])
   ensures exists* (link: N.struct_list_node).
-    R.pts_to item (item_record description link)
+    IR.item_pts_to item (item_record description link)
 {
-  rewrite (detached es) as (detached [(I.struct_item__link_1 item, description)]);
-  unfold (detached [(I.struct_item__link_1 item, description)]);
+  rewrite (detached es) as (detached [(IR.item_link_1 item, description)]);
+  unfold (detached [(IR.item_link_1 item, description)]);
   unfold (detached []);
-  with link. assert (R.pts_to (owner (I.struct_item__link_1 item))
+  with link. assert (IR.item_pts_to (owner (IR.item_link_1 item))
     (item_record description link));
-  rewrite (R.pts_to (owner (I.struct_item__link_1 item)) (item_record description link))
-    as (R.pts_to item (item_record description link));
+  rewrite (IR.item_pts_to (owner (IR.item_link_1 item)) (item_record description link))
+    as (IR.item_pts_to item (item_record description link));
 }
 
 (* These instantiations exercise descriptors without item fields or defaults. *)
@@ -257,14 +277,17 @@ fn check_payload_free_query (head node: X.lref)
   Q.find_found unit_ipl always_unit head node [(node, ())] description;
 }
 
-let list_ipl (storage: X.lref -> ref (list Int32.t)) : X.ipayload (list Int32.t) =
-  fun node description -> R.pts_to (storage node) description
+(* Deliberately not a C object: the point of this payload is that the list
+   theory never looks at one, so an ordinary Pulse reference holding an
+   ordinary list is the sharpest way to say so. *)
+let list_ipl (storage: X.lref -> PR.ref (list Int32.t)) : X.ipayload (list Int32.t) =
+  fun node description -> PR.pts_to (storage node) description
 
 let always_list : X.matcher (list Int32.t) = fun _ _ -> true
 let never_list : X.matcher (list Int32.t) = fun _ _ -> false
 
 ghost
-fn check_list_payload_queries (storage: X.lref -> ref (list Int32.t))
+fn check_list_payload_queries (storage: X.lref -> PR.ref (list Int32.t))
                               (head node: X.lref) (description: list Int32.t)
   requires X.is_list_ring_ix (list_ipl storage) head 1.0R [(node, description)]
   ensures X.is_list_ring_ix (list_ipl storage) head 1.0R [(node, description)]
@@ -289,7 +312,7 @@ fn check_list_payload_queries (storage: X.lref -> ref (list Int32.t))
 }
 
 divergent
-fn check_list_payload_pop (storage: X.lref -> ref (list Int32.t))
+fn check_list_payload_pop (storage: X.lref -> PR.ref (list Int32.t))
                          (head node: X.lref) (description: list Int32.t)
   requires X.is_list_ring_ix (list_ipl storage) head 1.0R [(node, description)]
   ensures Q.pop_post (list_ipl storage) head [(node, description)] node

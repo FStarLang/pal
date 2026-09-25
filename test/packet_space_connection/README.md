@@ -141,8 +141,9 @@ the connection and all array slots.
 ## The Palow port
 
 The example is real MsQuic-derived code, so it has to work under both memory
-models. It does, from a single C file: `helpers_palow/` holds a second copy of
-`Helpers_PACKET_SPACE_CONNECTION`, written against Palow, and the include path
+models. It does, from a single C file: `helpers/` holds
+`Helpers_PACKET_SPACE_CONNECTION` written against Palow and `helpers_old/`
+holds the copy written against the previous model, and the include path
 chooses which one the generated modules see. Nothing in the C names a model
 predicate, so nothing in the C had to change for the helpers.
 

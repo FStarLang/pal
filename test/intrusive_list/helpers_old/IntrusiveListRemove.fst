@@ -8,7 +8,7 @@ open Pulse.Lib.C
 open FStar.List.Tot
 #lang-pulse
 
-module R = IntrusiveListNodeRef
+module R = Pulse.Lib.Reference
 module N = Struct_list_node
 module X = IntrusiveListIndexed
 module C = IntrusiveListContext
@@ -157,7 +157,7 @@ fn finish (#a: Type0) (p: X.ipayload a) (m: X.matcher a) (head pos: X.lref)
     X.detached p (X.matching m es) **
     pure (X.no_match m (X.without m es)) **
     pure (X.first_match_entry m (X.without m es) == None) **
-    pure (X.first_match m (X.without m es) == R.null)
+    pure (X.first_match m (X.without m es) == null)
 {
   unfold (inv p m head pos es);
   with seen back. assert (X.split p head pos (X.without m seen) back);

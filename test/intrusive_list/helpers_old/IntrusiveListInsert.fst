@@ -8,7 +8,7 @@ open Pulse.Lib.C
 open FStar.List.Tot
 #lang-pulse
 
-module R = IntrusiveListNodeRef
+module R = Pulse.Lib.Reference
 module N = Struct_list_node
 module X = IntrusiveListIndexed
 module C = IntrusiveListContext
@@ -72,18 +72,14 @@ fn expose (#a: Type0) (p: X.ipayload a) (le: X.order a)
 }
 
 ghost
-(* Under the current model reading `node->next` unfolds the node into field
-   references and folds it back, and what comes back is the record rebuilt
-   field by field rather than the value that went in -- so the cursor has to
-   be moved to the rebuilt spelling. Palow's focus and unfocus give back the
-   value they took, so there is nothing to repack. The name stays because the
-   C names it. *)
 fn mid_repack (#a: Type0) (p: X.ipayload a) (le: X.order a)
               (head pos entry: X.lref) (description: a) (es: X.entries a)
               (#current: a) (#v: N.struct_list_node)
-  preserves mid p le head pos entry description es current v
+  requires mid p le head pos entry description es current v
+  ensures mid p le head pos entry description es current (X.mklink (X.lnext v) (X.lprev v))
 {
-  ()
+  rewrite (mid p le head pos entry description es current v)
+    as (mid p le head pos entry description es current (X.mklink (X.lnext v) (X.lprev v)));
 }
 
 ghost

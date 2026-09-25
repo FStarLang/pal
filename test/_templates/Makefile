@@ -19,15 +19,17 @@ PAL_OPTS :=
 ifeq ($(MODEL),old)
 PAL_OPTS += --old-model
 FSTAR_EXE ?= ../../opt/run-fstar.sh
-# A helper module is written against a memory model, so a test whose helpers
-# name Palow's predicates keeps a second copy under `helpers_palow/`. The C
-# should not have to know which one it is getting, so the include path chooses.
-HELPERS := helpers
+# A helper module is written against a memory model. Most say nothing either
+# model cannot hear and live in `helpers/`; a test whose helpers name the old
+# model's predicates keeps that copy under `helpers_old/`. The two use the same
+# module names, so the C never has to know which one it is getting -- the
+# include path chooses.
+HELPERS := $(if $(wildcard helpers_old),helpers_old,helpers)
 else
 # The Palow model's own modules are checked once, in `pulse/`, and found from
 # there rather than re-verified in every test.
 FSTAR_EXE ?= ../../opt/run-fstar.sh --include ../../pulse/_cache
-HELPERS := $(if $(wildcard helpers_palow),helpers_palow,helpers)
+HELPERS := helpers
 endif
 
 # If there's an include/ directory, add -I include

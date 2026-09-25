@@ -3522,10 +3522,11 @@ new facts about memory.
    an `option` under a mask. The helper module shrinks by a fifth.
 
    Nothing in the C had to name a model predicate to get there. A test may now
-   ship a `helpers_palow/` directory beside `helpers/`, holding a second copy
-   of the same hand-written module written against this model; the include
-   path chooses. Annotation churn in the C is one of the things being
-   measured, so it should not be inflated by a module name.
+   ship two copies of the same hand-written module under the same module name,
+   one per model, and the include path chooses. (The copies were
+   `helpers/` and `helpers_palow/` at the time; since milestone 10 they are
+   `helpers_old/` and `helpers/`.) Annotation churn in the C is one of the
+   things being measured, so it should not be inflated by a module name.
 
    Three translator changes came out of the port. A `requires` clause is now
    emitted one per line rather than joined with `**`, because a spliced clause
@@ -4731,9 +4732,9 @@ new facts about memory.
     summary of what changed.
 
     Two smaller things follow the default. A test that ships hand-written F\*
-    has it under `helpers/`, and one whose helpers name Palow's predicates
-    keeps a second copy under `helpers_palow/`; which one is on the include
-    path is now chosen by the model rather than by the caller, so the C never
-    has to know. And `palow-check.sh` becomes purely a census: the per-test
+    has it under `helpers/`, and `helpers/` now means Palow's copy; a test
+    whose helpers name the old model's predicates keeps *that* copy under
+    `helpers_old/`. Which one is on the include path is chosen by the model
+    rather than by the caller, so the C never has to know. And `palow-check.sh` becomes purely a census: the per-test
     Makefiles already verify Palow, so what it adds is the count, which is why
     it runs `--palow-permissive`.

@@ -8,10 +8,10 @@ open Pulse.Lib.C
 open FStar.List.Tot
 #lang-pulse
 
-module R = Pulse.Lib.Reference
+module R = IntrusiveListNodeRef
 module N = Struct_list_node
 
-unfold let lref = ref N.struct_list_node
+unfold let lref = R.ref N.struct_list_node
 
 (* The node points-to under whatever name the memory model gives it. The C
    sources name this rather than the model's own predicate, so that one set of
@@ -19,11 +19,11 @@ unfold let lref = ref N.struct_list_node
 unfold let lpts_to (r: lref) (v: N.struct_list_node) : slprop = R.pts_to r v
 unfold let lpts_to_uninit (r: lref) : slprop = R.pts_to_uninit r
 
-unfold let lnext (v: N.struct_list_node) : lref = v.N.struct_list_node__next
-unfold let lprev (v: N.struct_list_node) : lref = v.N.struct_list_node__prev
+unfold let lnext (v: N.struct_list_node) : lref = v.N.fld_next
+unfold let lprev (v: N.struct_list_node) : lref = v.N.fld_prev
 unfold let mklink (next prev: lref) : N.struct_list_node = {
-  N.struct_list_node__next = next;
-  N.struct_list_node__prev = prev;
+  N.fld_next = next;
+  N.fld_prev = prev;
 }
 
 unfold let ipayload (a: Type0) = lref -> a -> slprop
@@ -48,7 +48,7 @@ let rec first_match_entry (#a: Type0) (m: matcher a) (es: entries a)
     | e :: rest -> if m (fst e) (snd e) then Some e else first_match_entry m rest
 
 let first_match (#a: Type0) (m: matcher a) (es: entries a) : GTot lref =
-  match first_match_entry m es with | None -> null | Some e -> fst e
+  match first_match_entry m es with | None -> R.null | Some e -> fst e
 
 let rec no_match (#a: Type0) (m: matcher a) (es: entries a)
   : GTot prop (decreases es)
@@ -469,7 +469,9 @@ let rec is_list_seg_s_ix (#a: Type0) (pl: ipayload a)
       is_list_seg_s_ix pl cur (lnext v) endl sent p rest)
 
 ghost
-fn refs_distinct (#a: Type0) (r1 r2: R.ref a) (#v1 #v2: a)
+(* Monomorphic under Palow: a points-to there says how the bytes are laid
+   out, so it is per type, and every caller of this is at the node type. *)
+fn refs_distinct (r1 r2: lref) (#v1 #v2: N.struct_list_node)
   requires R.pts_to r1 v1 ** R.pts_to r2 v2
   ensures R.pts_to r1 v1 ** R.pts_to r2 v2 ** pure (r1 =!= r2)
 {

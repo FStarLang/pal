@@ -292,11 +292,11 @@ annotations themselves do not add runtime reads or writes.
 ## Palow
 
 This test verifies under both memory models from one set of C sources. The
-Palow versions of the eleven helper modules live in `helpers_palow/`, under
-the same module names as the originals; `test/palow-check.sh` prefers that
-directory when it exists.
+Palow versions of the eleven helper modules live in `helpers/`, under the same
+module names as the old model's copies, which live in `helpers_old/`; the
+include path chooses by model.
 
-Two modules there have no counterpart in `helpers/`. `IntrusiveListNodeRef`
+Two modules there have no counterpart in `helpers_old/`. `IntrusiveListNodeRef`
 presents Palow's `struct_list_node` in the shape `Pulse.Lib.Reference` has, so
 the generic list theory differs from its original only in a `module R = ...`
 line. `IntrusiveListItemRefs` does the same for the three client structs.

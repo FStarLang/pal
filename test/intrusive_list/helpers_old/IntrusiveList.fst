@@ -11,7 +11,7 @@ open FStar.List.Tot
 
 module X = IntrusiveListIndexed
 module C = IntrusiveListContext
-module R = IntrusiveListNodeRef
+module R = Pulse.Lib.Reference
 
 unfold let lref = X.lref
 unfold let payload = X.ipayload unit
@@ -425,12 +425,10 @@ fn move_close (p: payload) (source destination: lref)
 }
 
 ghost
-(* See `IntrusiveListOps.indexed_release_empty`. *)
 fn release_empty (p: payload) (head: lref)
   requires is_list_ring_with p head 1.0R []
-  ensures R.pts_to_uninit head
+  ensures exists* (v: Struct_list_node.struct_list_node). R.pts_to head v
 {
   ring_to_indexed p head 1.0R [];
   X.ring_elim_empty p head;
-  R.forget head;
 }
