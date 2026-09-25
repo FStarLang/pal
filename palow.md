@@ -517,17 +517,41 @@ are already flattened into `bytes`.
    `Pulse.Lib.C.Palow.Union` is the model side and `test/union_pun` is the C.
    No ghost statement turned out to be needed: the step is generated with the
    union.
- - We can write a custom allocator that first allocates some number of bytes
-   and then hands out pointers into that range, and it is usable just like
-   `malloc` today. The allocator exposes its own `pool_freeable` predicate, so
-   passing a `pool_malloc`'d pointer to `free` does not verify.
+ - **Done.** We can write a custom allocator that first allocates some number
+   of bytes and then hands out pointers into that range, and it is usable just
+   like `malloc` today. `Pulse.Lib.C.Palow.Pool` is the model side and
+   `test/pool_alloc` is the C. Passing a pool pointer to `free` does not
+   verify, but for a simpler reason than anticipated: the pool hands out a bare
+   points-to and never an `Alloc.freeable`, which is what `free` spends, so no
+   separate `pool_freeable` predicate is needed to rule the call out. Two
+   choices made the C work: the pool is *zeroed* rather than uninitialised, so
+   a freshly carved chunk can be claimed at a value immediately instead of
+   needing an uninitialised points-to the emitter has no way to know about; and
+   its sizes are `nat`s rather than `size_t`s, because a contract term is typed
+   with none of the `requires` in scope and a refined `SizeT.add` will not
+   typecheck there.
  - **Done.** `_core_ref` is deleted, and the recursive-struct tests that motivated it
    still verify.
- - We can write `memcpy` between two objects of different types and relate the
-   results at both types, including transporting a stored pointer's provenance
-   through the copy.
- - The existing `test/` suite still verifies, with no annotation churn beyond
-   the mechanical removal of `_core_ref`.
+ - **Done.** We can write `memcpy` between two objects of different types and
+   relate the results at both types, including transporting a stored pointer's
+   provenance through the copy. `Pulse.Lib.C.Palow.Provenance` is the model
+   side and `test/memcpy_transport` is the C. The copy is declared in C with
+   the contract the model gives it — the destination ends up holding the
+   source's bytes, and nothing about types, pointers or provenance — and both
+   results are derived from that alone. This is the test that justifies putting
+   provenance in `byte` rather than in the pointer: with an object
+   representation of plain `uint8_t`s the copied bytes would determine an
+   address but not an allocation, and the dereference at the end of `transport`
+   would not be provable.
+ - **Partly done.** The existing `test/` suite still verifies. The "no
+   annotation churn" half is missed: 41 of the 197 C files carry a
+   `#ifdef PALOW` block. That is the honest number to report, and it is the
+   main remaining cost of the refactor. Most of those blocks are one of a small
+   number of recurring shapes — a `_plain` parameter whose ownership is spliced
+   because the two models state it differently, a nullable allocation the old
+   model cannot describe, and a ghost step that only one model needs — so the
+   figure is a measure of how far apart the two vocabularies are, not of how
+   much rewriting a user would face once only one model exists.
 
 ## Evaluating the cost
 
@@ -4745,3 +4769,26 @@ new facts about memory.
     `palow-check.sh` becomes purely a census: the per-test Makefiles already
     verify Palow, so what it adds is the count, which is why it runs
     `--palow-permissive`.
+
+11. **The acceptance tests move out of the model and into C.** Four of the six
+    acceptance tests above had only ever been proved as Pulse programs under
+    `pulse/`. That is enough to show the model supports them, but not that PAL
+    does: the emitter sits between the two, and the thing being evaluated is
+    the pair. Each now has a C test that goes through the translator —
+    `test/xmalloc`, `test/union_pun`, `test/pool_alloc` and
+    `test/memcpy_transport` — and the model modules stay as the readable
+    statement of what is being claimed.
+
+    Only one of the four needed emitter work. The union pun is generated with
+    the union: for a scalar member `l` and a struct member `m` whose leading
+    field `f` has `l`'s type, `emit_union` emits a step between the two views,
+    and reads route through it. It has to be stated at the *field* and not at
+    the whole member, because in
+    `union { uint32_t x; struct { uint32_t y; uint32_t z; }; }` the bytes
+    behind `z` are never written, so there is no struct value to pun to — and
+    that is exactly why `a.z` stays unreadable, which is what C promises. The
+    other three needed nothing: they were expressible in the annotation
+    vocabulary as it already stood, which is the more interesting result.
+
+    The census is 1097 specifications, 1076 with bodies, 0 admitted, 21
+    external, 0 skipped.
