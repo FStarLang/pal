@@ -331,10 +331,25 @@ impl Env {
         self.globals.vars.get(&ident.val)
     }
 
-    pub fn lookup_var_type(&self, ident: &Ident) -> Option<&Rc<Type>> {
-        self.lookup_var(ident)
-            .map(|decl| &decl.ty)
-            .or_else(|| self.lookup_global_var(ident).map(|gv| &gv.ty))
+    pub fn lookup_var_type(&self, ident: &Ident) -> Option<Rc<Type>> {
+        if let Some(decl) = self.lookup_var(ident) {
+            return Some(decl.ty.clone());
+        }
+        let gv = self.lookup_global_var(ident)?;
+        // A mutable array global is storage, not a spec value, so it is modeled
+        // exactly like an `_array T *` parameter: the *expression* `g` is the
+        // `array T` handle. Only the declaration keeps the extent `N`, which the
+        // emitter needs to state the array's length (see `global_array_object`);
+        // every use of `g` sees the decayed type, so indexing goes through
+        // `array_read` / `array_write` rather than the pure `array_spec_idx`.
+        if !gv.is_pure
+            && let Some((elem, _)) = global_array_object(gv)
+        {
+            return Some(
+                TypeT::Pointer(elem.clone(), PointerKind::Array).with_loc(gv.ty.loc.clone()),
+            );
+        }
+        Some(gv.ty.clone())
     }
 
     pub fn push_stmt(&mut self, stmt: &Stmt) {
@@ -512,7 +527,8 @@ impl Env {
                 | BinOp::BitOr
                 | BinOp::BitXor
                 | BinOp::Shl
-                | BinOp::Shr,
+                | BinOp::Shr
+                | BinOp::Elvis,
                 lhs,
                 _,
             ) => self.infer_expr(lhs),
@@ -784,10 +800,9 @@ impl Env {
 
     /// Whether `&expr` is allowed, i.e. `expr` denotes storage.
     ///
-    /// This is `is_lvalue` plus the address-taking-only cases. Neither a
-    /// `_pure` global nor a mutable one is an lvalue -- PAL emits the former as
-    /// a plain top-level F* value and the latter as nothing but an address --
-    /// yet both can have their address taken. See `addressable_global`.
+    /// This is `is_lvalue` plus the address-taking-only cases. A `_pure` global
+    /// is not an lvalue -- PAL emits it as a plain top-level F* value -- yet its
+    /// address can still be taken. See `addressable_global`.
     pub fn is_addressable(&self, expr: &Expr) -> bool {
         if self.is_lvalue(expr) {
             return true;
@@ -795,7 +810,7 @@ impl Env {
         matches!(&expr.val, ExprT::Var(x) if self.addressable_global(x).is_some())
     }
 
-    /// The global named by `ident`, if `&ident` is supported.
+    /// The global named by `ident`, if not shadowed locally and `&ident` is supported.
     ///
     /// Every non-array global that denotes an object qualifies, whether or not
     /// it is `_pure`, because an address is not ownership. The two shapes reach
@@ -806,10 +821,11 @@ impl Env {
     ///   pointer can never be written through), which is what keeps its
     ///   ownership-free reads sound.
     /// * A mutable global gets the address and nothing else -- no `var_g` and
-    ///   no acquire. Since no `pts_to` is ever produced for it, no permission to
-    ///   read or write through the pointer can be obtained, so handing out the
-    ///   address is inert. Reads of the global itself are rejected in the
-    ///   emitter.
+    ///   no acquire. Its storage is named by that address, so reads and writes
+    ///   go through it (`!addr_var_g`, `addr_var_g := ..`), and the permission
+    ///   to do so is threaded by hand: a function that touches `g` says
+    ///   `_requires(_live(g))`, and the entrypoint assumes it. See
+    ///   `mutable_global_lvalue`.
     ///
     /// Excluded:
     ///
@@ -821,8 +837,46 @@ impl Env {
     /// * An enumerator is a constant, not an object: it has no storage, and
     ///   `&Color_Red` cannot be written in C.
     pub fn addressable_global(&self, ident: &Ident) -> Option<&GlobalVar> {
+        if self.lookup_var(ident).is_some() {
+            return None;
+        }
         let gv = self.lookup_global_var(ident)?;
         if global_var_is_array(gv) || gv.is_enum_constant {
+            return None;
+        }
+        Some(gv)
+    }
+
+    /// The global named by `ident`, if it is a *mutable* one whose storage PAL
+    /// models directly, i.e. the global is an lvalue denoting the cell at its
+    /// assumed address.
+    ///
+    /// PAL follows a bring-your-own-permission model for these: the emitted
+    /// module assumes only the address (`assume val addr_var_g : ref t`), never
+    /// any `pts_to` for it, so nothing can be read or written through it until
+    /// a caller supplies the permission. Contracts thread it explicitly with
+    /// `_live(g)`, and the entrypoint (`main`, or whatever the build treats as
+    /// one) assumes it, exactly as if `g` were a pointer parameter.
+    ///
+    /// A `_pure` global is excluded: it is a plain F* value, not storage. The
+    /// same exclusions as `addressable_global` apply otherwise.
+    pub fn mutable_global_lvalue(&self, ident: &Ident) -> Option<&GlobalVar> {
+        let gv = self.addressable_global(ident)?;
+        if gv.is_pure { None } else { Some(gv) }
+    }
+
+    /// The global named by `ident`, if it is a *mutable* C array object (`T g[N]`
+    /// or `T g[]`) and not shadowed locally.
+    ///
+    /// Like a mutable scalar global, its storage is assumed (here an `array T`
+    /// handle rather than a `ref`) and its ownership is not: contracts thread
+    /// `_live(g)`, which names the array's whole permission *and* its extent.
+    pub fn mutable_global_array(&self, ident: &Ident) -> Option<&GlobalVar> {
+        if self.lookup_var(ident).is_some() {
+            return None;
+        }
+        let gv = self.lookup_global_var(ident)?;
+        if gv.is_pure || global_array_object(gv).is_none() {
             return None;
         }
         Some(gv)
@@ -832,7 +886,9 @@ impl Env {
         match &expr.val {
             ExprT::Var(x) => match self.lookup_var(x) {
                 Some(decl) => decl.kind == LocalDeclKind::LValue,
-                None => false,
+                // A mutable global denotes the cell at its assumed address, so
+                // it is writable storage; a `_pure` one is a plain F* value.
+                None => self.mutable_global_lvalue(x).is_some(),
             },
             ExprT::Deref(_) => true,
             ExprT::Member(x, _) => self.is_lvalue(x),

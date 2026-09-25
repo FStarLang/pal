@@ -713,6 +713,25 @@ impl<'a> Elaborator<'a> {
                     }
                 }
                 match bin_op {
+                    BinOp::Elvis => {
+                        // The result type of `a ?: b` is cast to the meet of the two operands.
+                        if let Some(meet_type) = env.meet_type(lhs_ty.clone(), rhs_ty.clone()) {
+                            if !env.vtype_eq(lhs_ty, meet_type.clone()) {
+                                cast_to(lhs, meet_type.clone().to_rc())
+                            }
+                            if !env.vtype_eq(rhs_ty, meet_type.clone()) {
+                                cast_to(rhs, meet_type.to_rc())
+                            }
+                        } else {
+                            self.report(
+                                format!(
+                                    "cannot apply ?: to arguments of type {} and {}",
+                                    lhs_ty, rhs_ty
+                                ),
+                                &rval.loc,
+                            );
+                        }
+                    }
                     BinOp::LogAnd | BinOp::LogOr | BinOp::Implies => {
                         // For SLProp operands, use meet_type casts (&&→**, etc.)
                         // For non-SLProp operands, cast to Bool (handles int→bool)

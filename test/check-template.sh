@@ -6,19 +6,20 @@ set -u
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
-declare -A EXPECTED=(
-  [Makefile]="../_templates/Makefile"
-  [fstar.fst.config.json]="../_templates/fstar.fst.config.json"
-  [pal.config.json]="../_templates/pal.config.json"
-  [pal.h]="../pal.h"
-)
+EXPECTED="
+Makefile=../_templates/Makefile
+fstar.fst.config.json=../_templates/fstar.fst.config.json
+pal.config.json=../_templates/pal.config.json
+pal.h=../pal.h
+"
 
 status=0
 
 while IFS= read -r d; do
   name="$(basename "$d")"
-  for f in "${!EXPECTED[@]}"; do
-    expected="${EXPECTED[$f]}"
+  for pair in $EXPECTED; do
+    f="${pair%%=*}"
+    expected="${pair#*=}"
     path="$d/$f"
     if [ ! -L "$path" ]; then
       echo "ERROR: test/$name/$f is missing or not a symlink (expected symlink to $expected; see test/new.sh)" >&2

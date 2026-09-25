@@ -108,3 +108,329 @@ uint64_t test_u64_post_decr_wrap(void)
     a--;
     return a;
 }
+
+// Check expression results as well as the updated variables.
+
+int8_t test_i8_post_incr_result(void)
+    _ensures(return == 5)
+{
+    int8_t x = 5;
+    int8_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+int8_t test_i8_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    int8_t x = 5;
+    int8_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+int8_t test_i8_post_decr_result(void)
+    _ensures(return == 5)
+{
+    int8_t x = 5;
+    int8_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+int8_t test_i8_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    int8_t x = 5;
+    int8_t result = --x;
+    _assert(x == 4);
+    return result;
+}
+
+int16_t test_i16_post_incr_result(void)
+    _ensures(return == 5)
+{
+    int16_t x = 5;
+    int16_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+int16_t test_i16_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    int16_t x = 5;
+    int16_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+int16_t test_i16_post_decr_result(void)
+    _ensures(return == 5)
+{
+    int16_t x = 5;
+    int16_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+int16_t test_i16_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    int16_t x = 5;
+    int16_t result = --x;
+    _assert(x == 4);
+    return result;
+}
+
+int32_t test_i32_post_incr_result(void)
+    _ensures(return == 5)
+{
+    int32_t x = 5;
+    int32_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+int32_t test_i32_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    int32_t x = 5;
+    int32_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+int32_t test_i32_post_decr_result(void)
+    _ensures(return == 5)
+{
+    int32_t x = 5;
+    int32_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+int32_t test_i32_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    int32_t x = 5;
+    int32_t result = --x;
+    _assert(x == 4);
+    return result;
+}
+
+int64_t test_i64_post_incr_result(void)
+    _ensures(return == 5)
+{
+    int64_t x = 5;
+    int64_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+int64_t test_i64_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    int64_t x = 5;
+    int64_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+int64_t test_i64_post_decr_result(void)
+    _ensures(return == 5)
+{
+    int64_t x = 5;
+    int64_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+int64_t test_i64_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    int64_t x = 5;
+    int64_t result = --x;
+    _assert(x == 4);
+    return result;
+}
+
+uint8_t test_u8_post_incr_result(void)
+    _ensures(return == 5)
+{
+    uint8_t x = 5;
+    uint8_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+uint8_t test_u8_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    uint8_t x = 5;
+    uint8_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+uint8_t test_u8_post_decr_result(void)
+    _ensures(return == 5)
+{
+    uint8_t x = 5;
+    uint8_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+uint8_t test_u8_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    uint8_t x = 5;
+    uint8_t result = --x;
+    _assert(x == 4);
+    return result;
+}
+
+uint16_t test_u16_post_incr_result(void)
+    _ensures(return == 5)
+{
+    uint16_t x = 5;
+    uint16_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+uint16_t test_u16_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    uint16_t x = 5;
+    uint16_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+uint16_t test_u16_post_decr_result(void)
+    _ensures(return == 5)
+{
+    uint16_t x = 5;
+    uint16_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+uint16_t test_u16_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    uint16_t x = 5;
+    uint16_t result = --x;
+    _assert(x == 4);
+    return result;
+}
+
+uint32_t test_u32_post_incr_result(void)
+    _ensures(return == 5)
+{
+    uint32_t x = 5;
+    uint32_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+uint32_t test_u32_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    uint32_t x = 5;
+    uint32_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+uint32_t test_u32_post_decr_result(void)
+    _ensures(return == 5)
+{
+    uint32_t x = 5;
+    uint32_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+uint32_t test_u32_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    uint32_t x = 5;
+    uint32_t result = --x;
+    _assert(x == 4);
+    return result;
+}
+
+uint64_t test_u64_post_incr_result(void)
+    _ensures(return == 5)
+{
+    uint64_t x = 5;
+    uint64_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+uint64_t test_u64_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    uint64_t x = 5;
+    uint64_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+uint64_t test_u64_post_decr_result(void)
+    _ensures(return == 5)
+{
+    uint64_t x = 5;
+    uint64_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+uint64_t test_u64_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    uint64_t x = 5;
+    uint64_t result = --x;
+    _assert(x == 4);
+    return result;
+}
+
+size_t test_sizet_post_incr_result(void)
+    _ensures(return == 5)
+{
+    size_t x = 5;
+    size_t result = x++;
+    _assert(x == 6);
+    return result;
+}
+
+size_t test_sizet_pre_incr_result(void)
+    _ensures(return == 6)
+{
+    size_t x = 5;
+    size_t result = ++x;
+    _assert(x == 6);
+    return result;
+}
+
+size_t test_sizet_post_decr_result(void)
+    _ensures(return == 5)
+{
+    size_t x = 5;
+    size_t result = x--;
+    _assert(x == 4);
+    return result;
+}
+
+size_t test_sizet_pre_decr_result(void)
+    _ensures(return == 4)
+{
+    size_t x = 5;
+    size_t result = --x;
+    _assert(x == 4);
+    return result;
+}

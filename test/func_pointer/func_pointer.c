@@ -3,7 +3,7 @@
 #include <stdlib.h>
 
 /* Function-pointer tests against the axiomatized Pulse.Lib.C.FuncPtr library.
- * All examples verify except `rec_via_ptr` (`#if 0` at the end).
+ * `rec_via_ptr` remains disabled (`#if 0` at the end).
  *
  * Divergence: every function is `divergent fn` unless `_total`. A pointer to
  * a divergent target uses `of_fn_div`/`of_fn_div_valid`; a `_total` target
@@ -59,6 +59,22 @@ void do_nothing(void)
 {
 }
 
+_ghost_arg(uint32_t before)
+void ghost_only(void)
+    _requires(before < 100)
+{
+}
+
+_total
+_ghost_arg(uint32_t before)
+_ghost_arg(uint32_t after)
+uint32_t ghost_next(uint32_t value)
+    _requires(value == before && before < 100 && after == before + 1)
+    _ensures(return == after)
+{
+    return value + 1;
+}
+
 /* ---- shared type aliases ---- */
 
 typedef int32_t (*binop)(int32_t, int32_t);
@@ -72,6 +88,29 @@ typedef int32_t binop_fn(int32_t, int32_t);
 void store_no_call(void)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
+}
+
+/* The erased call witness supplies before without changing the C signature. */
+void take_pointer(void)
+{
+    void (*fp)(void) = ghost_only;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_ghost_only.func_ghost_only__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), 0ul)));
+    fp();
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Multiple ghosts must be forwarded from the same witness into pre and post. */
+_total
+uint32_t take_pointer_ghost_args(void)
+    _ensures(return == 42)
+{
+    uint32_t (*fp)(uint32_t) = ghost_next;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Funcptr_ghost_next.func_ghost_next__fp);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), (41ul, 42ul))));
+    uint32_t result = fp(41);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    return result;
 }
 
 /* Function-to-pointer decay without `&`. */
@@ -532,6 +571,7 @@ _include_pulse(Apply_weaker_spec,
     Pulse.Lib.C.FuncPtr.weaken f true true
       (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp)
       (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) aw_post
+      (fun _ y -> y)
       wpre_id
       wpost_weak
   }
@@ -685,11 +725,11 @@ int32_t reassign_join(int32_t use_sub)
     {
         fp = subtract;
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -708,11 +748,11 @@ int32_t reassign_join_call(int32_t use_sub)
     {
         fp = subtract;
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
@@ -728,11 +768,11 @@ binop select_op(int32_t use_sub)
     _ghost_stmt(let g_use_sub = Pulse.Lib.C.Ref.ghost_read $&(use_sub));
     if (use_sub) {
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
         return subtract;
     } else {
         _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
         return add;
     }
 }
@@ -1022,6 +1062,7 @@ _include_pulse(Total_to_div_spec,
     Pulse.Lib.C.FuncPtr.weaken f false true
       (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp)
       (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp)
+      (fun _ y -> y)
       wpre_id
       wpost_id
   }
@@ -1179,6 +1220,201 @@ struct mo_ops {
 const struct mo_ops the_mo_ops = {
     .f1 = mo_one, .fs = mo_scalar, .f2 = mo_two, .f3 = mo_three
 };
+
+/* Framing a call is different from framing a function pointer's validity.
+   Both contracts use the same witness type; 42 is an arbitrary fixed
+   pointee value, so witness conversion is not involved in this example. */
+_include_pulse(Fp_frame_spec,
+  unfold let plain_pre (p: ref Int32.t) (w: erased unit) : slprop = emp
+  unfold let plain_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop = emp
+
+  unfold let framed_pre (p: ref Int32.t) (w: erased unit) : slprop =
+    Pulse.Lib.Reference.pts_to p 42l
+  unfold let framed_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop =
+    Pulse.Lib.Reference.pts_to p 42l
+
+  ghost fn frame_wpre (p: ref Int32.t) (w: erased unit)
+    requires framed_pre p w
+    ensures plain_pre p w ** framed_pre p w
+  { () }
+
+  ghost fn frame_wpost (p: ref Int32.t) (w: erased unit) (r: unit)
+    requires plain_post p w r ** framed_pre p w
+    ensures framed_post p w r
+  { () }
+
+  ghost fn frame_plain (f: Pulse.Lib.C.FuncPtr.func_ptr (ref Int32.t) unit)
+    requires Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post
+    ensures Pulse.Lib.C.FuncPtr.is_valid f true framed_pre framed_post **
+            Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post
+  {
+    unfold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+    fold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+    Pulse.Lib.C.FuncPtr.frame f true plain_pre plain_post framed_pre;
+    Pulse.Lib.C.FuncPtr.weaken f true true
+      (fun p w -> plain_pre p w ** framed_pre p w)
+      (fun p w r -> plain_post p w r ** framed_pre p w)
+      framed_pre framed_post (fun _ w -> w) frame_wpre frame_wpost;
+    fold (Pulse.Lib.C.FuncPtr.is_valid f true plain_pre plain_post);
+  }
+)
+
+/* Control: ordinary call-site framing preserves the pointee. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_direct(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
+    _plain int *p)
+{
+    f(p);
+}
+
+/* Control: a consumer with the framed validity can call its pointer. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_consumer(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.framed_pre Fp_frame_spec.framed_post)),
+    _plain int *p)
+{
+    f(p);
+}
+
+/* Adapt the same arbitrary pointer's validity using the frame axiom.
+   Without this ghost step the consumer call fails with Error 19.
+   FuncPtr.weaken alone cannot carry a resource between its two coercions. */
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) 42l))
+void fp_frame_adapt(
+    void (*f)(_plain int *p)
+        _refine((_slprop) _inline_pulse(
+            Pulse.Lib.C.FuncPtr.is_valid $(this) true
+                Fp_frame_spec.plain_pre Fp_frame_spec.plain_post)),
+    _plain int *p)
+{
+    _ghost_stmt(Fp_frame_spec.frame_plain $(f));
+    fp_frame_consumer(f, p);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid $(f)
+      Fp_frame_spec.framed_pre Fp_frame_spec.framed_post);
+}
+
+uint32_t global_live_counter;
+
+/* Ghost-indexed ownership relates entry and exit values without `_old` or
+ * mutable entry equalities in the function-pointer postcondition guard. */
+_ghost_arg(uint32_t before)
+void global_live_bump(void)
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_counter) $(before)))
+    _requires(before < 100)
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == before + 1)
+{
+    global_live_counter = global_live_counter + 1;
+}
+
+_ghost_arg(uint32_t before)
+void global_live_call(void)
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_counter) $(before)))
+    _requires(before < 100)
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == before + 1)
+{
+    void (*fp)(void) = global_live_bump;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_bump.func_global_live_bump__fp);
+    fp();
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Keep direct _live coverage with a fixed-value postcondition. */
+void global_live_set(void)
+    _requires(_live(global_live_counter))
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == 42)
+{
+    global_live_counter = 42;
+}
+
+void global_live_set_call(void)
+    _requires(_live(global_live_counter))
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == 42)
+{
+    global_live_counter = 10;
+    void (*fp)(void) = global_live_set;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_set.func_global_live_set__fp);
+    fp();
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Snapshot both globals and the updated pointee; preserve q's saved value. */
+uint32_t global_live_left;
+uint32_t global_live_right;
+
+_ghost_arg(uint32_t before_left)
+_ghost_arg(uint32_t before_right)
+_ghost_arg(uint32_t before_p)
+_ghost_arg(uint32_t saved)
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(saved)))
+void global_live_mixed(_plain uint32_t *p, _plain uint32_t *q)
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_left) $(before_left)))
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_right) $(before_right)))
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) $(before_p)))
+    _requires(before_left < 100)
+    _requires(before_right < 100)
+    _requires(before_p < 100)
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(_live(*p))
+    _ensures(global_live_left == before_left + 1)
+    _ensures(global_live_right == before_right + 1)
+    _ensures(*p == before_p + 1)
+{
+    global_live_left = global_live_left + 1;
+    global_live_right = global_live_right + 1;
+    *p = *p + 1;
+}
+
+_ghost_arg(uint32_t before_left)
+_ghost_arg(uint32_t before_right)
+_ghost_arg(uint32_t before_p)
+_ghost_arg(uint32_t saved)
+_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(saved)))
+void global_live_mixed_call(_plain uint32_t *p, _plain uint32_t *q)
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_left) $(before_left)))
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_right) $(before_right)))
+    _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) $(before_p)))
+    _requires(before_left < 100)
+    _requires(before_right < 100)
+    _requires(before_p < 100)
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(_live(*p))
+    _ensures(global_live_left == before_left + 1)
+    _ensures(global_live_right == before_right + 1)
+    _ensures(*p == before_p + 1)
+{
+    void (*fp)(_plain uint32_t *, _plain uint32_t *) = global_live_mixed;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
+    fp(p, q);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+}
+
+/* Distinct values expose swapped witnesses and vacuous postconditions. */
+void global_live_distinct(void)
+    _requires(_live(global_live_left) && _live(global_live_right))
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(global_live_left == 11 && global_live_right == 21)
+{
+    global_live_left = 10;
+    global_live_right = 20;
+    uint32_t p = 30;
+    uint32_t q = 40;
+    void (*fp)(_plain uint32_t *, _plain uint32_t *) = global_live_mixed;
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
+    fp(&p, &q);
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _assert(p == 31 && q == 40);
+}
 
 #if 0
 

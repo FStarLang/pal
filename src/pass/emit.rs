@@ -9,7 +9,7 @@ use num_bigint::BigInt;
 
 use crate::{
     diag::{Diagnostic, DiagnosticLevel, Diagnostics},
-    env::{Env, LocalDecl, LocalDeclKind},
+    env::{Env, LocalDeclKind},
     ir::*,
     mayberc::MaybeRc,
 };
@@ -235,11 +235,12 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::TypeRefRefine(TypeRef::Union(u)) => Some(format!("Union_{}", u)),
         Name::TypeRefRefine(TypeRef::Typedef(t)) => Some(format!("Typedef_{}", t)),
         // Global address names live in the global's own module.
-        Name::GlobalAddr(v) | Name::GlobalAddrNotNull(v) | Name::GlobalAcquire(v) => {
-            Some(format!("Global_{}", v))
-        }
-        // Local names (Var, Val, Perm) are not cross-module references
-        Name::Var(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
+        Name::GlobalAddr(v)
+        | Name::GlobalAddrNotNull(v)
+        | Name::GlobalAcquire(v)
+        | Name::GlobalLive(v) => Some(format!("Global_{}", v)),
+        // Local names are not cross-module references.
+        Name::Var(_) | Name::Label(_) | Name::Val(_, _) | Name::Perm(_, _) => None,
     }
 }
 
@@ -503,6 +504,8 @@ impl From<&TypeRefKind> for TypeRef {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Name {
     Var(Rc<IdentT>),
+    /// C labels occupy a separate namespace from ordinary identifiers.
+    Label(Rc<IdentT>),
     /// The address of a `_pure` global: an assumed `ref` naming its storage,
     /// one per global, so distinct globals get distinct addresses.
     GlobalAddr(Rc<IdentT>),
@@ -511,6 +514,10 @@ enum Name {
     /// Acquires *read-only* ownership of a global's storage. Called in the
     /// prologue of every function that takes the global's address.
     GlobalAcquire(Rc<IdentT>),
+    /// Ownership of a mutable array global: the slprop `_live(g)` stands for.
+    /// Named rather than inlined because it also pins the array's extent, which
+    /// no pure term over the bare handle can recover.
+    GlobalLive(Rc<IdentT>),
     Val(Rc<IdentT>, u32),
     Perm(Rc<IdentT>, u32),
     Fn(Rc<IdentT>),
@@ -578,9 +585,11 @@ impl Name {
                     _ => format!("var_{}", v),
                 }
             }
+            Name::Label(v) => format!("label_{}", v),
             Name::GlobalAddr(v) => format!("addr_var_{}", v),
             Name::GlobalAddrNotNull(v) => format!("addr_var_{}_not_null", v),
             Name::GlobalAcquire(v) => format!("acquire_var_{}", v),
+            Name::GlobalLive(v) => format!("live_var_{}", v),
             Name::Val(v, idx) => {
                 let v: &str = v;
                 format!("val_{}_{}", v, idx)
@@ -782,6 +791,9 @@ struct Emitter<'a> {
     fn_module_map: HashMap<Rc<str>, String>,
     /// Maps typedef names that are OpaqueTypeDecls to their Type_* module (overrides Typedef_*).
     typedef_override_map: HashMap<Rc<str>, String>,
+    /// When set, `emit_name` fully qualifies type names even inside their owning
+    /// module. Used for type docs that get cached and re-emitted in other modules.
+    force_qualify_types: bool,
     /// Whether the function body currently being emitted is `_total`. Set at body
     /// entry in `emit_fn_defn`; read by the `FnPtrCall` arm to emit `call` (total
     /// body) vs `call_div` (divergent body).
@@ -903,7 +915,9 @@ impl<'a> Emitter<'a> {
             }
         };
         if let Some(owner_module) = owner_module {
-            if owner_module == self.current_module {
+            if owner_module == self.current_module
+                && !(self.force_qualify_types && matches!(name, Name::TypeRef(_)))
+            {
                 Doc::text(mangled)
             } else {
                 Doc::text(format!("{}.{}", owner_module, mangled))
@@ -1199,6 +1213,17 @@ fn collect_addr_taken(decls: &[Decl]) -> HashSet<Rc<str>> {
 }
 
 impl<'a> Emitter<'a> {
+    /// Emit a type whose rendering may be cached and re-used from another module
+    /// (e.g. predicate val-parameter types), so type names must always carry
+    /// their module qualifier.
+    fn emit_type_qualified(&mut self, env: &Env, ty: &Type) -> Doc {
+        let saved = self.force_qualify_types;
+        self.force_qualify_types = true;
+        let doc = self.emit_type(env, ty);
+        self.force_qualify_types = saved;
+        doc
+    }
+
     fn emit_type(&mut self, env: &Env, ty: &Type) -> Doc {
         annotated(ty, || {
             match &ty.val {
@@ -1853,7 +1878,7 @@ impl<'a> Emitter<'a> {
                 match kind {
                     PointerKind::Ref | PointerKind::Unknown => match variant {
                         SLPropVariant::Init { perm } => {
-                            let pointee_type_doc = self.emit_type(env, pointee_ty);
+                            let pointee_type_doc = self.emit_type_qualified(env, pointee_ty);
                             let val_name = self.push_val_binding(naming, this, pointee_type_doc);
                             let slprop = annotated(ty, || {
                                 naryfn([
@@ -1891,7 +1916,7 @@ impl<'a> Emitter<'a> {
                         }
                     },
                     PointerKind::Array => {
-                        let pointee_type_doc = self.emit_type(env, pointee_ty);
+                        let pointee_type_doc = self.emit_type_qualified(env, pointee_ty);
                         let val_type_doc = match variant {
                             SLPropVariant::Init { .. } => {
                                 unaryfn(Doc::text("full_array_spec"), pointee_type_doc)
@@ -2052,7 +2077,7 @@ impl<'a> Emitter<'a> {
                     resolving_struct,
                 );
                 if let SLPropVariant::Init { .. } = variant {
-                    let binding_type_doc = self.emit_type(env, binding_ty);
+                    let binding_type_doc = self.emit_type_qualified(env, binding_ty);
                     // RefineValue uses an explicit binding name from the user annotation
                     let raw_name = Doc::text(binding_name.val.to_string());
                     let val_name =
@@ -2166,61 +2191,28 @@ impl<'a> Emitter<'a> {
     fn emit_expr(&mut self, env: &Env, v: &Expr) -> ExprKind {
         match &v.val {
             ExprT::Var(x) => {
-                // C scoping: a parameter or local shadows a file-scope global of
-                // the same name, so the global is not in scope at this occurrence
-                // at all. `check_var` already resolves locals first; emission has
-                // to agree with it, or the two passes disagree about which
-                // variable an identifier denotes -- and emission wins.
-                let shadowed = env.lookup_var(x).is_some();
-                if let Some(gv) = env.lookup_global_var(x).filter(|_| !shadowed) {
-                    // A mutable global emits no `var_g`, so there is no name to
-                    // refer to here. Reject the read rather than emit a dangling
-                    // reference that F* would report as an unbound identifier.
-                    //
-                    // Arrays used to be exempt, on the grounds that they are
-                    // "still emitted as a spec value" -- but that is only true
-                    // of a PURE array. `emit_global_var` reports "non-pure array
-                    // globals are not yet supported" and emits an empty module,
-                    // so exempting them here produced exactly the dangling
-                    // reference this check exists to prevent: consumers named
-                    // `Global_g.var_g` into an empty module and F* answered
-                    // "Error 72: Identifier var_g not found in module Global_g".
-                    // That reads like a proof failure, when the truth is that
-                    // PAL declined to translate the global.
-                    if !gv.is_pure {
-                        // An ARRAY is different, and the difference is C's, not
-                        // PAL's: an array name has no value in the first place.
-                        // Except as the operand of `sizeof` or `&`, it decays to
-                        // a pointer to its first element (C17 6.3.2.1p3), so
-                        // there is nothing here to "read" and the objection
-                        // above does not apply. Emit the address as an
-                        // `ArrayLValue`, which is exactly what an `_array T *`
-                        // parameter already is, and every array operation --
-                        // subscript, assignment through a subscript,
-                        // `length_of` -- works on it unchanged.
-                        //
-                        // This gives out no ownership: `emit_global_addr`
-                        // emits no acquire for a mutable global, so without one
-                        // supplied by the project there is no `array_pts_to` in
-                        // existence and the handle can be compared and passed
-                        // around but never dereferenced.
-                        if global_var_is_array(gv) {
-                            let addr = annotated(v, || {
-                                let mangled =
-                                    self.nm.mangle(&Name::GlobalAddr(x.val.clone())).to_string();
-                                match self.fn_module_map.get(&x.val) {
-                                    Some(owner) if *owner != self.current_module => {
-                                        Doc::text(format!("{}.{}", owner, mangled))
-                                    }
-                                    _ => Doc::text(mangled),
-                                }
-                            });
-                            return ExprKind::ArrayLValue(addr);
-                        }
+                if let Some(decl) = env.lookup_var(x) {
+                    let x2 = annotated(v, || self.emit_var(x));
+                    match decl.kind {
+                        LocalDeclKind::RValue => ExprKind::RValue(x2),
+                        LocalDeclKind::LValue => ExprKind::LValue(x2),
+                    }
+                } else if let Some(gv) = env.lookup_global_var(x) {
+                    // A mutable global has no `var_g` value; its storage is
+                    // named by its assumed address, so it emits as an lvalue
+                    // over that address (`!addr_var_g` / `addr_var_g := ..`).
+                    // The permission comes from the caller, threaded by hand as
+                    // `_live(g)`. Arrays are exempt: they are still emitted as a
+                    // spec value.
+                    if env.mutable_global_lvalue(x).is_some() {
+                        return ExprKind::LValue(annotated(v, || {
+                            self.emit_name(Name::GlobalAddr(x.val.clone()))
+                        }));
+                    }
+                    if !gv.is_pure && !global_var_is_array(gv) {
                         self.report(
                             format!(
-                                "cannot read the mutable global {}; its address may be taken, \
-                                 but its value is not available",
+                                "cannot read the global {}; it has neither a value nor storage",
                                 x
                             ),
                             &x.loc,
@@ -2242,16 +2234,7 @@ impl<'a> Emitter<'a> {
                     });
                     ExprKind::RValue(x2)
                 } else {
-                    let x2 = annotated(v, || self.emit_var(x));
-                    if let Some(LocalDecl {
-                        kind: LocalDeclKind::RValue,
-                        ..
-                    }) = env.lookup_var(x)
-                    {
-                        ExprKind::RValue(x2)
-                    } else {
-                        ExprKind::LValue(x2)
-                    }
+                    ExprKind::LValue(annotated(v, || self.emit_var(x)))
                 }
             }
             ExprT::Deref(inner) => {
@@ -2741,6 +2724,24 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
             Doc::text(format!("`{}.rem`", get_int_mod(signed, width)?))
         }
         (BinOp::Mod, TypeT::SizeT) => Doc::text("`SizeT.rem`"),
+        (BinOp::Elvis, TypeT::Int { signed, width }) => Doc::text(format!(
+            "`Pulse.Lib.C.GNU.Elvis.elvis_{}int{}`",
+            if *signed { "" } else { "u" },
+            width
+        )),
+        (BinOp::Elvis, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_size_t`"),
+        (BinOp::Elvis, TypeT::PtrdiffT) => Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_ptrdiff_t`"),
+        (BinOp::Elvis, TypeT::Bool) => Doc::text("||"),
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_ref`")
+        }
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Core)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_core`")
+        }
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)) => {
+            Doc::text("`Pulse.Lib.C.GNU.Elvis.elvis_array`")
+        }
+        (BinOp::Elvis, _) => return None,
         (BinOp::Add, TypeT::Int { signed, width }) => {
             Doc::text(format!("`{}.add`", get_int_mod(signed, width)?))
         }
@@ -3380,6 +3381,32 @@ impl<'a> Emitter<'a> {
                                 Doc::text("(admit())")
                             }
                         }
+                        (
+                            TypeT::Pointer(_, kind),
+                            TypeT::Int {
+                                signed,
+                                width: width @ (32 | 64),
+                            },
+                        ) => {
+                            let raw = match kind {
+                                PointerKind::Core => val_doc,
+                                PointerKind::Ref | PointerKind::Unknown => {
+                                    unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val_doc)
+                                }
+                                PointerKind::Array | PointerKind::ArrayPtr => unaryfn(
+                                    Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                                    unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
+                                ),
+                            };
+                            unaryfn(
+                                Doc::text(format!(
+                                    "Pulse.Lib.C.CoreRef.core_to_{}int{}",
+                                    if *signed { "" } else { "u" },
+                                    width
+                                )),
+                                raw,
+                            )
+                        }
                         // FixedArray → Pointer(Array): array-to-pointer decay (identity in Pulse)
                         (
                             TypeT::FixedArray(_, _),
@@ -3887,6 +3914,14 @@ impl<'a> Emitter<'a> {
                     ]))
                 }
                 ExprT::Live(v) => {
+                    // `_live(g)` for a mutable array global is the named slprop
+                    // emitted alongside the global's handle: unlike `live_array`
+                    // it also pins the array's extent. See `emit_global_array`.
+                    if let ExprT::Var(x) = &v.val
+                        && env.mutable_global_array(x).is_some()
+                    {
+                        return self.emit_name(Name::GlobalLive(x.val.clone()));
+                    }
                     // Check if the dereferenced expression is an array type
                     let is_array = if let ExprT::Deref(inner) = &v.val {
                         env.infer_expr(inner)
@@ -5089,7 +5124,34 @@ impl<'a> Emitter<'a> {
                     else_branch,
                     ensures,
                 } => {
-                    let cond_doc = parens(self.emit_rvalue(env, cond));
+                    let mut cond_doc = parens(self.emit_rvalue(env, cond));
+                    // When the branches leave different resources, Pulse joins
+                    // them as a `match` on the condition, and can only reduce
+                    // that match under the branch hypothesis if the scrutinee
+                    // is a variable. A condition that applies a `_pure`
+                    // function -- `pal_c_assert_enabled()` is the common one --
+                    // stays an application unless it is bound first.
+                    let mut applies_pure_fn = false;
+                    walk_expr_tree(cond, &mut |e| {
+                        if let ExprT::FnCall(f, _) = &e.val
+                            && env.lookup_fn(f).is_some_and(|d| d.is_pure)
+                        {
+                            applies_pure_fn = true;
+                        }
+                    });
+                    let mut cond_binding = Doc::nil();
+                    if applies_pure_fn {
+                        let tmp = self.fresh_tmp("cond");
+                        cond_binding = Doc::text("let ")
+                            .append(tmp.clone())
+                            .append(" = ")
+                            .append(cond_doc)
+                            .append(";")
+                            .group()
+                            .nest(2)
+                            .append(Doc::hardline());
+                        cond_doc = parens(tmp);
+                    }
                     let ensures_doc = Doc::concat(ensures.iter().map(|e| {
                         Doc::line()
                             .append("ensures ")
@@ -5099,16 +5161,18 @@ impl<'a> Emitter<'a> {
                     }));
                     let then_doc = self.emit_block(env, then_branch);
                     let else_doc = self.emit_block(env, else_branch);
-                    Doc::text("if ")
-                        .append(cond_doc)
-                        .nest(2)
-                        .append(ensures_doc)
-                        .append(" ")
-                        .append(then_doc)
-                        .append(" else ")
-                        .append(else_doc)
-                        .append(";")
-                        .group()
+                    cond_binding.append(
+                        Doc::text("if ")
+                            .append(cond_doc)
+                            .nest(2)
+                            .append(ensures_doc)
+                            .append(" ")
+                            .append(then_doc)
+                            .append(" else ")
+                            .append(else_doc)
+                            .append(";")
+                            .group(),
+                    )
                 }
                 StmtT::Match {
                     scrutinee,
@@ -5219,7 +5283,7 @@ impl<'a> Emitter<'a> {
                     self.emit_inline_pulse_tokens(env, code).append(";")
                 }
                 StmtT::Goto(label) => Doc::text("goto ")
-                    .append(self.emit_name(Name::Var(label.val.clone())))
+                    .append(self.emit_name(Name::Label(label.val.clone())))
                     .append(";"),
                 StmtT::Label { .. } => Doc::text("(* unrestructured label *)"),
                 StmtT::GotoBlock {
@@ -5236,7 +5300,7 @@ impl<'a> Emitter<'a> {
                     }
                     doc.append(Doc::hardline())
                         .append("label ")
-                        .append(self.emit_name(Name::Var(label.val.clone())))
+                        .append(self.emit_name(Name::Label(label.val.clone())))
                         .append(":;")
                 }
                 StmtT::Error => Doc::text("(admit());"),
@@ -7789,12 +7853,21 @@ impl<'a> Emitter<'a> {
         // `let`-bound copy) keeps the argument *definitionally* the tuple
         // component, which the prover needs to match ownership (`pts_to`)
         // preconditions carried by pointer-parameter callees.
-        let call_body = match projs.len() {
-            0 => callee.append(" ()"),
-            _ => callee
-                .append(" ")
-                .append(Doc::intersperse(projs.iter().cloned(), Doc::text(" "))),
-        };
+        // Ghost values must come from the wrapper's witness, not fresh holes.
+        let ghost_args = (0..decl.ghost_args.len()).map(|i| {
+            Doc::text("#").append(parens(unaryfn(
+                Doc::text("hide"),
+                nested_pair_proj(Doc::text("(snd (reveal y_fp))"), i, decl.ghost_args.len()),
+            )))
+        });
+        let args = ghost_args.chain(if projs.is_empty() {
+            vec![Doc::text("()")]
+        } else {
+            projs
+        });
+        let call_body = callee
+            .append(" ")
+            .append(Doc::intersperse(args, Doc::text(" ")));
         let fst = Doc::hardline()
             .append(Doc::hardline())
             .append(wrap_sig)
@@ -7969,7 +8042,8 @@ impl<'a> Emitter<'a> {
             }
         }
 
-        if params.is_empty() {
+        // Empty C argument lists still take unit when ghost parameters exist.
+        if args.is_empty() {
             params.push(Doc::text("()"));
         }
 
@@ -8455,7 +8529,7 @@ impl<'a> Emitter<'a> {
             env.push_arg(arg, LocalDeclKind::RValue);
         }
 
-        if params.is_empty() {
+        if decl.args.is_empty() {
             params.push(Doc::text("()"));
         }
 
@@ -8777,15 +8851,22 @@ impl<'a> Emitter<'a> {
 
     fn emit_global_var(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
         if !gv.is_pure {
-            // A mutable global gets an address but no value: its storage cannot
-            // be read or written, so there is nothing for an initializer to
-            // mean and nothing for a spec value to describe.
+            // A mutable array global is the array object itself, so it is
+            // modeled as a handle plus the permission its users thread; every
+            // other mutable global is modeled by the cell at its address.
+            if global_array_object(gv).is_some() {
+                return self.emit_global_array(env, gv);
+            }
+            // A mutable global gets an address but no value: its storage is
+            // mutable, so no F* constant describes it. Reads and writes go
+            // through the address, with the permission supplied by the caller
+            // (`_live(g)`); see `Env::mutable_global_lvalue`. That also means
+            // an initializer has nothing to be attached to -- what the storage
+            // holds is whatever the (assumed) permission says it holds.
             return match self.emit_global_addr(env, gv) {
                 Some(addr) => addr,
-                // Only an enumerator reaches here, and it is always pure, so in
-                // practice this is unreachable. A mutable array global is
-                // emitted by `emit_global_addr` as storage of type
-                // `array <elem>`; see there.
+                // Nothing reaches here: an array was handled above and an
+                // enumerator is always pure.
                 None => Doc::nil(),
             };
         }
@@ -8818,16 +8899,87 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Emit a mutable array global (`T g[N]` / `T g[]`): the assumed `array`
+    /// handle naming its storage, and the slprop that `_live(g)` stands for.
+    ///
+    /// ```fstar
+    /// assume val var_g : (array t)
+    /// [@@pulse_eager_unfold]
+    /// let live_var_g : slprop =
+    ///   exists* (s: full_array_lspec t N). array_pts_to var_g 1.0R s
+    /// ```
+    ///
+    /// Same bring-your-own-permission model as a mutable scalar global (see
+    /// `emit_global_addr`): the handle is assumed, the ownership is not, so a
+    /// function that touches `g` demands `_live(g)` and the entrypoint assumes
+    /// it. `array_pts_to ... 1.0R` is full ownership -- unlike a `_pure`
+    /// global, whose fraction stays existential, a mutable array must be
+    /// writable, and only one holder of the permission can exist at a time.
+    ///
+    /// The permission is a *named* slprop rather than plain `live_array var_g`
+    /// because it also pins the extent: the length of an `array` lives in its
+    /// spec, so `N` can only be stated by the spec binder in the existential.
+    /// That is what lets `g._length` (`reveal (length_of var_g)`) reduce to `N`
+    /// wherever `_live(g)` is held. An incomplete `T g[]` has no extent to pin
+    /// here, so it binds a plain `full_array_spec` and callers must state the
+    /// length themselves.
+    fn emit_global_array(&mut self, env: &Env, gv: &GlobalVar) -> Doc {
+        let Some((elem, len)) = global_array_object(gv) else {
+            unreachable!("caller checked that this is an array object")
+        };
+        let elem_doc = self.emit_type(env, elem);
+        let handle = self.emit_name(Name::Var(gv.name.val.clone()));
+        let handle_val = Doc::text("assume val ")
+            .append(handle.clone())
+            .append(Doc::text(" : "))
+            .append(unaryfn(Doc::text("array"), elem_doc.clone()));
+
+        let spec_ty = match len {
+            Some(n) => naryfn([
+                Doc::text("full_array_lspec"),
+                elem_doc,
+                Doc::text(format!("{}", n)),
+            ]),
+            None => unaryfn(Doc::text("full_array_spec"), elem_doc),
+        };
+        let spec_var = Doc::text("s");
+        let pts_to = naryfn([
+            Doc::text("array_pts_to"),
+            handle,
+            Doc::text("1.0R"),
+            spec_var.clone(),
+        ]);
+        let live = Doc::text("[@@pulse_eager_unfold]")
+            .append(Doc::hardline())
+            .append(mk_let(
+                self.emit_name(Name::GlobalLive(gv.name.val.clone())),
+                &[],
+                Doc::text("slprop"),
+                wrap_exists(
+                    &[ExBinding {
+                        name: spec_var,
+                        ty: spec_ty,
+                    }],
+                    vec![pts_to],
+                ),
+            ));
+
+        handle_val.append(Doc::hardline()).append(live)
+    }
+
     /// Emit a global's address: an assumed `ref` (one per global, so distinct
     /// globals get distinct addresses) and a non-null axiom. A `_pure` global
     /// additionally gets the acquire that hands out *read-only* ownership of
     /// its storage; a mutable one gets no acquire at all.
     ///
-    /// A mutable global has no `var_g` for a `pts_to` to mention, and giving
-    /// out ownership of something writable would be unsound anyway. Emitting
-    /// the bare address is still safe: with no `pts_to` in existence there is
-    /// no permission to obtain, so the pointer can be compared but never read
-    /// or written through.
+    /// A mutable global has no `var_g` for a `pts_to` to mention, and handing
+    /// out ownership of something writable for free would be unsound: two
+    /// callers could each acquire full permission and race. So PAL emits the
+    /// bare address and follows a *bring-your-own-permission* model instead --
+    /// the ownership is threaded through contracts by hand, `_requires(_live(g))`
+    /// / `_ensures(_live(g))`, down from an entrypoint that assumes it. With no
+    /// permission in hand the pointer can still be compared, just not read or
+    /// written through.
     ///
     /// Reads of a `_pure` global are ownership-free, which is only sound if the
     /// storage holds `var_g` forever -- so the pointer must never be writable.
@@ -8851,71 +9003,27 @@ impl<'a> Emitter<'a> {
         // An enumerator is a constant, not an object: it has no storage, and
         // `&Color_Red` cannot be written in C. Giving it an address would assume
         // a cell that nothing can ever produce.
-        if gv.is_enum_constant {
-            return None;
-        }
-        // A *pure* array global is a spec value, not storage; it is emitted by
-        // `emit_global_var` as `full_array_lspec` and has no address.
-        let array_elem = global_var_array_elem(gv).filter(|_| !gv.is_pure);
-        if global_var_is_array(gv) && array_elem.is_none() {
+        if global_var_is_array(gv) || gv.is_enum_constant {
             return None;
         }
         let addr = self.emit_name(Name::GlobalAddr(gv.name.val.clone()));
-
-        // A mutable array global's storage has type `array <elem>`, the same
-        // type an `_array T *` parameter has, so every existing array
-        // operation -- `array_pts_to`, `array_idx`, `array_update`,
-        // `length_of` -- applies to it unchanged.
-        let (addr_ty, is_array) = match &array_elem {
-            Some(elem) => (
-                parens(
-                    Doc::text("array")
-                        .append(Doc::line())
-                        .append(self.emit_type(env, elem))
-                        .nest(2),
-                ),
-                true,
-            ),
-            None => {
-                let ty = self.emit_type(env, &gv.ty);
-                (
-                    parens(Doc::text("ref").append(Doc::line()).append(ty).nest(2)),
-                    false,
-                )
-            }
-        };
+        let ty = self.emit_type(env, &gv.ty);
+        let ref_ty = parens(Doc::text("ref").append(Doc::line()).append(ty).nest(2));
 
         let addr_val = Doc::text("assume val ")
             .append(addr.clone())
             .append(Doc::text(" : "))
-            .append(addr_ty);
-        // `Pulse.Lib.Reference.is_null` is about a `ref`. The array case states
-        // the same fact against the array library's own null: a C array object
-        // has at least one element, so its handle is never `array_null`. Stated
-        // as a disequality rather than through `array_is_null`, which is a
-        // `bool` and so cannot sit directly under `~`.
+            .append(ref_ty.clone());
         let not_null = Doc::text("assume val ")
             .append(self.emit_name(Name::GlobalAddrNotNull(gv.name.val.clone())))
-            .append(if is_array {
-                Doc::text(" : squash (~(")
-                    .append(addr.clone())
-                    .append(Doc::text(" == Pulse.Lib.C.Array.array_null"))
-            } else {
-                Doc::text(" : squash (~(Pulse.Lib.Reference.is_null ").append(addr.clone())
-            })
+            .append(Doc::text(" : squash (~(Pulse.Lib.Reference.is_null "))
+            .append(addr.clone())
             .append(Doc::text("))"));
-
-        // A mutable array gets the address and nothing else, for the same
-        // reason a mutable scalar does: handing out ownership of writable
-        // storage is exactly what must not happen. A project that needs to read
-        // one supplies its own acquire under an explicit trust argument.
-        if is_array {
-            return Some(addr_val.append(Doc::hardline()).append(not_null));
-        }
 
         // A mutable global gets the address and nothing else: the acquire below
         // mentions `var_g`, which is not emitted for it, and handing out
-        // ownership of a mutable object is exactly what must not happen.
+        // ownership of a mutable object for free is exactly what must not
+        // happen -- its permission is brought by the caller instead.
         if !gv.is_pure {
             return Some(addr_val.append(Doc::hardline()).append(not_null));
         }
@@ -9047,6 +9155,7 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_module: String::new(),
         fn_module_map,
         typedef_override_map,
+        force_qualify_types: false,
         current_fn_total: false,
         tmp_counter: 0,
         pending_prelude: Vec::new(),

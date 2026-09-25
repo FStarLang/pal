@@ -321,7 +321,7 @@ struct ops *get_ops(void)
                     (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)
                     Ops_spec.m_pre_w
                     (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)
-                    Ops_spec.m_wpre Ops_spec.m_wpost);
+                    (fun _ y -> y) Ops_spec.m_wpre Ops_spec.m_wpost);
     return p;
 }
 
