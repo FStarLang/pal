@@ -4792,3 +4792,20 @@ new facts about memory.
 
     The census is 1097 specifications, 1076 with bodies, 0 admitted, 21
     external, 0 skipped.
+
+12. **Interfaces come back.** Palow wrote only a `.fst` per module. The old
+    translator writes a `.fsti` for every function too, and the difference is
+    not cosmetic: without one, a caller's checked file depends on the callee's
+    *body*, so editing a body re-verifies everything downstream of it and a
+    module that merely names a function drags its implementation in. With one,
+    the dependency is on the contract, which is all a caller was ever entitled
+    to rely on.
+
+    The interface is the same text as the implementation's signature, so it is
+    taken from the same string rather than re-emitted -- the two cannot drift.
+    Two things are left out. A `_pure` function is an F\* `let`, not a Pulse
+    `fn`; hiding its definition behind an interface would hide the only thing
+    callers reason with, so it keeps none. And a `decreases` belongs to the
+    definition rather than to the contract: F\* rejects one in an interface,
+    and the measure that justified a function's recursion is no business of
+    its callers.

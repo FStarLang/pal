@@ -704,6 +704,17 @@ fn describe(ty: &Type) -> String {
 pub struct PalowModule {
     pub module_name: String,
     pub code: String,
+    /// The module's interface, for a module that has one: a function's
+    /// signature without its body.
+    ///
+    /// A generated module is one C declaration, so its interface is one
+    /// `fn` -- but writing it out is not redundant. Without it every caller
+    /// depends on the callee's *body*, so editing a body re-verifies
+    /// everything downstream of it, and a module that names a function it
+    /// never calls still drags the implementation in. With it the dependency
+    /// is on the contract, which is the thing a caller was ever entitled to
+    /// rely on. The old translator emitted these and Palow should too.
+    pub iface: Option<String>,
     /// Where in the C source this module came from. An IDE pointed at the
     /// output needs to get from a generated file back to the declaration that
     /// produced it; the mapping is per declaration rather than per token,
@@ -1411,6 +1422,8 @@ struct FnSurface {
     /// -- including a loop invariant -- can talk about.
     olens: HashMap<String, String>,
     decl: String,
+    /// The signature without its `decreases`, for the `.fsti`.
+    iface: String,
     /// The ownership the contract grants over what the parameters point to.
     /// A function body never has to restate this -- Pulse carries it -- except
     /// at a loop, whose invariant Pulse cannot invent.
@@ -4630,6 +4643,10 @@ fn emit_fn(
             bodies.join(" **\n             ")
         );
     }
+    // A `decreases` is part of the definition, not of the contract: an
+    // interface that repeated it would be a syntax error, and a caller has no
+    // use for the measure that justified the callee's recursion.
+    let iface = out.clone();
     if let Some(d) = &decreases {
         out += &format!("  decreases ({})\n", d);
     }
@@ -4850,6 +4867,7 @@ fn emit_fn(
         req_props,
         post_valid,
         decl: out,
+        iface,
         owned,
         guarded,
         granted,
@@ -8191,6 +8209,10 @@ struct FnItem<'a> {
     defn: Option<&'a FnDefn>,
     env: Env,
     sig: Option<FnSurface>,
+    /// The signature alone, to go into the `.fsti`. `None` for a `_pure`
+    /// function, which is an F* `let` rather than a Pulse `fn` and whose
+    /// definition callers reason with directly.
+    iface: Option<String>,
     /// The `__fp` wrapper's text, which goes into a module of its own.
     fp: Option<String>,
 }
@@ -8262,6 +8284,8 @@ pub fn emit_palow(
     }
     let structs = collect_structs(tu, &mut tds, &base);
     let mut chunks: Vec<Chunk> = structs;
+    // Module name -> the interface body to put in its `.fsti`.
+    let mut ifaces: HashMap<String, String> = HashMap::new();
     chunks.extend(emit_globals(&tds, tu));
 
     // A `_type` is a hand-written F* type expression with a C name attached.
@@ -8541,6 +8565,7 @@ pub fn emit_palow(
                     env,
                     sig: None,
                     fp: None,
+                    iface: None,
                 });
                 continue;
             }
@@ -8610,6 +8635,7 @@ pub fn emit_palow(
             env,
             fp: sig.fp.clone(),
             sig: Some(sig),
+            iface: None,
         });
     }
 
@@ -8653,6 +8679,17 @@ pub fn emit_palow(
                 _ => {}
             }
             out += &sig.decl;
+            // Everything written so far is exactly what the interface says:
+            // the signature, and `divergent` if the body turned out to be.
+            // A `_pure` function is an F* `let` and has no signature line to
+            // publish, so it gets no interface and stays fully visible.
+            it.iface = sig.decl.trim_start().starts_with("fn ").then(|| {
+                let mut i = String::new();
+                if matches!(&body, Ok(b) if b.divergent) {
+                    i += "divergent\n";
+                }
+                i + &sig.iface
+            });
             match body {
                 Ok(TranslatedBody { lines, .. }) => {
                     out += "{\n";
@@ -8692,6 +8729,9 @@ pub fn emit_palow(
     };
     for i in order {
         let name = items[i].name.clone();
+        if let Some(iface) = items[i].iface.take() {
+            ifaces.insert(format!("Func_{}", name), iface);
+        }
         chunks.push(Chunk {
             module: format!("Func_{}", name),
             code: std::mem::take(&mut items[i].code),
@@ -8713,7 +8753,7 @@ pub fn emit_palow(
         }
     }
 
-    into_modules(chunks)
+    into_modules(chunks, &ifaces)
 }
 
 /// The `open`s every generated module needs whatever it contains: the Palow
@@ -8821,7 +8861,7 @@ fn defined_names(code: &str) -> Vec<String> {
 /// cycle -- which matters, because F* modules may not be mutually recursive
 /// and C declarations, unlike F* ones, routinely refer to each other in an
 /// order the file does not fix.
-fn into_modules(chunks: Vec<Chunk>) -> Vec<PalowModule> {
+fn into_modules(chunks: Vec<Chunk>, ifaces: &HashMap<String, String>) -> Vec<PalowModule> {
     // A C name can produce more than one chunk -- a `_pure` function that did
     // not become an F* definition leaves a note behind and is then translated
     // again as a Pulse `fn` -- and both belong to the same module.
@@ -8869,15 +8909,27 @@ fn into_modules(chunks: Vec<Chunk>) -> Vec<PalowModule> {
         }
         deps.insert(ch.module.clone(), opens.clone());
 
-        let mut code = format!("module {}\n", ch.module);
-        code += HEADER;
-        code += PREAMBLE;
-        for m in &opens {
-            code += &format!("open {}\n", m);
-        }
-        if !opens.is_empty() {
-            code += "\n";
-        }
+        // The interface repeats the implementation's preamble verbatim,
+        // including its `open`s. They are computed from the body, so an
+        // interface may open a module its own text does not name -- harmless,
+        // and the alternative is a second scan that could disagree with the
+        // first about which module a name belongs to.
+        let preamble = {
+            let mut p = format!("module {}\n", ch.module);
+            p += HEADER;
+            p += PREAMBLE;
+            for m in &opens {
+                p += &format!("open {}\n", m);
+            }
+            if !opens.is_empty() {
+                p += "\n";
+            }
+            p
+        };
+        let iface = ifaces
+            .get(&ch.module)
+            .map(|body| format!("{}{}", preamble, body));
+        let mut code = preamble;
         code += &ch.code;
         for n in defined_names(&ch.code) {
             owner.insert(n, ch.module.clone());
@@ -8885,6 +8937,7 @@ fn into_modules(chunks: Vec<Chunk>) -> Vec<PalowModule> {
         out.push(PalowModule {
             module_name: ch.module,
             code,
+            iface,
             origin: ch.origin,
         });
     }

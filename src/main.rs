@@ -375,6 +375,11 @@ fn main() {
                 let path = outdir.join(format!("{}.fst", module.module_name));
                 write_if_changed(&path, module.code.as_bytes());
                 generated_files.insert(path);
+                if let Some(iface) = &module.iface {
+                    let path = outdir.join(format!("{}.fsti", module.module_name));
+                    write_if_changed(&path, iface.as_bytes());
+                    generated_files.insert(path);
+                }
             }
             // The same three files the old translator writes, for the same
             // reason: an IDE pointed at the output directory expects to find
