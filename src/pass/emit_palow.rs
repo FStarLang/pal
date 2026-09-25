@@ -1892,6 +1892,16 @@ impl<'a> Spec<'a> {
                     k => Ok(format!("({} +! {}sz)", a, k)),
                 }
             }
+            // A mutable global's address is a closed term the model already
+            // publishes, so `&g` in a contract is that term. Ownership of it
+            // is a separate matter and still has to be stated; what this says
+            // is only *where* the object is.
+            ExprT::Var(v)
+                if self.env.lookup_var(v).is_none() && self.env.addressable_global(v).is_some() =>
+            {
+                self.uses.borrow_mut().insert(format!("Global_{}", v.val));
+                Ok(format!("addr_var_{}", v.val))
+            }
             _ => Err(format!("an address of {} in a contract", expr_kind(e))),
         }
     }
@@ -3551,6 +3561,11 @@ fn emit_fn(
     // then written by one thread during start-up, then shared read-only.
     for g in globals {
         ghosts.push(format!("(#gval_{}: erased ({}))", g.name, g.fstar_ty));
+        // The value it holds on entry is part of the witness, for the same
+        // reason a parameter's pointee is: a caller reaching this function
+        // through a pointer has to say which state it is handing over, and a
+        // global's state is no less part of that for being unnamed in C.
+        wits.push((format!("gval_{}", g.name), g.fstar_ty.clone(), true));
         req.push(g.pts_to(&format!("gval_{}", g.name)));
         fresh.push((
             format!("gval_{}'", g.name),
@@ -4596,7 +4611,6 @@ fn emit_fn(
                 ParamMode::Regular | ParamMode::Const | ParamMode::Consumed
             )
         })
-        && globals.is_empty()
         && contract_ok;
     let fp = if simple {
         let tys: Vec<String> = decl
@@ -10012,11 +10026,20 @@ impl<'a> Body<'a> {
                 }
                 // A parameter the contract says nothing about points at
                 // memory this function does not hold. Saying so is the whole
-                // difference between a weaker specification and a wrong one.
-                ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => Err(format!(
-                    "a dereference of `{}`, whose ownership the contract does not state",
-                    v.val
-                )),
+                // difference between a weaker specification and a wrong one
+                // -- unless the contract spliced its ownership in, in which
+                // case what it says is beyond reading and the access is left
+                // to slprop matching, exactly as below.
+                ExprT::Var(v)
+                    if self.params.contains(&*v.val.to_string())
+                        && !self.spliced_own
+                        && !self.ghost_names.contains(&*v.val.to_string()) =>
+                {
+                    Err(format!(
+                        "a dereference of `{}`, whose ownership the contract does not state",
+                        v.val
+                    ))
+                }
                 // `malloc` may fail, so an allocation the source never tested
                 // is genuinely not owned. This is a real difference from the
                 // old model, whose allocator could not return null.
@@ -10048,7 +10071,10 @@ impl<'a> Body<'a> {
                 // and moving ownership onto a recovered pointer is exactly
                 // what such a statement is for -- so the access is left to
                 // slprop matching, on the same terms a spliced contract gets.
-                ExprT::Var(v) if self.ghost_names.contains(&*v.val.to_string()) => {
+                ExprT::Var(v)
+                    if self.ghost_names.contains(&*v.val.to_string())
+                        || self.params.contains(&*v.val.to_string()) =>
+                {
                     self.rvalue(inner)
                 }
                 ExprT::Var(v) => Err(format!(

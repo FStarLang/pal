@@ -4214,8 +4214,35 @@ new facts about memory.
    -- through typedefs, through `void *`, off a local's address, off an array
    parameter, off a call's result -- are all just code now.
 
-   As of this milestone: **1083 specifications, 1057 of them with real bodies,
-   6 admitted, 4 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
+   **A global's state is part of the witness.** A function reached through a
+   pointer was refused a wrapper whenever it touched a mutable global, and the
+   reason was that the wrapper's witness -- the tuple a caller of `call_div`
+   hands over to say which state the callee is being given -- was built out of
+   the parameters and the ghost arguments only. A global's ownership comes in
+   as a conjunct C never wrote, at a ghost value C never named, and that value
+   is no less part of what the caller is handing over for being invisible in
+   the source. Putting it in the witness is the whole fix; the four
+   `global_live_*` functions get wrappers, and their callers call them.
+
+   **`&g` denotes something in a contract.** A mutable global's address is a
+   closed term the model publishes, so a contract may name it. It owns
+   nothing by saying so -- an address is not a permission -- but it is what a
+   spliced ownership clause about a global has to start from.
+
+   **A contract that splices may have granted anything.** The body's rule for
+   dereferencing a parameter was that the contract has to say it owns the
+   pointee, which is right, and which was being applied even to contracts
+   whose ownership is spliced Pulse the emitter cannot read. Those already
+   had the right answer everywhere else: say nothing, emit the access, and
+   let slprop matching decide -- if the splice did not grant it, F\* rejects
+   it, which is where the honesty is. The same now goes for a parameter a
+   *ghost statement* in the body speaks about, which is how an unreachable
+   dereference gets its ownership: the path condition is contradictory, so
+   `rewrite emp as int32_t_pts_to p 1.0R 0l` is justified, and Palow having no
+   free `live` predicate to rewrite to instead turns out not to matter.
+
+   As of this milestone: **1083 specifications, 1063 of them with real bodies,
+   0 admitted, 0 contracts dropped, 20 external, 0 functions skipped**, plus **18 `_pure`
    functions emitted as F\* terms** (15 definitions and 3 `assume val`s). The generated `swap` is
    line-for-line the
    hand-written `swap_addressable` in `Examples`, which is the check that

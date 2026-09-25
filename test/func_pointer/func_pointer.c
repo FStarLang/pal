@@ -1557,22 +1557,44 @@ uint32_t global_live_counter;
 
 /* Ghost-indexed ownership relates entry and exit values without `_old` or
  * mutable entry equalities in the function-pointer postcondition guard. */
+#ifdef PALOW
+/* Palow names a global's entry value on its own: `_live` hands the ownership
+ * over at a ghost value and `_old` is that value, so the ghost argument the
+ * old model needs in order to say the same thing has nothing left to say. */
+void global_live_bump(void)
+    _requires(_live(global_live_counter))
+    _requires(global_live_counter < 100)
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == _old(global_live_counter) + 1)
+#else
 _ghost_arg(uint32_t before)
 void global_live_bump(void)
     _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_counter) $(before)))
     _requires(before < 100)
     _ensures(_live(global_live_counter))
     _ensures(global_live_counter == before + 1)
+#endif
 {
     global_live_counter = global_live_counter + 1;
 }
 
+#ifdef PALOW
+/* Palow names a global's entry value on its own: `_live` hands the ownership
+ * over at a ghost value and `_old` is that value, so the ghost argument the
+ * old model needs in order to say the same thing has nothing left to say. */
+void global_live_call(void)
+    _requires(_live(global_live_counter))
+    _requires(global_live_counter < 100)
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == _old(global_live_counter) + 1)
+#else
 _ghost_arg(uint32_t before)
 void global_live_call(void)
     _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_counter) $(before)))
     _requires(before < 100)
     _ensures(_live(global_live_counter))
     _ensures(global_live_counter == before + 1)
+#endif
 {
     void (*fp)(void) = global_live_bump;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_bump.func_global_live_bump__fp);
@@ -1605,6 +1627,25 @@ void global_live_set_call(void)
 uint32_t global_live_left;
 uint32_t global_live_right;
 
+#ifdef PALOW
+/* A global's ownership Palow names itself, so `_live` and `_old` say it; a
+ * `_plain` pointer's it does not -- that is what `_plain` is for -- so those
+ * two stay spliced, in Palow's own vocabulary. */
+_ghost_arg(uint32_t before_p)
+_ghost_arg(uint32_t saved)
+_preserves(_inline_pulse(uint32_t_pts_to $(q) 1.0R $(saved)))
+void global_live_mixed(_plain uint32_t *p, _plain uint32_t *q)
+    _requires(_live(global_live_left) && _live(global_live_right))
+    _requires(_inline_pulse(uint32_t_pts_to $(p) 1.0R $(before_p)))
+    _requires(global_live_left < 100)
+    _requires(global_live_right < 100)
+    _requires(before_p < 100)
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(_inline_pulse(uint32_t_pts_to $(p) 1.0R
+      (Pulse.Lib.C.UInt32.add_wrap $(before_p) 1ul)))
+    _ensures(global_live_left == _old(global_live_left) + 1)
+    _ensures(global_live_right == _old(global_live_right) + 1)
+#else
 _ghost_arg(uint32_t before_left)
 _ghost_arg(uint32_t before_right)
 _ghost_arg(uint32_t before_p)
@@ -1622,12 +1663,32 @@ void global_live_mixed(_plain uint32_t *p, _plain uint32_t *q)
     _ensures(global_live_left == before_left + 1)
     _ensures(global_live_right == before_right + 1)
     _ensures(*p == before_p + 1)
+#endif
 {
     global_live_left = global_live_left + 1;
     global_live_right = global_live_right + 1;
     *p = *p + 1;
 }
 
+#ifdef PALOW
+/* A global's ownership Palow names itself, so `_live` and `_old` say it; a
+ * `_plain` pointer's it does not -- that is what `_plain` is for -- so those
+ * two stay spliced, in Palow's own vocabulary. */
+_ghost_arg(uint32_t before_p)
+_ghost_arg(uint32_t saved)
+_preserves(_inline_pulse(uint32_t_pts_to $(q) 1.0R $(saved)))
+void global_live_mixed_call(_plain uint32_t *p, _plain uint32_t *q)
+    _requires(_live(global_live_left) && _live(global_live_right))
+    _requires(_inline_pulse(uint32_t_pts_to $(p) 1.0R $(before_p)))
+    _requires(global_live_left < 100)
+    _requires(global_live_right < 100)
+    _requires(before_p < 100)
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(_inline_pulse(uint32_t_pts_to $(p) 1.0R
+      (Pulse.Lib.C.UInt32.add_wrap $(before_p) 1ul)))
+    _ensures(global_live_left == _old(global_live_left) + 1)
+    _ensures(global_live_right == _old(global_live_right) + 1)
+#else
 _ghost_arg(uint32_t before_left)
 _ghost_arg(uint32_t before_right)
 _ghost_arg(uint32_t before_p)
@@ -1645,6 +1706,7 @@ void global_live_mixed_call(_plain uint32_t *p, _plain uint32_t *q)
     _ensures(global_live_left == before_left + 1)
     _ensures(global_live_right == before_right + 1)
     _ensures(*p == before_p + 1)
+#endif
 {
     void (*fp)(_plain uint32_t *, _plain uint32_t *) = global_live_mixed;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);

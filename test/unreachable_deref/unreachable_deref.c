@@ -9,10 +9,21 @@ int unreachable_read(_plain int *p)
   if (1)
     return 7;
 
+#ifdef PALOW
+  /* Palow has no free `live`: ownership of an `int` object is a points-to at
+     its address, and there is nothing weaker to rewrite to. The contradictory
+     path condition justifies the stronger rewrite just as well. */
+  _ghost_stmt(rewrite emp as int32_t_pts_to $(p) 1.0R 0l);
+#else
   _ghost_stmt(rewrite emp as live $(p));
+#endif
   return *p;
   /* PAL places trailing ghost statements before the generated return. */
+#ifdef PALOW
+  _ghost_stmt(rewrite (int32_t_pts_to $(p) 1.0R 0l) as emp);
+#else
   _ghost_stmt(rewrite (live $(p)) as emp);
+#endif
 }
 
 _ensures(return == 7)
