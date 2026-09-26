@@ -85,6 +85,58 @@ typedef int32_t binop_fn(int32_t, int32_t);
 /* ---- storing & decay ---- */
 
 /* A function-pointer local stored but never called. */
+/* Seeding `is_valid` when a function decays to an address, and putting it
+   down again afterwards, is scaffolding the old translator needs written at
+   the source level. Palow's emitter does both itself at every decay site, so
+   under PALOW these statements are not merely unnecessary but duplicates that
+   would be left over at the end of the function. */
+#ifdef PALOW
+#define _fp_ghost(x)
+#else
+#define _fp_ghost(x) _ghost_stmt(x)
+#endif
+
+/* Likewise for opening a local struct's storage before its fields are
+   written one at a time: the old model needs the source to say so, Palow
+   scatters and gathers the object itself. */
+#ifdef PALOW
+#define _unfold_uninit(T, p)
+#else
+#define _unfold_uninit(T, p) _ghost_stmt($unfold-uninit(T) p)
+#endif
+
+/* Both memory models axiomatize function pointers the same way, under
+   different names: `Pulse.Lib.C.FuncPtr` for PAL's model and
+   `Pulse.Lib.C.Palow.FnPtr` for Palow's. A one-line `include` gives the
+   annotations below a single spelling that works for either, so the test can
+   say what it is about instead of saying it twice.
+
+   The genuine differences are two. PAL's `func_ptr a b` remembers the domain
+   and range; Palow's `ptr` is one type for every pointer and forgets them,
+   since C does too. And the two emitters build a callback's ghost witness
+   differently -- PAL pairs the resource witness with the `_ghost_arg` tuple,
+   Palow has neither here -- so the witness type gets a name as well. The shim
+   names both away. */
+#ifdef PALOW
+_include_pulse(Fp_shim,
+  include Pulse.Lib.C.Palow.FnPtr
+
+  let func_ptr (a b: Type0) = Pulse.Lib.C.Palow.Ptr.ptr
+  let i32 = FStar.Int32.t
+  let wit = unit
+  unfold let i32_pred (x: i32) (p: perm) : slprop = emp
+)
+#else
+_include_pulse(Fp_shim,
+  include Pulse.Lib.C.FuncPtr
+
+  let i32 = Typedef_int32_t.ty_int32_t
+  let wit = unit & unit
+  unfold let i32_pred (x: i32) (p: perm) : slprop =
+    Typedef_int32_t.ty_int32_t__pred x p
+)
+#endif
+
 void store_no_call(void)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
@@ -95,7 +147,13 @@ void take_pointer(void)
 {
     void (*fp)(void) = ghost_only;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_ghost_only.func_ghost_only__fp);
+#ifdef PALOW
+    /* Palow's call witness is the tuple of ghost arguments alone: ownership
+       is named in the contract, so there is no leading unit component. */
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide 0ul));
+#else
     _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), 0ul)));
+#endif
     fp();
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 }
@@ -107,7 +165,11 @@ uint32_t take_pointer_ghost_args(void)
 {
     uint32_t (*fp)(uint32_t) = ghost_next;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Funcptr_ghost_next.func_ghost_next__fp);
+#ifdef PALOW
+    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide (41ul, 42ul)));
+#else
     _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), (41ul, 42ul))));
+#endif
     uint32_t result = fp(41);
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     return result;
@@ -118,9 +180,9 @@ int32_t use_no_amp(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Explicit address-of `&`. */
@@ -128,9 +190,9 @@ int32_t use_amp(void)
     _ensures(return == 7)
 {
     int32_t (*fp)(int32_t, int32_t) = &add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp(3, 4);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Transitive copy from another pointer. */
@@ -139,9 +201,9 @@ int32_t use_transitive(void)
 {
     int32_t (*fp1)(int32_t, int32_t) = add;
     int32_t (*fp2)(int32_t, int32_t) = fp1;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp2(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Straight-line reassignment: the same pointer, different targets per call. */
@@ -149,13 +211,13 @@ int32_t use_reassign(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     int32_t x = fp(1, 2);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
     fp = subtract;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
     int32_t y = fp(8, 6);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
     return y + x;
 }
 
@@ -166,9 +228,9 @@ int32_t use_reassign_copy(void)
     int32_t (*fp)(int32_t, int32_t) = subtract;
     int32_t (*src)(int32_t, int32_t) = add;
     fp = src;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp(1, 2);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* ---- type spellings ---- */
@@ -178,9 +240,9 @@ int32_t use_inline_declarator(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* `typedef`'d function-pointer type. */
@@ -188,9 +250,9 @@ int32_t use_typedef(void)
     _ensures(return == 5)
 {
     binop fp = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Const-qualified parameter types (qualifiers ignored). */
@@ -198,9 +260,9 @@ int32_t qualified_params(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(const int32_t, const int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* A function type (not a pointer) that decays to a pointer. */
@@ -208,9 +270,9 @@ int32_t func_type_decay(void)
     _ensures(return == 5)
 {
     binop_fn *fp = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Cast between compatible function-pointer types. */
@@ -218,9 +280,9 @@ int32_t use_cast(void)
     _ensures(return == 5)
 {
     binop fp = (binop) add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* ---- null & comparison ---- */
@@ -309,9 +371,9 @@ int32_t pass_local_cb(int32_t x)
 void use_void_cb(void)
 {
     void (*cb)(void) = do_nothing;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_do_nothing.func_do_nothing__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_do_nothing.func_do_nothing__fp);
     cb();
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Arity-1 call. */
@@ -319,9 +381,9 @@ int32_t use_arity1(void)
     _ensures(return == -5)
 {
     int32_t (*g)(int32_t) = neg;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_neg.func_neg__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_neg.func_neg__fp);
     return g(5);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Arity-3 call, mixed-width tuple. */
@@ -329,9 +391,9 @@ uint32_t use_arity3(void)
     _ensures(return == 15)
 {
     uint32_t (*fp3)(uint8_t, uint32_t, int32_t) = combine;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_combine.func_combine__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_combine.func_combine__fp);
     return fp3(5, 10, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Arity-3 call, mixed-width tuple, with `&`. */
@@ -339,9 +401,9 @@ uint32_t use_arity3_amp(void)
     _ensures(return == 15)
 {
     uint32_t (*fp3)(uint8_t, uint32_t, int32_t) = &combine;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_combine.func_combine__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_combine.func_combine__fp);
     return fp3(5, 10, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Same pointer called twice off one `of_fn_valid` (validity persists). */
@@ -349,10 +411,10 @@ int32_t call_twice(void)
     _ensures(return == 10)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     int32_t x = fp(2, 3);
     int32_t y = fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
     return x + y;
 }
 
@@ -366,14 +428,14 @@ int32_t use_conditional(int32_t sub)
 {
     if (sub == 1) {
         int32_t (*f)(int32_t, int32_t) = subtract;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
+        _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
         return f(8, 4);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+        _fp_ghost(Fp_shim.drop_is_valid _ _ _);
     } else {
         int32_t (*f)(int32_t, int32_t) = add;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+        _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
         return f(8, 4);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+        _fp_ghost(Fp_shim.drop_is_valid _ _ _);
     }
 }
 
@@ -383,9 +445,9 @@ int32_t ptr_to_fp(void)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
     int32_t (**pp)(int32_t, int32_t) = &fp;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return (*pp)(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* ---- loops ----
@@ -397,19 +459,19 @@ int32_t loop_call(void)
     _ensures(return == 6)
 {
     int32_t (*fp)(int32_t, int32_t) = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     int32_t acc = 1;
     int32_t i = 0;
     while (i < 5)
         _invariant(_live(i) && _live(acc))
-        _invariant(_inline_pulse(Pulse.Lib.C.FuncPtr.is_valid $(fp) true
-            (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp)))
+        _invariant(_inline_pulse(Fp_shim.is_valid $(fp) true
+            (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp)))
         _invariant(i >= 0 && i <= 5 && acc == i + 1)
     {
         acc = fp(acc, 1);
         i = i + 1;
     }
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
     return acc;
 }
 
@@ -419,8 +481,8 @@ int32_t loop_call(void)
 /* Function pointer as a callback parameter. */
 int32_t apply(int32_t (*op)(int32_t, int32_t)
                   _refine((_slprop) _inline_pulse(
-                      Pulse.Lib.C.FuncPtr.is_valid $(this) true
-                          (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp))),
+                      Fp_shim.is_valid $(this) true
+                          (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp))),
               int32_t a, int32_t b)
     _requires(a > 0 && a < 100 && b > 0 && b < 100)
     _ensures(return == a + b)
@@ -432,16 +494,16 @@ int32_t apply(int32_t (*op)(int32_t, int32_t)
 int32_t use_apply_add(void)
     _ensures(return == 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return apply(add, 2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Arity-1 callback parameter. */
 int32_t apply1(int32_t (*op)(int32_t)
                    _refine((_slprop) _inline_pulse(
-                       Pulse.Lib.C.FuncPtr.is_valid $(this) true
-                           (Pulse.Lib.C.FuncPtr.pre_of Funcptr_neg.func_neg__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_neg.func_neg__fp))),
+                       Fp_shim.is_valid $(this) true
+                           (Fp_shim.pre_of Funcptr_neg.func_neg__fp) (Fp_shim.post_of Funcptr_neg.func_neg__fp))),
                int32_t x)
     _requires(x > -100 && x < 100)
     _ensures(return == -x)
@@ -453,16 +515,16 @@ int32_t apply1(int32_t (*op)(int32_t)
 int32_t use_apply_neg(void)
     _ensures(return == -5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_neg.func_neg__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_neg.func_neg__fp);
     return apply1(neg, 5);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Callback parameter typed via the `binop` typedef. */
 int32_t apply_typedef(binop op
                           _refine((_slprop) _inline_pulse(
-                              Pulse.Lib.C.FuncPtr.is_valid $(this) true
-                                  (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp))),
+                              Fp_shim.is_valid $(this) true
+                                  (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp))),
                       int32_t a, int32_t b)
     _requires(a > 0 && a < 100 && b > 0 && b < 100)
     _ensures(return == a + b)
@@ -474,16 +536,16 @@ int32_t apply_typedef(binop op
 int32_t typedef_callback(void)
     _ensures(return == 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return apply_typedef(add, 2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Forward a callback parameter onward to another function (`apply`). */
 int32_t forward(int32_t (*op)(int32_t, int32_t)
                     _refine((_slprop) _inline_pulse(
-                        Pulse.Lib.C.FuncPtr.is_valid $(this) true
-                            (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp))),
+                        Fp_shim.is_valid $(this) true
+                            (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp))),
                 int32_t a, int32_t b)
     _requires(a > 0 && a < 100 && b > 0 && b < 100)
     _ensures(return == a + b)
@@ -495,9 +557,9 @@ int32_t forward(int32_t (*op)(int32_t, int32_t)
 int32_t use_forward(void)
     _ensures(return == 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return forward(add, 2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Higher-order: `g` itself takes a function pointer (like `apply`). Two
@@ -505,25 +567,25 @@ int32_t use_forward(void)
    so the surplus `add` fact is dropped. */
 int32_t hof(int32_t (*g)(int32_t (*)(int32_t, int32_t), int32_t, int32_t)
                 _refine((_slprop) _inline_pulse(
-                    Pulse.Lib.C.FuncPtr.is_valid $(this) true
-                        (Pulse.Lib.C.FuncPtr.pre_of Funcptr_apply.func_apply__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_apply.func_apply__fp))),
+                    Fp_shim.is_valid $(this) true
+                        (Fp_shim.pre_of Funcptr_apply.func_apply__fp) (Fp_shim.post_of Funcptr_apply.func_apply__fp))),
             int32_t a, int32_t b)
     _requires(a > 0 && a < 100 && b > 0 && b < 100)
     _ensures(return == a + b)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return g(add, a, b);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid
-        (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) _ _);
+    _fp_ghost(Fp_shim.drop_is_valid
+        (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) _ _);
 }
 
 /* Passing concrete `apply` (itself a callback-taking function) to `hof`. */
 int32_t use_hof(void)
     _ensures(return == 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_apply.func_apply__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_apply.func_apply__fp);
     return hof(apply, 2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* `apply_weaker` takes a callback whose declared post (`aw_post`) is weaker
@@ -531,14 +593,14 @@ int32_t use_hof(void)
    onto that weaker spec. */
 _include_pulse(Apply_weaker_spec,
   unfold
-  let aw_post (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-              (y_fp: erased (unit & unit))
-              (return_1: Typedef_int32_t.ty_int32_t) : slprop =
+  let aw_post (x_fp: (Fp_shim.i32 & Fp_shim.i32))
+              (y_fp: erased Fp_shim.wit)
+              (return_1: Fp_shim.i32) : slprop =
     let var_a = fst x_fp in
     let var_b = snd x_fp in
-    (Typedef_int32_t.ty_int32_t__pred var_a 1.0R) **
-    (Typedef_int32_t.ty_int32_t__pred var_b 1.0R) **
-    (Typedef_int32_t.ty_int32_t__pred return_1 1.0R) **
+    (Fp_shim.i32_pred var_a 1.0R) **
+    (Fp_shim.i32_pred var_b 1.0R) **
+    (Fp_shim.i32_pred return_1 1.0R) **
     pure (
       (((((0 < (id #int (Int32.v var_a))) && ((id #int (Int32.v var_a)) < 100)) &&
             (0 < (id #int (Int32.v var_b)))) && ((id #int (Int32.v var_b)) < 100)) &&
@@ -546,31 +608,31 @@ _include_pulse(Apply_weaker_spec,
       ==> (return_1 `Int32.lt` var_a))
 
   ghost
-  fn wpost_weak (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-                (y: erased (unit & unit))
-                (r: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y r
+  fn wpost_weak (x: (Fp_shim.i32 & Fp_shim.i32))
+                (y: erased Fp_shim.wit)
+                (r: Fp_shim.i32)
+    requires (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) x y r
     ensures aw_post x y r
   { () }
 
   ghost
-  fn wpre_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-             (y: erased (unit & unit))
-    requires (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
+  fn wpre_id (x: (Fp_shim.i32 & Fp_shim.i32))
+             (y: erased Fp_shim.wit)
+    requires (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) x y
+    ensures (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
 
   ghost
   fn weaken_sub_to_aw
-       (f: Pulse.Lib.C.FuncPtr.func_ptr
-             (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t)
-             Typedef_int32_t.ty_int32_t)
-    requires Pulse.Lib.C.FuncPtr.is_valid f true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp)
-    ensures Pulse.Lib.C.FuncPtr.is_valid f true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) aw_post
+       (f: Fp_shim.func_ptr
+             (Fp_shim.i32 & Fp_shim.i32)
+             Fp_shim.i32)
+    requires Fp_shim.is_valid f true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp)
+    ensures Fp_shim.is_valid f true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) aw_post
   {
-    Pulse.Lib.C.FuncPtr.weaken f true true
-      (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp)
-      (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) aw_post
+    Fp_shim.weaken f true true
+      (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp)
+      (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) aw_post
       (fun _ y -> y)
       wpre_id
       wpost_weak
@@ -580,8 +642,8 @@ _include_pulse(Apply_weaker_spec,
 /* Callback declared with a weaker postcondition than `subtract` provides. */
 int32_t apply_weaker(int32_t (*op)(int32_t, int32_t)
                          _refine((_slprop) _inline_pulse(
-                             Pulse.Lib.C.FuncPtr.is_valid $(this) true
-                                 (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) Apply_weaker_spec.aw_post)),
+                             Fp_shim.is_valid $(this) true
+                                 (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) Apply_weaker_spec.aw_post)),
                      int32_t a, int32_t b)
     _requires(a > 0 && a < 100 && b > 0 && b < 100 && a > b)
     _ensures(return < a)
@@ -593,26 +655,40 @@ int32_t apply_weaker(int32_t (*op)(int32_t, int32_t)
 int32_t weaken_callback(void)
     _ensures(return < 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
+    _ghost_stmt(Fp_shim.of_fn_div_valid (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) Funcptr_subtract.func_subtract__fp);
     _ghost_stmt(Apply_weaker_spec.weaken_sub_to_aw _);
     return apply_weaker(subtract, 5, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    /* `apply_weaker` hands the weakened validity back, so it has to be
+       dropped here.  Palow seeds a second, unweakened copy at the decay site
+       and drops that one itself, which is why this drop has to name the specs
+       it means instead of leaving them to inference. */
+    _ghost_stmt(Fp_shim.drop_is_valid (Fp_shim.of_fn_div (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) Funcptr_subtract.func_subtract__fp) (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) Apply_weaker_spec.aw_post);
 }
 
 /* `_nullable` callback: validity is wrapped in `unless_null`; the `if (fp)`
    branch elims it to `is_valid` for the call and intros it back afterwards. */
 int32_t guarded_call(int32_t (*fp)(int32_t, int32_t) _nullable
                          _refine((_slprop) _inline_pulse(
-                             Pulse.Lib.C.FuncPtr.is_valid $(this) true
-                                 (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp))))
+                             Fp_shim.is_valid $(this) true
+                                 (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp))))
     _ensures(return == 0 || return == 5)
 {
     if (fp) {
+#ifdef PALOW
+        /* Palow states a `_refine` on a `_nullable` parameter as it is
+           written, without wrapping it in `unless_null`, so validity is
+           already in hand inside the guard and there is nothing to eliminate
+           or reintroduce. The precondition is correspondingly stronger --
+           a caller must supply validity even to pass null -- which palow.md
+           records as a known deviation. */
+        return fp(2, 3);
+#else
         _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_nonnull $(fp)
-                        (Pulse.Lib.C.FuncPtr.is_valid $(fp) true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp)));
+                        (Fp_shim.is_valid $(fp) true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp)));
         return fp(2, 3);
         _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_nonnull $(fp)
-                        (Pulse.Lib.C.FuncPtr.is_valid $(fp) true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp)));
+                        (Fp_shim.is_valid $(fp) true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp)));
+#endif
     }
     return 0;
 }
@@ -640,12 +716,12 @@ int32_t is_set(int32_t (*fp)(int32_t, int32_t) _nullable)
 _include_pulse(Reassign_join_spec,
   unfold
   let rj_pre (g: bool)
-             (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-             (y_fp: erased (unit & unit)) : slprop =
+             (x_fp: (Fp_shim.i32 & Fp_shim.i32))
+             (y_fp: erased Fp_shim.wit) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
-    ((Typedef_int32_t.ty_int32_t__pred var_a 1.0R)) **
-    ((Typedef_int32_t.ty_int32_t__pred var_b 1.0R)) **
+    ((Fp_shim.i32_pred var_a 1.0R)) **
+    ((Fp_shim.i32_pred var_b 1.0R)) **
     (pure (if g
            then ((((((0 < (id #int (Int32.v var_a))) && ((id #int (Int32.v var_a)) < 100)) &&
                      (0 < (id #int (Int32.v var_b))))
@@ -660,14 +736,14 @@ _include_pulse(Reassign_join_spec,
 
   unfold
   let rj_post (g: bool)
-              (x_fp: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-              (y_fp: erased (unit & unit))
-              (return_1: Typedef_int32_t.ty_int32_t) : slprop =
+              (x_fp: (Fp_shim.i32 & Fp_shim.i32))
+              (y_fp: erased Fp_shim.wit)
+              (return_1: Fp_shim.i32) : slprop =
     let var_a = (fst x_fp) in
     let var_b = (snd x_fp) in
-    ((Typedef_int32_t.ty_int32_t__pred var_a 1.0R)) **
-    ((Typedef_int32_t.ty_int32_t__pred var_b 1.0R)) **
-    ((Typedef_int32_t.ty_int32_t__pred return_1 1.0R)) **
+    ((Fp_shim.i32_pred var_a 1.0R)) **
+    ((Fp_shim.i32_pred var_b 1.0R)) **
+    ((Fp_shim.i32_pred return_1 1.0R)) **
     (pure (if g
            then ((((((((0 < (id #int (Int32.v var_a))) && ((id #int (Int32.v var_a)) < 100)) &&
                        (0 < (id #int (Int32.v var_b))))
@@ -681,38 +757,61 @@ _include_pulse(Reassign_join_spec,
                    ((id #int (Int32.v var_b)) < 100)))) ==> (((return_1 = (var_a `Int32.add` var_b)))))))
 
   ghost
-  fn wpre_sub (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-              (y: erased (unit & unit))
+  fn wpre_sub (x: (Fp_shim.i32 & Fp_shim.i32))
+              (y: erased Fp_shim.wit)
     requires rj_pre true x y
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) x y
+    ensures (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) x y
   { () }
 
   ghost
-  fn wpost_sub (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: erased (unit & unit))
-               (r: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) x y r
+  fn wpost_sub (x: (Fp_shim.i32 & Fp_shim.i32))
+               (y: erased Fp_shim.wit)
+               (r: Fp_shim.i32)
+    requires (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) x y r
     ensures rj_post true x y r
   { () }
 
   ghost
-  fn wpre_add (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-              (y: erased (unit & unit))
+  fn wpre_add (x: (Fp_shim.i32 & Fp_shim.i32))
+              (y: erased Fp_shim.wit)
     requires rj_pre false x y
-    ensures (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) x y
+    ensures (Fp_shim.pre_of Funcptr_add.func_add__fp) x y
   { () }
 
   ghost
-  fn wpost_add (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: erased (unit & unit))
-               (r: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) x y r
+  fn wpost_add (x: (Fp_shim.i32 & Fp_shim.i32))
+               (y: erased Fp_shim.wit)
+               (r: Fp_shim.i32)
+    requires (Fp_shim.post_of Funcptr_add.func_add__fp) x y r
     ensures rj_post false x y r
   { () }
 
 )
 
 /* `fp` is `subtract` or `add` by a runtime guard, then called across the join. */
+#ifdef PALOW
+/* A scalar parameter is a value in Palow, not a cell, so there is no ghost
+   read to do: `use_sub` can be named directly in a contract. The local `fp`
+   does have storage, and its ownership is Palow's `ptr_pts_to`. */
+int32_t reassign_join(int32_t use_sub)
+    _requires(use_sub == 0 || use_sub == 1)
+    _ensures(use_sub == 1 ==> return == 2)
+    _ensures(use_sub == 0 ==> return == 4)
+{
+    int32_t (*fp)(int32_t, int32_t);
+    if (use_sub)
+    _ensures(_inline_pulse(exists* v. ptr_pts_to $&(fp) 1.0R v ** Fp_shim.is_valid v true (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub)))))
+    {
+        fp = subtract;
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+    } else {
+        fp = add;
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+    }
+    return fp(3, 1);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
+}
+#else
 int32_t reassign_join(int32_t use_sub)
     _requires(use_sub == 0 || use_sub == 1)
     _ensures(use_sub == 1 ==> return == 2)
@@ -721,21 +820,45 @@ int32_t reassign_join(int32_t use_sub)
     int32_t (*fp)(int32_t, int32_t);
     _ghost_stmt(let g_use_sub = Pulse.Lib.C.Ref.ghost_read $&(use_sub));
     if (use_sub)
-    _ensures(_inline_pulse((exists* v. Pulse.Lib.Reference.pts_to $&(fp) v ** Pulse.Lib.C.FuncPtr.is_valid v true (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub))) ** Pulse.Lib.Reference.pts_to $&(use_sub) (Ghost.reveal g_use_sub)))
+    _ensures(_inline_pulse((exists* v. Pulse.Lib.Reference.pts_to $&(fp) v ** Fp_shim.is_valid v true (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub))) ** Pulse.Lib.Reference.pts_to $&(use_sub) (Ghost.reveal g_use_sub)))
     {
         fp = subtract;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
+#endif
 
 /* Same as `reassign_join`, with the call after the join. */
+#ifdef PALOW
+/* A scalar parameter is a value in Palow, not a cell, so there is no ghost
+   read to do: `use_sub` can be named directly in a contract. The local `fp`
+   does have storage, and its ownership is Palow's `ptr_pts_to`. */
+int32_t reassign_join_call(int32_t use_sub)
+    _requires(use_sub == 0 || use_sub == 1)
+    _ensures(use_sub == 1 ==> return == 2)
+    _ensures(use_sub == 0 ==> return == 4)
+{
+    int32_t (*fp)(int32_t, int32_t);
+    if (use_sub)
+    _ensures(_inline_pulse(exists* v. ptr_pts_to $&(fp) 1.0R v ** Fp_shim.is_valid v true (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub)))))
+    {
+        fp = subtract;
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+    } else {
+        fp = add;
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+    }
+    return fp(3, 1);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
+}
+#else
 int32_t reassign_join_call(int32_t use_sub)
     _requires(use_sub == 0 || use_sub == 1)
     _ensures(use_sub == 1 ==> return == 2)
@@ -744,38 +867,56 @@ int32_t reassign_join_call(int32_t use_sub)
     int32_t (*fp)(int32_t, int32_t);
     _ghost_stmt(let g_use_sub = Pulse.Lib.C.Ref.ghost_read $&(use_sub));
     if (use_sub)
-    _ensures(_inline_pulse((exists* v. Pulse.Lib.Reference.pts_to $&(fp) v ** Pulse.Lib.C.FuncPtr.is_valid v true (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub))) ** Pulse.Lib.Reference.pts_to $&(use_sub) (Ghost.reveal g_use_sub)))
+    _ensures(_inline_pulse((exists* v. Pulse.Lib.Reference.pts_to $&(fp) v ** Fp_shim.is_valid v true (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub))) ** Pulse.Lib.Reference.pts_to $&(use_sub) (Ghost.reveal g_use_sub)))
     {
         fp = subtract;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
     } else {
         fp = add;
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
     }
     return fp(3, 1);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
+#endif
 
 /* Returns a runtime-chosen pointer, its validity threaded out through a
    guard-keyed `_ensures`. Written as explicit `if`/`else` so each arm has a
    source site to seed `of_fn_valid` and `weaken` onto the guard-keyed spec. */
+#ifdef PALOW
 binop select_op(int32_t use_sub)
     _requires(use_sub == 0 || use_sub == 1)
-    _ensures(_inline_pulse(Pulse.Lib.C.FuncPtr.is_valid return_1 true (Reassign_join_spec.rj_pre (int32_to_bool var_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool var_use_sub))))
+    _ensures(_inline_pulse(Fp_shim.is_valid $(return) true (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub)))))
 {
-    _ghost_stmt(let g_use_sub = Pulse.Lib.C.Ref.ghost_read $&(use_sub));
     if (use_sub) {
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_subtract.func_subtract__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
         return subtract;
     } else {
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-        _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken (Pulse.Lib.C.FuncPtr.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool $(use_sub))) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
         return add;
     }
 }
+#else
+binop select_op(int32_t use_sub)
+    _requires(use_sub == 0 || use_sub == 1)
+    _ensures(_inline_pulse(Fp_shim.is_valid return_1 true (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool var_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool var_use_sub))))
+{
+    _ghost_stmt(let g_use_sub = Pulse.Lib.C.Ref.ghost_read $&(use_sub));
+    if (use_sub) {
+        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_subtract.func_subtract__fp);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_subtract.func_subtract__fp) true true (Fp_shim.pre_of Funcptr_subtract.func_subtract__fp) (Fp_shim.post_of Funcptr_subtract.func_subtract__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_sub Reassign_join_spec.wpost_sub);
+        return subtract;
+    } else {
+        _ghost_stmt(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+        _ghost_stmt(Fp_shim.weaken (Fp_shim.of_fn_div _ _ Funcptr_add.func_add__fp) true true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp) (Reassign_join_spec.rj_pre (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (Reassign_join_spec.rj_post (Pulse.Lib.C.Casts.Bool.int32_to_bool g_use_sub)) (fun _ y -> y) Reassign_join_spec.wpre_add Reassign_join_spec.wpost_add);
+        return add;
+    }
+}
+#endif
 
 /* A function pointer used as a return value (via `select_op`). */
 int32_t return_fp(void)
@@ -783,7 +924,7 @@ int32_t return_fp(void)
 {
     binop fp = select_op(0);
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* ---- function pointers as data (structs, unions, heap, arrays) ----
@@ -802,11 +943,11 @@ int32_t use_struct_field(void)
     _ensures(return == 5)
 {
     struct ops o;
-    _ghost_stmt($unfold-uninit(struct ops) $&(o));
+    _unfold_uninit(struct ops, $&(o));
     o.op = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return o.op(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 union op_or_int {
@@ -820,9 +961,9 @@ int32_t union_field(void)
 {
     union op_or_int u;
     u.op = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return u.op(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Function pointer stored via a heap pointer, then called. */
@@ -831,10 +972,13 @@ int32_t malloc_fp(void)
 {
     int32_t (**pp)(int32_t, int32_t) =
         (int32_t (**)(int32_t, int32_t)) malloc(sizeof(int32_t (*)(int32_t, int32_t)));
+    if (pp == NULL) {
+        return 5;
+    }
     *pp = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     int32_t r = (*pp)(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
     free(pp);
     return r;
 }
@@ -860,9 +1004,9 @@ void ptr_arg_cb(int32_t *p)
     _ensures(*p == _old(*p) + 1)
 {
     void (*f)(int32_t *) = inc;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_inc.func_inc__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_inc.func_inc__fp);
     f(p);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 ---- end DISABLED ptr_arg_cb ---- */
 
@@ -881,10 +1025,10 @@ int32_t assign_from_agg(void)
     int32_t (*tbl[2])(int32_t, int32_t);
     tbl[0] = add;
     int32_t (*fp)(int32_t, int32_t) = tbl[0];
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(fp));
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.valid_cast _ $(fp));
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 int32_t use_array_slot(void)
@@ -893,10 +1037,10 @@ int32_t use_array_slot(void)
     int32_t (*tbl[2])(int32_t, int32_t);
     tbl[0] = add;
     int32_t (*f)(int32_t, int32_t) = tbl[0];
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(f));
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.valid_cast _ $(f));
     return f(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 int32_t array_runtime_idx(int32_t i)
@@ -907,10 +1051,10 @@ int32_t array_runtime_idx(int32_t i)
     tbl[0] = add;
     tbl[1] = add;
     int32_t (*f)(int32_t, int32_t) = tbl[i];
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(f));
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.valid_cast _ $(f));
     return f(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 int32_t multilayer(void)
@@ -920,12 +1064,12 @@ int32_t multilayer(void)
     tbl[0] = add;
     int32_t (*slot)(int32_t, int32_t) = tbl[0];
     struct ops o;
-    _ghost_stmt($unfold-uninit(struct ops) $&(o));
+    _unfold_uninit(struct ops, $&(o));
     o.op = slot;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.valid_cast _ $(slot));
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.valid_cast _ $(slot));
     return o.op(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 ---- end DISABLED block ---- */
 
@@ -944,18 +1088,26 @@ int32_t designated_vtable(void)
     _ensures(return == 5)
 {
     struct ops_c o = { .op = add };
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return o.op(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Ownership predicate for a `struct ops_c *` carrying `is_valid` on its `op`
    field, so `dispatch` can call through it. */
+#ifdef PALOW
+_include_pulse(Dispatch_spec,
+  unfold let ops_c_valid ([@@@mkey] this: Pulse.Lib.C.Palow.Ptr.ptr) (vo: Struct_ops_c.struct_ops_c) : slprop =
+    Struct_ops_c.struct_ops_c_pts_to this 1.0R vo **
+    Fp_shim.is_valid vo.Struct_ops_c.fld_op true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp)
+)
+#else
 _include_pulse(Dispatch_spec,
   unfold let ops_c_valid ([@@@mkey] this: ref Struct_ops_c.struct_ops_c) (vo: Struct_ops_c.struct_ops_c) : slprop =
     Pulse.Lib.Reference.pts_to this vo **
-    Pulse.Lib.C.FuncPtr.is_valid vo.Struct_ops_c.struct_ops_c__op true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_add.func_add__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_add.func_add__fp)
+    Fp_shim.is_valid vo.Struct_ops_c.struct_ops_c__op true (Fp_shim.pre_of Funcptr_add.func_add__fp) (Fp_shim.post_of Funcptr_add.func_add__fp)
 )
+#endif
 
 _type(ops_c_val, Struct_ops_c.struct_ops_c)
 _refine_value(ops_c_val vo, _inline_pulse(Dispatch_spec.ops_c_valid $(this) $(vo)))
@@ -976,11 +1128,11 @@ int32_t use_dispatch(void)
     _ensures(return == 5)
 {
     struct ops_c o;
-    _ghost_stmt($unfold-uninit(struct ops_c) $&(o));
+    _unfold_uninit(struct ops_c, $&(o));
     o.op = add;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     return dispatch(&o, 2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* A vtable with two distinct fn-ptr fields (`bin`, `un`), each called. */
@@ -993,15 +1145,15 @@ int32_t use_two_field_vtable(void)
     _ensures(return == -5)
 {
     struct vtable2 v;
-    _ghost_stmt($unfold-uninit(struct vtable2) $&(v));
+    _unfold_uninit(struct vtable2, $&(v));
     v.bin = add;
     v.un = neg;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
     int32_t s = v.bin(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_neg.func_neg__fp);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_neg.func_neg__fp);
     int32_t r = v.un(s);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
     return r;
 }
 
@@ -1015,17 +1167,33 @@ int32_t use_total_fp(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(int32_t, int32_t) = add_t;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Funcptr_add_t.func_add_t__fp);
+#ifdef PALOW
+/* Palow always reflects a C function as a possibly-divergent address: it
+   infers divergence per body rather than taking it from `_total`, and the
+   wrapper is written before any body is translated. So the total spellings
+   below -- `of_fn_valid`, `pre_of_tot`, and the `false` validity bit -- become
+   their divergent counterparts, and the weakening this section exercises runs
+   from `true` to `true`. Recorded in palow.md as a known deviation. */
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_add_t.func_add_t__fp);
     return fp(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#else
+    _fp_ghost(Fp_shim.of_fn_valid _ _ Funcptr_add_t.func_add_t__fp);
+    return fp(2, 3);
+#endif
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Callback parameter expecting a POSSIBLY-DIVERGENT pointer (`is_valid .. true`).
    The body is divergent (default), so the indirect call emits `call_div`. */
 int32_t apply_t(int32_t (*op)(int32_t, int32_t)
                     _refine((_slprop) _inline_pulse(
-                        Pulse.Lib.C.FuncPtr.is_valid $(this) true
-                            (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp))),
+#ifdef PALOW
+                        Fp_shim.is_valid $(this) true
+                            (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp))),
+#else
+                        Fp_shim.is_valid $(this) true
+                            (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp))),
+#endif
                 int32_t a, int32_t b)
     _requires(a > 0 && a < 100 && b > 0 && b < 100)
     _ensures(return == a + b)
@@ -1035,38 +1203,73 @@ int32_t apply_t(int32_t (*op)(int32_t, int32_t)
 
 /* Identity coercions plus a `weaken` from the total bit `false` to the divergent
    bit `true` (the `div ==> div'` refinement permits total->divergent). */
+#ifdef PALOW
 _include_pulse(Total_to_div_spec,
   ghost
-  fn wpre_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-             (y: erased (unit & unit))
-    requires (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
-    ensures (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
+  fn wpre_id (x: (Fp_shim.i32 & Fp_shim.i32))
+             (y: erased Fp_shim.wit)
+    requires (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) x y
+    ensures (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) x y
   { () }
 
   ghost
-  fn wpost_id (x: (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-               (y: erased (unit & unit))
-               (r: Typedef_int32_t.ty_int32_t)
-    requires (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
-    ensures (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
+  fn wpost_id (x: (Fp_shim.i32 & Fp_shim.i32))
+               (y: erased Fp_shim.wit)
+               (r: Fp_shim.i32)
+    requires (Fp_shim.post_of Funcptr_add_t.func_add_t__fp) x y r
+    ensures (Fp_shim.post_of Funcptr_add_t.func_add_t__fp) x y r
   { () }
 
   ghost
   fn weaken_t_to_div
-       (f: Pulse.Lib.C.FuncPtr.func_ptr
-             (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t)
-             Typedef_int32_t.ty_int32_t)
-    requires Pulse.Lib.C.FuncPtr.is_valid f false (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp)
-    ensures Pulse.Lib.C.FuncPtr.is_valid f true (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp)
+       (f: Fp_shim.func_ptr
+             (Fp_shim.i32 & Fp_shim.i32)
+             Fp_shim.i32)
+    requires Fp_shim.is_valid f true (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp)
+    ensures Fp_shim.is_valid f true (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp)
   {
-    Pulse.Lib.C.FuncPtr.weaken f false true
-      (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp)
-      (Pulse.Lib.C.FuncPtr.pre_of_tot Funcptr_add_t.func_add_t__fp) (Pulse.Lib.C.FuncPtr.post_of_tot Funcptr_add_t.func_add_t__fp)
+    Fp_shim.weaken f true true
+      (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp)
+      (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp)
       (fun _ y -> y)
       wpre_id
       wpost_id
   }
 )
+#else
+_include_pulse(Total_to_div_spec,
+  ghost
+  fn wpre_id (x: (Fp_shim.i32 & Fp_shim.i32))
+             (y: erased Fp_shim.wit)
+    requires (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
+    ensures (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) x y
+  { () }
+
+  ghost
+  fn wpost_id (x: (Fp_shim.i32 & Fp_shim.i32))
+               (y: erased Fp_shim.wit)
+               (r: Fp_shim.i32)
+    requires (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
+    ensures (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp) x y r
+  { () }
+
+  ghost
+  fn weaken_t_to_div
+       (f: Fp_shim.func_ptr
+             (Fp_shim.i32 & Fp_shim.i32)
+             Fp_shim.i32)
+    requires Fp_shim.is_valid f false (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp)
+    ensures Fp_shim.is_valid f true (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp)
+  {
+    Fp_shim.weaken f false true
+      (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp)
+      (Fp_shim.pre_of_tot Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of_tot Funcptr_add_t.func_add_t__fp)
+      (fun _ y -> y)
+      wpre_id
+      wpost_id
+  }
+)
+#endif
 
 /* Pass the TOTAL `add_t` to a callback that expects a possibly-divergent
    pointer: seed validity at `false`, `weaken` it up to `true`, then call. Shows
@@ -1074,10 +1277,22 @@ _include_pulse(Total_to_div_spec,
 int32_t weaken_total_to_div(void)
     _ensures(return == 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Funcptr_add_t.func_add_t__fp);
+#ifdef PALOW
+    _ghost_stmt(Fp_shim.of_fn_div_valid (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp) Funcptr_add_t.func_add_t__fp);
     _ghost_stmt(Total_to_div_spec.weaken_t_to_div _);
+#else
+    _fp_ghost(Fp_shim.of_fn_valid _ _ Funcptr_add_t.func_add_t__fp);
+    _ghost_stmt(Total_to_div_spec.weaken_t_to_div _);
+#endif
     return apply_t(add_t, 2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#ifdef PALOW
+    /* Palow seeds its own copy of the validity at the decay site and drops
+       that one itself; the copy seeded above for the `weaken` comes back out
+       of the call and is dropped here. */
+    _ghost_stmt(Fp_shim.drop_is_valid (Fp_shim.of_fn_div (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp) Funcptr_add_t.func_add_t__fp) (Fp_shim.pre_of Funcptr_add_t.func_add_t__fp) (Fp_shim.post_of Funcptr_add_t.func_add_t__fp));
+#else
+    _ghost_stmt(Fp_shim.drop_is_valid _ _ _);
+#endif
 }
 
 /* Plain pointer parameter, no workaround annotations. Taking `touch`'s
@@ -1118,17 +1333,35 @@ void use_destroy_impl_fp(void)
    `struct itemx`; folding `is_valid` into the struct's own predicate would
    make `Struct_itemx` depend back on it, a circular module dependency
    (Error 308). */
+#ifdef PALOW
+_include_pulse(Itemx_spec,
+  unfold let itemx_valid ([@@@mkey] this: Pulse.Lib.C.Palow.Ptr.ptr) (vo: Struct_itemx.struct_itemx) : slprop =
+    Struct_itemx.struct_itemx_pts_to this 1.0R vo **
+    Pulse.Lib.C.Palow.Alloc.freeable this Struct_itemx.struct_itemx_sizeof **
+    Fp_shim.is_valid vo.Struct_itemx.fld_destroy true (Fp_shim.pre_of Funcptr_destroy_impl.func_destroy_impl__fp) (Fp_shim.post_of Funcptr_destroy_impl.func_destroy_impl__fp)
+)
+#else
 _include_pulse(Itemx_spec,
   unfold let itemx_valid ([@@@mkey] this: ref Struct_itemx.struct_itemx) (vo: Struct_itemx.struct_itemx) : slprop =
     Pulse.Lib.Reference.pts_to this vo **
     Pulse.Lib.C.Ref.freeable this **
-    Pulse.Lib.C.FuncPtr.is_valid vo.Struct_itemx.struct_itemx__destroy true (Pulse.Lib.C.FuncPtr.pre_of Funcptr_destroy_impl.func_destroy_impl__fp) (Pulse.Lib.C.FuncPtr.post_of Funcptr_destroy_impl.func_destroy_impl__fp)
+    Fp_shim.is_valid vo.Struct_itemx.struct_itemx__destroy true (Fp_shim.pre_of Funcptr_destroy_impl.func_destroy_impl__fp) (Fp_shim.post_of Funcptr_destroy_impl.func_destroy_impl__fp)
 )
+#endif
 
 _type(itemx_val, Struct_itemx.struct_itemx)
 _refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
 _plain
 typedef struct itemx *itemx_ptr;
+
+/* The same object, but only if there is one. `mk_itemx` allocates, so its
+   result is the nullable spelling; `destroy_via_field` consumes an object that
+   already exists, so it keeps the plain one. Palow alone: PAL's emitter states
+   a nullable grant but has no way to spend it at a call site. */
+_type(itemx_val, Struct_itemx.struct_itemx)
+_refine_value(itemx_val vo, _inline_pulse(Itemx_spec.itemx_valid $(this) $(vo)))
+_nullable _plain
+typedef struct itemx *itemx_optr;
 
 /* Self-dispatch through a field verifies once `self` is `_consumes`: a
    borrowed `self` opens two separate existentials for the same value
@@ -1138,7 +1371,7 @@ typedef struct itemx *itemx_ptr;
    `drop_is_valid` clears the leftover non-affine `is_valid` fact. */
 void destroy_via_field(_consumes itemx_ptr p) {
     p->destroy(p);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+    _fp_ghost(Fp_shim.drop_is_valid _ _ _);
 }
 
 /* Constructs a valid `struct itemx` and RETURNS it, instead of consuming it
@@ -1146,19 +1379,33 @@ void destroy_via_field(_consumes itemx_ptr p) {
    `mk_point`. `malloc`'s memory is genuinely uninitialized, so an explicit
    `$unfold-uninit` is needed before the field writes (unlike `vec_fam.c`'s
    `calloc`-based `vec_new`). */
+#ifdef PALOW
+itemx_optr mk_itemx(void)
+#else
 itemx_ptr mk_itemx(void)
+#endif
 {
     struct itemx *it = (struct itemx *) malloc(sizeof(struct itemx));
-    _ghost_stmt($unfold-uninit(struct itemx) $(it));
+#ifdef PALOW
+    if (it == NULL) {
+        return NULL;
+    }
+#endif
+    _unfold_uninit(struct itemx, $(it));
     it->destroy = destroy_impl;
     it->n = 0;
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);
+    _fp_ghost(Fp_shim.of_fn_div_valid _ _ Funcptr_destroy_impl.func_destroy_impl__fp);
     return it;
 }
 
 void use_mk_itemx(void)
 {
     itemx_ptr it = mk_itemx();
+#ifdef PALOW
+    if (it == NULL) {
+        return;
+    }
+#endif
     destroy_via_field(it);
 }
 
@@ -1223,7 +1470,12 @@ const struct mo_ops the_mo_ops = {
 
 /* Framing a call is different from framing a function pointer's validity.
    Both contracts use the same witness type; 42 is an arbitrary fixed
-   pointee value, so witness conversion is not involved in this example. */
+   pointee value, so witness conversion is not involved in this example.
+
+   Old model only for now: Palow's `FnPtr` has no `frame` axiom yet, and the
+   contracts below are written against Pulse references rather than addresses.
+   Porting it is on the Palow backlog. */
+#ifndef PALOW
 _include_pulse(Fp_frame_spec,
   unfold let plain_pre (p: ref Int32.t) (w: erased unit) : slprop = emp
   unfold let plain_post (p: ref Int32.t) (w: erased unit) (r: unit) : slprop = emp
@@ -1299,27 +1551,50 @@ void fp_frame_adapt(
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid $(f)
       Fp_frame_spec.framed_pre Fp_frame_spec.framed_post);
 }
+#endif
 
 uint32_t global_live_counter;
 
 /* Ghost-indexed ownership relates entry and exit values without `_old` or
  * mutable entry equalities in the function-pointer postcondition guard. */
+#ifdef PALOW
+/* Palow names a global's entry value on its own: `_live` hands the ownership
+ * over at a ghost value and `_old` is that value, so the ghost argument the
+ * old model needs in order to say the same thing has nothing left to say. */
+void global_live_bump(void)
+    _requires(_live(global_live_counter))
+    _requires(global_live_counter < 100)
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == _old(global_live_counter) + 1)
+#else
 _ghost_arg(uint32_t before)
 void global_live_bump(void)
     _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_counter) $(before)))
     _requires(before < 100)
     _ensures(_live(global_live_counter))
     _ensures(global_live_counter == before + 1)
+#endif
 {
     global_live_counter = global_live_counter + 1;
 }
 
+#ifdef PALOW
+/* Palow names a global's entry value on its own: `_live` hands the ownership
+ * over at a ghost value and `_old` is that value, so the ghost argument the
+ * old model needs in order to say the same thing has nothing left to say. */
+void global_live_call(void)
+    _requires(_live(global_live_counter))
+    _requires(global_live_counter < 100)
+    _ensures(_live(global_live_counter))
+    _ensures(global_live_counter == _old(global_live_counter) + 1)
+#else
 _ghost_arg(uint32_t before)
 void global_live_call(void)
     _requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(&global_live_counter) $(before)))
     _requires(before < 100)
     _ensures(_live(global_live_counter))
     _ensures(global_live_counter == before + 1)
+#endif
 {
     void (*fp)(void) = global_live_bump;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_bump.func_global_live_bump__fp);
@@ -1352,6 +1627,25 @@ void global_live_set_call(void)
 uint32_t global_live_left;
 uint32_t global_live_right;
 
+#ifdef PALOW
+/* A global's ownership Palow names itself, so `_live` and `_old` say it; a
+ * `_plain` pointer's it does not -- that is what `_plain` is for -- so those
+ * two stay spliced, in Palow's own vocabulary. */
+_ghost_arg(uint32_t before_p)
+_ghost_arg(uint32_t saved)
+_preserves(_inline_pulse(uint32_t_pts_to $(q) 1.0R $(saved)))
+void global_live_mixed(_plain uint32_t *p, _plain uint32_t *q)
+    _requires(_live(global_live_left) && _live(global_live_right))
+    _requires(_inline_pulse(uint32_t_pts_to $(p) 1.0R $(before_p)))
+    _requires(global_live_left < 100)
+    _requires(global_live_right < 100)
+    _requires(before_p < 100)
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(_inline_pulse(uint32_t_pts_to $(p) 1.0R
+      (Pulse.Lib.C.UInt32.add_wrap $(before_p) 1ul)))
+    _ensures(global_live_left == _old(global_live_left) + 1)
+    _ensures(global_live_right == _old(global_live_right) + 1)
+#else
 _ghost_arg(uint32_t before_left)
 _ghost_arg(uint32_t before_right)
 _ghost_arg(uint32_t before_p)
@@ -1369,12 +1663,32 @@ void global_live_mixed(_plain uint32_t *p, _plain uint32_t *q)
     _ensures(global_live_left == before_left + 1)
     _ensures(global_live_right == before_right + 1)
     _ensures(*p == before_p + 1)
+#endif
 {
     global_live_left = global_live_left + 1;
     global_live_right = global_live_right + 1;
     *p = *p + 1;
 }
 
+#ifdef PALOW
+/* A global's ownership Palow names itself, so `_live` and `_old` say it; a
+ * `_plain` pointer's it does not -- that is what `_plain` is for -- so those
+ * two stay spliced, in Palow's own vocabulary. */
+_ghost_arg(uint32_t before_p)
+_ghost_arg(uint32_t saved)
+_preserves(_inline_pulse(uint32_t_pts_to $(q) 1.0R $(saved)))
+void global_live_mixed_call(_plain uint32_t *p, _plain uint32_t *q)
+    _requires(_live(global_live_left) && _live(global_live_right))
+    _requires(_inline_pulse(uint32_t_pts_to $(p) 1.0R $(before_p)))
+    _requires(global_live_left < 100)
+    _requires(global_live_right < 100)
+    _requires(before_p < 100)
+    _ensures(_live(global_live_left) && _live(global_live_right))
+    _ensures(_inline_pulse(uint32_t_pts_to $(p) 1.0R
+      (Pulse.Lib.C.UInt32.add_wrap $(before_p) 1ul)))
+    _ensures(global_live_left == _old(global_live_left) + 1)
+    _ensures(global_live_right == _old(global_live_right) + 1)
+#else
 _ghost_arg(uint32_t before_left)
 _ghost_arg(uint32_t before_right)
 _ghost_arg(uint32_t before_p)
@@ -1392,6 +1706,7 @@ void global_live_mixed_call(_plain uint32_t *p, _plain uint32_t *q)
     _ensures(global_live_left == before_left + 1)
     _ensures(global_live_right == before_right + 1)
     _ensures(*p == before_p + 1)
+#endif
 {
     void (*fp)(_plain uint32_t *, _plain uint32_t *) = global_live_mixed;
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);

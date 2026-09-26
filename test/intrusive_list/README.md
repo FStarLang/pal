@@ -288,3 +288,22 @@ and configuration symlinks follow the shared test scaffold.
 Assertions and assertion-only calls retain their enabled/disabled behavior.
 When comparing native runs, exercise both ordinary and `NDEBUG` builds; ghost
 annotations themselves do not add runtime reads or writes.
+
+## Palow
+
+This test verifies under both memory models from one set of C sources. The
+Palow versions of the eleven helper modules live in `helpers/`, under the same
+module names as the old model's copies, which live in `helpers_old/`; the
+include path chooses by model.
+
+Two modules there have no counterpart in `helpers_old/`. `IntrusiveListNodeRef`
+presents Palow's `struct_list_node` in the shape `Pulse.Lib.Reference` has, so
+the generic list theory differs from its original only in a `module R = ...`
+line. `IntrusiveListItemRefs` does the same for the three client structs.
+
+Where the C used to name a model's own predicate -- `Pulse.Lib.Reference.pts_to`,
+a field reference, an array's contents -- it now names a helper that each tree
+defines for itself: `IntrusiveListIndexed.lpts_to`, `item_pts_to`, `item_link`,
+`samples_of`. The `$unfold`/`$fold` pairs around field accesses stay in the C
+because the current model needs them; Palow replaces them with the
+`focus`/`unfocus` it writes itself.

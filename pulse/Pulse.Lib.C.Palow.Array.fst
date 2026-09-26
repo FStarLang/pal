@@ -1,0 +1,682 @@
+module Pulse.Lib.C.Palow.Array
+
+(* ---------------------------------------------------------------------------
+   Palow layer 1: arrays.
+
+   Unlike scalars and structs, arrays need *no* per-type definitions. An array
+   of `n` elements of type `t` is the same combinator applied to `t`'s own
+   representation relation and element size, so PAL emits nothing at all for an
+   array type -- it just instantiates `array_repr` with the element's `t_repr`.
+
+   That is a real simplification over the current model, where `T[N]` has its
+   own F* type (`full_array_lspec T N`), its own size axiom, and a pointer-kind
+   distinction (`_array` vs `_arrayptr`) that exists precisely because the F*
+   type of a variable changes depending on how it is used.
+
+   Splitting an array at an index is just `mem_split` at the corresponding byte
+   offset, so subarrays, `a + i` pointer arithmetic and per-element ownership
+   all come from layer 0 rather than from array-specific axioms.
+   --------------------------------------------------------------------------- *)
+
+#lang-pulse
+open Pulse
+open Pulse.Lib.C.Palow.Bytes
+open Pulse.Lib.C.Palow.Ptr
+open Pulse.Lib.C.Palow
+
+module SZ = FStar.SizeT
+module Seq = FStar.Seq
+module M = FStar.Math.Lemmas
+
+(* ---------------------------------------------------------------------------
+   The representation relation
+   --------------------------------------------------------------------------- *)
+
+(* The byte range occupied by element `i` of an array with `esize`-byte
+   elements. Total, returning the empty range when `i` is out of bounds: no
+   `*_repr` relation accepts an empty range for a non-empty type, so
+   `array_repr` below still says what it should, and making this total avoids
+   dragging a bounds proof through every use site. *)
+let elem_bytes (esize: nat) (b: bytes) (i: nat) : bytes =
+  let lo = esize * i in
+  let hi = lo + esize in
+  if hi <= len b then slice b lo hi else Seq.empty
+
+let array_repr (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
+               (xs: Seq.seq t) (b: bytes) : prop =
+  len b == esize * Seq.length xs /\
+  (forall (i: nat). i < Seq.length xs ==> t_repr (Seq.index xs i) (elem_bytes esize b i))
+
+let array_pts_to (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
+                 ([@@@mkey] a: ptr) (p: perm) (xs: Seq.seq t) : slprop =
+  exists* b. mem_pts_to a p b ** pure (array_repr t_repr esize xs b)
+
+(* The two directions between an array's ownership and the bytes under it.
+   Every scalar type publishes this pair under its own name, and a union arm
+   or a structure field has to be able to ask for it without knowing which
+   kind of thing it is holding. `array_pts_to` is a definition, so both are
+   a fold. *)
+ghost fn array_conceal (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                       (#p: perm) (#b: bytes) (#xs: Seq.seq t)
+  requires mem_pts_to a p b
+  requires pure (array_repr t_repr (SZ.v esize) xs b)
+  ensures  array_pts_to t_repr (SZ.v esize) a p xs
+{
+  fold (array_pts_to t_repr (SZ.v esize) a p xs);
+}
+
+ghost fn array_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                      (#p: perm) (#xs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a p xs
+  ensures  exists* b. mem_pts_to a p b ** pure (array_repr t_repr (SZ.v esize) xs b)
+{
+  unfold (array_pts_to t_repr (SZ.v esize) a p xs);
+}
+
+(* ---------------------------------------------------------------------------
+   Arithmetic helpers
+
+   These three are the entire nonlinear content of the module: `esize * (i+1)`
+   is monotone in `i`, so element `i` of an `n`-element array lies within the
+   first `esize * n` bytes.
+   --------------------------------------------------------------------------- *)
+
+let elem_fits (esize: nat) (n: nat) (i: nat)
+  : Lemma (requires i < n)
+          (ensures  esize * i + esize <= esize * n)
+  = M.distributivity_add_right esize i 1;
+    M.lemma_mult_le_right esize (i + 1) n
+
+let elem_bytes_prefix (esize: nat) (b: bytes) (n: nat) (i: nat)
+  : Lemma (requires esize * n <= len b /\ i < n)
+          (ensures  elem_bytes esize (slice b 0 (esize * n)) i == elem_bytes esize b i)
+  = elem_fits esize n i;
+    Seq.slice_slice b 0 (esize * n) (esize * i) (esize * i + esize)
+
+let elem_bytes_suffix (esize: nat) (b: bytes) (n: nat) (i: nat)
+  : Lemma (requires esize * n <= len b /\ esize * (n + i) + esize <= len b)
+          (ensures  elem_bytes esize (slice b (esize * n) (len b)) i
+                    == elem_bytes esize b (n + i))
+  = M.distributivity_add_right esize n i;
+    Seq.slice_slice b (esize * n) (len b) (esize * i) (esize * i + esize)
+
+(* ---------------------------------------------------------------------------
+   Splitting and joining the representation
+   --------------------------------------------------------------------------- *)
+
+#push-options "--z3rlimit 40"
+let array_repr_split (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
+                     (xs: Seq.seq t) (b: bytes) (n: nat)
+  : Lemma (requires array_repr t_repr esize xs b /\ n <= Seq.length xs)
+          (ensures  esize * n <= len b /\
+                    array_repr t_repr esize (Seq.slice xs 0 n) (slice b 0 (esize * n)) /\
+                    array_repr t_repr esize (Seq.slice xs n (Seq.length xs))
+                                            (slice b (esize * n) (len b)))
+  = let m = Seq.length xs in
+    M.lemma_mult_le_right esize n m;
+    let pre = slice b 0 (esize * n) in
+    let post = slice b (esize * n) (len b) in
+    let aux_pre (i: nat) : Lemma (i < n ==> t_repr (Seq.index (Seq.slice xs 0 n) i)
+                                                  (elem_bytes esize pre i)) =
+      if i < n then elem_bytes_prefix esize b n i
+    in
+    Classical.forall_intro aux_pre;
+    let aux_post (i: nat) : Lemma (i < m - n ==> t_repr (Seq.index (Seq.slice xs n m) i)
+                                                       (elem_bytes esize post i)) =
+      if i < m - n then begin
+        elem_fits esize m (n + i);
+        elem_bytes_suffix esize b n i
+      end
+    in
+    Classical.forall_intro aux_post;
+    M.distributivity_sub_right esize m n
+#pop-options
+
+#push-options "--z3rlimit 40"
+let array_repr_join (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
+                    (xs ys: Seq.seq t) (b1 b2: bytes)
+  : Lemma (requires array_repr t_repr esize xs b1 /\ array_repr t_repr esize ys b2)
+          (ensures  array_repr t_repr esize (Seq.append xs ys) (append b1 b2))
+  = let n = Seq.length xs in
+    let m = Seq.length ys in
+    let b = append b1 b2 in
+    M.distributivity_add_right esize n m;
+    let aux (i: nat) : Lemma (i < n + m ==> t_repr (Seq.index (Seq.append xs ys) i)
+                                                  (elem_bytes esize b i)) =
+      if i < n then begin
+        elem_fits esize n i;
+        Seq.lemma_append_len_disj b1 b2 b1 b2;
+        Seq.slice_slice b 0 (len b1) (esize * i) (esize * i + esize);
+        append_slice_left b1 b2
+      end else if i < n + m then begin
+        let j = i - n in
+        elem_fits esize m j;
+        M.distributivity_add_right esize n j;
+        append_slice_right b1 b2;
+        Seq.slice_slice b (len b1) (len b) (esize * j) (esize * j + esize)
+      end
+    in
+    Classical.forall_intro aux
+#pop-options
+
+(* ---------------------------------------------------------------------------
+   Ownership split and join
+
+   `off` is passed in rather than computed as `esize * n` so that the caller
+   supplies the `size_t` multiplication (and its overflow proof) at the point
+   where it is known to fit; PAL always knows the offset statically.
+   --------------------------------------------------------------------------- *)
+
+ghost fn array_split (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                     (#p: perm) (#xs: Seq.seq t)
+                     (n: SZ.t { SZ.v n <= Seq.length xs })
+                     (off: SZ.t { SZ.v off == SZ.v esize * SZ.v n })
+  requires array_pts_to t_repr (SZ.v esize) a p xs
+  ensures  array_pts_to t_repr (SZ.v esize) a p (Seq.slice xs 0 (SZ.v n))
+  ensures  array_pts_to t_repr (SZ.v esize) (a +! off) p
+                        (Seq.slice xs (SZ.v n) (Seq.length xs))
+{
+  unfold array_pts_to t_repr (SZ.v esize) a p xs;
+  with b. assert (mem_pts_to a p b ** pure (array_repr t_repr (SZ.v esize) xs b));
+  array_repr_split t_repr (SZ.v esize) xs b (SZ.v n);
+  mem_split a off;
+  fold array_pts_to t_repr (SZ.v esize) a p (Seq.slice xs 0 (SZ.v n));
+  fold array_pts_to t_repr (SZ.v esize) (a +! off) p
+                    (Seq.slice xs (SZ.v n) (Seq.length xs));
+}
+
+ghost fn array_join (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                    (off: SZ.t) (#p: perm) (#xs #ys: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a p xs
+  requires array_pts_to t_repr (SZ.v esize) (a +! off) p ys
+  requires pure (SZ.v off == SZ.v esize * Seq.length xs)
+  ensures  array_pts_to t_repr (SZ.v esize) a p (Seq.append xs ys)
+{
+  unfold array_pts_to t_repr (SZ.v esize) a p xs;
+  with b1. assert (mem_pts_to a p b1 ** pure (array_repr t_repr (SZ.v esize) xs b1));
+  unfold array_pts_to t_repr (SZ.v esize) (a +! off) p ys;
+  with b2. assert (mem_pts_to (a +! off) p b2
+                   ** pure (array_repr t_repr (SZ.v esize) ys b2));
+  mem_join a #p #b1 #b2 off;
+  array_repr_join t_repr (SZ.v esize) xs ys b1 b2;
+  fold array_pts_to t_repr (SZ.v esize) a p (Seq.append xs ys);
+}
+
+(* ---------------------------------------------------------------------------
+   Individual elements
+
+   `elem_pts_to` is the generic shape of a layer-1 points-to: the concrete
+   scalar predicates in `Pulse.Lib.C.Palow.Scalar` are definitionally equal to
+   it (their representation happens to be unique, so they drop the
+   existential), and a generated struct predicate is literally this.
+   --------------------------------------------------------------------------- *)
+
+let elem_pts_to (#t: Type0) (t_repr: t -> bytes -> prop)
+                ([@@@mkey] a: ptr) (p: perm) (x: t) : slprop =
+  exists* b. mem_pts_to a p b ** pure (t_repr x b)
+
+let singleton_repr (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat) (x: t) (b: bytes)
+  : Lemma (requires len b == esize /\ t_repr x b)
+          (ensures  array_repr t_repr esize (Seq.create 1 x) b)
+  = assert (elem_bytes esize b 0 == slice b 0 esize);
+    Seq.lemma_eq_intro (slice b 0 esize) b
+
+let singleton_repr_elim (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat) (x: t) (b: bytes)
+  : Lemma (requires array_repr t_repr esize (Seq.create 1 x) b)
+          (ensures  len b == esize /\ t_repr x b)
+  = assert (elem_bytes esize b 0 == slice b 0 esize);
+    Seq.lemma_eq_intro (slice b 0 esize) b
+
+ghost fn array_singleton_elim (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                              (#p: perm) (#x: t)
+  requires array_pts_to t_repr (SZ.v esize) a p (Seq.create 1 x)
+  ensures  elem_pts_to t_repr a p x
+{
+  unfold array_pts_to t_repr (SZ.v esize) a p (Seq.create 1 x);
+  with b. assert (mem_pts_to a p b
+                  ** pure (array_repr t_repr (SZ.v esize) (Seq.create 1 x) b));
+  singleton_repr_elim t_repr (SZ.v esize) x b;
+  fold elem_pts_to t_repr a p x;
+}
+
+ghost fn array_singleton_intro (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                               (#p: perm) (#x: t)
+  requires elem_pts_to t_repr a p x
+  requires pure (forall (b: bytes). t_repr x b ==> len b == SZ.v esize)
+  ensures  array_pts_to t_repr (SZ.v esize) a p (Seq.create 1 x)
+{
+  unfold elem_pts_to t_repr a p x;
+  with b. assert (mem_pts_to a p b ** pure (t_repr x b));
+  singleton_repr t_repr (SZ.v esize) x b;
+  fold array_pts_to t_repr (SZ.v esize) a p (Seq.create 1 x);
+}
+
+(* ---------------------------------------------------------------------------
+   Focusing on one element
+
+   This is what `a[i]` needs, and it is two `array_split`s: the element lives at
+   `a + esize * i`, exactly as C says. Nothing here is array-specific beyond the
+   arithmetic -- the ownership transfer is `mem_split`.
+   --------------------------------------------------------------------------- *)
+
+ghost fn array_focus (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                     (#p: perm) (#xs: Seq.seq t)
+                     (i: SZ.t { SZ.v i < Seq.length xs })
+                     (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) a p xs
+  ensures  array_pts_to t_repr (SZ.v esize) a p (Seq.slice xs 0 (SZ.v i))
+  ensures  elem_pts_to t_repr (a +! off) p (Seq.index xs (SZ.v i))
+  ensures  array_pts_to t_repr (SZ.v esize) ((a +! off) +! esize) p
+                        (Seq.slice xs (SZ.v i + 1) (Seq.length xs))
+{
+  array_split t_repr a esize i off;
+  let tail = Seq.slice xs (SZ.v i) (Seq.length xs);
+  array_split t_repr (a +! off) esize #p #tail 1sz esize;
+  Seq.lemma_eq_intro (Seq.slice tail 0 1) (Seq.create 1 (Seq.index xs (SZ.v i)));
+  rewrite (array_pts_to t_repr (SZ.v esize) (a +! off) p (Seq.slice tail 0 1))
+       as (array_pts_to t_repr (SZ.v esize) (a +! off) p
+                        (Seq.create 1 (Seq.index xs (SZ.v i))));
+  array_singleton_elim t_repr (a +! off) esize;
+  Seq.lemma_eq_intro (Seq.slice tail 1 (Seq.length tail))
+                     (Seq.slice xs (SZ.v i + 1) (Seq.length xs));
+}
+
+(* ---------------------------------------------------------------------------
+   Putting the element back
+
+   `array_focus` on its own is only half of `a[i]`: a read has to give the
+   element back unchanged and a write has to give a different one back, and
+   both are this. Taking the new element as an implicit `y` rather than
+   insisting it is `Seq.index xs i` is what makes the write case work, and the
+   read case is `y == Seq.index xs i`, where `Seq.upd` is the identity.
+
+   The side condition is the one place where a representation relation has to
+   be a *function* of the value's width: putting `y` back into an array whose
+   stride is `esize` is only meaningful if `y`'s bytes are `esize` long. Every
+   `t_repr` PAL generates satisfies it -- that is what `t_repr_len` says --
+   and it is stated rather than assumed because `elem_pts_to` alone does not
+   know the stride.
+   --------------------------------------------------------------------------- *)
+
+let upd_split (#t: Type) (xs: Seq.seq t) (i: nat { i < Seq.length xs }) (y: t)
+  : Lemma (Seq.upd xs i y
+           == Seq.append (Seq.slice xs 0 i)
+                         (Seq.append (Seq.create 1 y)
+                                     (Seq.slice xs (i + 1) (Seq.length xs))))
+  = Seq.lemma_eq_intro (Seq.upd xs i y)
+                       (Seq.append (Seq.slice xs 0 i)
+                                   (Seq.append (Seq.create 1 y)
+                                               (Seq.slice xs (i + 1) (Seq.length xs))))
+
+ghost fn array_unfocus (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                       (#p: perm) (#xs: Seq.seq t) (#y: t)
+                       (i: SZ.t { SZ.v i < Seq.length xs })
+                       (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) a p (Seq.slice xs 0 (SZ.v i))
+  requires elem_pts_to t_repr (a +! off) p y
+  requires array_pts_to t_repr (SZ.v esize) ((a +! off) +! esize) p
+                        (Seq.slice xs (SZ.v i + 1) (Seq.length xs))
+  requires pure (forall (b: bytes). t_repr y b ==> len b == SZ.v esize)
+  ensures  array_pts_to t_repr (SZ.v esize) a p (Seq.upd xs (SZ.v i) y)
+{
+  array_singleton_intro t_repr (a +! off) esize;
+  array_join t_repr (a +! off) esize esize
+             #p #(Seq.create 1 y) #(Seq.slice xs (SZ.v i + 1) (Seq.length xs));
+  array_join t_repr a esize off
+             #p #(Seq.slice xs 0 (SZ.v i))
+             #(Seq.append (Seq.create 1 y) (Seq.slice xs (SZ.v i + 1) (Seq.length xs)));
+  upd_split xs (SZ.v i) y;
+  rewrite (array_pts_to t_repr (SZ.v esize) a p
+                        (Seq.append (Seq.slice xs 0 (SZ.v i))
+                                    (Seq.append (Seq.create 1 y)
+                                                (Seq.slice xs (SZ.v i + 1) (Seq.length xs)))))
+       as (array_pts_to t_repr (SZ.v esize) a p (Seq.upd xs (SZ.v i) y));
+}
+
+(* The generic layer-1 view of one element, opened and closed. A scalar's own
+   `t_reveal`/`t_conceal` produce and consume exactly this shape, so these two
+   are the adapters between an array element and the machine operations. *)
+
+ghost fn elem_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (#p: perm) (#x: t)
+  requires elem_pts_to t_repr a p x
+  ensures  exists* b. mem_pts_to a p b ** pure (t_repr x b)
+{
+  unfold elem_pts_to t_repr a p x;
+}
+
+ghost fn elem_conceal (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                      (#p: perm) (#b: bytes) (#x: t)
+  requires mem_pts_to a p b
+  requires pure (t_repr x b)
+  ensures  elem_pts_to t_repr a p x
+{
+  fold elem_pts_to t_repr a p x;
+}
+
+(* Closing a focus that only read: the sequence that comes back is the one that
+   went in. This is `array_unfocus` plus the observation that `Seq.upd xs i
+   (Seq.index xs i)` is `xs`, done once here so that every emitted subscript
+   read does not have to repeat it. *)
+ghost fn array_unfocus_read (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                            (#p: perm) (#xs: Seq.seq t)
+                            (i: SZ.t { SZ.v i < Seq.length xs })
+                            (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) a p (Seq.slice xs 0 (SZ.v i))
+  requires elem_pts_to t_repr (a +! off) p (Seq.index xs (SZ.v i))
+  requires array_pts_to t_repr (SZ.v esize) ((a +! off) +! esize) p
+                        (Seq.slice xs (SZ.v i + 1) (Seq.length xs))
+  requires pure (forall (b: bytes).
+                   t_repr (Seq.index xs (SZ.v i)) b ==> len b == SZ.v esize)
+  ensures  array_pts_to t_repr (SZ.v esize) a p xs
+{
+  array_unfocus t_repr a esize i off;
+  Seq.lemma_eq_intro (Seq.upd xs (SZ.v i) (Seq.index xs (SZ.v i))) xs;
+  rewrite (array_pts_to t_repr (SZ.v esize) a p (Seq.upd xs (SZ.v i) (Seq.index xs (SZ.v i))))
+       as (array_pts_to t_repr (SZ.v esize) a p xs);
+}
+
+(* The byte offset of an in-bounds element fits in a `size_t`, so the
+   multiplication a subscript needs is well-defined. This is not an extra
+   assumption: owning the array means owning `esize * length xs` bytes at `a`,
+   and `mem_pts_to_fits` says a live range ends at an address that fits. C says
+   the same thing, and for the same reason. *)
+ghost fn array_offset_fits (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                           (#p: perm) (#xs: Seq.seq t)
+                           (i: SZ.t { SZ.v i < Seq.length xs })
+  preserves array_pts_to t_repr (SZ.v esize) a p xs
+  ensures   pure (SZ.fits (SZ.v esize * SZ.v i))
+{
+  unfold array_pts_to t_repr (SZ.v esize) a p xs;
+  with b. assert (mem_pts_to a p b ** pure (array_repr t_repr (SZ.v esize) xs b));
+  mem_pts_to_fits a;
+  elem_fits (SZ.v esize) (Seq.length xs) (SZ.v i);
+  SZ.fits_lte (SZ.v esize * SZ.v i) (addr_of a + len b);
+  fold array_pts_to t_repr (SZ.v esize) a p xs;
+}
+
+(* ---------------------------------------------------------------------------
+   Storage that is not yet initialised
+
+   A C array local is `esize * n` bytes of automatic storage whose elements are
+   written one at a time, so at any point some hold a value and some do not.
+   The way to say that here is not a new predicate but a different
+   representation relation: an element is an `option t`, and `None` represents
+   any bytes of the right width.
+
+   Everything above then applies unchanged, because none of it looks at the
+   representation. `array_split`, `array_join`, `array_focus` and
+   `array_unfocus` work on a partially initialised array exactly as they do on
+   a fully initialised one, and allocating one is a single proof rather than an
+   unrolling per length.
+
+   The payoff is where the initialisation is tracked. Reading `a[i]` needs
+   `Some? (Seq.index xs i)`, which is C's rule that reading an uninitialised
+   object is undefined -- and it is a proof obligation on the generated code
+   rather than a translator refusal, so the emitter does not have to remember
+   which elements have been written. The sequence remembers.
+   --------------------------------------------------------------------------- *)
+
+let maybe_repr (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat)
+               (x: option t) (b: bytes) : prop =
+  match x with
+  | None -> len b == esize
+  | Some v -> t_repr v b
+
+let create_repr (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat) (n: nat) (b: bytes)
+  : Lemma (requires len b == esize * n)
+          (ensures  array_repr (maybe_repr t_repr esize) esize
+                               (Seq.create n (None #t)) b)
+  = let xs : Seq.seq (option t) = Seq.create n None in
+    let aux (i: nat)
+      : Lemma (i < n ==> maybe_repr t_repr esize (Seq.index xs i) (elem_bytes esize b i))
+      = if i < n then elem_fits esize n i
+    in
+    Classical.forall_intro aux
+
+(* Claim `esize * n` raw bytes as an array of uninitialised elements. This is
+   the only place the two views meet, and it is a fold: the bytes are already
+   the right length, and `None` represents any bytes of that length. *)
+ghost fn array_claim_uninit (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                            (esize: SZ.t) (n: SZ.t) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v esize * SZ.v n)
+  ensures  array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R
+                        (Seq.create (SZ.v n) (None #t))
+{
+  create_repr t_repr (SZ.v esize) (SZ.v n) b;
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R
+                    (Seq.create (SZ.v n) (None #t));
+}
+
+(* Every element of a zeroed block is itself zeroed: slicing a constant
+   sequence anywhere gives the same constant sequence. *)
+let elem_bytes_zeroed (esize: nat) (n: nat) (i: nat)
+  : Lemma (requires i < n)
+          (ensures  elem_bytes esize (zeroed (esize * n)) i == zeroed esize)
+  = elem_fits esize n i;
+    Seq.lemma_eq_elim (elem_bytes esize (zeroed (esize * n)) i) (zeroed esize)
+
+(* Claim `esize * n` zeroed bytes as an array of *initialised* elements.
+   `calloc` differs from `malloc` in exactly this: the storage arrives holding
+   a value, so the caller is handed `Some z` rather than `None` and may read
+   before writing.
+
+   Which value `z` is cannot be decided here -- it is whatever the element
+   type's representation relation makes of an all-zero range -- so it is an
+   implicit the caller fixes, with `t_repr z (zeroed esize)` as the obligation
+   that it really is the one. *)
+ghost fn array_claim_zeroed (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                            (esize: SZ.t) (n: SZ.t) (#z: t) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (b == zeroed (SZ.v esize * SZ.v n))
+  requires pure (t_repr z (zeroed (SZ.v esize)))
+  ensures  array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R
+                        (Seq.create (SZ.v n) (Some z))
+{
+  Classical.forall_intro (Classical.move_requires (elem_bytes_zeroed (SZ.v esize) (SZ.v n)));
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R
+                    (Seq.create (SZ.v n) (Some z));
+}
+
+(* And back, at whatever the elements have become. Giving the storage up does
+   not depend on what was last written to it, which is why this asks for no
+   `Some`. *)
+ghost fn array_forget (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                      (#xs: Seq.seq (option t))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs
+  ensures  exists* b. mem_pts_to a 1.0R b
+                      ** pure (len b == SZ.v esize * Seq.length xs)
+{
+  unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs;
+}
+
+(* An element that does hold a value, as an ordinary element of `t`. The
+   `Some?` is stated as a side condition rather than matched on the implicit,
+   because at the point of use what is in context is `Seq.index xs i` and only
+   the solver knows it is a `Some`. *)
+ghost fn elem_maybe_get (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (a: ptr)
+                        (#p: perm) (#x: (x: option t { Some? x }))
+  requires elem_pts_to (maybe_repr t_repr (SZ.v esize)) a p x
+  ensures  elem_pts_to t_repr a p (Some?.v x)
+{
+  unfold elem_pts_to (maybe_repr t_repr (SZ.v esize)) a p x;
+  fold elem_pts_to t_repr a p (Some?.v x);
+}
+
+ghost fn elem_maybe_put (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (a: ptr)
+                        (#p: perm) (#x: t)
+  requires elem_pts_to t_repr a p x
+  ensures  elem_pts_to (maybe_repr t_repr (SZ.v esize)) a p (Some x)
+{
+  unfold elem_pts_to t_repr a p x;
+  fold elem_pts_to (maybe_repr t_repr (SZ.v esize)) a p (Some x);
+}
+
+(* The write-only view of one element, whatever it held before. A write to
+   `a[i]` goes down to this and comes back up through the type's own
+   `t_write_uninit`, which is the same path a scalar local takes. *)
+ghost fn elem_maybe_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (a: ptr)
+                           (#x: option t)
+  requires elem_pts_to (maybe_repr t_repr (SZ.v esize)) a 1.0R x
+  requires pure (forall (v: t) (b: bytes). t_repr v b ==> len b == SZ.v esize)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v esize)
+{
+  unfold elem_pts_to (maybe_repr t_repr (SZ.v esize)) a 1.0R x;
+}
+
+(* ---------------------------------------------------------------------------
+   An array's storage, as one predicate
+
+   `T f[N]` inside a structure is N elements of storage, and a structure's
+   write-only view has to name that storage without naming what is in it --
+   there is nothing in it. Hiding the sequence is what makes the view a
+   *predicate on the address alone*, which is what every other field's
+   `_pts_to_uninit` already is, and it is what lets the struct-level fold that
+   assembles them stay a fold.
+
+   The length stays visible because it is the one thing the storage does
+   determine: `N` is part of the field's type. *)
+let array_pts_to_uninit (#t: Type0) (t_repr: t -> bytes -> prop)
+                        (esize: nat) (n: nat) ([@@@mkey] a: ptr) : slprop =
+  exists* (xs: Seq.seq (option t)).
+    array_pts_to (maybe_repr t_repr esize) esize a 1.0R xs ** pure (Seq.length xs == n)
+
+ghost fn array_claim_all_uninit (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                                (esize: SZ.t) (n: SZ.t) (#b: bytes)
+  requires mem_pts_to a 1.0R b
+  requires pure (len b == SZ.v esize * SZ.v n)
+  ensures  array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a
+{
+  array_claim_uninit t_repr a esize n;
+  fold array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a;
+}
+
+ghost fn array_reveal_all_uninit (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                                 (esize: SZ.t) (n: SZ.t)
+  requires array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v esize * SZ.v n)
+{
+  unfold array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a;
+  array_forget t_repr a esize;
+}
+
+(* Every element of a live array does hold a value, so a live array is storage
+   that happens to be full. The `Some`s are added by hand rather than by a
+   lemma with a pattern: `somes` appears nowhere else, and this is the only
+   direction anything needs it. *)
+let somes (#t: Type0) (xs: Seq.seq t) : Seq.seq (option t) =
+  Seq.init (Seq.length xs) (fun i -> Some (Seq.index xs i))
+
+ghost fn array_forget_all (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                          (esize: SZ.t) (n: SZ.t) (#xs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a 1.0R xs
+  requires pure (Seq.length xs == SZ.v n)
+  ensures  array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a
+{
+  unfold array_pts_to t_repr (SZ.v esize) a 1.0R xs;
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R (somes xs);
+  fold array_pts_to_uninit t_repr (SZ.v esize) (SZ.v n) a;
+}
+
+(* The same, without being told how long the array is. Giving storage up is
+   the one operation whose length the caller usually does not have to hand:
+   the ownership being given up says how long it is, and the `freeable` that
+   goes with it says how much storage goes back. This is what a `free` of a
+   pointer whose ownership a hand-written helper supplied needs, since there
+   is no allocation site nearby to have remembered a length. *)
+ghost fn array_forget_full (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                           (esize: SZ.t) (#xs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a 1.0R xs
+  ensures  exists* b. mem_pts_to a 1.0R b
+                      ** pure (len b == SZ.v esize * Seq.length xs)
+{
+  unfold array_pts_to t_repr (SZ.v esize) a 1.0R xs;
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R (somes xs);
+  array_forget t_repr a esize;
+}
+
+(* And the other way, once every element has been written. This is what the
+   loop that fills an array field ends with. *)
+ghost fn array_claim_all (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                         (esize: SZ.t) (vs: Seq.seq t)
+                         (#xs: (xs: Seq.seq (option t) { Seq.length xs == Seq.length vs }))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs
+  requires pure (forall (i: nat). i < Seq.length vs ==>
+                                 Seq.index xs i == Some (Seq.index vs i))
+  ensures  array_pts_to t_repr (SZ.v esize) a 1.0R vs
+{
+  unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs;
+  fold array_pts_to t_repr (SZ.v esize) a 1.0R vs;
+}
+
+(* Every element has been written, but nothing has said *which* values were
+   written. That is enough: a sequence all of whose elements are `Some` is a
+   sequence of values, and which values it is need never be named. This is the
+   step a union's array arm takes when the last of its elements is filled --
+   the values were written one statement at a time and no term names them all
+   at once. *)
+let all_some (#t: Type0) (xs: Seq.seq (option t)) : prop =
+  forall (i: nat). i < Seq.length xs ==> Some? (Seq.index xs i)
+
+let unsomes (#t: Type0) (xs: Seq.seq (option t) { all_some xs }) : Seq.seq t =
+  Seq.init (Seq.length xs) (fun (i: nat { i < Seq.length xs }) -> Some?.v (Seq.index xs i))
+
+ghost fn array_claim_all_somes (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
+                               (esize: SZ.t) (#xs: Seq.seq (option t))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a 1.0R xs
+  requires pure (all_some xs)
+  ensures  exists* (vs: Seq.seq t).
+             array_pts_to t_repr (SZ.v esize) a 1.0R vs **
+             pure (Seq.length vs == Seq.length xs)
+{
+  array_claim_all t_repr a esize (unsomes xs);
+}
+
+let somes_length (#t: Type0) (xs: Seq.seq t)
+  : Lemma (Seq.length (somes xs) == Seq.length xs)
+          [SMTPat (Seq.length (somes xs))] = ()
+
+let somes_index (#t: Type0) (xs: Seq.seq t) (i: nat)
+  : Lemma (requires i < Seq.length xs)
+          (ensures  Seq.index (somes xs) i == Some (Seq.index xs i))
+          [SMTPat (Seq.index (somes xs) i)] = ()
+
+(* ---------------------------------------------------------------------------
+   Handing a local array to a callee
+
+   A local array is storage that remembers which elements have been written,
+   so it is held in the `option` view; a function that takes `T *` wants every
+   element to hold a value, so it asks for the plain one. Passing one to the
+   other is these two ghost steps and nothing else -- no bytes move, and the
+   array is at the same address throughout.
+
+   `array_somes` carries out the obligation that makes the call legal at all:
+   C says reading an uninitialised object is undefined, so a callee that may
+   read every element may only be given an array where every element has been
+   written. That is exactly its precondition.
+
+   The `xs == somes vs` it leaves behind is what lets the caller put its own
+   view back together afterwards: `array_unsomes` returns `somes vs`, and the
+   equation says that is the sequence it started with. *)
+ghost fn array_somes (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                     (#p: perm) (#xs: Seq.seq (option t))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a p xs
+  requires pure (forall (i: nat). i < Seq.length xs ==> Some? (Seq.index xs i))
+  ensures  exists* (vs: Seq.seq t).
+             array_pts_to t_repr (SZ.v esize) a p vs **
+             pure (xs == somes vs /\ Seq.length vs == Seq.length xs)
+{
+  unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a p xs;
+  let vs : Seq.seq t = Seq.init (Seq.length xs) (fun i -> Some?.v (Seq.index xs i));
+  Seq.lemma_eq_intro xs (somes vs);
+  fold array_pts_to t_repr (SZ.v esize) a p vs;
+}
+
+ghost fn array_unsomes (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t)
+                       (#p: perm) (#vs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) a p vs
+  ensures  array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a p (somes vs)
+{
+  unfold array_pts_to t_repr (SZ.v esize) a p vs;
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) a p (somes vs);
+}

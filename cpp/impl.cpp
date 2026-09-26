@@ -1,4 +1,5 @@
 #include "generated.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/MacroArgs.h"
@@ -207,6 +208,44 @@ public:
     ctx.set_target_int_widths(
         TargetIntWidths(TI.getCharWidth(), TI.getShortWidth(), TI.getIntWidth(),
                         TI.getLongWidth(), TI.getLongLongWidth()));
+    ctx.set_pointer_size(TI.getPointerWidth(LangAS::Default) / 8);
+  }
+
+  // Layout `kind` tags shared with `Ctx::set_type_layout` on the Rust side.
+  static constexpr uint32_t kLayoutTypedef = 0;
+  static constexpr uint32_t kLayoutStruct = 1;
+  static constexpr uint32_t kLayoutUnion = 2;
+
+  // Report the target-ABI size and alignment of `qt` under the name PAL uses
+  // for it, so that the emitter can turn `sizeof`/`_Alignof` into concrete
+  // `SizeT` literals rather than opaque `c_sizeof` applications.
+  void recordTypeLayout(uint32_t kind, StringRef name, QualType qt) {
+    if (qt.isNull() || qt->isIncompleteType() || qt->isDependentType() ||
+        qt->isVariableArrayType())
+      return;
+    ctx.set_type_layout(kind, toStr(name),
+                        astCtx->getTypeSizeInChars(qt).getQuantity(),
+                        astCtx->getTypeAlignInChars(qt).getQuantity());
+  }
+
+  // Report the offset of every field of `decl`. A bit-field has no byte
+  // offset of its own -- several of them share one storage unit -- so it is
+  // reported in bits instead, and the emitter works out which bytes the unit
+  // covers.
+  void recordFieldOffsets(uint32_t kind, StringRef name, RecordDecl *decl) {
+    auto const &layout = astCtx->getASTRecordLayout(decl);
+    for (auto *f : decl->fields()) {
+      auto bitOffset = layout.getFieldOffset(f->getFieldIndex());
+      if (f->isBitField()) {
+        ctx.set_field_bit_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                                 bitOffset);
+        continue;
+      }
+      if (bitOffset % astCtx->getCharWidth() != 0)
+        continue;
+      ctx.set_field_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                           bitOffset / astCtx->getCharWidth());
+    }
   }
 
   virtual bool HandleTopLevelDecl(DeclGroupRef DG) override {
@@ -360,6 +399,9 @@ public:
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/false);
       }
+      recordTypeLayout(kLayoutStruct, toStringRef(ident_name(ident)),
+                       astCtx->getRecordType(decl));
+      recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
       // Process nested record declarations (inner structs/unions)
@@ -377,6 +419,8 @@ public:
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
       }
+      recordTypeLayout(kLayoutUnion, toStringRef(ident_name(ident)),
+                       astCtx->getRecordType(decl));
       ctx.add_union(std::move(builder));
     } else {
       reportUnsupported(decl->getSourceRange(), loc, "unsupported record kind",
@@ -2985,6 +3029,8 @@ public:
           trQualType(TD->getUnderlyingType(), TD->getSourceRange(), &anon,
                      findFnProtoTypeLoc(TD->getTypeSourceInfo()));
       type = trTypeAttrs(TD->getAttrs(), std::move(type));
+      recordTypeLayout(kLayoutTypedef, TD->getName(),
+                       astCtx->getTypedefType(TD));
       bool isPointerView = false;
       if (TD->hasAttrs()) {
         for (auto *attr : TD->getAttrs()) {
@@ -3324,6 +3370,15 @@ static void parse_file(RefMut<Ctx> ctx) {
       ArgumentInsertPosition::BEGIN));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
+
+  // Extra preprocessor defines, which is how the caller says which memory
+  // model this translation is for.
+  size_t defineCount = ctx.get_define_count();
+  for (size_t i = 0; i < defineCount; i++) {
+    std::string def = "-D" + toString(ctx.get_define(i));
+    Tool.appendArgumentsAdjuster(
+        getInsertArgumentAdjuster(def.c_str(), ArgumentInsertPosition::BEGIN));
+  }
 
   // Add user-specified include paths
   size_t includePathCount = ctx.get_include_path_count();

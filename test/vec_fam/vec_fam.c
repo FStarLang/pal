@@ -32,7 +32,15 @@ void vec_set(struct vec *v, unsigned i, int x)
     v->data[i] = x;
 }
 
+/* Palow's allocators may fail, so the honest return type says so: everything
+   the contract promises about the object holds only when there is one. PAL's
+   FAM allocators are infallible, so the nullable spelling -- and the test that
+   goes with it -- is Palow's alone. */
+#ifdef PALOW
+_allocated _nullable typedef struct vec *vec_ptr;
+#else
 _allocated typedef struct vec *vec_ptr;
+#endif
 
 // Allocate and zero-initialize a vec using the idiomatic flexible-array-member
 // calloc: `calloc(1, sizeof(struct vec) + n * sizeof(int))`. This is the
@@ -49,6 +57,11 @@ _allocated typedef struct vec *vec_ptr;
 vec_ptr vec_new(unsigned n)
 {
     struct vec *v = calloc(1, sizeof(struct vec) + n * sizeof(int));
+#ifdef PALOW
+    if (v == NULL) {
+        return NULL;
+    }
+#endif
     v->len = n;
     return v;
 }
@@ -69,7 +82,32 @@ vec_ptr vec_new(unsigned n)
 vec_ptr vec_new_filled(unsigned n, int x)
 {
     struct vec *v = malloc(sizeof(struct vec) + n * sizeof(int));
+#ifdef PALOW
+    if (v == NULL) {
+        return NULL;
+    }
+#endif
     v->len = n;
+#ifdef PALOW
+    /* Palow holds the unfilled tail as a sequence of `option`s at the address
+       the field starts at, so the frontier invariant is about that sequence:
+       it is as long as the allocation asked for, and everything below `i`
+       holds a value. When the loop ends `i == n`, which is what lets the
+       object be gathered. */
+    for (unsigned i = 0; i < n; i = i + 1)
+        _invariant(_live(i))
+        _invariant(_inline_pulse(
+            exists* (s: FStar.Seq.seq (option Int32.t)).
+              (array_pts_to (maybe_repr int32_t_repr (SizeT.v 4sz)) (SizeT.v 4sz)
+                 ($(v) +! Struct_vec.struct_vec_offsetof_data) 1.0R s) **
+              (pure (FStar.Seq.length s == UInt32.v $(n))) **
+              (pure (forall (k: nat). k < FStar.Seq.length s ==> k < UInt32.v $(i)
+                                      ==> Some? (FStar.Seq.index s k)))
+        ))
+    {
+        v->data[i] = x;
+    }
+#else
     for (unsigned i = 0; i < n; i = i + 1)
         _invariant(_live(i))
         _invariant(_inline_pulse(
@@ -83,5 +121,6 @@ vec_ptr vec_new_filled(unsigned n, int x)
     {
         v->data[i] = x;
     }
+#endif
     return v;
 }

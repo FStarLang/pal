@@ -10,7 +10,6 @@ include Pulse.Class.PtsTo
 include FStar.Int.Cast
 include Pulse.Lib.C.Casts
 include Pulse.Lib.C.UnaryOps
-include Pulse.Lib.C.Sizeof
 include Pulse.Lib.C.Nullable
 include Pulse.Lib.WithPure
 open Pulse.Lib.Core

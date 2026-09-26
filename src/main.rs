@@ -5,7 +5,8 @@ use std::{
 };
 
 use crate::{
-    diag::{Diagnostic, Diagnostics},
+    diag::{Diagnostic, DiagnosticLevel, Diagnostics},
+    ir::Location,
     vfs::{OverlayFS, RealFS, VFS},
 };
 use clap::Parser;
@@ -15,6 +16,7 @@ mod diag;
 mod env;
 mod hauntedc;
 mod ir;
+mod layout;
 mod mayberc;
 mod pass;
 mod source_range_info;
@@ -44,6 +46,18 @@ struct Cli {
         help = "Show timing information for each compiler pass"
     )]
     time_passes: bool,
+
+    #[arg(
+        long = "old-model",
+        help = "Emit against the previous memory model instead of Palow"
+    )]
+    old_model: bool,
+
+    #[arg(
+        long = "palow-permissive",
+        help = "Report Palow's untranslated constructs as comments only, not as errors"
+    )]
+    palow_permissive: bool,
 
     #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
     quiet: bool,
@@ -159,8 +173,19 @@ fn main() {
     let mut combined_tu = ir::TranslationUnit {
         main_file_names: Vec::new(),
         decls: Vec::new(),
+        layouts: ir::LayoutTable::new(),
+        pointer_size: 8,
     };
     let mut diags = Diagnostics::empty();
+
+    // A source can be translated for either memory model, and hand-written
+    // Pulse in it names predicates only one of them has. `PALOW` lets the
+    // source say which fragment is which.
+    let defines: Vec<String> = if cli.old_model {
+        vec![]
+    } else {
+        vec!["PALOW".to_string()]
+    };
 
     let parse_start = Instant::now();
     for file in &cli.files {
@@ -174,11 +199,14 @@ fn main() {
             std::process::exit(1);
         }
 
-        let (tu, file_diags) = clang::parse_file(&file_name, &cli.include_paths, &mut *vfs);
+        let (tu, file_diags) =
+            clang::parse_file(&file_name, &cli.include_paths, &defines, &mut *vfs);
         combined_tu
             .main_file_names
             .push(tu.main_file_names[0].clone());
         combined_tu.decls.extend(tu.decls);
+        combined_tu.layouts.extend(tu.layouts);
+        combined_tu.pointer_size = tu.pointer_size;
         diags.merge(file_diags);
     }
     if cli.time_passes {
@@ -202,7 +230,7 @@ fn main() {
     }
 
     let t = Instant::now();
-    pass::merge::merge(&mut diags, &mut combined_tu);
+    pass::merge::merge(&mut diags, &mut combined_tu, !cli.old_model);
     if cli.time_passes {
         eprintln!(
             "  merge ({} decls): {:.3}s",
@@ -270,6 +298,133 @@ fn main() {
 
     if cli.print_ir {
         println!("{}", combined_tu);
+        return;
+    }
+
+    if !cli.old_model {
+        // A test whose hand-written Pulse is written against the *old* memory
+        // model marks itself, and Palow leaves those fragments alone rather
+        // than splicing text that names predicates it does not have.
+        //
+        // There are two such markers and the difference between them is the
+        // whole point. `palow-old-annotations` is a backlog: the fragment
+        // could be written in this model and has not been yet, so the count is
+        // meant to reach zero. `palow-model-specific` is not: the test exists
+        // to exercise something the old model has and this one deliberately
+        // does not -- `_core_ref`, the `$fold`/`$unfold` antiquotations that
+        // name generated struct helpers -- so it will carry its marker for as
+        // long as the old emitter is around. Counting the two together would
+        // make a permanent floor look like unfinished work.
+        let marked = |name: &str| {
+            cli.files
+                .first()
+                .map(|f| {
+                    Path::new(f)
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join(name)
+                        .exists()
+                })
+                .unwrap_or(false)
+        };
+        let model_specific = marked("palow-model-specific");
+        let splice_inline = !marked("palow-old-annotations") && !model_specific;
+        let modules = pass::emit_palow::emit_palow(&combined_tu, splice_inline, model_specific);
+        // A gap the generated file owns up to is still a gap. While the
+        // translation was being built, saying so in a comment was the point:
+        // the comment is what made the coverage measurable, and turning a
+        // missing feature into a hard failure would have stopped the whole
+        // suite on the first one. There is nothing left to measure, so the
+        // comment becomes an error -- a specification that is quietly weaker
+        // than the one the user wrote is the failure mode this model exists to
+        // rule out, and it should not be possible to get one by accident.
+        // `--palow-permissive` is for a measurement run, which wants the
+        // comments and the count back.
+        if !cli.palow_permissive {
+            for module in &modules {
+                for why in pass::emit_palow::weakenings(module) {
+                    let loc = match &module.origin {
+                        Some(o) => Location {
+                            file_name: o.file.clone(),
+                            range: o.range,
+                        },
+                        None => {
+                            let z = crate::ir::Position {
+                                line: 1,
+                                character: 1,
+                            };
+                            Location {
+                                file_name: cli.files.first().cloned().unwrap_or_default().into(),
+                                range: crate::ir::Range { start: z, end: z },
+                            }
+                        }
+                    };
+                    diags.report(Diagnostic {
+                        loc,
+                        level: DiagnosticLevel::Error,
+                        msg: format!("`{}`: {}", module.module_name, why),
+                    });
+                }
+            }
+        }
+        if let Some(outdir) = &cli.outdir {
+            let outdir = Path::new(&outdir).to_path_buf();
+            std::fs::create_dir_all(&outdir).unwrap();
+            let mut generated_files: HashSet<PathBuf> = HashSet::new();
+            for module in &modules {
+                let path = outdir.join(format!("{}.fst", module.module_name));
+                write_if_changed(&path, module.code.as_bytes());
+                generated_files.insert(path);
+                if let Some(iface) = &module.iface {
+                    let path = outdir.join(format!("{}.fsti", module.module_name));
+                    write_if_changed(&path, iface.as_bytes());
+                    generated_files.insert(path);
+                }
+            }
+            // The same three files the old translator writes, for the same
+            // reason: an IDE pointed at the output directory expects to find
+            // them, and `TranslationErrors` is what makes a translation
+            // failure a *verification* failure rather than a silent gap.
+            let errors_path = outdir.join("TranslationErrors.fst");
+            write_if_changed(
+                &errors_path,
+                {
+                    let mut errors_code = "module TranslationErrors\n".to_string();
+                    if diags.has_errors() {
+                        errors_code += "let _ = assert False\n";
+                    }
+                    errors_code
+                }
+                .as_bytes(),
+            );
+            generated_files.insert(errors_path);
+            std::fs::write(
+                outdir.join("source_range_info.json"),
+                source_range_info::serialize_palow(&modules),
+            )
+            .unwrap();
+            std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
+            // A module that is no longer generated has to go, or the next
+            // verification run picks up a stale one and succeeds on code that
+            // no longer exists.
+            if let Ok(entries) = std::fs::read_dir(&outdir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(ext) = path.extension() {
+                        if (ext == "fst" || ext == "fsti") && !generated_files.contains(&path) {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+        } else {
+            for module in &modules {
+                println!("{}", module.code);
+            }
+        }
+        if !cli.quiet {
+            diags.print_to_stderr(&mut *vfs);
+        }
         return;
     }
 

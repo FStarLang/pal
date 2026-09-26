@@ -58,12 +58,22 @@ void set_elem_fields(_array struct entry *a, uint32_t i, uint64_t v, uint64_t t)
 // Like set_x, but instead of taking the whole array it takes an _arrayptr that
 // already points at the struct to update. The field is written through the
 // pointer (p->x), borrowing write permission from the parent array `arr`.
+#ifdef PALOW
+// An interior pointer is an address like any other here, and there is no
+// separate `arrayptr` predicate relating it to the array it came out of: what
+// the caller lends is a run of cells starting at this address, which it split
+// off and will put back. So the Palow contract is the ordinary array one, and
+// the only thing it has to say is that the run is not empty.
+void set_x_via_ptr(_array struct point *p, int val)
+  _requires(p._length > 0)
+#else
 void set_x_via_ptr(_arrayptr struct point *p, int val)
   _preserves(_inline_pulse(arrayptr_pts_to $(p) $`arr))
   _requires(_inline_pulse(array_pts_to_full $`arr 1.0R $`v))
   _requires((bool) _inline_pulse(0 <= offset_of $(p) - offset_of $`arr
     /\ offset_of $(p) - offset_of $`arr < array_spec_len $`v))
   _ensures(_inline_pulse(exists* v_new. array_pts_to $`arr 1.0R v_new))
+#endif
 {
   p->x = val;
 }

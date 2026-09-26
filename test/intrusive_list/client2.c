@@ -53,19 +53,21 @@ _plain struct item2 *items2_find(_plain struct list_node *head, int priority)
             $(head) $(node) (reveal $(entries)));
         _ghost_stmt(with description. assert IntrusiveListExample2.item_ipl $(node) description);
         _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
+        /* The successor is read while the node is still a node: opening the
+           payload joins the link back into the item it belongs to, and there
+           is no reading `node->next` once it is a field of that. */
+        _plain struct list_node *next = node->next;
+        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
         _plain struct item2 *item = containing_record(node, struct item2, link);
         _ghost_stmt(IntrusiveListExample2.value_open $(node) $(item));
         int current_priority = item->priority;
         if (current_priority == priority) {
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
             _ghost_stmt(IntrusiveListExample2.value_close $(node) $(item));
             _ghost_stmt(IntrusiveListItems.find_found IntrusiveListExample2.item_ipl
                 (IntrusiveListExample2.matches_priority $(priority))
                 $(head) $(node) (reveal $(entries)) description);
             return item;
         }
-        _plain struct list_node *next = node->next;
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
         _ghost_stmt(IntrusiveListExample2.value_close $(node) $(item));
         _ghost_stmt(IntrusiveListItems.find_step IntrusiveListExample2.item_ipl
             (IntrusiveListExample2.matches_priority $(priority))
@@ -127,7 +129,11 @@ void items2_insert_sorted(_plain struct list_node *head, _plain struct item2 *it
                 (reveal $(description)) (reveal $(entries))))))
 {
     _ghost_stmt(IntrusiveListExample2.priority_order ());
+    /* The item's own priority does not change, so it is read once, while the
+       item is still whole: from `prepare_item` on, its link belongs to the
+       list machinery and the item is no longer an object one can read. */
     _ghost_stmt(IntrusiveListExample2.open_for_insert $(item) (reveal $(description)));
+    int new_priority = item->priority;
     _plain struct list_node *entry = &item->link;
     _ghost_stmt(IntrusiveListExample2.prepare_item $(item) $(entry) (reveal $(description)));
     _ghost_stmt(IntrusiveListIndexed.head_open IntrusiveListExample2.item_ipl
@@ -141,6 +147,9 @@ void items2_insert_sorted(_plain struct list_node *head, _plain struct item2 *it
     _ghost_stmt(let stopped = Pulse.Lib.GhostReference.alloc (0 = 1));
     while (node != head)
         _invariant(_live(node))
+        /* Read before the loop, so the loop has to be told it still holds. */
+        _invariant(_inline_pulse(pure ($(new_priority) ==
+            (reveal $(description)).IntrusiveListExample2.priority)))
         _invariant(_inline_pulse(live stopped))
         _invariant(_inline_pulse(
             IntrusiveListInsert.inv IntrusiveListExample2.item_ipl
@@ -148,7 +157,7 @@ void items2_insert_sorted(_plain struct list_node *head, _plain struct item2 *it
                 (reveal $(description)) (reveal $(entries))
                 (Pulse.Lib.GhostReference.op_Bang stopped) **
             IntrusiveListExample2.item_ipl $(entry) (reveal $(description)) **
-            Pulse.Lib.Reference.pts_to_uninit $(entry)))
+            IntrusiveListIndexed.lpts_to_uninit $(entry)))
         _ensures(_inline_pulse(
             (Pulse.Lib.GhostReference.op_Bang stopped) == (0 = 0) \/
             $(node) == $(head))) {
@@ -157,11 +166,8 @@ void items2_insert_sorted(_plain struct list_node *head, _plain struct item2 *it
             (reveal $(description)) (reveal $(entries)));
         _plain struct item2 *current = containing_record(node, struct item2, link);
         _ghost_stmt(IntrusiveListExample2.value_open $(node) $(current));
-        _ghost_stmt(IntrusiveListExample2.value_open $(entry) $(item));
         int current_priority = current->priority;
-        int new_priority = item->priority;
         _ghost_stmt(IntrusiveListExample2.value_close $(node) $(current));
-        _ghost_stmt(IntrusiveListExample2.value_close $(entry) $(item));
         if (current_priority > new_priority) {
             _ghost_stmt(IntrusiveListInsert.unexpose IntrusiveListExample2.item_ipl
                 IntrusiveListExample2.priority_le $(head) $(node) $(entry)
@@ -282,13 +288,13 @@ void list_example2(void)
         .priority = 4, .used = 4, .samples = {41, 42, 43, 44}, .processed = &fourth_count
     };
     _ghost_stmt(let d_first = IntrusiveListExample2.make 2l 4ul
-        (array_spec_of_list_with_len [11ul; 12ul; 13ul; 14ul] 4) $(&first_count) 0ul);
+        (IntrusiveListExample2.samples_of [11ul; 12ul; 13ul; 14ul]) $(&first_count) 0ul);
     _ghost_stmt(let d_second = IntrusiveListExample2.make 1l 0ul
-        (array_spec_of_list_with_len [21ul; 22ul; 23ul; 24ul] 4) $(&second_count) 7ul);
+        (IntrusiveListExample2.samples_of [21ul; 22ul; 23ul; 24ul]) $(&second_count) 7ul);
     _ghost_stmt(let d_third = IntrusiveListExample2.make 2l 2ul
-        (array_spec_of_list_with_len [31ul; 32ul; 33ul; 34ul] 4) $(&third_count) 3ul);
+        (IntrusiveListExample2.samples_of [31ul; 32ul; 33ul; 34ul]) $(&third_count) 3ul);
     _ghost_stmt(let d_fourth = IntrusiveListExample2.make 4l 4ul
-        (array_spec_of_list_with_len [41ul; 42ul; 43ul; 44ul] 4) $(&fourth_count) 0ul);
+        (IntrusiveListExample2.samples_of [41ul; 42ul; 43ul; 44ul]) $(&fourth_count) 0ul);
     _ghost_stmt(IntrusiveListExample2.capture $(&first) $(&first_count) d_first);
     _ghost_stmt(IntrusiveListExample2.capture $(&second) $(&second_count) d_second);
     _ghost_stmt(IntrusiveListExample2.capture $(&third) $(&third_count) d_third);

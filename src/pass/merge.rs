@@ -228,7 +228,7 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
     }
 }
 
-pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
+pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit, palow: bool) {
     // === Phase 1: Deduplicate identical declarations from shared headers ===
     // For each declaration kind+name, keep the most complete content at the
     // earliest (first) position. This preserves the source ordering so that later
@@ -567,7 +567,7 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     }
 
     // === Phase 3: Order type definitions before their dependents ===
-    reorder_type_deps(tu);
+    reorder_type_deps(tu, palow);
 }
 
 /// A key uniquely identifying a type-defining declaration. The first component
@@ -590,6 +590,20 @@ const UNION_NS: u8 = 2;
 /// contribute no predicate/spec at emission, so they impose no ordering
 /// constraint and are deliberately not descended into (doing so would create a
 /// false dependency cycle for the recursive structs core_ref exists to break).
+/// Whether an annotation chain wraps a `_plain` pointer -- a bare address
+/// that carries no predicate about what it points at.
+fn is_plain_ptr(ty: &Type) -> bool {
+    match &ty.val {
+        TypeT::Plain(inner) => matches!(&inner.val, TypeT::Pointer(..)),
+        TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _)
+        | TypeT::Nullable(inner) => is_plain_ptr(inner),
+        _ => false,
+    }
+}
+
 fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
     match &ty.val {
         // See the doc comment: `core_ref` imposes no emission-order dependency.
@@ -817,7 +831,7 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
 /// position of an earlier forward declaration (e.g. introduced by a forward
 /// `typedef`), which would otherwise place a struct before an anonymous struct
 /// lifted out of one of its fields.
-fn reorder_type_deps(tu: &mut TranslationUnit) {
+fn reorder_type_deps(tu: &mut TranslationUnit, palow: bool) {
     let n = tu.decls.len();
     if n == 0 {
         return;
@@ -846,7 +860,17 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
             DeclT::StructDefn(s) => {
                 collect_type_refs(&s.refines, &mut refs);
                 for f in &s.fields {
-                    collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                    let fty = f.val.logical_type(&f.loc);
+                    // In Palow a pointer field's F* type is `ptr`, so the
+                    // only reason a struct has to follow the one it points
+                    // at is the ownership predicate -- and a `_plain`
+                    // pointer has none. Dropping the edge is what lets a
+                    // pair of mutually referential structs be emitted at
+                    // all, which is the job `_core_ref` used to do.
+                    if palow && is_plain_ptr(&fty) {
+                        continue;
+                    }
+                    collect_type_refs(&fty, &mut refs);
                 }
             }
             DeclT::UnionDefn(u) => {

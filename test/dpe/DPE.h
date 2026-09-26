@@ -7,7 +7,14 @@
 #include "pal.h"
 #include "HACL.h"
 
+#ifdef PALOW
+// Palow: the right to free a block is meaningless without saying how much
+// storage goes back, so `freeable` carries the size. The only array this is
+// written on is a `dice_digest`, which is sixty-four bytes.
+#define _allocated_array _refine((_slprop) _inline_pulse(freeable $(this) 64sz))
+#else
 #define _allocated_array _refine((_slprop) _inline_pulse(freeable_array $(this)))
+#endif
 
 #define UDS_LEN 32
 _refine(this._length == UDS_LEN) _array

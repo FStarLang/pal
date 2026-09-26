@@ -24,9 +24,18 @@ typedef const E* PCE;
 // index is in bounds, and the result is a live pointer to cell `idx`.
 _arrayptr PE get_entry(_array PE table, uint32_t count, uint32_t idx)
   _requires(table._length == count && idx < count)
+#ifdef PALOW
+  /* A pointer is an address here, so an interior pointer is arithmetic and
+     there is no separate `arrayptr` predicate to relate it to the array: the
+     cell's address *is* the base plus the index, scaled by the element size.
+     The caller keeps the array's ownership throughout. */
+  _ensures(_inline_pulse(
+      pure ($(return) == $(table) +! ($(sizeof(E)) `SizeT.mul` sizet_of_uint32 $(idx)))))
+#else
   _ensures(_inline_pulse(
       arrayptr_pts_to $(return) $(table) **
       pure (offset_of $(return) == offset_of $(table) + FStar.UInt32.v $(idx))))
+#endif
 {
     _arrayptr PE entry = NULL;
 

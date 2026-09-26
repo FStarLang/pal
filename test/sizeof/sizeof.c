@@ -154,17 +154,15 @@ size_t align_of_int(void)
     return _Alignof(int);
 }
 
-// Array sizeof related to element size. PAL translates `sizeof(int[8])` to
-// `c_sizeof (full_array_lspec int 8)`, and the `c_sizeof_array` axiom relates
-// it to `sizeof(int) * 8`.
+// Array sizeof related to element size. PAL takes every size straight from
+// clang, so `sizeof(int[8])` translates to the literal `32sz`.
 size_t size_of_int_array_len(void)
     _ensures(return == sizeof(int) * 8)
 {
     return sizeof(int[8]);
 }
 
-// Zero-length array has size 0: `c_sizeof (full_array_lspec int 0)` reduces to
-// `sizeof(int) * 0 == 0` via the `c_sizeof_array` axiom.
+// Zero-length array has size 0 (a GNU extension clang accepts).
 size_t size_of_int_array_zero(void)
     _ensures(return == 0)
 {
@@ -183,4 +181,38 @@ size_t align_of_typeof_expr(two_ints value)
     _ensures(return == _Alignof(two_ints))
 {
     return ALIGN_OF(value);
+}
+
+// Sizes come from clang's target ABI rather than an opaque F* function, so
+// exact values are provable. These are LP64 values; on a target with a
+// different ABI clang would report different numbers and the postconditions
+// would be adjusted with them.
+size_t size_of_int_exact(void)
+    _ensures(return == 4)
+{
+    return sizeof(int);
+}
+
+size_t size_of_two_ints_exact(void)
+    _ensures(return == 8)
+{
+    return sizeof(two_ints);
+}
+
+size_t align_of_two_ints_exact(void)
+    _ensures(return == 4)
+{
+    return _Alignof(two_ints);
+}
+
+// A struct with internal padding: `char` then `int` occupies 8 bytes, not 5.
+typedef struct {
+    char c;
+    int i;
+} padded;
+
+size_t size_of_padded_exact(void)
+    _ensures(return == 8)
+{
+    return sizeof(padded);
 }

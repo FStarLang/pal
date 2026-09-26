@@ -310,7 +310,7 @@ fn punct2<
         .padded_by(ws())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TargetIntWidths {
     pub char_width: u32,
     pub short_width: u32,

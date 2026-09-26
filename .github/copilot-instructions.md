@@ -16,6 +16,13 @@ cargo build
 # Run all tests (builds first, then verifies generated .fst files with F*)
 make test -j8
 
+# One test, in the default (Palow) memory model, and in the previous one
+make -C test/swap
+make -C test/swap MODEL=old
+
+# Palow coverage census (counts untranslated constructs instead of failing)
+make palow-check
+
 # Run a single test by translating a C file directly
 cargo run -- test/swap.c          # produces Swap.fst, Swap_diagnostics.json, Swap_source_range_info.json
 cargo run -- --print-ir test/swap.c  # print the IR without emitting files
@@ -26,6 +33,8 @@ clang-format -i cpp/impl.cpp
 ```
 
 The test suite (`test/Makefile`) runs `pal` on each `.c` file in `test/`, then verifies the generated `.fst` files using F*/Pulse.
+
+`pal` emits the **Palow** memory model (`src/pass/emit_palow.rs`, see `palow.md`) by default, into `out/`; `--old-model` selects the previous emitter (`src/pass/emit.rs`), which the suite still exercises via `make -C test MODEL=old` into `out_old/`. Anything Palow cannot translate is a hard error -- `--palow-permissive` downgrades those to comments for a coverage run.
 
 ALWAYS RUN `make test -j8` TO MAKE SURE THE TESTS SUCCEED!!!
 

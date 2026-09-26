@@ -1,0 +1,138 @@
+#include "pal.h"
+#include <stdint.h>
+#include <stddef.h>
+
+// Struct field access. Under Palow a struct's points-to is the separating
+// conjunction of its fields', so `s->f` is a focus of one field, a machine
+// operation on it, and an unfocus -- the same shape as an array subscript,
+// because it is the same operation on a sub-range.
+
+struct point {
+  int32_t x;
+  int32_t y;
+};
+
+int32_t get_x(const struct point *p)
+  _ensures(return == p->x)
+{
+  return p->x;
+}
+
+void set_x(struct point *p, int32_t v)
+  _ensures(p->x == v && p->y == _old(p->y))
+{
+  p->x = v;
+}
+
+// Two fields of the same struct, in both directions. An unfocus that put the
+// wrong field back, or forgot to rebuild the record, shows up here.
+void swap_xy(struct point *p)
+  _ensures(p->x == _old(p->y) && p->y == _old(p->x))
+{
+  int32_t t = p->x;
+  p->x = p->y;
+  p->y = t;
+}
+
+// A struct whose fields are of different widths, so the offsets are not all
+// multiples of one size and padding is possible.
+struct mixed {
+  uint8_t tag;
+  uint64_t value;
+};
+
+void bump(struct mixed *m, uint8_t t)
+  _ensures(m->tag == t)
+{
+  m->tag = t;
+}
+
+// Two structs at once: focusing a field of one must not disturb the other.
+void copy_point(struct point *a, const struct point *b)
+  _ensures(a->x == b->x && a->y == b->y)
+{
+  a->x = b->x;
+  a->y = b->y;
+}
+
+// A fixed-size array field. In C `T f[N]` inside a struct is N elements of
+// storage, not a pointer, so the field owns a whole `array_pts_to` and its
+// length is part of the record type. A subscript through one focuses the field
+// out of the struct and then the element out of the field.
+struct buf {
+  uint32_t len;
+  uint32_t data[4];
+};
+
+uint32_t first(const struct buf *b)
+  _ensures(return == b->data[0])
+{
+  return b->data[0];
+}
+
+void store(struct buf *b, size_t i, uint32_t v)
+  _requires(i < 4)
+  _ensures(b->data[i] == v)
+{
+  b->data[i] = v;
+}
+
+// A scalar field and an array field of the same struct, in one function.
+void set_len(struct buf *b, uint32_t v)
+  _ensures(b->len == v && b->data[0] == _old(b->data[0]))
+{
+  b->len = v;
+}
+
+// A struct with a hole in it: `c` at offset 8 leaves three bytes of padding
+// before the end of the object. Those bytes belong to the object in C, so
+// `struct_padded_pts_to` owns them too -- otherwise a struct that came out of
+// automatic storage could never go back into it, having dropped the gap on the
+// way through the points-to.
+struct padded {
+  int32_t a;
+  int32_t b;
+  uint8_t c;
+};
+
+uint8_t tag(const struct padded *p)
+  _ensures(return == p->c)
+{
+  return p->c;
+}
+
+// A struct local. Its storage is carved out of one flat byte range by the
+// generated `struct_padded_stack_alloc`, field by field and gap by gap, and
+// handed back the same way at the end of the block.
+int32_t pick_local(int32_t x)
+  _ensures(return == x)
+{
+  struct padded p = {.a = x, .b = 0, .c = 0};
+  return p.a;
+}
+
+// A field of a nested struct. Reaching `o->in.v` means focusing `in` out of
+// `outer` and then `v` out of `in`, and closing both again in the opposite
+// order. A write through the inner field changes the outer struct's value, so
+// the outer field closes with the general unfocus and not the read one.
+struct inner {
+  int32_t v;
+  int32_t w;
+};
+
+struct nest {
+  int32_t tag;
+  struct inner in;
+};
+
+int32_t inner_v(const struct nest *o)
+  _ensures(return == o->in.v)
+{
+  return o->in.v;
+}
+
+void set_inner_v(struct nest *o, int32_t x)
+  _ensures(o->in.v == x && o->tag == _old(o->tag) && o->in.w == _old(o->in.w))
+{
+  o->in.v = x;
+}

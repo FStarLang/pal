@@ -69,3 +69,59 @@ void fill_first(_out _array int *a)
     _ghost_stmt(array_return_cell $(a));
 }
 
+
+typedef struct {
+  int lo;
+  int hi;
+} pair;
+
+// Handing a *field* to an `_out` parameter. The field is opened for the
+// length of the call exactly as an array element is, and since `p` already
+// holds a value the field gives it up before the callee writes through it.
+//
+// Palow only: PAL models a field of a live struct as something that has to be
+// unfolded to raw storage by hand before it can be handed out as a write-only
+// `ref`, so the same source needs explicit unfold/fold ghost steps there.
+// Palow's field focus is that step, so the call stands on its own.
+#ifdef PALOW
+void init_field(pair *p)
+  _requires(_live(*p))
+  _ensures(p->hi == 42)
+{
+    init_cell(&p->hi);
+}
+#endif
+
+#ifdef PALOW
+// Palow: a local array handed to an `_out _array` parameter. PAL's model has
+// no uninitialised-array view, so the whole `_out _array` mode is Palow's.
+void fill_two(_out _array int *a)
+  _preserves(a._length == 2)
+{
+  a[0] = 1;
+  a[1] = 2;
+}
+
+void use_fill_two(void)
+{
+  int buf[2];
+  fill_two(buf);
+}
+#endif
+
+// The array behind a struct's `_array` pointer field. Its ownership lives in
+// the struct's deep predicate, so handing it to a callee borrows that
+// predicate for the length of the statement.
+struct holder {
+  _array int *cells;
+  size_t n;
+};
+
+int sum_cells(_array const int *c, size_t n)
+  _requires(c._length == n);
+
+int sum_holder(const struct holder *h)
+  _requires(h->cells._length == h->n)
+{
+  return sum_cells(h->cells, h->n);
+}

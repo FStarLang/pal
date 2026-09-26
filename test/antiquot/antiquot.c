@@ -3,7 +3,13 @@
 void test_rvalue_antiquot(int *x)
     _ensures(_inline_pulse(pure (Int32.v $(*x) > 0)))
 {
+#ifdef PALOW
+    // Palow has no `|->` typeclass on `ptr`: every C type publishes its own
+    // points-to, so the two claims are spelled with theirs.
+    _assert(_inline_pulse(ptr_pts_to $&(x) 1.0R $(x) ** int32_t_pts_to $&(*x) 1.0R $(*x)));
+#else
     _assert(_inline_pulse($&(x) |-> $(x) ** $&(*x) |-> $(*x)));
+#endif
     *x = 6 + 7;
 }
 

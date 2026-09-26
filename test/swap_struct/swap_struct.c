@@ -24,5 +24,13 @@ int_pair swap_functional(int_pair x)
 void use_swap() {
   int_pair x = { .a = 1, .b = 2 };
   swap_inplace(&x);
+#ifdef PALOW
+  // Palow spells a structure's ownership with the predicate generated for
+  // that structure, at an explicit permission; there is no overloaded
+  // `pts_to`.
+  _assert(_inline_pulse(struct_int_pair_pts_to $(&x) 1.0R
+                          $((int_pair) { .a = 2, .b = 1 })));
+#else
   _assert(_inline_pulse(pts_to $(&x) $((int_pair) { .a = 2, .b = 1 })));
+#endif
 }

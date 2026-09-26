@@ -38,7 +38,20 @@ int32_t roundtrip(struct counter *c) _ensures(return == 1) {
   return back == c;
 }
 
-/* Write through a recovered pointer; the caller supplies ownership by hand. */
+/* Write through a recovered pointer; the caller supplies ownership by hand.
+ *
+ * The two models spell the hand-written ownership differently, and the
+ * difference is the point: PAL has to *convert* the `core_ref` to a typed
+ * `ref` before it can state a points-to, while in Palow a `void *` is already
+ * the same `ptr` a `struct counter *` is, so the predicate applies to it
+ * directly. */
+#ifdef PALOW
+void implicit(void *p)
+  _requires(_inline_pulse(
+    exists* (cv: $type(struct counter)). struct_counter_pts_to $(p) 1.0R cv))
+  _ensures(_inline_pulse(
+    exists* (cv: $type(struct counter)). struct_counter_pts_to $(p) 1.0R cv))
+#else
 void implicit(void *p)
   _requires(_inline_pulse(
     exists* (cv: $type(struct counter)).
@@ -46,6 +59,7 @@ void implicit(void *p)
   _ensures(_inline_pulse(
     exists* (cv: $type(struct counter)).
       pts_to (Pulse.Lib.C.CoreRef.core_to_ref $type(struct counter) $(p)) cv))
+#endif
 {
   struct counter *c = p;
   c->n = 0;
@@ -69,15 +83,31 @@ int32_t read_selected(_Bool flag, int32_t *ip, struct counter *sp)
   void *p = select_ptr(flag, ip, sp);
   if (flag) {
     int32_t *back = (int32_t *)p;
+#ifdef PALOW
+    _ghost_stmt(with v. rewrite (int32_t_pts_to $(ip) 1.0R v) as (int32_t_pts_to $(back) 1.0R v));
+#else
     _ghost_stmt(with v. rewrite (pts_to $(ip) v) as (pts_to $(back) v));
+#endif
     int32_t r = *back;
+#ifdef PALOW
+    _ghost_stmt(rewrite (int32_t_pts_to $(back) 1.0R $(r)) as (int32_t_pts_to $(ip) 1.0R $(r)));
+#else
     _ghost_stmt(rewrite (pts_to $(back) $(r)) as (pts_to $(ip) $(r)));
+#endif
     return r;
   } else {
     struct counter *back = (struct counter *)p;
+#ifdef PALOW
+    _ghost_stmt(with v. rewrite (struct_counter_pts_to $(sp) 1.0R v) as (struct_counter_pts_to $(back) 1.0R v));
+#else
     _ghost_stmt(with v. rewrite (pts_to $(sp) v) as (pts_to $(back) v));
+#endif
     struct counter sv = *back;
+#ifdef PALOW
+    _ghost_stmt(rewrite (struct_counter_pts_to $(back) 1.0R $(sv)) as (struct_counter_pts_to $(sp) 1.0R $(sv)));
+#else
     _ghost_stmt(rewrite (pts_to $(back) $(sv)) as (pts_to $(sp) $(sv)));
+#endif
     return sv.n;
   }
 }
