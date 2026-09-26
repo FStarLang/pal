@@ -65,30 +65,47 @@ let encode_tail (n: nat { n > 0 }) (p: prov) (x: nat)
     bytes_ext lhs rhs
 #pop-options
 
-#push-options "--z3rlimit 120 --fuel 2 --ifuel 2"
+(* The first byte of an encoding. It is `byte_at p x 0`, and `pow2 (8 * 0)` is
+   `1`, but saying so inside `decode_encode` costs a query with the induction
+   hypothesis and the whole `encode`/`decode` axiomatization in context. Here
+   there is nothing to search. *)
+let encode_head (n: nat { n > 0 }) (p: prov) (x: nat)
+  : Lemma ((get (encode n p x) 0).value == Some (U8.uint_to_t (x % 256)))
+  = assert_norm (pow2 (8 * 0) == 1)
+
+(* The arithmetic core of `decode_encode`, with no bytes in sight: splitting a
+   number modulo `256 * m` into its low byte and the rest. Stated over plain
+   `nat`s because that is what it is about, and because the solver was
+   previously proving it in a context full of sequences and quantified
+   pointwise predicates, where the nonlinear steps below turn into a search. *)
+#push-options "--z3rlimit 30"
+let mod_split (x: nat) (m: pos)
+  : Lemma (x % (256 * m) == x % 256 + 256 * ((x / 256) % m))
+  = M.modulo_division_lemma x 256 m;
+    M.modulo_modulo_lemma x 256 m;
+    M.euclidean_division_definition (x % (256 * m)) 256
+#pop-options
+
+(* `pow2 (8 * n) == 256 * pow2 (8 * (n - 1))`. The exponent step `8 * n ==
+   8 + 8 * (n - 1)` is linear, but left inside the `pow2` argument it makes
+   `pow2_plus` a search rather than a rewrite. *)
+let pow2_step (n: nat { n > 0 })
+  : Lemma (pow2 (8 * n) == 256 * pow2 (8 * (n - 1)))
+  = assert_norm (pow2 8 == 256);
+    assert (8 * n == 8 + 8 * (n - 1));
+    M.pow2_plus 8 (8 * (n - 1))
+
+#push-options "--z3rlimit 30 --fuel 1 --ifuel 1"
 let rec decode_encode (n: nat) (p: prov) (x: nat)
   : Lemma (ensures decode (encode n p x) == Some (x % pow2 (8 * n)))
           (decreases n)
-  = assert_norm (pow2 8 == 256);
-    assert_norm (pow2 0 == 1);
-    if n = 0 then ()
+  = if n = 0 then assert_norm (pow2 (8 * 0) == 1)
     else begin
-      let b = encode n p x in
-      let m = pow2 (8 * (n - 1)) in
-      assert ((get b 0).value == Some (U8.uint_to_t (x % 256)));
+      encode_head n p x;
       encode_tail n p x;
       decode_encode (n - 1) p (x / 256);
-      assert (decode (slice b 1 (len b)) == Some ((x / 256) % m));
-      assert (decode b == Some (x % 256 + 256 * ((x / 256) % m)));
-      // `8 * n == 8 + 8 * (n - 1)` is linear, but leaving it to the solver
-      // inside the `pow2` argument makes the step nonlinear. Saying it first
-      // keeps `pow2_plus` a rewrite rather than a search.
-      assert (8 * n == 8 + 8 * (n - 1));
-      M.pow2_plus 8 (8 * (n - 1));
-      assert (pow2 (8 * n) == 256 * m);
-      M.modulo_division_lemma x 256 m;
-      M.modulo_modulo_lemma x 256 m;
-      M.euclidean_division_definition (x % (256 * m)) 256
+      pow2_step n;
+      mod_split x (pow2 (8 * (n - 1)))
     end
 #pop-options
 
