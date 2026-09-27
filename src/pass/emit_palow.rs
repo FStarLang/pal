@@ -4759,6 +4759,26 @@ fn emit_fn(
     // then never names the struct's own points-to is one that owns it in
     // pieces, and the fields have to be reached at their own addresses
     // because there is no whole to open.
+    // A `void *` return whose contract hands the caller bytes is claimed at
+    // the caller's type, exactly as `malloc`'s is. `_allocated` is not the
+    // thing that makes that possible -- it only adds the right to `free` --
+    // so a function that carves a chunk out of storage it keeps gives its
+    // caller the same deal, minus that right. The contract says which it is by
+    // whether it grants `mem_pts_to` at the return, and the caller reads the
+    // same words the callee wrote.
+    if contract_ok
+        && ret_block.is_none()
+        && is_void_ptr(tds, &decl.ret_type)
+        && (out.contains(&format!("mem_pts_to ({})", ret_name))
+            || out.contains(&format!("mem_pts_to {}", ret_name)))
+    {
+        ret_block = Some(RetBlock {
+            pn: String::new(),
+            raw: true,
+            guarded: None,
+        });
+    }
+
     let mut piece_types = if contract_ok {
         pieces_named(&out)
     } else {
@@ -13764,7 +13784,7 @@ impl<'a> Body<'a> {
         let Some(rb) = self.allocating_call(init) else {
             return Ok(());
         };
-        if self.in_branch {
+        if self.in_branch && !self.tail_branch {
             return Err("a call returning a block inside a branch".to_string());
         }
         // A `void *` block arrives untyped, and the local it is assigned to is

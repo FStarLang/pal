@@ -4905,8 +4905,8 @@ new facts about memory.
     So the contract says it instead:
 
     ```
-    unfold let pool_inv (a: ptr) (b: SZ.t) (en: nat) : slprop =
-      exists* (e sz: SZ.t) (bs: bytes).
+    unfold let pool_inv (a: ptr) (b: SZ.t) (e: SZ.t) : slprop =
+      exists* (sz: SZ.t) (bs: bytes).
         size_t_pts_to (a +! struct_pool_offsetof_begin) 1.0R b **
         size_t_pts_to (a +! struct_pool_offsetof_end) 1.0R e **
         struct_pool_padding a 1.0R **
@@ -4948,18 +4948,75 @@ new facts about memory.
     different program. The trailing term is now either recognised (`n *
     sizeof(elem)`, or `n` itself when the element is a byte) or reported.
 
-    What is still missing is the client. `int *x = pool_alloc(p, 4);` asks the
-    caller to claim a `void *` that no allocation site produced, which is the
-    `_allocated void *` path of milestone 13 generalised to a function that
-    hands out a piece of something it keeps; and handing the pieces back before
-    `pool_free` is ghost work the author has no vocabulary for yet.
-
-    Palow models no alignment: a byte is a value and a provenance, and
-    `struct_S_alignof` is emitted but appears in no ownership predicate. So
-    `int *y = pool_alloc(p, sizeof(long))` — which lands four bytes into the
-    tail, correctly aligned for the `int` it is declared as and misaligned for
-    the `long` whose size was asked for — is not detected, and neither would
-    the `int` case have been.
-
     The census is 1103 specifications, 1081 with bodies, 0 admitted, 22
+    external, 0 skipped.
+
+15. **The client of a pool.** Finishing the program needs two more things, one
+    in the emitter and one in the contract.
+
+    In the emitter, the `void *` rule of milestone 13 was tied to `_allocated`,
+    and `pool_alloc` allocates nothing — it hands out a piece of something it
+    keeps. But `_allocated` was never what made the rule work: the claim is
+    driven by the `mem_pts_to` the contract grants at the return, and
+    `_allocated` only adds the right to `free`. So the rule is now: **a `void *`
+    return whose contract grants `mem_pts_to` at the return value is claimed at
+    the caller's type**, allocated or not. `int *x = pool_alloc(p, 4);` becomes
+    an `int32_t_claim_uninit` on the returned bytes, exactly like `xmalloc`.
+    Relatedly, the guard that refused a block-returning call inside a branch now
+    reads `in_branch && !tail_branch`, matching the three allocation sites: the
+    code after an early `return` is a continuation, not a fork.
+
+    In the contract, `pool_free` has to get all of the storage back, so the
+    invariant counts what has come home:
+
+    ```
+    let returned ([@@@mkey] a: ptr) (r: SZ.t) : slprop =
+      exists* rs. mem_pts_to a 1.0R rs ** pure (len rs == SZ.v r)
+
+    unfold let pool_inv (a: ptr) (b r e: SZ.t) : slprop =
+      exists* (sz: SZ.t) (bs: bytes).
+        size_t_pts_to (a +! offsetof_begin) 1.0R b **
+        size_t_pts_to (a +! offsetof_end) 1.0R e **
+        struct_pool_padding a 1.0R **
+        returned (a +! offsetof_data) r **
+        mem_pts_to ((a +! offsetof_data) +! b) 1.0R bs **
+        freeable a sz ** pure (...)
+    ```
+
+    The first `r` bytes belong to the pool again, the bytes from `r` up to `b`
+    are out with whoever holds them, and the bytes from `b` on were never given
+    to anyone. A ghost `pool_return a r n` moves one chunk from the second
+    range to the first with a single `mem_join`, and `pool_free` requires
+    `pool_inv p b b e` — a pool that owns all of its storage again, which
+    nothing short of every chunk coming back can establish.
+
+    `returned` is a plain `let`, not an `unfold let`, on purpose. Written
+    inline, `r` would be tied to the state only by a `pure` equation over an
+    existential `rs`, and a `pure` fact is not something the matcher in Pulse
+    can solve an implicit from: the caller would have to pass every ghost index
+    by hand, which it cannot. Behind an opaque slprop keyed on the address, `r`
+    is an argument, and unification finds it. The same reasoning turned the
+    capacity index from a `nat` into the `size_t` that `end` holds. **The rule
+    is: a ghost index a caller must infer has to appear in an argument position
+    of a slprop, never only in a `pure`.**
+
+    One rough edge is left. `pool_new` writes its own `unless_null` in its
+    `_ensures`, and the emitter only knows how to spend a guard it wrote
+    itself, so `example` eliminates it with two `_ghost_stmt`s — one per arm of
+    the null test. Teaching the emitter to recognise a hand-written
+    `unless_null` in a spliced postcondition would remove them.
+
+    `test/pool_flex` now verifies the whole program, `example` included, with
+    no admits and no dropped clauses, and its body is the C transliterated:
+    two calls, two claims, three writes, one read, and the ghost hand-backs.
+
+    Alignment is still not modelled: a byte is a value and a provenance, and
+    `struct_S_alignof` is emitted but appears in no ownership predicate. So the
+    `long *y = pool_alloc(p, sizeof(long))` of the example, which lands four
+    bytes into the tail and is therefore misaligned on every target where
+    `_Alignof(long)` is 8, verifies happily. Neither that nor a misaligned
+    `int` would be caught. Making `T_pts_to` carry `aligned a T_alignof` and
+    making every `T_claim` demand it is the next piece of the model.
+
+    The census is 1104 specifications, 1082 with bodies, 0 admitted, 22
     external, 0 skipped.
