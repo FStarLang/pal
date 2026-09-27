@@ -928,6 +928,28 @@ public:
     return nullptr;
   }
 
+  // The size in bytes of a record's flexible array member's element type, or 0
+  // if the record has no flexible array member. `malloc(sizeof(S) + n)` is an
+  // allocation of `n` elements exactly when that size is 1, which is the usual
+  // shape for a byte pool.
+  uint64_t flexElemSize(QualType qt) {
+    const auto *rt = qt->getAsStructureType();
+    if (!rt)
+      return 0;
+    const RecordDecl *rd = rt->getDecl()->getDefinition();
+    if (!rd)
+      return 0;
+    const FieldDecl *last = nullptr;
+    for (const auto *f : rd->fields())
+      last = f;
+    if (!last)
+      return 0;
+    const auto *arr = astCtx->getAsIncompleteArrayType(last->getType());
+    if (!arr)
+      return 0;
+    return astCtx->getTypeSizeInChars(arr->getElementType()).getQuantity();
+  }
+
   bool canOmitVariadicArgument(Expr *e) {
     if (e->HasSideEffects(*astCtx))
       return false;
@@ -1058,9 +1080,24 @@ public:
                       return mk_malloc_flex(std::move(loc), std::move(allocTy),
                                             std::move(countExpr));
                     }
-                    // Unrecognized array term: fall back to an empty flexible
-                    // tail (plain struct malloc).
-                    return mk_malloc(std::move(loc), std::move(allocTy));
+                    // `malloc(sizeof(S) + n)` with a byte-sized tail: the term
+                    // is the count, since the elements are bytes.
+                    if (flexElemSize(structSide->getTypeOfArgument()) == 1) {
+                      auto countExpr = trRValue(arrayTerm);
+                      return mk_malloc_flex(std::move(loc), std::move(allocTy),
+                                            std::move(countExpr));
+                    }
+                    // Anything else would have to be dropped to be translated,
+                    // and a smaller allocation than the C asked for is not a
+                    // weaker translation of it but a different program.
+                    reportUnsupported(
+                        e->getSourceRange(), loc,
+                        "unsupported flexible-array allocation size",
+                        "the trailing term must be `n * sizeof(elem)`, or the "
+                        "element type must be a byte");
+                    return mk_rvalue_err(
+                        std::move(loc),
+                        trQualType(e->getType(), e->getSourceRange()));
                   }
                 }
               }

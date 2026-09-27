@@ -1479,6 +1479,11 @@ struct FnSurface {
     /// Whether the function's postcondition is `false`, so a call to it does
     /// not come back.
     noreturn: bool,
+    /// Pointer parameters whose struct pointee the contract owns field by
+    /// field rather than whole. See `pieces_named`.
+    pieces: HashSet<String>,
+    /// The structs themselves, by Palow name.
+    piece_types: HashSet<String>,
     /// The ownership the contract grants over what the parameters point to.
     /// A function body never has to restate this -- Pulse carries it -- except
     /// at a loop, whose invariant Pulse cannot invent.
@@ -3084,6 +3089,7 @@ fn emit_fn(
     decl: &FnDecl,
     globals: &[Slot],
     decay: bool,
+    file_pieces: &HashSet<String>,
 ) -> Result<FnSurface, String> {
     let name = format!("func_{}", decl.name.val);
 
@@ -4744,6 +4750,39 @@ fn emit_fn(
     // A `decreases` is part of the definition, not of the contract: an
     // interface that repeated it would be a syntax error, and a caller has no
     // use for the measure that justified the callee's recursion.
+    // Which parameters the contract holds in pieces. A struct's generated
+    // points-to is one slprop over the whole object, which is the right shape
+    // for a struct a caller hands over and gets back; it is the wrong shape
+    // for one that owns storage it hands out, since after the first hand-out
+    // no single term describes what is left. `_plain` already says the
+    // contract owns this parameter rather than the emitter; a contract that
+    // then never names the struct's own points-to is one that owns it in
+    // pieces, and the fields have to be reached at their own addresses
+    // because there is no whole to open.
+    let mut piece_types = if contract_ok {
+        pieces_named(&out)
+    } else {
+        HashSet::new()
+    };
+    // A helper in an `_include_pulse` block is part of the contract that uses
+    // it, so a struct it owns in pieces is one this file owns in pieces --
+    // unless this particular contract does name the whole object, in which
+    // case this function wants a value and the general rule applies.
+    piece_types.extend(
+        file_pieces
+            .iter()
+            .filter(|sn| !out.contains(&format!("{}_pts_to", sn)))
+            .cloned(),
+    );
+    let pieces: HashSet<String> = decl
+        .args
+        .iter()
+        .filter_map(|a| {
+            let sn = palow_name(tds, pointee(tds, &peel(tds, &a.ty))?.as_ref())?;
+            let name = a.name.as_ref()?.val.to_string();
+            piece_types.contains(&sn).then_some(name)
+        })
+        .collect();
     let iface = out.clone();
     if let Some(d) = &decreases {
         out += &format!("  decreases ({})\n", d);
@@ -4967,6 +5006,8 @@ fn emit_fn(
         decl: out,
         iface,
         noreturn,
+        pieces,
+        piece_types,
         owned,
         guarded,
         granted,
@@ -8486,6 +8527,22 @@ pub fn emit_palow(
         });
     }
 
+    // Which structs this file owns in pieces. A hand-written helper is part
+    // of the contracts that use it, so the question is asked of the whole
+    // file's hand-written Pulse at once: a struct whose field offsets a helper
+    // names, and whose points-to nothing names, is one nobody here treats as a
+    // value.
+    let file_pieces: String = tu
+        .decls
+        .iter()
+        .filter_map(|decl| match &decl.val {
+            DeclT::IncludeDecl(id) if splice_inline => include_pulse(&tds, &id.code).ok(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let file_pieces = pieces_named(&file_pieces);
+
     // `_pure` functions first, and as F* definitions rather than Pulse `fn`s.
     // A `_pure` function is the vocabulary a contract is written in, so it has
     // to be a term an `_ensures` or an `_assert` can mention; a `fn` is a
@@ -8660,7 +8717,7 @@ pub fn emit_palow(
             .map(|g| globals[g].clone())
             .collect();
         let decay = decayed.contains(&*fndecl.name.val.to_string());
-        let sig = match emit_fn(&tds, &env, fndecl, &granted, decay) {
+        let sig = match emit_fn(&tds, &env, fndecl, &granted, decay, &file_pieces) {
             Ok(s) => s,
             Err(why) => {
                 items.push(FnItem {
@@ -9442,6 +9499,11 @@ struct Body<'a> {
     granted: &'a HashSet<String>,
     /// See `FnSurface::spliced_own`.
     spliced_own: bool,
+    /// Parameters whose struct pointee the contract owns field by field. See
+    /// `FnSurface::pieces`.
+    pieces: &'a HashSet<String>,
+    /// See `FnSurface::piece_types`.
+    piece_types: &'a HashSet<String>,
     /// Parameters whose ownership sits behind a nullness guard, so a loop
     /// invariant claiming their storage is claiming the guard is discharged.
     guarded: &'a HashSet<String>,
@@ -10416,6 +10478,35 @@ impl<'a> Body<'a> {
             // afterwards, exactly as a subscript does; the difference is that
             // the access happens in the callee rather than here.
             ExprT::Index(base, idx) => {
+                // An array field of a struct the contract holds in pieces is
+                // not the emitter's to hand out: whatever owns those bytes is
+                // whatever the contract said owns them, and all the body needs
+                // of `&p->data[i]` is where it is. Taking an address reads
+                // nothing, so there is nothing to focus and nothing to put
+                // back.
+                if let ExprT::Member(sbase, f) = &strip_vattr(base).val
+                    && self.in_pieces(sbase)
+                {
+                    let fty = self.field_ty(sbase, f)?;
+                    let esize = match field_shape(self.tds, &fty) {
+                        Some(FieldShape::Array { esize, .. } | FieldShape::Flex { esize, .. }) => {
+                            esize
+                        }
+                        _ => {
+                            return Err(format!(
+                                "a subscript of `{}`, which is not an array field",
+                                f.val
+                            ));
+                        }
+                    };
+                    let a = self.addr_only(base)?;
+                    let i = self.index(idx)?;
+                    return Ok(if esize == 1 {
+                        format!("({} +! {})", a, i)
+                    } else {
+                        format!("({} +! ({}sz `SizeT.mul` {}))", a, esize, i)
+                    });
+                }
                 let f = self.focus_elem(base, Some(idx), false)?;
                 self.lines.extend(f.open_read.iter().cloned());
                 self.pending_close.extend(f.close_write);
@@ -10437,6 +10528,27 @@ impl<'a> Body<'a> {
         }
         let v = lvalue_name(strip_vattr(a))?;
         self.aliases.get(&v).cloned()
+    }
+
+    /// Whether the struct this place is a field of is one the contract owns
+    /// field by field.
+    ///
+    /// Such a struct is never a value: no term describes it, because the
+    /// storage it is made of is not all in one owner's hands. So an access to
+    /// a field is an access to that field's own storage, at that field's own
+    /// address, with nothing opened around it -- which is the same thing a
+    /// half-written local does while it is being filled, and for the same
+    /// reason.
+    fn in_pieces(&self, base: &Expr) -> bool {
+        if self.pieces.is_empty() {
+            return false;
+        }
+        let base = strip_vattr(base);
+        let v = match &base.val {
+            ExprT::Deref(inner) => lvalue_name(strip_vattr(inner)),
+            _ => lvalue_name(base),
+        };
+        v.is_some_and(|v| self.pieces.contains(&v))
     }
 
     /// The address an lvalue denotes, computed by arithmetic alone.
@@ -10593,6 +10705,24 @@ impl<'a> Body<'a> {
                     Some(pos) => format!("uint{}_t", pos.unit_bits),
                     None => self.field_pn(base, f)?,
                 };
+                if self.in_pieces(base) {
+                    if ff.bits.is_some() {
+                        return Err(format!(
+                            "a bit-field of `{}`, whose storage the contract holds in pieces",
+                            f.val
+                        ));
+                    }
+                    return Ok(Focus {
+                        write_fn: format!("{}_write", pn),
+                        pn,
+                        bits: None,
+                        at: ff.at,
+                        open_read: Vec::new(),
+                        open_write: Vec::new(),
+                        close_read: ff.close_read,
+                        close_write: ff.close_write,
+                    });
+                }
                 if let Some(focus) = self.scattered_field(&ff, f, &pn, writing) {
                     if ff.bits.is_some() {
                         return Err(format!(
@@ -14146,7 +14276,7 @@ impl<'a> Body<'a> {
                 // zeros, the fixed fields still storage.
                 _ if b.flex.is_some() => {
                     let fx = b.flex.as_ref().unwrap();
-                    vec![
+                    let mut ls = vec![
                         format!("elim_unless_null {} {};", b.tmp, sl),
                         match &fx.zero {
                             Some((z, why)) => format!(
@@ -14161,7 +14291,23 @@ impl<'a> Body<'a> {
                                 format!("{}_claim_uninit_flex {} {};", b.pn, b.tmp, fx.n)
                             }
                         },
-                    ]
+                    ];
+                    // A struct this file owns in pieces never wants the tail
+                    // as an array: it is storage to hand out. Giving it up
+                    // here rather than at the end is what lets a ghost step
+                    // the author writes see it as bytes.
+                    if self.piece_types.contains(&b.pn) {
+                        ls.push(format!(
+                            "array_forget{} {}_repr ({} +! {}_offsetof_{}) {};",
+                            if fx.zero.is_some() { "_full" } else { "" },
+                            fx.pn,
+                            b.tmp,
+                            b.pn,
+                            fx.field,
+                            fx.esize
+                        ));
+                    }
+                    ls
                 }
                 None => vec![
                     format!("elim_unless_null {} {};", b.tmp, sl),
@@ -14256,6 +14402,13 @@ impl<'a> Body<'a> {
             return;
         }
         let (tmp, pn) = (b.tmp.clone(), b.pn.clone());
+        // A contract that owns this struct in pieces is not asking for a
+        // value: the tail is storage it hands out, not a sequence it has
+        // filled. Giving the array up for the bytes it stands for is the last
+        // step, and there is nothing to gather.
+        if self.piece_types.contains(&pn) {
+            return;
+        }
         self.lines.push(format!(
             "array_claim_all_somes {}_repr ({} +! {}_offsetof_{}) {};",
             fx.pn, tmp, pn, fx.field, fx.esize
@@ -14315,6 +14468,15 @@ impl<'a> Body<'a> {
         // ownership rather than the caller; and if the splice did not in fact
         // grant it, F* rejects the `free`.
         let Some(i) = found else {
+            // A struct the contract owns in pieces has no whole to give up:
+            // the ownership `free` needs is the ownership the contract has,
+            // and reassembling it is a ghost step the author writes, because
+            // only the author knows what was handed out and has come back.
+            if self.in_pieces(arg) && !self.blocks.iter().any(|b| b.var == name) {
+                let v = self.rvalue(arg)?;
+                self.lines.push(format!("free {};", v));
+                return Ok(());
+            }
             if self.spliced_own
                 && !self.blocks.iter().any(|b| b.var == name)
                 && let Ok(ty) = self.ty_of(arg)
@@ -16632,6 +16794,33 @@ fn is_literal(e: &Expr) -> bool {
     }
 }
 
+/// The structs a contract owns field by field rather than whole.
+///
+/// A struct's generated points-to is one slprop over the whole object, which
+/// is the right shape for one a caller hands over and gets back; it is the
+/// wrong shape for one that owns storage it hands out, since after the first
+/// hand-out no single term describes what is left. So a contract that names a
+/// field's offset -- which is to say, names a field's storage separately --
+/// and never names the struct's own points-to is one that owns it in pieces,
+/// and the fields have to be reached at their own addresses because there is
+/// no whole to open. The contract says which it is by what it mentions; there
+/// is nothing extra for an author to write.
+fn pieces_named(contract: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let b = contract.as_bytes();
+    for (i, _) in contract.match_indices("_offsetof_") {
+        let mut j = i;
+        while j > 0 && (b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_') {
+            j -= 1;
+        }
+        let sn = &contract[j..i];
+        if sn.starts_with("struct_") && !contract.contains(&format!("{}_pts_to", sn)) {
+            out.insert(sn.to_string());
+        }
+    }
+    out
+}
+
 /// Whether a parameter is `_plain`: a pointer the callee may dereference but
 /// holds nothing through. That is the one argument position a literal's
 /// address can be passed in, since a literal comes with no ownership at all.
@@ -17163,6 +17352,8 @@ fn emit_body(
         owned: &sig.owned,
         granted: &sig.granted,
         spliced_own: sig.spliced_own,
+        pieces: &sig.pieces,
+        piece_types: &sig.piece_types,
         guarded: &sig.guarded,
         valid_fps: &sig.valid_fps,
         local_valid_fps: HashSet::new(),

@@ -4880,3 +4880,86 @@ new facts about memory.
 
     The census is 1100 specifications, 1078 with bodies, 0 admitted, 22
     external, 0 skipped.
+
+14. **A struct that hands out its own storage.** A pool allocator built on a
+    flexible array member —
+
+    ```c
+    typedef struct { size_t begin, end; unsigned char data[]; } pool;
+    void *pool_alloc(pool *p, size_t n) {
+        if (n > p->end - p->begin) return NULL;
+        void *x = &p->data[p->begin];
+        p->begin += n;
+        return x;
+    }
+    ```
+
+    — is the first program whose ownership the generated predicates cannot
+    describe at all. `struct_pool_pts_to a perm x` is one slprop over the whole
+    object, which is the right shape for a struct a caller hands over and gets
+    back; it is the wrong shape for one that owns storage it hands out, because
+    after the first hand-out no single term describes what is left. The tail is
+    pinned at `a +! offsetof_data`, so carving from the front of it cannot be
+    said in the value at all.
+
+    So the contract says it instead:
+
+    ```
+    unfold let pool_inv (a: ptr) (b: SZ.t) (en: nat) : slprop =
+      exists* (e sz: SZ.t) (bs: bytes).
+        size_t_pts_to (a +! struct_pool_offsetof_begin) 1.0R b **
+        size_t_pts_to (a +! struct_pool_offsetof_end) 1.0R e **
+        struct_pool_padding a 1.0R **
+        mem_pts_to ((a +! struct_pool_offsetof_data) +! b) 1.0R bs **
+        freeable a sz ** pure (...)
+    ```
+
+    What has been handed out is not mentioned, which is exactly what makes the
+    chunks independent of the pool and of each other.
+
+    The emitter reads this off the contract rather than off a new annotation:
+    **a struct whose field offsets the hand-written Pulse names, and whose
+    points-to it never names, is one that is owned in pieces.** Naming an
+    offset *is* naming a field's storage separately, so the rule is the
+    question. It is asked of the file's `_include_pulse` helpers as well as of
+    each signature, since a helper is part of every contract that uses it, and
+    a function whose own contract does name the whole object opts back out.
+
+    Four places then behave differently. A field access emits no
+    `_focus`/`_unfocus` pair — there is no whole to open, so `p->begin` is a
+    `size_t_read` at `p +! offsetof_begin` and nothing else. `&p->data[i]` is
+    address arithmetic with no `array_focus`: the element's ownership is not
+    the emitter's to hand out. A freshly `malloc`ed flexible struct gives its
+    tail up for bytes at the allocation site instead of gathering a value at
+    the end. And `free(p)` emits the `free` alone, because reassembling the
+    block is a ghost step only the author can take — only the author knows
+    everything has come back.
+
+    The resulting bodies are the C, transliterated: `pool_alloc` is two reads,
+    a comparison, one pointer sum, one write, and two ghost steps (`mem_split`,
+    and a `rewrite` that makes Pulse's syntactic matcher use the `add_add` SMT
+    pattern). `test/pool_flex` verifies `pool_new`, `pool_alloc` and
+    `pool_free`.
+
+    Translating the program also turned up a frontend bug worth recording:
+    `malloc(sizeof(pool) + max_alloc)` silently dropped the `+ max_alloc` and
+    allocated a bare `pool`. That is worse than any of the four weakening
+    markers, because it is not a weaker translation of the program — it is a
+    different program. The trailing term is now either recognised (`n *
+    sizeof(elem)`, or `n` itself when the element is a byte) or reported.
+
+    What is still missing is the client. `int *x = pool_alloc(p, 4);` asks the
+    caller to claim a `void *` that no allocation site produced, which is the
+    `_allocated void *` path of milestone 13 generalised to a function that
+    hands out a piece of something it keeps; and handing the pieces back before
+    `pool_free` is ghost work the author has no vocabulary for yet.
+
+    Palow models no alignment: a byte is a value and a provenance, and
+    `struct_S_alignof` is emitted but appears in no ownership predicate. So
+    `int *y = pool_alloc(p, sizeof(long))` — which lands four bytes into the
+    tail, correctly aligned for the `int` it is declared as and misaligned for
+    the `long` whose size was asked for — is not detected, and neither would
+    the `int` case have been.
+
+    The census is 1103 specifications, 1081 with bodies, 0 admitted, 22
+    external, 0 skipped.
