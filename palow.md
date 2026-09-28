@@ -280,6 +280,198 @@ a computation) and the `c_sizeof_array` axiom (`sizeof(int[8])` is just `32sz`).
 a clang AST at hand, resolves through the same table, so specifications and code
 agree by construction.
 
+### Alignment
+
+**Not implemented; this is the proposal.** Palow models no alignment at all
+today. `uint32_t_alignof` and `struct_S_alignof` are emitted, but they appear
+in no ownership predicate, so nothing anywhere relates an object's address to
+its type. The gap is not academic. In `test/pool_flex`,
+
+```c
+int  *x = pool_alloc(p, sizeof(int));
+long *y = pool_alloc(p, sizeof(long));
+```
+
+hands out `data + 0` and `data + 4`. On every LP64 target `_Alignof(long)` is
+8, so `y` is misaligned, and `*y = *x` is undefined behaviour. The whole
+program verifies. That is the one place where a Palow proof is currently
+*unsound* with respect to ISO C rather than merely conservative, so it should
+be closed.
+
+The pieces are already there: a pointer has a ghost `addr_of`, and the
+arithmetic on it is exact (`addr_of_add`). What is missing is a predicate and
+the discipline of threading it.
+
+#### The predicate
+
+```fstar
+(* `Pulse.Lib.C.Palow.Ptr` *)
+let aligned (a: ptr) (n: SZ.t) : prop =
+  SZ.v n > 0 /\ addr_of a % SZ.v n == 0
+```
+
+A pure prop on the address, not an slprop. Alignment is a property of a
+pointer, not a resource: it cannot be consumed, it is not split when ownership
+is split, and two holders of a half-permission both have it. Making it an
+slprop would mean duplicating and recombining a fact that was never scarce.
+
+Two lemmas carry all of the arithmetic:
+
+```fstar
+val aligned_add (a: ptr) (m n: SZ.t)
+  : Lemma (requires aligned a m /\ SZ.v n % SZ.v m == 0)
+          (ensures  aligned (a +! n) m)
+
+val aligned_divides (a: ptr) (m n: SZ.t)
+  : Lemma (requires aligned a m /\ SZ.v n > 0 /\ SZ.v m % SZ.v n == 0)
+          (ensures  aligned a n)
+```
+
+The first steps to a field or an array element; the second weakens a stronger
+guarantee (what `malloc` gives) to the one a particular type needs. Both are
+`FStar.Math.Lemmas` one-liners.
+
+#### Where it is carried
+
+Inside the typed points-to, as a conjunct of the abstract predicate:
+
+```fstar
+val uint32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U32.t) : slprop
+
+val uint32_t_pts_to_aligned (a: ptr) (p: perm) (x: U32.t)
+  : Lemma (uint32_t_pts_to a p x == uint32_t_pts_to a p x ** pure (aligned a uint32_t_alignof))
+```
+
+— or, since these predicates are axiomatized anyway, simply a ghost
+`uint32_t_aligned` that reads the fact back out of ownership. The point is that
+*holding an object of type `T` at `a` entails `aligned a T_alignof`*, so the
+fact is available wherever it is needed without being passed around, and every
+way into typed ownership has to establish it:
+
+| step | alignment |
+|---|---|
+| `T_claim`, `T_claim_uninit`, `T_conceal` | **requires** `aligned a T_alignof` |
+| `T_reveal`, `T_reveal_uninit`, `T_forget` | **ensures** it (free: it was already held) |
+| `T_stack_alloc` | **ensures** it, by construction |
+| `malloc`, `calloc` | **ensures** `aligned a max_align` |
+
+`max_align` is `_Alignof(max_align_t)` for the target — 16 on LP64 — which is
+exactly C11 7.22.3p1: storage from `malloc` is suitably aligned for any object
+type with a fundamental alignment. A `T_claim` on a fresh block then needs
+`aligned_divides a 16sz T_alignof`, and `16 % 4 == 0` is a literal computation.
+
+Crucially, `mem_pts_to` is **not** touched. Bytes have alignment 1; the
+constraint belongs to the typed layer, and keeping the byte layer free of it is
+what lets `memcpy`, type punning and a byte-level allocator go on saying
+nothing about types. The corollary is the right one: a range obtained by
+copying bytes has no alignment until someone proves it, which is precisely the
+obligation ISO C imposes on a punning cast.
+
+#### Aggregates and arrays
+
+A field inherits from the struct. `struct_S_pts_to a p x` carries
+`aligned a struct_S_alignof`, and `struct_S_focus_f` derives the field's from
+`aligned_add a struct_S_alignof struct_S_offsetof_f` plus
+`struct_S_offsetof_f % T_alignof == 0` — which is a fact about the layout clang
+gave us, true by construction and, since both are literals, discharged by
+computation. `unfocus` needs nothing: the struct's alignment was never given
+up.
+
+`array_pts_to` gains the same conjunct at the array's own alignment (the
+element's, since C arrays have no padding). `array_focus` at index `i` needs
+`aligned (a +! i*esize) T_alignof`, i.e. `(i * esize) % esize == 0`. This is
+the one genuinely nonlinear step in the whole design — and it is a single
+lemma inside `Pulse.Lib.C.Palow.Array`, paid once, never in generated code.
+
+#### What it costs, and where it shows up
+
+For ordinary code the answer should be **nothing**, because every quantity
+involved is a literal. A local, a field of a local, a `malloc`ed object, an
+element of an array at a symbolic index — all of these get their alignment from
+the table above with no annotation, because the divisibility side conditions
+are closed arithmetic on numerals and Z3 computes them. That is the claim to
+check, not to assume; see the rollout below.
+
+The obligation becomes *visible* exactly where C says it should:
+
+- a pointer manufactured from an integer through `Pulse.Lib.C.Palow.Expose`
+  has whatever alignment its address happens to have, so claiming a type
+  through it is the author's obligation;
+- a byte range claimed at a type after a `memcpy` likewise;
+- and an allocator that carves a block into chunks must say something about
+  where its chunks land.
+
+That last one is the interesting case, and it is why `test/pool_flex` is the
+right acceptance test.
+
+#### The payoff, and what it does to `pool_flex`
+
+Under this design `pool_flex` **stops verifying**, which is the point. The
+`int64_t_claim_uninit` on `(a +! offsetof_data) +! b` needs
+`(addr_of a + 16 + SZ.v b) % 8 == 0` with `b` the pool's `begin`, about which
+the invariant says nothing but `v b <= v e`. It is unprovable, and no amount of
+ghost work makes it provable, because the program is wrong.
+
+The fix is the one a real allocator makes: round up. `pool_alloc` rounds `n`
+(or `begin`) up to `max_align`, and `pool_inv` carries
+`pure (SZ.v b % SZ.v max_align == 0)`, which `pool_new` establishes at `b == 0`
+and each allocation re-establishes. The claim then goes through by
+`aligned_divides`. So the test grows one line of C and one conjunct of
+invariant, and in exchange it becomes a faithful pool allocator whose proof
+says what a pool allocator actually has to guarantee. The `int` case, which is
+accidentally correct today, will also then be correct for a reason.
+
+We have no way to write a test that *must not* verify, which is what would pin
+this down as a regression test rather than a story. A `should-fail` marker file
+alongside `palow-only`, with `test/Makefile` inverting the exit status of the
+F\* run, is the obvious small addition and should come with this work.
+
+#### Rollout, with a measurement at each step
+
+The point of the refactor is a number, so the steps are chosen so that each one
+can be measured on its own:
+
+1. `aligned` and the two lemmas in `Pulse.Lib.C.Palow.Ptr`. Nothing depends on
+   them yet; cost zero by construction.
+2. `malloc`, `calloc` and every `T_stack_alloc` *ensure* alignment. Purely
+   additive — no existing proof can break, and any that slows down does so
+   because of one extra hypothesis, which is worth knowing on its own.
+3. Scalars carry and demand it. This is the step that touches every proof in
+   the suite. **Measure here**: census, wall-clock, and the count of tests
+   needing a new annotation.
+4. Aggregates and arrays: the focus/unfocus machinery and `array_focus`.
+   Measure again.
+5. `pool_flex` rounds up; the `should-fail` mechanism lands with a negative
+   test for the misaligned `long`.
+
+If step 3 or 4 is expensive, the fallback is to keep the alignment conjunct but
+make it `T_alignof`-generic and prove the literal side conditions once per type
+at definition time rather than at every claim — the obligations do not change,
+only who discharges them.
+
+#### Open questions
+
+- **`_Alignas` and over-aligned types.** `_Alignas(64) struct S` raises
+  `struct_S_alignof`; nothing in the design cares, since the alignment is read
+  from clang. But `malloc` does *not* guarantee it, so claiming such a type on
+  `malloc`ed storage should fail — correctly — and `aligned_alloc` needs a
+  model. Worth doing, since it is the only way to write the program at all.
+- **Packed structs.** `__attribute__((packed))` gives fields alignment 1, which
+  the layout table already reports; the field-offset side condition then holds
+  trivially. The reads and writes are a separate question the model does not
+  address today either.
+- **`char` access is free.** `uint8_t_alignof` is `1sz` and `aligned a 1sz` is
+  `addr_of a % 1 == 0`, which is trivially true, so no byte-level code pays
+  anything. This is not an accident, and it is the reason the byte layer can
+  stay alignment-free.
+- **Should `freeable` carry it?** `free` requires a pointer from `malloc`, and
+  `freeable` already pins that down; adding alignment to it would be
+  redundant. Leaving it out.
+- **Null.** `addr_of null == 0`, so `aligned null n` holds for every `n`. That
+  is harmless — you still cannot claim anything at `null`, because there is no
+  `mem_pts_to` for it — and it keeps `unless_null` proofs from needing a case
+  split.
+
 ### Permissions
 
 Fractional permissions apply to whole objects, not to individual bytes:
@@ -845,6 +1037,12 @@ new facts about memory.
 
 ### Known deviations
 
+- **Alignment is not modelled.** `T_alignof` is emitted but appears in no
+  ownership predicate, so nothing relates an object's address to its type and a
+  misaligned access verifies. Unlike the rest of this list, this one is not a
+  conservative restriction but a genuine unsoundness with respect to ISO C: see
+  "Alignment" above for the proposal that closes it, and `test/pool_flex` for a
+  program it currently lets through.
 - `( +! )` is total, so forming an out-of-bounds pointer is not itself
   rejected; only out-of-bounds *access* is, because `mem_pts_to` is available
   only for in-bounds ranges. This is strictly more permissive than ISO C.
