@@ -240,6 +240,7 @@ fn alloc_ne_null ()
   let p = malloc uint32_t_sizeof;
   if (not (is_null p)) {
     elim_unless_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof ** pure (aligned p max_align));
+    aligned_divides p max_align uint32_t_alignof;
     uint32_t_claim_uninit p;
     uint32_t_write_uninit p 7ul;
     uint32_t_forget p;

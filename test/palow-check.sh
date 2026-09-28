@@ -30,6 +30,12 @@ check_one() {
   local dir="$WORK/$name"
   mkdir -p "$dir"
 
+  # A negative test is *meant* not to verify (see `should-fail`), so it says
+  # nothing about coverage and would only report itself as a failure here.
+  if [[ -f $tdir/should-fail ]]; then
+    return 0
+  fi
+
   local inc=()
   if [[ -d $tdir/include ]]; then
     inc=(-I "$tdir/include")

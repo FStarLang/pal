@@ -68,6 +68,7 @@ fn pool_alloc_uint32 (rp: R.ref ptr) (rn: R.ref SZ.t)
     mem_pts_to_not_null cur;
     assert (pure (not (is_null cur)));
     mem_split cur uint32_t_sizeof;
+    aligned_add cur uint32_t_alignof uint32_t_sizeof;
     rp := cur +! uint32_t_sizeof;
     rn := SZ.sub rem uint32_t_sizeof;
     fold pool_inv rp rn;

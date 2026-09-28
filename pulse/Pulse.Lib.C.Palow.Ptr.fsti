@@ -93,24 +93,36 @@ val add_add (a: ptr) (m n: SZ.t)
    ownership (`T_claim`, `T_conceal`) has to establish it and every way out
    returns it. The byte layer stays free of it -- bytes have alignment 1 --
    which is what lets `memcpy`, type punning and a byte-level allocator go on
-   saying nothing about types. See `palow.md`. *)
-let aligned (a: ptr) (n: SZ.t) : prop =
-  SZ.v n > 0 /\ addr_of a % SZ.v n == 0
+   saying nothing about types. See `palow.md`.
+
+   One pragmatic detail: the definition is `opaque_to_smt`. A wide struct's
+   reveal proof holds one alignment hypothesis per field, and unfolded those
+   are `addr_of a % k == 0` -- nonlinear arithmetic, which Z3 will happily
+   spend the whole rlimit on. Opaque, they are atoms, and the three lemmas
+   below are the only way to move between them. The 69-field struct in
+   `test/dpe` is the difference between five minutes and an hour. *)
+[@@"opaque_to_smt"]
+let divides_addr (a: ptr) (n: nat { n > 0 }) : prop = addr_of a % n == 0
+
+let aligned (a: ptr) (n: SZ.t) : prop = SZ.v n > 0 /\ divides_addr a (SZ.v n)
 
 (* Alignment 1 is no constraint, so byte-level code pays nothing. *)
-let aligned_one (a: ptr) : Lemma (aligned a 1sz) [SMTPat (aligned a 1sz)] = ()
+let aligned_one (a: ptr) : Lemma (aligned a 1sz) [SMTPat (aligned a 1sz)] =
+  reveal_opaque (`%divides_addr) divides_addr
 
 (* `null` has address zero, so it is aligned for everything. Harmless -- there
    is no `mem_pts_to` at `null` to claim anything through -- and it keeps
    `unless_null` proofs from needing a case split. *)
-let aligned_null (n: SZ.t { SZ.v n > 0 }) : Lemma (aligned null n) = ()
+let aligned_null (n: SZ.t { SZ.v n > 0 }) : Lemma (aligned null n) =
+  reveal_opaque (`%divides_addr) divides_addr
 
 (* Stepping to a field or an array element: an offset that is itself a multiple
    of the alignment preserves it. *)
 let aligned_add (a: ptr) (m n: SZ.t)
   : Lemma (requires aligned a m /\ SZ.v n % SZ.v m == 0)
           (ensures  aligned (a +! n) m)
-  = FStar.Math.Lemmas.modulo_distributivity (addr_of a) (SZ.v n) (SZ.v m)
+  = reveal_opaque (`%divides_addr) divides_addr;
+    FStar.Math.Lemmas.modulo_distributivity (addr_of a) (SZ.v n) (SZ.v m)
 
 (* Weakening a stronger guarantee to the one a particular type needs: this is
    how `malloc`'s alignment for `max_align_t` becomes alignment for whatever
@@ -118,13 +130,25 @@ let aligned_add (a: ptr) (m n: SZ.t)
 let aligned_divides (a: ptr) (m n: SZ.t)
   : Lemma (requires aligned a m /\ SZ.v n > 0 /\ SZ.v m % SZ.v n == 0)
           (ensures  aligned a n)
-  = let x = addr_of a in
+  = reveal_opaque (`%divides_addr) divides_addr;
+    let x = addr_of a in
     let vm = SZ.v m in
     let vn = SZ.v n in
     FStar.Math.Lemmas.lemma_div_exact x vm;
     FStar.Math.Lemmas.lemma_div_exact vm vn;
     FStar.Math.Lemmas.paren_mul_right (x / vm) (vm / vn) vn;
     FStar.Math.Lemmas.multiple_modulo_lemma ((x / vm) * (vm / vn)) vn
+
+(* The two steps a structure field needs, in the order it needs them: weaken
+   the structure's alignment to the field's, then step by the offset. Both side
+   conditions are closed arithmetic on numerals, so a generated
+   `struct_S_field_aligned` is a list of calls to this and nothing else. *)
+let aligned_field (a: ptr) (m: SZ.t) (off: SZ.t) (n: SZ.t)
+  : Lemma (requires aligned a m /\ SZ.v n > 0 /\ SZ.v m % SZ.v n == 0
+                    /\ SZ.v off % SZ.v n == 0)
+          (ensures  aligned (a +! off) n)
+  = aligned_divides a m n;
+    aligned_add a n off
 
 (* The alignment of `max_align_t`: the strictest fundamental alignment on the
    target, and by C11 7.22.3p1 what `malloc` and `calloc` guarantee. Like the

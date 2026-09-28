@@ -282,10 +282,10 @@ agree by construction.
 
 ### Alignment
 
-**Not implemented; this is the proposal.** Palow models no alignment at all
-today. `uint32_t_alignof` and `struct_S_alignof` are emitted, but they appear
-in no ownership predicate, so nothing anywhere relates an object's address to
-its type. The gap is not academic. In `test/pool_flex`,
+**Implemented** (milestone 16). Until then Palow modelled no alignment at
+all: `uint32_t_alignof` and `struct_S_alignof` were emitted, but they appeared
+in no ownership predicate, so nothing anywhere related an object's address to
+its type. The gap was not academic. In `test/pool_flex`,
 
 ```c
 int  *x = pool_alloc(p, sizeof(int));
@@ -294,9 +294,9 @@ long *y = pool_alloc(p, sizeof(long));
 
 hands out `data + 0` and `data + 4`. On every LP64 target `_Alignof(long)` is
 8, so `y` is misaligned, and `*y = *x` is undefined behaviour. The whole
-program verifies. That is the one place where a Palow proof is currently
-*unsound* with respect to ISO C rather than merely conservative, so it should
-be closed.
+program verified. That was the one place where a Palow proof was *unsound*
+with respect to ISO C rather than merely conservative, and it is now closed:
+`pool_alloc` rounds up, and the misaligned version no longer goes through.
 
 The pieces are already there: a pointer has a ghost `addr_of`, and the
 arithmetic on it is exact (`addr_of_add`). What is missing is a predicate and
@@ -333,20 +333,12 @@ guarantee (what `malloc` gives) to the one a particular type needs. Both are
 
 #### Where it is carried
 
-Inside the typed points-to, as a conjunct of the abstract predicate:
-
-```fstar
-val uint32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U32.t) : slprop
-
-val uint32_t_pts_to_aligned (a: ptr) (p: perm) (x: U32.t)
-  : Lemma (uint32_t_pts_to a p x == uint32_t_pts_to a p x ** pure (aligned a uint32_t_alignof))
-```
-
-— or, since these predicates are axiomatized anyway, simply a ghost
-`uint32_t_aligned` that reads the fact back out of ownership. The point is that
-*holding an object of type `T` at `a` entails `aligned a T_alignof`*, so the
-fact is available wherever it is needed without being passed around, and every
-way into typed ownership has to establish it:
+Inside the typed points-to, as a conjunct of the predicate itself — so
+`uint32_t_pts_to a p x` is defined to include `pure (aligned a uint32_t_alignof)`
+and `uint32_t_reveal` hands the fact back along with the bytes. The point is
+that *holding an object of type `T` at `a` entails `aligned a T_alignof`*, so
+the fact is available wherever it is needed without being passed around, and
+every way into typed ownership has to establish it:
 
 | step | alignment |
 |---|---|
@@ -369,13 +361,34 @@ obligation ISO C imposes on a punning cast.
 
 #### Aggregates and arrays
 
-A field inherits from the struct. `struct_S_pts_to a p x` carries
-`aligned a struct_S_alignof`, and `struct_S_focus_f` derives the field's from
-`aligned_add a struct_S_alignof struct_S_offsetof_f` plus
-`struct_S_offsetof_f % T_alignof == 0` — which is a fact about the layout clang
-gave us, true by construction and, since both are literals, discharged by
-computation. `unfocus` needs nothing: the struct's alignment was never given
-up.
+A field inherits from the struct, but not by carrying the struct's alignment
+in `struct_S_pts_to`: that predicate is already a conjunction of field
+points-to, each of which carries *its own* field's alignment, so the struct's
+follows from the field at offset zero and adding it again would be redundant.
+What each generated struct gets instead is a lemma
+
+```fstar
+let struct_S_field_aligned (a: ptr)
+  : Lemma (requires aligned a struct_S_alignof)
+          (ensures  aligned a T0_alignof
+                    /\ aligned (a +! struct_S_offsetof_f) T1_alignof /\ ...)
+  = ()
+```
+
+and only the byte-facing entry points — `struct_S_conceal`,
+`struct_S_claim_uninit`, `struct_S_claim_*_flex`, `struct_S_of_elem` — ask the
+caller for `aligned a struct_S_alignof`. Every conjunct is
+`struct_S_offsetof_f % T_alignof == 0`, a fact about the layout clang gave us,
+true by construction and, since both sides are literals, discharged by
+computation — which is why the lemma proves by `()`. `unfocus` needs nothing:
+the field's alignment was never given up.
+
+A **union** is different, because `union_U_pts_to` is stated directly over
+`mem_pts_to` rather than over member points-to; there the conjunct really is
+carried in the predicate, with a `union_U_member_aligned` lemma for the members
+(all at offset zero). The residue `union_U_rest_f` that stays behind while a
+member is focused carries the union's alignment, so `unfocus` can give it back
+without its caller having to supply it.
 
 `array_pts_to` gains the same conjunct at the array's own alignment (the
 element's, since C arrays have no padding). `array_focus` at index `i` needs
@@ -421,33 +434,34 @@ invariant, and in exchange it becomes a faithful pool allocator whose proof
 says what a pool allocator actually has to guarantee. The `int` case, which is
 accidentally correct today, will also then be correct for a reason.
 
-We have no way to write a test that *must not* verify, which is what would pin
-this down as a regression test rather than a story. A `should-fail` marker file
-alongside `palow-only`, with `test/Makefile` inverting the exit status of the
-F\* run, is the obvious small addition and should come with this work.
+Pinning that down as a regression test rather than a story needs a way to
+write a test that *must not* verify, so one landed with this work.
+`test/misaligned` carries a `should-fail` file alongside `palow-only`; the
+template `Makefile` then requires the F\* run to fail *and* requires every line
+of `should-fail` to appear in its output, so a test cannot start failing for
+some unrelated reason and still look like it is doing its job. The file there
+names `aligned (a +! FStar.SizeT.uint_to_t 1)` and `uint32_t_alignof`.
 
-#### Rollout, with a measurement at each step
+#### What it cost
 
-The point of the refactor is a number, so the steps are chosen so that each one
-can be measured on its own:
+The numbers are in "Alignment is cheap except on wide structs" under
+"Evaluating the cost". In summary: the census is unchanged, the annotation
+overhead is four clauses across three shims plus one mechanical argument in six
+test files, and verification is 13% more CPU — but 65% more wall time, because
+almost all of the increase lands in the one 69-field struct that was already
+the slowest thing in the suite.
 
-1. `aligned` and the two lemmas in `Pulse.Lib.C.Palow.Ptr`. Nothing depends on
-   them yet; cost zero by construction.
-2. `malloc`, `calloc` and every `T_stack_alloc` *ensure* alignment. Purely
-   additive — no existing proof can break, and any that slows down does so
-   because of one extra hypothesis, which is worth knowing on its own.
-3. Scalars carry and demand it. This is the step that touches every proof in
-   the suite. **Measure here**: census, wall-clock, and the count of tests
-   needing a new annotation.
-4. Aggregates and arrays: the focus/unfocus machinery and `array_focus`.
-   Measure again.
-5. `pool_flex` rounds up; the `should-fail` mechanism lands with a negative
-   test for the misaligned `long`.
-
-If step 3 or 4 is expensive, the fallback is to keep the alignment conjunct but
-make it `T_alignof`-generic and prove the literal side conditions once per type
-at definition time rather than at every claim — the obligations do not change,
-only who discharges them.
+One thing had to change in the model to get even that. Written out, `aligned a
+n` is `addr_of a % SZ.v n == 0`, and a wide struct's carve holds one of those
+per field: nonlinear arithmetic, sixty-nine times over, in every query. So the
+divisibility hides behind an `opaque_to_smt` `divides_addr`, and `aligned_add`,
+`aligned_divides` and `aligned_field` are the only ways through it. The cost of
+that is that nothing about alignment happens by itself any more: a generated
+`struct_S_field_aligned` is a list of `aligned_field` calls rather than `()`,
+`struct_S_claim_uninit` establishes each field's alignment immediately before
+claiming it rather than all of them up front (which is worth a factor of two on
+its own), and a hand-written shim that steps a pointer has to call
+`aligned_add`. That last one is the only part a user of PAL sees.
 
 #### Open questions
 
@@ -919,6 +933,53 @@ The escape hatch tells the same story. Of 312 `_include_pulse` and
 only and 58 are Palow only — so Palow is not currently buying its coverage by
 dropping into hand-written Pulse more often.
 
+### Alignment is cheap except on wide structs
+
+Milestone 16 made every typed points-to carry `aligned a T_alignof`. Both
+columns below are the Palow suite alone, from a clean cache, at `-j8` on the
+same machine, immediately before and after that change:
+
+| | before alignment | after |
+| --- | --- | --- |
+| wall time | 7 m 05 s | 11 m 43 s |
+| CPU time | 41 m 47 s | 47 m 15 s |
+
+**13% more CPU and 65% more wall time.** The two disagree for the same reason
+they did in the second measurements: the wall clock is set by a single module.
+`test/dpe`'s 69-field `Struct__profile_descriptor_t` goes from 308 s to 607 s,
+and that 299 s is 64% of the whole wall-time increase. Everything else is in
+the noise — a synthetic 40-field struct is 110 s before and 100 s after, i.e.
+no regression at all at that width.
+
+`--profile_group_by_decl` puts 310 s of the 607 s in `claim_uninit`, the carve
+that turns a block of bytes into one cell per field, against 28 s before. This
+is the *third* time that function has been the bottleneck, and for the third
+variant of the same reason: it is the one place where `n` facts about `n`
+fields are all live at once. Two things already helped, and both are in:
+
+- the divisibility behind `aligned` is `opaque_to_smt`, so a context holding
+  69 alignment facts holds 69 atoms rather than 69 nonlinear remainders. Before
+  this, the same module took 983 s;
+- the alignment of each field is established immediately before that field is
+  claimed, rather than all at once from `struct_S_field_aligned`. That lemma
+  returns a 69-way conjunction, and putting it in the context of all 69 claims
+  means splitting it 69 times: 708 s down to 310 s.
+
+What is left is the same quadratic as before, now with one more fact per field
+in it. The fix is the same one the focus machinery needs: stop stating `n`
+things about `n` fields in a single proof. Emitting a small per-field ghost
+function for the claim, so that each field's alignment is derived and consumed
+inside its own verification condition and never enters the caller's context,
+should remove it, and is the obvious next step.
+
+The annotation overhead is small and, as designed, lands exactly where C says
+it should. Four clauses across three shims — `xmalloc_generic`'s block
+promises `aligned a max_align`, `pool_alloc`'s promises `aligned a
+uint32_t_alignof` and calls `aligned_add` twice, `memcpy_transport`'s `raw`
+takes an alignment parameter because copied bytes have none — plus one
+mechanical extra argument to `array_pts_to` in six test files, plus
+`test/pool_flex` rounding up, which is a bug fix and not overhead.
+
 ### Still to measure
 
  - Z3 queries and rlimit consumed. `--query_stats` reports nothing on a
@@ -1037,12 +1098,11 @@ new facts about memory.
 
 ### Known deviations
 
-- **Alignment is not modelled.** `T_alignof` is emitted but appears in no
-  ownership predicate, so nothing relates an object's address to its type and a
-  misaligned access verifies. Unlike the rest of this list, this one is not a
-  conservative restriction but a genuine unsoundness with respect to ISO C: see
-  "Alignment" above for the proposal that closes it, and `test/pool_flex` for a
-  program it currently lets through.
+- **Over-aligned types are not modelled.** Ordinary alignment is (see
+  "Alignment" above), but `_Alignas` and `aligned_alloc` are not: a type whose
+  alignment exceeds `max_align` can be given no storage at all, since `malloc`
+  promises only `max_align` and there is no other source. This is a
+  restriction, not an unsoundness -- such a program is rejected, not accepted.
 - `( +! )` is total, so forming an out-of-bounds pointer is not itself
   rejected; only out-of-bounds *access* is, because `mem_pts_to` is available
   only for in-bounds ranges. This is strictly more permissive than ISO C.
@@ -5218,3 +5278,56 @@ new facts about memory.
 
     The census is 1104 specifications, 1082 with bodies, 0 admitted, 22
     external, 0 skipped.
+
+16. **Alignment, and a pool that honours it.** The misaligned `long` above is
+    now rejected. `aligned a n` is a pure prop in `Pulse.Lib.C.Palow.Ptr` —
+    `SZ.v n > 0 /\ addr_of a % SZ.v n == 0` — with `aligned_add` to step to a
+    field or an element and `aligned_divides` to weaken what `malloc` gives to
+    what a type needs. Allocation promises `aligned a max_align`, every typed
+    points-to carries the alignment of its type, and every way into typed
+    ownership from bytes demands it. The byte layer is untouched, on purpose:
+    bytes have alignment one, and a range that arrives by being copied has no
+    alignment until someone proves it, which is exactly the obligation ISO C
+    puts on a punning cast. See "Alignment" above for the design.
+
+    Three things in the emitter were not obvious in advance.
+
+    A generated **struct** does *not* carry `aligned a struct_S_alignof` in its
+    `pts_to`: that predicate is a conjunction of field points-to which each
+    already carry their own field's alignment, so adding it would be redundant.
+    Instead each struct gets a `struct_S_field_aligned` lemma, proved by `()`,
+    and only the byte-facing entry points ask for the struct's alignment. A
+    generated **union** is the other way round, because its `pts_to` is stated
+    directly over `mem_pts_to`; there the conjunct is in the predicate, and the
+    residue `union_U_rest_f` carries it while a member is focused so that
+    `unfocus` can hand it back without its caller having to.
+
+    Wide structs needed two more things. Their reveal proofs carry a
+    representation, a length *and* an alignment hypothesis per field, and the
+    69-field `dpe` struct and `intrusive_list`'s `item3` started timing out on
+    facts as small as `1 + 7 == 8`. Generated modules now `#set-options
+    "--z3rlimit 40"`, which costs nothing on the proofs that already went
+    through — rlimit is a cap, not a budget that gets spent. And the
+    divisibility inside `aligned` is `opaque_to_smt`, because sixty-nine live
+    `addr_of a % k == 0` facts are sixty-nine pieces of nonlinear arithmetic in
+    every query. The price of the opacity is that nothing about alignment is
+    automatic any more: `struct_S_field_aligned` is a list of `aligned_field`
+    calls rather than `()`, `struct_S_claim_uninit` proves each field's
+    alignment immediately before claiming it, and a shim that steps a pointer
+    calls `aligned_add`. See "Alignment is cheap except on wide structs" for
+    what all of that is worth: 13% more CPU over the suite, 65% more wall time,
+    almost all of it in that one struct.
+
+    `test/pool_flex` rounds its cursor up to `max_align`, so `long *y` lands at
+    `data + 16` rather than `data + 4`, and the client returns 16 bytes per
+    chunk instead of 4 and 8. Rounding up is written with addition and
+    remainder rather than a division and a multiplication, because no
+    multiplication operator is in scope in a generated module.
+
+    `test/misaligned` is the first **negative** test: a `should-fail` file next
+    to `palow-only` says verification must fail, and names the strings that
+    have to appear in the output so that the test cannot pass by failing for
+    the wrong reason.
+
+    The census is unchanged at 1104 specifications, 1082 with bodies, 0
+    admitted, 22 external, 0 skipped — so nothing was weakened to pay for this.

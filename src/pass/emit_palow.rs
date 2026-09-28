@@ -5657,23 +5657,31 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     // the union alignment is the maximum of. Pure arithmetic on numerals.
     {
         let mut cs: Vec<String> = Vec::new();
+        let mut ps: Vec<String> = Vec::new();
         for m in &ui.members {
+            let pn = match &m.shape {
+                FieldShape::One { pn } => pn,
+                FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
+            };
             cs.push(match &m.shape {
                 FieldShape::One { pn } => format!("aligned a {}_alignof", pn),
                 FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                     format!("array_aligned {} (SizeT.v {}_alignof) a", esize, pn)
                 }
             });
+            ps.push(format!("aligned_divides a {un}_alignof {pn}_alignof"));
         }
         if cs.is_empty() {
             cs.push("True".to_string());
+            ps.push("()".to_string());
         }
         c += &format!(
             "let {un}_member_aligned (a: ptr)\n  \
              : Lemma (requires aligned a {un}_alignof)\n          \
-             (ensures  {conj})\n  = ()\n\n",
+             (ensures  {conj})\n  = {proof}\n\n",
             un = un,
-            conj = cs.join("\n                    /\\ ")
+            conj = cs.join("\n                    /\\ "),
+            proof = ps.join(";\n    ")
         );
     }
 
@@ -5962,6 +5970,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         c += &format!(
             "    {k} v -> {{\n      \
              with b. assert (mem_pts_to a 1.0R b);\n      \
+             {un}_member_aligned a;\n      \
              mem_split a {msz}sz;\n      \
              {claim}\n      \
              {write}\n      \
@@ -6353,10 +6362,15 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     // out of bytes needs all of it at once.
     {
         let mut cs: Vec<String> = Vec::new();
+        let mut ps: Vec<String> = Vec::new();
         for f in &si.fields {
-            let Some(fa) = palow_alignof(tds, &f.ty) else {
+            // A flexible array member has no `palow_alignof` -- its type is
+            // incomplete -- but it does have an element type, and that is what
+            // its alignment is.
+            let fa = palow_alignof(tds, &f.ty);
+            if fa.is_none() && !matches!(f.shape, FieldShape::Flex { .. }) {
                 continue;
-            };
+            }
             let at = if f.offset == 0 {
                 "a".to_string()
             } else {
@@ -6368,17 +6382,34 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
                     format!("array_aligned {} (SizeT.v {}_alignof) {}", esize, pn, at)
                 }
             });
+            let pn = match &f.shape {
+                FieldShape::One { pn } => pn,
+                FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
+            };
+            // `divides_addr` is opaque to the solver, so neither of these
+            // steps happens by itself: weaken the object's alignment to the
+            // field's, then step by the offset.
+            ps.push(if f.offset == 0 {
+                format!("aligned_divides a {sn}_alignof {pn}_alignof")
+            } else {
+                format!(
+                    "aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof",
+                    f.name
+                )
+            });
             let _ = fa;
         }
         if cs.is_empty() {
             cs.push("True".to_string());
+            ps.push("()".to_string());
         }
         c += &format!(
             "\nlet {sn}_field_aligned (a: ptr)\n  \
              : Lemma (requires aligned a {sn}_alignof)\n          \
-             (ensures  {conj})\n  = ()\n",
+             (ensures  {conj})\n  = {proof}\n",
             sn = sn,
-            conj = cs.join("\n                    /\\ ")
+            conj = cs.join("\n                    /\\ "),
+            proof = ps.join(";\n    ")
         );
     }
 
@@ -7423,6 +7454,27 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // expensive thing the emitter produces for a wide struct. Claiming a piece
     // consumes its byte term, so interleaving keeps exactly one live at a
     // time. On a forty-field struct this alone is 40.7s to 10.1s.
+    //
+    // The alignment of each field is established here too, one field at a
+    // time, rather than once up front from `{sn}_field_aligned`. That lemma
+    // hands back a single conjunction of one fact per field, and putting it in
+    // the context of all `n` claims means splitting an `n`-way conjunction `n`
+    // times. On the sixty-nine-field struct in `test/dpe` that is the
+    // difference between twelve minutes and half a minute.
+    let align_at = |f: &StructField, alloc: &mut String| {
+        let pn = match &f.shape {
+            FieldShape::One { pn } => pn,
+            FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
+        };
+        if f.offset == 0 {
+            *alloc += &format!("  aligned_divides a {sn}_alignof {pn}_alignof;\n");
+        } else {
+            *alloc += &format!(
+                "  aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof;\n",
+                f.name
+            );
+        }
+    };
     let claim_at = |f: &StructField, alloc: &mut String| match &f.shape {
         FieldShape::One { pn } => {
             *alloc += &format!("  {}_claim_uninit {};\n", pn, at(f.offset));
@@ -7460,10 +7512,12 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     for off in bounds.iter().rev() {
         alloc += &format!("  mem_split a {}sz;\n", off);
         if let Some(f) = field_at(*off) {
+            align_at(f, &mut alloc);
             claim_at(f, &mut alloc);
         }
     }
     if let Some(f) = field_at(0) {
+        align_at(f, &mut alloc);
         claim_at(f, &mut alloc);
     }
     // Claiming raw storage at this type is the carve on its own; a stack
@@ -7476,7 +7530,6 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
          \x20 requires pure (len b == SizeT.v {sn}_sizeof /\\ aligned a {sn}_alignof)\n\
          \x20 ensures  {sn}_pts_to_uninit a\n\
          {{\n\
-         \x20 {sn}_field_aligned a;\n\
          {alloc}\
          \x20 fold {sn}_padding a 1.0R;\n\
          \x20 fold {sn}_pts_to_uninit a;\n}}\n\n",
@@ -9064,10 +9117,10 @@ module Float32 = FStar.Float32\n\
 module Float64 = FStar.Float64\n\
 \n\
 (* The reveal/conceal proofs of a struct carry one hypothesis per field --\n\
-   its representation, its length and its alignment -- so the context grows\n\
-   with the width of the struct even though each step is arithmetic on\n\
-   numerals. Raising the cap costs nothing on the proofs that already go\n\
-   through; it only buys room for the wide ones. *)\n\
+\x20  its representation, its length and its alignment -- so the context grows\n\
+\x20  with the width of the struct even though each step is arithmetic on\n\
+\x20  numerals. Raising the cap costs nothing on the proofs that already go\n\
+\x20  through; it only buys room for the wide ones. *)\n\
 #set-options \"--z3rlimit 40\"\n\n";
 
 /// The top-level names a chunk defines. F* has no way to ask this of a string,

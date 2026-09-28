@@ -62,6 +62,7 @@ uint32_t *pool_take(_plain uint8_t *a, size_t rest)
 {
   _ghost_stmt(mem_split $(a) 4sz);
   _ghost_stmt(aligned_add $(a) uint32_t_alignof 4sz);
+  _ghost_stmt(aligned_add $(a) uint32_t_alignof 8sz);
   _ghost_stmt(encode_zero 4);
   _ghost_stmt(uint32_t_claim $(a) 0ul);
   return (uint32_t *) a;
@@ -93,6 +94,10 @@ void pool_take2(_plain uint8_t *a, size_t rest)
   _ghost_stmt(mem_split $(a) 4sz);
   _ghost_stmt(uint32_t_claim $(a) 0ul);
   _ghost_stmt(mem_split ($(a) +! 4sz) 4sz);
+  /* `divides_addr` is opaque, so stepping four bytes on from an aligned
+     address is a lemma call rather than something the solver does itself. */
+  _ghost_stmt(aligned_add $(a) uint32_t_alignof 4sz);
+  _ghost_stmt(aligned_add $(a) uint32_t_alignof 8sz);
   _ghost_stmt(uint32_t_claim ($(a) +! 4sz) 0ul);
   /* The tail is at `(a + 4) + 4`, and the contract says `a + 8`. `add_add`
      makes the two equal; `rewrite each` is what says so to the matcher, which

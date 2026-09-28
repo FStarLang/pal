@@ -53,13 +53,17 @@ let array_repr (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
    what makes element `i` aligned whenever the base is. Carrying it inside the
    predicate rather than demanding it at each use means a split, a focus and a
    `+! esize` all preserve alignment without anyone restating it. *)
+(* Same shape as `aligned`, and opaque for the same reason: the divisibility
+   of the address is hidden behind `divides_addr` so that a proof carrying many
+   of these facts at once does not hand Z3 a pile of nonlinear arithmetic. *)
 let array_aligned (esize: nat) (ealign: nat) (a: ptr) : prop =
-  esize > 0 /\ ealign > 0 /\ esize % ealign == 0 /\ addr_of a % ealign == 0
+  esize > 0 /\ ealign > 0 /\ esize % ealign == 0 /\ divides_addr a ealign
 
 let array_aligned_add (esize: nat) (ealign: nat) (a: ptr) (n: SZ.t)
   : Lemma (requires array_aligned esize ealign a /\ SZ.v n % esize == 0)
           (ensures  array_aligned esize ealign (a +! n))
-  = FStar.Math.Lemmas.lemma_div_exact (SZ.v n) esize;
+  = reveal_opaque (`%divides_addr) divides_addr;
+    FStar.Math.Lemmas.lemma_div_exact (SZ.v n) esize;
     FStar.Math.Lemmas.lemma_div_exact esize ealign;
     FStar.Math.Lemmas.paren_mul_right (SZ.v n / esize) (esize / ealign) ealign;
     FStar.Math.Lemmas.multiple_modulo_lemma ((SZ.v n / esize) * (esize / ealign)) ealign;

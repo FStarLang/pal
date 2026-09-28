@@ -206,7 +206,8 @@ let struct_T_field_aligned (a: ptr)
   : Lemma (requires aligned a struct_T_alignof)
           (ensures  aligned a uint32_t_alignof
                     /\ aligned (a +! struct_T_offsetof_z) uint32_t_alignof)
-  = ()
+  = aligned_field a struct_T_alignof struct_T_offsetof_y uint32_t_alignof;
+    aligned_field a struct_T_alignof struct_T_offsetof_z uint32_t_alignof
 
 let struct_T_repr_intro (x: struct_T) (b_y b_z: bytes)
   : Lemma (requires uint32_t_repr x.y b_y /\ uint32_t_repr x.z b_z)

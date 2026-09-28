@@ -56,10 +56,33 @@ $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
 	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
 	@touch $@
 
+# A negative test carries a `should-fail` file: verification must fail, and
+# every line of that file must appear in the output. Without the second half a
+# test could start failing for some unrelated reason and still look like it was
+# doing its job.
+ifneq ($(wildcard should-fail),)
+verify: $(OUT_DIR)/.stamp
+	@if $(MAKE) --no-print-directory -f ../verify.mk \
+		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
+		HELPERS=$(HELPERS) DEPEND=.depend.$(MODEL) >$(OUT_DIR)/verify.log 2>&1; then \
+		echo "ERROR: $(CURDIR) verified, but should-fail says it must not" >&2; \
+		exit 1; \
+	fi; \
+	while IFS= read -r pat; do \
+		[ -z "$$pat" ] && continue; \
+		if ! grep -qF -- "$$pat" $(OUT_DIR)/verify.log; then \
+			echo "ERROR: $(CURDIR) failed, but not for the expected reason:" >&2; \
+			echo "       no line of the output contains '$$pat'" >&2; \
+			exit 1; \
+		fi; \
+	done < should-fail; \
+	echo "Failed as expected: $(CURDIR)"
+else
 verify: $(OUT_DIR)/.stamp
 	@$(MAKE) --no-print-directory -f ../verify.mk \
 		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
 		HELPERS=$(HELPERS) DEPEND=.depend.$(MODEL)
+endif
 
 compile: $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_FILES))
 
