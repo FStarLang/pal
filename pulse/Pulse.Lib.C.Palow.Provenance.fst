@@ -65,7 +65,8 @@ fn round_trip (a: ptr) (#p: perm) (#x: erased U32.t)
    `ptr_read` means we never have to say that it equals `target`, it just is. *)
 fn transport (src dst: ptr) (#target: ptr) (#bd: bytes) (#x: erased U32.t)
   requires ptr_pts_to src 1.0R target
-  requires mem_pts_to dst 1.0R bd ** pure (len bd == SZ.v ptr_sizeof)
+  requires mem_pts_to dst 1.0R bd
+  requires pure (len bd == SZ.v ptr_sizeof /\ aligned dst ptr_alignof)
   preserves uint32_t_pts_to target 1.0R x
   returns   y : U32.t
   ensures   ptr_pts_to src 1.0R target ** ptr_pts_to dst 1.0R target

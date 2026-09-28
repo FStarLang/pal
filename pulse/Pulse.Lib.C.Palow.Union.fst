@@ -58,7 +58,14 @@ let union_U_repr (u: union_U) (b: bytes) : prop =
       | U_t t -> struct_T_repr t b))
 
 let union_U_pts_to ([@@@mkey] a: ptr) (p: perm) (u: union_U) : slprop =
-  exists* b. mem_pts_to a p b ** pure (union_U_repr u b)
+  exists* b. mem_pts_to a p b ** pure (union_U_repr u b /\ aligned a union_U_alignof)
+
+(* A union's members all start at offset zero, so each one's alignment is the
+   union's -- which is by construction the strictest of theirs. *)
+let union_U_member_aligned (a: ptr)
+  : Lemma (requires aligned a union_U_alignof)
+          (ensures  aligned a uint32_t_alignof /\ aligned a struct_T_alignof)
+  = ()
 
 (* Ownership of the bytes past the end of the `x` member. The `x` view hands
    these back separately so that the union can be reassembled, and so that a
@@ -81,6 +88,7 @@ ghost fn union_U_split_x (a: ptr) (#p: perm) (#v: U32.t)
   ensures  union_U_x_rest a p
 {
   unfold union_U_pts_to a p (U_x v);
+  union_U_member_aligned a;
   with b. assert (mem_pts_to a p b ** pure (union_U_repr (U_x v) b));
   mem_split a 4sz;
   Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v v));

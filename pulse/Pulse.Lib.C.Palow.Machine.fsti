@@ -150,7 +150,8 @@ fn ptr_stack_free (a: ptr)
    from `mem_split` rather than another axiom. *)
 fn mem_stack_alloc (n: SZ.t)
   returns  a : ptr
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v n)
+  ensures  exists* b. mem_pts_to a 1.0R b
+                      ** pure (len b == SZ.v n /\ aligned a max_align)
 
 fn mem_stack_free (a: ptr) (#b: erased bytes)
   requires mem_pts_to a 1.0R b

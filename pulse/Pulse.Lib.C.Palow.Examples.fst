@@ -130,7 +130,7 @@ fn sum_two (x y: ptr) (#px #py: perm) (#a #b: erased I32.t)
    --------------------------------------------------------------------------- *)
 
 fn array_get (a: ptr) (i: SZ.t) (#p: perm) (#xs: erased (Seq.seq U32.t))
-  preserves array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a p xs
+  preserves array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) (SZ.v uint32_t_alignof) a p xs
   requires  pure (SZ.v i < Seq.length xs)
   returns   v : U32.t
   // The precondition is not in scope when the postcondition is typed, and
@@ -138,30 +138,30 @@ fn array_get (a: ptr) (i: SZ.t) (#p: perm) (#xs: erased (Seq.seq U32.t))
   // the emitter's `guards` mechanism does for a generated contract.
   ensures   pure (SZ.v i < Seq.length xs /\ v == Seq.index xs (SZ.v i))
 {
-  array_offset_fits uint32_t_repr a uint32_t_sizeof i;
-  array_focus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
+  array_offset_fits uint32_t_repr a uint32_t_sizeof uint32_t_alignof i;
+  array_focus uint32_t_repr a uint32_t_sizeof uint32_t_alignof i (uint32_t_sizeof `SZ.mul` i);
   uint32_t_of_elem (a +! (uint32_t_sizeof `SZ.mul` i));
   let v = uint32_t_read (a +! (uint32_t_sizeof `SZ.mul` i));
   uint32_t_to_elem (a +! (uint32_t_sizeof `SZ.mul` i));
-  array_unfocus_read uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
+  array_unfocus_read uint32_t_repr a uint32_t_sizeof uint32_t_alignof i (uint32_t_sizeof `SZ.mul` i);
   v
 }
 
 fn array_set (a: ptr) (i: SZ.t) (w: U32.t) (#xs: erased (Seq.seq U32.t))
-  requires array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a 1.0R xs
+  requires array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) (SZ.v uint32_t_alignof) a 1.0R xs
   requires pure (SZ.v i < Seq.length xs)
   // Same story as `array_get`: `Seq.upd` is partial, so the sequence that
   // comes back is named and constrained rather than written out in the slprop.
   ensures  exists* (ys: Seq.seq U32.t).
-             array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) a 1.0R ys **
+             array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) (SZ.v uint32_t_alignof) a 1.0R ys **
              pure (SZ.v i < Seq.length xs /\ ys == Seq.upd xs (SZ.v i) w)
 {
-  array_offset_fits uint32_t_repr a uint32_t_sizeof i;
-  array_focus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
+  array_offset_fits uint32_t_repr a uint32_t_sizeof uint32_t_alignof i;
+  array_focus uint32_t_repr a uint32_t_sizeof uint32_t_alignof i (uint32_t_sizeof `SZ.mul` i);
   uint32_t_of_elem (a +! (uint32_t_sizeof `SZ.mul` i));
   uint32_t_write (a +! (uint32_t_sizeof `SZ.mul` i)) w;
   uint32_t_to_elem (a +! (uint32_t_sizeof `SZ.mul` i));
-  array_unfocus uint32_t_repr a uint32_t_sizeof i (uint32_t_sizeof `SZ.mul` i);
+  array_unfocus uint32_t_repr a uint32_t_sizeof uint32_t_alignof i (uint32_t_sizeof `SZ.mul` i);
 }
 
 (* ---------------------------------------------------------------------------
@@ -239,13 +239,13 @@ fn alloc_ne_null ()
 {
   let p = malloc uint32_t_sizeof;
   if (not (is_null p)) {
-    elim_unless_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof);
+    elim_unless_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof ** pure (aligned p max_align));
     uint32_t_claim_uninit p;
     uint32_t_write_uninit p 7ul;
     uint32_t_forget p;
     uint32_t_reveal_uninit p;
     free p;
   } else {
-    elim_unless_null_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof);
+    elim_unless_null_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof ** pure (aligned p max_align));
   };
 }

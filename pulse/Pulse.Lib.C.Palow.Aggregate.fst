@@ -55,7 +55,7 @@ let struct_S_repr (x: struct_S) (b: bytes) : prop =
      (uint32_t_repr x.f (slice b 0 4) /\ uint8_t_repr x.g (slice b 4 5)))
 
 let struct_S_pts_to ([@@@mkey] a: ptr) (p: perm) (x: struct_S) : slprop =
-  exists* b. mem_pts_to a p b ** pure (struct_S_repr x b)
+  exists* b. mem_pts_to a p b ** pure (struct_S_repr x b /\ aligned a struct_S_alignof)
 
 (* Ownership of the padding, which the split hands back separately so that the
    join can put the struct together again. *)
@@ -96,6 +96,16 @@ let struct_S_padptr (a: ptr)
     addr_of_add a struct_S_padoff;
     ptr_ext ((a +! 4sz) +! 1sz) (a +! struct_S_padoff)
 
+(* Each field's alignment follows from the structure's plus its offset: clang
+   lays a field out at a multiple of its own alignment, so the side condition
+   is a fact about the layout and, since both are numerals, a computation. This
+   is the whole of what the alignment discipline costs an aggregate. *)
+let struct_S_field_aligned (a: ptr)
+  : Lemma (requires aligned a struct_S_alignof)
+          (ensures  aligned a uint32_t_alignof
+                    /\ aligned (a +! struct_S_offsetof_g) uint8_t_alignof)
+  = ()
+
 (* ---------------------------------------------------------------------------
    Field split and join
 
@@ -112,6 +122,7 @@ ghost fn struct_S_split (a: ptr) (#p: perm) (#x: struct_S)
   unfold struct_S_pts_to a p x;
   with b. assert (mem_pts_to a p b ** pure (struct_S_repr x b));
   struct_S_repr_elim x b;
+  struct_S_field_aligned a;
 
   mem_split a 4sz;
   Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v x.f));
@@ -189,7 +200,13 @@ let struct_T_repr (x: struct_T) (b: bytes) : prop =
      (uint32_t_repr x.y (slice b 0 4) /\ uint32_t_repr x.z (slice b 4 8)))
 
 let struct_T_pts_to ([@@@mkey] a: ptr) (p: perm) (x: struct_T) : slprop =
-  exists* b. mem_pts_to a p b ** pure (struct_T_repr x b)
+  exists* b. mem_pts_to a p b ** pure (struct_T_repr x b /\ aligned a struct_T_alignof)
+
+let struct_T_field_aligned (a: ptr)
+  : Lemma (requires aligned a struct_T_alignof)
+          (ensures  aligned a uint32_t_alignof
+                    /\ aligned (a +! struct_T_offsetof_z) uint32_t_alignof)
+  = ()
 
 let struct_T_repr_intro (x: struct_T) (b_y b_z: bytes)
   : Lemma (requires uint32_t_repr x.y b_y /\ uint32_t_repr x.z b_z)
@@ -204,6 +221,7 @@ ghost fn struct_T_split (a: ptr) (#p: perm) (#x: struct_T)
   ensures  uint32_t_pts_to (a +! struct_T_offsetof_z) p x.z
 {
   unfold struct_T_pts_to a p x;
+  struct_T_field_aligned a;
   with b. assert (mem_pts_to a p b ** pure (struct_T_repr x b));
   mem_split a 4sz;
   Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v x.y));
@@ -248,7 +266,8 @@ let struct_V_offsetof_data : SZ.t = 4sz
 
 let struct_V_pts_to ([@@@mkey] a: ptr) (p: perm) (n: U32.t) (xs: Seq.seq U32.t) : slprop =
   uint32_t_pts_to a p n
-  ** array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) (a +! struct_V_offsetof_data) p xs
+  ** array_pts_to uint32_t_repr (SZ.v uint32_t_sizeof) (SZ.v uint32_t_alignof)
+                    (a +! struct_V_offsetof_data) p xs
   ** pure (U32.v n == Seq.length xs)
 
 (* Bridging the generic element view and the scalar points-to. `uint32_t_repr x b`
@@ -256,6 +275,7 @@ let struct_V_pts_to ([@@@mkey] a: ptr) (p: perm) (n: U32.t) (xs: Seq.seq U32.t) 
    fold/unfold pair; PAL emits one such pair per scalar type. *)
 ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires elem_pts_to uint32_t_repr a p x
+  requires pure (aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to a p x
 {
   unfold elem_pts_to uint32_t_repr a p x;
@@ -265,6 +285,7 @@ ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
 ghost fn uint32_t_to_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
   ensures  elem_pts_to uint32_t_repr a p x
+  ensures  pure (aligned a uint32_t_alignof)
 {
   uint32_t_reveal a #p #x;
   fold elem_pts_to uint32_t_repr a p x;
@@ -284,16 +305,17 @@ fn struct_V_get (a: ptr) (#p: perm) (#n: erased U32.t) (#xs: Seq.seq U32.t)
   ensures  pure (r == Seq.index xs (SZ.v i))
 {
   unfold struct_V_pts_to a p n xs;
-  array_focus uint32_t_repr (a +! struct_V_offsetof_data) uint32_t_sizeof i off;
+  array_focus uint32_t_repr (a +! struct_V_offsetof_data) uint32_t_sizeof uint32_t_alignof i off;
   uint32_t_of_elem ((a +! struct_V_offsetof_data) +! off);
   let r = uint32_t_read ((a +! struct_V_offsetof_data) +! off);
   uint32_t_to_elem ((a +! struct_V_offsetof_data) +! off);
 
   array_singleton_intro uint32_t_repr ((a +! struct_V_offsetof_data) +! off)
-                        uint32_t_sizeof;
+                        uint32_t_sizeof uint32_t_alignof;
   array_join uint32_t_repr ((a +! struct_V_offsetof_data) +! off) uint32_t_sizeof
-             uint32_t_sizeof;
-  array_join uint32_t_repr (a +! struct_V_offsetof_data) uint32_t_sizeof off;
+             uint32_t_alignof uint32_t_sizeof;
+  array_join uint32_t_repr (a +! struct_V_offsetof_data) uint32_t_sizeof
+             uint32_t_alignof off;
   Seq.lemma_eq_intro
     (Seq.append (Seq.slice xs 0 (SZ.v i))
                 (Seq.append (Seq.create 1 (Seq.index xs (SZ.v i)))

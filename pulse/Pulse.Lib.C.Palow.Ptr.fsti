@@ -79,6 +79,58 @@ val add_add (a: ptr) (m n: SZ.t)
           (ensures  (a +! m) +! n == a +! SZ.add m n)
           [SMTPat ((a +! m) +! n)]
 
+(* ---------------------------------------------------------------------------
+   Alignment
+
+   An object of type `T` may only live at an address divisible by
+   `T_alignof` (C11 6.2.8). This is a *pure* property of an address, not an
+   slprop: it is not consumed, it is not split when ownership is split, and two
+   holders of a half-permission both have it. Making it a resource would mean
+   duplicating and recombining a fact that was never scarce.
+
+   Where it is carried instead is in the typed points-to predicates: holding a
+   `T` at `a` entails `aligned a T_alignof`, so every way *into* typed
+   ownership (`T_claim`, `T_conceal`) has to establish it and every way out
+   returns it. The byte layer stays free of it -- bytes have alignment 1 --
+   which is what lets `memcpy`, type punning and a byte-level allocator go on
+   saying nothing about types. See `palow.md`. *)
+let aligned (a: ptr) (n: SZ.t) : prop =
+  SZ.v n > 0 /\ addr_of a % SZ.v n == 0
+
+(* Alignment 1 is no constraint, so byte-level code pays nothing. *)
+let aligned_one (a: ptr) : Lemma (aligned a 1sz) [SMTPat (aligned a 1sz)] = ()
+
+(* `null` has address zero, so it is aligned for everything. Harmless -- there
+   is no `mem_pts_to` at `null` to claim anything through -- and it keeps
+   `unless_null` proofs from needing a case split. *)
+let aligned_null (n: SZ.t { SZ.v n > 0 }) : Lemma (aligned null n) = ()
+
+(* Stepping to a field or an array element: an offset that is itself a multiple
+   of the alignment preserves it. *)
+let aligned_add (a: ptr) (m n: SZ.t)
+  : Lemma (requires aligned a m /\ SZ.v n % SZ.v m == 0)
+          (ensures  aligned (a +! n) m)
+  = FStar.Math.Lemmas.modulo_distributivity (addr_of a) (SZ.v n) (SZ.v m)
+
+(* Weakening a stronger guarantee to the one a particular type needs: this is
+   how `malloc`'s alignment for `max_align_t` becomes alignment for whatever
+   the caller claims. *)
+let aligned_divides (a: ptr) (m n: SZ.t)
+  : Lemma (requires aligned a m /\ SZ.v n > 0 /\ SZ.v m % SZ.v n == 0)
+          (ensures  aligned a n)
+  = let x = addr_of a in
+    let vm = SZ.v m in
+    let vn = SZ.v n in
+    FStar.Math.Lemmas.lemma_div_exact x vm;
+    FStar.Math.Lemmas.lemma_div_exact vm vn;
+    FStar.Math.Lemmas.paren_mul_right (x / vm) (vm / vn) vn;
+    FStar.Math.Lemmas.multiple_modulo_lemma ((x / vm) * (vm / vn)) vn
+
+(* The alignment of `max_align_t`: the strictest fundamental alignment on the
+   target, and by C11 7.22.3p1 what `malloc` and `calloc` guarantee. Like the
+   scalar sizes this fixes an LP64 target; see `palow.md`. *)
+let max_align : SZ.t = 16sz
+
 (* Comparison, difference, and negative offset.
 
    ISO C defines `<`, `<=` and `-` on pointers only when both operands point

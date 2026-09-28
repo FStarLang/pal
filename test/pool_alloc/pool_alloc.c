@@ -39,7 +39,7 @@ _include_pulse(Pool_shim,
      because a contract term is typed with none of the `requires` in scope, so
      a refined subtraction would not typecheck there. *)
   unfold let pool_block (a: ptr) (n: nat) : slprop =
-    mem_pts_to a 1.0R (zeroed n)
+    mem_pts_to a 1.0R (zeroed n) ** pure (aligned a uint32_t_alignof)
 
   (* Two zeroed ranges laid end to end are one zeroed range. This is what a
      chunk going back into the pool needs, and it is the only thing in this
@@ -61,6 +61,7 @@ _ensures(_inline_pulse(Pool_shim.pool_block ($(a) +! 4sz) (FStar.SizeT.v $(rest)
 uint32_t *pool_take(_plain uint8_t *a, size_t rest)
 {
   _ghost_stmt(mem_split $(a) 4sz);
+  _ghost_stmt(aligned_add $(a) uint32_t_alignof 4sz);
   _ghost_stmt(encode_zero 4);
   _ghost_stmt(uint32_t_claim $(a) 0ul);
   return (uint32_t *) a;

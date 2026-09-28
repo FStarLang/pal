@@ -31,8 +31,13 @@ _include_pulse(Copy_shim,
 
   (* Storage of a given size and no particular type: what the destination of a
      copy is before the copy, and the only thing said about it. *)
-  unfold let raw (a: ptr) (n: FStar.SizeT.t) : slprop =
-    exists* b. mem_pts_to a 1.0R b ** pure (len b == FStar.SizeT.v n)
+  (* The alignment is an argument because copied bytes carry none: `mem_copy`
+     promises the destination the source's bytes and nothing else, so whoever
+     is going to claim the destination at a type has to have said, in advance,
+     that it is aligned for that type. *)
+  unfold let raw (a: ptr) (n al: FStar.SizeT.t) : slprop =
+    exists* b. mem_pts_to a 1.0R b
+               ** pure (len b == FStar.SizeT.v n /\ aligned a al)
 )
 
 _type(bytes_t, Pulse.Lib.C.Palow.Bytes.bytes)
@@ -58,7 +63,7 @@ void mem_copy(_plain uint8_t *dst, _plain const uint8_t *src, size_t n);
  * representation of its value by definition. */
 _ghost_arg(uint32_t x)
 _requires(_inline_pulse(uint32_t_pts_to $(src) 1.0R $(x)))
-_requires(_inline_pulse(Copy_shim.raw $(dst) uint32_t_sizeof))
+_requires(_inline_pulse(Copy_shim.raw $(dst) uint32_t_sizeof uint32_t_alignof))
 _ensures(_inline_pulse(uint32_t_pts_to $(src) 1.0R $(x)))
 _ensures(_inline_pulse(uint32_t_pts_to $(dst) 1.0R $(x)))
 _ensures(return == x)
@@ -80,7 +85,7 @@ uint32_t copy_scalar(_plain uint32_t *dst, _plain const uint32_t *src)
  * Note that `mem_copy` was told nothing about pointers. */
 _ghost_arg(uint32_t x)
 _requires(_inline_pulse(ptr_pts_to $(src) 1.0R $(target)))
-_requires(_inline_pulse(Copy_shim.raw $(dst) ptr_sizeof))
+_requires(_inline_pulse(Copy_shim.raw $(dst) ptr_sizeof ptr_alignof))
 _requires(_inline_pulse(uint32_t_pts_to $(target) 1.0R $(x)))
 _ensures(_inline_pulse(ptr_pts_to $(src) 1.0R $(target)))
 _ensures(_inline_pulse(ptr_pts_to $(dst) 1.0R $(target)))

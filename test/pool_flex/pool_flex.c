@@ -24,6 +24,23 @@ _include_pulse(P,
   include Pulse.Lib.C.Palow.Nullable
   include Struct_pool_anon_1
 
+  (* How much of the pool one allocation of `n` bytes actually consumes.
+     A pool that hands out objects of every type has to hand out suitably
+     aligned addresses, and `max_align` is what suitably aligned means; so the
+     cursor moves by `n` rounded up to a multiple of it, never by `n`.
+     Written with addition and remainder rather than a division and a
+     multiplication because no multiplication operator is in scope in a
+     generated module. *)
+  unfold let roundup (n: FStar.SizeT.t) : GTot nat =
+    FStar.SizeT.v n + (16 - FStar.SizeT.v n % 16) % 16
+
+  (* The bytes between the end of a chunk and the start of the next one. They
+     belong to whoever holds the chunk -- the pool has moved past them -- so
+     they come back with it. *)
+  let pad ([@@@mkey] a: ptr) (n: FStar.SizeT.t) : slprop =
+    exists* bs. mem_pts_to (a +! n) 1.0R bs
+                ** pure (len bs == roundup n - FStar.SizeT.v n)
+
   (* The `r` bytes at `a` that have been given back to the pool. Opaque, so
      that `r` is something the Pulse matcher can solve for: a quantity tied to
      the state only by a `pure` equation is not one a caller could ever infer.
@@ -53,6 +70,8 @@ _include_pulse(P,
       pure (FStar.SizeT.v b <= FStar.SizeT.v e
 /\ len bs == FStar.SizeT.v e - FStar.SizeT.v b
 /\ FStar.SizeT.v r <= FStar.SizeT.v b
+/\ aligned a max_align
+/\ FStar.SizeT.v b % 16 == 0
 /\ FStar.SizeT.v sz == FStar.SizeT.v struct_pool_anon_1_sizeof + FStar.SizeT.v e)
 
   (* Give a chunk back. There is no C function for this -- a bump allocator
@@ -97,12 +116,14 @@ pool *pool_new(size_t max_alloc)
 _ghost_arg(size_t b)
 _ghost_arg(size_t r)
 _ghost_arg(size_t e)
-_requires(_inline_pulse(pure (FStar.SizeT.v $(n) <= FStar.SizeT.v $(e) - FStar.SizeT.v $(b))))
+_requires(_inline_pulse(pure (P.roundup $(n) <= FStar.SizeT.v $(e) - FStar.SizeT.v $(b))))
 _requires(_inline_pulse(P.pool_inv $(p) $(b) $(r) $(e)))
 _ensures(_inline_pulse(
   pure ($(return) == ($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) **
+  pure (aligned $(return) max_align) **
   (exists* bs. mem_pts_to $(return) 1.0R bs ** pure (len bs == FStar.SizeT.v $(n))) **
-  (exists* b2. pure (FStar.SizeT.v b2 == FStar.SizeT.v $(b) + FStar.SizeT.v $(n))
+  P.pad $(return) $(n) **
+  (exists* b2. pure (FStar.SizeT.v b2 == FStar.SizeT.v $(b) + P.roundup $(n))
                ** P.pool_inv $(p) b2 $(r) $(e))))
 void *pool_alloc(_plain pool *p, size_t n)
 {
@@ -112,13 +133,24 @@ void *pool_alloc(_plain pool *p, size_t n)
         return NULL;
     }
     void *x = &p->data[p->begin];
+    /* The cursor moves by the rounded size, so that the next chunk starts on
+       a `max_align` boundary just as this one did. Declared after the early
+       return so that the unreachable branch has nothing to give back. */
+    size_t m = n + (16 - n % 16) % 16;
+    /* The chunk is aligned because the data area is and the cursor is a
+       multiple of `max_align`. */
+    _ghost_stmt(aligned_add $(p) max_align struct_pool_anon_1_offsetof_data);
+    _ghost_stmt(aligned_add ($(p) +! struct_pool_anon_1_offsetof_data) max_align $(b));
+    /* The slot is `m` bytes: `n` for the caller and the rest for the pad. */
+    _ghost_stmt(mem_split (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(m));
     _ghost_stmt(mem_split (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
-    p->begin += n;
+    _ghost_stmt(fold P.pad (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
+    p->begin += m;
     /* The chunk handed out sits at `(data + b) + n`, and the contract says
        `data + (b + n)`. The SMT pattern proves them equal; the rewrite is
        what makes the syntactic matcher in Pulse use it. */
-    _ghost_stmt(rewrite each ((($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) +! $(n))
-                as (($(p) +! struct_pool_anon_1_offsetof_data) +! ($(b) `FStar.SizeT.add` $(n))));
+    _ghost_stmt(rewrite each ((($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) +! $(m))
+                as (($(p) +! struct_pool_anon_1_offsetof_data) +! ($(b) `FStar.SizeT.add` $(m))));
     return x;
 }
 
@@ -161,12 +193,21 @@ void example()
     /* Hand both chunks back before the pool goes. The pointers are the ones
        `pool_alloc` promised, which is what the two rewrites say. */
     _ghost_stmt(int32_t_reveal $(x));
+    _ghost_stmt(unfold P.pad $(x) 4sz);
+    _ghost_stmt(mem_join $(x) 4sz);
     _ghost_stmt(rewrite each $(x)
                 as (($(p) +! struct_pool_anon_1_offsetof_data) +! 0sz));
-    _ghost_stmt(P.pool_return $(p) 0sz 4sz);
+    _ghost_stmt(P.pool_return $(p) 0sz 16sz);
     _ghost_stmt(int64_t_reveal $(y));
+    /* The second chunk is at `data + 16`, and the pool says so as a `size_t`
+       whose value is 16. Naming the address before the rewrite is what keeps
+       the equality query small enough to go through. */
+    _ghost_stmt(assert pure ($(y) == (($(p) +! struct_pool_anon_1_offsetof_data)
+                                      +! 16sz)));
+    _ghost_stmt(unfold P.pad $(y) 8sz);
+    _ghost_stmt(mem_join $(y) 8sz);
     _ghost_stmt(rewrite each $(y)
-                as (($(p) +! struct_pool_anon_1_offsetof_data) +! 4sz));
-    _ghost_stmt(P.pool_return $(p) 4sz 8sz);
+                as (($(p) +! struct_pool_anon_1_offsetof_data) +! 16sz));
+    _ghost_stmt(P.pool_return $(p) 16sz 16sz);
     pool_free(p);
 }

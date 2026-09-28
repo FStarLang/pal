@@ -27,6 +27,7 @@ _include_pulse(Xm,
 
   unfold let block (a: ptr) (n: FStar.SizeT.t) : slprop =
     mem_pts_to a 1.0R (uninit (FStar.SizeT.v n)) ** freeable a n
+    ** pure (aligned a max_align)
 )
 
 /* A postcondition of `0` is false, so there is no state this function could

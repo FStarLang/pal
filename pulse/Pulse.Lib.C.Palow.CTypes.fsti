@@ -100,12 +100,13 @@ ghost fn bool_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: bool)
 
 ghost fn bool_t_reveal (a: ptr) (#p: perm) (#x: bool)
   requires bool_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (bool_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (bool_t_repr x b /\ aligned a bool_t_alignof)
 
 
 ghost fn bool_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: bool)
   requires mem_pts_to a p b
   requires pure (bool_t_repr x b)
+  requires pure (aligned a bool_t_alignof)
   ensures  bool_t_pts_to a p x
 
 
@@ -117,19 +118,20 @@ ghost fn bool_t_forget (a: ptr) (#x: bool)
 ghost fn bool_t_claim (a: ptr) (#b: bytes) (x: bool)
   requires mem_pts_to a 1.0R b
   requires pure (bool_t_repr x b)
+  requires pure (aligned a bool_t_alignof)
   ensures  bool_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn bool_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v bool_t_sizeof)
+  requires pure (len b == SZ.v bool_t_sizeof /\ aligned a bool_t_alignof)
   ensures  bool_t_pts_to_uninit a
 
 
 ghost fn bool_t_reveal_uninit (a: ptr)
   requires bool_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v bool_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v bool_t_sizeof /\ aligned a bool_t_alignof)
 
 
 
@@ -190,12 +192,13 @@ ghost fn int8_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I8.t)
 
 ghost fn int8_t_reveal (a: ptr) (#p: perm) (#x: I8.t)
   requires int8_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (int8_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (int8_t_repr x b /\ aligned a int8_t_alignof)
 
 
 ghost fn int8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: I8.t)
   requires mem_pts_to a p b
   requires pure (int8_t_repr x b)
+  requires pure (aligned a int8_t_alignof)
   ensures  int8_t_pts_to a p x
 
 
@@ -207,19 +210,20 @@ ghost fn int8_t_forget (a: ptr) (#x: I8.t)
 ghost fn int8_t_claim (a: ptr) (#b: bytes) (x: I8.t)
   requires mem_pts_to a 1.0R b
   requires pure (int8_t_repr x b)
+  requires pure (aligned a int8_t_alignof)
   ensures  int8_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn int8_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v int8_t_sizeof)
+  requires pure (len b == SZ.v int8_t_sizeof /\ aligned a int8_t_alignof)
   ensures  int8_t_pts_to_uninit a
 
 
 ghost fn int8_t_reveal_uninit (a: ptr)
   requires int8_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int8_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int8_t_sizeof /\ aligned a int8_t_alignof)
 
 
 
@@ -280,12 +284,13 @@ ghost fn int16_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I16.t)
 
 ghost fn int16_t_reveal (a: ptr) (#p: perm) (#x: I16.t)
   requires int16_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (int16_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (int16_t_repr x b /\ aligned a int16_t_alignof)
 
 
 ghost fn int16_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: I16.t)
   requires mem_pts_to a p b
   requires pure (int16_t_repr x b)
+  requires pure (aligned a int16_t_alignof)
   ensures  int16_t_pts_to a p x
 
 
@@ -297,19 +302,20 @@ ghost fn int16_t_forget (a: ptr) (#x: I16.t)
 ghost fn int16_t_claim (a: ptr) (#b: bytes) (x: I16.t)
   requires mem_pts_to a 1.0R b
   requires pure (int16_t_repr x b)
+  requires pure (aligned a int16_t_alignof)
   ensures  int16_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn int16_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v int16_t_sizeof)
+  requires pure (len b == SZ.v int16_t_sizeof /\ aligned a int16_t_alignof)
   ensures  int16_t_pts_to_uninit a
 
 
 ghost fn int16_t_reveal_uninit (a: ptr)
   requires int16_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int16_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int16_t_sizeof /\ aligned a int16_t_alignof)
 
 
 
@@ -370,12 +376,13 @@ ghost fn int32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I32.t)
 
 ghost fn int32_t_reveal (a: ptr) (#p: perm) (#x: I32.t)
   requires int32_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (int32_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (int32_t_repr x b /\ aligned a int32_t_alignof)
 
 
 ghost fn int32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: I32.t)
   requires mem_pts_to a p b
   requires pure (int32_t_repr x b)
+  requires pure (aligned a int32_t_alignof)
   ensures  int32_t_pts_to a p x
 
 
@@ -387,19 +394,20 @@ ghost fn int32_t_forget (a: ptr) (#x: I32.t)
 ghost fn int32_t_claim (a: ptr) (#b: bytes) (x: I32.t)
   requires mem_pts_to a 1.0R b
   requires pure (int32_t_repr x b)
+  requires pure (aligned a int32_t_alignof)
   ensures  int32_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn int32_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v int32_t_sizeof)
+  requires pure (len b == SZ.v int32_t_sizeof /\ aligned a int32_t_alignof)
   ensures  int32_t_pts_to_uninit a
 
 
 ghost fn int32_t_reveal_uninit (a: ptr)
   requires int32_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int32_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int32_t_sizeof /\ aligned a int32_t_alignof)
 
 
 
@@ -460,12 +468,13 @@ ghost fn int64_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
 
 ghost fn int64_t_reveal (a: ptr) (#p: perm) (#x: I64.t)
   requires int64_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (int64_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (int64_t_repr x b /\ aligned a int64_t_alignof)
 
 
 ghost fn int64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: I64.t)
   requires mem_pts_to a p b
   requires pure (int64_t_repr x b)
+  requires pure (aligned a int64_t_alignof)
   ensures  int64_t_pts_to a p x
 
 
@@ -477,19 +486,20 @@ ghost fn int64_t_forget (a: ptr) (#x: I64.t)
 ghost fn int64_t_claim (a: ptr) (#b: bytes) (x: I64.t)
   requires mem_pts_to a 1.0R b
   requires pure (int64_t_repr x b)
+  requires pure (aligned a int64_t_alignof)
   ensures  int64_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn int64_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v int64_t_sizeof)
+  requires pure (len b == SZ.v int64_t_sizeof /\ aligned a int64_t_alignof)
   ensures  int64_t_pts_to_uninit a
 
 
 ghost fn int64_t_reveal_uninit (a: ptr)
   requires int64_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int64_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int64_t_sizeof /\ aligned a int64_t_alignof)
 
 
 
@@ -550,12 +560,13 @@ ghost fn uint16_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U16.t)
 
 ghost fn uint16_t_reveal (a: ptr) (#p: perm) (#x: U16.t)
   requires uint16_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (uint16_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (uint16_t_repr x b /\ aligned a uint16_t_alignof)
 
 
 ghost fn uint16_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U16.t)
   requires mem_pts_to a p b
   requires pure (uint16_t_repr x b)
+  requires pure (aligned a uint16_t_alignof)
   ensures  uint16_t_pts_to a p x
 
 
@@ -567,19 +578,20 @@ ghost fn uint16_t_forget (a: ptr) (#x: U16.t)
 ghost fn uint16_t_claim (a: ptr) (#b: bytes) (x: U16.t)
   requires mem_pts_to a 1.0R b
   requires pure (uint16_t_repr x b)
+  requires pure (aligned a uint16_t_alignof)
   ensures  uint16_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn uint16_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v uint16_t_sizeof)
+  requires pure (len b == SZ.v uint16_t_sizeof /\ aligned a uint16_t_alignof)
   ensures  uint16_t_pts_to_uninit a
 
 
 ghost fn uint16_t_reveal_uninit (a: ptr)
   requires uint16_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint16_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint16_t_sizeof /\ aligned a uint16_t_alignof)
 
 
 
@@ -640,12 +652,13 @@ ghost fn uint64_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U64.t)
 
 ghost fn uint64_t_reveal (a: ptr) (#p: perm) (#x: U64.t)
   requires uint64_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (uint64_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (uint64_t_repr x b /\ aligned a uint64_t_alignof)
 
 
 ghost fn uint64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U64.t)
   requires mem_pts_to a p b
   requires pure (uint64_t_repr x b)
+  requires pure (aligned a uint64_t_alignof)
   ensures  uint64_t_pts_to a p x
 
 
@@ -657,19 +670,20 @@ ghost fn uint64_t_forget (a: ptr) (#x: U64.t)
 ghost fn uint64_t_claim (a: ptr) (#b: bytes) (x: U64.t)
   requires mem_pts_to a 1.0R b
   requires pure (uint64_t_repr x b)
+  requires pure (aligned a uint64_t_alignof)
   ensures  uint64_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn uint64_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v uint64_t_sizeof)
+  requires pure (len b == SZ.v uint64_t_sizeof /\ aligned a uint64_t_alignof)
   ensures  uint64_t_pts_to_uninit a
 
 
 ghost fn uint64_t_reveal_uninit (a: ptr)
   requires uint64_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint64_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint64_t_sizeof /\ aligned a uint64_t_alignof)
 
 
 
@@ -759,12 +773,13 @@ ghost fn size_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: SZ.t)
 
 ghost fn size_t_reveal (a: ptr) (#p: perm) (#x: SZ.t)
   requires size_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (size_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (size_t_repr x b /\ aligned a size_t_alignof)
 
 
 ghost fn size_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: SZ.t)
   requires mem_pts_to a p b
   requires pure (size_t_repr x b)
+  requires pure (aligned a size_t_alignof)
   ensures  size_t_pts_to a p x
 
 
@@ -776,19 +791,20 @@ ghost fn size_t_forget (a: ptr) (#x: SZ.t)
 ghost fn size_t_claim (a: ptr) (#b: bytes) (x: SZ.t)
   requires mem_pts_to a 1.0R b
   requires pure (size_t_repr x b)
+  requires pure (aligned a size_t_alignof)
   ensures  size_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn size_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v size_t_sizeof)
+  requires pure (len b == SZ.v size_t_sizeof /\ aligned a size_t_alignof)
   ensures  size_t_pts_to_uninit a
 
 
 ghost fn size_t_reveal_uninit (a: ptr)
   requires size_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v size_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v size_t_sizeof /\ aligned a size_t_alignof)
 
 
 
@@ -851,19 +867,20 @@ ghost fn uint8_t_forget (a: ptr) (#x: U8.t)
 ghost fn uint8_t_claim (a: ptr) (#b: bytes) (x: U8.t)
   requires mem_pts_to a 1.0R b
   requires pure (uint8_t_repr x b)
+  requires pure (aligned a uint8_t_alignof)
   ensures  uint8_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn uint8_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v uint8_t_sizeof)
+  requires pure (len b == SZ.v uint8_t_sizeof /\ aligned a uint8_t_alignof)
   ensures  uint8_t_pts_to_uninit a
 
 
 ghost fn uint8_t_reveal_uninit (a: ptr)
   requires uint8_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint8_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint8_t_sizeof /\ aligned a uint8_t_alignof)
 
 
 (* ---------------------------------------------------------------------------
@@ -878,82 +895,98 @@ ghost fn uint8_t_reveal_uninit (a: ptr)
 
 ghost fn bool_t_of_elem (a: ptr) (#p: perm) (#x: bool)
   requires elem_pts_to bool_t_repr a p x
+  requires pure (aligned a bool_t_alignof)
   ensures  bool_t_pts_to a p x
 
 
 ghost fn bool_t_to_elem (a: ptr) (#p: perm) (#x: bool)
   requires bool_t_pts_to a p x
   ensures  elem_pts_to bool_t_repr a p x
+  ensures  pure (aligned a bool_t_alignof)
 
 
 ghost fn int8_t_of_elem (a: ptr) (#p: perm) (#x: I8.t)
   requires elem_pts_to int8_t_repr a p x
+  requires pure (aligned a int8_t_alignof)
   ensures  int8_t_pts_to a p x
 
 
 ghost fn int8_t_to_elem (a: ptr) (#p: perm) (#x: I8.t)
   requires int8_t_pts_to a p x
   ensures  elem_pts_to int8_t_repr a p x
+  ensures  pure (aligned a int8_t_alignof)
 
 
 ghost fn int16_t_of_elem (a: ptr) (#p: perm) (#x: I16.t)
   requires elem_pts_to int16_t_repr a p x
+  requires pure (aligned a int16_t_alignof)
   ensures  int16_t_pts_to a p x
 
 
 ghost fn int16_t_to_elem (a: ptr) (#p: perm) (#x: I16.t)
   requires int16_t_pts_to a p x
   ensures  elem_pts_to int16_t_repr a p x
+  ensures  pure (aligned a int16_t_alignof)
 
 
 ghost fn int32_t_of_elem (a: ptr) (#p: perm) (#x: I32.t)
   requires elem_pts_to int32_t_repr a p x
+  requires pure (aligned a int32_t_alignof)
   ensures  int32_t_pts_to a p x
 
 
 ghost fn int32_t_to_elem (a: ptr) (#p: perm) (#x: I32.t)
   requires int32_t_pts_to a p x
   ensures  elem_pts_to int32_t_repr a p x
+  ensures  pure (aligned a int32_t_alignof)
 
 
 ghost fn int64_t_of_elem (a: ptr) (#p: perm) (#x: I64.t)
   requires elem_pts_to int64_t_repr a p x
+  requires pure (aligned a int64_t_alignof)
   ensures  int64_t_pts_to a p x
 
 
 ghost fn int64_t_to_elem (a: ptr) (#p: perm) (#x: I64.t)
   requires int64_t_pts_to a p x
   ensures  elem_pts_to int64_t_repr a p x
+  ensures  pure (aligned a int64_t_alignof)
 
 
 ghost fn uint16_t_of_elem (a: ptr) (#p: perm) (#x: U16.t)
   requires elem_pts_to uint16_t_repr a p x
+  requires pure (aligned a uint16_t_alignof)
   ensures  uint16_t_pts_to a p x
 
 
 ghost fn uint16_t_to_elem (a: ptr) (#p: perm) (#x: U16.t)
   requires uint16_t_pts_to a p x
   ensures  elem_pts_to uint16_t_repr a p x
+  ensures  pure (aligned a uint16_t_alignof)
 
 
 ghost fn uint64_t_of_elem (a: ptr) (#p: perm) (#x: U64.t)
   requires elem_pts_to uint64_t_repr a p x
+  requires pure (aligned a uint64_t_alignof)
   ensures  uint64_t_pts_to a p x
 
 
 ghost fn uint64_t_to_elem (a: ptr) (#p: perm) (#x: U64.t)
   requires uint64_t_pts_to a p x
   ensures  elem_pts_to uint64_t_repr a p x
+  ensures  pure (aligned a uint64_t_alignof)
 
 
 ghost fn size_t_of_elem (a: ptr) (#p: perm) (#x: SZ.t)
   requires elem_pts_to size_t_repr a p x
+  requires pure (aligned a size_t_alignof)
   ensures  size_t_pts_to a p x
 
 
 ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
   requires size_t_pts_to a p x
   ensures  elem_pts_to size_t_repr a p x
+  ensures  pure (aligned a size_t_alignof)
 
 
 
@@ -1070,12 +1103,13 @@ ghost fn float32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: float32)
 
 ghost fn float32_t_reveal (a: ptr) (#p: perm) (#x: float32)
   requires float32_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (float32_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (float32_t_repr x b /\ aligned a float32_t_alignof)
 
 
 ghost fn float32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: float32)
   requires mem_pts_to a p b
   requires pure (float32_t_repr x b)
+  requires pure (aligned a float32_t_alignof)
   ensures  float32_t_pts_to a p x
 
 
@@ -1087,19 +1121,20 @@ ghost fn float32_t_forget (a: ptr) (#x: float32)
 ghost fn float32_t_claim (a: ptr) (#b: bytes) (x: float32)
   requires mem_pts_to a 1.0R b
   requires pure (float32_t_repr x b)
+  requires pure (aligned a float32_t_alignof)
   ensures  float32_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn float32_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v float32_t_sizeof)
+  requires pure (len b == SZ.v float32_t_sizeof /\ aligned a float32_t_alignof)
   ensures  float32_t_pts_to_uninit a
 
 
 ghost fn float32_t_reveal_uninit (a: ptr)
   requires float32_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float32_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float32_t_sizeof /\ aligned a float32_t_alignof)
 
 
 
@@ -1160,12 +1195,13 @@ ghost fn float64_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: float64)
 
 ghost fn float64_t_reveal (a: ptr) (#p: perm) (#x: float64)
   requires float64_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (float64_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (float64_t_repr x b /\ aligned a float64_t_alignof)
 
 
 ghost fn float64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: float64)
   requires mem_pts_to a p b
   requires pure (float64_t_repr x b)
+  requires pure (aligned a float64_t_alignof)
   ensures  float64_t_pts_to a p x
 
 
@@ -1177,29 +1213,32 @@ ghost fn float64_t_forget (a: ptr) (#x: float64)
 ghost fn float64_t_claim (a: ptr) (#b: bytes) (x: float64)
   requires mem_pts_to a 1.0R b
   requires pure (float64_t_repr x b)
+  requires pure (aligned a float64_t_alignof)
   ensures  float64_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
    again: the two directions an allocation and a deallocation take. *)
 ghost fn float64_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v float64_t_sizeof)
+  requires pure (len b == SZ.v float64_t_sizeof /\ aligned a float64_t_alignof)
   ensures  float64_t_pts_to_uninit a
 
 
 ghost fn float64_t_reveal_uninit (a: ptr)
   requires float64_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float64_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float64_t_sizeof /\ aligned a float64_t_alignof)
 
 
 ghost fn float32_t_of_elem (a: ptr) (#p: perm) (#x: float32)
   requires elem_pts_to float32_t_repr a p x
+  requires pure (aligned a float32_t_alignof)
   ensures  float32_t_pts_to a p x
 
 
 ghost fn float32_t_to_elem (a: ptr) (#p: perm) (#x: float32)
   requires float32_t_pts_to a p x
   ensures  elem_pts_to float32_t_repr a p x
+  ensures  pure (aligned a float32_t_alignof)
 
 
 let float32_t_repr_len (x: float32) (b: bytes)
@@ -1209,12 +1248,14 @@ let float32_t_repr_len (x: float32) (b: bytes)
 
 ghost fn float64_t_of_elem (a: ptr) (#p: perm) (#x: float64)
   requires elem_pts_to float64_t_repr a p x
+  requires pure (aligned a float64_t_alignof)
   ensures  float64_t_pts_to a p x
 
 
 ghost fn float64_t_to_elem (a: ptr) (#p: perm) (#x: float64)
   requires float64_t_pts_to a p x
   ensures  elem_pts_to float64_t_repr a p x
+  ensures  pure (aligned a float64_t_alignof)
 
 
 let float64_t_repr_len (x: float64) (b: bytes)

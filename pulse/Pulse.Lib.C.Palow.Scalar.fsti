@@ -68,12 +68,13 @@ val uint8_t_repr_len (x: U8.t) (b: bytes)
 
 ghost fn uint8_t_reveal (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (uint8_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (uint8_t_repr x b /\ aligned a uint8_t_alignof)
 
 
 ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U8.t)
   requires mem_pts_to a p b
   requires pure (uint8_t_repr x b)
+  requires pure (aligned a uint8_t_alignof)
   ensures  uint8_t_pts_to a p x
 
 
@@ -151,12 +152,13 @@ ghost fn uint32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
    an axiom. *)
 ghost fn uint32_t_reveal (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (uint32_t_repr x b)
+  ensures  exists* b. mem_pts_to a p b ** pure (uint32_t_repr x b /\ aligned a uint32_t_alignof)
 
 
 ghost fn uint32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U32.t)
   requires mem_pts_to a p b
   requires pure (uint32_t_repr x b)
+  requires pure (aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to a p x
 
 
@@ -170,7 +172,7 @@ ghost fn uint32_t_forget (a: ptr) (#x: U32.t)
 
 ghost fn uint32_t_claim_uninit (a: ptr) (#b: bytes)
   requires mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v uint32_t_sizeof)
+  requires pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to_uninit a
 
 
@@ -180,6 +182,7 @@ ghost fn uint32_t_claim_uninit (a: ptr) (#b: bytes)
 ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
   requires mem_pts_to a 1.0R b
   requires pure (uint32_t_repr x b)
+  requires pure (aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to a 1.0R x
 
 
@@ -187,7 +190,7 @@ ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
    back to `free` as bytes, so write-only ownership has to be spendable. *)
 ghost fn uint32_t_reveal_uninit (a: ptr)
   requires uint32_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint32_t_sizeof)
+  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
 
 
 (* ---------------------------------------------------------------------------
@@ -265,12 +268,13 @@ ghost fn ptr_gather (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
 
 ghost fn ptr_reveal (dest: ptr) (#p: perm) (#a: ptr)
   requires ptr_pts_to dest p a
-  ensures  exists* b. mem_pts_to dest p b ** pure (ptr_repr a b)
+  ensures  exists* b. mem_pts_to dest p b ** pure (ptr_repr a b /\ aligned dest ptr_alignof)
 
 
 ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
   requires mem_pts_to dest p b
   requires pure (ptr_repr a b)
+  requires pure (aligned dest ptr_alignof)
   ensures  ptr_pts_to dest p a
 
 
@@ -287,13 +291,13 @@ ghost fn ptr_forget (dest: ptr) (#a: ptr)
 
 ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes)
   requires mem_pts_to dest 1.0R b
-  requires pure (len b == SZ.v ptr_sizeof)
+  requires pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
   ensures  ptr_pts_to_uninit dest
 
 
 ghost fn ptr_reveal_uninit (dest: ptr)
   requires ptr_pts_to_uninit dest
-  ensures  exists* b. mem_pts_to dest 1.0R b ** pure (len b == SZ.v ptr_sizeof)
+  ensures  exists* b. mem_pts_to dest 1.0R b ** pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
 
 (* ---------------------------------------------------------------------------
    Elements of an array
@@ -307,32 +311,38 @@ ghost fn ptr_reveal_uninit (dest: ptr)
 
 ghost fn uint8_t_of_elem (a: ptr) (#p: perm) (#x: U8.t)
   requires elem_pts_to uint8_t_repr a p x
+  requires pure (aligned a uint8_t_alignof)
   ensures  uint8_t_pts_to a p x
 
 
 ghost fn uint8_t_to_elem (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
   ensures  elem_pts_to uint8_t_repr a p x
+  ensures  pure (aligned a uint8_t_alignof)
 
 
 ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires elem_pts_to uint32_t_repr a p x
+  requires pure (aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to a p x
 
 
 ghost fn uint32_t_to_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
   ensures  elem_pts_to uint32_t_repr a p x
+  ensures  pure (aligned a uint32_t_alignof)
 
 
 ghost fn ptr_of_elem (a: ptr) (#p: perm) (#x: ptr)
   requires elem_pts_to ptr_repr a p x
+  requires pure (aligned a ptr_alignof)
   ensures  ptr_pts_to a p x
 
 
 ghost fn ptr_to_elem (a: ptr) (#p: perm) (#x: ptr)
   requires ptr_pts_to a p x
   ensures  elem_pts_to ptr_repr a p x
+  ensures  pure (aligned a ptr_alignof)
 
 
 

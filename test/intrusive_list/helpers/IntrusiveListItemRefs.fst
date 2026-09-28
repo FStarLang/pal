@@ -91,7 +91,7 @@ unfold let item2_used ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
   uint32_t_pts_to (item2_used_1 a) p v
 unfold let item2_samples ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
                          (v: samples_t) : slprop =
-  array_pts_to uint32_t_repr 4 (item2_samples_1 a) p v
+  array_pts_to uint32_t_repr 4 (SizeT.v uint32_t_alignof) (item2_samples_1 a) p v
 unfold let item2_processed ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
                            (v: ptr) : slprop =
   ptr_pts_to (item2_processed_1 a) p v

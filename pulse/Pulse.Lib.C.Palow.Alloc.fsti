@@ -38,14 +38,24 @@ val freeable_timeless (a: ptr) (n: SZ.t)
 
 (* Allocation may fail, so the postcondition is guarded by nullness. The bytes
    handed back are uninitialized: reading them at any type is blocked, because
-   no `*_repr` relates a value to a range containing an uninitialized byte. *)
+   no `*_repr` relates a value to a range containing an uninitialized byte.
+
+   The storage is aligned for `max_align_t`, which is exactly what C11
+   7.22.3p1 promises: suitably aligned for any object type with a fundamental
+   alignment. A caller claiming a particular type gets what it needs from
+   `aligned_divides`, and since both alignments are numerals that side
+   condition is a computation. Note that this is *not* enough for an
+   over-aligned type (`_Alignas(64)`), which is correct -- such a type has to
+   come from `aligned_alloc`. *)
 fn malloc (n: SZ.t)
   returns  a : ptr
-  ensures  unless_null a (mem_pts_to a 1.0R (uninit (SZ.v n)) ** freeable a n)
+  ensures  unless_null a (mem_pts_to a 1.0R (uninit (SZ.v n)) ** freeable a n
+                          ** pure (aligned a max_align))
 
 fn calloc (n: SZ.t)
   returns  a : ptr
-  ensures  unless_null a (mem_pts_to a 1.0R (zeroed (SZ.v n)) ** freeable a n)
+  ensures  unless_null a (mem_pts_to a 1.0R (zeroed (SZ.v n)) ** freeable a n
+                          ** pure (aligned a max_align))
 
 (* `free` needs the whole block back, at full permission, and needs to be told
    nothing about its contents. Requiring `len b == SZ.v n` is what makes

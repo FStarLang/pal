@@ -98,7 +98,7 @@ vec_ptr vec_new_filled(unsigned n, int x)
         _invariant(_live(i))
         _invariant(_inline_pulse(
             exists* (s: FStar.Seq.seq (option Int32.t)).
-              (array_pts_to (maybe_repr int32_t_repr (SizeT.v 4sz)) (SizeT.v 4sz)
+              (array_pts_to (maybe_repr int32_t_repr (SizeT.v 4sz)) (SizeT.v 4sz) (SizeT.v int32_t_alignof)
                  ($(v) +! Struct_vec.struct_vec_offsetof_data) 1.0R s) **
               (pure (FStar.Seq.length s == UInt32.v $(n))) **
               (pure (forall (k: nat). k < FStar.Seq.length s ==> k < UInt32.v $(i)

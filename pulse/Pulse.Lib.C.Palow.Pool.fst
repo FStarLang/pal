@@ -39,11 +39,11 @@ module R = Pulse.Lib.Reference
 let pool_inv (rp: R.ref ptr) (rn: R.ref SZ.t) : slprop =
   exists* (a: ptr) (n: SZ.t) (b: bytes).
     R.pts_to rp a ** R.pts_to rn n ** mem_pts_to a 1.0R b **
-    pure (len b == SZ.v n)
+    pure (len b == SZ.v n /\ aligned a uint32_t_alignof)
 
 ghost fn pool_intro (rp: R.ref ptr) (rn: R.ref SZ.t) (#a: ptr) (#n: SZ.t) (#b: bytes)
   requires R.pts_to rp a ** R.pts_to rn n ** mem_pts_to a 1.0R b
-  requires pure (len b == SZ.v n)
+  requires pure (len b == SZ.v n /\ aligned a uint32_t_alignof)
   ensures  pool_inv rp rn
 {
   fold pool_inv rp rn;
