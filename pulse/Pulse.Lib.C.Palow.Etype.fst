@@ -113,20 +113,25 @@ let emod (x: int) (m: nat) : int = if m = 0 then x else x % m
      union every offset is zero, so every member is accessible -- which is
      exactly the C rule that reading any member of a union object is
      permitted. Type punning through a union is legal C, and it stays legal
-     here. *)
-let rec access_ok (ty: ctype) (off: int) (u: ctype) : Tot prop (decreases %[ctype_size ty; 0]) =
-  u == tchar \/
-  (off == 0 /\ ty == u) \/
+     here.
+
+   It is a `bool` rather than a `prop` because the solver has to *compute* it:
+   every descriptor is a closed term, so each instance reduces to `true` or
+   `false` without the solver having to reason about the recursion. That also
+   makes it usable in the `if` of `store_entry` below. *)
+let rec access_ok (ty: ctype) (off: int) (u: ctype) : Tot bool (decreases %[ctype_size ty; 0]) =
+  u = tchar ||
+  (off = 0 && ty = u) ||
   (match ty with
-   | TArr e n -> 0 <= off /\ off < csize e * n /\ access_ok e (emod off (csize e)) u
+   | TArr e n -> 0 <= off && off < csize e * n && access_ok e (emod off (csize e)) u
    | TStruct _ _ ms -> access_ok_members ms off u
    | TUnion _ _ ms -> access_ok_members ms off u
-   | TScalar _ -> False)
+   | TScalar _ -> false)
 and access_ok_members (ms: list (nat & ctype)) (off: int) (u: ctype)
-  : Tot prop (decreases %[members_size ms; 1]) =
+  : Tot bool (decreases %[members_size ms; 1]) =
   match ms with
-  | [] -> False
-  | (o, m) :: r -> access_ok m (off - o) u \/ access_ok_members r off u
+  | [] -> false
+  | (o, m) :: r -> access_ok m (off - o) u || access_ok_members r off u
 
 (* One entry per byte: which object this byte belongs to, and which byte of it
    this is. `fixed` distinguishes a declared object, whose type is settled for
@@ -160,11 +165,21 @@ let read_ok (e: etypes) (u: ctype) : prop =
   (forall (k: nat). k < elen e ==>
     (match eget e k with
      | None -> True
-     | Some en -> access_ok en.ty (en.off - k) u))
+     | Some en -> b2t (access_ok en.ty (en.off - k) u)))
 
+(* A byte is relabelled only if its current type does not already license the
+   store. That condition is what keeps the index from being *too* fine: writing
+   an `int` through a pointer to the first member of a `struct a` must not turn
+   those four bytes into a standalone `int` object and so destroy the enclosing
+   struct, and it does not, because `access_ok struct_a_ctype 0 int32_t_ctype`
+   already holds. Only a store the current type does *not* license -- writing
+   a `struct b` over storage that held a `struct a` -- moves the index, which
+   is exactly the case 6.5p6 is about. *)
 let store_entry (en: option etype_entry) (u: ctype) (k: nat) : option etype_entry =
   match en with
-  | Some e0 -> if e0.fixed then Some e0 else Some ({ ty = u; off = k; fixed = false })
+  | Some e0 ->
+    if e0.fixed || access_ok e0.ty (e0.off - k) u then Some e0
+    else Some ({ ty = u; off = k; fixed = false })
   | None -> Some ({ ty = u; off = k; fixed = false })
 
 (* A store at type `u` gives allocated storage that effective type, and leaves
@@ -265,3 +280,28 @@ let ptr_store_read_ok ()
 let array_elem_read_ok (n: nat) (i: nat { i < n })
   : Lemma (read_ok (Seq.slice (etypes_of (TArr ct_u32 n) true) (4 * i) (4 * i + 4)) ct_u32)
   = assert (forall (k: nat). k < 4 ==> emod (4 * i + k - k) 4 == 0)
+
+(* A store through a member's own type does not disturb the object it is a
+   member of: this is the "is the index too fine?" question, and the answer is
+   no. Writing a `uint32_t` over the first member of an allocated `struct T`
+   leaves the whole index alone, so the struct can still be read as a struct
+   afterwards. *)
+let member_store_keeps_object ()
+  : Lemma (store_etypes (Seq.slice (etypes_of ct_T false) 0 4) ct_u32
+           == Seq.slice (etypes_of ct_T false) 0 4)
+  = Seq.lemma_eq_intro (store_etypes (Seq.slice (etypes_of ct_T false) 0 4) ct_u32)
+                       (Seq.slice (etypes_of ct_T false) 0 4)
+
+(* But a store the current type does *not* license does move the index, which
+   is what makes allocated storage reusable at another type -- legal C, and the
+   reason the retype step has to exist at all. It takes the whole object: the
+   permission required is full permission over all `csize u` bytes. *)
+let retype_allocated ()
+  : Lemma (store_etypes (etypes_of ct_T false) ct_S == etypes_of ct_S false)
+  = assert (~(access_ok ct_T 0 ct_S));
+    Seq.lemma_eq_intro (store_etypes (etypes_of ct_T false) ct_S) (etypes_of ct_S false)
+
+(* And a *declared* object is never retyped, however the store is made. *)
+let retype_declared ()
+  : Lemma (store_etypes (etypes_of ct_T true) ct_S == etypes_of ct_T true)
+  = Seq.lemma_eq_intro (store_etypes (etypes_of ct_T true) ct_S) (etypes_of ct_T true)

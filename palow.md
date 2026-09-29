@@ -678,11 +678,49 @@ nothing measurable: the census is unchanged at 1104/1082/0/22/0.
 
 *Stage 3 -- enforcement* is not done. See below.
 
-Layer 0 reserves the index as `mem_pts_to_at`, with `mem_recall`/`mem_forget`
-and index-aware split/join. In this first cut the index is present but not
-enforced: recall and forget together make `mem_pts_to a p b` equivalent to
-`exists* e. mem_pts_to_at a p b e`, so no layer-1 predicate has to mention one
-and no existing proof changes.
+Layer 0 carries the index on the *primitive* points-to, `mem_pts_to_at`, and
+ties the index-free one to it by an slprop equality:
+
+```fstar
+val mem_pts_to_at ([@@@mkey] a: ptr) (p: perm) (b: bytes) (e: Etype.etypes) : slprop
+val mem_pts_to    ([@@@mkey] a: ptr) (p: perm) (b: bytes) : slprop
+
+val mem_pts_to_at_eq (a: ptr) (p: perm) (b: bytes)
+  : Lemma (mem_pts_to a p b ==
+           (exists* e. mem_pts_to_at a p b e ** pure (Etype.elen e == len b)))
+```
+
+The first cut had these as two *independent* abstract predicates joined by a
+`mem_recall`/`mem_forget` ghost pair, and that is unsound as an enforcement
+mechanism. The mistake is a natural one, so it is worth saying exactly where it
+goes wrong. Hiding an index behind an existential is fine on its own: you hold
+a resource, and eliminating the existential hands back the index you actually
+have. But a `forget`/`recall` pair between two *unrelated* predicates is not
+hiding, it is erasure -- forget the index, recall a fresh unconstrained one,
+and every constraint on it is gone. In particular `fixed` is gone, so a
+declared object could be laundered into allocated storage and then retyped,
+which is precisely the thing effective types exist to forbid.
+
+An equality cannot be used that way, because it does not let the two sides
+drift apart; and `mem_pts_to_at_injective` (the index analogue of the existing
+`mem_pts_to_injective`) says the bytes at an address determine their index, so
+eliminating the existential gives you *the* index rather than merely *an*
+index.
+
+An equality rather than a `let` definition, which would be the obvious
+encoding, for a practical reason worth recording: Pulse's frame matcher keys on
+the head symbol of a `val`, and `[@@@mkey]` on a `let` binder does not have the
+same effect. Making `mem_pts_to` a definition rebuilt the model cleanly but
+pushed `test/fnptr_slprop_spec` into an SMT timeout on a goal as simple as
+`slice b 0 16 == b`, because matching had become unification. The equality
+keeps the matcher exactly as it was: the whole suite is unchanged.
+
+`mem_split` and `mem_join` are now consequences of `mem_split_at` and
+`mem_join_at` rather than independent assumptions, and are stated separately
+only because layer 0 has no implementation module to derive them in.
+
+In this first cut the index is still not *enforced*: no layer-1 predicate
+constrains it, so no existing proof changes.
 
 #### What enforcement will cost
 
@@ -715,10 +753,54 @@ available, but only as an explicit ghost step on full permission
 share, and it has no effect on a declared object, whose store is undefined
 behaviour rather than a retype.
 
-The thing to watch is cost. A per-byte `Seq` index is the same shape as the
-per-field alignment facts, which turned out to be the most expensive thing in
-the model on wide structs; the mitigation is likely to be the same, keeping
-the index out of the solver's reach behind an opaque `read_ok`.
+#### How fine is the index?
+
+A per-byte index invites a second worry: if each byte's entry moves
+independently, can a write through one member of a struct demote the struct?
+Take an allocated `struct T { uint32_t y, z; }`, focus `y`, and store a
+`uint32_t` through it. If that store relabelled bytes 0-3 as a standalone
+`uint32_t` object, the struct would no longer read back as a struct -- which is
+not what C says, and would make the model unusable for exactly the
+field-at-a-time reasoning the rest of Palow is built on.
+
+The fix is in the store rule: **a byte is relabelled only if its current type
+does not already license the store.**
+
+```fstar
+let store_entry (en: option etype_entry) (u: ctype) (k: nat) : option etype_entry =
+  match en with
+  | Some e0 -> if e0.fixed || access_ok e0.ty (e0.off - k) u then Some e0
+               else Some ({ ty = u; off = k; fixed = false })
+  | None -> Some ({ ty = u; off = k; fixed = false })
+```
+
+`access_ok struct_T_ctype 0 uint32_t_ctype` already holds, so the member store
+is a no-op on the index and the struct survives (`member_store_keeps_object`).
+Writing a `struct S` over storage that held a `struct T` is *not* licensed, so
+that store does move the index (`retype_allocated`) -- which is the case 6.5p6
+is actually about, and is legal C on allocated storage. A declared object is
+never relabelled either way (`retype_declared`). Fresh `None` storage is always
+relabelled, which is what keeps `no_int_to_ptr_pun` true.
+
+That also settles the related question of whether a `struct T` permission can
+be laundered into a `struct S` one. It can -- but only by a store of a whole
+`struct S`, which needs full permission over all of the bytes at once, because
+claiming the result requires `read_ok` at `struct_S_ctype` over the joined
+range and no partial relabelling gets you there. Retyping half a struct is
+permitted, safe, and lossy: you get a well-typed half and you can no longer
+reconstitute the struct. That is also what C gives you.
+
+Making this work required `access_ok` to be a `bool` rather than a `prop`, so
+it can be the test in that `if`. That is the better choice anyway: descriptors
+are closed terms, so every instance *computes* instead of asking the solver to
+reason about the recursion.
+
+#### What to watch
+
+Cost. A per-byte `Seq` index is the same shape as the per-field alignment
+facts, which turned out to be the most expensive thing in the model on wide
+structs; the mitigation is likely to be the same, keeping the index out of the
+solver's reach behind an opaque `read_ok`.
 
 The reason to do this before the translator port rather than after is that it
 is the one change to layer 0 that cannot be made cheaply later -- adding an
@@ -5413,3 +5495,42 @@ new facts about memory.
     stays at 1104 specifications, 1082 with bodies, 0 admitted, 22 external, 0
     skipped. What turning it on will cost is written up under "Effective
     types".
+
+18. **Two holes in the effective-type design, closed.** Both were found by
+    reading the design rather than by a failing proof, and both are worth
+    recording because the mistakes are natural ones.
+
+    *An index you can forget is an index you can forge.* Layer 0 related its
+    indexed and index-free points-to predicates by a `mem_recall`/`mem_forget`
+    ghost pair. Between two independent abstract predicates that is not hiding
+    an index, it is erasing one: forget and recall, and the index that comes
+    back is unconstrained — `fixed` included, so a declared object could have
+    been laundered into allocated storage and retyped. The pair is replaced by
+    an slprop *equality*, `mem_pts_to_at_eq`, plus `mem_pts_to_at_injective`
+    saying the bytes at an address determine their index. An equality does not
+    let the two sides drift apart. (The obvious encoding — make `mem_pts_to` a
+    `let` over the indexed one — is sound and rebuilt the model cleanly, but
+    `[@@@mkey]` does not work on a `let` binder, and the resulting
+    unification-instead-of-matching timed `test/fnptr_slprop_spec` out on
+    `slice b 0 16 == b`. The equality keeps the matcher untouched.)
+
+    *A per-byte index must not be per-byte in its effects.* If a store at type
+    `u` relabelled every byte it covered, then writing a `uint32_t` through one
+    member of an allocated `struct T` would turn those four bytes into a
+    standalone `uint32_t` object and destroy the enclosing struct — not what C
+    says, and fatal for the field-at-a-time reasoning the rest of Palow is
+    built on. `store_entry` now relabels a byte only when its current type does
+    *not* already license the store, which is the case 6.5p6 is actually about.
+    Three new theorems pin the behaviour down: a member store leaves the object
+    alone, a whole-object store over allocated storage does retype it, and a
+    declared object is never retyped. Laundering a `struct T` permission into a
+    `struct S` one is still possible — but only by storing a whole `struct S`,
+    which needs full permission over all the bytes at once, because no partial
+    relabelling produces `read_ok` at the new type.
+
+    `access_ok` became a `bool` to serve as the test in that `if`, which is the
+    better choice regardless: descriptors are closed terms, so every instance
+    computes rather than asking the solver to reason about the recursion.
+
+    Enforcement is still off, so again nothing was weakened: 1104
+    specifications, 1082 with bodies, 0 admitted, 22 external, 0 skipped.

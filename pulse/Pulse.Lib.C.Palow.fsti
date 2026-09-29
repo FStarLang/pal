@@ -25,7 +25,38 @@ module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module Etype = Pulse.Lib.C.Palow.Etype
 
+(* Ownership of a range of bytes, together with the per-byte effective-type
+   index those bytes carry (see `Pulse.Lib.C.Palow.Etype`). The index is part
+   of the *primitive* notion rather than something layered on afterwards, for
+   a reason worth spelling out: if there were an index-free `mem_pts_to` with
+   an axiom recovering an index from it, then forgetting an index and
+   recalling a fresh one would launder the whole thing -- in particular a
+   declared object's `fixed` flag could be dropped, and the object retyped.
+   There is no such axiom because there is no such predicate: `mem_pts_to` is
+   a *definition*, so an index can be hidden but never conjured. *)
+val mem_pts_to_at ([@@@mkey] a: ptr) (p: perm) (b: bytes) (e: Etype.etypes) : slprop
+
+val mem_pts_to_at_timeless (a: ptr) (p: perm) (b: bytes) (e: Etype.etypes)
+  : Lemma (timeless (mem_pts_to_at a p b e))
+          [SMTPat (timeless (mem_pts_to_at a p b e))]
+
+(* Ownership of the bytes, not caring what the index is. Everything that only
+   transports bytes -- padding, `memcpy`, allocation, the aggregate and array
+   split/join machinery -- is stated in terms of this and never mentions an
+   index. *)
 val mem_pts_to ([@@@mkey] a: ptr) (p: perm) (b: bytes) : slprop
+
+(* ...and it is exactly the indexed one with the index hidden. Stated as an
+   slprop *equality* rather than as a pair of ghost steps: an equality cannot
+   be used to launder an index, because it does not let the two sides drift
+   apart, whereas a `forget`/`recall` pair between two independent predicates
+   would let an index be discarded and a fresh unconstrained one conjured --
+   `fixed` and all. It is an equality rather than a definition only because
+   Pulse's frame matcher keys on the head symbol of a `val`, and making this
+   one a `let` costs more in matching than the index is worth. *)
+val mem_pts_to_at_eq (a: ptr) (p: perm) (b: bytes)
+  : Lemma (mem_pts_to a p b ==
+           (exists* e. mem_pts_to_at a p b e ** pure (Etype.elen e == len b)))
 
 val mem_pts_to_timeless (a: ptr) (p: perm) (b: bytes)
   : Lemma (timeless (mem_pts_to a p b))
@@ -130,36 +161,24 @@ ghost fn mem_join (a: ptr) (#p: perm) (#b1 #b2: bytes) (n: SZ.t { SZ.v n == len 
    layer 0 that cannot be made cheaply after the fact: adding an index to
    `mem_pts_to` touches every module in the stack.
 
-   In this first cut the index is present but not *enforced*: `mem_recall` and
-   `mem_forget` together make `mem_pts_to a p b` equivalent to
-   `exists* e. mem_pts_to_at a p b e`, so an unconstrained index can always be
-   conjured and discarded, and no layer-1 predicate has to mention one. Turning
-   enforcement on means deleting `mem_recall`'s unconstrained form and making
-   the typed loads and stores in `Pulse.Lib.C.Palow.Machine` demand
-   `Etype.read_ok` and produce `Etype.store_etypes`. That change is confined to
-   this module and to `Machine`; the aggregate, array and union lemmas do not
-   mention the index at all, since splitting and joining bytes splits and joins
-   the index alongside them.
+   In this first cut the index is present but not *enforced*: no layer-1
+   predicate constrains it, so `mem_pts_to` -- which hides it -- is all anyone
+   uses, and every existing proof goes through unchanged. Turning enforcement
+   on means making the typed loads and stores in `Pulse.Lib.C.Palow.Machine`
+   demand `Etype.read_ok` and produce `Etype.store_etypes`, and making each
+   typed points-to carry `read_ok e t_ctype` for the index it holds. The
+   aggregate, array and union lemmas do not mention the index at all, since
+   splitting and joining bytes splits and joins the index alongside them.
    --------------------------------------------------------------------------- *)
-
-val mem_pts_to_at ([@@@mkey] a: ptr) (p: perm) (b: bytes) (e: Etype.etypes) : slprop
-
-val mem_pts_to_at_timeless (a: ptr) (p: perm) (b: bytes) (e: Etype.etypes)
-  : Lemma (timeless (mem_pts_to_at a p b e))
-          [SMTPat (timeless (mem_pts_to_at a p b e))]
-
-(* Every byte owned has an index entry, even if that entry is `None`. *)
-ghost fn mem_recall (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
-  ensures  exists* e. mem_pts_to_at a p b e ** pure (Etype.elen e == len b)
-
-ghost fn mem_forget (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
-  requires mem_pts_to_at a p b e
-  ensures  mem_pts_to a p b
 
 (* Splitting a range splits its index at the same point. This is the reason the
    aggregate and array lemmas survive the addition of effective types untouched:
-   they are stated over `mem_pts_to`, and the index follows the bytes. *)
+   they are stated over `mem_pts_to`, and the index follows the bytes.
+
+   `mem_split` and `mem_join` above are consequences of these two rather than
+   independent assumptions -- unfold, split the index with the bytes, fold --
+   and are stated separately only because this module has no implementation to
+   derive them in. *)
 ghost fn mem_split_at (a: ptr) (#p: perm) (#b: bytes)
                       (#e: Etype.etypes { Etype.elen e == len b })
                       (n: SZ.t { SZ.v n <= len b })
@@ -167,6 +186,16 @@ ghost fn mem_split_at (a: ptr) (#p: perm) (#b: bytes)
   ensures  mem_pts_to_at a p (slice b 0 (SZ.v n)) (Seq.slice e 0 (SZ.v n))
   ensures  mem_pts_to_at (a +! n) p (slice b (SZ.v n) (len b))
                          (Seq.slice e (SZ.v n) (Etype.elen e))
+
+(* The bytes at an address determine their index, just as they determine each
+   other (`mem_pts_to_injective`). This is what makes the equality above safe
+   to use in both directions: eliminating the existential gives you *the*
+   index, not merely *an* index. *)
+ghost fn mem_pts_to_at_injective (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
+                                 (#e1 #e2: Etype.etypes)
+  preserves mem_pts_to_at a p1 b1 e1
+  preserves mem_pts_to_at a p2 b2 e2
+  ensures   pure (e1 == e2)
 
 ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
                      (#e1: Etype.etypes { Etype.elen e1 == len b1 })
