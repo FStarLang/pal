@@ -606,12 +606,11 @@ it now, because retrofitting an index onto `mem_pts_to` later is disruptive.
 Proposal: carry a per-byte effective-type map alongside the bytes.
 
 ```fstar
-noeq type ctype =                    // generated descriptors, one per C type
-  | TChar | TInt32 | TUInt32 | ...
-  | TPtr
-  | TStruct of string
-  | TUnion  of string
-  | TArray  of ctype & nat
+type ctype =                         // generated descriptors, one per C type
+  | TScalar of scalar
+  | TStruct of string & nat & list (nat & ctype)   // tag, size, members
+  | TUnion  of string & nat & list (nat & ctype)
+  | TArr    of ctype & nat
 
 noeq type etype_entry = {
   ty:    ctype;   // the type of the object living here
@@ -641,24 +640,85 @@ Access rules:
 - Declared objects (`fixed = true`) get their entries at allocation and keep
   them for their lifetime.
 
-**Implemented.** `Pulse.Lib.C.Palow.Etype` defines the vocabulary and the
-access rules, and proves the facts that decide whether they are usable:
+**Implemented, in two of three stages.**
+
+*Stage 1 -- the rules.* `Pulse.Lib.C.Palow.Etype` defines the vocabulary and
+the access rules, and proves the facts that decide whether they are usable:
 reading a `uint32_t` out of a `union U` object is allowed at *both* member
-offsets (so acceptance test 2 survives), an array is readable element by
-element, and reading a pointer out of storage whose last store was an integer
-is not allowed. `access_ok` is defined by cases over a closed `ctype`, which is
-exactly the shape a code generator emits; the enumeration is instantiated here
-at the types the rest of the model uses.
+offsets (so acceptance test 2 survives), a struct member is readable at its
+own offset, a struct is *not* compatible with a union of the same shape, an
+array is readable element by element, and reading a pointer out of storage
+whose last store was an integer is not allowed.
+
+*Stage 2 -- the descriptors.* A descriptor has to be something the emitter can
+write, which rules out a closed enumeration with one constructor per C type:
+`ctype` is a tree, and a struct descriptor carries its tag, its size, and its
+members with their offsets. The tag is in the constructor because C compares
+types by tag, not by shape -- two structs with identical layouts are different
+types, and `struct_not_union` above is the same point for the struct/union
+distinction. Unions reuse the member list with every offset zero, which is
+both the right layout and the reason every member of a union is readable.
+
+Every type in the model now has a descriptor (`uint32_t_ctype`,
+`struct_S_ctype`, ...), and the emitter writes one per generated struct and
+union, composed out of its members':
+
+```fstar
+let struct_stru_ctype : ET.ctype =
+  ET.TStruct "struct_stru" 8 [(0, int8_t_ctype); (4, union_ab_ctype)]
+```
+
+Two cases are worth naming. `int8_t` and `uint8_t` are `signed char` and
+`unsigned char` -- *character types*, which may alias anything -- so both get
+`TScalar SChar` rather than distinct 8-bit descriptors. And a flexible array
+member is omitted from its struct's descriptor: it has no size, so it is not
+part of the type, and the storage past the last real member is typed by
+whatever is stored into it. Emitting the descriptors changed no proof and cost
+nothing measurable: the census is unchanged at 1104/1082/0/22/0.
+
+*Stage 3 -- enforcement* is not done. See below.
 
 Layer 0 reserves the index as `mem_pts_to_at`, with `mem_recall`/`mem_forget`
 and index-aware split/join. In this first cut the index is present but not
 enforced: recall and forget together make `mem_pts_to a p b` equivalent to
 `exists* e. mem_pts_to_at a p b e`, so no layer-1 predicate has to mention one
-and no existing proof changes. Switching enforcement on means deleting
-`mem_recall`'s unconstrained form and making the typed loads and stores in
-`Machine` demand `read_ok` and produce `store_etypes`. That change is confined
-to layer 0 and `Machine`: the aggregate, array and union lemmas never mention
-the index, because splitting bytes splits the index alongside them.
+and no existing proof changes.
+
+#### What enforcement will cost
+
+Switching it on is the disruptive part, and the shape is now clear. The index
+is state, so the fact that these bytes are accessible at type `T` cannot be a
+duplicable side condition -- it has to live inside `T_pts_to`. But it need not
+live there *precisely*: the typed layer never needs to know the index, only
+that `read_ok e T_ctype` holds of it. That predicate is established once, by
+`T_claim`, and preserved by every `T`-write, so each typed points-to grows one
+existential and one `pure` conjunct:
+
+```fstar
+let uint32_t_pts_to a p x =
+  exists* b e. mem_pts_to_at a p b e
+            ** pure (uint32_t_repr x b /\ read_ok e uint32_t_ctype /\ aligned a uint32_t_alignof)
+```
+
+Since every `T_pts_to` is abstract, that existential is not exposed: what
+changes is what `T_reveal` and `T_conceal` say, and the fact that they hand
+out `mem_pts_to_at` rather than `mem_pts_to`. That is the churn -- every
+byte-facing step in the aggregate, array and union machinery has to use the
+index-carrying split and join.
+
+Where the rule bites is *re-typing*. Fresh `malloc` storage has an all-`None`
+index, which satisfies `read_ok` at every type, so claiming it costs nothing.
+Once it has been written at `uint32_t`, claiming the same bytes at another
+type fails -- which is the point. C allows the retype, so it has to be
+available, but only as an explicit ghost step on full permission
+(`mem_store_etypes`), which is exactly right: you cannot retype storage you
+share, and it has no effect on a declared object, whose store is undefined
+behaviour rather than a retype.
+
+The thing to watch is cost. A per-byte `Seq` index is the same shape as the
+per-field alignment facts, which turned out to be the most expensive thing in
+the model on wide structs; the mitigation is likely to be the same, keeping
+the index out of the solver's reach behind an opaque `read_ok`.
 
 The reason to do this before the translator port rather than after is that it
 is the one change to layer 0 that cannot be made cheaply later -- adding an
@@ -5331,3 +5391,25 @@ new facts about memory.
 
     The census is unchanged at 1104 specifications, 1082 with bodies, 0
     admitted, 22 external, 0 skipped — so nothing was weakened to pay for this.
+
+17. **Effective types get descriptors the emitter can write.** The `ctype`
+    vocabulary of milestone 8 was a closed enumeration with one constructor per
+    C type used in the model — fine for proving the rules, impossible for a
+    code generator to extend. It is now a tree: a struct or union descriptor
+    carries its tag, its size, and its members with their offsets, so
+    `access_ok` is stated once and instantiated per translated type rather than
+    extended per translated type. Two theorems were added to pin down what the
+    tag is for: a struct member is readable at its own offset, and a struct is
+    not compatible with a union of the same layout.
+
+    Every scalar in the model has a descriptor, and the emitter writes one per
+    generated struct and union, composed out of its members'. `int8_t` and
+    `uint8_t` share `TScalar SChar`, because they are character types and may
+    alias anything; a flexible array member is omitted from its struct's
+    descriptor, because it has no size and so is not part of the type.
+
+    Enforcement is still off — the descriptors are emitted but nothing consumes
+    them yet — so this milestone changed no proof and cost nothing: the census
+    stays at 1104 specifications, 1082 with bodies, 0 admitted, 22 external, 0
+    skipped. What turning it on will cost is written up under "Effective
+    types".

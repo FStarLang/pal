@@ -32,39 +32,70 @@ open Pulse
 
 module Seq = FStar.Seq
 
-(* The types PAL would generate a descriptor for. `TStructS`, `TStructT` and
-   `TUnionU` mirror the aggregates in `Pulse.Lib.C.Palow.Aggregate` and
-   `Pulse.Lib.C.Palow.Union`; `TUChar` stands for the character types, which
-   C exempts from the rules entirely. *)
+(* The scalar types are a closed set -- `Pulse.Lib.C.Palow.CTypes` fixes
+   exactly this one -- but the aggregates are not: PAL meets a new struct,
+   union or array in every translation unit, and the model cannot enumerate
+   them in advance. So a `ctype` is a *tree*, with scalars at the leaves and
+   each aggregate carrying its own size and the offsets of its members. The
+   emitter writes one `let struct_S_ctype : ctype = TStruct "S" 8 [...]` per
+   type and nothing in this module has to change.
+
+   `SChar` stands for the character types, which C exempts from 6.5p7
+   entirely; `uint8_t` is `unsigned char`, so it is `SChar` and not a distinct
+   eight-bit integer. *)
+type scalar =
+  | SChar
+  | SBool
+  | SInt8 | SInt16 | SInt32 | SInt64
+  | SUInt16 | SUInt32 | SUInt64
+  | SFloat32 | SFloat64
+  | SPtr
+
+let scalar_size (s: scalar) : nat =
+  match s with
+  | SChar | SBool | SInt8 -> 1
+  | SInt16 | SUInt16 -> 2
+  | SInt32 | SUInt32 | SFloat32 -> 4
+  | SInt64 | SUInt64 | SFloat64 | SPtr -> 8
+
+(* An aggregate carries its tag name as well as its layout, because C's notion
+   of compatible type is by tag, not by shape: two structs with identical
+   layouts are still different types, and punning between them is undefined.
+   A union's members all sit at offset zero, which is the whole of the union
+   rule, so unions and structs share a member list and differ only in the
+   constructor -- and in the constructor being different, which is what keeps
+   a struct from being compatible with a union of the same shape. *)
 type ctype =
-  | TUChar
-  | TUInt32
-  | TPtr
-  | TStructS                    (* struct S { uint32_t f; uint8_t g; }, size 8 *)
-  | TStructT                    (* struct T { uint32_t y; uint32_t z; }        *)
-  | TUnionU                     (* union U  { uint32_t x; struct T t; }        *)
-  | TArr : ctype -> nat -> ctype
+  | TScalar : scalar -> ctype
+  | TStruct : string -> nat -> list (nat & ctype) -> ctype
+  | TUnion  : string -> nat -> list (nat & ctype) -> ctype
+  | TArr    : ctype -> nat -> ctype
+
+let tchar : ctype = TScalar SChar
 
 let rec csize (t: ctype) : Tot nat (decreases t) =
   match t with
-  | TUChar -> 1
-  | TUInt32 -> 4
-  | TPtr -> 8
-  | TStructS -> 8
-  | TStructT -> 8
-  | TUnionU -> 8
+  | TScalar s -> scalar_size s
+  | TStruct _ n _ -> n
+  | TUnion _ n _ -> n
   | TArr e n -> csize e * n
 
-(* `access_ok` recurses into members, which are not structurally smaller than
-   the aggregate, so it decreases on an explicit rank instead. The rank is just
-   "how deeply nested is this type": every member of an aggregate has a
-   strictly smaller one. *)
-let rec crank (t: ctype) : Tot nat (decreases t) =
+(* `access_ok` recurses into members, which are not subterms of the aggregate
+   in the sense F* checks automatically, so it decreases on an explicit size.
+   Every aggregate is strictly bigger than its member list, and a member list
+   is strictly bigger than its tail; the second component of the lexicographic
+   pair handles the case of a one-member list, where the member and the list
+   have the same size. *)
+let rec ctype_size (t: ctype) : Tot nat (decreases t) =
   match t with
-  | TUChar | TUInt32 | TPtr -> 0
-  | TStructS | TStructT -> 1
-  | TUnionU -> 2
-  | TArr e _ -> crank e + 1
+  | TScalar _ -> 1
+  | TStruct _ _ ms -> 1 + members_size ms
+  | TUnion _ _ ms -> 1 + members_size ms
+  | TArr e _ -> 1 + ctype_size e
+and members_size (ms: list (nat & ctype)) : Tot nat (decreases ms) =
+  match ms with
+  | [] -> 0
+  | (_, m) :: r -> ctype_size m + members_size r
 
 (* Total remainder, so that the array case does not need a well-formedness side
    condition on zero-length element types. *)
@@ -77,20 +108,25 @@ let emod (x: int) (m: nat) : int = if m = 0 then x else x % m
    - a character type may access anything;
    - a type may access itself at offset 0;
    - an array delegates to its element type, modulo the element size, which is
-     what makes `a[i]` an access to the element rather than to the array;
-   - a struct delegates to each member at that member's offset; and
-   - a union delegates to *every* member at offset 0, which is exactly the
-     C rule that reading any member of a union object is permitted. Type
-     punning through a union is legal C, and it stays legal here. *)
-let rec access_ok (ty: ctype) (off: int) (u: ctype) : Tot prop (decreases crank ty) =
-  u == TUChar \/
+     what makes `a[i]` an access to the element rather than to the array; and
+   - an aggregate delegates to each member at that member's offset. For a
+     union every offset is zero, so every member is accessible -- which is
+     exactly the C rule that reading any member of a union object is
+     permitted. Type punning through a union is legal C, and it stays legal
+     here. *)
+let rec access_ok (ty: ctype) (off: int) (u: ctype) : Tot prop (decreases %[ctype_size ty; 0]) =
+  u == tchar \/
   (off == 0 /\ ty == u) \/
   (match ty with
    | TArr e n -> 0 <= off /\ off < csize e * n /\ access_ok e (emod off (csize e)) u
-   | TStructS -> access_ok TUInt32 off u \/ access_ok TUChar (off - 4) u
-   | TStructT -> access_ok TUInt32 off u \/ access_ok TUInt32 (off - 4) u
-   | TUnionU -> access_ok TUInt32 off u \/ access_ok TStructT off u
-   | _ -> False)
+   | TStruct _ _ ms -> access_ok_members ms off u
+   | TUnion _ _ ms -> access_ok_members ms off u
+   | TScalar _ -> False)
+and access_ok_members (ms: list (nat & ctype)) (off: int) (u: ctype)
+  : Tot prop (decreases %[members_size ms; 1]) =
+  match ms with
+  | [] -> False
+  | (o, m) :: r -> access_ok m (off - o) u \/ access_ok_members r off u
 
 (* One entry per byte: which object this byte belongs to, and which byte of it
    this is. `fixed` distinguishes a declared object, whose type is settled for
@@ -145,13 +181,29 @@ let store_etypes (e: etypes) (u: ctype { elen e == csize u }) : e':etypes { elen
 
 (* ---------------------------------------------------------------------------
    Theorems
+
+   The aggregates the examples in `Pulse.Lib.C.Palow.Aggregate` and
+   `Pulse.Lib.C.Palow.Union` use, written as descriptors. These stand in for
+   what PAL emits; nothing below knows they are the only ones.
    --------------------------------------------------------------------------- *)
+
+let ct_u32 : ctype = TScalar SUInt32
+let ct_ptr : ctype = TScalar SPtr
+
+(* struct S { uint32_t f; uint8_t g; }, size 8 *)
+let ct_S : ctype = TStruct "S" 8 [(0, ct_u32); (4, tchar)]
+
+(* struct T { uint32_t y; uint32_t z; } *)
+let ct_T : ctype = TStruct "T" 8 [(0, ct_u32); (4, ct_u32)]
+
+(* union U { uint32_t x; struct T t; } -- every member at offset zero *)
+let ct_U : ctype = TUnion "U" 8 [(0, ct_u32); (0, ct_T)]
 
 (* Character types are exempt: this is why `memcpy` and byte-wise inspection
    never need to know an object's type. *)
 let read_char_ok (e: etypes)
   : Lemma (requires elen e == 1)
-          (ensures  read_ok e TUChar)
+          (ensures  read_ok e tchar)
   = ()
 
 (* Storing into untyped storage gives it that effective type, and it is then
@@ -172,32 +224,44 @@ let store_fixed_stable (t: ctype) (u: ctype { csize u == csize t })
    the rule has to go through the `struct T` member to reach a `uint32_t` at
    its offset 0. *)
 let union_read_x_ok ()
-  : Lemma (read_ok (Seq.slice (etypes_of TUnionU true) 0 4) TUInt32)
+  : Lemma (read_ok (Seq.slice (etypes_of ct_U true) 0 4) ct_u32)
   = ()
 
 let union_read_t_z_ok ()
-  : Lemma (read_ok (Seq.slice (etypes_of TUnionU true) 4 8) TUInt32)
+  : Lemma (read_ok (Seq.slice (etypes_of ct_U true) 4 8) ct_u32)
+  = ()
+
+(* A struct member is readable at its own offset, and the descriptor is
+   generated, so this is the shape every field access has. *)
+let struct_member_read_ok ()
+  : Lemma (read_ok (Seq.slice (etypes_of ct_T true) 4 8) ct_u32)
+  = ()
+
+(* But a struct is not compatible with a union of the same shape, nor with
+   another struct of the same layout: C compares tags, not bytes. *)
+let struct_not_union ()
+  : Lemma (~(access_ok ct_T 0 ct_U))
   = ()
 
 (* The rule that actually does work: allocated storage whose last store was an
    integer cannot then be read as a pointer. Under a model without effective
    types this program verifies; clang is entitled to miscompile it. *)
 let no_int_to_ptr_pun ()
-  : Lemma (~(read_ok (Seq.append (store_etypes (etypes_none 4) TUInt32)
-                                 (store_etypes (etypes_none 4) TUInt32))
-                     TPtr))
-  = assert (eget (Seq.append (store_etypes (etypes_none 4) TUInt32)
-                             (store_etypes (etypes_none 4) TUInt32)) 0
-            == Some ({ ty = TUInt32; off = 0; fixed = false }))
+  : Lemma (~(read_ok (Seq.append (store_etypes (etypes_none 4) ct_u32)
+                                 (store_etypes (etypes_none 4) ct_u32))
+                     ct_ptr))
+  = assert (eget (Seq.append (store_etypes (etypes_none 4) ct_u32)
+                             (store_etypes (etypes_none 4) ct_u32)) 0
+            == Some ({ ty = ct_u32; off = 0; fixed = false }))
 
 (* ...but the same storage *is* readable as a pointer if that is what was
    stored into it, which is what keeps `Pulse.Lib.C.Palow.Provenance` alive
    once the rules are switched on. *)
 let ptr_store_read_ok ()
-  : Lemma (read_ok (store_etypes (etypes_none 8) TPtr) TPtr)
+  : Lemma (read_ok (store_etypes (etypes_none 8) ct_ptr) ct_ptr)
   = ()
 
 (* An array of `uint32_t` is readable element by element, at every element. *)
 let array_elem_read_ok (n: nat) (i: nat { i < n })
-  : Lemma (read_ok (Seq.slice (etypes_of (TArr TUInt32 n) true) (4 * i) (4 * i + 4)) TUInt32)
+  : Lemma (read_ok (Seq.slice (etypes_of (TArr ct_u32 n) true) (4 * i) (4 * i + 4)) ct_u32)
   = assert (forall (k: nat). k < 4 ==> emod (4 * i + k - k) 4 == 0)

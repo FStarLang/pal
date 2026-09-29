@@ -33,6 +33,7 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 
 module SZ = FStar.SizeT
+module ET = Pulse.Lib.C.Palow.Etype
 module U8 = FStar.UInt8
 module U32 = FStar.UInt32
 module M = FStar.Math.Lemmas
@@ -54,6 +55,8 @@ let encode_zero (n: nat)
 
 let uint8_t_sizeof : SZ.t = 1sz
 let uint8_t_alignof : SZ.t = 1sz
+  (* `uint8_t` is `unsigned char`, a character type: it may alias anything. *)
+let uint8_t_ctype : ET.ctype = ET.TScalar ET.SChar
 
 let uint8_t_repr (x: U8.t) (b: bytes) : prop =
   b == encode (SZ.v uint8_t_sizeof) None (U8.v x)
@@ -84,6 +87,7 @@ ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U8.t)
 
 let uint32_t_sizeof : SZ.t = 4sz
 let uint32_t_alignof : SZ.t = 4sz
+let uint32_t_ctype : ET.ctype = ET.TScalar ET.SUInt32
 
 let uint32_t_repr (x: U32.t) (b: bytes) : prop =
   b == encode (SZ.v uint32_t_sizeof) None (U32.v x)
@@ -216,6 +220,7 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
 
 let ptr_sizeof : SZ.t = 8sz
 let ptr_alignof : SZ.t = 8sz
+let ptr_ctype : ET.ctype = ET.TScalar ET.SPtr
 
 let ptr_repr (a: ptr) (b: bytes) : prop =
   b == encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a)

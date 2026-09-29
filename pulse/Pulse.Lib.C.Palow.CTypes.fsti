@@ -34,6 +34,7 @@ open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Float
 
 module SZ = FStar.SizeT
+module ET = Pulse.Lib.C.Palow.Etype
 module U8 = FStar.UInt8
 module U16 = FStar.UInt16
 module U32 = FStar.UInt32
@@ -47,6 +48,7 @@ module I64 = FStar.Int64
 
 let bool_t_sizeof : SZ.t = 1sz
 let bool_t_alignof : SZ.t = 1sz
+let bool_t_ctype : ET.ctype = ET.TScalar ET.SBool
 
 let bool_t_repr (x: bool) (b: bytes) : prop =
   b == encode (SZ.v bool_t_sizeof) None (if x then 1 else 0)
@@ -139,6 +141,8 @@ ghost fn bool_t_reveal_uninit (a: ptr)
 
 let int8_t_sizeof : SZ.t = 1sz
 let int8_t_alignof : SZ.t = 1sz
+  (* `int8_t` is `signed char`, a character type: it may alias anything. *)
+let int8_t_ctype : ET.ctype = ET.TScalar ET.SChar
 
 let int8_t_repr (x: I8.t) (b: bytes) : prop =
   b == encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x))
@@ -231,6 +235,7 @@ ghost fn int8_t_reveal_uninit (a: ptr)
 
 let int16_t_sizeof : SZ.t = 2sz
 let int16_t_alignof : SZ.t = 2sz
+let int16_t_ctype : ET.ctype = ET.TScalar ET.SInt16
 
 let int16_t_repr (x: I16.t) (b: bytes) : prop =
   b == encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x))
@@ -323,6 +328,7 @@ ghost fn int16_t_reveal_uninit (a: ptr)
 
 let int32_t_sizeof : SZ.t = 4sz
 let int32_t_alignof : SZ.t = 4sz
+let int32_t_ctype : ET.ctype = ET.TScalar ET.SInt32
 
 let int32_t_repr (x: I32.t) (b: bytes) : prop =
   b == encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x))
@@ -415,6 +421,7 @@ ghost fn int32_t_reveal_uninit (a: ptr)
 
 let int64_t_sizeof : SZ.t = 8sz
 let int64_t_alignof : SZ.t = 8sz
+let int64_t_ctype : ET.ctype = ET.TScalar ET.SInt64
 
 let int64_t_repr (x: I64.t) (b: bytes) : prop =
   b == encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x))
@@ -507,6 +514,7 @@ ghost fn int64_t_reveal_uninit (a: ptr)
 
 let uint16_t_sizeof : SZ.t = 2sz
 let uint16_t_alignof : SZ.t = 2sz
+let uint16_t_ctype : ET.ctype = ET.TScalar ET.SUInt16
 
 let uint16_t_repr (x: U16.t) (b: bytes) : prop =
   b == encode (SZ.v uint16_t_sizeof) None (U16.v x)
@@ -599,6 +607,7 @@ ghost fn uint16_t_reveal_uninit (a: ptr)
 
 let uint64_t_sizeof : SZ.t = 8sz
 let uint64_t_alignof : SZ.t = 8sz
+let uint64_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
 
 let uint64_t_repr (x: U64.t) (b: bytes) : prop =
   b == encode (SZ.v uint64_t_sizeof) None (U64.v x)
@@ -720,6 +729,9 @@ val size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < pow2 64) (ensures SZ.fi
 
 let size_t_sizeof : SZ.t = 8sz
 let size_t_alignof : SZ.t = 8sz
+  (* `size_t` is a typedef for `unsigned long`, the same type as `uint64_t`
+     on this target, so it shares a descriptor. *)
+let size_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
 
 let size_t_repr (x: SZ.t) (b: bytes) : prop =
   b == encode (SZ.v size_t_sizeof) None (SZ.v x)
@@ -1050,6 +1062,7 @@ let size_t_repr_len (x: SZ.t) (b: bytes)
 
 let float32_t_sizeof : SZ.t = 4sz
 let float32_t_alignof : SZ.t = 4sz
+let float32_t_ctype : ET.ctype = ET.TScalar ET.SFloat32
 
 let float32_t_repr (x: float32) (b: bytes) : prop =
   b == encode (SZ.v float32_t_sizeof) None (float32_bits x)
@@ -1142,6 +1155,7 @@ ghost fn float32_t_reveal_uninit (a: ptr)
 
 let float64_t_sizeof : SZ.t = 8sz
 let float64_t_alignof : SZ.t = 8sz
+let float64_t_ctype : ET.ctype = ET.TScalar ET.SFloat64
 
 let float64_t_repr (x: float64) (b: bytes) : prop =
   b == encode (SZ.v float64_t_sizeof) None (float64_bits x)

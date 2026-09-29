@@ -92,6 +92,17 @@ const MAX_BYTE_LEVEL_FIELDS: usize = 16;
 /// How a struct field is owned. A scalar or nested struct field is one
 /// points-to; a fixed-size array field is a whole `array_pts_to`, because in C
 /// `T f[N]` inside a struct is N elements of storage and not a pointer.
+/// The effective-type descriptor for a member of the given shape, or `None`
+/// for a flexible array member -- which has no size, and so is not part of
+/// the enclosing type at all.
+fn ctype_of_shape(shape: &FieldShape) -> Option<String> {
+    match shape {
+        FieldShape::One { pn } => Some(format!("{}_ctype", pn)),
+        FieldShape::Array { pn, len, .. } => Some(format!("(ET.TArr {}_ctype {})", pn, len)),
+        FieldShape::Flex { .. } => None,
+    }
+}
+
 enum FieldShape {
     One {
         pn: String,
@@ -5652,6 +5663,20 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     }
     c += &format!("let {}_sizeof : SizeT.t = {}sz\n", un, ui.size);
     c += &format!("let {}_alignof : SizeT.t = {}sz\n\n", un, ui.align);
+    // Every member of a union sits at offset zero, so the member list is a
+    // list of `(0, member)`. The distinct constructor is what keeps a union
+    // from being compatible with a struct of the same shape.
+    c += &format!(
+        "let {un}_ctype : ET.ctype = ET.TUnion \"{un}\" {size} [{ms}]\n\n",
+        un = un,
+        size = ui.size,
+        ms = ui
+            .members
+            .iter()
+            .filter_map(|m| Some(format!("(0, {})", ctype_of_shape(&m.shape)?)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
     // Every member of a union starts where the object does, so an object
     // aligned for the union is aligned for each member: the members are what
     // the union alignment is the maximum of. Pure arithmetic on numerals.
@@ -6355,6 +6380,24 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         );
     }
     c += "\n";
+    // The effective type of an object of this type, as C's aliasing rules see
+    // it: one entry per member, at its offset. The tag is the generated name,
+    // which is derived from the C tag, so two structurally identical structs
+    // with different tags get different descriptors -- which is what C means
+    // by compatible type. A flexible array member is not part of the type:
+    // the storage past the last real member is separately typed by whatever
+    // is stored into it.
+    c += &format!(
+        "let {sn}_ctype : ET.ctype = ET.TStruct \"{sn}\" {size} [{ms}]\n\n",
+        sn = sn,
+        size = si.size,
+        ms = si
+            .fields
+            .iter()
+            .filter_map(|f| Some(format!("({}, {})", f.offset, ctype_of_shape(&f.shape)?)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
     // Every field of an object of this type is aligned for its own type, and
     // by nothing deeper than arithmetic on numerals: the offset is a multiple
     // of the field's alignment, and the field's alignment divides the
@@ -9104,6 +9147,7 @@ open Pulse.Lib.C.Palow.FnPtr\n\
 open Pulse.Lib.C.Palow.Expose\n\
 module Seq = FStar.Seq\n\
 module Bits = Pulse.Lib.C.Palow.Bits\n\
+module ET = Pulse.Lib.C.Palow.Etype\n\
 module Int8 = FStar.Int8\n\
 module Int16 = FStar.Int16\n\
 module Int32 = FStar.Int32\n\
