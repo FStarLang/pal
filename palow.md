@@ -795,6 +795,61 @@ it can be the test in that `if`. That is the better choice anyway: descriptors
 are closed terms, so every instance *computes* instead of asking the solver to
 reason about the recursion.
 
+#### Where the index has to be visible
+
+Two questions decide how disruptive enforcement is. Packaging the index
+behind an existential — either in `mem_pts_to` or inside a typed points-to —
+raises the first: if the index is existentially quantified, what is being
+enforced? And if it is *not* packaged, does it have to be threaded through
+every aggregate predicate and every focus lemma?
+
+The answer to the first is that the two existentials do different jobs.
+`mem_pts_to_at_eq` is about *soundness of the packaging*, not enforcement: it
+says you cannot forge an index, and it lets type-agnostic code — padding,
+allocation, the byte-level split and join — stay on `mem_pts_to` unchanged. It
+enforces nothing by itself. Enforcement lives in the *typed* predicates, whose
+invariant is `read_ok e t_ctype` for the index they hold; the existential does
+not weaken that, because `t_pts_to` is abstract and the only way to obtain one
+is through a rule that establishes the invariant. What the existential does
+cost is *transport*: a step that hands bytes out as `mem_pts_to` and takes them
+back has lost the fact, because the index it gets back is quantified afresh.
+
+The answer to the second turns on one lemma, which is now proved:
+
+```fstar
+val access_ok_trans (ty: ctype) (d: int) (s: ctype) (off: int) (fld: ctype)
+  : Lemma (requires access_ok ty d s /\ access_ok s off fld)
+          (ensures  access_ok ty (d + off) fld)
+```
+
+`access_ok` composes. A struct's bytes are labelled with the *struct's* type,
+so reading one member is an access at a type the byte's own label never
+mentions; composition is what turns "these bytes hold a `struct S`" into
+"these four of them may be read as a `uint32_t`". `read_ok_slice` packages it:
+an index that licenses a read at `s` licenses a read of `s`'s member at that
+member's offset. So field claims are justified from the *enclosing* object's
+index, and **no aggregate predicate and no focus lemma has to carry one**.
+
+Proving it required tightening `access_ok`: an access has to *fit* inside the
+object it is an access to. Without the bound, the character rule licensed a
+byte access at any offset whatsoever — including outside the object — and
+composition failed. The bound is right independently; it was simply missing.
+
+The converse does not hold, and that is what fixes the remaining threading.
+`fields_dont_make_a_struct` exhibits two standalone `uint32_t` objects side by
+side: each licenses a `uint32_t` read, together they occupy exactly the bytes
+of a `struct T { uint32_t y, z; }`, and they are not one. An aggregate's index
+is strictly more than the conjunction of its fields', so it cannot be dropped
+at the aggregate boundary and rebuilt from the fields.
+
+Putting the two together: the index must be named at the bytes-to-object
+boundary — `t_conceal`, `struct_S_claim_uninit`, `_claim_*_flex`, `_of_elem`,
+which take `mem_pts_to_at` rather than `mem_pts_to` — and nowhere else. That is
+the same small set of entry points that already carries `aligned a
+struct_S_alignof`, and for the same reason: it is where an object is made out
+of storage. Everything above it (the predicates, the focus and unfocus
+machinery, `unless_null`, the generated contracts) is untouched.
+
 #### What to watch
 
 Cost. A per-byte `Seq` index is the same shape as the per-field alignment
@@ -5534,3 +5589,40 @@ new facts about memory.
 
     Enforcement is still off, so again nothing was weakened: 1104
     specifications, 1082 with bodies, 0 admitted, 22 external, 0 skipped.
+
+19. **The index does not have to be threaded.** Two questions about the
+    effective-type design needed answers before enforcement could be costed:
+    if the index sits behind an existential, what is being enforced — and if it
+    does not, does it have to be threaded through every aggregate predicate?
+
+    The existentials do different jobs. `mem_pts_to_at_eq` makes the index
+    unforgeable and lets type-agnostic code stay on `mem_pts_to`; it enforces
+    nothing by itself. Enforcement is the `read_ok e t_ctype` invariant of the
+    *typed* predicates, which an existential does not weaken, because those
+    predicates are abstract and the only way to get one is through a rule that
+    establishes it.
+
+    Threading turns on `access_ok_trans`, now proved: `access_ok` composes, so
+    an index that licenses a read at `s` licenses a read of `s`'s member at
+    that member's offset (`read_ok_slice`). A struct's bytes are labelled with
+    the struct's type, and composition is what turns "these bytes hold a
+    `struct S`" into "these four may be read as a `uint32_t`". Field claims are
+    therefore justified from the enclosing object's index, and no aggregate
+    predicate and no focus lemma has to carry one.
+
+    Proving it required tightening `access_ok`: an access has to *fit* inside
+    the object it is an access to. Without the bound the character rule
+    licensed a byte access at any offset at all, including outside the object,
+    and composition failed — the bound was simply missing.
+
+    The converse does not hold. `fields_dont_make_a_struct` exhibits two
+    standalone `uint32_t` objects that each license a `uint32_t` read, occupy
+    exactly the bytes of a `struct T { uint32_t y, z; }`, and are not one. So
+    the index cannot be dropped at the aggregate boundary and rebuilt from the
+    fields: it has to be named at the bytes-to-object boundary — `t_conceal`,
+    `struct_S_claim_uninit`, `_claim_*_flex`, `_of_elem` — and nowhere else.
+    That is the same small set of entry points that already carries
+    `aligned a struct_S_alignof`, and for the same reason.
+
+    Still no enforcement, so still nothing weakened: 1104 specifications, 1082
+    with bodies, 0 admitted, 22 external, 0 skipped.

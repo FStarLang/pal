@@ -31,6 +31,7 @@ module Pulse.Lib.C.Palow.Etype
 open Pulse
 
 module Seq = FStar.Seq
+module M = FStar.Math.Lemmas
 
 (* The scalar types are a closed set -- `Pulse.Lib.C.Palow.CTypes` fixes
    exactly this one -- but the aggregates are not: PAL meets a new struct,
@@ -118,20 +119,72 @@ let emod (x: int) (m: nat) : int = if m = 0 then x else x % m
    It is a `bool` rather than a `prop` because the solver has to *compute* it:
    every descriptor is a closed term, so each instance reduces to `true` or
    `false` without the solver having to reason about the recursion. That also
-   makes it usable in the `if` of `store_entry` below. *)
+   makes it usable in the `if` of `store_entry` below.
+
+   An access also has to *fit*: it covers `csize u` bytes starting at `off`,
+   and those have to be inside the object. Without that bound the character
+   rule would licence a byte access at any offset whatsoever, including
+   outside the object, and `access_ok` would not compose (see
+   `access_ok_trans`). *)
 let rec access_ok (ty: ctype) (off: int) (u: ctype) : Tot bool (decreases %[ctype_size ty; 0]) =
-  u = tchar ||
+  0 < csize u && 0 <= off && off + csize u <= csize ty &&
+  (u = tchar ||
   (off = 0 && ty = u) ||
   (match ty with
    | TArr e n -> 0 <= off && off < csize e * n && access_ok e (emod off (csize e)) u
    | TStruct _ _ ms -> access_ok_members ms off u
    | TUnion _ _ ms -> access_ok_members ms off u
-   | TScalar _ -> false)
+   | TScalar _ -> false))
 and access_ok_members (ms: list (nat & ctype)) (off: int) (u: ctype)
   : Tot bool (decreases %[members_size ms; 1]) =
   match ms with
   | [] -> false
   | (o, m) :: r -> access_ok m (off - o) u || access_ok_members r off u
+
+(* Stepping an offset within an element never carries out of it, because an
+   access fits inside the object it is an access to. *)
+let mod_add_no_carry (d: nat) (q: pos) (off: nat)
+  : Lemma (requires d % q + off < q)
+          (ensures  (d + off) % q == d % q + off)
+  = M.euclidean_division_definition d q;
+    M.lemma_mod_plus (d % q + off) (d / q) q;
+    M.small_mod (d % q + off) q
+
+(* `access_ok` composes: if `ty` has an `s` at offset `d`, and an `s` has a
+   `fld` at offset `off`, then `ty` has a `fld` at `d + off`.
+
+   This is the load-bearing lemma of the whole design, because it is what lets
+   the index stay out of the aggregate predicates. A struct's bytes are
+   labelled with the *struct's* type, so reading one member is an access at a
+   type the byte's label does not mention; composition is what turns "these
+   bytes hold a struct S" into "these four of them may be read as a
+   uint32_t". Without it, every aggregate predicate would have to carry the
+   index so that field claims could be justified from it directly. *)
+let rec access_ok_trans (ty: ctype) (d: int) (s: ctype) (off: int) (fld: ctype)
+  : Lemma (requires access_ok ty d s /\ access_ok s off fld)
+          (ensures  access_ok ty (d + off) fld)
+          (decreases %[ctype_size ty; 0])
+  = if s = tchar || (d = 0 && ty = s) then () else
+    match ty with
+    | TScalar _ -> ()
+    | TArr e n ->
+      access_ok_trans e (emod d (csize e)) s off fld;
+      if csize e > 0 then begin
+        assert (emod d (csize e) + csize s <= csize e);
+        assert (off + csize fld <= csize s);
+        mod_add_no_carry d (csize e) off
+      end
+    | TStruct _ _ ms -> access_ok_trans_members ms d s off fld
+    | TUnion _ _ ms -> access_ok_trans_members ms d s off fld
+and access_ok_trans_members (ms: list (nat & ctype)) (d: int) (s: ctype) (off: int) (fld: ctype)
+  : Lemma (requires access_ok_members ms d s /\ access_ok s off fld)
+          (ensures  access_ok_members ms (d + off) fld)
+          (decreases %[members_size ms; 1])
+  = match ms with
+    | [] -> ()
+    | (o, m) :: r ->
+      if access_ok m (d - o) s then access_ok_trans m (d - o) s off fld
+      else access_ok_trans_members r d s off fld
 
 (* One entry per byte: which object this byte belongs to, and which byte of it
    this is. `fixed` distinguishes a declared object, whose type is settled for
@@ -147,6 +200,13 @@ type etypes = Seq.seq (option etype_entry)
 
 let elen (e: etypes) : nat = Seq.length e
 let eget (e: etypes) (i: nat { i < elen e }) : option etype_entry = Seq.index e i
+
+(* A byte's offset within its object is an offset *into* that object. Every
+   index this module builds satisfies this, and `store_etypes` preserves it;
+   it is stated separately because `etypes` is a plain sequence. *)
+let etypes_wf (e: etypes) : prop =
+  forall (k: nat). k < elen e ==>
+    (match eget e k with None -> True | Some en -> en.off < csize en.ty)
 
 (* Freshly allocated storage: no effective type anywhere. *)
 let etypes_none (n: nat) : e:etypes { elen e == n } = Seq.create n None
@@ -217,7 +277,7 @@ let ct_U : ctype = TUnion "U" 8 [(0, ct_u32); (0, ct_T)]
 (* Character types are exempt: this is why `memcpy` and byte-wise inspection
    never need to know an object's type. *)
 let read_char_ok (e: etypes)
-  : Lemma (requires elen e == 1)
+  : Lemma (requires elen e == 1 /\ etypes_wf e)
           (ensures  read_ok e tchar)
   = ()
 
@@ -305,3 +365,48 @@ let retype_allocated ()
 let retype_declared ()
   : Lemma (store_etypes (etypes_of ct_T true) ct_S == etypes_of ct_T true)
   = Seq.lemma_eq_intro (store_etypes (etypes_of ct_T true) ct_S) (etypes_of ct_T true)
+
+(* ---------------------------------------------------------------------------
+   Where the index has to be visible
+
+   These two settle how far the index has to be threaded through the typed
+   layer. The first says a member claim is justified by the *enclosing
+   object's* index, via `access_ok_trans` -- so a struct's byte-facing entry
+   points can hand out field permissions without the field predicates ever
+   naming an index. The second says the converse fails, so the index cannot be
+   dropped at the aggregate boundary and reconstructed from the fields.
+   --------------------------------------------------------------------------- *)
+
+(* Downward: an index that licenses a read at `s` licenses a read of `s`'s
+   member `fld` over exactly that member's bytes. *)
+let read_ok_slice (e: etypes) (s: ctype) (off: nat) (fld: ctype)
+  : Lemma (requires read_ok e s /\ access_ok s off fld /\ off + csize fld <= elen e)
+          (ensures  read_ok (Seq.slice e off (off + csize fld)) fld)
+  = let e' = Seq.slice e off (off + csize fld) in
+    let aux (k: nat { k < elen e' })
+      : Lemma (match eget e' k with
+               | None -> True
+               | Some en -> b2t (access_ok en.ty (en.off - k) fld))
+      = match eget e' k with
+        | None -> ()
+        | Some en -> access_ok_trans en.ty (en.off - (off + k)) s off fld
+    in
+    FStar.Classical.forall_intro aux
+
+(* Upward: it does not come back. Two standalone `uint32_t` objects side by
+   side each licence a `uint32_t` read, and together they occupy exactly the
+   bytes of a `struct T { uint32_t y, z; }` -- but they are not one, and no
+   amount of field-level information says otherwise. So an aggregate's index
+   is strictly more than the conjunction of its fields' indices, and the
+   byte-facing entry points that build an aggregate out of bytes have to be
+   given it. *)
+let fields_dont_make_a_struct ()
+  : Lemma (let e = Seq.append (etypes_of ct_u32 false) (etypes_of ct_u32 false) in
+           read_ok (Seq.slice e 0 4) ct_u32 /\
+           read_ok (Seq.slice e 4 8) ct_u32 /\
+           ~(read_ok e ct_T))
+  = let e = Seq.append (etypes_of ct_u32 false) (etypes_of ct_u32 false) in
+    Seq.lemma_eq_intro (Seq.slice e 0 4) (etypes_of ct_u32 false);
+    Seq.lemma_eq_intro (Seq.slice e 4 8) (etypes_of ct_u32 false);
+    assert (eget e 0 == Some ({ ty = ct_u32; off = 0; fixed = false }));
+    assert (~(access_ok ct_u32 0 ct_T))
