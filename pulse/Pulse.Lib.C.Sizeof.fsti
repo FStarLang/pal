@@ -49,28 +49,69 @@ val c_sizeof_uint8_one (a: Type0 { a == FStar.UInt8.t })
   : Lemma (v (c_sizeof a) == 1)
     [SMTPat (v (c_sizeof a))]
 
-val c_sizeof_int16_pos (a: Type0 { a == FStar.Int16.t })
-  : Lemma (v (c_sizeof a) > 0)
+/// The wider integer types have exact sizes too, for the same reason as
+/// `int8_t`/`uint8_t` above but by way of the translation rather than by way of
+/// C alone. The derivation has three steps, and it is worth writing down
+/// because the conclusion is stronger than what C by itself guarantees for the
+/// non-exact-width types.
+///
+/// 1. PAL maps a C integer type to `FStar.UIntN.t`/`FStar.IntN.t` **by its bit
+///    width as the target reports it** -- `TargetIntWidths` in
+///    `src/hauntedc.rs`, consumed by `get_uint_mod`/`get_int_mod` in
+///    `src/pass/emit.rs`. The model it then gives that type is full N-bit
+///    modular arithmetic over all N bits: `Pulse.Lib.C.UIntN.add_wrap` wraps
+///    modulo 2^N and `Pulse.Lib.C.BitField.mask_uN` masks all N of them. So in
+///    PAL's model the type has exactly N value bits and no padding bits. (C
+///    permits padding bits in integer types other than the character types and
+///    the exact-width types; a program translated by PAL is already being
+///    verified against a model in which they do not exist.)
+///
+/// 2. C17 6.2.6.1p4: an object of type T occupies `sizeof(T)` bytes of
+///    CHAR_BIT bits each, and its object representation is exactly those bits.
+///    With no padding bits, `sizeof(T) * CHAR_BIT == N`.
+///
+/// 3. `CHAR_BIT == 8`. PAL commits to this already by mapping `char` to
+///    `FStar.UInt8.t`/`FStar.Int8.t` -- there is no `FStar.UInt9.t` to map it
+///    to otherwise -- and `TargetIntWidths::default()` sets `char_width: 8`.
+///
+/// Hence `sizeof(T) == N / 8`.
+///
+/// **Residual assumption:** a target with `CHAR_BIT != 8`. PAL cannot translate
+/// such a target correctly in the first place, so these axioms add no exposure
+/// that the character-type mapping has not already taken on.
+///
+/// **Why bother.** `sizeof(x)` appears in C mostly inside an arithmetic
+/// expression -- `sizeof(bmap) * 8 / bits_per_entry` to count the entries of a
+/// bitmap, `sizeof(buf) / sizeof(buf[0])` to count an array's elements -- and
+/// with only `sizeof > 0` known, the *multiplication* cannot be shown to fit in
+/// `size_t`, so an ordinary bounds assertion fails on an obligation that has
+/// nothing to do with bounds. These replace the `_pos` lemmas they supersede
+/// rather than sitting alongside them: an `SMTPat` is paid by every query in
+/// every PAL program, and two facts where one will do is a cost with no
+/// benefit.
+
+val c_sizeof_int16_two (a: Type0 { a == FStar.Int16.t })
+  : Lemma (v (c_sizeof a) == 2)
     [SMTPat (v (c_sizeof a))]
 
-val c_sizeof_uint16_pos (a: Type0 { a == FStar.UInt16.t })
-  : Lemma (v (c_sizeof a) > 0)
+val c_sizeof_uint16_two (a: Type0 { a == FStar.UInt16.t })
+  : Lemma (v (c_sizeof a) == 2)
     [SMTPat (v (c_sizeof a))]
 
-val c_sizeof_int32_pos (a: Type0 { a == FStar.Int32.t })
-  : Lemma (v (c_sizeof a) > 0)
+val c_sizeof_int32_four (a: Type0 { a == FStar.Int32.t })
+  : Lemma (v (c_sizeof a) == 4)
     [SMTPat (v (c_sizeof a))]
 
-val c_sizeof_uint32_pos (a: Type0 { a == FStar.UInt32.t })
-  : Lemma (v (c_sizeof a) > 0)
+val c_sizeof_uint32_four (a: Type0 { a == FStar.UInt32.t })
+  : Lemma (v (c_sizeof a) == 4)
     [SMTPat (v (c_sizeof a))]
 
-val c_sizeof_int64_pos (a: Type0 { a == FStar.Int64.t })
-  : Lemma (v (c_sizeof a) > 0)
+val c_sizeof_int64_eight (a: Type0 { a == FStar.Int64.t })
+  : Lemma (v (c_sizeof a) == 8)
     [SMTPat (v (c_sizeof a))]
 
-val c_sizeof_uint64_pos (a: Type0 { a == FStar.UInt64.t })
-  : Lemma (v (c_sizeof a) > 0)
+val c_sizeof_uint64_eight (a: Type0 { a == FStar.UInt64.t })
+  : Lemma (v (c_sizeof a) == 8)
     [SMTPat (v (c_sizeof a))]
 
 val c_sizeof_float32_pos (a: Type0 { a == FStar.Float32.t })
