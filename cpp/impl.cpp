@@ -3417,9 +3417,6 @@ public:
           opaque_to_smt = true;
         }
       }
-      if (is_extern && !is_pure) {
-        return {};
-      }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
                                 std::move(init), is_pure, is_extern,
                                 opaque_to_smt,
