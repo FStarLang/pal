@@ -8865,7 +8865,26 @@ pub fn emit_palow(
     // global declared `extern` and never stored through here: the value is
     // decided in another unit, so publishing it says nothing, and dropping
     // the ownership leaves the contract naming an object with no contents.
-    globals.retain(|n, _| written.contains(n) || lived.contains(n));
+    //
+    // `written` over-approximates: `&g` counts as a write, because an address
+    // that escapes may be stored through. That does not hold for an immutable
+    // global -- C forbids storing into a `const` object, and `_pure` says the
+    // same -- so `&g` is never a write to one. Where its value is published,
+    // a pointer to it reads through `acquire`, whose existential fraction
+    // never writes; where it is not (a struct with no byte representation,
+    // say), nothing can read it through any pointer, which is no loss for a
+    // dispatch table whose address is only stored. Owning it would only make
+    // each function that installs `&ops` in a slot demand a full permission
+    // that nothing can supply.
+    let immutable: HashSet<String> = tu
+        .decls
+        .iter()
+        .filter_map(|d| match &d.val {
+            DeclT::GlobalVar(gv) if gv.is_pure => Some(gv.name.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    globals.retain(|n, _| (written.contains(n) && !immutable.contains(n)) || lived.contains(n));
     for (name, t) in touched {
         grants.insert(
             name.clone(),
