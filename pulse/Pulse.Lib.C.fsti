@@ -6,6 +6,7 @@ include Pulse.Lib.C.Int32
 include Pulse.Lib.C.Ref
 include Pulse.Lib.C.CoreRef
 include Pulse.Lib.C.Array
+include Pulse.Lib.C.Array.Rows
 include Pulse.Class.PtsTo
 include FStar.Int.Cast
 include Pulse.Lib.C.Casts
