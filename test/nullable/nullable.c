@@ -26,7 +26,7 @@ void takes_nullable_refined(
 
 // A nullable pointer to a struct.
 struct ops { int32_t a; };
-void takes_nullable_struct(_nullable const struct ops *p) {}
+void takes_nullable_struct(_nullable _mutable const struct ops *p) {}
 
 // A nullable function pointer.
 typedef int (*binop)(int, int);
