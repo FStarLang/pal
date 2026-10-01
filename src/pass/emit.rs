@@ -2013,14 +2013,14 @@ impl<'a> Emitter<'a> {
                 // own null branch. Bound inside, the null case discharges as
                 // `emp` and asks for no witness at all.
                 //
-                // Implicit (`'`-quoted) bindings are left where they are: those
-                // are universally quantified at the enclosing signature, so
-                // they need no witness, and hoisting is what lets a caller
-                // relate the value across a `preserves`.
+                // Implicit (`'`-quoted) bindings also stay inside the guard for
+                // nullable pointers. A null caller has no readable cell from
+                // which to form expressions such as `!p`; keeping the value
+                // under the guard lets the null case collapse to `emp`.
                 let this_doc = self.emit_rvalue(env, this);
                 let mut inner_props: Vec<Doc> = vec![];
                 let mut local_bindings: Vec<ExBinding> = vec![];
-                let existential = matches!(naming, ValNaming::Standard { quote: false, .. });
+                let existential = matches!(naming, ValNaming::Standard { .. });
                 if existential {
                     let mut local_naming = ValNaming::Standard {
                         quote: false,
