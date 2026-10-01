@@ -703,6 +703,11 @@ public:
         return trLValue(ic->getSubExpr());
       }
     } else if (isa<CompoundLiteralExpr>(e)) {
+      auto hoisted = hoistedCompoundLiterals.find(e->IgnoreParenImpCasts());
+      if (hoisted != hoistedCompoundLiterals.end()) {
+        auto tmp = ctx.mk_ident(toStr(StringRef(hoisted->second)), loc.clone());
+        return mk_lvalue_var(std::move(loc), std::move(tmp));
+      }
       // C11 6.5.2.5p4 makes a compound literal an lvalue, so `(T){...}.f` and
       // `&(T){...}` are both legal. The object it names is unnamed and fresh,
       // though, so nothing stored through it can be observed by any later
@@ -2061,6 +2066,7 @@ public:
   /// Structure-valued call results bound ahead of the statement that projects
   /// from them, keyed by the call expression.
   std::map<const Expr *, std::string> hoistedRValues;
+  std::map<const Expr *, std::string> hoistedCompoundLiterals;
   int rvalueHoistCounter = 0;
 
   /// Bind a structure-valued call that a member projection reads from to a
@@ -2118,18 +2124,61 @@ public:
     hoistedRValues[base] = name;
   }
 
+  void hoistAddressedCompoundLiterals(Vec<Rc<ir::Stmt>> &stmts, Expr *e) {
+    if (!e)
+      return;
+    e = e->IgnoreParens();
+    if (auto *co = dyn_cast<ConditionalOperator>(e)) {
+      hoistAddressedCompoundLiterals(stmts, co->getCond());
+      return;
+    }
+    if (auto *bo = dyn_cast<BinaryOperator>(e)) {
+      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr) {
+        hoistAddressedCompoundLiterals(stmts, bo->getLHS());
+        return;
+      }
+    }
+    if (auto *uo = dyn_cast<UnaryOperator>(e);
+        uo && uo->getOpcode() == UO_AddrOf) {
+      auto *base = uo->getSubExpr()->IgnoreParenImpCasts();
+      if (auto *cl = dyn_cast<CompoundLiteralExpr>(base)) {
+        if (!hoistedCompoundLiterals.count(base)) {
+          auto baseLoc = getRange(base->getSourceRange());
+          auto ty = trQualType(base->getType(), base->getSourceRange());
+          auto name = "__pal_compound_" + std::to_string(rvalueHoistCounter++);
+          auto id = ctx.mk_ident(toStr(StringRef(name)), baseLoc.clone());
+          stmts.push(mk_var_decl(baseLoc.clone(), id.clone(), ty.clone()));
+          stmts.push(mk_assign(baseLoc.clone(),
+                               mk_lvalue_var(baseLoc.clone(), id.clone()),
+                               trRValue(cl)));
+          hoistedCompoundLiterals[base] = name;
+        }
+        return;
+      }
+    }
+    for (auto *child : e->children()) {
+      if (auto *ce = dyn_cast_or_null<Expr>(child)) {
+        hoistAddressedCompoundLiterals(stmts, ce);
+      }
+    }
+  }
+
   rust::Unit trStmt(Vec<Rc<ir::Stmt>> &stmts, Stmt *stmt) {
     auto loc = getRange(stmt->getSourceRange());
 
     if (auto *e = dyn_cast<Expr>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, e);
       hoistRValueMembers(stmts, e);
     } else if (auto *ret = dyn_cast<ReturnStmt>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, ret->getRetValue());
       hoistRValueMembers(stmts, ret->getRetValue());
     } else if (auto *ifs = dyn_cast<IfStmt>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, ifs->getCond());
       hoistRValueMembers(stmts, ifs->getCond());
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto *d : ds->decls()) {
         if (auto *vd = dyn_cast<VarDecl>(d)) {
+          hoistAddressedCompoundLiterals(stmts, vd->getInit());
           hoistRValueMembers(stmts, vd->getInit());
         }
       }
