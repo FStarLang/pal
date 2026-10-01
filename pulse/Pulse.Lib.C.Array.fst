@@ -704,6 +704,19 @@ let array_spec_borrow_index #t (s: array_spec t) (i: nat) (k: nat { k < Seq.leng
 = if k = i then Seq.lemma_index_upd1 s i OutOfMask
   else Seq.lemma_index_upd2 s i OutOfMask k
 
+// The mask/initd view of the above, stated without a `k < length` hypothesis
+// so a client can use it before it has established one. Both sides are False
+// when `k` is out of range, and `array_spec_borrow` is the identity when `i`
+// is, so the only real case is the in-range one handled by `lemma_index_upd2`.
+let array_spec_borrow_mask #t (s: array_spec t) (i: nat) (k: nat)
+  : Lemma (requires k <> i)
+          (ensures (array_spec_mask (array_spec_borrow s i) k <==> array_spec_mask s k) /\
+                   (array_spec_initd (array_spec_borrow s i) k <==> array_spec_initd s k))
+          [SMTPat (array_spec_mask (array_spec_borrow s i) k)]
+= if i < Seq.length s && k < Seq.length s
+  then Seq.lemma_index_upd2 s i OutOfMask k
+  else ()
+
 // The backing sequence of a borrowed spec: cell `i` reads back as `None`
 // (unowned), the rest unchanged.
 let to_seq_borrow #t (s: array_spec t) (i: nat)
@@ -816,6 +829,29 @@ fn array_return_cell u#a (#t: Type u#a) (a: array t)
   A.mask_vext a (to_seq y);
   A.mask_mext a (to_mask y);
   fold (array_pts_to a 1.0R y);
+}
+
+let array_spec_set_get #a s i =
+  // Cell `i` is masked, so it is `Val x` or `Uninit`; `array_spec_get` maps
+  // those to `Some x` / `None` and `opt_cell` maps them straight back, so the
+  // `Seq.upd` writes the value the cell already had.
+  assert (array_spec_mask s i);
+  array_spec_get_spec s i;
+  assert (opt_cell (array_spec_get s i) == Seq.index s i);
+  Seq.lemma_eq_elim (array_spec_set s i (array_spec_get s i)) s
+
+ghost
+fn array_return_cell_unchanged u#a (#t: Type u#a) (a: array t)
+  (#i: nat)
+  (#s: erased (array_spec t) { array_spec_mask s i })
+  requires MU.pts_to_maybe_uninit (array_cell_ref a i) (array_spec_get s i)
+  requires array_pts_to a 1.0R (array_spec_borrow s i)
+  ensures array_pts_to a 1.0R s
+{
+  array_return_cell a #i #(array_spec_get s i) #s;
+  array_spec_set_get s i;
+  rewrite (array_pts_to a 1.0R (array_spec_set s i (array_spec_get s i)))
+       as (array_pts_to a 1.0R s);
 }
 
 // Borrow the cell an arrayptr `x` points at, out of its live parent array `y`.

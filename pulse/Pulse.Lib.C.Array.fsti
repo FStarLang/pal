@@ -567,6 +567,24 @@ ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
 /// but `i`.
 val array_spec_borrow (#a: Type u#a) (s: array_spec a) (i: nat) : array_spec a
 
+/// Borrowing lends out one cell and changes nothing else, so the length is
+/// preserved. `array_spec_borrow` is abstract here, so without this a client
+/// cannot see the length survive a borrow -- and a struct field typed
+/// `full_array_lspec t n` stops being one the moment a cell of it is borrowed,
+/// which is exactly the common case (`&s->field[i]`).
+val array_spec_borrow_len (#a: Type u#a) (s: array_spec a) (i: nat)
+  : Lemma (array_spec_len (array_spec_borrow s i) == array_spec_len s)
+    [SMTPat (array_spec_len (array_spec_borrow s i))]
+
+/// Cell `i` is out of the mask after borrowing; every other cell keeps its
+/// mask, initialization and value. Needed alongside the length for a borrowed
+/// spec to still be recognised as `full_array_lspec` at cells other than `i`.
+val array_spec_borrow_mask (#a: Type u#a) (s: array_spec a) (i: nat) (k: nat)
+  : Lemma (requires k <> i)
+          (ensures (array_spec_mask (array_spec_borrow s i) k <==> array_spec_mask s k) /\
+                   (array_spec_initd (array_spec_borrow s i) k <==> array_spec_initd s k))
+    [SMTPat (array_spec_mask (array_spec_borrow s i) k)]
+
 /// Ghost ref aliasing cell `i` of `a` (defaulted so it is well-typed without a
 /// `i < length a` hypothesis). Used to name the borrowed cell across the
 /// borrow/return boundary.
@@ -613,6 +631,27 @@ fn array_return_cell u#a (#t: Type u#a) (a: array t)
   requires MU.pts_to_maybe_uninit (array_cell_ref a i) w
   requires array_pts_to a 1.0R (array_spec_borrow s i)
   ensures array_pts_to a 1.0R (array_spec_set s i w)
+
+/// Returning a cell you did not write to is a no-op on the spec. Needed
+/// because a borrow taken only to READ through -- `struct T *p = &a[i];` in C,
+/// which is the only way to reach an inline array field of a row (the
+/// by-value `a[i].f` gives the field's CONTENTS, an `array_spec`, where a
+/// pointer is wanted) -- must still be returned before the next iteration, and
+/// the array's ownership is often pinned to an exact spec by an enclosing
+/// value-keyed struct predicate, which `array_spec_set s i _` does not match.
+val array_spec_set_get #a (s: array_spec a) (i: nat) :
+  Lemma (requires array_spec_mask s i)
+    (ensures array_spec_set s i (array_spec_get s i) == s)
+
+/// `array_return_cell` for a cell that was only read from: the array comes
+/// back as exactly the `s` it was borrowed from, not `array_spec_set s i _`.
+ghost
+fn array_return_cell_unchanged u#a (#t: Type u#a) (a: array t)
+  (#i: nat)
+  (#s: erased (array_spec t) { array_spec_mask s i })
+  requires MU.pts_to_maybe_uninit (array_cell_ref a i) (array_spec_get s i)
+  requires array_pts_to a 1.0R (array_spec_borrow s i)
+  ensures array_pts_to a 1.0R s
 
 // ---------------------------------------------------------------------------
 // Borrowing the cell an arrayptr points at, out of its live parent array.
