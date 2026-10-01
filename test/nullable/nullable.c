@@ -42,32 +42,30 @@ void takes_nullable_fnptr(_nullable binop f) {}
 // that reduces to emp (writing those out breaks the match).
 
 void call_ref(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (null #Int32.t) (Pulse.Lib.Reference.pts_to (null #Int32.t) #1.0R 0l));
+    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null_ref #Int32.t (null #Int32.t) (Pulse.Lib.Reference.pts_to (null #Int32.t) #1.0R 0l));
     takes_nullable_ref(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (null #Int32.t) _);
+    _ghost_stmt(Pulse.Lib.C.Nullable.elim_null_ref #Int32.t (null #Int32.t));
 }
 // _array needs array_pts_to_full and a concrete full_array_spec.
 void call_array(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (array_null #Int32.t) (array_pts_to_full (array_null #Int32.t) 1.0R (array_spec_zeroed Int32.t 0 0l)));
+    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null_array #Int32.t (array_null #Int32.t) (exists* (val_a_0: full_array_spec Int32.t). array_pts_to_full (array_null #Int32.t) 1.0R val_a_0));
     takes_nullable_array(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (array_null #Int32.t) _);
+    _ghost_stmt(Pulse.Lib.C.Nullable.elim_null_arr #Int32.t (array_null #Int32.t) #(exists* (val_a_0: full_array_spec Int32.t). array_pts_to_full (array_null #Int32.t) 1.0R val_a_0));
 }
 // _arrayptr emits no pts_to of its own, so p is emp.
 void call_arrayptr(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (array_null #Int32.t) emp);
+    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null_array #Int32.t (array_null #Int32.t) emp);
     takes_nullable_arrayptr(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (array_null #Int32.t) _);
+    _ghost_stmt(Pulse.Lib.C.Nullable.elim_null_arr #Int32.t (array_null #Int32.t) #emp);
 }
 // A refinement rides inside the same unless_null, so p is the refinement.
 void call_refined(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (array_null #Int32.t) (Nullable_include1.nonneg_offset (array_null #Int32.t)));
+    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null_array #Int32.t (array_null #Int32.t) (Nullable_include1.nonneg_offset (array_null #Int32.t)));
     takes_nullable_refined(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (array_null #Int32.t) _);
+    _ghost_stmt(Pulse.Lib.C.Nullable.elim_null_arr #Int32.t (array_null #Int32.t) #(Nullable_include1.nonneg_offset (array_null #Int32.t)));
 }
 void call_struct(void) {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (null #Struct_ops.struct_ops) (Pulse.Lib.Reference.pts_to (null #Struct_ops.struct_ops) #1.0R (Struct_ops.Mkstruct_ops 0l)));
     takes_nullable_struct(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (null #Struct_ops.struct_ops) _);
 }
 // A function pointer uses FuncPtr.null, and its pred is emp.
 void call_fnptr(void) {
