@@ -40,6 +40,38 @@ fn machine_int_suffix(signed: bool, width: u32) -> Option<&'static str> {
     }
 }
 
+/// The largest `size_t` literal F* will accept in `Nsz` notation.
+///
+/// `FStar.SizeT.fits_at_least_16` is the only bound available without a
+/// platform assumption, so the `Nsz` syntax stops at 2^16 - 1. Anything larger
+/// -- a 64KiB buffer, say -- was previously emitted as e.g. `65536sz` and
+/// rejected outright with "65536 is not in the expected range for FStar.SizeT",
+/// so the whole module failed to translate.
+const MAX_SIZET_LITERAL: u64 = 65535;
+
+/// Emit a `size_t` literal, falling back to a conversion when it is too large
+/// for `Nsz` notation.
+///
+/// `Pulse.Lib.C.Assumptions` assumes `fits_u64` with an SMTPat, so
+/// `SizeT.uint_to_t n` discharges its `fits` precondition automatically for any
+/// value C could have produced. This mirrors what `emit_machine_int_literal`
+/// already does for widths with no literal suffix.
+fn emit_sizet_literal_u64(val: u64) -> Doc {
+    if val > MAX_SIZET_LITERAL {
+        parens(Doc::text(format!("SizeT.uint_to_t {val}")))
+    } else {
+        Doc::text(format!("{val}sz"))
+    }
+}
+
+fn emit_sizet_literal(val: &BigInt) -> Doc {
+    if *val > BigInt::from(MAX_SIZET_LITERAL) {
+        parens(Doc::text(format!("SizeT.uint_to_t {val}")))
+    } else {
+        Doc::text(format!("{val}sz"))
+    }
+}
+
 fn emit_machine_int_literal(val: &BigInt, signed: bool, width: u32) -> Doc {
     let normalized = if signed {
         val.clone()
@@ -1165,7 +1197,7 @@ impl<'a> Emitter<'a> {
             TypeT::FixedArray(elem_ty, length) => parens(naryfn([
                 Doc::text("array_spec_zeroed"),
                 self.emit_type(env, elem_ty),
-                parens(Doc::text(format!("SizeT.v {}sz", length))),
+                parens(Doc::text("SizeT.v ").append(emit_sizet_literal_u64(*length))),
                 self.emit_type_default(env, elem_ty),
             ])),
             // Zero-length flexible array member default (a `full_array_spec` of
@@ -2627,7 +2659,7 @@ impl<'a> Emitter<'a> {
                 TypeT::Int { signed, width } => {
                     return emit_machine_int_literal(val, signed, width);
                 }
-                TypeT::SizeT => return Doc::text(format!("{}sz", val)),
+                TypeT::SizeT => return emit_sizet_literal(val),
                 _ => {}
             }
         }
@@ -2644,7 +2676,7 @@ impl<'a> Emitter<'a> {
                         TypeT::Int { signed, width } => {
                             emit_machine_int_literal(val, signed, width)
                         }
-                        TypeT::SizeT => Doc::text(format!("{}sz", val)),
+                        TypeT::SizeT => emit_sizet_literal(val),
                         TypeT::SpecInt | TypeT::SpecNat => Doc::text(format!("{}", val)),
                         TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
                             if **val == BigInt::ZERO =>
@@ -2723,7 +2755,7 @@ impl<'a> Emitter<'a> {
                     // Special case: integer literal cast to SizeT → emit Nsz
                     if matches!(&to_ty.val, TypeT::SizeT) {
                         if let ExprT::IntLit(n, _) = &val.val {
-                            return Doc::text(format!("{}sz", n));
+                            return emit_sizet_literal(n);
                         }
                     }
                     if env.vtype_eq(from_ty.clone(), to_ty.clone()) {
@@ -4172,7 +4204,7 @@ impl<'a> Emitter<'a> {
                         // Fixed-size array declaration: emit stack_alloc_array + defer
                         let x_doc = self.emit_name(Name::Var(x.val.clone()));
                         let elem_type_doc = self.emit_type(env, elem_ty);
-                        let size_doc = Doc::text(format!("{}sz", length));
+                        let size_doc = emit_sizet_literal_u64(*length);
                         let alloc = Doc::text("let ")
                             .append(x_doc.clone())
                             .append(Doc::text(" ="))
@@ -4304,7 +4336,7 @@ impl<'a> Emitter<'a> {
                         return naryfn([
                             Doc::text("array_multiple_writes"),
                             arr_doc,
-                            Doc::text(format!("{}sz", length)),
+                            emit_sizet_literal_u64(length),
                             self.emit_rvalue(env, init),
                         ])
                         .append(";")
@@ -5193,6 +5225,27 @@ impl<'a> Emitter<'a> {
 
         let mut ses = vec![];
 
+        // F* has no empty-record syntax, so a C struct with no members would
+        // emit `noeq type t = { }` and fail to parse. Empty structs are a
+        // GNU extension and do occur in
+        // generated headers. Give the record a unit-typed placeholder, and
+        // supply it at the two literal sites below so they stay consistent
+        // with the declaration.
+        let empty_placeholder_decl = || {
+            if fields.is_empty() {
+                Doc::hardline().append(Doc::text("pal_empty_struct_placeholder: unit;"))
+            } else {
+                Doc::nil()
+            }
+        };
+        let empty_placeholder_lit = || {
+            if fields.is_empty() {
+                Doc::line().append(Doc::text("pal_empty_struct_placeholder = ();"))
+            } else {
+                Doc::nil()
+            }
+        };
+
         ses.push(
             Doc::text("noeq type")
                 .append(Doc::line())
@@ -5214,6 +5267,7 @@ impl<'a> Emitter<'a> {
                             .nest(2),
                     )
                 })))
+                .append(empty_placeholder_decl())
                 .nest(2)
                 .append(Doc::line())
                 .append("}")
@@ -5940,6 +5994,7 @@ impl<'a> Emitter<'a> {
                                 .append(fold_arg_name(fld))
                                 .append(";")
                         })))
+                        .append(empty_placeholder_lit())
                         .nest(2)
                         .append(Doc::line())
                         .append("}")
@@ -6169,6 +6224,7 @@ impl<'a> Emitter<'a> {
                         .group()
                         .nest(2)
                 })))
+                .append(empty_placeholder_lit())
                 .nest(2)
                 .append(Doc::line())
                 .append("}")

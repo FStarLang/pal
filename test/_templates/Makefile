@@ -16,6 +16,12 @@ INCLUDES += -I include
 endif
 PAL_OPTS += $(INCLUDES)
 
+# Extra preprocessor flags (-D, -I) for this test, passed to both PAL and cc.
+ifneq ($(wildcard extra_opts),)
+EXTRA_OPTS := $(shell cat extra_opts)
+PAL_OPTS += $(EXTRA_OPTS)
+endif
+
 all: verify compile
 
 translate: $(OUT_DIR)/.stamp
@@ -33,7 +39,7 @@ compile: $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_FILES))
 
 $(OBJ_DIR)/%.o: %.c $(C_FILES) $(H_FILES)
 	@mkdir -p $(OBJ_DIR)
-	$(CC) $(INCLUDES) -c $< -o $@
+	$(CC) $(INCLUDES) $(EXTRA_OPTS) -c $< -o $@
 
 clean:
 	rm -rf $(OUT_DIR) $(CACHE_DIR) $(OBJ_DIR)
