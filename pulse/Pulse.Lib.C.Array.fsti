@@ -518,6 +518,25 @@ val arrayptr_lt (#t: Type) (x z: array t) :
 /// non-owning arrayptr may be converted.
 val array_to_ref (#t: Type u#a) (r: array t) : R.ref t
 
+/// `array_to_ref` preserves nullness in both directions. It is the identity
+/// on the shared handle, so this is a theorem, not an assumption. It is what
+/// lets `_ensures(return != NULL)` hold of a function returning an array
+/// (for example an array field of a struct) once `array_pts_to_not_null` has
+/// put `not (array_is_null a)` in context; `ref_to_core_is_null` carries the
+/// fact on to the `core_ref` a `void *` return erases to.
+val array_to_ref_is_null (#t: Type u#a) (r: array t)
+  : Lemma (R.is_null (array_to_ref r) == array_is_null r)
+          [SMTPat (R.is_null (array_to_ref r))]
+
+/// The inverse coercion. `array t` and `ref t` are the same handle, so this is
+/// the identity too. PAL emits it for an integer-to-pointer cast whose target
+/// is an array pointer: the raw address becomes a `ref` via
+/// `CR.u64_to_core_ref`/`CR.core_to_ref` and then an `array`. Like
+/// `array_to_ref` it carries NO ownership -- in particular it says nothing
+/// about the resulting array's length, which is the point: a length is part of
+/// an `array_pts_to`, and an address alone has none.
+val ref_to_array (#t: Type u#a) (r: R.ref t) : array t
+
 /// Drop an arrayptr_pts_to predicate (for scope exit / cleanup).
 ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
   requires arrayptr_pts_to x y

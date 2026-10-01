@@ -53,6 +53,22 @@ val ref_to_core_null (a: Type u#a)
 (* Decidable pointer equality, with no preconditions. *)
 val core_ref_eq (x y: core_ref) : (b: bool { b == true <==> x == y })
 
+(* Integer-to-pointer cast, modeling the C cast `(T * ) n`.
+
+   UNINTERPRETED, and that is the whole design. `u64_to_core_ref` produces a
+   pointer carrying NO ownership, so nothing can be read or written through it
+   without a separately supplied `pts_to`. That keeps this direction sound
+   rather than trusted: "address A holds an object of type T" is not a fact
+   about the C program -- it comes from a linker script or a hardware manual --
+   so it has to be introduced deliberately, as an assumption, at the point
+   where it is claimed.
+
+   Deliberately absent: any round-trip law with the pointer-to-integer casts
+   above (`core_to_uint64` and friends). C only guarantees a round trip via
+   `uintptr_t` (C17 7.20.1.4p1), and a program relying on it relies on
+   provenance rules PAL does not model. *)
+val u64_to_core_ref (x: UInt64.t) : core_ref
+
 instance has_zero_default_core_ref : has_zero_default core_ref = {
   zero_default = core_null
 }
