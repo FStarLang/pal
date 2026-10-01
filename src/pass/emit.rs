@@ -4403,6 +4403,9 @@ impl<'a> Emitter<'a> {
                                         "Pulse.Lib.C.Nullable.intro_unless_null_null_ref "
                                             .to_string(),
                                     )
+                                    .append(Doc::text("#"))
+                                    .append(parens(self.emit_type(env, &pointee)))
+                                    .append(Doc::text(" "))
                                     .append(name.clone())
                                     .append(Doc::text(" "))
                                     .append(parens(mk_star(guard_props)))
@@ -4412,6 +4415,9 @@ impl<'a> Emitter<'a> {
                         }
                         out.after.push(
                             Doc::text("Pulse.Lib.C.Nullable.elim_null_ref ".to_string())
+                                .append(Doc::text("#"))
+                                .append(parens(self.emit_type(env, &pointee)))
+                                .append(Doc::text(" "))
                                 .append(name.clone())
                                 .append(Doc::text(";")),
                         );
