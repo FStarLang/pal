@@ -4,8 +4,8 @@
 
 // Dummy declaration for C assert() translation
 static inline void __pal_c_assert(_Bool x) { (void)x; }
-// Opaque function used to guard assert — Pulse verifies both branches
-__attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
+// Guard used for assert translation; PAL verifies the assertion branch.
+__attribute__((annotate("pal-pure"))) static inline _Bool pal_c_assert_enabled(void) { return 1 == 1; }
 
 #define __pal_concat_ind(x, y) x ## y
 #define __pal_concat(x, y) __pal_concat_ind(x, y)
