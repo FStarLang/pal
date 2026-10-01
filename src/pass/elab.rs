@@ -1218,6 +1218,61 @@ impl<'a> Elaborator<'a> {
                     };
                     return true;
                 }
+                if let Some((name, fields, outer_cast)) = match &rhs.val {
+                    ExprT::StructInit(name, fields) => Some((name, fields, None)),
+                    ExprT::Cast(inner, ty) => match &inner.val {
+                        ExprT::StructInit(name, fields) => Some((name, fields, Some(ty.clone()))),
+                        _ => None,
+                    },
+                    _ => None,
+                } {
+                    let conditional =
+                        fields
+                            .iter()
+                            .enumerate()
+                            .find_map(|(idx, (_, value))| match &value.val {
+                                ExprT::Cond(c, a, b) => {
+                                    Some((idx, c.clone(), a.clone(), b.clone()))
+                                }
+                                ExprT::Cast(inner, ty) => match &inner.val {
+                                    ExprT::Cond(c, a, b) => Some((
+                                        idx,
+                                        c.clone(),
+                                        ExprT::Cast(a.clone(), ty.clone())
+                                            .with_loc(value.loc.clone()),
+                                        ExprT::Cast(b.clone(), ty.clone())
+                                            .with_loc(value.loc.clone()),
+                                    )),
+                                    _ => None,
+                                },
+                                _ => None,
+                            });
+                    let Some((idx, c, a, b)) = conditional else {
+                        return false;
+                    };
+                    let branch_rhs = |field_value: Rc<Expr>| {
+                        let mut branch_fields = fields.clone();
+                        branch_fields[idx].1 = field_value;
+                        let struct_init = ExprT::StructInit(name.clone(), branch_fields)
+                            .with_loc(rhs.loc.clone());
+                        match &outer_cast {
+                            Some(ty) => {
+                                ExprT::Cast(struct_init, ty.clone()).with_loc(rhs.loc.clone())
+                            }
+                            None => struct_init,
+                        }
+                    };
+                    let lhs = lhs.clone();
+                    s.val = StmtT::If {
+                        cond: c,
+                        then_branch: Rc::new(vec![
+                            StmtT::Assign(lhs.clone(), branch_rhs(a)).with_loc(loc.clone()),
+                        ]),
+                        else_branch: Rc::new(vec![StmtT::Assign(lhs, branch_rhs(b)).with_loc(loc)]),
+                        ensures: Rc::new(vec![]),
+                    };
+                    return true;
+                }
             }
             StmtT::Return(Some(rhs)) => {
                 if let ExprT::Cond(c, a, b) = &rhs.val {
