@@ -790,10 +790,9 @@ public:
                            false);
     }
     // A braced initializer for a scalar object: C permits `int x = {0}` and
-    // `T x = {}`, and BOSS reaches it through typedefs whose definition on one
-    // platform is a struct and on another a plain integer -- `SNAP_LE_UINT32`
-    // and `SNAP_CRC64` are both. The list holds at most one element, and it
-    // initializes the object directly.
+    // `T x = {}`. Code can reach it through typedefs whose definition is a
+    // struct on one platform and a plain integer on another. The list holds at
+    // most one element, and it initializes the object directly.
     if (qt->isScalarType()) {
       if (init->getNumInits() == 0) {
         return trZeroInit(init->getType(), range, std::move(loc));
