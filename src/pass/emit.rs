@@ -9,7 +9,7 @@ use num_bigint::BigInt;
 
 use crate::{
     diag::{Diagnostic, DiagnosticLevel, Diagnostics},
-    env::{Env, LocalDecl, LocalDeclKind},
+    env::{Env, LocalDeclKind},
     ir::*,
     mayberc::MaybeRc,
 };
