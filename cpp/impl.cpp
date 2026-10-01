@@ -3134,6 +3134,9 @@ public:
           opaque_to_smt = true;
         }
       }
+      if (is_extern && !is_pure) {
+        return {};
+      }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
                                 std::move(init), is_pure, is_extern,
                                 opaque_to_smt,
@@ -3176,6 +3179,10 @@ public:
     } else if (dyn_cast<StaticAssertDecl>(D)) {
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
+      return {};
+    } else if (dyn_cast<FileScopeAsmDecl>(D)) {
+      reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
+                        "file-scope assembly is not translated", "");
       return {};
     }
 
@@ -3415,6 +3422,9 @@ static void parse_file(RefMut<Ctx> ctx) {
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-DC2PULSE", "-fno-builtin", "-D_FORTIFY_SOURCE=0"},
       ArgumentInsertPosition::BEGIN));
+  Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+      {"-Wno-unused-but-set-variable", "-Wno-unused-variable"},
+      ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
