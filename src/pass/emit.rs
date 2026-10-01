@@ -40,6 +40,38 @@ fn machine_int_suffix(signed: bool, width: u32) -> Option<&'static str> {
     }
 }
 
+/// The largest `size_t` literal F* will accept in `Nsz` notation.
+///
+/// `FStar.SizeT.fits_at_least_16` is the only bound available without a
+/// platform assumption, so the `Nsz` syntax stops at 2^16 - 1. Anything larger
+/// -- a 64KiB buffer, say -- was previously emitted as e.g. `65536sz` and
+/// rejected outright with "65536 is not in the expected range for FStar.SizeT",
+/// so the whole module failed to translate.
+const MAX_SIZET_LITERAL: u64 = 65535;
+
+/// Emit a `size_t` literal, falling back to a conversion when it is too large
+/// for `Nsz` notation.
+///
+/// `Pulse.Lib.C.Assumptions` assumes `fits_u64` with an SMTPat, so
+/// `SizeT.uint_to_t n` discharges its `fits` precondition automatically for any
+/// value C could have produced. This mirrors what `emit_machine_int_literal`
+/// already does for widths with no literal suffix.
+fn emit_sizet_literal_u64(val: u64) -> Doc {
+    if val > MAX_SIZET_LITERAL {
+        parens(Doc::text(format!("SizeT.uint_to_t {val}")))
+    } else {
+        Doc::text(format!("{val}sz"))
+    }
+}
+
+fn emit_sizet_literal(val: &BigInt) -> Doc {
+    if *val > BigInt::from(MAX_SIZET_LITERAL) {
+        parens(Doc::text(format!("SizeT.uint_to_t {val}")))
+    } else {
+        Doc::text(format!("{val}sz"))
+    }
+}
+
 fn emit_machine_int_literal(val: &BigInt, signed: bool, width: u32) -> Doc {
     let normalized = if signed {
         val.clone()
@@ -713,6 +745,31 @@ impl<'a> Emitter<'a> {
         tmp
     }
 
+    /// Give a raw address (`core_ref`) the pointer kind an integer-to-pointer
+    /// cast asks for. The result carries no ownership whichever kind
+    /// it is -- `core_to_ref` recovers a typed reference, not a `pts_to`.
+    fn emit_core_as_ptr(
+        &mut self,
+        env: &Env,
+        kind: &PointerKind,
+        pointee: &Rc<Type>,
+        val: Doc,
+    ) -> Doc {
+        match kind {
+            PointerKind::Core => val,
+            PointerKind::Array | PointerKind::ArrayPtr => parens(naryfn([
+                Doc::text("Pulse.Lib.C.Array.ref_to_array"),
+                self.emit_type(env, pointee),
+                val,
+            ])),
+            PointerKind::Ref | PointerKind::Unknown => parens(naryfn([
+                Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
+                self.emit_type(env, pointee),
+                val,
+            ])),
+        }
+    }
+
     /// Emit a Name with full module qualification when it refers to a different module.
     fn emit_name(&mut self, name: Name) -> Doc {
         let mangled = self.nm.mangle(&name).to_string();
@@ -1140,7 +1197,7 @@ impl<'a> Emitter<'a> {
             TypeT::FixedArray(elem_ty, length) => parens(naryfn([
                 Doc::text("array_spec_zeroed"),
                 self.emit_type(env, elem_ty),
-                parens(Doc::text(format!("SizeT.v {}sz", length))),
+                parens(Doc::text("SizeT.v ").append(emit_sizet_literal_u64(*length))),
                 self.emit_type_default(env, elem_ty),
             ])),
             // Zero-length flexible array member default (a `full_array_spec` of
@@ -2602,7 +2659,7 @@ impl<'a> Emitter<'a> {
                 TypeT::Int { signed, width } => {
                     return emit_machine_int_literal(val, signed, width);
                 }
-                TypeT::SizeT => return Doc::text(format!("{}sz", val)),
+                TypeT::SizeT => return emit_sizet_literal(val),
                 _ => {}
             }
         }
@@ -2619,7 +2676,7 @@ impl<'a> Emitter<'a> {
                         TypeT::Int { signed, width } => {
                             emit_machine_int_literal(val, signed, width)
                         }
-                        TypeT::SizeT => Doc::text(format!("{}sz", val)),
+                        TypeT::SizeT => emit_sizet_literal(val),
                         TypeT::SpecInt | TypeT::SpecNat => Doc::text(format!("{}", val)),
                         TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
                             if **val == BigInt::ZERO =>
@@ -2698,7 +2755,7 @@ impl<'a> Emitter<'a> {
                     // Special case: integer literal cast to SizeT → emit Nsz
                     if matches!(&to_ty.val, TypeT::SizeT) {
                         if let ExprT::IntLit(n, _) = &val.val {
-                            return Doc::text(format!("{}sz", n));
+                            return emit_sizet_literal(n);
                         }
                     }
                     if env.vtype_eq(from_ty.clone(), to_ty.clone()) {
@@ -3136,6 +3193,17 @@ impl<'a> Emitter<'a> {
                             };
                             unaryfn(Doc::text(fn_name), val_doc)
                         }
+                        // FixedArray → `core_ref`: an array decaying straight to
+                        // a raw pointer, which is what `(void *)a` does. Two
+                        // steps that are each the identity in Pulse -- take the
+                        // array's handle as a `ref`, then erase its pointee type
+                        // -- so the result is the array's base address carrying
+                        // no ownership and no length. That is the honest model
+                        // of a `void *`: there is no pointee type to own.
+                        (TypeT::FixedArray(_, _), TypeT::Pointer(_, PointerKind::Core)) => unaryfn(
+                            Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                            unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
+                        ),
                         // `core_ref` (raw `_core_ref` back-pointer) → typed `ref T`:
                         // recover the typed reference. The pointee type is known
                         // from the cast target. Mirrors array_to_arrayptr below.
@@ -3188,6 +3256,39 @@ impl<'a> Emitter<'a> {
                                 Doc::text("(admit())")
                             }
                         }
+                        // Integer → pointer: an address the C program did not
+                        // derive from an object.
+                        //
+                        // The result carries NO ownership, so nothing can be
+                        // read or written through it. That is what keeps this
+                        // direction honest: the claim "address A holds an
+                        // object of type T" comes from a linker script or a
+                        // hardware manual, not from the C, so it cannot be
+                        // discharged here and must be assumed where it is made.
+                        // Translating the cast rather than refusing it is still
+                        // the right move -- refusing made the whole enclosing
+                        // function an untranslated `(admit())`, which hides the
+                        // surrounding code's real obligations as well.
+                        (TypeT::Int { signed, width }, TypeT::Pointer(to_pointee, to_kind)) => {
+                            let u64 = if !*signed && *width == 64 {
+                                val_doc
+                            } else if get_int_mod(signed, width).is_some() {
+                                unaryfn(
+                                    Doc::text(format!(
+                                        "Int.Cast.{}int{}_to_uint64",
+                                        if *signed { "" } else { "u" },
+                                        width
+                                    )),
+                                    val_doc,
+                                )
+                            } else {
+                                self.report(default_msg.clone(), &v.loc);
+                                return Doc::text("(admit())");
+                            };
+                            let core =
+                                unaryfn(Doc::text("Pulse.Lib.C.CoreRef.u64_to_core_ref"), u64);
+                            self.emit_core_as_ptr(env, to_kind, to_pointee, core)
+                        }
                         // array/arrayptr → `core_ref`: convert the arrayptr to a
                         // `ref` of the same handle (`array_to_ref`, the identity
                         // coercion) and erase it to the raw base+offset address
@@ -3201,6 +3302,24 @@ impl<'a> Emitter<'a> {
                             Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
                             unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
                         ),
+                        // array/arrayptr → plain `ref`: the identity coercion.
+                        // `ref t` and `array t` are the same handle, so this
+                        // reads nothing and carries no ownership -- which is
+                        // exactly right when the destination wants none (a
+                        // `_plain` parameter, say `strcmp(tab + off, want)`).
+                        // When the destination *does* want ownership the call
+                        // still fails, but as an honest unprovable `pts_to`
+                        // rather than as an ill-typed term, which is the
+                        // difference between a proof obligation the user can
+                        // read and "Expected expression of type ref Int8.t".
+                        // Note this is NOT the borrow path: initializing a
+                        // plain-pointer local from an arrayptr is handled
+                        // earlier and lowers to `arrayptr_borrow_cell`, which
+                        // carves real ownership out of the parent array.
+                        (
+                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
+                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
+                        ) => unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
                         (TypeT::Pointer(_, _), TypeT::Pointer(_, to_kind)) => {
                             // Pointer kind change (e.g., Ref→ArrayPtr for null)
                             if matches!(&val.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) {
@@ -4142,7 +4261,7 @@ impl<'a> Emitter<'a> {
                         // Fixed-size array declaration: emit stack_alloc_array + defer
                         let x_doc = self.emit_name(Name::Var(x.val.clone()));
                         let elem_type_doc = self.emit_type(env, elem_ty);
-                        let size_doc = Doc::text(format!("{}sz", length));
+                        let size_doc = emit_sizet_literal_u64(*length);
                         let alloc = Doc::text("let ")
                             .append(x_doc.clone())
                             .append(Doc::text(" ="))
@@ -4274,7 +4393,7 @@ impl<'a> Emitter<'a> {
                         return naryfn([
                             Doc::text("array_multiple_writes"),
                             arr_doc,
-                            Doc::text(format!("{}sz", length)),
+                            emit_sizet_literal_u64(length),
                             self.emit_rvalue(env, init),
                         ])
                         .append(";")
@@ -5163,6 +5282,27 @@ impl<'a> Emitter<'a> {
 
         let mut ses = vec![];
 
+        // F* has no empty-record syntax, so a C struct with no members would
+        // emit `noeq type t = { }` and fail to parse. Empty structs are a
+        // GNU extension and do occur in
+        // generated headers. Give the record a unit-typed placeholder, and
+        // supply it at the two literal sites below so they stay consistent
+        // with the declaration.
+        let empty_placeholder_decl = || {
+            if fields.is_empty() {
+                Doc::hardline().append(Doc::text("pal_empty_struct_placeholder: unit;"))
+            } else {
+                Doc::nil()
+            }
+        };
+        let empty_placeholder_lit = || {
+            if fields.is_empty() {
+                Doc::line().append(Doc::text("pal_empty_struct_placeholder = ();"))
+            } else {
+                Doc::nil()
+            }
+        };
+
         ses.push(
             Doc::text("noeq type")
                 .append(Doc::line())
@@ -5184,6 +5324,7 @@ impl<'a> Emitter<'a> {
                             .nest(2),
                     )
                 })))
+                .append(empty_placeholder_decl())
                 .nest(2)
                 .append(Doc::line())
                 .append("}")
@@ -5910,6 +6051,7 @@ impl<'a> Emitter<'a> {
                                 .append(fold_arg_name(fld))
                                 .append(";")
                         })))
+                        .append(empty_placeholder_lit())
                         .nest(2)
                         .append(Doc::line())
                         .append("}")
@@ -6139,6 +6281,7 @@ impl<'a> Emitter<'a> {
                         .group()
                         .nest(2)
                 })))
+                .append(empty_placeholder_lit())
                 .nest(2)
                 .append(Doc::line())
                 .append("}")

@@ -22,12 +22,16 @@ the variadic arguments. The generated function and its calls contain only
 the fixed parameters; extra arguments do not transfer ownership to the
 callee.
 
-For this initial support, ignored arguments must be scalar literals,
-non-volatile/non-atomic scalar or pointer local/parameter values, or addresses
-of ordinary local variables or parameters. Parentheses and implicit value
-conversions (including default promotions) are allowed. Computations,
-dereferences, member/subscript reads, side effects, and other unsupported
-extra expressions are rejected rather than silently skipping their evaluation.
+For this initial support, ignored arguments must be literals (including
+string literals), integer constant expressions, non-volatile/non-atomic scalar
+or pointer local/parameter values, addresses of ordinary local variables or
+parameters (including a local array, which decays to its address), or
+computations over those that cannot be undefined: integer conversions, `~`,
+`&`, `|`, `^`, unsigned `+`, `-` and `*`, and unsigned shifts by a constant
+smaller than the width. Parentheses and implicit value conversions (including
+default promotions) are allowed. Dereferences, member/subscript reads,
+division, signed arithmetic, side effects, and other unsupported extra
+expressions are rejected rather than silently skipping their evaluation.
 Indirect variadic calls and variadic argument extraction are not supported.
 
 For example, `read_first(int *first, ...)` may return `*first`, and a caller
