@@ -810,8 +810,12 @@ impl<'a> Emitter<'a> {
             PointerKind::Core => val,
             PointerKind::Array | PointerKind::ArrayPtr => parens(naryfn([
                 Doc::text("Pulse.Lib.C.Array.ref_to_array"),
-                self.emit_type(env, pointee),
-                val,
+                Doc::text("#").append(self.emit_type(env, pointee)),
+                parens(naryfn([
+                    Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
+                    self.emit_type(env, pointee),
+                    val,
+                ])),
             ])),
             PointerKind::Ref | PointerKind::Unknown => parens(naryfn([
                 Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
@@ -3289,6 +3293,13 @@ impl<'a> Emitter<'a> {
                         // from the cast target. Mirrors array_to_arrayptr below.
                         (
                             TypeT::Pointer(_, PointerKind::Core),
+                            TypeT::Pointer(
+                                to_pointee,
+                                to_kind @ (PointerKind::Array | PointerKind::ArrayPtr),
+                            ),
+                        ) => self.emit_core_as_ptr(env, to_kind, to_pointee, val_doc),
+                        (
+                            TypeT::Pointer(_, PointerKind::Core),
                             TypeT::Pointer(to_pointee, PointerKind::Ref | PointerKind::Unknown),
                         ) => parens(naryfn([
                             Doc::text("Pulse.Lib.C.CoreRef.core_to_ref"),
@@ -3369,6 +3380,66 @@ impl<'a> Emitter<'a> {
                             Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
                             unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
                         ),
+                        (
+                            TypeT::Pointer(
+                                from_pointee,
+                                PointerKind::Array | PointerKind::ArrayPtr,
+                            ),
+                            TypeT::Pointer(to_pointee, PointerKind::Array | PointerKind::ArrayPtr),
+                        ) if matches!(
+                            env.vtype_whnf(from_pointee.clone().into()).val,
+                            TypeT::Void
+                        ) =>
+                        {
+                            unaryfn(
+                                Doc::text("Pulse.Lib.C.Array.ref_to_array")
+                                    .append(Doc::line())
+                                    .append(Doc::text("#"))
+                                    .append(self.emit_type(env, to_pointee)),
+                                unaryfn(
+                                    Doc::text("Pulse.Lib.C.CoreRef.core_to_ref")
+                                        .append(Doc::line())
+                                        .append(self.emit_type(env, to_pointee)),
+                                    unaryfn(
+                                        Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                                        unaryfn(
+                                            Doc::text("Pulse.Lib.C.Array.array_to_ref"),
+                                            val_doc,
+                                        ),
+                                    ),
+                                ),
+                            )
+                        }
+                        (
+                            TypeT::Pointer(
+                                from_pointee,
+                                PointerKind::Array | PointerKind::ArrayPtr,
+                            ),
+                            TypeT::Pointer(to_pointee, PointerKind::Ref | PointerKind::Unknown),
+                        ) if matches!(
+                            env.vtype_whnf(from_pointee.clone().into()).val,
+                            TypeT::Void
+                        ) =>
+                        {
+                            unaryfn(
+                                Doc::text("Pulse.Lib.C.Array.ref_to_array")
+                                    .append(Doc::line())
+                                    .append(Doc::text("#"))
+                                    .append(self.emit_type(env, to_pointee)),
+                                unaryfn(
+                                    Doc::text("Pulse.Lib.C.CoreRef.core_to_ref")
+                                        .append(Doc::line())
+                                        .append(self.emit_type(env, to_pointee)),
+                                    unaryfn(
+                                        Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                                        unaryfn(
+                                            Doc::text("Pulse.Lib.C.Array.array_to_ref"),
+                                            val_doc,
+                                        ),
+                                    ),
+                                ),
+                            )
+                        }
                         // array/arrayptr → plain `ref`: the identity coercion.
                         // `ref t` and `array t` are the same handle, so this
                         // reads nothing and carries no ownership -- which is

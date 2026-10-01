@@ -692,6 +692,23 @@ public:
           ty = mk_type_array(std::move(loc), std::move(ty));
         } else if (ann->getAnnotation() == "pal-arrayptr" &&
                    ann->args_size() == 0) {
+          if (!declQt.isNull()) {
+            auto qt = declQt.IgnoreParens();
+            if (auto outer = qt->getAs<PointerType>()) {
+              if (auto inner = outer->getPointeeType()
+                                   .IgnoreParens()
+                                   ->getAs<PointerType>()) {
+                ty = mk_pointer_unknown(
+                    loc.clone(),
+                    mk_type_arrayptr(
+                        std::move(loc),
+                        mk_pointer_unknown(
+                            getRange(declRange),
+                            trQualType(inner->getPointeeType(), declRange))));
+                continue;
+              }
+            }
+          }
           ty = mk_type_arrayptr(std::move(loc), std::move(ty));
         } else if (ann->getAnnotation() == "pal-core-ref" &&
                    ann->args_size() == 0) {
@@ -1466,6 +1483,15 @@ public:
         // BitCast (e.g., T* → void*): pass through after malloc/calloc
         // detection. F* functions like memcpy are type-polymorphic.
         if (ic->getCastKind() == CK_BitCast) {
+          auto *srcPtr = ic->getSubExpr()->getType()->getAs<PointerType>();
+          auto *dstPtr = ic->getType()->getAs<PointerType>();
+          if (srcPtr && dstPtr &&
+              (srcPtr->getPointeeType()->isVoidType() ||
+               dstPtr->getPointeeType()->isVoidType())) {
+            return mk_rvalue_cast(
+                std::move(loc), trRValue(ic->getSubExpr()),
+                trQualType(ic->getType(), ic->getSourceRange()));
+          }
           return trRValue(ic->getSubExpr());
         }
 

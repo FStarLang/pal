@@ -313,6 +313,38 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    fn promote_core_cast_to_array_for_arith(env: &Env, expr: &mut Rc<Expr>) -> bool {
+        let expr = Rc::make_mut(expr);
+        let ExprT::Cast(inner, target_ty) = &mut expr.val else {
+            return false;
+        };
+        let target_whnf = env.vtype_whnf(target_ty.clone().into());
+        let TypeT::Pointer(pointee, PointerKind::Ref | PointerKind::Unknown) = &target_whnf.val
+        else {
+            return false;
+        };
+        let Ok(inner_ty) = env.infer_expr(inner).map(|t| env.vtype_whnf(t)) else {
+            return false;
+        };
+        let is_raw_pointer = match &inner_ty.val {
+            TypeT::Pointer(_, PointerKind::Core) => true,
+            TypeT::Pointer(inner_pointee, PointerKind::Array | PointerKind::ArrayPtr) => {
+                matches!(
+                    env.vtype_whnf(inner_pointee.clone().into()).val,
+                    TypeT::Void
+                )
+            }
+            _ => false,
+        };
+        if !is_raw_pointer {
+            return false;
+        }
+        let loc = target_ty.loc.clone();
+        *Rc::make_mut(target_ty) =
+            TypeT::Pointer(pointee.clone(), PointerKind::Array).with_loc_core(loc);
+        true
+    }
+
     fn elab_inline_pulse_code(&mut self, env: &Env, code: &mut InlinePulseCode) {
         let env = &mut env.clone();
         let prev_in_inline_pulse = self.in_inline_pulse;
@@ -625,12 +657,30 @@ impl<'a> Elaborator<'a> {
             ExprT::BinOp(bin_op, lhs, rhs) => {
                 self.elab_rvalue(env, Rc::make_mut(lhs), None);
                 self.elab_rvalue(env, Rc::make_mut(rhs), None);
-                let Some(lhs_ty) = self.infer_expr(env, lhs) else {
+                let Some(mut lhs_ty) = self.infer_expr(env, lhs) else {
                     return;
                 };
-                let Some(rhs_ty) = self.infer_expr(env, rhs) else {
+                let Some(mut rhs_ty) = self.infer_expr(env, rhs) else {
                     return;
                 };
+                if matches!(bin_op, BinOp::Add | BinOp::Sub) {
+                    let changed_lhs = Self::promote_core_cast_to_array_for_arith(env, lhs);
+                    let changed_rhs = if matches!(bin_op, BinOp::Add) {
+                        Self::promote_core_cast_to_array_for_arith(env, rhs)
+                    } else {
+                        false
+                    };
+                    if changed_lhs || changed_rhs {
+                        let Some(new_lhs_ty) = self.infer_expr(env, lhs) else {
+                            return;
+                        };
+                        let Some(new_rhs_ty) = self.infer_expr(env, rhs) else {
+                            return;
+                        };
+                        lhs_ty = new_lhs_ty;
+                        rhs_ty = new_rhs_ty;
+                    }
+                }
                 if *bin_op == BinOp::Eq {
                     let lhs_ty = env.vtype_whnf(lhs_ty.clone());
                     if let TypeT::Pointer(_, _) = &lhs_ty.val {
