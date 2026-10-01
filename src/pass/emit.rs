@@ -3600,6 +3600,9 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 ExprT::FnCall(f, args) => {
+                    if f.val.as_ref() == "pal_c_assert_enabled" && args.is_empty() {
+                        return Doc::text("true");
+                    }
                     let args = if args.is_empty() {
                         Doc::text("()")
                     } else {
