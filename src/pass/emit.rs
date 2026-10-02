@@ -1055,13 +1055,6 @@ impl<'a> Emitter<'a> {
                     );
                 ok = false;
             }
-            if matches!(b.mode, ParamMode::Out) && !b.field_path.is_empty() {
-                self.report(
-                        "cannot pass an array-cell field directly to an _out parameter; use an explicit local pointer form".to_string(),
-                        &b.cell.loc,
-                    );
-                ok = false;
-            }
         }
 
         for i in 0..borrowed.len() {
@@ -1233,7 +1226,7 @@ impl<'a> Emitter<'a> {
                 );
             }
             let group = groups.get_mut(&key).unwrap();
-            if !matches!(b.mode, ParamMode::Out) {
+            if !matches!(b.mode, ParamMode::Out) || !b.field_path.is_empty() {
                 group.needs_read = true;
             }
             if !matches!(b.mode, ParamMode::Const) {

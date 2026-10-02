@@ -16,12 +16,28 @@ void GetTwo(uint64_t* v, uint32_t* f)
     *f = 2;
 }
 
+void OutTwo(_out uint64_t* v, _out uint32_t* f)
+  _ensures(true)
+{
+    *v = 5;
+    *f = 6;
+}
+
 uint32_t GetTwoRet(uint64_t* v, uint32_t* f)
   _ensures(true)
   _ensures(return == 4)
 {
     *v = 3;
     *f = 4;
+    return *f;
+}
+
+uint32_t OutTwoRet(_out uint64_t* v, _out uint32_t* f)
+  _ensures(true)
+  _ensures(return == 8)
+{
+    *v = 7;
+    *f = 8;
     return *f;
 }
 
@@ -51,6 +67,14 @@ void InitD(_out D* d)
     *d = (D){ .State = 0, .Ver = 0, .Fl = 0, .Flags = { .A = false, .B = false } };
 }
 
+uint32_t InitDRet(_out D* d)
+  _ensures(true)
+  _ensures(return == 9)
+{
+    *d = (D){ .State = 9, .Ver = 0, .Fl = 0, .Flags = { .A = false, .B = false } };
+    return d->State;
+}
+
 void Writer(_array D* A, uint16_t Count, uint16_t Index)
   _requires(A._length == Count)
   _preserves_value(A._length)
@@ -60,6 +84,7 @@ void Writer(_array D* A, uint16_t Count, uint16_t Index)
         SetD(&A[Index], 7);
         InitD(&A[Index]);
         GetTwo(&A[Index].Ver, &A[Index].Fl);
+        OutTwo(&A[Index].Ver, &A[Index].Fl);
         A[Index].Flags.A = false;
         A[Index].Flags.B = true;
     }
@@ -77,7 +102,9 @@ void WriterLoop(_array D* A, size_t Count)
       _invariant(i <= Count)
     {
         SetD(&A[i], 11);
+        InitD(&A[i]);
         GetTwo(&A[i].Ver, &A[i].Fl);
+        OutTwo(&A[i].Ver, &A[i].Fl);
         A[i].Flags.A = true;
         A[i].Flags.B = false;
         i = i + 1;
@@ -114,12 +141,30 @@ uint32_t AssignWritableCellCallResult(_array D* A, uint16_t Count, uint16_t Inde
     return status;
 }
 
+uint32_t AssignOutCellCallResult(_array D* A, uint16_t Count, uint16_t Index)
+  _requires(A._length == Count)
+  _requires(Index < Count)
+  _preserves_value(A._length)
+{
+    uint32_t status = InitDRet(&A[Index]);
+    return status;
+}
+
 uint32_t AssignFieldCallResult(_array D* A, uint16_t Count, uint16_t Index)
   _requires(A._length == Count)
   _requires(Index < Count)
   _preserves_value(A._length)
 {
     uint32_t status = GetTwoRet(&A[Index].Ver, &A[Index].Fl);
+    return status;
+}
+
+uint32_t AssignOutFieldCallResult(_array D* A, uint16_t Count, uint16_t Index)
+  _requires(A._length == Count)
+  _requires(Index < Count)
+  _preserves_value(A._length)
+{
+    uint32_t status = OutTwoRet(&A[Index].Ver, &A[Index].Fl);
     return status;
 }
 
@@ -141,12 +186,30 @@ uint32_t InitWritableCellCallResult(_array D* A, uint16_t Count, uint16_t Index)
     return t;
 }
 
+uint32_t InitOutCellCallResult(_array D* A, uint16_t Count, uint16_t Index)
+  _requires(A._length == Count)
+  _requires(Index < Count)
+  _preserves_value(A._length)
+{
+    uint32_t t = InitDRet(&A[Index]);
+    return t;
+}
+
 uint32_t InitFieldCallResult(_array D* A, uint16_t Count, uint16_t Index)
   _requires(A._length == Count)
   _requires(Index < Count)
   _preserves_value(A._length)
 {
     uint32_t t = GetTwoRet(&A[Index].Ver, &A[Index].Fl);
+    return t;
+}
+
+uint32_t InitOutFieldCallResult(_array D* A, uint16_t Count, uint16_t Index)
+  _requires(A._length == Count)
+  _requires(Index < Count)
+  _preserves_value(A._length)
+{
+    uint32_t t = OutTwoRet(&A[Index].Ver, &A[Index].Fl);
     return t;
 }
 

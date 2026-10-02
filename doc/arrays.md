@@ -48,7 +48,9 @@ When a full `_array` cell is passed by address to a `T*` parameter, PAL emits
 `array_borrow_cell`. For readable parameters it follows with `array_cell_read`;
 after the call it packages the (possibly updated) cell with
 `Pulse.Lib.C.MaybeUninit.intro_maybe_some` and `array_return_cell`. `const`
-parameters still use `array_return_cell_unchanged`.
+parameters still use `array_return_cell_unchanged`. A whole-cell `_out`
+argument does not need `array_cell_read`; field `_out` arguments do read the
+cell first so the struct can be raw-unfolded before the field refs are passed.
 
 For field arguments such as `f(&a[i].x, &a[i].y)`, PAL borrows the cell once and
 uses the ordinary generated struct field accessors on the borrowed ref. To keep
