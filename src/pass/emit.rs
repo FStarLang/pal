@@ -1659,6 +1659,65 @@ impl<'a> Emitter<'a> {
             }
     }
 
+    fn expr_reads_mutable_local(&self, env: &Env, e: &Expr) -> bool {
+        match &e.val {
+            ExprT::Var(x) => env
+                .lookup_var(x)
+                .is_some_and(|decl| decl.kind == LocalDeclKind::LValue),
+            ExprT::UnOp(_, a)
+            | ExprT::Cast(a, _)
+            | ExprT::VAttr(_, a)
+            | ExprT::Ref(a)
+            | ExprT::Live(a)
+            | ExprT::Old(a)
+            | ExprT::Forall(_, _, a)
+            | ExprT::Exists(_, _, a)
+            | ExprT::UnionInit(_, _, a)
+            | ExprT::Deref(a)
+            | ExprT::Member(a, _)
+            | ExprT::ContainerOf(a, _, _) => self.expr_reads_mutable_local(env, a),
+            ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) | ExprT::Index(a, b) => {
+                self.expr_reads_mutable_local(env, a) || self.expr_reads_mutable_local(env, b)
+            }
+            ExprT::Cond(a, b, c) | ExprT::Memset(_, a, b, c) => {
+                self.expr_reads_mutable_local(env, a)
+                    || self.expr_reads_mutable_local(env, b)
+                    || self.expr_reads_mutable_local(env, c)
+            }
+            ExprT::FnCall(_, args) => args.iter().any(|a| self.expr_reads_mutable_local(env, a)),
+            ExprT::FnPtrCall(callee, args) => {
+                self.expr_reads_mutable_local(env, callee)
+                    || args.iter().any(|a| self.expr_reads_mutable_local(env, a))
+            }
+            ExprT::StructInit(_, fields) => fields
+                .iter()
+                .any(|(_, a)| self.expr_reads_mutable_local(env, a)),
+            ExprT::ArrayInit { elems, .. } => {
+                elems.iter().any(|a| self.expr_reads_mutable_local(env, a))
+            }
+            ExprT::MallocArray(_, a)
+            | ExprT::CallocArray(_, a)
+            | ExprT::MallocFlex(_, a)
+            | ExprT::CallocFlex(_, a)
+            | ExprT::MemsetZero(_, a)
+            | ExprT::Free(a)
+            | ExprT::PreIncr(a)
+            | ExprT::PostIncr(a)
+            | ExprT::PreDecr(a)
+            | ExprT::PostDecr(a) => self.expr_reads_mutable_local(env, a),
+            ExprT::BoolLit(_)
+            | ExprT::IntLit(_, _)
+            | ExprT::FloatLit(_, _)
+            | ExprT::FnRef(_)
+            | ExprT::InlinePulse(_, _)
+            | ExprT::Malloc(_)
+            | ExprT::Calloc(_)
+            | ExprT::SizeOf(_)
+            | ExprT::AlignOf(_)
+            | ExprT::Error(_) => false,
+        }
+    }
+
     fn expr_needs_short_circuit_lowering(&self, env: &Env, e: &Expr) -> bool {
         match &e.val {
             ExprT::BinOp(BinOp::LogAnd | BinOp::LogOr, lhs, rhs) => {
@@ -1672,6 +1731,9 @@ impl<'a> Emitter<'a> {
             ExprT::Cond(cond, then_expr, else_expr) => {
                 self.expr_has_stateful_precondition(env, then_expr)
                     || self.expr_has_stateful_precondition(env, else_expr)
+                    || self.expr_reads_mutable_local(env, cond)
+                    || self.expr_reads_mutable_local(env, then_expr)
+                    || self.expr_reads_mutable_local(env, else_expr)
                     || self.expr_needs_short_circuit_lowering(env, cond)
                     || self.expr_needs_short_circuit_lowering(env, then_expr)
                     || self.expr_needs_short_circuit_lowering(env, else_expr)
@@ -2000,7 +2062,10 @@ impl<'a> Emitter<'a> {
             }
             ExprT::Cond(cond, then_expr, else_expr) => {
                 let mut cond_doc = self.emit_short_circuit_expr(env, cond);
-                let branches_need_stmt = self.expr_has_stateful_precondition(env, then_expr)
+                let branches_need_stmt = self.expr_reads_mutable_local(env, cond)
+                    || self.expr_reads_mutable_local(env, then_expr)
+                    || self.expr_reads_mutable_local(env, else_expr)
+                    || self.expr_has_stateful_precondition(env, then_expr)
                     || self.expr_has_stateful_precondition(env, else_expr);
                 if branches_need_stmt {
                     if cond_doc.prelude.is_empty() {
