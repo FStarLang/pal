@@ -83,6 +83,53 @@ static bool isSideEffectFreeZero(ASTContext &ctx, const Expr *e) {
          result.Val.getInt() == 0;
 }
 
+// Returns true when `e` reads memory through a pointer. Such expressions are
+// side-effect-free in C, but they are not stable pure facts for PAL's do-while
+// auto-linking invariant: the user's loop invariant may rebind the pointee to
+// its current value, while a spec translation of the guard can refer back to a
+// function-entry value.
+static bool readsThroughPointer(const Expr *e) {
+  if (!e)
+    return false;
+  e = e->IgnoreParenImpCasts();
+  if (const auto *u = dyn_cast<UnaryOperator>(e)) {
+    if (u->getOpcode() == UO_Deref)
+      return true;
+    return readsThroughPointer(u->getSubExpr());
+  }
+  if (const auto *m = dyn_cast<MemberExpr>(e)) {
+    return m->isArrow() || readsThroughPointer(m->getBase());
+  }
+  if (const auto *s = dyn_cast<ArraySubscriptExpr>(e)) {
+    return readsThroughPointer(s->getBase()) ||
+           readsThroughPointer(s->getIdx());
+  }
+  if (const auto *c = dyn_cast<CallExpr>(e)) {
+    if (readsThroughPointer(c->getCallee()))
+      return true;
+    for (const Expr *arg : c->arguments())
+      if (readsThroughPointer(arg))
+        return true;
+    return false;
+  }
+  if (const auto *co = dyn_cast<ConditionalOperator>(e)) {
+    return readsThroughPointer(co->getCond()) ||
+           readsThroughPointer(co->getTrueExpr()) ||
+           readsThroughPointer(co->getFalseExpr());
+  }
+  if (const auto *bco = dyn_cast<BinaryConditionalOperator>(e)) {
+    return readsThroughPointer(bco->getCommon()) ||
+           readsThroughPointer(bco->getFalseExpr());
+  }
+  for (const Stmt *child : e->children()) {
+    if (const auto *childExpr = dyn_cast_or_null<Expr>(child)) {
+      if (readsThroughPointer(childExpr))
+        return true;
+    }
+  }
+  return false;
+}
+
 // Returns true if control cannot leave `s` by falling off its end, because `s`
 // claims it is never reached past that point. `__builtin_unreachable()` is how
 // C spells that claim, and it is what a `noreturn` abort macro expands to.
@@ -2488,12 +2535,16 @@ public:
         // the `first || cond` fact the original do-while guard would have
         // provided.
         //
-        // This is only sound when `cond` is a *pure* expression: the invariant
-        // is a `with_pure` proposition, so an impure guard (e.g. `while (f())`)
-        // cannot appear in it. When the guard has side effects we omit the
-        // linking invariant entirely (such loops must instead carry a
-        // user-written invariant relating program state to the guard's result).
-        if (!d->getCond()->HasSideEffects(*astCtx)) {
+        // This is only sound when `cond` is a stable pure expression: the
+        // invariant is a `with_pure` proposition, so an impure guard (e.g.
+        // `while (f())`) cannot appear in it. Likewise, a guard that reads
+        // through a pointer can be pure in C but unstable for PAL proofs: a
+        // user invariant may rebind the pointee to its current value, while the
+        // spec translation of the guard can refer to an entry-value binder.
+        // Such loops must instead carry a user-written invariant relating
+        // program state to the guard's result.
+        if (!d->getCond()->HasSideEffects(*astCtx) &&
+            !readsThroughPointer(d->getCond())) {
           auto firstRead = mk_rvalue_lvalue(
               loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone()));
           auto contReadInv = mk_rvalue_lvalue(
