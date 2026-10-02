@@ -33,7 +33,8 @@ $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
 
 verify: $(OUT_DIR)/.stamp
 	@$(MAKE) --no-print-directory -f ../verify.mk \
-		OUT_DIR=$(OUT_DIR) FSTAR_EXE=$(FSTAR_EXE) CACHE_DIR=$(CACHE_DIR)
+		OUT_DIR=$(OUT_DIR) FSTAR_EXE=$(FSTAR_EXE) CACHE_DIR=$(CACHE_DIR) \
+		EXPECTED_FAILURES_FILE=expected-verification-failures.txt
 
 compile: $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_FILES))
 
