@@ -93,6 +93,28 @@ PalPacketSpaceConnectionOwnerUpdate(
 }
 
 /*
+ * The one place the two memory models genuinely diverge. `PacketSpace` arrives
+ * as raw storage, and how a parameter says that is a property of the model:
+ * Palow has an `_out` mode whose precondition IS the uninitialised points-to
+ * and whose body scatters the field writes into it, while the current model
+ * has no such mode -- a `ref t` always holds a `t` -- so the same fact has to
+ * be written by hand and opened and closed with ghost statements.
+ */
+#ifdef PALOW
+#define _storage _out
+#define _uninit_pre
+#define _open_storage(ty, p)
+#define _close_storage(ty, p)
+#define _not_null(p) _ghost_stmt(struct_packet_space_pts_to_not_null $(p))
+#else
+#define _storage _plain
+#define _uninit_pre ** Pulse.Lib.Reference.pts_to_uninit $(PacketSpace)
+#define _open_storage(ty, p) _ghost_stmt($unfold-uninit(ty) $(p))
+#define _close_storage(ty, p) _ghost_stmt($fold(ty) $(p) _ _ _ _)
+#define _not_null(p) _ghost_stmt(Pulse.Lib.Reference.pts_to_not_null $(p))
+#endif
+
+/*
  * Models QuicPacketSpaceInitialize's create + install lifecycle in one step,
  * producing the full owner.
  *
@@ -111,29 +133,34 @@ void
 PalPacketSpaceInitialize(
     _plain connection* Connection,
     uint32_t EncryptLevel,
-    _plain packet_space* PacketSpace
+    _storage packet_space* PacketSpace
     )
     _requires(_inline_pulse(
         Helpers_PACKET_SPACE_CONNECTION.connection_slot_empty
             $(Connection) $(EncryptLevel)
-        ** Pulse.Lib.Reference.pts_to_uninit $(PacketSpace)))
+        _uninit_pre))
     _ensures(_inline_pulse(
         Helpers_PACKET_SPACE_CONNECTION.connection_owner_exists $(PacketSpace)))
 {
     /* Turn raw memory into a valid packet space: open the per-field uninit reps,
-     * populate every field, then fold to ESTABLISH the representation. */
-    _ghost_stmt($unfold-uninit(packet_space) $(PacketSpace));
+     * populate every field, then fold to ESTABLISH the representation.
+     *
+     * Under Palow the parameter is an `_out`, so the emitter already knows the
+     * storage is uninitialised and scatters the four writes into it itself;
+     * the two ghost statements are what the current model needs to say the
+     * same thing by hand. */
+    _open_storage(packet_space, PacketSpace);
     PacketSpace->connection = Connection;
     PacketSpace->encrypt_level = EncryptLevel;
     PacketSpace->largest_acknowledged = 0;
     PacketSpace->ack_needed = PACKET_SPACE_ACK_NOT_NEEDED;
-    _ghost_stmt($fold(packet_space) $(PacketSpace) _ _ _ _);
+    _close_storage(packet_space, PacketSpace);
 
     /* Install into the connection's slot and deposit into the full owner. */
     Connection->packets[EncryptLevel] = PacketSpace;
-    /* A live `pts_to PacketSpace _` proves the pointer is non-NULL, which the
-     * deposit needs to record `slot_at ... == Some PacketSpace` with a live slot. */
-    _ghost_stmt(Pulse.Lib.Reference.pts_to_not_null $(PacketSpace));
+    /* A live points-to proves the pointer is non-NULL, which the deposit needs
+     * to record that the slot it fills is a live one. */
+    _not_null(PacketSpace);
     _ghost_stmt(
         Helpers_PACKET_SPACE_CONNECTION.deposit
             $(PacketSpace) $(Connection) $(EncryptLevel));

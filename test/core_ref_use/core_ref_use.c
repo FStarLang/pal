@@ -28,6 +28,15 @@ struct bar {
  * and dereference one of its fields. The caller hands over ownership of the bar
  * reached through `back`; a `_core_ref` carries none by design, so this single
  * clause cannot be auto-generated and is supplied (and preserved) by hand. */
+#ifdef PALOW
+/* There is no coercion here, and nothing to convert: a `_core_ref` is an
+   address and so is a `struct bar *`, so the clause is the ordinary points-to
+   at the address the field holds. */
+void via_back(struct inner *p)
+  _preserves(_inline_pulse(
+    (exists* (bv: $type(struct bar)).
+      Struct_bar.struct_bar_pts_to (($(*p)).$field(struct inner::back)) 1.0R bv)))
+#else
 void via_back(struct inner *p)
   _requires(_inline_pulse(
     exists* (bv: $type(struct bar)).
@@ -37,6 +46,7 @@ void via_back(struct inner *p)
     exists* (bv: $type(struct bar)).
       pts_to (Pulse.Lib.C.CoreRef.core_to_ref $type(struct bar)
                 ($(*p)).$field(struct inner::back)) bv))
+#endif
 {
     struct bar *b = p->back; // core_to_ref coercion emitted here
     long *o = b->other;      // executable field read through the typed pointer

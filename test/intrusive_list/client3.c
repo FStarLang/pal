@@ -12,7 +12,7 @@ struct item3 {
 };
 
 _type(items3_payload, IntrusiveList.payload)
-_type(items3_nodes, list (ref Struct_list_node.struct_list_node))
+_type(items3_nodes, list IntrusiveList.lref)
 
 #ifdef C2PULSE
 #define ITEMS3_ASSERT_ENABLED pal_c_assert_enabled()
@@ -116,10 +116,10 @@ void items3_enqueue(_plain struct list_node *head, _plain struct item3 *item)
     _requires(_inline_pulse(
         IntrusiveList.is_list_ring_with IntrusiveListExample3.payload
             $(head) 1.0R (reveal $(nodes)) **
-        (exists* (v: Struct_item3.struct_item3). Pulse.Lib.Reference.pts_to $(item) v)))
+        (exists* (v: Struct_item3.struct_item3). IntrusiveListExample3.item_pts_to $(item) v)))
     _ensures(_inline_pulse(
         IntrusiveList.is_list_ring_with IntrusiveListExample3.payload $(head) 1.0R
-            (FStar.List.Tot.append (reveal $(nodes)) [Struct_item3.struct_item3__link_1 $(item)])))
+            (FStar.List.Tot.append (reveal $(nodes)) [IntrusiveListExample3.item_link $(item)])))
 {
     _ghost_stmt(IntrusiveListExample3.open_item $(item));
     item->ready = true;

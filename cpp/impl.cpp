@@ -1,4 +1,5 @@
 #include "generated.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/MacroArgs.h"
@@ -228,6 +229,44 @@ public:
     ctx.set_target_int_widths(
         TargetIntWidths(TI.getCharWidth(), TI.getShortWidth(), TI.getIntWidth(),
                         TI.getLongWidth(), TI.getLongLongWidth()));
+    ctx.set_pointer_size(TI.getPointerWidth(LangAS::Default) / 8);
+  }
+
+  // Layout `kind` tags shared with `Ctx::set_type_layout` on the Rust side.
+  static constexpr uint32_t kLayoutTypedef = 0;
+  static constexpr uint32_t kLayoutStruct = 1;
+  static constexpr uint32_t kLayoutUnion = 2;
+
+  // Report the target-ABI size and alignment of `qt` under the name PAL uses
+  // for it, so that the emitter can turn `sizeof`/`_Alignof` into concrete
+  // `SizeT` literals rather than opaque `c_sizeof` applications.
+  void recordTypeLayout(uint32_t kind, StringRef name, QualType qt) {
+    if (qt.isNull() || qt->isIncompleteType() || qt->isDependentType() ||
+        qt->isVariableArrayType())
+      return;
+    ctx.set_type_layout(kind, toStr(name),
+                        astCtx->getTypeSizeInChars(qt).getQuantity(),
+                        astCtx->getTypeAlignInChars(qt).getQuantity());
+  }
+
+  // Report the offset of every field of `decl`. A bit-field has no byte
+  // offset of its own -- several of them share one storage unit -- so it is
+  // reported in bits instead, and the emitter works out which bytes the unit
+  // covers.
+  void recordFieldOffsets(uint32_t kind, StringRef name, RecordDecl *decl) {
+    auto const &layout = astCtx->getASTRecordLayout(decl);
+    for (auto *f : decl->fields()) {
+      auto bitOffset = layout.getFieldOffset(f->getFieldIndex());
+      if (f->isBitField()) {
+        ctx.set_field_bit_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                                 bitOffset);
+        continue;
+      }
+      if (bitOffset % astCtx->getCharWidth() != 0)
+        continue;
+      ctx.set_field_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                           bitOffset / astCtx->getCharWidth());
+    }
   }
 
   virtual bool HandleTopLevelDecl(DeclGroupRef DG) override {
@@ -381,6 +420,9 @@ public:
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/false);
       }
+      recordTypeLayout(kLayoutStruct, toStringRef(ident_name(ident)),
+                       astCtx->getRecordType(decl));
+      recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
       // Process nested record declarations (inner structs/unions)
@@ -398,6 +440,8 @@ public:
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
       }
+      recordTypeLayout(kLayoutUnion, toStringRef(ident_name(ident)),
+                       astCtx->getRecordType(decl));
       ctx.add_union(std::move(builder));
     } else {
       reportUnsupported(decl->getSourceRange(), loc, "unsupported record kind",
@@ -905,6 +949,28 @@ public:
     return nullptr;
   }
 
+  // The size in bytes of a record's flexible array member's element type, or 0
+  // if the record has no flexible array member. `malloc(sizeof(S) + n)` is an
+  // allocation of `n` elements exactly when that size is 1, which is the usual
+  // shape for a byte pool.
+  uint64_t flexElemSize(QualType qt) {
+    const auto *rt = qt->getAsStructureType();
+    if (!rt)
+      return 0;
+    const RecordDecl *rd = rt->getDecl()->getDefinition();
+    if (!rd)
+      return 0;
+    const FieldDecl *last = nullptr;
+    for (const auto *f : rd->fields())
+      last = f;
+    if (!last)
+      return 0;
+    const auto *arr = astCtx->getAsIncompleteArrayType(last->getType());
+    if (!arr)
+      return 0;
+    return astCtx->getTypeSizeInChars(arr->getElementType()).getQuantity();
+  }
+
   // Whether an ignored variadic argument can be dropped without losing a
   // proof obligation: evaluating it must have no side effects, read no memory
   // other than non-volatile locals, and have no undefined behavior.
@@ -1101,9 +1167,24 @@ public:
                       return mk_malloc_flex(std::move(loc), std::move(allocTy),
                                             std::move(countExpr));
                     }
-                    // Unrecognized array term: fall back to an empty flexible
-                    // tail (plain struct malloc).
-                    return mk_malloc(std::move(loc), std::move(allocTy));
+                    // `malloc(sizeof(S) + n)` with a byte-sized tail: the term
+                    // is the count, since the elements are bytes.
+                    if (flexElemSize(structSide->getTypeOfArgument()) == 1) {
+                      auto countExpr = trRValue(arrayTerm);
+                      return mk_malloc_flex(std::move(loc), std::move(allocTy),
+                                            std::move(countExpr));
+                    }
+                    // Anything else would have to be dropped to be translated,
+                    // and a smaller allocation than the C asked for is not a
+                    // weaker translation of it but a different program.
+                    reportUnsupported(
+                        e->getSourceRange(), loc,
+                        "unsupported flexible-array allocation size",
+                        "the trailing term must be `n * sizeof(elem)`, or the "
+                        "element type must be a byte");
+                    return mk_rvalue_err(
+                        std::move(loc),
+                        trQualType(e->getType(), e->getSourceRange()));
                   }
                 }
               }
@@ -3278,6 +3359,8 @@ public:
           trQualType(TD->getUnderlyingType(), TD->getSourceRange(), &anon,
                      findFnProtoTypeLoc(TD->getTypeSourceInfo()));
       type = trTypeAttrs(TD->getAttrs(), std::move(type));
+      recordTypeLayout(kLayoutTypedef, TD->getName(),
+                       astCtx->getTypedefType(TD));
       bool isPointerView = false;
       if (TD->hasAttrs()) {
         for (auto *attr : TD->getAttrs()) {

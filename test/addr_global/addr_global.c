@@ -72,3 +72,16 @@ int32_t call_via_addr_of_global_struct(void)
     _ghost_stmt(drop_ (exists* q. pts_to Global_g_ops.addr_var_g_ops #q _));
 }
 
+/* Storing `&g` is no write to `g`. An immutable global is never owned, so a
+ * function that installs its address in a dispatch slot -- what every kernel
+ * driver does with a `const struct net_device_ops` -- needs no permission on
+ * it, and the functions above that `acquire` it are not made to own it either. */
+typedef struct {
+    const ops *_plain o; /* a dispatch slot owns nothing */
+} holder;
+
+void install_ops(holder *h)
+    _ensures(h->o == &g_ops)
+{
+    h->o = &g_ops;
+}

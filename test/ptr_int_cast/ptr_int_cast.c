@@ -136,10 +136,21 @@ void *blob_addr(struct blobholder *h)
     _ensures(return != NULL)
 {
     void *raw = h->blob;
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.Array.array_pts_to_not_null
         (Struct_blobholder.struct_blobholder__get_blob $(h)));
     _ghost_stmt(Pulse.Lib.C.CoreRef.ref_to_core_is_null
         (Pulse.Lib.C.Array.array_to_ref
             (Struct_blobholder.struct_blobholder__get_blob $(h))));
+#else
+    /* The same fact in Palow, where the decay is the identity on addresses:
+       the field has to be focused for its bytes to be in hand, and owning a
+       byte is what rules out the empty provenance. */
+    _ghost_stmt(Struct_blobholder.struct_blobholder_focus_blob $(h));
+    _ghost_stmt(Pulse.Lib.C.Palow.Array.array_pts_to_not_null uint8_t_repr 1
+        (FStar.SizeT.v uint8_t_alignof)
+        ($(h) +! Struct_blobholder.struct_blobholder_offsetof_blob));
+    _ghost_stmt(Struct_blobholder.struct_blobholder_unfocus_read_blob $(h));
+#endif
     return raw;
 }

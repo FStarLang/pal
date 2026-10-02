@@ -212,12 +212,12 @@ _plain struct list_node *list_remove_head(_plain struct list_node *head)
         as (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R
             (FStar.List.Tot.tl LIST_RING_ENTRIES)));
     _ghost_stmt(assert exists* (next: IntrusiveListIndexed.lref).
-        Pulse.Lib.Reference.pts_to $(first) (IntrusiveListIndexed.mklink next $(head)));
+        IntrusiveListIndexed.lpts_to $(first) (IntrusiveListIndexed.mklink next $(head)));
     _ghost_stmt(rewrite
         (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R
             (FStar.List.Tot.tl LIST_RING_ENTRIES) **
         (exists* (next: IntrusiveListIndexed.lref).
-            Pulse.Lib.Reference.pts_to $(first) (IntrusiveListIndexed.mklink next $(head))) **
+            IntrusiveListIndexed.lpts_to $(first) (IntrusiveListIndexed.mklink next $(head))) **
         LIST_RING_PAYLOAD $(first) (snd (FStar.List.Tot.hd LIST_RING_ENTRIES)) **
         pure ($(first) == fst (FStar.List.Tot.hd LIST_RING_ENTRIES)))
         as (IntrusiveListContext.remove_head_post LIST_CTX $(head) $(first)));

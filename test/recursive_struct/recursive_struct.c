@@ -30,6 +30,33 @@ int get_data(node *n) {
     return n->data;
 }
 
+/* The list predicate has the same shape in both memory models; what differs
+   is the vocabulary for "the object at this address", "the right to free it",
+   and "a points-to rules out null". Naming those three once here keeps one
+   copy of the predicate and its three ghost lemmas. */
+#ifdef PALOW
+#define _node_pts_to(h, nd) struct_node_pts_to h 1.0R nd
+#define _node_freeable(h) freeable h struct_node_sizeof
+#define _node_not_null(h) struct_node_pts_to_not_null h
+#define _node_uninit(h) ptr_pts_to_uninit h
+/* The permission the refinement holds the list at. The old model names the
+   one its generated typedef predicate is parameterised by; Palow states the
+   ownership directly, at the full permission `_node_pts_to` uses. */
+#define _node_perm 1.0R
+/* The ghost value the list refinement binds, as the measure for `traverse`.
+   Each model has its own name for it: the old one auto-binds a ticked
+   variable, Palow makes it an erased implicit named after the parameter and
+   the refinement. */
+#define _node_elements_of_head reveal val_head_elements
+#else
+#define _node_pts_to(h, nd) pts_to h nd
+#define _node_freeable(h) freeable h
+#define _node_not_null(h) Pulse.Lib.Reference.pts_to_not_null h
+#define _node_uninit(h) pts_to_uninit h
+#define _node_perm p
+#define _node_elements_of_head reveal $`val_head_0
+#endif
+
 /* 3. _include_pulse: recursive ownership predicate + ghost helpers.
  *    Tests that pal generates correct struct types and that _include_pulse
  *    can define recursive predicates over self-referential structs. */
@@ -42,16 +69,16 @@ _include_pulse(Recursive_struct_include1,
     | [] -> pure (is_null head)
     | hd :: tl ->
       exists* (nd: $type(node)).
-        pts_to head nd **
-        freeable head **
+        _node_pts_to(head, nd) **
+        _node_freeable(head) **
         pure (nd.$field(node::data) == hd) **
         is_list nd.$field(node::next) p tl
 )
 
 _type(spec_list, list Int32.t)
 
-_refine_value(spec_list elements, _inline_pulse(Recursive_struct_include1.is_list $(this) p $(elements)))
-_refine_uninit(_inline_pulse(pts_to_uninit $(this)))
+_refine_value(spec_list elements, _inline_pulse(Recursive_struct_include1.is_list $(this) _node_perm $(elements)))
+_refine_uninit(_inline_pulse(_node_uninit($(this))))
 _plain
 typedef struct node *list;
 
@@ -68,7 +95,7 @@ _include_pulse(Recursive_struct_include2,
       Nil -> { () }
       Cons hd tl -> {
         unfold (Recursive_struct_include1.is_list head _ (hd :: tl));
-        Pulse.Lib.Reference.pts_to_not_null head;
+        _node_not_null(head);
         unreachable ()
       }
     }
@@ -77,7 +104,7 @@ _include_pulse(Recursive_struct_include2,
   ghost fn elim_is_list_nonnull (head: $type(node *)) (#l: list Int32.t)
     requires Recursive_struct_include1.is_list head $`p l ** pure (not (is_null head))
     ensures exists* (nd: $type(node)) (tl: list Int32.t).
-      pts_to head nd ** freeable head **
+      _node_pts_to(head, nd) ** _node_freeable(head) **
       pure (l == nd.$field(node::data) :: tl) **
       Recursive_struct_include1.is_list nd.$field(node::next) $`p tl
   {
@@ -92,8 +119,8 @@ _include_pulse(Recursive_struct_include2,
     (nd: $type(node))
     (#tl: list Int32.t)
     requires
-      pts_to head nd **
-      freeable head **
+      _node_pts_to(head, nd) **
+      _node_freeable(head) **
       Recursive_struct_include1.is_list nd.$field(node::next) $`p tl
     ensures Recursive_struct_include1.is_list head $`p (nd.$field(node::data) :: tl)
   {
@@ -107,7 +134,7 @@ _include_pulse(Recursive_struct_include2,
 _rec void traverse(const list head)
     // Pulse can't currently prove termination from the opaque _elements_of
     // accessor, so we measure on the predicate's spec value directly.
-    _decreases((spec_list) _inline_pulse(reveal $`val_head_0))
+    _decreases((spec_list) _inline_pulse(_node_elements_of_head))
 {
     if (head == NULL) {
         _ghost_stmt(Recursive_struct_include2.is_list_nil_case $(head));

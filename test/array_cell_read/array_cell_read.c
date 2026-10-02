@@ -30,7 +30,11 @@ uint64_t id_at(_array struct ctx *all, size_t idx) _requires(all._length == N)
     _ensures(_forall(size_t k, k < N ==> all[k].id == _old(all[k].id))) {
   struct ctx *c = &all[idx];
   uint64_t r = c->id;
+#ifndef PALOW
+  /* Palow gives the cell back with `array_unfocus_read`, which the emitter
+     already writes; only the old model needs the step spelled out. */
   _ghost_stmt(Pulse.Lib.C.Array.array_return_cell_unchanged (!var_all));
+#endif
   return r;
 }
 
