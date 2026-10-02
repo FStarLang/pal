@@ -1,0 +1,1 @@
+-DPAL_TEST_FLAG=7 -Ifirst -Isecond

@@ -9144,8 +9144,68 @@ pub fn emit_palow(
         }
     }
 
-    into_modules(chunks, &ifaces)
+    let mut modules = into_modules(chunks, &ifaces);
+    for m in &mut modules {
+        m.code = widen_sizet_literals(&m.code);
+        if let Some(i) = &m.iface {
+            m.iface = Some(widen_sizet_literals(i));
+        }
+    }
+    modules
 }
+
+/// `FStar.SizeT.fits_at_least_16` is the only bound available without a
+/// platform assumption, so F*'s `Nsz` notation stops at 2^16 - 1 and rejects
+/// anything larger outright: "65536 is not in the expected range for
+/// FStar.SizeT". A struct holding a 64KiB buffer has a `sizeof`, offsets and
+/// element counts past that bound, so the emitter would produce a module F*
+/// will not even parse.
+///
+/// Which literal is too large is a property of the notation, not of the
+/// quantity, and the emitter writes `Nsz` from a couple of dozen places --
+/// sizes, alignments, offsets, element sizes, array lengths, pointer
+/// arithmetic. Rewriting the finished module text catches all of them at once
+/// and cannot miss a new one. `Pulse.Lib.C.Assumptions` assumes `fits_u64`
+/// with an SMTPat, so `SizeT.uint_to_t n` discharges its `fits` precondition
+/// for any value C could have produced.
+fn widen_sizet_literals(code: &str) -> String {
+    let b = code.as_bytes();
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0;
+    while i < b.len() {
+        // A digit that does not continue an identifier starts a literal.
+        let starts = b[i].is_ascii_digit()
+            && (i == 0
+                || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'.'));
+        if !starts {
+            out.push(b[i] as char);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let digits = &code[start..i];
+        // ... and `sz` ends it, so long as nothing else follows to make the
+        // whole thing some other name.
+        let is_sz = code[i..].starts_with("sz")
+            && !b
+                .get(i + 2)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+        match (is_sz, digits.parse::<u64>()) {
+            (true, Ok(n)) if n > MAX_SIZET_LITERAL => {
+                out += &format!("(SizeT.uint_to_t {})", n);
+                i += 2;
+            }
+            _ => out += digits,
+        }
+    }
+    out
+}
+
+/// The largest value F* will accept in `Nsz` notation.
+const MAX_SIZET_LITERAL: u64 = 65535;
 
 /// The `open`s every generated module needs whatever it contains: the Palow
 /// model itself, and the F* integer modules the emitted names are spelled in.
@@ -15896,6 +15956,17 @@ impl<'a> Body<'a> {
                     c
                 };
 
+                // Whatever the condition borrowed belongs to the `if`, not to
+                // an arm: C evaluates the condition before it picks a branch.
+                // Left queued, the borrow is given back by the first statement
+                // of the *then* arm -- inside one side of a join whose other
+                // side never borrowed -- and the arms no longer agree. Worse,
+                // an arm that reaches the same object again focuses what is
+                // already focused, which is where this showed up.
+                let close = std::mem::take(&mut self.pending_close);
+                self.lines.extend(close);
+                self.close_own();
+
                 // Whether a slot holds a value or still holds uninitialised
                 // storage decides which of two *different* slprops it has, and
                 // that is the one thing Pulse cannot join for us. The two arms
@@ -16596,7 +16667,13 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
                 width,
             },
             TypeT::SizeT,
-        ) if *width != 8 => Ok(format!("(sizet_of_uint{} {})", width, v)),
+        ) => Ok(match width {
+            // There is no `sizet_of_uint8`: `unsigned char` widens first,
+            // which is exact and is what C's own integer promotions do
+            // before the conversion anyway.
+            8 => format!("(sizet_of_uint32 (FStar.Int.Cast.uint8_to_uint32 {}))", v),
+            _ => format!("(sizet_of_uint{} {})", width, v),
+        }),
         (
             TypeT::SizeT,
             TypeT::Int {
@@ -16646,6 +16723,26 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
         // own.
         (TypeT::Pointer(..) | TypeT::FnPtr { .. }, TypeT::Bool) => {
             Ok(format!("(not (is_null {}))", v))
+        }
+        // An integer converted to a pointer type. The integer carries no
+        // evidence that any allocation is live, let alone which one, so what
+        // comes back is PNVI's invalid pointer: the address asked for and the
+        // empty provenance. Nothing can be read or written through it, which
+        // is the honest translation -- "address A holds an object of type T"
+        // is a fact about a linker script, not about the C.
+        //
+        // A program that does mean the round trip writes it through
+        // `uintptr_to_ptr`, which charges for a usable pointer with `exposed`
+        // and `in_footprint`. That cannot be reached from a cast alone.
+        (TypeT::Int { width: 64, .. } | TypeT::SizeT, TypeT::Pointer(..)) => {
+            let n = match &from.val {
+                TypeT::SizeT => v.to_string(),
+                TypeT::Int { signed: true, .. } => {
+                    format!("(sizet_of_uint64 (FStar.Int.Cast.int64_to_uint64 {}))", v)
+                }
+                _ => format!("(sizet_of_uint64 {})", v),
+            };
+            Ok(format!("(uintptr_to_invalid_ptr {})", n))
         }
         // An array decays to a pointer to its first element. Palow already
         // names an array by that address, so the conversion is the identity.

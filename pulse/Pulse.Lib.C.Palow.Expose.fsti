@@ -110,3 +110,26 @@ fn uintptr_to_ptr (n: SZ.t) (q: erased prov)
   requires  pure (in_footprint q (SZ.v n))
   returns   a : ptr
   ensures   pure (addr_of a == SZ.v n /\ prov_of a == reveal q)
+
+(* Casting an integer to a pointer type where the integer was not obtained
+   by exposing a live allocation.
+
+   PNVI calls the result an *invalid* pointer: it has the address that was
+   asked for and the empty provenance, so it is derived from no object and
+   nothing can ever be read or written through it -- `mem_pts_to` is never
+   available for it, and no rule produces one. It is still a pointer value,
+   which is all C promises for the cast itself, so forming it, comparing it
+   and returning it are all fine.
+
+   This needs no axiom. `null` already has address 0 and the empty provenance,
+   and `( +! )` preserves provenance, so the invalid pointer at `n` is just
+   `null +! n`. A pleasant consequence of defining it that way is that it is
+   `null` exactly when `n` is zero, which is what C says of a cast of the
+   constant zero to a pointer type.
+
+   The difference from `uintptr_to_ptr` above is the whole point: that one
+   gives back a usable pointer and charges for it with `exposed q` and
+   `in_footprint`; this one is free and gives back nothing usable. A
+   translation reaches for it when the C offers no evidence of an allocation,
+   which is the common case -- an address from a linker script, say. *)
+let uintptr_to_invalid_ptr (n: SZ.t) : ptr = null +! n

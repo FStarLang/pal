@@ -154,7 +154,7 @@ impl<'src> Display for Token<'src> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Token::Whitespace => write!(f, " "),
-            Token::String(tok) => write!(f, "{}", tok),
+            Token::String(tok) => write!(f, "\"{}\"", tok),
             Token::Integer(i, radix, suffix) => {
                 let prefix = match radix {
                     16 => "0x",
@@ -216,9 +216,15 @@ fn lex_core_token<'src>() -> impl Parser<'src, &'src str, Token<'src>> {
 
     let ident = text::ident().map(Token::Ident); // as C demands: XID_Start XID_Continue*
 
-    // TODO FIXME
-    let string = just('"')
-        .not()
+    // A string literal, kept verbatim between its quotes (escapes included),
+    // so that it is re-emitted exactly as written. Inside `_include_pulse` it
+    // is F* text: `[@@"opaque_to_smt"]`, `reveal_opaque "M.f"`.
+    //
+    // This used to be `just('"').not().repeated()`, but `not()` is a
+    // zero-width lookahead, so the repetition never consumed input and
+    // chumsky aborted the process ("Repeated combinator making no progress")
+    // on any string literal at all.
+    let string = choice((just('\\').then(any()).ignored(), none_of("\"\\").ignored()))
         .repeated()
         .to_slice()
         .delimited_by(just('"'), just('"'))

@@ -22,12 +22,16 @@ the variadic arguments. The generated function and its calls contain only
 the fixed parameters; extra arguments do not transfer ownership to the
 callee.
 
-For this initial support, ignored arguments must be scalar literals,
-non-volatile/non-atomic scalar or pointer local/parameter values, or addresses
-of ordinary local variables or parameters. Parentheses and implicit value
-conversions (including default promotions) are allowed. Computations,
-dereferences, member/subscript reads, side effects, and other unsupported
-extra expressions are rejected rather than silently skipping their evaluation.
+For this initial support, ignored arguments must be literals (including
+string literals), integer constant expressions, non-volatile/non-atomic scalar
+or pointer local/parameter values, addresses of ordinary local variables or
+parameters (including a local array, which decays to its address), or
+computations over those that cannot be undefined: integer conversions, `~`,
+`&`, `|`, `^`, unsigned `+`, `-` and `*`, and unsigned shifts by a constant
+smaller than the width. Parentheses and implicit value conversions (including
+default promotions) are allowed. Dereferences, member/subscript reads,
+division, signed arithmetic, side effects, and other unsupported extra
+expressions are rejected rather than silently skipping their evaluation.
 Indirect variadic calls and variadic argument extraction are not supported.
 
 For example, `read_first(int *first, ...)` may return `*first`, and a caller
@@ -421,7 +425,7 @@ A mutable array global (`T g[N]`, `extern T g[]`, or the `_array T *g` spelling)
 is the array *object*, so it is modeled as an assumed handle rather than a cell
 at an address, and behaves in every other respect like an `_array T *`
 parameter — `g[i]` is `array_read` / `array_write`, `g._length` is
-`reveal (length_of var_g)`, and `g` decays to an array pointer:
+`reveal #nat (length_of var_g)`, and `g` decays to an array pointer:
 
 ```fstar
 assume val var_g : (array t)

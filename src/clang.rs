@@ -85,10 +85,10 @@ impl<'a> Ctx<'a> {
         &self.include_paths[idx]
     }
 
-    /// Extra preprocessor defines, which is how a test source says which
-    /// memory model it is being translated for. `--palow` defines `PALOW`,
-    /// so hand-written Pulse that names predicates only one of the two
-    /// models has can be written twice in the one file.
+    /// Extra preprocessor defines: a test's own `-D` flags, and how a source
+    /// says which memory model it is being translated for. `--palow` defines
+    /// `PALOW`, so hand-written Pulse that names predicates only one of the
+    /// two models has can be written twice in the one file.
     fn get_define_count(&self) -> usize {
         self.defines.len()
     }
@@ -540,8 +540,13 @@ impl DeclBuilder {
         })
     }
     fn arg_anon(&mut self, ty: Rc<Type>, mode: ParamMode) {
+        // Give the parameter the same synthesized name the emitter would print
+        // for it, so that the environment and the generated Pulse agree. An
+        // unregistered name resolves as an lvalue and picks up a spurious
+        // dereference in the generated `requires`/`ensures` (see Env::push_arg).
+        let name = Rc::<str>::from(format!("_unnamed{}", self.args.len())).with_loc(ty.loc.clone());
         self.args.push(FnArg {
-            name: None,
+            name: Some(name),
             ty,
             mode,
         })

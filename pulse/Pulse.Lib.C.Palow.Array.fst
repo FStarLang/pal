@@ -722,3 +722,42 @@ ghost fn array_unsomes (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize:
   unfold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p vs;
   fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) a p (somes vs);
 }
+
+(* `s[i] <- s[i]` is `s`.
+
+   A cell borrowed only to read still comes back through `array_unfocus`,
+   whose postcondition names the *updated* sequence -- the emitter cannot
+   always tell in advance that the borrow will not be written, and
+   `array_unfocus_read` is only reachable when it can. The two sequences are
+   extensionally equal but not syntactically so, which is the one thing
+   slprop matching cannot bridge on its own, so a read-only borrow failed on
+   an obligation that has nothing to do with what the C did. One extensional
+   step is all it needs, and the pattern is specific enough to cost nothing
+   elsewhere. *)
+let upd_index_eq (#t: Type) (s: Seq.seq t) (i: nat)
+  : Lemma (requires i < Seq.length s)
+          (ensures Seq.upd s i (Seq.index s i) == s)
+          [SMTPat (Seq.upd s i (Seq.index s i))]
+  = Seq.lemma_eq_elim (Seq.upd s i (Seq.index s i)) s
+
+(* A non-empty array's base address is not null, and names a real allocation.
+
+   This is `mem_pts_to_not_null` carried through the definition: the bytes an
+   array owns are `esize * length` of them, so a non-empty array of non-empty
+   elements owns at least one byte, and owning a byte is what rules out the
+   empty provenance. A caller reaches for it when it has to say that an
+   interior pointer -- the address of an array field, say -- is not null,
+   which no amount of pointer arithmetic can establish on its own. *)
+ghost fn array_pts_to_not_null (#t: Type0) (t_repr: t -> bytes -> prop)
+                               (esize: nat) (ealign: nat) (a: ptr)
+                               (#p: perm) (#xs: Seq.seq t)
+  preserves array_pts_to t_repr esize ealign a p xs
+  requires  pure (esize > 0 /\ Seq.length xs > 0)
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold array_pts_to t_repr esize ealign a p xs;
+  with b. assert mem_pts_to a p b;
+  M.lemma_mult_le_right esize 1 (Seq.length xs);
+  mem_pts_to_not_null a;
+  fold array_pts_to t_repr esize ealign a p xs;
+}

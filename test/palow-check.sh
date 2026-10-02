@@ -18,7 +18,9 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 
 check_one() {
-  local tdir=$1
+  # Arrives relative to the repo root. Translation runs from the test's own
+  # directory, so every path here has to be absolute.
+  local tdir=$ROOT/$1
   # One output directory per *test*, translated in a single invocation with all
   # of the test's files, which is how the per-test Makefile drives PAL. A file
   # is not a translation unit here: PAL combines them, and several tests rely on
@@ -40,9 +42,21 @@ check_one() {
   if [[ -d $tdir/include ]]; then
     inc=(-I "$tdir/include")
   fi
+  # A test's own preprocessor flags, the same ones its Makefile passes. A test
+  # whose C does not compile without them has nothing to say about coverage,
+  # so leaving them out would report a translation failure rather than a gap.
+  if [[ -f $tdir/extra_opts ]]; then
+    # Word splitting is the point: the file holds a flag list.
+    # shellcheck disable=SC2206
+    inc+=($(cat "$tdir/extra_opts"))
+  fi
 
   local cfiles=("$tdir"/*.c)
-  if ! "$PAL" --quiet "${inc[@]}" --palow-permissive --outdir "$dir" "${cfiles[@]}" 2>"$dir/pal.err"; then
+  # Run from the test's own directory: a flag list in `extra_opts` is written
+  # the way the test's Makefile would pass it, so `-Ifirst` means the test's
+  # `first/`. Everything else here is an absolute path already.
+  if ! (cd "$tdir" && "$PAL" --quiet "${inc[@]}" --palow-permissive \
+        --outdir "$dir" "${cfiles[@]}") 2>"$dir/pal.err"; then
     echo "FAIL $name (translation)"
     cat "$dir/pal.err"
     return 1

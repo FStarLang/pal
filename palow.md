@@ -1324,9 +1324,18 @@ new facts about memory.
   address. This is PNVI-ae-udi's "user disambiguation" resolved statically, and
   it is a restriction only for programs that genuinely rely on the ambiguity.
 - The effective-type index is defined and carried by layer 0 but not enforced:
-  `mem_recall` hands out an unconstrained index. Until that is removed we are
-  strictly more permissive than ISO C, in the direction of accepting programs
-  clang may miscompile.
+  no typed load demands `read_ok` and no typed store produces `store_etypes`,
+  so the index is a fact about the bytes that nothing yet has to respect.
+  Until stage 3 lands we are strictly more permissive than ISO C, in the
+  direction of accepting programs clang may miscompile.
+- A struct with no members -- a GNU extension, and one that turns up in
+  generated headers -- is not translated, and neither is a struct that embeds
+  one. A zero-byte object is degenerate in a byte-level model in a way it is
+  not in a field-wise one: it has no bytes to own, and when it is embedded it
+  shares its offset with whatever follows, so the object no longer splits into
+  disjoint fields and padding. `test/empty_struct` carries an `old-only`
+  marker and records the shape; Palow reports it as a skipped struct rather
+  than translating it weakly.
 - `size_t` is eight bytes and `SizeT.v` is assumed to be below `pow2 64`, for
   the same reason and with the same justification as `Ptr.addr_bound`.
 - Palow has no *total* function pointers. Divergence is inferred per body,
@@ -5626,3 +5635,50 @@ new facts about memory.
 
     Still no enforcement, so still nothing weakened: 1104 specifications, 1082
     with bodies, 0 admitted, 22 external, 0 skipped.
+
+20. **Done: `main` merged, and the five things it caught.** Thirty-three
+    commits of `main` landed on the branch. Most merged cleanly; what is worth
+    recording is that the new tests `main` brought with it were the first
+    exercise Palow had of five separate things, and three of them were real
+    bugs rather than missing features.
+
+    - **Condition borrows escaped into a branch.** `if (t->entries[i].key ==
+      key)` focuses an array element to evaluate the condition, and the
+      emitter queued the matching unfocus rather than emitting it. The queue
+      was then drained by the first statement of the *then* arm — inside one
+      side of a join whose other side never borrowed — and an arm that reached
+      the same object again focused what was already focused. The condition
+      belongs to the `if`, not to an arm, so it is now drained before either
+      arm runs. This was a soundness-shaped bug in the sense that mattered:
+      perfectly ordinary C did not translate.
+    - **`Nsz` is only syntax below 2^16.** A struct holding a 64KiB buffer has
+      a `sizeof`, offsets and element counts past that bound, and F* rejects
+      the literal outright. Which literal is too large is a property of the
+      notation rather than of the quantity, and the emitter writes `Nsz` from
+      a couple of dozen places, so the finished module text is rewritten once
+      (`widen_sizet_literals`) instead of each site being taught the bound.
+    - **A read-only borrow could not be given back.** `array_unfocus` names
+      the *updated* sequence, and `s[i] <- s[i]` is `s` only extensionally —
+      the one thing slprop matching cannot bridge. One `Seq.lemma_eq_elim`
+      under a pattern specific enough to cost nothing elsewhere.
+    - **Integer-to-pointer casts.** These now translate, to PNVI's *invalid*
+      pointer: the address asked for and the empty provenance. It needs no
+      axiom, because `null` already has address 0 and empty provenance and
+      `( +! )` preserves provenance, so it is `null +! n` — which is `null`
+      exactly when `n` is zero, as C says of a cast of the constant zero. The
+      usable round trip stays where it was, behind `exposed` and
+      `in_footprint`.
+    - **`unsigned char` to `size_t`.** There is no `sizet_of_uint8`; the value
+      widens first, which is exact and is what C's integer promotions do
+      anyway.
+
+    One gap is left and is recorded under "Known deviations": a struct with no
+    members, and a struct that embeds one. `test/empty_struct` carries a new
+    `old-only` marker, the mirror of `palow-only` — a test of something the
+    old model covers and Palow does not yet, which should be a shrinking set.
+
+    Census: 1169 specifications, 1140 with bodies, 1 admitted, 28 external,
+    2 skipped. The three gaps are all the one empty-struct deviation. The
+    census itself now passes a test's `extra_opts` and runs from the test's own
+    directory, which it has to do for a test whose C needs its own `-D` and
+    `-I` to compile at all.

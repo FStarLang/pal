@@ -38,12 +38,25 @@ INCLUDES += -I include
 endif
 PAL_OPTS += $(INCLUDES)
 
+# Extra preprocessor flags (-D, -I) for this test, passed to both PAL and cc.
+ifneq ($(wildcard extra_opts),)
+EXTRA_OPTS := $(shell cat extra_opts)
+PAL_OPTS += $(EXTRA_OPTS)
+endif
+
 # A test whose annotations are written against the Palow memory model cannot be
 # translated by the old emitter, and carries a `palow-only` marker file. Such a
 # test is still compiled by a real C compiler -- the annotations must stay
 # no-ops outside translation, which is the whole point of `pal.h` -- and is
 # still verified under the default model. Only `MODEL=old` skips it.
+#
+# The mirror of that is `old-only`: a test of something the old model covers
+# and Palow does not yet. It names a gap rather than a difference of dialect,
+# so it should be a shrinking set, and the gap itself has to be written down
+# in palow.md. Only the default model skips it.
 ifeq ($(MODEL)$(wildcard palow-only),oldpalow-only)
+all: compile
+else ifeq ($(MODEL)$(wildcard old-only),palowold-only)
 all: compile
 else
 all: verify compile
@@ -88,7 +101,7 @@ compile: $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_FILES))
 
 $(OBJ_DIR)/%.o: %.c $(C_FILES) $(H_FILES)
 	@mkdir -p $(OBJ_DIR)
-	$(CC) $(INCLUDES) -c $< -o $@
+	$(CC) $(INCLUDES) $(EXTRA_OPTS) -c $< -o $@
 
 clean:
 	rm -rf out _cache out_old _cache_old .depend.palow .depend.old $(OUT_DIR) $(CACHE_DIR) $(OBJ_DIR)

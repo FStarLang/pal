@@ -19,6 +19,7 @@ mod ir;
 mod layout;
 mod mayberc;
 mod pass;
+mod prims;
 mod source_range_info;
 mod vfs;
 
@@ -64,6 +65,12 @@ struct Cli {
 
     #[arg(short = 'I', help = "Additional include search paths")]
     include_paths: Vec<String>,
+
+    #[arg(
+        short = 'D',
+        help = "Preprocessor definitions, e.g. -DFOO or -DFOO=bar"
+    )]
+    defines: Vec<String>,
 
     #[arg(help = "C source files to translate")]
     files: Vec<String>,
@@ -181,11 +188,14 @@ fn main() {
     // A source can be translated for either memory model, and hand-written
     // Pulse in it names predicates only one of them has. `PALOW` lets the
     // source say which fragment is which.
-    let defines: Vec<String> = if cli.old_model {
-        vec![]
-    } else {
-        vec!["PALOW".to_string()]
-    };
+    // The source's own `-D` flags, and on top of them the one that says which
+    // memory model this is. `--palow` defines `PALOW`, so hand-written Pulse
+    // that names predicates only one of the two models has can be written
+    // twice in the one file.
+    let mut defines: Vec<String> = cli.defines.clone();
+    if !cli.old_model {
+        defines.push("PALOW".to_string());
+    }
 
     let parse_start = Instant::now();
     for file in &cli.files {
