@@ -744,6 +744,28 @@ enum SLPropVariant<'a> {
     Uninit,
 }
 
+#[derive(Clone)]
+struct BorrowedArrayCellArg {
+    arg_index: usize,
+    arr: Rc<Expr>,
+    idx: Rc<Expr>,
+    cell: Rc<Expr>,
+    field_path: Vec<Rc<Ident>>,
+    mode: ParamMode,
+    arr_key: String,
+    idx_key: String,
+    field_key: String,
+}
+
+struct BorrowedArrayCellGroup {
+    arr: Rc<Expr>,
+    idx: Rc<Expr>,
+    cell: Rc<Expr>,
+    tmp: Doc,
+    needs_read: bool,
+    writable: bool,
+}
+
 struct Emitter<'a> {
     nm: NameMangling,
     diags: &'a mut Diagnostics,
@@ -796,38 +818,172 @@ impl<'a> Emitter<'a> {
         tmp
     }
 
-    fn direct_array_cell_ref_arg(
-        &self,
+    fn decompose_array_cell_ref(
+        arg: &Rc<Expr>,
+    ) -> Option<(Rc<Expr>, Rc<Expr>, Rc<Expr>, Vec<Rc<Ident>>)> {
+        fn go(
+            e: &Rc<Expr>,
+            fields_rev: &mut Vec<Rc<Ident>>,
+        ) -> Option<(Rc<Expr>, Rc<Expr>, Rc<Expr>)> {
+            match &e.val {
+                ExprT::Index(arr, idx) => Some((arr.clone(), idx.clone(), e.clone())),
+                ExprT::Member(base, fld) => {
+                    fields_rev.push(fld.clone());
+                    go(base, fields_rev)
+                }
+                _ => None,
+            }
+        }
+
+        let ExprT::Ref(inner) = &arg.val else {
+            return None;
+        };
+        let mut fields_rev = Vec::new();
+        let (arr, idx, cell) = go(inner, &mut fields_rev)?;
+        fields_rev.reverse();
+        Some((arr, idx, cell, fields_rev))
+    }
+
+    fn expr_key(e: &Expr) -> String {
+        e.to_string()
+    }
+
+    fn field_path_key(path: &[Rc<Ident>]) -> String {
+        if path.is_empty() {
+            "<cell>".to_string()
+        } else {
+            path.iter()
+                .map(|f| f.val.as_ref())
+                .collect::<Vec<_>>()
+                .join(".")
+        }
+    }
+
+    fn field_paths_may_alias(a: &[Rc<Ident>], b: &[Rc<Ident>]) -> bool {
+        if a.is_empty() || b.is_empty() {
+            return true;
+        }
+        let min_len = a.len().min(b.len());
+        a.iter()
+            .take(min_len)
+            .zip(b.iter().take(min_len))
+            .all(|(x, y)| x.val == y.val)
+            && (a.len() == b.len() || a.len() == min_len || b.len() == min_len)
+    }
+
+    fn collect_expr_vars(e: &Expr, out: &mut HashSet<String>) {
+        if let ExprT::Var(x) = &e.val {
+            out.insert(x.val.to_string());
+        }
+        walk_expr_tree(e, &mut |sub| {
+            if let ExprT::Var(x) = &sub.val {
+                out.insert(x.val.to_string());
+            }
+        });
+    }
+
+    fn root_var(e: &Expr) -> Option<String> {
+        match &e.val {
+            ExprT::Var(x) => Some(x.val.to_string()),
+            ExprT::Cast(inner, _)
+            | ExprT::Member(inner, _)
+            | ExprT::Index(inner, _)
+            | ExprT::Deref(inner)
+            | ExprT::Ref(inner)
+            | ExprT::VAttr(_, inner) => Self::root_var(inner),
+            _ => None,
+        }
+    }
+
+    fn expr_is_dup_safe(e: &Expr) -> bool {
+        match &e.val {
+            ExprT::Var(_)
+            | ExprT::BoolLit(_)
+            | ExprT::IntLit(_, _)
+            | ExprT::FloatLit(_, _)
+            | ExprT::FnRef(_)
+            | ExprT::InlinePulse(_, _)
+            | ExprT::SizeOf(_)
+            | ExprT::AlignOf(_)
+            | ExprT::Error(_) => true,
+            ExprT::Deref(a)
+            | ExprT::Member(a, _)
+            | ExprT::VAttr(_, a)
+            | ExprT::Ref(a)
+            | ExprT::UnOp(_, a)
+            | ExprT::Cast(a, _)
+            | ExprT::ContainerOf(a, _, _)
+            | ExprT::Live(a)
+            | ExprT::Old(a)
+            | ExprT::Forall(_, _, a)
+            | ExprT::Exists(_, _, a)
+            | ExprT::UnionInit(_, _, a)
+            | ExprT::MemsetZero(_, a) => Self::expr_is_dup_safe(a),
+            ExprT::Index(a, b) | ExprT::BinOp(_, a, b) => {
+                Self::expr_is_dup_safe(a) && Self::expr_is_dup_safe(b)
+            }
+            ExprT::Cond(a, b, c) => {
+                Self::expr_is_dup_safe(a) && Self::expr_is_dup_safe(b) && Self::expr_is_dup_safe(c)
+            }
+            ExprT::StructInit(_, fields) => fields.iter().all(|(_, a)| Self::expr_is_dup_safe(a)),
+            ExprT::ArrayInit { elems, .. } => elems.iter().all(|a| Self::expr_is_dup_safe(a)),
+            ExprT::FnCall(_, _)
+            | ExprT::FnPtrCall(_, _)
+            | ExprT::AssignExpr(_, _)
+            | ExprT::Malloc(_)
+            | ExprT::MallocArray(_, _)
+            | ExprT::Calloc(_)
+            | ExprT::CallocArray(_, _)
+            | ExprT::MallocFlex(_, _)
+            | ExprT::CallocFlex(_, _)
+            | ExprT::Memset(_, _, _, _)
+            | ExprT::Free(_)
+            | ExprT::PreIncr(_)
+            | ExprT::PostIncr(_)
+            | ExprT::PreDecr(_)
+            | ExprT::PostDecr(_) => false,
+        }
+    }
+
+    fn borrowed_array_cell_ref_arg(
+        &mut self,
         env: &Env,
         fn_decl: &FnDecl,
         i: usize,
         arg: &Rc<Expr>,
-    ) -> Option<(Rc<Expr>, Rc<Expr>, bool)> {
-        let ExprT::Ref(inner) = &arg.val else {
-            return None;
-        };
-        let ExprT::Index(arr, idx) = &inner.val else {
-            return None;
-        };
+    ) -> Option<BorrowedArrayCellArg> {
+        let (arr, idx, cell, field_path) = Self::decompose_array_cell_ref(arg)?;
         let param = fn_decl.args.get(i)?;
         let param_is_ref = matches!(
             env.vtype_whnf(param.ty.clone().into()).val,
             TypeT::Pointer(_, PointerKind::Ref)
         );
         let arr_is_array = env
-            .infer_expr(arr)
+            .infer_expr(&arr)
             .ok()
             .map(|t| env.vtype_whnf(t))
             .is_some_and(|t| matches!(&t.val, TypeT::Pointer(_, PointerKind::Array)));
-        if param_is_ref && arr_is_array {
-            Some((
-                arr.clone(),
-                idx.clone(),
-                matches!(param.mode, ParamMode::Const),
-            ))
-        } else {
-            None
+        if !param_is_ref || !arr_is_array {
+            return None;
         }
+        if matches!(param.mode, ParamMode::Consumed) {
+            self.report(
+                "cannot pass a borrowed array cell to a consumed pointer parameter; use an explicit local pointer and return the cell by hand".to_string(),
+                &arg.loc,
+            );
+            return None;
+        }
+        Some(BorrowedArrayCellArg {
+            arg_index: i,
+            arr_key: Self::expr_key(&arr),
+            idx_key: Self::expr_key(&idx),
+            field_key: Self::field_path_key(&field_path),
+            arr,
+            idx,
+            cell,
+            field_path,
+            mode: param.mode,
+        })
     }
 
     fn emit_array_cell_read(&mut self, env: &Env, arr: &Rc<Expr>, idx: &Rc<Expr>) -> Doc {
@@ -839,6 +995,24 @@ impl<'a> Emitter<'a> {
         .append(";")
         .nest(2)
         .group()
+    }
+
+    fn emit_array_cell_return(&mut self, env: &Env, arr: &Rc<Expr>, idx: &Rc<Expr>) -> Doc {
+        let arr_doc = self.emit_rvalue(env, arr);
+        let idx_doc = self.emit_rvalue(env, idx);
+        let cell_ref = naryfn([
+            Doc::text("array_cell_ref"),
+            arr_doc.clone(),
+            unaryfn(Doc::text("SizeT.v"), idx_doc),
+        ]);
+        Doc::text("Pulse.Lib.C.MaybeUninit.intro_maybe_some ")
+            .append(cell_ref)
+            .append(";")
+            .append(Doc::hardline())
+            .append(naryfn([Doc::text("array_return_cell"), arr_doc]))
+            .append(";")
+            .nest(2)
+            .group()
     }
 
     fn emit_array_cell_return_unchanged(
@@ -862,6 +1036,331 @@ impl<'a> Emitter<'a> {
             .append(";")
             .nest(2)
             .group()
+    }
+
+    fn validate_borrowed_array_cell_args(
+        &mut self,
+        args: &[Rc<Expr>],
+        borrowed: &[BorrowedArrayCellArg],
+    ) -> bool {
+        let mut ok = true;
+        let borrowed_indices: HashSet<usize> = borrowed.iter().map(|b| b.arg_index).collect();
+
+        for b in borrowed {
+            if !Self::expr_is_dup_safe(&b.idx) {
+                self.report(
+                        "array-cell pointer argument uses an index with side effects; use an explicit local pointer form".to_string(),
+                        &b.idx.loc,
+                    );
+                ok = false;
+            }
+            if matches!(b.mode, ParamMode::Out) && !b.field_path.is_empty() {
+                self.report(
+                        "cannot pass an array-cell field directly to an _out parameter; use an explicit local pointer form".to_string(),
+                        &b.cell.loc,
+                    );
+                ok = false;
+            }
+        }
+
+        for i in 0..borrowed.len() {
+            for j in (i + 1)..borrowed.len() {
+                let a = &borrowed[i];
+                let b = &borrowed[j];
+                if a.arr_key == b.arr_key && a.idx_key != b.idx_key {
+                    self.report(
+                            "borrowed array-cell arguments for the same array must use the identical index expression; use an explicit local pointer form".to_string(),
+                            &b.idx.loc,
+                        );
+                    ok = false;
+                }
+                if a.arr_key == b.arr_key
+                    && a.idx_key == b.idx_key
+                    && Self::field_paths_may_alias(&a.field_path, &b.field_path)
+                {
+                    self.report(
+                            format!(
+                                "borrowed array-cell arguments may alias at field path {}; use distinct fields or an explicit local pointer form",
+                                b.field_key
+                            ),
+                            &b.cell.loc,
+                        );
+                    ok = false;
+                }
+            }
+        }
+
+        for b in borrowed {
+            let mut forbidden = HashSet::new();
+            if let Some(root) = Self::root_var(&b.arr) {
+                forbidden.insert(root);
+            }
+            Self::collect_expr_vars(&b.idx, &mut forbidden);
+            if forbidden.is_empty() {
+                continue;
+            }
+            for (i, arg) in args.iter().enumerate() {
+                if borrowed_indices.contains(&i) {
+                    continue;
+                }
+                let mut vars = HashSet::new();
+                Self::collect_expr_vars(arg, &mut vars);
+                if let Some(v) = vars.iter().find(|v| forbidden.contains(*v)) {
+                    self.report(
+                            format!(
+                                "borrowed array-cell argument variable `{}` also appears in another call argument; use an explicit local pointer form",
+                                v
+                            ),
+                            &arg.loc,
+                        );
+                    ok = false;
+                }
+            }
+        }
+        ok
+    }
+
+    fn emit_borrowed_cell_field_ref(
+        &mut self,
+        env: &Env,
+        cell: &Rc<Expr>,
+        tmp: Doc,
+        path: &[Rc<Ident>],
+    ) -> Doc {
+        if path.is_empty() {
+            return tmp;
+        }
+        let mut cur_ty = match env.infer_expr(cell) {
+            Ok(ty) => env.vtype_whnf(ty),
+            Err(_) => {
+                self.report(
+                    format!("cannot infer type of borrowed array cell {}", cell),
+                    &cell.loc,
+                );
+                return Doc::text("(admit())");
+            }
+        };
+        let mut cur_doc = tmp;
+        for fld in path {
+            let TypeT::TypeRef(TypeRefKind::Struct(struct_name)) = &cur_ty.val else {
+                self.report(
+                    format!("cannot project field {} from non-struct array cell", fld),
+                    &fld.loc,
+                );
+                return Doc::text("(admit())");
+            };
+            cur_doc = unaryfn(
+                self.emit_name(Name::StructFieldProj(
+                    struct_name.val.clone(),
+                    fld.val.clone(),
+                )),
+                cur_doc,
+            );
+            let Some(sdef) = env.lookup_struct(struct_name) else {
+                self.report(format!("unknown struct {}", struct_name), &fld.loc);
+                return Doc::text("(admit())");
+            };
+            let Some(field_ty) = sdef.get_field(fld) else {
+                self.report(
+                    format!("unknown field {} in struct {}", fld, struct_name),
+                    &fld.loc,
+                );
+                return Doc::text("(admit())");
+            };
+            cur_ty = env.vtype_whnf(field_ty.into());
+        }
+        cur_doc
+    }
+
+    fn plan_borrowed_array_cell_call(
+        &mut self,
+        env: &Env,
+        fn_decl: &FnDecl,
+        args: &[Rc<Expr>],
+    ) -> Option<(Vec<Doc>, Vec<Doc>, Vec<Doc>)> {
+        let mut borrowed = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(b) = self.borrowed_array_cell_ref_arg(env, fn_decl, i, arg) {
+                borrowed.push(b);
+            }
+        }
+        if borrowed.is_empty() {
+            return None;
+        }
+        if !self.validate_borrowed_array_cell_args(args, &borrowed) {
+            return None;
+        }
+
+        let mut groups: HashMap<(String, String), BorrowedArrayCellGroup> = HashMap::new();
+        let mut group_order = Vec::new();
+        for b in &borrowed {
+            let key = (b.arr_key.clone(), b.idx_key.clone());
+            if !groups.contains_key(&key) {
+                group_order.push(key.clone());
+                groups.insert(
+                    key.clone(),
+                    BorrowedArrayCellGroup {
+                        arr: b.arr.clone(),
+                        idx: b.idx.clone(),
+                        cell: b.cell.clone(),
+                        tmp: self.fresh_tmp("borrow"),
+                        needs_read: false,
+                        writable: false,
+                    },
+                );
+            }
+            let group = groups.get_mut(&key).unwrap();
+            if !matches!(b.mode, ParamMode::Out) {
+                group.needs_read = true;
+            }
+            if !matches!(b.mode, ParamMode::Const) {
+                group.writable = true;
+            }
+        }
+
+        let mut prelude = Vec::new();
+        for key in &group_order {
+            let group = groups.get(key).unwrap();
+            let arr_doc = self.emit_rvalue(env, &group.arr);
+            let idx_doc = self.emit_rvalue(env, &group.idx);
+            prelude.push(
+                Doc::text("let ")
+                    .append(group.tmp.clone())
+                    .append(Doc::text(" ="))
+                    .append(Doc::line())
+                    .append(naryfn([Doc::text("array_borrow_cell"), arr_doc, idx_doc]))
+                    .append(";")
+                    .nest(2)
+                    .group(),
+            );
+            if group.needs_read {
+                prelude.push(self.emit_array_cell_read(env, &group.arr, &group.idx));
+            }
+        }
+
+        let borrowed_by_index: HashMap<usize, BorrowedArrayCellArg> =
+            borrowed.into_iter().map(|b| (b.arg_index, b)).collect();
+        let mut emitted_args = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(b) = borrowed_by_index.get(&i) {
+                let group = groups
+                    .get(&(b.arr_key.clone(), b.idx_key.clone()))
+                    .expect("borrowed argument group");
+                emitted_args.push(self.emit_borrowed_cell_field_ref(
+                    env,
+                    &group.cell,
+                    group.tmp.clone(),
+                    &b.field_path,
+                ));
+            } else {
+                emitted_args.push(self.emit_rvalue(env, arg));
+            }
+        }
+
+        let mut postlude: Vec<Doc> = Vec::new();
+        for key in group_order.into_iter().rev() {
+            let group = groups.get(&key).unwrap();
+            if group.writable {
+                postlude.push(self.emit_array_cell_return(env, &group.arr, &group.idx));
+            } else {
+                postlude.push(self.emit_array_cell_return_unchanged(env, &group.arr, &group.idx));
+            }
+        }
+
+        Some((prelude, emitted_args, postlude))
+    }
+
+    fn decompose_array_member_lvalue(
+        expr: &Rc<Expr>,
+    ) -> Option<(Rc<Expr>, Rc<Expr>, Option<Rc<Expr>>, Vec<Rc<Ident>>)> {
+        fn go(
+            e: &Rc<Expr>,
+            fields_rev: &mut Vec<Rc<Ident>>,
+        ) -> Option<(Rc<Expr>, Rc<Expr>, Option<Rc<Expr>>)> {
+            let ExprT::Member(base, fld) = &e.val else {
+                return None;
+            };
+            fields_rev.push(fld.clone());
+            match &base.val {
+                ExprT::Index(arr, idx) => Some((base.clone(), arr.clone(), Some(idx.clone()))),
+                ExprT::Deref(ptr) => Some((base.clone(), ptr.clone(), None)),
+                ExprT::Member(_, _) => go(base, fields_rev),
+                _ => None,
+            }
+        }
+
+        let mut fields_rev = Vec::new();
+        let (cell, arr, idx) = go(expr, &mut fields_rev)?;
+        fields_rev.reverse();
+        Some((cell, arr, idx, fields_rev))
+    }
+
+    fn emit_record_field_update(
+        &mut self,
+        env: &Env,
+        ty: MaybeRc<Type>,
+        base_doc: Doc,
+        path: &[Rc<Ident>],
+        value_doc: Doc,
+    ) -> Option<Doc> {
+        let fld = path.first()?;
+        let ty = env.vtype_whnf(ty.into());
+        let TypeT::TypeRef(TypeRefKind::Struct(struct_name)) = &ty.val else {
+            self.report(
+                format!("cannot update nested field {} of non-struct value", fld),
+                &fld.loc,
+            );
+            return None;
+        };
+        let sdef = env.lookup_struct(struct_name)?;
+        let field_doc = self.emit_name(Name::StructDirectFieldName(
+            struct_name.val.clone(),
+            fld.val.clone(),
+        ));
+        if path.len() == 1 {
+            return Some(
+                Doc::text("{ ")
+                    .append(base_doc)
+                    .append(Doc::text(" with "))
+                    .append(field_doc)
+                    .append(Doc::text(" = "))
+                    .append(value_doc)
+                    .append(Doc::text(" }")),
+            );
+        }
+        let field_ty = sdef.get_field(fld)?;
+        let field_base = parens(base_doc.clone())
+            .append(Doc::text("."))
+            .append(field_doc.clone());
+        let nested =
+            self.emit_record_field_update(env, field_ty.into(), field_base, &path[1..], value_doc)?;
+        Some(
+            Doc::text("{ ")
+                .append(base_doc)
+                .append(Doc::text(" with "))
+                .append(field_doc)
+                .append(Doc::text(" = "))
+                .append(nested)
+                .append(Doc::text(" }")),
+        )
+    }
+
+    fn emit_array_member_update_fn(
+        &mut self,
+        env: &Env,
+        cell: &Rc<Expr>,
+        path: &[Rc<Ident>],
+    ) -> Option<Doc> {
+        if path.is_empty() {
+            return None;
+        }
+        let cell_ty = env.infer_expr(cell).ok()?;
+        self.emit_record_field_update(env, cell_ty, Doc::text("__v"), path, Doc::text("__y"))
+            .map(|body| {
+                Doc::text("(fun __v __y -> ")
+                    .append(body)
+                    .append(Doc::text(")"))
+            })
     }
 
     /// Give a raw address (`core_ref`) the pointer kind an integer-to-pointer
@@ -4637,8 +5136,39 @@ impl<'a> Emitter<'a> {
                     if let ExprT::FnCall(f, args) = &v.val
                         && let Some(fn_decl) = env.lookup_fn(f)
                     {
+                        if let Some((prelude, emitted_args, postlude)) =
+                            self.plan_borrowed_array_cell_call(env, &fn_decl, args)
+                        {
+                            let call_doc = Doc::concat(
+                                prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                            )
+                            .append(
+                                discard_lead
+                                    .clone()
+                                    .append(parens(
+                                        self.emit_name(Name::Fn(f.val.clone()))
+                                            .append(Doc::concat(
+                                                emitted_args
+                                                    .into_iter()
+                                                    .map(|arg| Doc::line().append(arg)),
+                                            ))
+                                            .nest(2),
+                                    ))
+                                    .append(";")
+                                    .nest(2)
+                                    .group(),
+                            )
+                            .append(if postlude.is_empty() {
+                                Doc::nil()
+                            } else {
+                                Doc::hardline().append(Doc::concat(
+                                    postlude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                                ))
+                            });
+                            return call_doc;
+                        }
                         let mut prelude = Vec::new();
-                        let mut postlude = Vec::new();
+                        let postlude: Vec<Doc> = Vec::new();
                         let mut emitted_args = Vec::new();
                         for (i, arg) in args.iter().enumerate() {
                             let callee_expects_array = fn_decl.args.get(i).is_some_and(|fn_arg| {
@@ -4647,16 +5177,6 @@ impl<'a> Emitter<'a> {
                                     TypeT::Pointer(_, PointerKind::Array)
                                 )
                             });
-                            // `&a[i]` passed into a plain `T *` parameter (a Pulse
-                            // `ref`) where `a` is a real `_array`: borrow cell `i`
-                            // with `array_borrow_cell` and pass a fresh binding.
-                            // For read-only (`const`) parameters, also reveal the
-                            // initialized maybe-cell with `array_cell_read`, then
-                            // package it back and return it unchanged after the
-                            // call. Writable/out calls still require the explicit
-                            // local form so user annotations say how the cell is
-                            // initialized and returned.
-                            let borrow_cell = self.direct_array_cell_ref_arg(env, &fn_decl, i, arg);
                             let array_init = match &arg.val {
                                 ExprT::ArrayInit {
                                     elem_ty, is_static, ..
@@ -4673,31 +5193,7 @@ impl<'a> Emitter<'a> {
                                 }
                                 _ => None,
                             };
-                            if let Some((arr, idx, read_only)) = borrow_cell {
-                                let tmp = self.fresh_tmp("borrow");
-                                let arr_doc = self.emit_rvalue(env, &arr);
-                                let idx_doc = self.emit_rvalue(env, &idx);
-                                let borrow = Doc::text("let ")
-                                    .append(tmp.clone())
-                                    .append(Doc::text(" ="))
-                                    .append(Doc::line())
-                                    .append(naryfn([
-                                        Doc::text("array_borrow_cell"),
-                                        arr_doc,
-                                        idx_doc,
-                                    ]))
-                                    .append(";")
-                                    .nest(2)
-                                    .group();
-                                prelude.push(borrow);
-                                if read_only {
-                                    prelude.push(self.emit_array_cell_read(env, &arr, &idx));
-                                    postlude.push(
-                                        self.emit_array_cell_return_unchanged(env, &arr, &idx),
-                                    );
-                                }
-                                emitted_args.push(tmp);
-                            } else if let Some((elem_ty, spec_arg, is_static)) = array_init
+                            if let Some((elem_ty, spec_arg, is_static)) = array_init
                                 && (callee_expects_array || !is_static)
                             {
                                 let tmp = self.fresh_tmp("arraylit");
@@ -5029,72 +5525,49 @@ impl<'a> Emitter<'a> {
                     // a[i].field = val → array_update / arrayptr_update
                     // (*p).field = val → array_update / arrayptr_update at index 0
                     //   (the `p->field` form, where `p` is an array/arrayptr)
-                    if let ExprT::Member(base, fld) = &x.val {
+                    if let Some((cell, arr, idx, path)) = Self::decompose_array_member_lvalue(x) {
                         // Resolve the array/arrayptr being projected and the element index.
                         // The deref form only applies to array/arrayptr pointers; plain
                         // struct pointers fall through to the generic lvalue path below.
-                        let arr_and_idx: Option<(&Rc<Expr>, Option<&Rc<Expr>>)> = match &base.val {
-                            ExprT::Index(arr, idx) => Some((arr, Some(idx))),
-                            ExprT::Deref(ptr) => Some((ptr, None)),
-                            _ => None,
-                        };
-                        if let Some((arr, idx)) = arr_and_idx {
-                            let arr_ty = env.infer_expr(arr).ok().map(|ty| env.vtype_whnf(ty));
-                            let is_arrayptr = arr_ty
-                                .as_ref()
-                                .map(|ty| {
-                                    matches!(ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr))
-                                })
-                                .unwrap_or(false);
-                            let is_array = arr_ty
-                                .as_ref()
-                                .map(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Array)))
-                                .unwrap_or(false);
-                            let applies = idx.is_some() || is_array || is_arrayptr;
-                            // Check that the element type is a struct
-                            if applies
-                                && let Some(struct_name) =
-                                    env.infer_expr(base).ok().and_then(|ty| {
-                                        let ty = env.vtype_whnf(ty);
-                                        match &ty.val {
-                                            TypeT::TypeRef(TypeRefKind::Struct(s)) => {
-                                                Some(s.val.clone())
-                                            }
-                                            _ => None,
-                                        }
-                                    })
-                            {
-                                let fn_name = if is_arrayptr {
-                                    "arrayptr_update"
-                                } else {
-                                    "array_update"
-                                };
-                                let arr_doc = match self.emit_expr(env, arr) {
-                                    ExprKind::ArrayLValue(arr_doc) => arr_doc,
-                                    arr_doc => arr_doc.to_rvalue(),
-                                };
-                                let idx_doc = match idx {
-                                    Some(idx) => self.emit_rvalue(env, idx),
-                                    None => Doc::text("0sz"),
-                                };
-                                let field_name = self.emit_name(Name::StructDirectFieldName(
-                                    struct_name,
-                                    fld.val.clone(),
-                                ));
-                                let upd_fn = Doc::text("(fun __v __y -> { __v with ")
-                                    .append(field_name)
-                                    .append(Doc::text(" = __y })"));
-                                return naryfn([
-                                    Doc::text(fn_name),
-                                    arr_doc,
-                                    idx_doc,
-                                    upd_fn,
+                        let arr_ty = env.infer_expr(&arr).ok().map(|ty| env.vtype_whnf(ty));
+                        let is_arrayptr = arr_ty
+                            .as_ref()
+                            .map(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr)))
+                            .unwrap_or(false);
+                        let is_array = arr_ty
+                            .as_ref()
+                            .map(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Array)))
+                            .unwrap_or(false);
+                        let applies = idx.is_some() || is_array || is_arrayptr;
+                        if applies
+                            && let Some(upd_fn) =
+                                self.emit_array_member_update_fn(env, &cell, &path)
+                        {
+                            let fn_name = if is_arrayptr {
+                                "arrayptr_update"
+                            } else {
+                                "array_update"
+                            };
+                            let arr_doc = match self.emit_expr(env, &arr) {
+                                ExprKind::ArrayLValue(arr_doc) => arr_doc,
+                                arr_doc => arr_doc.to_rvalue(),
+                            };
+                            let idx_doc = match &idx {
+                                Some(idx) => self.emit_rvalue(env, idx),
+                                None => Doc::text("0sz"),
+                            };
+                            let rhs = match self.bitfield_member_mask(env, x) {
+                                Some((width, mask_fn)) => naryfn([
+                                    Doc::text(mask_fn),
+                                    Doc::text(width.to_string()),
                                     self.emit_rvalue(env, t),
-                                ])
+                                ]),
+                                None => self.emit_rvalue(env, t),
+                            };
+                            return naryfn([Doc::text(fn_name), arr_doc, idx_doc, upd_fn, rhs])
                                 .append(";")
                                 .nest(2)
                                 .group();
-                            }
                         }
                     }
                     if let ExprT::Index(arr, idx) = &x.val {
@@ -5432,41 +5905,9 @@ impl<'a> Emitter<'a> {
                     if let ExprT::FnCall(f, args) = &t.val
                         && let Some(fn_decl) = env.lookup_fn(f)
                     {
-                        let mut prelude = Vec::new();
-                        let mut postlude = Vec::new();
-                        let mut emitted_args = Vec::new();
-                        let mut changed = false;
-                        for (i, arg) in args.iter().enumerate() {
-                            if let Some((arr, idx, true)) =
-                                self.direct_array_cell_ref_arg(env, &fn_decl, i, arg)
-                            {
-                                changed = true;
-                                let tmp = self.fresh_tmp("borrow");
-                                let arr_doc = self.emit_rvalue(env, &arr);
-                                let idx_doc = self.emit_rvalue(env, &idx);
-                                prelude.push(
-                                    Doc::text("let ")
-                                        .append(tmp.clone())
-                                        .append(Doc::text(" ="))
-                                        .append(Doc::line())
-                                        .append(naryfn([
-                                            Doc::text("array_borrow_cell"),
-                                            arr_doc,
-                                            idx_doc,
-                                        ]))
-                                        .append(";")
-                                        .nest(2)
-                                        .group(),
-                                );
-                                prelude.push(self.emit_array_cell_read(env, &arr, &idx));
-                                postlude
-                                    .push(self.emit_array_cell_return_unchanged(env, &arr, &idx));
-                                emitted_args.push(tmp);
-                            } else {
-                                emitted_args.push(self.emit_rvalue(env, arg));
-                            }
-                        }
-                        if changed {
+                        if let Some((prelude, emitted_args, postlude)) =
+                            self.plan_borrowed_array_cell_call(env, &fn_decl, args)
+                        {
                             let ret = self.fresh_tmp("return");
                             return Doc::concat(
                                 prelude.into_iter().map(|doc| doc.append(Doc::hardline())),

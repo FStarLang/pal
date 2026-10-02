@@ -35,8 +35,28 @@ PAL emits the `SZ.t`-indexed forms by default (subscripts come out as `0sz`, `1s
 | `a._length`                 | lowers to `length_of a`                                              |
 | `a[i]` (rvalue)             | `array_read a i`                                                     |
 | `a[i] = v`                  | `array_write a i v` (peephole on `StmtT::Assign`)                    |
+| `a[i].f = v`                | `array_update a i (fun x y -> { x with f = y }) v`                  |
+| `a[i].f.g = v`              | nested `array_update` record update; bit-field leaves are masked     |
+| `callee(&a[i])`             | borrows cell `i`, passes a `ref T`, then returns the cell            |
+| `callee(&a[i].f, &a[i].g)`  | borrows cell `i` once, passes distinct field refs, then returns it   |
 
 `_array` and `_arrayptr` annotations are defined in `pal.h`; absent them, `T*` is treated as a single-element reference (`ref T`).
+
+## Direct cell borrows for calls
+
+When a full `_array` cell is passed by address to a `T*` parameter, PAL emits
+`array_borrow_cell`. For readable parameters it follows with `array_cell_read`;
+after the call it packages the (possibly updated) cell with
+`Pulse.Lib.C.MaybeUninit.intro_maybe_some` and `array_return_cell`. `const`
+parameters still use `array_return_cell_unchanged`.
+
+For field arguments such as `f(&a[i].x, &a[i].y)`, PAL borrows the cell once and
+uses the ordinary generated struct field accessors on the borrowed ref. To keep
+this sound, all direct borrowed-cell arguments in one call for the same array
+must use the identical index expression, field paths must not alias, the array
+root and index variables must not appear in other arguments, and the index must
+be side-effect-free. If any rule is violated PAL reports a diagnostic and the
+program should use the explicit local-pointer borrow/return form instead.
 
 ## Generated function signature
 
