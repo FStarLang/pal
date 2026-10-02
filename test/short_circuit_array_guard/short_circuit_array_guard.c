@@ -17,6 +17,10 @@ typedef struct FlagBox {
   bool ok;
 } FlagBox;
 
+typedef struct OptionalBox {
+  int x;
+} OptionalBox;
+
 size_t find_first_and(_array int *a, size_t len)
   _requires(a._length == len)
   _preserves_value(a._length)
@@ -79,4 +83,11 @@ bool write_short_circuit_forms(_array int *a, size_t len, size_t i, bool choose)
   }
   r = box.ok || *out;
   return r;
+}
+
+bool nullable_member_guard(_nullable const OptionalBox *p)
+{
+  if (p != NULL && p->x == 0)
+    return true;
+  return false;
 }

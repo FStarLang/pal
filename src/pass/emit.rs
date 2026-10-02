@@ -1424,10 +1424,87 @@ impl<'a> Emitter<'a> {
         (tmp, bind)
     }
 
+    fn nullable_guarded_value_block(
+        &mut self,
+        env: &Env,
+        guard: &NullableGuard,
+        branch_is_then: bool,
+        value_prelude: Vec<Doc>,
+        value_expr: Doc,
+        ty: Doc,
+    ) -> Doc {
+        let name: Rc<Ident> = Rc::<str>::from(format!("__pal_guarded_{}", self.tmp_counter))
+            .with_loc(guard.pointer.loc.clone());
+        self.tmp_counter += 1;
+        let mut genv = env.clone();
+        genv.push_var_decl(&name, guard.inner.clone(), LocalDeclKind::RValue);
+        let bound = mk_rvar(&name);
+        let name_doc = self.emit_name(Name::Var(name.val.clone()));
+        let bind_guard = Doc::text("let ")
+            .append(name_doc.clone())
+            .append(" = ")
+            .append(parens(self.emit_rvalue(env, &guard.pointer)))
+            .append(";");
+        let branch_is_nonnull = if branch_is_then {
+            guard.then_is_nonnull
+        } else {
+            !guard.then_is_nonnull
+        };
+        let (elim_nonnull, elim_null) = if guard.array {
+            (
+                "Pulse.Lib.C.Nullable.elim_unless_null_arr",
+                "Pulse.Lib.C.Nullable.elim_null_arr",
+            )
+        } else {
+            (
+                "Pulse.Lib.C.Nullable.elim_unless_null_ref",
+                "Pulse.Lib.C.Nullable.elim_null_ref",
+            )
+        };
+        let elim = Doc::text(if branch_is_nonnull {
+            elim_nonnull
+        } else {
+            elim_null
+        })
+        .append(" ")
+        .append(name_doc.clone())
+        .append(";");
+        let payload = self.nullable_payload(&genv, guard, &bound);
+        let mut close = payload
+            .as_ref()
+            .map(|p| {
+                Doc::text("assert (Pulse.Lib.C.Nullable.unless_null ")
+                    .append(name_doc.clone())
+                    .append(" ")
+                    .append(p.clone())
+                    .append(");")
+            })
+            .unwrap_or_else(Doc::nil);
+        for a in self.current_fn_borrow_asserts.iter() {
+            close = close.append(Doc::line()).append(a.clone());
+        }
+        let (value_tmp, value_bind) = self.emit_short_circuit_binding(ty, value_expr);
+        block(
+            Doc::hardline()
+                .append(bind_guard)
+                .append(Doc::hardline())
+                .append(elim)
+                .append(Doc::hardline())
+                .append(Self::concat_stmt_docs(value_prelude))
+                .append(value_bind)
+                .append(Doc::hardline())
+                .append(close)
+                .append(Doc::hardline())
+                .append(value_tmp),
+        )
+    }
+
     fn expr_has_stateful_precondition(&self, env: &Env, e: &Expr) -> bool {
         match &e.val {
-            ExprT::Index(_, _) | ExprT::Deref(_) | ExprT::FnCall(_, _) | ExprT::FnPtrCall(_, _) => {
-                true
+            ExprT::Index(_, _) | ExprT::FnCall(_, _) | ExprT::FnPtrCall(_, _) => true,
+            ExprT::Deref(ptr) => {
+                self.expr_is_nullable_pointer(env, ptr)
+                    || self.expr_has_stateful_precondition(env, ptr)
             }
             ExprT::Malloc(_)
             | ExprT::MallocArray(_, _)
@@ -1445,12 +1522,7 @@ impl<'a> Emitter<'a> {
             | ExprT::AssignExpr(_, _) => true,
             ExprT::Member(base, _) => {
                 self.expr_has_stateful_precondition(env, base)
-                    || env.infer_expr(base).ok().is_some_and(|ty| {
-                        matches!(
-                            env.vtype_whnf(ty).val,
-                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
-                        )
-                    })
+                    || self.expr_is_nullable_pointer(env, base)
             }
             ExprT::UnOp(_, a)
             | ExprT::Cast(a, _)
@@ -1487,6 +1559,40 @@ impl<'a> Emitter<'a> {
             | ExprT::AlignOf(_)
             | ExprT::Error(_) => false,
         }
+    }
+
+    fn type_is_nullable_pointer(&self, env: &Env, ty: &Type) -> bool {
+        match &ty.val {
+            TypeT::Nullable(inner) => {
+                let inner = env.vtype_whnf(inner.clone().into());
+                matches!(
+                    inner.val,
+                    TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+                        | TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
+                )
+            }
+            TypeT::TypeRef(TypeRefKind::Typedef(name)) => env
+                .lookup_type(name)
+                .is_some_and(|defn| self.type_is_nullable_pointer(env, &defn.body)),
+            TypeT::Refine(inner, _)
+            | TypeT::RefineAlways(inner, _)
+            | TypeT::RefineUninit(inner, _)
+            | TypeT::RefineValue(inner, ..)
+            | TypeT::Plain(inner) => self.type_is_nullable_pointer(env, inner),
+            _ => false,
+        }
+    }
+
+    fn expr_is_nullable_pointer(&self, env: &Env, e: &Expr) -> bool {
+        env.infer_expr(e)
+            .ok()
+            .is_some_and(|ty| self.type_is_nullable_pointer(env, &ty))
+            || match &e.val {
+                ExprT::Cast(inner, _) | ExprT::VAttr(_, inner) => {
+                    self.expr_is_nullable_pointer(env, inner)
+                }
+                _ => false,
+            }
     }
 
     fn expr_needs_short_circuit_lowering(&self, env: &Env, e: &Expr) -> bool {
@@ -1745,6 +1851,7 @@ impl<'a> Emitter<'a> {
                         expr: self.emit_rvalue(env, e),
                     };
                 }
+                let nullable_guard = self.nullable_guard(env, lhs);
                 let mut lhs_doc = self.emit_short_circuit_expr(env, lhs);
                 if lhs_doc.prelude.is_empty() {
                     lhs_doc.expr = self.emit_bool_condition_value(env, lhs);
@@ -1758,15 +1865,57 @@ impl<'a> Emitter<'a> {
                     }
                     let rhs_doc = self.emit_short_circuit_expr(env, rhs);
                     let (then_branch, else_branch) = if is_and {
-                        (
-                            Self::block_with_final(rhs_doc.prelude, rhs_doc.expr),
-                            Self::block_with_final(vec![], Doc::text("false")),
-                        )
+                        if let Some(guard) = &nullable_guard {
+                            (
+                                self.nullable_guarded_value_block(
+                                    env,
+                                    guard,
+                                    true,
+                                    rhs_doc.prelude,
+                                    rhs_doc.expr,
+                                    Doc::text("bool"),
+                                ),
+                                self.nullable_guarded_value_block(
+                                    env,
+                                    guard,
+                                    false,
+                                    vec![],
+                                    Doc::text("false"),
+                                    Doc::text("bool"),
+                                ),
+                            )
+                        } else {
+                            (
+                                Self::block_with_final(rhs_doc.prelude, rhs_doc.expr),
+                                Self::block_with_final(vec![], Doc::text("false")),
+                            )
+                        }
                     } else {
-                        (
-                            Self::block_with_final(vec![], Doc::text("true")),
-                            Self::block_with_final(rhs_doc.prelude, rhs_doc.expr),
-                        )
+                        if let Some(guard) = &nullable_guard {
+                            (
+                                self.nullable_guarded_value_block(
+                                    env,
+                                    guard,
+                                    true,
+                                    vec![],
+                                    Doc::text("true"),
+                                    Doc::text("bool"),
+                                ),
+                                self.nullable_guarded_value_block(
+                                    env,
+                                    guard,
+                                    false,
+                                    rhs_doc.prelude,
+                                    rhs_doc.expr,
+                                    Doc::text("bool"),
+                                ),
+                            )
+                        } else {
+                            (
+                                Self::block_with_final(vec![], Doc::text("true")),
+                                Self::block_with_final(rhs_doc.prelude, rhs_doc.expr),
+                            )
+                        }
                     };
                     let body = self.emit_if_statement_expr(lhs_doc.expr, then_branch, else_branch);
                     let (tmp, bind) = self.emit_short_circuit_binding(Doc::text("bool"), body);
