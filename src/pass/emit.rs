@@ -132,14 +132,25 @@ pub fn decl_name(decl: &Decl) -> String {
 /// memory, mentions ownership or another variable is excluded, and a condition
 /// that is excluded is simply not propagated to array elements (it fails
 /// closed: the fact is missing, not wrong).
-fn expr_is_value_pure(e: &Expr) -> bool {
+///
+/// The one exception is the name of a mutable array global, which decays to
+/// its address: the assumed handle `var_g`, a constant that no write changes.
+/// So `this.p == g` compares the field with a fixed address and is as much a
+/// fact about the value as `this.p == NULL`.
+fn expr_is_value_pure(env: &Env, e: &Expr) -> bool {
     match &e.val {
-        ExprT::Var(x) => &*x.val == "this",
-        ExprT::Member(base, _) => expr_is_value_pure(base),
+        ExprT::Var(x) => {
+            &*x.val == "this"
+                || (env.lookup_var(x).is_none()
+                    && env
+                        .lookup_global_var(x)
+                        .is_some_and(|gv| !gv.is_pure && global_var_is_array(gv)))
+        }
+        ExprT::Member(base, _) => expr_is_value_pure(env, base),
         ExprT::BoolLit(_) | ExprT::IntLit(..) => true,
-        ExprT::UnOp(_, a) => expr_is_value_pure(a),
-        ExprT::BinOp(_, a, b) => expr_is_value_pure(a) && expr_is_value_pure(b),
-        ExprT::Cast(a, ty) => !matches!(ty.val, TypeT::SLProp) && expr_is_value_pure(a),
+        ExprT::UnOp(_, a) => expr_is_value_pure(env, a),
+        ExprT::BinOp(_, a, b) => expr_is_value_pure(env, a) && expr_is_value_pure(env, b),
+        ExprT::Cast(a, ty) => !matches!(ty.val, TypeT::SLProp) && expr_is_value_pure(env, a),
         // `(_Bool) _inline_pulse(M.p $(this.f))`: how a refinement names an F*
         // predicate, typically an opaque one, so that the refinement is a
         // single uninterpreted symbol to SMT in every context that carries
@@ -152,7 +163,7 @@ fn expr_is_value_pure(e: &Expr) -> bool {
                     InlinePulseToken::Verbatim(_)
                     | InlinePulseToken::TypeAntiquot { .. }
                     | InlinePulseToken::FieldAntiquot { .. } => true,
-                    InlinePulseToken::RValueAntiquot { expr, .. } => expr_is_value_pure(expr),
+                    InlinePulseToken::RValueAntiquot { expr, .. } => expr_is_value_pure(env, expr),
                     _ => false,
                 })
         }
@@ -162,14 +173,14 @@ fn expr_is_value_pure(e: &Expr) -> bool {
 
 /// The value-pure boolean conditions of a struct's declaration refinements
 /// (`_refine(c)` elaborates to `Refine(_, Cast(c, SLProp))`), outermost last.
-fn struct_value_refinements(decl: &StructDefn) -> Vec<Rc<Expr>> {
+fn struct_value_refinements(env: &Env, decl: &StructDefn) -> Vec<Rc<Expr>> {
     let mut out = vec![];
     let mut t: &Type = &decl.refines;
     loop {
         match &t.val {
             TypeT::Refine(inner, p) => {
                 if let ExprT::Cast(b, to) = &p.val {
-                    if matches!(to.val, TypeT::SLProp) && expr_is_value_pure(b) {
+                    if matches!(to.val, TypeT::SLProp) && expr_is_value_pure(env, b) {
                         out.push(b.clone());
                     }
                 }
@@ -1843,7 +1854,7 @@ impl<'a> Emitter<'a> {
             return None;
         };
         let decl = env.lookup_struct(name)?;
-        if struct_value_refinements(decl).is_empty() {
+        if struct_value_refinements(env, decl).is_empty() {
             return None;
         }
         Some(self.emit_name(Name::TypeRefRefine(k.into())))
@@ -6063,7 +6074,7 @@ impl<'a> Emitter<'a> {
         // predicate: what an `_array` of this struct asserts of its elements.
         // A named top-level function rather than a lambda, so every use is the
         // same term and the element lemmas' patterns match across modules.
-        let value_refines = struct_value_refinements(decl);
+        let value_refines = struct_value_refinements(env, decl);
         if !value_refines.is_empty() {
             let conj = value_refines
                 .iter()
@@ -8959,6 +8970,21 @@ impl<'a> Emitter<'a> {
             Doc::text("1.0R"),
             spec_var.clone(),
         ]);
+        // L24, as for an `_array` parameter: a pure refinement of the element
+        // type holds of every initialized element. Whoever supplies `_live(g)`
+        // (in the end, an entrypoint assumption about the initial contents)
+        // supplies this too, and every write through `_live(g)` keeps it.
+        let mut body = vec![pts_to];
+        if let Some(refine) = self.elem_refine_pred(env, elem) {
+            body.push(unaryfn(
+                Doc::text("pure"),
+                naryfn([
+                    Doc::text("Pulse.Lib.C.Array.array_spec_forall"),
+                    refine,
+                    spec_var.clone(),
+                ]),
+            ));
+        }
         let live = Doc::text("[@@pulse_eager_unfold]")
             .append(Doc::hardline())
             .append(mk_let(
@@ -8970,7 +8996,7 @@ impl<'a> Emitter<'a> {
                         name: spec_var,
                         ty: spec_ty,
                     }],
-                    vec![pts_to],
+                    body,
                 ),
             ));
 

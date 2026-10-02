@@ -20,6 +20,9 @@
 //   N4 max_small's loop over `struct plain`     -> Func_max_plain
 //   N5 `struct small` without its `_refine`     -> Func_read_small, Func_max_small
 //   N6 read_hidden without its reveal           -> Func_read_hidden
+//   N7 `struct slot` without its pool clause     -> Func_slot_pool
+//   N8 the global's `_live` without the element fact (no refinement on the
+//      `live_var_slots` predicate)                -> Func_slot_gid
 
 struct _refine(this.v < 100) small {
   uint32_t v;
@@ -122,4 +125,49 @@ uint32_t forward_hidden(_array struct hidden *a)
   _requires(a._length == 2)
 {
   return hidden_v(a[1]);
+}
+
+// A mutable array global of a refined struct: `_live(g)` carries the element
+// fact like an `_array` parameter does, so a read through the global yields
+// the refinement. Whoever supplies `_live(g)` (in the end an entry point's
+// precondition, i.e. an assumption about the initial contents) supplies the
+// fact too, and every write through it must keep it.
+//
+// The refinement may also compare a pointer field with the address of a
+// mutable array global: the name of such a global decays to a constant
+// handle, so the comparison is a fact about the value alone.
+struct item {
+  uint32_t v;
+};
+
+struct item pool_a[4];
+struct item pool_b[4];
+
+struct _refine(this.gid < 4)
+       _refine(this.pool == NULL || this.pool == pool_a || this.pool == pool_b)
+       slot {
+  uint32_t gid;
+  struct item *pool;
+};
+
+struct slot slots[3];
+
+uint32_t slot_gid(size_t i)
+  _requires(i < 3)
+  _preserves(_live(slots))
+  _ensures(return < 4)
+{
+  return slots[i].gid;
+}
+
+// The pointer can only be one of the two pools: no third case to handle.
+int slot_pool(struct slot *s)
+  _ensures(return == 0 || return == 1 || return == 2)
+{
+  if (s->pool == NULL)
+    return 0;
+  if (s->pool == pool_a)
+    return 1;
+  _assert(s->pool == pool_b);
+  return 2;
 }
