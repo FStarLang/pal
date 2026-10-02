@@ -1,0 +1,6 @@
+borrowed array-cell arguments for the same array must use the identical index expression
+borrowed array-cell arguments may alias at field path X
+borrowed array-cell argument variable `A` also appears in another call argument
+borrowed array-cell argument variable `I` also appears in another call argument
+array-cell pointer argument uses an index with side effects
+cannot pass an array-cell field directly to an _out parameter
