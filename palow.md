@@ -1328,14 +1328,6 @@ new facts about memory.
   so the index is a fact about the bytes that nothing yet has to respect.
   Until stage 3 lands we are strictly more permissive than ISO C, in the
   direction of accepting programs clang may miscompile.
-- A struct with no members -- a GNU extension, and one that turns up in
-  generated headers -- is not translated, and neither is a struct that embeds
-  one. A zero-byte object is degenerate in a byte-level model in a way it is
-  not in a field-wise one: it has no bytes to own, and when it is embedded it
-  shares its offset with whatever follows, so the object no longer splits into
-  disjoint fields and padding. `test/empty_struct` carries an `old-only`
-  marker and records the shape; Palow reports it as a skipped struct rather
-  than translating it weakly.
 - `size_t` is eight bytes and `SizeT.v` is assumed to be below `pow2 64`, for
   the same reason and with the same justification as `Ptr.addr_bound`.
 - Palow has no *total* function pointers. Divergence is inferred per body,
@@ -5676,9 +5668,68 @@ new facts about memory.
     members, and a struct that embeds one. `test/empty_struct` carries a new
     `old-only` marker, the mirror of `palow-only` — a test of something the
     old model covers and Palow does not yet, which should be a shrinking set.
+    (Milestone 21 closes it and removes the marker.)
 
     Census: 1169 specifications, 1140 with bodies, 1 admitted, 28 external,
     2 skipped. The three gaps are all the one empty-struct deviation. The
     census itself now passes a test's `extra_opts` and runs from the test's own
     directory, which it has to do for a test whose C needs its own `-D` and
     `-I` to compile at all.
+
+21. **Objects of size zero.** `struct empty { };` is a GNU extension that both
+    GCC and Clang accept and that turns up in real headers, so it has to be
+    translated rather than skipped. It is the one place where a byte-level
+    model is harder than a field-wise one: the object owns no bytes, so a
+    points-to built out of `mem_pts_to` has nothing to be built from, and when
+    such a member is embedded it shares its offset with whatever follows it, so
+    the object no longer tiles into disjoint pieces that `mem_split` can carve.
+
+    The resolution is one equation in layer 0:
+
+    ```
+    val mem_pts_to_empty (a: ptr) (p: perm) (b: bytes)
+      : Lemma (requires len b == 0) (ensures mem_pts_to a p b == emp)
+    ```
+
+    It is sound because every other axiom in that file that says something
+    about an address — `mem_pts_to_not_null`, `mem_pts_to_perm_bound`,
+    `mem_pts_to_disjoint` — is already guarded by `len b > 0`, and the one that
+    is not, `mem_pts_to_fits`, says nothing new at length zero because
+    `Ptr.addr_bound` already puts every address below `pow2 64`. In other
+    words, the guards that were written to let `malloc(0)` return a
+    non-dereferenceable pointer are exactly the guards that make a zero-length
+    range the unit of the heap. `Pulse.Lib.C.Palow.Empty` packages the two
+    directions as `mem_pts_to_nil` and `drop_mem_pts_to_nil` so that generated
+    code calls a ghost step instead of rewriting with an slprop equality; the
+    range is an explicit argument of `mem_pts_to_nil`, because its caller is a
+    `_conceal` that already knows which empty slice of the enclosing object it
+    means and an existential there would not match.
+
+    With that, nothing else about empty structs is special-cased in the model.
+    In the emitter there are two changes:
+
+    - A zero-size member is **not a region**. Regions tile an object and are
+      carved apart by `mem_split`; a zero-length piece shares its offset with
+      its successor, so including it would make the split sequence ambiguous —
+      and, concretely, `struct wrapper { struct empty e; int x; }` would try to
+      split at offset 0 twice. Instead such a member's points-to is conjured
+      where it stands and discarded where it is given up: `mem_pts_to_nil`
+      before `_conceal` and before `_claim_uninit`, `drop_mem_pts_to_nil`
+      after `_reveal` and after `_reveal_uninit`. The range has to be named at
+      those four points, because the enclosing object's own range is in the
+      context at the same address.
+    - A struct with *no* members gets one explicit zero-length gap, so that
+      `_padding` is a real `mem_pts_to` and every existing loop over regions
+      generates its byte view unchanged rather than needing a degenerate copy.
+      The record itself gets a `pal_empty_struct_placeholder: unit` field —
+      the same name the old emitter uses — because F\* has no empty record,
+      and every literal site goes through one `record_fields` helper so that
+      the declaration and the uses cannot drift apart.
+
+    A zero-*length array* member -- `int values[0];`, which is how the same
+    idiom is spelled portably -- falls out of the same treatment, and a struct
+    that has nothing but those is the case that needs the explicit gap.
+
+    `test/empty_struct`'s `old-only` marker is gone and `get_x` has a body.
+    Census: 1169 specifications, 1141 with bodies, 0 admitted, 28 external,
+    0 skipped -- the first time Palow has no gaps at all.
