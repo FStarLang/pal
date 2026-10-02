@@ -58,6 +58,11 @@ root and index variables must not appear in other arguments, and the index must
 be side-effect-free. If any rule is violated PAL reports a diagnostic and the
 program should use the explicit local-pointer borrow/return form instead.
 
+The same borrow/return lowering applies when such a call is the whole
+right-hand side of an assignment, a local initializer, or a `return`. For
+assignments, the left-hand side must not itself mention the borrowed array; PAL
+rejects forms like `a[i].x = f(&a[i].y)` with a diagnostic.
+
 ## Generated function signature
 
 For `void foo(_array unsigned *a) _requires(a._length == 2) ...`, PAL emits in `Func_foo.fsti`:

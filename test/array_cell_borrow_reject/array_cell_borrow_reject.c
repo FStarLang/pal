@@ -9,6 +9,7 @@ void UseTwo(uint32_t* x, uint32_t* y) { *x = 1; *y = 2; }
 void UseArray(uint32_t* x, _array Pair* a) { *x = 0; }
 void UseIndex(uint32_t* x, size_t i) { *x = (uint32_t)i; }
 void OutOne(_out uint32_t* x) { *x = 3; }
+uint32_t ReadOne(uint32_t* x) { return *x; }
 
 void DifferentIndex(_array Pair* A, size_t Count, size_t I, size_t J)
   _requires(A._length == Count)
@@ -55,5 +56,13 @@ void OutField(_array Pair* A, size_t Count, size_t I)
 {
     if (I < Count) {
         OutOne(&A[I].X);
+    }
+}
+
+void AssignTargetOverlap(_array Pair* A, size_t Count, size_t I)
+  _requires(A._length == Count)
+{
+    if (I < Count) {
+        A[I].X = ReadOne(&A[I].Y);
     }
 }

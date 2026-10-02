@@ -1042,6 +1042,7 @@ impl<'a> Emitter<'a> {
         &mut self,
         args: &[Rc<Expr>],
         borrowed: &[BorrowedArrayCellArg],
+        assignment_target: Option<&Expr>,
     ) -> bool {
         let mut ok = true;
         let borrowed_indices: HashSet<usize> = borrowed.iter().map(|b| b.arg_index).collect();
@@ -1085,6 +1086,27 @@ impl<'a> Emitter<'a> {
                             ),
                             &b.cell.loc,
                         );
+                    ok = false;
+                }
+            }
+        }
+
+        if let Some(target) = assignment_target {
+            let mut target_vars = HashSet::new();
+            Self::collect_expr_vars(target, &mut target_vars);
+            for b in borrowed {
+                let mut forbidden = HashSet::new();
+                if let Some(root) = Self::root_var(&b.arr) {
+                    forbidden.insert(root);
+                }
+                if let Some(v) = target_vars.iter().find(|v| forbidden.contains(*v)) {
+                    self.report(
+                        format!(
+                            "assignment target overlaps borrowed array-cell argument variable `{}`; use an explicit local pointer form",
+                            v
+                        ),
+                        &target.loc,
+                    );
                     ok = false;
                 }
             }
@@ -1177,6 +1199,7 @@ impl<'a> Emitter<'a> {
         env: &Env,
         fn_decl: &FnDecl,
         args: &[Rc<Expr>],
+        assignment_target: Option<&Expr>,
     ) -> Option<(Vec<Doc>, Vec<Doc>, Vec<Doc>)> {
         let mut borrowed = Vec::new();
         for (i, arg) in args.iter().enumerate() {
@@ -1187,7 +1210,7 @@ impl<'a> Emitter<'a> {
         if borrowed.is_empty() {
             return None;
         }
-        if !self.validate_borrowed_array_cell_args(args, &borrowed) {
+        if !self.validate_borrowed_array_cell_args(args, &borrowed, assignment_target) {
             return None;
         }
 
@@ -1361,6 +1384,142 @@ impl<'a> Emitter<'a> {
                     .append(body)
                     .append(Doc::text(")"))
             })
+    }
+
+    fn emit_assignment_from_doc(&mut self, env: &Env, x: &Rc<Expr>, rhs_doc: Doc) -> Doc {
+        if let Some((cell, arr, idx, path)) = Self::decompose_array_member_lvalue(x) {
+            let arr_ty = env.infer_expr(&arr).ok().map(|ty| env.vtype_whnf(ty));
+            let is_arrayptr = arr_ty
+                .as_ref()
+                .map(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr)))
+                .unwrap_or(false);
+            let is_array = arr_ty
+                .as_ref()
+                .map(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Array)))
+                .unwrap_or(false);
+            let applies = idx.is_some() || is_array || is_arrayptr;
+            if applies && let Some(upd_fn) = self.emit_array_member_update_fn(env, &cell, &path) {
+                let fn_name = if is_arrayptr {
+                    "arrayptr_update"
+                } else {
+                    "array_update"
+                };
+                let arr_doc = match self.emit_expr(env, &arr) {
+                    ExprKind::ArrayLValue(arr_doc) => arr_doc,
+                    arr_doc => arr_doc.to_rvalue(),
+                };
+                let idx_doc = match &idx {
+                    Some(idx) => self.emit_rvalue(env, idx),
+                    None => Doc::text("0sz"),
+                };
+                let rhs = match self.bitfield_member_mask(env, x) {
+                    Some((width, mask_fn)) => {
+                        naryfn([Doc::text(mask_fn), Doc::text(width.to_string()), rhs_doc])
+                    }
+                    None => rhs_doc,
+                };
+                return naryfn([Doc::text(fn_name), arr_doc, idx_doc, upd_fn, rhs])
+                    .append(";")
+                    .nest(2)
+                    .group();
+            }
+        }
+        if let ExprT::Index(arr, idx) = &x.val {
+            let is_arrayptr = env
+                .infer_expr(arr)
+                .map(|ty| {
+                    matches!(
+                        env.vtype_whnf(ty).val,
+                        TypeT::Pointer(_, PointerKind::ArrayPtr)
+                    )
+                })
+                .unwrap_or(false);
+            let fn_name = if is_arrayptr {
+                "arrayptr_write"
+            } else {
+                "array_write"
+            };
+            let arr_doc = match self.emit_expr(env, arr) {
+                ExprKind::ArrayLValue(arr_doc) => arr_doc,
+                arr_doc => arr_doc.to_rvalue(),
+            };
+            return naryfn([
+                Doc::text(fn_name),
+                arr_doc,
+                self.emit_rvalue(env, idx),
+                rhs_doc,
+            ])
+            .append(";")
+            .nest(2)
+            .group();
+        }
+        if let ExprT::Deref(inner) = &x.val {
+            let write_fn = env
+                .infer_expr(inner)
+                .map(|ty| match env.vtype_whnf(ty).val {
+                    TypeT::Pointer(_, PointerKind::Array) => Some("array_write"),
+                    TypeT::Pointer(_, PointerKind::ArrayPtr) => Some("arrayptr_write"),
+                    _ => None,
+                })
+                .unwrap_or(None);
+            if let Some(write_fn) = write_fn {
+                return naryfn([
+                    Doc::text(write_fn),
+                    self.emit_rvalue(env, inner),
+                    Doc::text("0sz"),
+                    rhs_doc,
+                ])
+                .append(";")
+                .nest(2)
+                .group();
+            }
+        }
+        if let ExprT::Member(base, fld) = &x.val {
+            if let Ok(base_ty) = env.infer_expr(base) {
+                let base_ty = env.vtype_whnf(base_ty);
+                if let TypeT::TypeRef(TypeRefKind::Union(union_name)) = &base_ty.val {
+                    let ctor = self.emit_name(Name::UnionFieldConstructor(
+                        union_name.val.clone(),
+                        fld.val.clone(),
+                    ));
+                    return self
+                        .emit_lvalue(env, base)
+                        .append(Doc::line())
+                        .append(":=")
+                        .group()
+                        .append(Doc::line())
+                        .append(unaryfn(ctor, rhs_doc))
+                        .append(";")
+                        .group()
+                        .nest(2);
+                }
+            }
+            let rhs = match self.bitfield_member_mask(env, x) {
+                Some((width, mask_fn)) => {
+                    naryfn([Doc::text(mask_fn), Doc::text(width.to_string()), rhs_doc])
+                }
+                None => rhs_doc,
+            };
+            return self
+                .emit_lvalue(env, x)
+                .append(Doc::line())
+                .append(":=")
+                .group()
+                .append(Doc::line())
+                .append(rhs)
+                .append(";")
+                .group()
+                .nest(2);
+        }
+        self.emit_lvalue(env, x)
+            .append(Doc::line())
+            .append(":=")
+            .group()
+            .append(Doc::line())
+            .append(rhs_doc)
+            .append(";")
+            .group()
+            .nest(2)
     }
 
     /// Give a raw address (`core_ref`) the pointer kind an integer-to-pointer
@@ -5137,7 +5296,7 @@ impl<'a> Emitter<'a> {
                         && let Some(fn_decl) = env.lookup_fn(f)
                     {
                         if let Some((prelude, emitted_args, postlude)) =
-                            self.plan_borrowed_array_cell_call(env, &fn_decl, args)
+                            self.plan_borrowed_array_cell_call(env, &fn_decl, args, None)
                         {
                             let call_doc = Doc::concat(
                                 prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
@@ -5338,18 +5497,56 @@ impl<'a> Emitter<'a> {
                             .append(not_null)
                     }
                 }
-                StmtT::Let(x, ty, value) => Doc::text("let ")
-                    .append(self.emit_name(Name::Var(x.val.clone())))
-                    .append(" :")
-                    .append(Doc::line())
-                    .append(self.emit_type(env, ty))
-                    .append(Doc::line())
-                    .append("=")
-                    .group()
-                    .append(Doc::line().append(self.emit_rvalue(env, value)).nest(2))
-                    .append(";")
-                    .nest(2)
-                    .group(),
+                StmtT::Let(x, ty, value) => {
+                    if let ExprT::FnCall(f, args) = &value.val
+                        && let Some(fn_decl) = env.lookup_fn(f)
+                        && let Some((prelude, emitted_args, postlude)) =
+                            self.plan_borrowed_array_cell_call(env, &fn_decl, args, None)
+                    {
+                        let init = Doc::text("let ")
+                            .append(self.emit_name(Name::Var(x.val.clone())))
+                            .append(" :")
+                            .append(Doc::line())
+                            .append(self.emit_type(env, ty))
+                            .append(Doc::line())
+                            .append("=")
+                            .group()
+                            .append(Doc::line())
+                            .append(parens(
+                                self.emit_name(Name::Fn(f.val.clone()))
+                                    .append(Doc::concat(
+                                        emitted_args.into_iter().map(|arg| Doc::line().append(arg)),
+                                    ))
+                                    .nest(2),
+                            ))
+                            .append(";")
+                            .nest(2)
+                            .group();
+                        return Doc::concat(
+                            prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                        )
+                        .append(init)
+                        .append(if postlude.is_empty() {
+                            Doc::nil()
+                        } else {
+                            Doc::hardline().append(Doc::concat(
+                                postlude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                            ))
+                        });
+                    }
+                    Doc::text("let ")
+                        .append(self.emit_name(Name::Var(x.val.clone())))
+                        .append(" :")
+                        .append(Doc::line())
+                        .append(self.emit_type(env, ty))
+                        .append(Doc::line())
+                        .append("=")
+                        .group()
+                        .append(Doc::line().append(self.emit_rvalue(env, value)).nest(2))
+                        .append(";")
+                        .nest(2)
+                        .group()
+                }
                 StmtT::DeclStackArray {
                     name,
                     elem_type,
@@ -5431,6 +5628,27 @@ impl<'a> Emitter<'a> {
                         .append(";")
                         .nest(2)
                         .group();
+                    }
+                    if let ExprT::FnCall(f, args) = &t.val
+                        && let Some(fn_decl) = env.lookup_fn(f)
+                        && let Some((prelude, emitted_args, postlude)) =
+                            self.plan_borrowed_array_cell_call(env, &fn_decl, args, Some(x))
+                    {
+                        let call = parens(
+                            self.emit_name(Name::Fn(f.val.clone()))
+                                .append(Doc::concat(
+                                    emitted_args.into_iter().map(|arg| Doc::line().append(arg)),
+                                ))
+                                .nest(2),
+                        );
+                        return Doc::concat(
+                            prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                        )
+                        .append(self.emit_assignment_from_doc(env, x, call))
+                        .append(Doc::hardline())
+                        .append(Doc::concat(
+                            postlude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                        ));
                     }
                     // Function-pointer store (`fp = add`, `fp = other`, `fp = 0`,
                     // ...) needs no special handling: the ref keeps ordinary
@@ -5906,7 +6124,7 @@ impl<'a> Emitter<'a> {
                         && let Some(fn_decl) = env.lookup_fn(f)
                     {
                         if let Some((prelude, emitted_args, postlude)) =
-                            self.plan_borrowed_array_cell_call(env, &fn_decl, args)
+                            self.plan_borrowed_array_cell_call(env, &fn_decl, args, None)
                         {
                             let ret = self.fresh_tmp("return");
                             return Doc::concat(
