@@ -52,6 +52,12 @@ struct Cli {
     #[arg(short = 'I', help = "Additional include search paths")]
     include_paths: Vec<String>,
 
+    #[arg(
+        short = 'D',
+        help = "Preprocessor definitions, e.g. -DFOO or -DFOO=bar"
+    )]
+    defines: Vec<String>,
+
     #[arg(help = "C source files to translate")]
     files: Vec<String>,
 }
@@ -175,7 +181,8 @@ fn main() {
             std::process::exit(1);
         }
 
-        let (tu, file_diags) = clang::parse_file(&file_name, &cli.include_paths, &mut *vfs);
+        let (tu, file_diags) =
+            clang::parse_file(&file_name, &cli.include_paths, &cli.defines, &mut *vfs);
         combined_tu
             .main_file_names
             .push(tu.main_file_names[0].clone());

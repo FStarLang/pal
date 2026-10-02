@@ -26,6 +26,7 @@ pub struct Ctx<'a> {
     vfs: &'a mut dyn VFS,
     input_file_name: String,
     include_paths: Vec<String>,
+    defines: Vec<String>,
     interned_strs: HashSet<Rc<str>>,
     translation_unit: TranslationUnit,
     diagnostics: Diagnostics,
@@ -33,13 +34,19 @@ pub struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    fn new(input_file_name: String, include_paths: Vec<String>, vfs: &'a mut dyn VFS) -> Ctx<'a> {
+    fn new(
+        input_file_name: String,
+        include_paths: Vec<String>,
+        defines: Vec<String>,
+        vfs: &'a mut dyn VFS,
+    ) -> Ctx<'a> {
         let input_fn: &str = &input_file_name;
         let main_file_name: Rc<str> = Rc::from(input_fn);
         Ctx {
             vfs,
             input_file_name,
             include_paths,
+            defines,
             interned_strs: HashSet::new(),
             translation_unit: TranslationUnit {
                 main_file_names: vec![main_file_name],
@@ -60,6 +67,14 @@ impl<'a> Ctx<'a> {
 
     fn get_include_path(&self, idx: usize) -> &str {
         &self.include_paths[idx]
+    }
+
+    fn get_define_count(&self) -> usize {
+        self.defines.len()
+    }
+
+    fn get_define(&self, idx: usize) -> &str {
+        &self.defines[idx]
     }
 
     fn set_target_int_widths(&mut self, widths: TargetIntWidths) {
@@ -473,8 +488,13 @@ impl DeclBuilder {
         })
     }
     fn arg_anon(&mut self, ty: Rc<Type>, mode: ParamMode) {
+        // Give the parameter the same synthesized name the emitter would print
+        // for it, so that the environment and the generated Pulse agree. An
+        // unregistered name resolves as an lvalue and picks up a spurious
+        // dereference in the generated `requires`/`ensures` (see Env::push_arg).
+        let name = Rc::<str>::from(format!("_unnamed{}", self.args.len())).with_loc(ty.loc.clone());
         self.args.push(FnArg {
-            name: None,
+            name: Some(name),
             ty,
             mode,
         })
@@ -997,9 +1017,15 @@ fn mk_label(loc: Rc<SourceInfo>, label: Rc<Ident>, ensures: Exprs) -> Rc<Stmt> {
 pub fn parse_file(
     file_name: &str,
     include_paths: &[String],
+    defines: &[String],
     vfs: &mut dyn VFS,
 ) -> (TranslationUnit, Diagnostics) {
-    let mut ctx = Ctx::new(file_name.to_string(), include_paths.to_vec(), vfs);
+    let mut ctx = Ctx::new(
+        file_name.to_string(),
+        include_paths.to_vec(),
+        defines.to_vec(),
+        vfs,
+    );
     generated::parse_file(&mut ctx);
     (ctx.translation_unit, ctx.diagnostics)
 }
