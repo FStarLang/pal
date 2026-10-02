@@ -640,6 +640,12 @@ impl NameMangling {
         unreachable!()
     }
 
+    fn fresh_local(&mut self, base: String) -> Rc<str> {
+        let name = self.pick_new(base);
+        self.used.insert(name.clone());
+        name
+    }
+
     fn mangle(&mut self, name: &Name) -> Rc<str> {
         if let Some(mangled) = self.map.get(name) {
             return mangled.clone();
@@ -801,6 +807,13 @@ struct Emitter<'a> {
     /// only borrows, one assertion per borrowed parameter. A branch that reads
     /// through one of these restates it on the way out; see `borrow_bindings`.
     current_fn_borrow_asserts: Vec<Doc>,
+    /// Immutable entry-value bindings for named parameters in the function body.
+    /// Used to give `_old(param)` a stable meaning in loop invariants and label
+    /// postconditions, where Pulse's `old` term form is not accepted.
+    current_fn_param_entries: HashMap<Rc<str>, Doc>,
+    preserved_param_deref_entries: HashSet<Rc<str>>,
+    emit_params_as_entries: bool,
+    emit_old_params_as_entries: bool,
     tmp_counter: usize,
     /// Literal `NULL` arguments that have been given a name for the duration
     /// of a call, keyed by the address of the argument expression. See
@@ -821,6 +834,57 @@ impl<'a> Emitter<'a> {
         let tmp = Doc::text(format!("__pal_{}_{}", prefix, self.tmp_counter));
         self.tmp_counter += 1;
         tmp
+    }
+
+    fn with_old_params_as_entries<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let old = self.emit_old_params_as_entries;
+        self.emit_old_params_as_entries = true;
+        let result = f(self);
+        self.emit_old_params_as_entries = old;
+        result
+    }
+
+    fn with_preserved_param_deref_entries<T>(
+        &mut self,
+        preserved: HashSet<Rc<str>>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let old = std::mem::replace(&mut self.preserved_param_deref_entries, preserved);
+        let result = f(self);
+        self.preserved_param_deref_entries = old;
+        result
+    }
+
+    fn collect_preserved_old_params(&self, e: &Expr, out: &mut HashSet<Rc<str>>) {
+        match &e.val {
+            ExprT::BinOp(BinOp::LogAnd, l, r) => {
+                self.collect_preserved_old_params(l, out);
+                self.collect_preserved_old_params(r, out);
+            }
+            ExprT::BinOp(BinOp::Eq, l, r) => {
+                if let Some(param) = old_param_equality(l, r)
+                    && self.current_fn_param_entries.contains_key(&param)
+                {
+                    out.insert(param);
+                }
+            }
+            ExprT::Cast(inner, _) => self.collect_preserved_old_params(inner, out),
+            _ => {}
+        }
+    }
+
+    fn set_fn_param_entries(&mut self, decl: &FnDecl) {
+        self.current_fn_param_entries.clear();
+        for arg in decl.args.iter() {
+            if let Some(name) = &arg.name {
+                let var_name = Doc::text(self.nm.mangle(&Name::Var(name.val.clone())).to_string());
+                let entry_ident = self
+                    .nm
+                    .fresh_local(format!("{}__entry", var_name.pretty(80)));
+                self.current_fn_param_entries
+                    .insert(name.val.clone(), Doc::text(entry_ident.to_string()));
+            }
+        }
     }
 
     fn decompose_array_cell_ref(
@@ -2258,6 +2322,12 @@ impl<'a> Emitter<'a> {
 
     /// Emit a Name with full module qualification when it refers to a different module.
     fn emit_name(&mut self, name: Name) -> Doc {
+        if self.emit_params_as_entries
+            && let Name::Var(v) = &name
+            && let Some(entry) = self.current_fn_param_entries.get(v)
+        {
+            return entry.clone();
+        }
         let mangled = self.nm.mangle(&name).to_string();
         // For Name::Fn, look up the actual module from the declaration-based map
         let owner_module = if let Name::Fn(ref v) = name {
@@ -3651,6 +3721,11 @@ impl<'a> Emitter<'a> {
                             ExprKind::LValue(Doc::text("(admit())"))
                         }
                     }
+                } else if let ExprT::Var(x) = &inner.val
+                    && self.preserved_param_deref_entries.contains(&x.val)
+                    && let Some(entry) = self.current_fn_param_entries.get(&x.val)
+                {
+                    ExprKind::LValue(annotated(v, || entry.clone()))
                 } else {
                     ExprKind::LValue(annotated(v, || self.emit_expr(env, inner).to_rvalue()))
                 }
@@ -5241,7 +5316,16 @@ impl<'a> Emitter<'a> {
                         unaryfn(Doc::text("live"), self.emit_lvalue(env, v))
                     }
                 }
-                ExprT::Old(v) => unaryfn(Doc::text("old"), self.emit_rvalue(env, v)),
+                ExprT::Old(v) => {
+                    if self.emit_old_params_as_entries
+                        && let ExprT::Var(x) = &v.val
+                        && let Some(entry) = self.current_fn_param_entries.get(&x.val)
+                    {
+                        entry.clone()
+                    } else {
+                        unaryfn(Doc::text("old"), self.emit_rvalue(env, v))
+                    }
+                }
                 ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
                     let mut env = env.clone();
                     env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
@@ -6822,7 +6906,7 @@ impl<'a> Emitter<'a> {
                             doc = doc
                                 .append(Doc::hardline())
                                 .append("ensures ")
-                                .append(self.emit_rvalue(env, e));
+                                .append(self.with_old_params_as_entries(|s| s.emit_rvalue(env, e)));
                         }
                         doc.append(Doc::hardline())
                             .append("label ")
@@ -6847,7 +6931,9 @@ impl<'a> Emitter<'a> {
                         .append(Doc::line())
                         .append(Doc::concat(inv.iter().map(|inv| {
                             Doc::text("invariant ")
-                                .append(self.emit_rvalue(env, inv))
+                                .append(
+                                    self.with_old_params_as_entries(|s| s.emit_rvalue(env, inv)),
+                                )
                                 .group()
                                 .nest(2)
                                 .append(Doc::line())
@@ -6952,11 +7038,17 @@ impl<'a> Emitter<'a> {
                     ensures,
                 } => {
                     let mut doc = block(self.emit_stmts(env, body));
+                    let mut preserved = HashSet::new();
                     for e in ensures.iter() {
-                        doc = doc
-                            .append(Doc::hardline())
-                            .append("ensures ")
-                            .append(self.emit_rvalue(env, e));
+                        self.collect_preserved_old_params(e, &mut preserved);
+                    }
+                    for e in ensures.iter() {
+                        let preserved = preserved.clone();
+                        doc = doc.append(Doc::hardline()).append("ensures ").append(
+                            self.with_preserved_param_deref_entries(preserved, |s| {
+                                s.with_old_params_as_entries(|s| s.emit_rvalue(env, e))
+                            }),
+                        );
                     }
                     doc.append(Doc::hardline())
                         .append("label ")
@@ -6975,6 +7067,91 @@ fn block(stmts: Doc) -> Doc {
         .append(Doc::hardline())
         .append(Doc::text("}"))
         .group()
+}
+
+fn old_param_equality(l: &Expr, r: &Expr) -> Option<Rc<str>> {
+    fn as_var(e: &Expr) -> Option<Rc<str>> {
+        match &e.val {
+            ExprT::Var(x) => Some(x.val.clone()),
+            ExprT::Cast(inner, _) => as_var(inner),
+            _ => None,
+        }
+    }
+    fn as_old_var(e: &Expr) -> Option<Rc<str>> {
+        match &e.val {
+            ExprT::Old(inner) => as_var(inner),
+            ExprT::Cast(inner, _) => as_old_var(inner),
+            _ => None,
+        }
+    }
+    match (as_var(l), as_old_var(r)) {
+        (Some(v), Some(o)) if v == o => Some(v),
+        _ => match (as_old_var(l), as_var(r)) {
+            (Some(o), Some(v)) if v == o => Some(v),
+            _ => None,
+        },
+    }
+}
+
+fn expr_has_old_param(e: &Expr, params: &HashSet<Rc<str>>) -> bool {
+    let mut found = false;
+    walk_expr_tree(e, &mut |e| {
+        if let ExprT::Old(inner) = &e.val
+            && let ExprT::Var(x) = &inner.val
+            && params.contains(&x.val)
+        {
+            found = true;
+        }
+    });
+    found
+}
+
+fn stmts_need_entry_old(stmts: &[Rc<Stmt>], params: &HashSet<Rc<str>>) -> bool {
+    fn any_expr(exprs: &[Rc<Expr>], params: &HashSet<Rc<str>>) -> bool {
+        exprs.iter().any(|e| expr_has_old_param(e, params))
+    }
+
+    stmts.iter().any(|stmt| match &stmt.val {
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ensures,
+            ..
+        } => {
+            any_expr(ensures, params)
+                || stmts_need_entry_old(then_branch, params)
+                || stmts_need_entry_old(else_branch, params)
+        }
+        StmtT::Match {
+            branches,
+            default_branch,
+            ensures,
+            ..
+        } => {
+            any_expr(ensures, params)
+                || branches
+                    .iter()
+                    .any(|b| stmts_need_entry_old(&b.body, params))
+                || stmts_need_entry_old(default_branch, params)
+        }
+        StmtT::While {
+            inv,
+            requires,
+            ensures,
+            body,
+            ..
+        } => {
+            any_expr(inv, params)
+                || any_expr(requires, params)
+                || any_expr(ensures, params)
+                || stmts_need_entry_old(body, params)
+        }
+        StmtT::Label { ensures, .. } => any_expr(ensures, params),
+        StmtT::GotoBlock { body, ensures, .. } => {
+            any_expr(ensures, params) || stmts_need_entry_old(body, params)
+        }
+        _ => false,
+    })
 }
 
 impl<'a> Emitter<'a> {
@@ -10238,16 +10415,41 @@ impl<'a> Emitter<'a> {
             .iter()
             .filter_map(|a| a.name.as_ref().map(|n| (n.val.clone(), a.mode)))
             .collect();
-        let decl_doc = self.emit_fn_sig(env, decl).nest(2).append(Doc::hardline());
+        let param_names: HashSet<Rc<str>> = decl
+            .args
+            .iter()
+            .filter_map(|a| a.name.as_ref().map(|n| n.val.clone()))
+            .collect();
+        let needs_entry_old = stmts_need_entry_old(body, &param_names);
+        let decl_doc = if needs_entry_old {
+            self.set_fn_param_entries(decl);
+            let old = self.emit_params_as_entries;
+            self.emit_params_as_entries = true;
+            let doc = self
+                .emit_fn_sig_inner(env, decl, false)
+                .nest(2)
+                .append(Doc::hardline());
+            self.emit_params_as_entries = old;
+            doc
+        } else {
+            self.current_fn_param_entries.clear();
+            self.emit_fn_sig(env, decl).nest(2).append(Doc::hardline())
+        };
+        self.emit_old_params_as_entries = false;
         let arg_redecl_as_mut = Doc::concat(decl.args.iter().filter_map(|arg| {
             arg.name.as_ref().map(|n| {
                 Doc::line().append(annotated(n, || {
                     Doc::group({
-                        let n = self.emit_name(Name::Var(n.val.clone()));
+                        let var_name = self.emit_name(Name::Var(n.val.clone()));
+                        let entry_name = self
+                            .current_fn_param_entries
+                            .get(&n.val)
+                            .cloned()
+                            .unwrap_or_else(|| var_name.clone());
                         Doc::text("let mut ")
-                            .append(n.clone())
+                            .append(var_name)
                             .append(" = ")
-                            .append(n)
+                            .append(entry_name)
                             .append(";")
                     })
                 }))
@@ -11232,6 +11434,10 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         current_fn_total: false,
         current_fn_param_modes: HashMap::new(),
         current_fn_borrow_asserts: Vec::new(),
+        current_fn_param_entries: HashMap::new(),
+        preserved_param_deref_entries: HashSet::new(),
+        emit_params_as_entries: false,
+        emit_old_params_as_entries: false,
         tmp_counter: 0,
         null_arg_names: HashMap::new(),
     };
