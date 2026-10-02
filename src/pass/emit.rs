@@ -796,6 +796,74 @@ impl<'a> Emitter<'a> {
         tmp
     }
 
+    fn direct_array_cell_ref_arg(
+        &self,
+        env: &Env,
+        fn_decl: &FnDecl,
+        i: usize,
+        arg: &Rc<Expr>,
+    ) -> Option<(Rc<Expr>, Rc<Expr>, bool)> {
+        let ExprT::Ref(inner) = &arg.val else {
+            return None;
+        };
+        let ExprT::Index(arr, idx) = &inner.val else {
+            return None;
+        };
+        let param = fn_decl.args.get(i)?;
+        let param_is_ref = matches!(
+            env.vtype_whnf(param.ty.clone().into()).val,
+            TypeT::Pointer(_, PointerKind::Ref)
+        );
+        let arr_is_array = env
+            .infer_expr(arr)
+            .ok()
+            .map(|t| env.vtype_whnf(t))
+            .is_some_and(|t| matches!(&t.val, TypeT::Pointer(_, PointerKind::Array)));
+        if param_is_ref && arr_is_array {
+            Some((
+                arr.clone(),
+                idx.clone(),
+                matches!(param.mode, ParamMode::Const),
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn emit_array_cell_read(&mut self, env: &Env, arr: &Rc<Expr>, idx: &Rc<Expr>) -> Doc {
+        naryfn([
+            Doc::text("array_cell_read"),
+            self.emit_rvalue(env, arr),
+            self.emit_rvalue(env, idx),
+        ])
+        .append(";")
+        .nest(2)
+        .group()
+    }
+
+    fn emit_array_cell_return_unchanged(
+        &mut self,
+        env: &Env,
+        arr: &Rc<Expr>,
+        idx: &Rc<Expr>,
+    ) -> Doc {
+        let arr_doc = self.emit_rvalue(env, arr);
+        let idx_doc = self.emit_rvalue(env, idx);
+        let cell_ref = naryfn([
+            Doc::text("array_cell_ref"),
+            arr_doc.clone(),
+            unaryfn(Doc::text("SizeT.v"), idx_doc),
+        ]);
+        Doc::text("Pulse.Lib.C.MaybeUninit.intro_maybe_some ")
+            .append(cell_ref)
+            .append(";")
+            .append(Doc::hardline())
+            .append(naryfn([Doc::text("array_return_cell_unchanged"), arr_doc]))
+            .append(";")
+            .nest(2)
+            .group()
+    }
+
     /// Give a raw address (`core_ref`) the pointer kind an integer-to-pointer
     /// cast asks for. The result carries no ownership whichever kind
     /// it is -- `core_to_ref` recovers a typed reference, not a `pts_to`.
@@ -4570,6 +4638,7 @@ impl<'a> Emitter<'a> {
                         && let Some(fn_decl) = env.lookup_fn(f)
                     {
                         let mut prelude = Vec::new();
+                        let mut postlude = Vec::new();
                         let mut emitted_args = Vec::new();
                         for (i, arg) in args.iter().enumerate() {
                             let callee_expects_array = fn_decl.args.get(i).is_some_and(|fn_arg| {
@@ -4578,64 +4647,16 @@ impl<'a> Emitter<'a> {
                                     TypeT::Pointer(_, PointerKind::Array)
                                 )
                             });
-                            // `&a[i]` passed into a plain `int *` param (a Pulse
+                            // `&a[i]` passed into a plain `T *` parameter (a Pulse
                             // `ref`) where `a` is a real `_array`: borrow cell `i`
-                            // out of the array with `array_borrow_cell`. The
-                            // borrow is emitted as a call prelude and the fresh
-                            // binding passed in place of the address-of
-                            // expression. (The name is not strictly required --
-                            // an inline `f (array_borrow_cell a i)` would be
-                            // A-normalized by Pulse to the same binding.) The
-                            // returning side is invoked manually by the user via
-                            // inline Pulse.
-                            //
-                            // The cell is handed out as `pts_to_maybe_uninit`
-                            // carrying its current optional value. At the call the
-                            // maybe-cell adapts to whatever the callee expects via
-                            // the `[@@pulse_intro]` coercions -- `reveal_maybe` for
-                            // a readable `pts_to` (when the cell is known `Some`),
-                            // `forget_maybe` for a write-only `pts_to_uninit`
-                            // (`_out`) -- so the call itself typechecks with no
-                            // ghost step. PAL does NOT, however, emit the matching
-                            // return: after the call the (now written) cell is left
-                            // carved out of the array, so a function whose
-                            // postcondition owns the *whole* array cannot
-                            // re-establish it and F* reports leftover resources.
-                            // Handing a cell to such a function therefore requires
-                            // borrowing into a local (`T* p = &a[i];`) and giving
-                            // the cell back explicitly (`intro_maybe_some` + the
-                            // index-inferring `array_return_cell`); the direct
-                            // `f(&a[i])` form carries the borrow one way only.
-                            let borrow_cell = match &arg.val {
-                                ExprT::Ref(inner) => match &inner.val {
-                                    ExprT::Index(arr, idx) => {
-                                        let param = fn_decl.args.get(i);
-                                        let param_is_ref = param.is_some_and(|fn_arg| {
-                                            matches!(
-                                                env.vtype_whnf(fn_arg.ty.clone().into()).val,
-                                                TypeT::Pointer(_, PointerKind::Ref)
-                                            )
-                                        });
-                                        let arr_is_array = env
-                                            .infer_expr(arr)
-                                            .ok()
-                                            .map(|t| env.vtype_whnf(t))
-                                            .is_some_and(|t| {
-                                                matches!(
-                                                    &t.val,
-                                                    TypeT::Pointer(_, PointerKind::Array)
-                                                )
-                                            });
-                                        if param_is_ref && arr_is_array {
-                                            Some((arr.clone(), idx.clone()))
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    _ => None,
-                                },
-                                _ => None,
-                            };
+                            // with `array_borrow_cell` and pass a fresh binding.
+                            // For read-only (`const`) parameters, also reveal the
+                            // initialized maybe-cell with `array_cell_read`, then
+                            // package it back and return it unchanged after the
+                            // call. Writable/out calls still require the explicit
+                            // local form so user annotations say how the cell is
+                            // initialized and returned.
+                            let borrow_cell = self.direct_array_cell_ref_arg(env, &fn_decl, i, arg);
                             let array_init = match &arg.val {
                                 ExprT::ArrayInit {
                                     elem_ty, is_static, ..
@@ -4652,7 +4673,7 @@ impl<'a> Emitter<'a> {
                                 }
                                 _ => None,
                             };
-                            if let Some((arr, idx)) = borrow_cell {
+                            if let Some((arr, idx, read_only)) = borrow_cell {
                                 let tmp = self.fresh_tmp("borrow");
                                 let arr_doc = self.emit_rvalue(env, &arr);
                                 let idx_doc = self.emit_rvalue(env, &idx);
@@ -4669,6 +4690,12 @@ impl<'a> Emitter<'a> {
                                     .nest(2)
                                     .group();
                                 prelude.push(borrow);
+                                if read_only {
+                                    prelude.push(self.emit_array_cell_read(env, &arr, &idx));
+                                    postlude.push(
+                                        self.emit_array_cell_return_unchanged(env, &arr, &idx),
+                                    );
+                                }
                                 emitted_args.push(tmp);
                             } else if let Some((elem_ty, spec_arg, is_static)) = array_init
                                 && (callee_expects_array || !is_static)
@@ -4731,7 +4758,14 @@ impl<'a> Emitter<'a> {
                                     .append(";")
                                     .nest(2)
                                     .group(),
-                            );
+                            )
+                            .append(if postlude.is_empty() {
+                                Doc::nil()
+                            } else {
+                                Doc::hardline().append(Doc::concat(
+                                    postlude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                                ))
+                            });
                             return call_doc;
                         }
                     }
@@ -5394,12 +5428,86 @@ impl<'a> Emitter<'a> {
                 }
                 StmtT::Break => Doc::text("break;"),
                 StmtT::Continue => Doc::text("continue;"),
-                StmtT::Return(Some(t)) => Doc::text("return")
-                    .append(Doc::line())
-                    .append(self.emit_rvalue(env, t))
-                    .append(";")
-                    .group()
-                    .nest(2),
+                StmtT::Return(Some(t)) => {
+                    if let ExprT::FnCall(f, args) = &t.val
+                        && let Some(fn_decl) = env.lookup_fn(f)
+                    {
+                        let mut prelude = Vec::new();
+                        let mut postlude = Vec::new();
+                        let mut emitted_args = Vec::new();
+                        let mut changed = false;
+                        for (i, arg) in args.iter().enumerate() {
+                            if let Some((arr, idx, true)) =
+                                self.direct_array_cell_ref_arg(env, &fn_decl, i, arg)
+                            {
+                                changed = true;
+                                let tmp = self.fresh_tmp("borrow");
+                                let arr_doc = self.emit_rvalue(env, &arr);
+                                let idx_doc = self.emit_rvalue(env, &idx);
+                                prelude.push(
+                                    Doc::text("let ")
+                                        .append(tmp.clone())
+                                        .append(Doc::text(" ="))
+                                        .append(Doc::line())
+                                        .append(naryfn([
+                                            Doc::text("array_borrow_cell"),
+                                            arr_doc,
+                                            idx_doc,
+                                        ]))
+                                        .append(";")
+                                        .nest(2)
+                                        .group(),
+                                );
+                                prelude.push(self.emit_array_cell_read(env, &arr, &idx));
+                                postlude
+                                    .push(self.emit_array_cell_return_unchanged(env, &arr, &idx));
+                                emitted_args.push(tmp);
+                            } else {
+                                emitted_args.push(self.emit_rvalue(env, arg));
+                            }
+                        }
+                        if changed {
+                            let ret = self.fresh_tmp("return");
+                            return Doc::concat(
+                                prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                            )
+                            .append(
+                                Doc::text("let ")
+                                    .append(ret.clone())
+                                    .append(Doc::text(" ="))
+                                    .append(Doc::line())
+                                    .append(parens(
+                                        self.emit_name(Name::Fn(f.val.clone()))
+                                            .append(Doc::concat(
+                                                emitted_args
+                                                    .into_iter()
+                                                    .map(|arg| Doc::line().append(arg)),
+                                            ))
+                                            .nest(2),
+                                    ))
+                                    .append(";")
+                                    .nest(2)
+                                    .group(),
+                            )
+                            .append(Doc::hardline())
+                            .append(Doc::concat(
+                                postlude.into_iter().map(|doc| doc.append(Doc::hardline())),
+                            ))
+                            .append(Doc::text("return"))
+                            .append(Doc::line())
+                            .append(ret)
+                            .append(";")
+                            .group()
+                            .nest(2);
+                        }
+                    }
+                    Doc::text("return")
+                        .append(Doc::line())
+                        .append(self.emit_rvalue(env, t))
+                        .append(";")
+                        .group()
+                        .nest(2)
+                }
                 StmtT::Return(None) => Doc::text("return;"),
                 // `_assert(false)` is a claim that control never reaches this
                 // point, not a proposition to carry forward. Pulse spells that
