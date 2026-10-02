@@ -488,10 +488,24 @@ impl PrettyIR for StmtT {
                 cond,
                 then_branch,
                 else_branch,
+                requires,
                 ensures,
             } => RcDoc::text("if (")
                 .append(cond.to_doc().nest(4))
                 .append(")")
+                .append(
+                    RcDoc::concat(requires.iter().map(|e| {
+                        RcDoc::line().append(
+                            RcDoc::text("_requires(")
+                                .append(RcDoc::line_())
+                                .append(e.to_doc())
+                                .nest(2)
+                                .append(")")
+                                .group(),
+                        )
+                    }))
+                    .nest(2),
+                )
                 .append(
                     RcDoc::concat(ensures.iter().map(|e| {
                         RcDoc::line().append(
@@ -601,6 +615,11 @@ impl PrettyIR for StmtT {
                 .group(),
             StmtT::Return(None) => RcDoc::text("return;"),
             StmtT::Assert(v) => RcDoc::text("_assert(")
+                .append(v.to_doc())
+                .append(");")
+                .nest(2)
+                .group(),
+            StmtT::TernaryRequires(v) => RcDoc::text("_ternary_requires(")
                 .append(v.to_doc())
                 .append(");")
                 .nest(2)

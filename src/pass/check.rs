@@ -651,9 +651,13 @@ impl<'a> Checker<'a> {
                 cond,
                 then_branch,
                 else_branch,
+                requires,
                 ensures,
             } => {
                 self.check_bool(env, cond);
+                for r in &**requires {
+                    self.check_slprop(env, r)
+                }
                 for e in &**ensures {
                     self.check_slprop(env, e)
                 }
@@ -732,7 +736,7 @@ impl<'a> Checker<'a> {
                 }
             }
             StmtT::Assert(v) => self.check_slprop(env, v),
-            StmtT::TernaryEnsures(_) => {}
+            StmtT::TernaryRequires(_) | StmtT::TernaryEnsures(_) => {}
             StmtT::GhostStmt(code) => self.check_inline_pulse_code(env, code),
             StmtT::Goto(_) => {}
             StmtT::Label { ensures, .. } => {

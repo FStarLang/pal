@@ -952,11 +952,19 @@ fn mk_return_void(loc: Rc<SourceInfo>) -> Rc<Stmt> {
 fn mk_call(loc: Rc<SourceInfo>, f: Rc<Expr>) -> Rc<Stmt> {
     StmtT::Call(f).with_loc(loc)
 }
-fn mk_if(loc: Rc<SourceInfo>, cond: Rc<Expr>, a: Stmts, b: Stmts, ensures: Exprs) -> Rc<Stmt> {
+fn mk_if(
+    loc: Rc<SourceInfo>,
+    cond: Rc<Expr>,
+    a: Stmts,
+    b: Stmts,
+    requires: Exprs,
+    ensures: Exprs,
+) -> Rc<Stmt> {
     StmtT::If {
         cond,
         then_branch: Rc::new(a),
         else_branch: Rc::new(b),
+        requires: Rc::new(requires),
         ensures: Rc::new(ensures),
     }
     .with_loc(loc)
@@ -1010,6 +1018,9 @@ fn mk_stmt_err(loc: Rc<SourceInfo>) -> Rc<Stmt> {
 }
 fn mk_assert(loc: Rc<SourceInfo>, v: Rc<Expr>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::Assert(v))
+}
+fn mk_ternary_requires(loc: Rc<SourceInfo>, v: Rc<Expr>) -> Rc<Stmt> {
+    mk_ast(loc, StmtT::TernaryRequires(v))
 }
 fn mk_ternary_ensures(loc: Rc<SourceInfo>, v: Rc<Expr>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::TernaryEnsures(v))

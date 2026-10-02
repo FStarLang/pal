@@ -739,7 +739,10 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
         }
     };
     match &s.val {
-        StmtT::Call(e) | StmtT::Assert(e) | StmtT::TernaryEnsures(e) => collect_refs_expr(e, out),
+        StmtT::Call(e)
+        | StmtT::Assert(e)
+        | StmtT::TernaryRequires(e)
+        | StmtT::TernaryEnsures(e) => collect_refs_expr(e, out),
         StmtT::Decl(_, ty) => collect_type_refs(ty, out),
         StmtT::Let(_, ty, value) => {
             collect_type_refs(ty, out);
@@ -759,6 +762,7 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
             cond,
             then_branch,
             else_branch,
+            requires,
             ensures,
         } => {
             collect_refs_expr(cond, out);
@@ -768,6 +772,7 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
             for st in else_branch.iter() {
                 collect_refs_stmt(st, out);
             }
+            exprs(requires, out);
             exprs(ensures, out);
         }
         StmtT::Match {

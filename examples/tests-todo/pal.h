@@ -15,6 +15,7 @@
 #define _invariant(p) __attribute__((annotate("pal-invariant", __capture_args(p))))
 
 #define _assert(p) ({ __attribute__((annotate("pal-assert", __capture_args(p)))) {} })
+#define _ternary_requires(p) ({ __attribute__((annotate("pal-ternary-requires", __capture_args(p)))) {} })
 #define _ternary_ensures(p) ({ __attribute__((annotate("pal-ternary-ensures", __capture_args(p)))) {} })
 #define _ghost_stmt(args) ({ __attribute__((annotate("pal-ghost-stmt", __capture_args(args)))) {} })
 
@@ -40,6 +41,7 @@
 #define _invariant(p)
 
 #define _assert(p)
+#define _ternary_requires(p)
 #define _ternary_ensures(p)
 #define _ghost_stmt(args)
 

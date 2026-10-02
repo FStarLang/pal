@@ -29,6 +29,8 @@ uint32_t choose_assign(bool use_view)
     Parser storage = { 0 };
     Parser *parser = &storage;
     uint32_t bound = 0;
+    _ternary_requires((_slprop) _inline_pulse(Pulse.Lib.Reference.pts_to var_parser var_storage) &&
+        _live(storage) && _live(use_view) && _live(bound));
     _ternary_ensures(_live(storage) && _live(parser) && _live(use_view) && _live(bound) &&
         (bound == 11 || bound == 22));
     bound = use_view ? FieldArm(&parser->BaseView) : WholeArm(parser);
@@ -40,6 +42,9 @@ uint32_t choose_initializer(bool use_view)
 {
     Parser storage = { 0 };
     Parser *parser = &storage;
+    _ternary_requires((_slprop) _inline_pulse(Pulse.Lib.Reference.pts_to var_parser var_storage) &&
+        (_slprop) _inline_pulse(Pulse.Lib.Reference.pts_to_uninit var_bound) &&
+        _live(storage) && _live(use_view));
     _ternary_ensures(_live(storage) && _live(parser) && _live(use_view) && _live(bound) &&
         (bound == 11 || bound == 22));
     uint32_t bound = use_view ? FieldArm(&parser->BaseView) : WholeArm(parser);
@@ -51,6 +56,8 @@ uint32_t choose_return(bool use_view)
 {
     Parser storage = { 0 };
     Parser *parser = &storage;
+    _ternary_requires((_slprop) _inline_pulse(Pulse.Lib.Reference.pts_to var_parser var_storage) &&
+        _live(storage) && _live(use_view));
     _ternary_ensures(_live(storage) && _live(parser) && _live(use_view));
     return use_view ? FieldArm(&parser->BaseView) : WholeArm(parser);
 }
@@ -61,6 +68,8 @@ uint32_t choose_bad_post(bool use_view)
     Parser storage = { 0 };
     Parser *parser = &storage;
     uint32_t bound = 0;
+    _ternary_requires((_slprop) _inline_pulse(Pulse.Lib.Reference.pts_to var_parser var_storage) &&
+        _live(storage) && _live(use_view) && _live(bound));
     _ternary_ensures(_live(storage) && _live(parser) && _live(use_view) && _live(bound) && bound == 42);
     bound = use_view ? FieldArm(&parser->BaseView) : WholeArm(parser);
     return bound;

@@ -26,6 +26,7 @@ __attribute__((annotate("pal-pure"))) static inline _Bool pal_c_assert_enabled(v
 #define _do_while_cond(name) __attribute__((annotate("pal-do-while-cond", #name)))
 
 #define _assert(p) ({ __attribute__((annotate("pal-assert", __capture_args(p)))) {} })
+#define _ternary_requires(p) ({ __attribute__((annotate("pal-ternary-requires", __capture_args(p)))) {} })
 #define _ternary_ensures(p) ({ __attribute__((annotate("pal-ternary-ensures", __capture_args(p)))) {} })
 #define _ghost_stmt(args) ({ __attribute__((annotate("pal-ghost-stmt", __capture_args(args)))) {} })
 #define _ghost_arg(p) __attribute__((annotate("pal-ghost-arg", __capture_args(p))))
@@ -86,6 +87,7 @@ __attribute__((annotate("pal-pure"))) static inline _Bool pal_c_assert_enabled(v
 #define _do_while_cond(name)
 
 #define _assert(p) ((void)0)
+#define _ternary_requires(p) ((void)0)
 #define _ternary_ensures(p) ((void)0)
 #define _ghost_stmt(args) ((void)0)
 #define _ghost_arg(p)

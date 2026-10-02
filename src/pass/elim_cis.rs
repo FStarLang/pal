@@ -233,9 +233,10 @@ fn rewrite_stmts(env: &Env, stmts: &mut Stmts, elim: &HashMap<Rc<IdentT>, ElimUn
 
 fn rewrite_stmt(env: &Env, stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     match &mut stmt.val {
-        StmtT::Call(e) | StmtT::Assert(e) | StmtT::TernaryEnsures(e) => {
-            rewrite_expr(env, Rc::make_mut(e), elim)
-        }
+        StmtT::Call(e)
+        | StmtT::Assert(e)
+        | StmtT::TernaryRequires(e)
+        | StmtT::TernaryEnsures(e) => rewrite_expr(env, Rc::make_mut(e), elim),
         StmtT::DeclStackArray { size, .. } => rewrite_expr(env, Rc::make_mut(size), elim),
         StmtT::Let(_, _, value) => rewrite_expr(env, Rc::make_mut(value), elim),
         StmtT::Assign(lhs, rhs) => {
@@ -246,11 +247,15 @@ fn rewrite_stmt(env: &Env, stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion
             cond,
             then_branch,
             else_branch,
+            requires,
             ensures,
         } => {
             rewrite_expr(env, Rc::make_mut(cond), elim);
             rewrite_stmts(env, Rc::make_mut(then_branch), elim);
             rewrite_stmts(env, Rc::make_mut(else_branch), elim);
+            for e in Rc::make_mut(requires).iter_mut() {
+                rewrite_expr(env, Rc::make_mut(e), elim);
+            }
             for e in Rc::make_mut(ensures).iter_mut() {
                 rewrite_expr(env, Rc::make_mut(e), elim);
             }
@@ -534,9 +539,11 @@ fn rewrite_types_stmts(stmts: &mut Stmts, elim: &HashMap<Rc<IdentT>, ElimUnion>)
 
 fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     match &mut stmt.val {
-        StmtT::Call(e) | StmtT::Assert(e) | StmtT::TernaryEnsures(e) | StmtT::Return(Some(e)) => {
-            rewrite_types_expr(Rc::make_mut(e), elim)
-        }
+        StmtT::Call(e)
+        | StmtT::Assert(e)
+        | StmtT::TernaryRequires(e)
+        | StmtT::TernaryEnsures(e)
+        | StmtT::Return(Some(e)) => rewrite_types_expr(Rc::make_mut(e), elim),
         StmtT::Decl(_, ty) => rewrite_type(ty, elim),
         StmtT::Let(_, ty, value) => {
             rewrite_type(ty, elim);
@@ -556,11 +563,15 @@ fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
             cond,
             then_branch,
             else_branch,
+            requires,
             ensures,
         } => {
             rewrite_types_expr(Rc::make_mut(cond), elim);
             rewrite_types_stmts(Rc::make_mut(then_branch), elim);
             rewrite_types_stmts(Rc::make_mut(else_branch), elim);
+            for e in Rc::make_mut(requires).iter_mut() {
+                rewrite_types_expr(Rc::make_mut(e), elim);
+            }
             for e in Rc::make_mut(ensures).iter_mut() {
                 rewrite_types_expr(Rc::make_mut(e), elim);
             }

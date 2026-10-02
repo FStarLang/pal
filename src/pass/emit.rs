@@ -2567,6 +2567,7 @@ fn walk_stmt_tree(s: &Stmt, f: &mut impl FnMut(&Expr)) {
         | StmtT::Error => {}
         StmtT::Call(e)
         | StmtT::Assert(e)
+        | StmtT::TernaryRequires(e)
         | StmtT::TernaryEnsures(e)
         | StmtT::Return(Some(e))
         | StmtT::Let(_, _, e)
@@ -2579,9 +2580,12 @@ fn walk_stmt_tree(s: &Stmt, f: &mut impl FnMut(&Expr)) {
             cond,
             then_branch,
             else_branch,
-            ..
+            requires,
+            ensures,
         } => {
             walk_expr_tree(cond, f);
+            requires.iter().for_each(|e| walk_expr_tree(e, f));
+            ensures.iter().for_each(|e| walk_expr_tree(e, f));
             then_branch.iter().for_each(|s| walk_stmt_tree(s, f));
             else_branch.iter().for_each(|s| walk_stmt_tree(s, f));
         }
@@ -5790,6 +5794,7 @@ impl<'a> Emitter<'a> {
                 self.nullable_arg_ghosts_expr(env, r, out);
             }
             StmtT::Call(e) | StmtT::Return(Some(e)) => self.nullable_arg_ghosts_expr(env, e, out),
+            StmtT::TernaryRequires(e) => self.nullable_arg_ghosts_expr(env, e, out),
             StmtT::TernaryEnsures(e) => self.nullable_arg_ghosts_expr(env, e, out),
             StmtT::Let(_, _, e) => self.nullable_arg_ghosts_expr(env, e, out),
             _ => {}
@@ -6725,12 +6730,25 @@ impl<'a> Emitter<'a> {
                     cond,
                     then_branch,
                     else_branch,
+                    requires,
                     ensures,
                 } => {
                     let lowered_cond = self.emit_short_circuit_expr(env, cond);
                     let cond_has_prelude = !lowered_cond.prelude.is_empty();
                     let cond_prelude = lowered_cond.prelude;
                     let cond_doc = parens(lowered_cond.expr);
+                    let requires_doc = if requires.is_empty() {
+                        Doc::nil()
+                    } else {
+                        Doc::line()
+                            .append("requires ")
+                            .append(Doc::intersperse(
+                                requires.iter().map(|e| self.emit_rvalue(env, e)),
+                                Doc::line().append("** "),
+                            ))
+                            .group()
+                            .nest(2)
+                    };
                     let ensures_doc = if ensures.is_empty() {
                         Doc::nil()
                     } else {
@@ -6858,6 +6876,7 @@ impl<'a> Emitter<'a> {
                     let if_doc = Doc::text("if ")
                         .append(cond_doc)
                         .nest(2)
+                        .append(requires_doc)
                         .append(ensures_doc)
                         .append(" ")
                         .append(then_doc)
@@ -7031,6 +7050,9 @@ impl<'a> Emitter<'a> {
                         .group()
                         .nest(2)
                 }),
+                StmtT::TernaryRequires(_) => Doc::text("(* misplaced _ternary_requires *)")
+                    .append(Doc::line())
+                    .append("(admit());"),
                 StmtT::TernaryEnsures(_) => Doc::text("(* misplaced _ternary_ensures *)")
                     .append(Doc::line())
                     .append("(admit());"),
@@ -7125,10 +7147,12 @@ fn stmts_need_entry_old(stmts: &[Rc<Stmt>], params: &HashSet<Rc<str>>) -> bool {
         StmtT::If {
             then_branch,
             else_branch,
+            requires,
             ensures,
             ..
         } => {
-            any_expr(ensures, params)
+            any_expr(requires, params)
+                || any_expr(ensures, params)
                 || stmts_need_entry_old(then_branch, params)
                 || stmts_need_entry_old(else_branch, params)
         }

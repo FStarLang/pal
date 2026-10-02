@@ -361,7 +361,7 @@ by the surrounding if-`_ensures`) that you need to re-prove `i + 1 <= len` at th
 back-edge. Fold with the post-increment `i` while the open spec is still explicit,
 and the non-strict bound discharges directly.
 
-## 6.5. Non-tail `if`: always add `_ensures`
+## 6.5. Non-tail `if`: prefer framed `_requires` + `_ensures`
 
 When a C `if` (with or without `else`) is **not the last statement of its
 enclosing function body**, Pulse infers the if's post-state by joining the two
@@ -373,19 +373,28 @@ walls off every downstream helper call whose precondition expects a clean
 `pure p` — Error 228 fires at the next call site with the printed wrap visible
 in the "In the context" dump.
 
-**Fix**: ascribe the if's post-state with `_ensures(_inline_pulse(...))`
-(requires a recent PAL with the if-`_ensures` feature). Pulse then checks each
-branch directly against the ensures, skipping the inferred join. See the PAL test `test/if_ensures` for a worked if-`_ensures` example.
+**Fix**: ascribe the if's post-state with the framed form
+`_requires(R) _ensures(P)` (requires a recent PAL with framed if annotations).
+PAL emits Pulse's `if c requires R ensures P { ... } else { ... }`: Pulse proves
+`R` from the current context, checks the branch against `P`, and adds the
+untouched frame back to `P`. This skips the inferred join without forcing you to
+restate every unrelated local and resource. See the PAL tests `test/if_ensures`
+and `test/framed_if_requires` for worked examples.
 
 ```c
 if (cond)
-    _ensures(_inline_pulse(<post-state slprop>))
+    _requires(_inline_pulse(<resources the branch uses>))
+    _ensures(_inline_pulse(<post-state for those resources>))
 {
     ...
 }
 ```
 
-Gotchas in the ensures body:
+Legacy unframed `_ensures(P)` is still supported, but Pulse does not frame it:
+`P` must describe the complete post-state of the `if`. Use it only for small
+contexts where restating the full state is easy.
+
+Gotchas in framed annotations:
 
 1. **`$(X)` expands to `(!var_X)` (an stt action) in body context**, which
    slprop position rejects with Error 12. **Refer to PAL's internal local names
@@ -393,10 +402,11 @@ Gotchas in the ensures body:
    ghost args (not shadowed), etc. The `_inline_pulse(...)` body is parsed with
    the local scope in effect, so unqualified names resolve correctly.
 
-2. **Every local ref's `pts_to` must be re-introduced** via existential
-   bindings, even for refs the branch doesn't touch — Pulse does **not**
-   auto-frame across an if-ensures. Bind values with fresh names and carry any
-   safety facts the downstream code needs in pure form:
+2. **Put only the resources the branch really uses in `R`/`P`; let the frame
+   carry the rest.** With the framed form, unrelated locals and struct pieces do
+   not need to be listed. If you use legacy unframed `_ensures(P)`, then every
+   local ref's `pts_to` must still be re-introduced via existential bindings,
+   even for refs the branch doesn't touch:
 
    ```c
    _ensures(_inline_pulse(
@@ -409,14 +419,20 @@ Gotchas in the ensures body:
               /\ val_mid.count == var_val_pre.count)))
    ```
 
-3. **`DBG_ASSERT(...)`-style macros are themselves non-tail ifs.** PAL lifts each
+3. **`_live(local)` abstracts the local's value.** This is fine for ordinary
+   liveness, but not enough when the branch needs a precise pointer alias (for
+   example a local cursor that must remain equal to a field address so an outer
+   struct can refold). In that case put the exact `pts_to` or alias fact in the
+   framed pre/post, not just `_live(cursor)`.
+
+4. **`DBG_ASSERT(...)`-style macros are themselves non-tail ifs.** PAL lifts each
    into `if (assert_enabled()) { assert (with_pure ...) } else {}` — both
    branches are slprop no-ops, but the if-join still wraps, and consecutive
    asserts produce compounding nested wraps. Cleanest fix: **delete the assert
    from the proof source** — `_requires` already enforces the property
    statically, and the assert is a runtime no-op under `NDEBUG`.
 
-4. **Bind the post-state via a free top-level existential, *not* via a
+5. **Bind the post-state via a free top-level existential, *not* via a
    record-update expression.** Write
    `exists* val_post. ... obj_inv obj_v 1.0R val_post ** pure (val_post.X == var_val_pre.X /\ ...)`
    with one pure equation per unchanged field. **Avoid**

@@ -440,6 +440,7 @@ pub enum StmtT {
         cond: Rc<Expr>,
         then_branch: Rc<Stmts>,
         else_branch: Rc<Stmts>,
+        requires: Rc<Exprs>,
         ensures: Rc<Exprs>,
     },
     Match {
@@ -459,6 +460,7 @@ pub enum StmtT {
     Continue,
     Return(Option<Rc<Expr>>),
     Assert(Rc<Expr>),
+    TernaryRequires(Rc<Expr>),
     TernaryEnsures(Rc<Expr>),
     GhostStmt(Rc<InlinePulseCode>),
     Goto(Rc<Ident>),

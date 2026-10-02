@@ -225,6 +225,7 @@ fn normalize_stmt(env: &Env, stmt: &mut Stmt) {
     match &mut stmt.val {
         StmtT::Call(expr)
         | StmtT::Assert(expr)
+        | StmtT::TernaryRequires(expr)
         | StmtT::TernaryEnsures(expr)
         | StmtT::Return(Some(expr)) => {
             normalize_expr(env, Rc::make_mut(expr));
@@ -248,11 +249,13 @@ fn normalize_stmt(env: &Env, stmt: &mut Stmt) {
             cond,
             then_branch,
             else_branch,
+            requires,
             ensures,
         } => {
             normalize_expr(env, Rc::make_mut(cond));
             normalize_stmts(env, Rc::make_mut(then_branch));
             normalize_stmts(env, Rc::make_mut(else_branch));
+            normalize_exprs(env, Rc::make_mut(requires));
             normalize_exprs(env, Rc::make_mut(ensures));
         }
         StmtT::Match {

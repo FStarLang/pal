@@ -333,7 +333,7 @@ mod crate::clang {
     fn mk_return(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_return_void(Rc<SourceInfo>) -> Rc<Stmt>;
     fn mk_call(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
-    fn mk_if(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Stmt>>, Vec<Rc<Stmt>>, Vec<Rc<Expr>>) -> Rc<Stmt>;
+    fn mk_if(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Stmt>>, Vec<Rc<Stmt>>, Vec<Rc<Expr>>, Vec<Rc<Expr>>) -> Rc<Stmt>;
     fn mk_match_branch(Vec<Rc<Expr>>, Vec<Rc<Stmt>>) -> Rc<MatchBranch>;
     fn mk_match(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<MatchBranch>>, Vec<Rc<Stmt>>, Vec<Rc<Expr>>) -> Rc<Stmt>;
     fn mk_while(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Expr>>, Vec<Rc<Expr>>, Vec<Rc<Expr>>, Vec<Rc<Stmt>>) -> Rc<Stmt>;
@@ -341,6 +341,7 @@ mod crate::clang {
     fn mk_continue(Rc<SourceInfo>) -> Rc<Stmt>;
     fn mk_stmt_err(Rc<SourceInfo>) -> Rc<Stmt>;
     fn mk_assert(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
+    fn mk_ternary_requires(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_ternary_ensures(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_goto(Rc<SourceInfo>, Rc<Ident>) -> Rc<Stmt>;
     fn mk_label(Rc<SourceInfo>, Rc<Ident>, Vec<Rc<Expr>>) -> Rc<Stmt>;

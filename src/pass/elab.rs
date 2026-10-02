@@ -1049,11 +1049,19 @@ impl<'a> Elaborator<'a> {
                 cond,
                 then_branch,
                 else_branch,
+                requires,
                 ensures,
             } => {
                 let bool_ty = TypeT::Bool.with_loc(cond.loc.clone());
                 self.elab_rvalue(env, Rc::make_mut(cond), Some(&bool_ty));
                 self.cast_to_bool(env, cond);
+                if !requires.is_empty() && ensures.is_empty() {
+                    self.report(
+                        "`_requires` on an if statement must be paired with `_ensures`".to_string(),
+                        &stmt.loc,
+                    );
+                }
+                self.elab_slprops(env, Rc::make_mut(requires));
                 self.elab_slprops(env, Rc::make_mut(ensures));
                 self.elab_stmts(env, Rc::make_mut(then_branch));
                 self.elab_stmts(env, Rc::make_mut(else_branch));
@@ -1118,7 +1126,7 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(v), Some(&slprop_ty));
                 self.cast_to_slprop(env, v);
             }
-            StmtT::TernaryEnsures(_) => {}
+            StmtT::TernaryRequires(_) | StmtT::TernaryEnsures(_) => {}
             StmtT::GhostStmt(code) => self.elab_inline_pulse_code(env, Rc::make_mut(code)),
             StmtT::Goto(_) => {}
             StmtT::Label { ensures, .. } => {
@@ -1215,6 +1223,7 @@ impl<'a> Elaborator<'a> {
                             StmtT::Assign(lhs.clone(), a).with_loc(loc.clone()),
                         ]),
                         else_branch: Rc::new(vec![StmtT::Assign(lhs, b).with_loc(loc)]),
+                        requires: Rc::new(vec![]),
                         ensures: Rc::new(vec![]),
                     };
                     return true;
@@ -1270,6 +1279,7 @@ impl<'a> Elaborator<'a> {
                             StmtT::Assign(lhs.clone(), branch_rhs(a)).with_loc(loc.clone()),
                         ]),
                         else_branch: Rc::new(vec![StmtT::Assign(lhs, branch_rhs(b)).with_loc(loc)]),
+                        requires: Rc::new(vec![]),
                         ensures: Rc::new(vec![]),
                     };
                     return true;
@@ -1282,6 +1292,7 @@ impl<'a> Elaborator<'a> {
                         cond: c,
                         then_branch: Rc::new(vec![StmtT::Return(Some(a)).with_loc(loc.clone())]),
                         else_branch: Rc::new(vec![StmtT::Return(Some(b)).with_loc(loc)]),
+                        requires: Rc::new(vec![]),
                         ensures: Rc::new(vec![]),
                     };
                     return true;
@@ -1294,6 +1305,7 @@ impl<'a> Elaborator<'a> {
                         cond: c,
                         then_branch: Rc::new(vec![StmtT::Call(a).with_loc(loc.clone())]),
                         else_branch: Rc::new(vec![StmtT::Call(b).with_loc(loc)]),
+                        requires: Rc::new(vec![]),
                         ensures: Rc::new(vec![]),
                     };
                     return true;
@@ -1364,6 +1376,7 @@ impl<'a> Elaborator<'a> {
             | StmtT::Let(_, _, e)
             | StmtT::Return(Some(e))
             | StmtT::Assert(e)
+            | StmtT::TernaryRequires(e)
             | StmtT::TernaryEnsures(e)
             | StmtT::DeclStackArray { size: e, .. } => Self::count_cond_expr(e),
             StmtT::Assign(lhs, rhs) => Self::count_cond_expr(lhs) + Self::count_cond_expr(rhs),
@@ -1383,9 +1396,15 @@ impl<'a> Elaborator<'a> {
 
     fn elab_stmts(&mut self, env: &Env, stmts: &mut Vec<Rc<Stmt>>) {
         let mut env = env.clone();
+        let mut pending_ternary_requires: Vec<Rc<Expr>> = Vec::new();
         let mut pending_ternary_ensures: Vec<Rc<Expr>> = Vec::new();
         let mut i = 0;
         while i < stmts.len() {
+            if let StmtT::TernaryRequires(e) = &stmts[i].val {
+                pending_ternary_requires.push(e.clone());
+                stmts.remove(i);
+                continue;
+            }
             if let StmtT::TernaryEnsures(e) = &stmts[i].val {
                 pending_ternary_ensures.push(e.clone());
                 stmts.remove(i);
@@ -1394,14 +1413,22 @@ impl<'a> Elaborator<'a> {
 
             Self::refine_decl_pointer_kind(&env, stmts, i);
 
-            let cond_count = if pending_ternary_ensures.is_empty() {
+            let has_pending_ternary =
+                !pending_ternary_requires.is_empty() || !pending_ternary_ensures.is_empty();
+            let cond_count = if !has_pending_ternary {
                 0
             } else {
                 Self::count_cond_stmt(&stmts[i])
             };
             let attach_ternary_ensures = !pending_ternary_ensures.is_empty() && cond_count == 1;
-            if !pending_ternary_ensures.is_empty() && cond_count == 0 {
+            if has_pending_ternary && cond_count == 0 {
                 if !matches!(stmts[i].val, StmtT::Decl(..)) {
+                    for e in pending_ternary_requires.drain(..) {
+                        self.report(
+                            "_ternary_requires must be immediately followed by a statement containing exactly one conditional expression and a matching _ternary_ensures".to_string(),
+                            &e.loc,
+                        );
+                    }
                     for e in pending_ternary_ensures.drain(..) {
                         self.report(
                             "_ternary_ensures must be immediately followed by a statement containing exactly one conditional expression".to_string(),
@@ -1410,9 +1437,25 @@ impl<'a> Elaborator<'a> {
                     }
                 }
             } else if cond_count > 1 {
+                for e in pending_ternary_requires.drain(..) {
+                    self.report(
+                        "_ternary_requires cannot attach to a statement containing more than one conditional expression".to_string(),
+                        &e.loc,
+                    );
+                }
                 for e in pending_ternary_ensures.drain(..) {
                     self.report(
                         "_ternary_ensures cannot attach to a statement containing more than one conditional expression".to_string(),
+                        &e.loc,
+                    );
+                }
+            } else if cond_count == 1
+                && !pending_ternary_requires.is_empty()
+                && pending_ternary_ensures.is_empty()
+            {
+                for e in pending_ternary_requires.drain(..) {
+                    self.report(
+                        "_ternary_requires must be paired with _ternary_ensures".to_string(),
                         &e.loc,
                     );
                 }
@@ -1432,6 +1475,25 @@ impl<'a> Elaborator<'a> {
                     val: ExprT::Var(name.clone()),
                     loc: loc.clone(),
                 });
+                let tmp_uninit = format!(
+                    "Pulse.Lib.Reference.pts_to_uninit {}",
+                    format!("var_{}", name.val)
+                );
+                pending_ternary_requires.push(Rc::new(Ast {
+                    val: ExprT::InlinePulse(
+                        Rc::new(InlinePulseCode {
+                            tokens: vec![InlinePulseToken::Verbatim(CodeToken {
+                                before: "",
+                                text: Ast {
+                                    val: Rc::from(tmp_uninit.as_str()),
+                                    loc: loc.clone(),
+                                },
+                            })],
+                        }),
+                        TypeT::SLProp.with_loc(loc.clone()),
+                    ),
+                    loc: loc.clone(),
+                }));
                 pending_ternary_ensures.push(Rc::new(Ast {
                     val: ExprT::Live(tmp.clone()),
                     loc: loc.clone(),
@@ -1451,11 +1513,24 @@ impl<'a> Elaborator<'a> {
             self.elab_stmt(&env, Rc::make_mut(&mut stmts[i]));
             let lowered = Self::lower_expr(&mut stmts[i]);
             if attach_ternary_ensures {
-                if lowered && let StmtT::If { ensures, .. } = &mut Rc::make_mut(&mut stmts[i]).val {
+                if lowered
+                    && let StmtT::If {
+                        requires, ensures, ..
+                    } = &mut Rc::make_mut(&mut stmts[i]).val
+                {
+                    let requires = Rc::make_mut(requires);
+                    requires.append(&mut pending_ternary_requires);
+                    self.elab_slprops(&env, requires);
                     let ensures = Rc::make_mut(ensures);
                     ensures.append(&mut pending_ternary_ensures);
                     self.elab_slprops(&env, ensures);
                 } else {
+                    for e in pending_ternary_requires.drain(..) {
+                        self.report(
+                            "_ternary_requires can only attach to a conditional expression lowered as the statement's full result".to_string(),
+                            &e.loc,
+                        );
+                    }
                     for e in pending_ternary_ensures.drain(..) {
                         self.report(
                             "_ternary_ensures can only attach to a conditional expression lowered as the statement's full result".to_string(),
@@ -1466,6 +1541,12 @@ impl<'a> Elaborator<'a> {
             }
             env.push_stmt(&stmts[i]);
             i += 1;
+        }
+        for e in pending_ternary_requires {
+            self.report(
+                "_ternary_requires must be followed by a statement containing exactly one conditional expression and a matching _ternary_ensures".to_string(),
+                &e.loc,
+            );
         }
         for e in pending_ternary_ensures {
             self.report(

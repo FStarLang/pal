@@ -2289,10 +2289,13 @@ public:
       }
     } else if (auto *i = dyn_cast<IfStmt>(stmt)) {
       auto thenStmt = i->getThen();
+      auto reqs = Vec<Rc<ir::Expr>>::new_();
       auto enss = Vec<Rc<ir::Expr>>::new_();
       if (auto attrThen = dyn_cast_or_null<AttributedStmt>(thenStmt)) {
         for (auto attr : attrThen->getAttrs()) {
-          if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
+          if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
+            reqs.push(std::move(req.value()));
+          } else if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
             enss.push(std::move(ens.value()));
           }
         }
@@ -2300,7 +2303,7 @@ public:
       }
       return stmts.push(mk_if(loc.clone(), trRValue(i->getCond()),
                               trStmts(thenStmt), trStmts(i->getElse()),
-                              std::move(enss)));
+                              std::move(reqs), std::move(enss)));
     } else if (auto *w = dyn_cast<WhileStmt>(stmt)) {
       auto body = w->getBody();
       auto invs = Vec<Rc<ir::Expr>>::new_();
@@ -2837,7 +2840,8 @@ public:
           }
           auto ifStmt =
               mk_if(childLoc.clone(), std::move(cond), makeChainBody(*group),
-                    std::move(chain), Vec<Rc<ir::Expr>>::new_());
+                    std::move(chain), Vec<Rc<ir::Expr>>::new_(),
+                    Vec<Rc<ir::Expr>>::new_());
           if (--remaining == 0) {
             stmts.push(std::move(ifStmt));
           } else {
@@ -2927,7 +2931,7 @@ public:
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(cond),
                            std::move(thenStmts), std::move(elseStmts),
-                           caseEnss()));
+                           Vec<Rc<ir::Expr>>::new_(), caseEnss()));
 
         } else {
           if (!switchCanBreak) {
@@ -2957,7 +2961,7 @@ public:
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           stmts.push(mk_if(std::move(childLoc), std::move(notBrk),
                            std::move(thenStmts), std::move(elseStmts),
-                           caseEnss()));
+                           Vec<Rc<ir::Expr>>::new_(), caseEnss()));
         }
       }
 
@@ -3117,6 +3121,7 @@ public:
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
           return stmts.push(mk_if(std::move(loc), std::move(enabledCall),
                                   std::move(thenStmts), std::move(elseStmts),
+                                  Vec<Rc<ir::Expr>>::new_(),
                                   Vec<Rc<ir::Expr>>::new_()));
         }
       }
@@ -3124,7 +3129,8 @@ public:
     } else if (auto *se = dyn_cast<StmtExpr>(stmt)) {
       // _assert(p) expands to ({ __attribute__((annotate("pal-assert",
       // ...))) {} })
-      // _ternary_ensures(p) expands similarly with "pal-ternary-ensures"
+      // _ternary_requires(p) / _ternary_ensures(p) expand similarly with
+      // "pal-ternary-requires" / "pal-ternary-ensures"
       // _ghost_stmt(p) expands similarly with "pal-ghost-stmt"
       if (auto *comp = dyn_cast<CompoundStmt>(se->getSubStmt())) {
         for (auto s : comp->body()) {
@@ -3132,6 +3138,11 @@ public:
             for (auto a : attr->getAttrs()) {
               if (auto val = isUnaryAttrOf(a, "pal-assert")) {
                 stmts.push(mk_assert(loc.clone(), std::move(val.value())));
+                return rust::Unit();
+              }
+              if (auto val = isUnaryAttrOf(a, "pal-ternary-requires")) {
+                stmts.push(
+                    mk_ternary_requires(loc.clone(), std::move(val.value())));
                 return rust::Unit();
               }
               if (auto val = isUnaryAttrOf(a, "pal-ternary-ensures")) {

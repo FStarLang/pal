@@ -329,9 +329,11 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
             cond,
             then_branch,
             else_branch,
+            requires,
             ensures,
         } => {
             scan_expr(deps, cond);
+            scan_exprs(deps, requires);
             scan_exprs(deps, ensures);
             scan_stmts(deps, then_branch);
             scan_stmts(deps, else_branch)
@@ -369,7 +371,9 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
                 scan_expr(deps, v)
             }
         }
-        StmtT::Assert(v) | StmtT::TernaryEnsures(v) => scan_expr(deps, v),
+        StmtT::Assert(v) | StmtT::TernaryRequires(v) | StmtT::TernaryEnsures(v) => {
+            scan_expr(deps, v)
+        }
         StmtT::GhostStmt(code) => scan_inline_pulse_code(deps, code),
         StmtT::Goto(_) => {}
         StmtT::Label { ensures, .. } => {

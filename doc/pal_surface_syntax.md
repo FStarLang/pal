@@ -124,6 +124,44 @@ A loop with two `break` sites would carry two `_ensures` clauses, one for each.
 
 For `do { ... } while (cond)`, PAL desugars to `while (first || cond)` with a fresh boolean flag. Use `_do_while_first(name)` to name that flag explicitly when the invariant needs to refer to it (see `test/do_while/do_while.c`).
 
+### If postconditions and frames
+
+`_ensures(p)` may be attached to the body of an `if` statement. PAL emits it as
+a Pulse postcondition for the generated `if`, so it ascribes the state after the
+whole conditional rather than only the state after the then-branch:
+
+```c
+if (cond)
+  _ensures(_live(x) && x == 1)
+{
+  x = 1;
+}
+```
+
+For large contexts, prefer the framed form with `_requires(r)` next to
+`_ensures(p)`:
+
+```c
+if (cond)
+  _requires(_live(p) && _live(*p))
+  _ensures(_live(p) && _live(*p))
+{
+  p->field = value;
+}
+```
+
+PAL emits this as `if cond requires r ensures p { ... } else { ... }`. Pulse
+proves `r` from the current context, checks the conditional against `p`, and
+adds back the untouched frame, so unrelated locals and resources do not have to
+be restated in `p`. `_requires` on an `if` must be paired with `_ensures`; PAL
+reports an error otherwise.
+
+The predicates use the usual body-annotation meaning of `_live`, `$(...)`, and
+`_old(...)`. Note that `_live(local)` describes ownership of the local cell but
+abstracts its current value. If a branch must preserve an exact pointer value
+(for example a local cursor known to equal a particular field address), state
+that exact points-to or alias fact explicitly in the framed pre/post.
+
 ### Ternary postconditions
 
 PAL lowers a top-level C conditional expression in an assignment, declaration
@@ -132,11 +170,17 @@ different folded/unfolded shapes, the generated `if` may need an explicit
 postcondition, just like a handwritten C `if` can use `_ensures(p)`.
 
 Place `_ternary_ensures(p);` immediately before the statement containing the
-single conditional expression:
+single conditional expression. If the generated `if` should use Pulse's framed
+form, place `_ternary_requires(r);` immediately before the matching
+`_ternary_ensures(p);`:
 
 ```c
 _ternary_ensures(_live(x) && x == (flag ? a : b));
 x = flag ? f(a) : g(b);
+
+_ternary_requires(_live(buf));
+_ternary_ensures(_live(buf) && _live(y) && y == (flag ? a : b));
+uint32_t y = flag ? f(buf) : g(buf);
 
 _ternary_ensures(_live(y) && y == (flag ? a : b));
 uint32_t y = flag ? f(a) : g(b);
@@ -152,6 +196,11 @@ the variable declared by the following statement. For returns, the predicate is
 the postcondition of the generated `if` before the `return` in each branch, so
 it should describe resources or facts available before control leaves the
 function.
+
+`_ternary_requires(r)` has the same meaning as `_requires(r)` on a handwritten
+`if`: it is checked against the current context and the untouched frame is
+restored after the generated conditional. It must be paired with
+`_ternary_ensures(p)`.
 
 The annotation is intentionally narrow: the following statement must contain
 exactly one conditional expression, and that expression must be the full result
