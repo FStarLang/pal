@@ -369,7 +369,7 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
                 scan_expr(deps, v)
             }
         }
-        StmtT::Assert(v) => scan_expr(deps, v),
+        StmtT::Assert(v) | StmtT::TernaryEnsures(v) => scan_expr(deps, v),
         StmtT::GhostStmt(code) => scan_inline_pulse_code(deps, code),
         StmtT::Goto(_) => {}
         StmtT::Label { ensures, .. } => {

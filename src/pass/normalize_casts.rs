@@ -223,7 +223,10 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
 
 fn normalize_stmt(env: &Env, stmt: &mut Stmt) {
     match &mut stmt.val {
-        StmtT::Call(expr) | StmtT::Assert(expr) | StmtT::Return(Some(expr)) => {
+        StmtT::Call(expr)
+        | StmtT::Assert(expr)
+        | StmtT::TernaryEnsures(expr)
+        | StmtT::Return(Some(expr)) => {
             normalize_expr(env, Rc::make_mut(expr));
         }
         StmtT::Decl(_, ty) => normalize_type(env, ty),

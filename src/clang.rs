@@ -1011,6 +1011,9 @@ fn mk_stmt_err(loc: Rc<SourceInfo>) -> Rc<Stmt> {
 fn mk_assert(loc: Rc<SourceInfo>, v: Rc<Expr>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::Assert(v))
 }
+fn mk_ternary_ensures(loc: Rc<SourceInfo>, v: Rc<Expr>) -> Rc<Stmt> {
+    mk_ast(loc, StmtT::TernaryEnsures(v))
+}
 fn mk_goto(loc: Rc<SourceInfo>, label: Rc<Ident>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::Goto(label))
 }

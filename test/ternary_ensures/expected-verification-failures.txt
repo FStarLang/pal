@@ -1,0 +1,1 @@
+Func_choose_bad_post

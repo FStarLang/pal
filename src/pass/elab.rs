@@ -1118,6 +1118,7 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(v), Some(&slprop_ty));
                 self.cast_to_slprop(env, v);
             }
+            StmtT::TernaryEnsures(_) => {}
             StmtT::GhostStmt(code) => self.elab_inline_pulse_code(env, Rc::make_mut(code)),
             StmtT::Goto(_) => {}
             StmtT::Label { ensures, .. } => {
@@ -1303,16 +1304,174 @@ impl<'a> Elaborator<'a> {
         false
     }
 
+    fn count_cond_expr(expr: &Expr) -> usize {
+        let here = usize::from(matches!(expr.val, ExprT::Cond(_, _, _)));
+        here + match &expr.val {
+            ExprT::Var(_)
+            | ExprT::BoolLit(_)
+            | ExprT::IntLit(_, _)
+            | ExprT::FloatLit(_, _)
+            | ExprT::FnRef(_)
+            | ExprT::InlinePulse(_, _)
+            | ExprT::Malloc(_)
+            | ExprT::Calloc(_)
+            | ExprT::SizeOf(_)
+            | ExprT::AlignOf(_)
+            | ExprT::Error(_) => 0,
+            ExprT::Deref(a)
+            | ExprT::Member(a, _)
+            | ExprT::VAttr(_, a)
+            | ExprT::Ref(a)
+            | ExprT::UnOp(_, a)
+            | ExprT::Cast(a, _)
+            | ExprT::ContainerOf(a, _, _)
+            | ExprT::Live(a)
+            | ExprT::Old(a)
+            | ExprT::Forall(_, _, a)
+            | ExprT::Exists(_, _, a)
+            | ExprT::UnionInit(_, _, a)
+            | ExprT::MallocArray(_, a)
+            | ExprT::CallocArray(_, a)
+            | ExprT::MallocFlex(_, a)
+            | ExprT::CallocFlex(_, a)
+            | ExprT::MemsetZero(_, a)
+            | ExprT::Free(a)
+            | ExprT::PreIncr(a)
+            | ExprT::PostIncr(a)
+            | ExprT::PreDecr(a)
+            | ExprT::PostDecr(a) => Self::count_cond_expr(a),
+            ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+                Self::count_cond_expr(a) + Self::count_cond_expr(b)
+            }
+            ExprT::Cond(a, b, c) | ExprT::Memset(_, a, b, c) => {
+                Self::count_cond_expr(a) + Self::count_cond_expr(b) + Self::count_cond_expr(c)
+            }
+            ExprT::FnCall(_, args) => args.iter().map(|a| Self::count_cond_expr(a)).sum(),
+            ExprT::FnPtrCall(callee, args) => {
+                Self::count_cond_expr(callee)
+                    + args.iter().map(|a| Self::count_cond_expr(a)).sum::<usize>()
+            }
+            ExprT::StructInit(_, fields) => {
+                fields.iter().map(|(_, a)| Self::count_cond_expr(a)).sum()
+            }
+            ExprT::ArrayInit { elems, .. } => elems.iter().map(|a| Self::count_cond_expr(a)).sum(),
+        }
+    }
+
+    fn count_cond_stmt(stmt: &Stmt) -> usize {
+        match &stmt.val {
+            StmtT::Call(e)
+            | StmtT::Let(_, _, e)
+            | StmtT::Return(Some(e))
+            | StmtT::Assert(e)
+            | StmtT::TernaryEnsures(e)
+            | StmtT::DeclStackArray { size: e, .. } => Self::count_cond_expr(e),
+            StmtT::Assign(lhs, rhs) => Self::count_cond_expr(lhs) + Self::count_cond_expr(rhs),
+            StmtT::If { cond, .. } | StmtT::While { cond, .. } => Self::count_cond_expr(cond),
+            StmtT::Match { scrutinee, .. } => Self::count_cond_expr(scrutinee),
+            StmtT::Decl(..)
+            | StmtT::Break
+            | StmtT::Continue
+            | StmtT::Return(None)
+            | StmtT::GhostStmt(_)
+            | StmtT::Goto(_)
+            | StmtT::Label { .. }
+            | StmtT::GotoBlock { .. }
+            | StmtT::Error => 0,
+        }
+    }
+
     fn elab_stmts(&mut self, env: &Env, stmts: &mut Vec<Rc<Stmt>>) {
         let mut env = env.clone();
+        let mut pending_ternary_ensures: Vec<Rc<Expr>> = Vec::new();
         let mut i = 0;
         while i < stmts.len() {
+            if let StmtT::TernaryEnsures(e) = &stmts[i].val {
+                pending_ternary_ensures.push(e.clone());
+                stmts.remove(i);
+                continue;
+            }
+
             Self::refine_decl_pointer_kind(&env, stmts, i);
 
+            let cond_count = if pending_ternary_ensures.is_empty() {
+                0
+            } else {
+                Self::count_cond_stmt(&stmts[i])
+            };
+            let attach_ternary_ensures = !pending_ternary_ensures.is_empty() && cond_count == 1;
+            if !pending_ternary_ensures.is_empty() && cond_count == 0 {
+                if !matches!(stmts[i].val, StmtT::Decl(..)) {
+                    for e in pending_ternary_ensures.drain(..) {
+                        self.report(
+                            "_ternary_ensures must be immediately followed by a statement containing exactly one conditional expression".to_string(),
+                            &e.loc,
+                        );
+                    }
+                }
+            } else if cond_count > 1 {
+                for e in pending_ternary_ensures.drain(..) {
+                    self.report(
+                        "_ternary_ensures cannot attach to a statement containing more than one conditional expression".to_string(),
+                        &e.loc,
+                    );
+                }
+            }
+
+            if attach_ternary_ensures
+                && let StmtT::Return(Some(ret_expr)) = &stmts[i].val
+                && let ExprT::Cond(_, _, _) = &ret_expr.val
+                && let Some(ret_ty) = &env.return_type
+            {
+                let loc = stmts[i].loc.clone();
+                let name = Rc::new(Ast {
+                    val: Rc::from(format!("__pal_ternary_return_{}", i).as_str()),
+                    loc: loc.clone(),
+                });
+                let tmp = Rc::new(Ast {
+                    val: ExprT::Var(name.clone()),
+                    loc: loc.clone(),
+                });
+                pending_ternary_ensures.push(Rc::new(Ast {
+                    val: ExprT::Live(tmp.clone()),
+                    loc: loc.clone(),
+                }));
+                let decl = StmtT::Decl(name, ret_ty.clone()).with_loc(loc.clone());
+                let assign = StmtT::Assign(tmp.clone(), ret_expr.clone()).with_loc(loc.clone());
+                let ret = StmtT::Return(Some(tmp)).with_loc(loc);
+                stmts[i] = decl;
+                stmts.insert(i + 1, assign);
+                stmts.insert(i + 2, ret);
+                self.elab_stmt(&env, Rc::make_mut(&mut stmts[i]));
+                env.push_stmt(&stmts[i]);
+                i += 1;
+                continue;
+            }
+
             self.elab_stmt(&env, Rc::make_mut(&mut stmts[i]));
-            Self::lower_expr(&mut stmts[i]);
+            let lowered = Self::lower_expr(&mut stmts[i]);
+            if attach_ternary_ensures {
+                if lowered && let StmtT::If { ensures, .. } = &mut Rc::make_mut(&mut stmts[i]).val {
+                    let ensures = Rc::make_mut(ensures);
+                    ensures.append(&mut pending_ternary_ensures);
+                    self.elab_slprops(&env, ensures);
+                } else {
+                    for e in pending_ternary_ensures.drain(..) {
+                        self.report(
+                            "_ternary_ensures can only attach to a conditional expression lowered as the statement's full result".to_string(),
+                            &e.loc,
+                        );
+                    }
+                }
+            }
             env.push_stmt(&stmts[i]);
             i += 1;
+        }
+        for e in pending_ternary_ensures {
+            self.report(
+                "_ternary_ensures must be followed by a statement containing exactly one conditional expression".to_string(),
+                &e.loc,
+            );
         }
     }
 

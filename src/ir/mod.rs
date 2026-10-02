@@ -459,6 +459,7 @@ pub enum StmtT {
     Continue,
     Return(Option<Rc<Expr>>),
     Assert(Rc<Expr>),
+    TernaryEnsures(Rc<Expr>),
     GhostStmt(Rc<InlinePulseCode>),
     Goto(Rc<Ident>),
     Label {

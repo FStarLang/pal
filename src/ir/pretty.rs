@@ -605,6 +605,11 @@ impl PrettyIR for StmtT {
                 .append(");")
                 .nest(2)
                 .group(),
+            StmtT::TernaryEnsures(v) => RcDoc::text("_ternary_ensures(")
+                .append(v.to_doc())
+                .append(");")
+                .nest(2)
+                .group(),
             StmtT::GhostStmt(code) => RcDoc::text("_ghost_stmt(")
                 .append(inline_pulse_code_to_doc(code))
                 .append(");")

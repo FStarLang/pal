@@ -3124,6 +3124,7 @@ public:
     } else if (auto *se = dyn_cast<StmtExpr>(stmt)) {
       // _assert(p) expands to ({ __attribute__((annotate("pal-assert",
       // ...))) {} })
+      // _ternary_ensures(p) expands similarly with "pal-ternary-ensures"
       // _ghost_stmt(p) expands similarly with "pal-ghost-stmt"
       if (auto *comp = dyn_cast<CompoundStmt>(se->getSubStmt())) {
         for (auto s : comp->body()) {
@@ -3131,6 +3132,11 @@ public:
             for (auto a : attr->getAttrs()) {
               if (auto val = isUnaryAttrOf(a, "pal-assert")) {
                 stmts.push(mk_assert(loc.clone(), std::move(val.value())));
+                return rust::Unit();
+              }
+              if (auto val = isUnaryAttrOf(a, "pal-ternary-ensures")) {
+                stmts.push(
+                    mk_ternary_ensures(loc.clone(), std::move(val.value())));
                 return rust::Unit();
               }
               if (auto ctr = isUnaryAttrCounter(a, "pal-ghost-stmt")) {

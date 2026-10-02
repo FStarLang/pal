@@ -2567,6 +2567,7 @@ fn walk_stmt_tree(s: &Stmt, f: &mut impl FnMut(&Expr)) {
         | StmtT::Error => {}
         StmtT::Call(e)
         | StmtT::Assert(e)
+        | StmtT::TernaryEnsures(e)
         | StmtT::Return(Some(e))
         | StmtT::Let(_, _, e)
         | StmtT::DeclStackArray { size: e, .. } => walk_expr_tree(e, f),
@@ -5789,6 +5790,7 @@ impl<'a> Emitter<'a> {
                 self.nullable_arg_ghosts_expr(env, r, out);
             }
             StmtT::Call(e) | StmtT::Return(Some(e)) => self.nullable_arg_ghosts_expr(env, e, out),
+            StmtT::TernaryEnsures(e) => self.nullable_arg_ghosts_expr(env, e, out),
             StmtT::Let(_, _, e) => self.nullable_arg_ghosts_expr(env, e, out),
             _ => {}
         }
@@ -6729,13 +6731,18 @@ impl<'a> Emitter<'a> {
                     let cond_has_prelude = !lowered_cond.prelude.is_empty();
                     let cond_prelude = lowered_cond.prelude;
                     let cond_doc = parens(lowered_cond.expr);
-                    let ensures_doc = Doc::concat(ensures.iter().map(|e| {
+                    let ensures_doc = if ensures.is_empty() {
+                        Doc::nil()
+                    } else {
                         Doc::line()
                             .append("ensures ")
-                            .append(self.emit_rvalue(env, e))
+                            .append(Doc::intersperse(
+                                ensures.iter().map(|e| self.emit_rvalue(env, e)),
+                                Doc::line().append("** "),
+                            ))
                             .group()
                             .nest(2)
-                    }));
+                    };
                     // A branch on the nullness of a `_nullable` pointer decides
                     // whether that pointer's `unless_null` is carrying anything,
                     // so open it here rather than leaving every branch body to
@@ -7024,6 +7031,9 @@ impl<'a> Emitter<'a> {
                         .group()
                         .nest(2)
                 }),
+                StmtT::TernaryEnsures(_) => Doc::text("(* misplaced _ternary_ensures *)")
+                    .append(Doc::line())
+                    .append("(admit());"),
                 StmtT::GhostStmt(code) => {
                     let env = &mut env.clone();
                     self.emit_inline_pulse_tokens(env, code).append(";")
@@ -7154,6 +7164,30 @@ fn stmts_need_entry_old(stmts: &[Rc<Stmt>], params: &HashSet<Rc<str>>) -> bool {
     })
 }
 
+fn stmt_always_returns(stmt: &Stmt) -> bool {
+    match &stmt.val {
+        StmtT::Return(_) => true,
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        } => stmts_always_return(then_branch) && stmts_always_return(else_branch),
+        StmtT::Match {
+            branches,
+            default_branch: then_branch,
+            ..
+        } => {
+            branches.iter().all(|b| stmts_always_return(&b.body))
+                && stmts_always_return(then_branch)
+        }
+        _ => false,
+    }
+}
+
+fn stmts_always_return(stmts: &[Rc<Stmt>]) -> bool {
+    stmts.iter().any(|s| stmt_always_returns(s))
+}
+
 impl<'a> Emitter<'a> {
     fn emit_stmts(&mut self, env: &Env, stmts: &Vec<Rc<Stmt>>) -> Doc {
         let mut env = env.clone();
@@ -7235,6 +7269,7 @@ impl<'a> Emitter<'a> {
             if idx == stmts.len()
                 && let StmtT::If { ensures, .. } = &stmt.val
                 && !ensures.is_empty()
+                && !stmt_always_returns(stmt)
             {
                 doc = doc.append(Doc::line().append("()"));
             }

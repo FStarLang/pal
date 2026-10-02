@@ -124,6 +124,41 @@ A loop with two `break` sites would carry two `_ensures` clauses, one for each.
 
 For `do { ... } while (cond)`, PAL desugars to `while (first || cond)` with a fresh boolean flag. Use `_do_while_first(name)` to name that flag explicitly when the invariant needs to refer to it (see `test/do_while/do_while.c`).
 
+### Ternary postconditions
+
+PAL lowers a top-level C conditional expression in an assignment, declaration
+initializer, or return into a Pulse `if`. When the two arms leave resources in
+different folded/unfolded shapes, the generated `if` may need an explicit
+postcondition, just like a handwritten C `if` can use `_ensures(p)`.
+
+Place `_ternary_ensures(p);` immediately before the statement containing the
+single conditional expression:
+
+```c
+_ternary_ensures(_live(x) && x == (flag ? a : b));
+x = flag ? f(a) : g(b);
+
+_ternary_ensures(_live(y) && y == (flag ? a : b));
+uint32_t y = flag ? f(a) : g(b);
+
+_ternary_ensures(_live(p) && _live(*p));
+return flag ? f(&p->field) : g(p);
+```
+
+The predicate uses the usual PAL specification language, including
+`_inline_pulse`, `$(...)`, and `_old(...)`. For assignments and declaration
+initializers, the assigned lvalue is in scope in the predicate even when it is
+the variable declared by the following statement. For returns, the predicate is
+the postcondition of the generated `if` before the `return` in each branch, so
+it should describe resources or facts available before control leaves the
+function.
+
+The annotation is intentionally narrow: the following statement must contain
+exactly one conditional expression, and that expression must be the full result
+that PAL lowers for the statement. PAL reports an error if the next statement
+has no `?:`, has more than one `?:`, or has only a nested conditional
+expression that cannot receive an `if` postcondition.
+
 ### Refinements for data types
 
 As explained in `structs.md`, PAL auto-generates predicates for compound types. These can be further enriched with user-supplied predicates carried by the type itself:

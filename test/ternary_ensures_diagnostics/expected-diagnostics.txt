@@ -1,0 +1,2 @@
+_ternary_ensures must be immediately followed by a statement containing exactly one conditional expression
+_ternary_ensures cannot attach to a statement containing more than one conditional expression
