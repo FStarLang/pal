@@ -5495,12 +5495,21 @@ impl<'a> Emitter<'a> {
                 | ExprT::PostDecr(val) => {
                     // Check if this is pointer arithmetic (arrayptr++/--)
                     let val_ty = env.infer_expr(val).ok().map(|t| env.vtype_whnf(t));
-                    let is_ptr = val_ty.as_ref().is_some_and(|t| {
-                        matches!(
-                            t.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        )
-                    });
+                    fn pointer_kind(env: &Env, ty: &Type) -> Option<PointerKind> {
+                        match &env.vtype_whnf(ty.clone().into()).val {
+                            TypeT::Pointer(_, kind) => Some(kind.clone()),
+                            TypeT::Nullable(inner)
+                            | TypeT::Plain(inner)
+                            | TypeT::Refine(inner, _)
+                            | TypeT::RefineAlways(inner, _)
+                            | TypeT::RefineUninit(inner, _)
+                            | TypeT::RefineValue(inner, ..) => pointer_kind(env, inner),
+                            _ => None,
+                        }
+                    }
+                    let ptr_kind = val_ty.as_ref().and_then(|t| pointer_kind(env, t));
+                    let is_ptr =
+                        matches!(ptr_kind, Some(PointerKind::Array | PointerKind::ArrayPtr));
                     if is_ptr {
                         let is_incr = matches!(&v.val, ExprT::PreIncr(_) | ExprT::PostIncr(_));
                         let is_pre = matches!(&v.val, ExprT::PreIncr(_) | ExprT::PreDecr(_));
@@ -5512,6 +5521,17 @@ impl<'a> Emitter<'a> {
                                 .append(self.emit_lvalue(env, val)),
                         )
                     } else {
+                        if matches!(
+                            ptr_kind,
+                            Some(PointerKind::Unknown | PointerKind::Ref | PointerKind::Core)
+                        ) {
+                            self.report(
+                                "pointer increment/decrement requires an _arrayptr annotation"
+                                    .to_string(),
+                                &val.loc,
+                            );
+                            return Doc::text("(admit())");
+                        }
                         let prefix = match &v.val {
                             ExprT::PreIncr(_) => "pluspluspre",
                             ExprT::PostIncr(_) => "pluspluspost",

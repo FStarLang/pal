@@ -84,4 +84,4 @@ Inline arrays embedded in structs/unions have a *dual* representation: the noeq 
 
 ## Arrayptrs
 
-`_arrayptr T*` denotes a sub-array sharing a base with its parent array. The Pulse representation is just an `array t` with `length == 0`; the relationship to the parent is asserted by the pure `arrayptr_pts_to` slprop. Pointer arithmetic (`a + i`) lowers to `arrayptr_shift`; comparisons lower to `arrayptr_eq` / `arrayptr_lt` / `arrayptr_lte`.
+`_arrayptr T*` denotes a sub-array sharing a base with its parent array. The Pulse representation is just an `array t` with `length == 0`; the relationship to the parent is asserted by the pure `arrayptr_pts_to` slprop. Pointer arithmetic (`a + i`) lowers to `arrayptr_shift`; comparisons lower to `arrayptr_eq` / `arrayptr_lt` / `arrayptr_lte`. Increment and decrement forms (`p++`, `++p`, `p--`, `--p`, including `_arrayptr` struct fields) lower to the `arrayptr_*_{incr,decr}` helpers. PAL rejects increment/decrement on unannotated `T*` values with a diagnostic; add `_arrayptr` when the pointer is a cursor into an owned array segment.
