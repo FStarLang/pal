@@ -3095,6 +3095,20 @@ new facts about memory.
    field gives its value up on its own and what is left is the storage the
    local started with.
 
+   A field that is itself a struct is filled the same way. `h.list.next = x`
+   on storage still being filled cannot focus `list` -- that needs `h` to be
+   a value -- so `h` is scattered and `list`'s own storage becomes a slot of
+   its own, scattered in turn; when `list`'s last field is written it is
+   gathered, counts as written in `h`, and may complete `h` in its turn.
+   Before this, such a write focused the outer field anyway and failed in
+   F* with nothing said by the translator. And where an author's ghost step
+   has already taken the object apart -- typically a contract predicate
+   that hands over some fields as storage and others with values -- the
+   `$scattered(struct T) $(p)` hint says so: the writes then fill the
+   remaining fields by address without scattering again, and the object is
+   gathered only if every field gets written. `test/nested_scatter` covers
+   both.
+
    This is what the old model's source-level `$unfold-uninit` was for, so
    under `PALOW` that annotation is now a no-op macro in the one test that
    uses it. One wrinkle came with it: a validity seeded for a function stored
