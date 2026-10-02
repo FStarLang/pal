@@ -174,6 +174,7 @@ impl Env {
                             .with_loc(name.loc.clone()),
                         fields: vec![],
                         eager_unfold_pred: false,
+                        abi_size: None,
                     });
                 }
             }
