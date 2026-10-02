@@ -9850,6 +9850,16 @@ struct Body<'a> {
     /// -- so the open has to outlive the statement that made it. The author
     /// says where it ends, with the matching `$fold`.
     open_elems: Vec<(String, Vec<String>)>,
+    /// Struct-typed fields being filled one field at a time inside an object
+    /// that is itself being filled that way, keyed by the field's address: the
+    /// object's address, its Palow struct name, and the field's C name. The
+    /// field gets a slot of its own, and when that slot is gathered the field
+    /// counts as written in the object around it -- which may complete that
+    /// object in turn.
+    nested_scatter: BTreeMap<String, (String, String, String)>,
+    /// Storage `$scattered` said is already in pieces, by address, until it
+    /// is gathered: the first write into it must not scatter it again.
+    prescattered: HashSet<String>,
     /// Parameters whose `_own` is currently unfolded. Deep ownership is held
     /// folded, because that is the form a contract states and a call passes;
     /// a statement that reaches through a pointer field scatters it, uses the
@@ -11376,7 +11386,7 @@ impl<'a> Body<'a> {
         // A flexible struct arrives from its allocation already in pieces:
         // the claim is what broke it up, and there is no whole-object
         // uninitialised view to break up instead.
-        if self.scattered_set(target).is_empty() && !flex {
+        if !self.scatter_started(target, &ff.a) && !flex {
             self.lines
                 .push(format!("{}_scatter_uninit {};", ff.sn, ff.a));
         }
@@ -11393,10 +11403,12 @@ impl<'a> Body<'a> {
                 close_write.push(format!("{}_unfocus_{} {};", un, arm, ff.a));
             }
             self.scattered_set_mut(target).clear();
+            self.prescattered.remove(&ff.a);
             match target {
                 Scattering::Slot(i) => self.slots[i].init = true,
                 Scattering::Block(i) => self.blocks[i].init = true,
             }
+            self.gather_enclosing(&ff.a, &mut close_write);
         }
         // Whatever had to be opened to reach the storage is still open:
         // scattering happens *inside* that, not instead of it.
@@ -11411,6 +11423,177 @@ impl<'a> Body<'a> {
             close_read: Vec::new(),
             close_write,
         })
+    }
+
+    /// The storage at `a` that is waiting to be filled, if any: a local or
+    /// noted slot, or a checked block, that holds no value yet.
+    fn scatter_target(&self, a: &str) -> Option<Scattering> {
+        match self
+            .slots
+            .iter()
+            .rposition(|s| s.addr == a && !s.init && s.array.is_none())
+        {
+            Some(i) => Some(Scattering::Slot(i)),
+            None => Some(Scattering::Block(self.blocks.iter().rposition(|b| {
+                b.tmp == a && b.checked && !b.freed && !b.init && b.array.is_none()
+            })?)),
+        }
+    }
+
+    /// Whether the storage at `a` has already been broken into its fields:
+    /// some field has been written, or a struct-typed field is itself being
+    /// filled and so has its own storage out of the object already.
+    fn scatter_started(&self, t: Scattering, a: &str) -> bool {
+        !self.scattered_set(t).is_empty()
+            || self.prescattered.contains(a)
+            || self
+                .nested_scatter
+                .iter()
+                .any(|(at, (pa, _, _))| pa == a && self.scatter_target(at).is_some())
+    }
+
+    /// The struct a scatter-able struct's fields are, by name, when it has
+    /// the uninitialised view `_scatter_uninit` needs: every field has to
+    /// have one.
+    fn scatter_fields(&self, sn: &str) -> Option<Vec<String>> {
+        let si = self.tds.structs.get(sn.strip_prefix("struct_")?)?;
+        si.fields
+            .iter()
+            .all(|x| match &x.shape {
+                FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+                FieldShape::Array { .. } => true,
+                FieldShape::Flex { .. } => false,
+            })
+            .then(|| si.fields.iter().map(|x| x.name.clone()).collect())
+    }
+
+    /// The object at `a` has just become a value. If it is a struct-typed
+    /// field of an object that is still being filled, that field now counts
+    /// as written there -- and if it was the last one, the enclosing object
+    /// is gathered too, and so on outwards.
+    fn gather_enclosing(&mut self, a: &str, close: &mut Vec<String>) {
+        let Some((pa, psn, pf)) = self.nested_scatter.remove(a) else {
+            return;
+        };
+        let (Some(t), Some(names)) = (self.scatter_target(&pa), self.scatter_fields(&psn)) else {
+            return;
+        };
+        self.scattered_set_mut(t).insert(pf);
+        if names.iter().all(|n| self.scattered_set(t).contains(n)) {
+            close.push(format!("{}_gather {};", psn, pa));
+            self.scattered_set_mut(t).clear();
+            self.prescattered.remove(&pa);
+            match t {
+                Scattering::Slot(i) => self.slots[i].init = true,
+                Scattering::Block(i) => self.blocks[i].init = true,
+            }
+            self.gather_enclosing(&pa, close);
+        }
+    }
+
+    /// `o.f.g` where `o` is storage still being filled and `f` is a struct.
+    ///
+    /// Focusing `f` would need `o` to be a value, which it is not -- it holds
+    /// bytes. So `o` is broken into its fields instead, exactly as a write
+    /// to a scalar field of it would, and `f`'s own storage becomes a slot of
+    /// its own that the write to `g` scatters into in turn. Nothing is opened
+    /// around `f`: once `o` is in pieces, `f` is reached by address. Returns
+    /// `None` when `o` is not such storage, leaving the focus to the caller.
+    fn nested_scatter_base(
+        &mut self,
+        b2: &Expr,
+        f2: &Ident,
+        fty: &Type,
+        writing: bool,
+    ) -> Result<Option<(String, Vec<String>, Vec<String>)>, String> {
+        // Naming the object must cost nothing to find out whether it is
+        // storage being filled; anything that takes steps is rolled back.
+        let mark = self.lines.len();
+        let closing = self.pending_close.len();
+        let tmp = self.tmp;
+        let a = match self.addr_only(b2) {
+            Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => a,
+            _ => {
+                self.lines.truncate(mark);
+                self.pending_close.truncate(closing);
+                self.tmp = tmp;
+                return Ok(None);
+            }
+        };
+        // `o.f.g.h`: `o.f` becomes storage being filled only once something
+        // is written into it, and this may be that write -- so the level
+        // around it is given the chance to start first.
+        if self.scatter_target(&a).is_none()
+            && let ExprT::Member(b3, f3) = &strip_vattr(b2).val
+            && !self.in_pieces(b3)
+            && let Ok(ty2) = self.ty_of(b2)
+            && matches!(&peel(self.tds, &ty2).val, TypeT::TypeRef(TypeRefKind::Struct(_)))
+            && let Some((_, cr, cw)) = self.nested_scatter_base(b3, f3, &ty2, writing)?
+            && !(cr.is_empty() && cw.is_empty())
+        {
+            return Err(format!(
+                "a field of `{}`, which is being filled one field at a time inside a place \
+                 that has to be opened",
+                f3.val
+            ));
+        }
+        let Some(target) = self.scatter_target(&a) else {
+            return Ok(None);
+        };
+        let (sn, _) = self.struct_of(b2)?;
+        let Some(names) = self.scatter_fields(&sn) else {
+            return Ok(None);
+        };
+        let ff = self.open_field(b2, f2, writing)?;
+        if ff.a != a || !names.iter().any(|n| n == &*f2.val) {
+            return Err(format!(
+                "a field of `{}`, which is being filled one field at a time",
+                f2.val
+            ));
+        }
+        // Already written: `f` is a value, and the access focuses into it.
+        if self.scattered_set(target).contains(&*f2.val) {
+            return Ok(Some((ff.at, ff.close_read, ff.close_write)));
+        }
+        // Already being filled itself.
+        if self.nested_scatter.contains_key(&ff.at) && self.scatter_target(&ff.at).is_some() {
+            return Ok(Some((ff.at, ff.close_read, ff.close_write)));
+        }
+        if !writing {
+            return Err(format!("a read of `{}`, which has not been written", f2.val));
+        }
+        let (Some(pn), Some(fsty)) = (palow_name(self.tds, fty), fstar_type(self.tds, fty)) else {
+            return Ok(None);
+        };
+        if self.scatter_fields(&pn).is_none() {
+            return Err(format!(
+                "a field of `{}`, which is being filled one field at a time and has no \
+                 uninitialised view",
+                f2.val
+            ));
+        }
+        if !self.scatter_started(target, &a) {
+            self.lines.push(format!("{}_scatter_uninit {};", sn, a));
+        }
+        self.nested_scatter
+            .insert(ff.at.clone(), (a, sn, f2.val.to_string()));
+        // The field's storage is the enclosing object's, which is where it is
+        // released if it ever is: a slot of its own would release it twice.
+        self.slots.push(Slot {
+            name: format!("*{}", ff.at),
+            addr: ff.at.clone(),
+            palow_ty: pn,
+            fstar_ty: fsty,
+            init: false,
+            array: None,
+            global: true,
+            union_arm: None,
+            filling: None,
+            holds_fn: BTreeMap::new(),
+            holds_block: BTreeMap::new(),
+            scattered: BTreeSet::new(),
+        });
+        Ok(Some((ff.at, ff.close_read, ff.close_write)))
     }
 
     /// The fields written so far into whichever of the two kinds of storage is
@@ -11519,6 +11702,14 @@ impl<'a> Body<'a> {
             // A union-typed field is reached the same way: the aggregate
             // holding it has to be opened before anything inside it can be
             // named, and which of the two it is changes nothing about that.
+            if matches!(
+                &peel(self.tds, &fty).val,
+                TypeT::TypeRef(TypeRefKind::Struct(_))
+            ) && !self.in_pieces(b2)
+                && let Some(r) = self.nested_scatter_base(b2, f2, &fty, writing)?
+            {
+                return Ok(r);
+            }
             if matches!(
                 &peel(self.tds, &fty).val,
                 TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
@@ -15289,6 +15480,8 @@ impl<'a> Body<'a> {
         // and nowhere else, so the environment is extended as the statements
         // go by and restored at the closing brace, as it is for a branch.
         let outer_env = self.env.clone();
+        let outer_nested = self.nested_scatter.clone();
+        let outer_prescattered = self.prescattered.clone();
         let mark = self.slots.len();
         let r = (|| -> Result<(), String> {
             for s in body.iter() {
@@ -15303,6 +15496,8 @@ impl<'a> Body<'a> {
             Ok(())
         })();
         self.env = outer_env;
+        self.nested_scatter = outer_nested;
+        self.prescattered = outer_prescattered;
         self.slots.truncate(mark);
         self.in_branch = was_branch;
         self.tail_branch = was_tail_branch;
@@ -15761,6 +15956,30 @@ impl<'a> Body<'a> {
                 // have all been written and gathered, so the element is a
                 // value again and goes back into the array.
                 self.close_open_elem(code);
+                Ok(())
+            }
+            StmtT::GhostStmt(code) if matches!(aux_fn_kind(code), Some(AuxFnKind::Scattered)) => {
+                // The object is already in pieces -- a ghost step of the
+                // author's took it apart, and may have given some fields
+                // values on the way. It is the same slot `$unfold-uninit`
+                // makes, except that the scatter has already happened, so the
+                // first write must not do it again; and since the fields the
+                // body does not write are none of its business, the object is
+                // only gathered if the body writes every one of them.
+                let Some(e) = uninit_open_arg(code) else {
+                    return Err("`$scattered` without an object".to_string());
+                };
+                let before = self.slots.len();
+                self.note_uninit(e);
+                if self.slots.len() == before {
+                    return Err(
+                        "`$scattered` of something that is not a struct this body can name \
+                         by address"
+                            .to_string(),
+                    );
+                }
+                let a = self.slots[before].addr.clone();
+                self.prescattered.insert(a);
                 Ok(())
             }
             StmtT::GhostStmt(code) if ghost_replaced(code) => {
@@ -16324,6 +16543,8 @@ impl<'a> Body<'a> {
         let outer_slots = self.slots.clone();
         let outer_seeded = self.seeded.clone();
         let outer_open = self.open_elems.clone();
+        let outer_nested = self.nested_scatter.clone();
+        let outer_prescattered = self.prescattered.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
         let outer_tail_branch = std::mem::replace(&mut self.tail_branch, true);
 
@@ -16334,6 +16555,8 @@ impl<'a> Body<'a> {
         self.tail_branch = outer_tail_branch;
         self.in_branch = outer_in_branch;
         self.open_elems = outer_open;
+        self.nested_scatter = outer_nested;
+        self.prescattered = outer_prescattered;
         self.seeded = outer_seeded;
         self.slots = outer_slots;
         self.out_params = outer_out;
@@ -16375,6 +16598,8 @@ impl<'a> Body<'a> {
         let outer_out = self.out_params.clone();
         let outer_seeded = self.seeded.clone();
         let outer_open = self.open_elems.clone();
+        let outer_nested = self.nested_scatter.clone();
+        let outer_prescattered = self.prescattered.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
         let outer_tail_branch = std::mem::replace(&mut self.tail_branch, false);
         let outer_diverged = std::mem::replace(&mut self.diverged, false);
@@ -16444,6 +16669,8 @@ impl<'a> Body<'a> {
         })();
 
         self.open_elems = outer_open;
+        self.nested_scatter = outer_nested;
+        self.prescattered = outer_prescattered;
         self.slots.truncate(mark);
         for (slot, (init, holds, blocks, scattered)) in self.slots.iter_mut().zip(outer_state) {
             slot.init = init;
@@ -16493,6 +16720,36 @@ impl<'a> Body<'a> {
                 FieldShape::Array { .. } | FieldShape::Flex { .. } => None,
             })
             .collect()
+    }
+
+    /// Put back every struct-typed field of the object at `a` that is still
+    /// being filled, innermost first: each written field of it gives its
+    /// value up and the field is storage again. Returns whether there was
+    /// any -- which means the object itself was scattered.
+    fn unwind_nested(&mut self, a: &str) -> bool {
+        let kids: Vec<String> = self
+            .nested_scatter
+            .iter()
+            .filter(|(_, (pa, _, _))| pa == a)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut any = false;
+        for k in kids {
+            self.nested_scatter.remove(&k);
+            let Some(j) = self.slots.iter().rposition(|s| s.addr == k && !s.init) else {
+                continue;
+            };
+            any = true;
+            self.unwind_nested(&k);
+            let pn = self.slots[j].palow_ty.clone();
+            for (name, p) in self.scattered_field_names(j) {
+                self.lines
+                    .push(format!("{}_forget ({} +! {}_offsetof_{});", p, k, pn, name));
+            }
+            self.lines.push(format!("{}_gather_uninit {};", pn, k));
+            self.slots[j].scattered.clear();
+        }
+        any
     }
 
     fn release_from(&mut self, mark: usize) {
@@ -16560,11 +16817,14 @@ impl<'a> Body<'a> {
                 ));
                 continue;
             }
+            // A struct-typed field left half-built is put back first, so
+            // that what the object holds for it is storage again.
+            let nested = self.unwind_nested(&addr);
             // A half-built object never became a value, so there is nothing
             // to forget as a whole: each field that did get written gives its
             // own value up, and what is left is the storage the slot started
             // with.
-            if !scattered.is_empty() {
+            if !scattered.is_empty() || nested {
                 let fpn = self.scattered_field_names(i);
                 for (name, p) in fpn {
                     self.lines.push(format!(
@@ -17728,6 +17988,8 @@ fn emit_body(
         in_loop: false,
         pending_close: Vec::new(),
         open_elems: Vec::new(),
+        nested_scatter: BTreeMap::new(),
+        prescattered: HashSet::new(),
         own_open: Vec::new(),
         loop_mark: None,
         mirrors: HashMap::new(),
@@ -18069,6 +18331,9 @@ fn aux_fn_antiquot(
                 AuxFnKind::Activate => {
                     Err("`$activate` of a struct, which has no arms".to_string())
                 }
+                AuxFnKind::Scattered => {
+                    Err("`$scattered` other than as a statement of its own".to_string())
+                }
             }
         }
         TypeT::TypeRef(TypeRefKind::Union(n)) if tds.unions.contains_key(&*n.val) => {
@@ -18080,7 +18345,7 @@ fn aux_fn_antiquot(
                 AuxFnKind::Unfold => Ok(format!("{}_focus_{}", un, f.val)),
                 AuxFnKind::Fold => Ok(format!("{}_unfocus_{}", un, f.val)),
                 AuxFnKind::Activate => Ok(format!("{}_switch_uninit_{}", un, f.val)),
-                AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit => Err(format!(
+                AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit | AuxFnKind::Scattered => Err(format!(
                     "`${}` of a union, which is uninitialised as a whole",
                     kind.keyword()
                 )),
@@ -18261,7 +18526,10 @@ fn aux_activate(code: &InlinePulseCode) -> Option<(&Type, &Ident, &Expr)> {
 /// The old model's uninitialised-open takes exactly one argument, the object,
 /// and it arrives as the first antiquotation after the head.
 fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
-    if !matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
+    if !matches!(
+        aux_fn_kind(code),
+        Some(AuxFnKind::UnfoldUninit | AuxFnKind::Scattered)
+    )
         && !ghost_head(code).contains("__aux_raw_unfold_uninit")
     {
         return None;

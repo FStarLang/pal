@@ -684,6 +684,11 @@ pub enum AuxFnKind {
     /// uninitialized. Union-only; has no struct form. Emits the per-arm
     /// activation fn `union_<U>__activate_<arm>`.
     Activate,
+    /// `$scattered(struct S) $(p)` — says that `*p` is already in pieces:
+    /// its fields are owned one by one, those the body writes as storage.
+    /// Palow-only; it emits nothing, and only tells the emitter to fill the
+    /// remaining fields by address instead of opening the object.
+    Scattered,
 }
 
 impl AuxFnKind {
@@ -694,6 +699,7 @@ impl AuxFnKind {
             AuxFnKind::Fold => "fold",
             AuxFnKind::FoldUninit => "fold-uninit",
             AuxFnKind::Activate => "activate",
+            AuxFnKind::Scattered => "scattered",
         }
     }
 
@@ -705,7 +711,7 @@ impl AuxFnKind {
             AuxFnKind::UnfoldUninit => Some("raw_unfold_uninit"),
             AuxFnKind::Fold => Some("raw_fold"),
             AuxFnKind::FoldUninit => Some("raw_fold_uninit"),
-            AuxFnKind::Activate => None,
+            AuxFnKind::Activate | AuxFnKind::Scattered => None,
         }
     }
 
@@ -713,7 +719,10 @@ impl AuxFnKind {
         match self {
             AuxFnKind::Unfold => Some("raw_unfold"),
             AuxFnKind::Fold => Some("raw_fold"),
-            AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit | AuxFnKind::Activate => None,
+            AuxFnKind::UnfoldUninit
+            | AuxFnKind::FoldUninit
+            | AuxFnKind::Activate
+            | AuxFnKind::Scattered => None,
         }
     }
 }
