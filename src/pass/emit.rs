@@ -766,6 +766,11 @@ struct BorrowedArrayCellGroup {
     writable: bool,
 }
 
+struct ShortCircuitExpr {
+    prelude: Vec<Doc>,
+    expr: Doc,
+}
+
 struct Emitter<'a> {
     nm: NameMangling,
     diags: &'a mut Diagnostics,
@@ -1377,6 +1382,564 @@ impl<'a> Emitter<'a> {
                     .append(body)
                     .append(Doc::text(")"))
             })
+    }
+
+    fn concat_stmt_docs(docs: Vec<Doc>) -> Doc {
+        Doc::concat(docs.into_iter().map(|doc| doc.append(Doc::hardline())))
+    }
+
+    fn block_with_final(prelude: Vec<Doc>, expr: Doc) -> Doc {
+        block(
+            Doc::hardline()
+                .append(Self::concat_stmt_docs(prelude))
+                .append(expr),
+        )
+    }
+
+    fn emit_if_statement_expr(&mut self, cond: Doc, then_doc: Doc, else_doc: Doc) -> Doc {
+        Doc::text("if ")
+            .append(parens(cond))
+            .append(" ")
+            .append(then_doc)
+            .append(" else ")
+            .append(else_doc)
+            .group()
+    }
+
+    fn emit_short_circuit_binding(&mut self, ty: Doc, body: Doc) -> (Doc, Doc) {
+        let tmp = self.fresh_tmp("sc");
+        let bind = Doc::text("let ")
+            .append(tmp.clone())
+            .append(" :")
+            .append(Doc::line())
+            .append(ty)
+            .append(Doc::line())
+            .append("=")
+            .group()
+            .append(Doc::line())
+            .append(body)
+            .append(";")
+            .nest(2)
+            .group();
+        (tmp, bind)
+    }
+
+    fn expr_has_stateful_precondition(&self, env: &Env, e: &Expr) -> bool {
+        match &e.val {
+            ExprT::Index(_, _) | ExprT::Deref(_) | ExprT::FnCall(_, _) | ExprT::FnPtrCall(_, _) => {
+                true
+            }
+            ExprT::Malloc(_)
+            | ExprT::MallocArray(_, _)
+            | ExprT::Calloc(_)
+            | ExprT::CallocArray(_, _)
+            | ExprT::MallocFlex(_, _)
+            | ExprT::CallocFlex(_, _)
+            | ExprT::Memset(_, _, _, _)
+            | ExprT::MemsetZero(_, _)
+            | ExprT::Free(_)
+            | ExprT::PreIncr(_)
+            | ExprT::PostIncr(_)
+            | ExprT::PreDecr(_)
+            | ExprT::PostDecr(_)
+            | ExprT::AssignExpr(_, _) => true,
+            ExprT::Member(base, _) => {
+                self.expr_has_stateful_precondition(env, base)
+                    || env.infer_expr(base).ok().is_some_and(|ty| {
+                        matches!(
+                            env.vtype_whnf(ty).val,
+                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+                        )
+                    })
+            }
+            ExprT::UnOp(_, a)
+            | ExprT::Cast(a, _)
+            | ExprT::VAttr(_, a)
+            | ExprT::Ref(a)
+            | ExprT::ContainerOf(a, _, _)
+            | ExprT::Live(a)
+            | ExprT::Old(a)
+            | ExprT::Forall(_, _, a)
+            | ExprT::Exists(_, _, a)
+            | ExprT::UnionInit(_, _, a) => self.expr_has_stateful_precondition(env, a),
+            ExprT::BinOp(_, a, b) => {
+                self.expr_has_stateful_precondition(env, a)
+                    || self.expr_has_stateful_precondition(env, b)
+            }
+            ExprT::Cond(a, b, c) => {
+                self.expr_has_stateful_precondition(env, a)
+                    || self.expr_has_stateful_precondition(env, b)
+                    || self.expr_has_stateful_precondition(env, c)
+            }
+            ExprT::StructInit(_, fields) => fields
+                .iter()
+                .any(|(_, a)| self.expr_has_stateful_precondition(env, a)),
+            ExprT::ArrayInit { elems, .. } => elems
+                .iter()
+                .any(|a| self.expr_has_stateful_precondition(env, a)),
+            ExprT::Var(_)
+            | ExprT::BoolLit(_)
+            | ExprT::IntLit(_, _)
+            | ExprT::FloatLit(_, _)
+            | ExprT::FnRef(_)
+            | ExprT::InlinePulse(_, _)
+            | ExprT::SizeOf(_)
+            | ExprT::AlignOf(_)
+            | ExprT::Error(_) => false,
+        }
+    }
+
+    fn expr_needs_short_circuit_lowering(&self, env: &Env, e: &Expr) -> bool {
+        match &e.val {
+            ExprT::BinOp(BinOp::LogAnd | BinOp::LogOr, lhs, rhs) => {
+                !env.infer_expr(lhs)
+                    .ok()
+                    .is_some_and(|ty| ty.val == TypeT::SLProp)
+                    && (self.expr_has_stateful_precondition(env, rhs)
+                        || self.expr_needs_short_circuit_lowering(env, lhs)
+                        || self.expr_needs_short_circuit_lowering(env, rhs))
+            }
+            ExprT::Cond(cond, then_expr, else_expr) => {
+                self.expr_has_stateful_precondition(env, then_expr)
+                    || self.expr_has_stateful_precondition(env, else_expr)
+                    || self.expr_needs_short_circuit_lowering(env, cond)
+                    || self.expr_needs_short_circuit_lowering(env, then_expr)
+                    || self.expr_needs_short_circuit_lowering(env, else_expr)
+            }
+            ExprT::UnOp(_, a)
+            | ExprT::Cast(a, _)
+            | ExprT::VAttr(_, a)
+            | ExprT::Deref(a)
+            | ExprT::Ref(a)
+            | ExprT::Live(a)
+            | ExprT::Old(a)
+            | ExprT::Forall(_, _, a)
+            | ExprT::Exists(_, _, a)
+            | ExprT::UnionInit(_, _, a) => self.expr_needs_short_circuit_lowering(env, a),
+            ExprT::Member(base, _) => self.expr_needs_short_circuit_lowering(env, base),
+            ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+                self.expr_needs_short_circuit_lowering(env, a)
+                    || self.expr_needs_short_circuit_lowering(env, b)
+            }
+            ExprT::Index(a, b) => {
+                self.expr_needs_short_circuit_lowering(env, a)
+                    || self.expr_needs_short_circuit_lowering(env, b)
+            }
+            ExprT::Memset(_, dst, value, count) => {
+                self.expr_needs_short_circuit_lowering(env, dst)
+                    || self.expr_needs_short_circuit_lowering(env, value)
+                    || self.expr_needs_short_circuit_lowering(env, count)
+            }
+            ExprT::FnCall(_, args) | ExprT::FnPtrCall(_, args) => args
+                .iter()
+                .any(|a| self.expr_needs_short_circuit_lowering(env, a)),
+            ExprT::StructInit(_, fields) => fields
+                .iter()
+                .any(|(_, a)| self.expr_needs_short_circuit_lowering(env, a)),
+            ExprT::ArrayInit { elems, .. } => elems
+                .iter()
+                .any(|a| self.expr_needs_short_circuit_lowering(env, a)),
+            ExprT::MallocArray(_, a)
+            | ExprT::CallocArray(_, a)
+            | ExprT::ContainerOf(a, _, _)
+            | ExprT::MallocFlex(_, a)
+            | ExprT::CallocFlex(_, a)
+            | ExprT::MemsetZero(_, a)
+            | ExprT::Free(a)
+            | ExprT::PreIncr(a)
+            | ExprT::PostIncr(a)
+            | ExprT::PreDecr(a)
+            | ExprT::PostDecr(a) => self.expr_needs_short_circuit_lowering(env, a),
+            ExprT::Var(_)
+            | ExprT::BoolLit(_)
+            | ExprT::IntLit(_, _)
+            | ExprT::FloatLit(_, _)
+            | ExprT::FnRef(_)
+            | ExprT::InlinePulse(_, _)
+            | ExprT::Malloc(_)
+            | ExprT::Calloc(_)
+            | ExprT::SizeOf(_)
+            | ExprT::AlignOf(_)
+            | ExprT::Error(_) => false,
+        }
+    }
+
+    fn emit_cast_doc(&mut self, env: &Env, val: &Expr, val_doc: Doc, to_ty: &Type) -> Doc {
+        let Ok(from_ty) = env.infer_expr(val).map(|t| env.vtype_whnf(t)) else {
+            return val_doc;
+        };
+        let to_ty = env.vtype_whnf(to_ty.clone().into());
+        if matches!(&to_ty.val, TypeT::SizeT)
+            && let ExprT::IntLit(n, _) = &val.val
+        {
+            return emit_sizet_literal(n);
+        }
+        if env.vtype_eq(from_ty.clone(), to_ty.clone()) {
+            return val_doc;
+        }
+
+        let default_msg = format!("unsupported cast from {} to {}", from_ty, to_ty);
+        match (&from_ty.val, &to_ty.val) {
+            (TypeT::Bool, TypeT::Int { signed, width }) => {
+                fn abbrev(s: &bool, w: &u32) -> String {
+                    format!("{}int{}", if *s { "" } else { "u" }, w)
+                }
+                unaryfn(
+                    Doc::text(format!("bool_to_{}", abbrev(signed, width))),
+                    val_doc,
+                )
+            }
+            (TypeT::Bool, TypeT::SpecInt | TypeT::SpecNat) => {
+                unaryfn(Doc::text("bool_to_int"), val_doc)
+            }
+            (TypeT::SpecInt | TypeT::SpecNat, TypeT::Bool) => parens(
+                val_doc
+                    .append(Doc::line())
+                    .append("<>")
+                    .append(Doc::line())
+                    .append("0"),
+            ),
+            (TypeT::SpecInt | TypeT::SpecNat, TypeT::SLProp) => unaryfn(
+                Doc::text("with_pure"),
+                parens(
+                    val_doc
+                        .append(Doc::line())
+                        .append("<>")
+                        .append(Doc::line())
+                        .append("0"),
+                ),
+            ),
+            (TypeT::SpecNat, TypeT::SpecInt) => with_type(val_doc, Doc::text("int")),
+            (TypeT::SpecInt, TypeT::SpecNat) => with_type(val_doc, Doc::text("nat")),
+            (TypeT::Bool, TypeT::SizeT) => parens(
+                Doc::text("if")
+                    .append(Doc::line())
+                    .append(val_doc)
+                    .group()
+                    .append(Doc::line())
+                    .append("then")
+                    .append(Doc::line().append("1sz").nest(2))
+                    .append(Doc::line())
+                    .append("else")
+                    .append(Doc::line().append("0sz").nest(2)),
+            ),
+            (TypeT::Bool, TypeT::SLProp) => unaryfn(Doc::text("with_pure"), val_doc),
+            (TypeT::SLProp, TypeT::Bool) => {
+                self.report(default_msg, &val.loc);
+                val_doc
+            }
+            (TypeT::Int { signed, width }, TypeT::Bool) => {
+                let zero = emit_machine_int_literal(&BigInt::ZERO, *signed, *width);
+                parens(
+                    val_doc
+                        .append(Doc::line())
+                        .append("<>")
+                        .append(Doc::line())
+                        .append(zero),
+                )
+            }
+            (
+                TypeT::Int {
+                    signed: signed1,
+                    width: width1,
+                },
+                TypeT::Int {
+                    signed: signed2,
+                    width: width2,
+                },
+            ) => {
+                if signed1 == signed2 {
+                    if width1 < width2 {
+                        unaryfn(
+                            Doc::text(format!("int{}_to_int{}", width1, width2)),
+                            val_doc,
+                        )
+                    } else {
+                        unaryfn(
+                            Doc::text(format!("int{}_trunc_int{}", width2, width1)),
+                            val_doc,
+                        )
+                    }
+                } else if *signed1 {
+                    if width1 == width2 {
+                        unaryfn(
+                            Doc::text(format!("uint{}_of_int{}", width2, width1)),
+                            val_doc,
+                        )
+                    } else if width1 < width2 {
+                        unaryfn(
+                            Doc::text(format!("int{}_to_uint{}", width1, width2)),
+                            val_doc,
+                        )
+                    } else {
+                        unaryfn(
+                            Doc::text(format!("uint{}_trunc_int{}", width2, width1)),
+                            val_doc,
+                        )
+                    }
+                } else if width1 == width2 {
+                    unaryfn(
+                        Doc::text(format!("int{}_of_uint{}", width2, width1)),
+                        val_doc,
+                    )
+                } else if width1 < width2 {
+                    unaryfn(
+                        Doc::text(format!("uint{}_to_int{}", width1, width2)),
+                        val_doc,
+                    )
+                } else {
+                    unaryfn(
+                        Doc::text(format!("int{}_trunc_uint{}", width2, width1)),
+                        val_doc,
+                    )
+                }
+            }
+            (TypeT::Int { .. }, TypeT::SpecInt) => unaryfn(Doc::text("v"), val_doc),
+            (TypeT::Int { .. }, TypeT::SpecNat) => {
+                self.report(default_msg, &val.loc);
+                val_doc
+            }
+            (TypeT::SpecInt | TypeT::SpecNat, TypeT::Int { signed, width }) => {
+                let prefix = if *signed { "int" } else { "uint" };
+                unaryfn(Doc::text(format!("{}_to_{}", prefix, width)), val_doc)
+            }
+            _ => {
+                self.report(default_msg, &val.loc);
+                val_doc
+            }
+        }
+    }
+
+    fn emit_bool_condition_value(&mut self, env: &Env, e: &Expr) -> Doc {
+        let is_bool = |expr: &Expr| {
+            env.infer_expr(expr)
+                .ok()
+                .is_some_and(|ty| matches!(env.vtype_whnf(ty).val, TypeT::Bool))
+        };
+        if is_bool(e)
+            && let ExprT::Cast(inner, _) = &e.val
+        {
+            if is_bool(inner) {
+                return self.emit_bool_condition_value(env, inner);
+            }
+            if let ExprT::Cast(grand, _) = &inner.val
+                && is_bool(grand)
+            {
+                return self.emit_bool_condition_value(env, grand);
+            }
+        }
+        self.emit_rvalue(env, e)
+    }
+
+    fn emit_short_circuit_expr(&mut self, env: &Env, e: &Expr) -> ShortCircuitExpr {
+        match &e.val {
+            ExprT::BinOp(BinOp::LogAnd | BinOp::LogOr, lhs, rhs) => {
+                let is_and = matches!(&e.val, ExprT::BinOp(BinOp::LogAnd, _, _));
+                if env
+                    .infer_expr(lhs)
+                    .ok()
+                    .is_some_and(|ty| ty.val == TypeT::SLProp)
+                {
+                    return ShortCircuitExpr {
+                        prelude: vec![],
+                        expr: self.emit_rvalue(env, e),
+                    };
+                }
+                let mut lhs_doc = self.emit_short_circuit_expr(env, lhs);
+                if lhs_doc.prelude.is_empty() {
+                    lhs_doc.expr = self.emit_bool_condition_value(env, lhs);
+                }
+                if self.expr_has_stateful_precondition(env, rhs) {
+                    if lhs_doc.prelude.is_empty() {
+                        let (tmp, bind) =
+                            self.emit_short_circuit_binding(Doc::text("bool"), lhs_doc.expr);
+                        lhs_doc.prelude.push(bind);
+                        lhs_doc.expr = tmp;
+                    }
+                    let rhs_doc = self.emit_short_circuit_expr(env, rhs);
+                    let (then_branch, else_branch) = if is_and {
+                        (
+                            Self::block_with_final(rhs_doc.prelude, rhs_doc.expr),
+                            Self::block_with_final(vec![], Doc::text("false")),
+                        )
+                    } else {
+                        (
+                            Self::block_with_final(vec![], Doc::text("true")),
+                            Self::block_with_final(rhs_doc.prelude, rhs_doc.expr),
+                        )
+                    };
+                    let body = self.emit_if_statement_expr(lhs_doc.expr, then_branch, else_branch);
+                    let (tmp, bind) = self.emit_short_circuit_binding(Doc::text("bool"), body);
+                    lhs_doc.prelude.push(bind);
+                    ShortCircuitExpr {
+                        prelude: lhs_doc.prelude,
+                        expr: tmp,
+                    }
+                } else {
+                    let rhs_doc = self.emit_short_circuit_expr(env, rhs);
+                    lhs_doc.prelude.extend(rhs_doc.prelude);
+                    let op = if is_and { "&&" } else { "||" };
+                    ShortCircuitExpr {
+                        prelude: lhs_doc.prelude,
+                        expr: binop(lhs_doc.expr, Doc::text(op), rhs_doc.expr),
+                    }
+                }
+            }
+            ExprT::Cond(cond, then_expr, else_expr) => {
+                let mut cond_doc = self.emit_short_circuit_expr(env, cond);
+                let branches_need_stmt = self.expr_has_stateful_precondition(env, then_expr)
+                    || self.expr_has_stateful_precondition(env, else_expr);
+                if branches_need_stmt {
+                    if cond_doc.prelude.is_empty() {
+                        let (tmp, bind) =
+                            self.emit_short_circuit_binding(Doc::text("bool"), cond_doc.expr);
+                        cond_doc.prelude.push(bind);
+                        cond_doc.expr = tmp;
+                    }
+                    let then_doc = self.emit_short_circuit_expr(env, then_expr);
+                    let else_doc = self.emit_short_circuit_expr(env, else_expr);
+                    let body = self.emit_if_statement_expr(
+                        cond_doc.expr,
+                        Self::block_with_final(then_doc.prelude, then_doc.expr),
+                        Self::block_with_final(else_doc.prelude, else_doc.expr),
+                    );
+                    let ty_doc = env
+                        .infer_expr(e)
+                        .ok()
+                        .map(|ty| self.emit_type(env, &ty))
+                        .unwrap_or_else(|| Doc::text("_"));
+                    let (tmp, bind) = self.emit_short_circuit_binding(ty_doc, body);
+                    cond_doc.prelude.push(bind);
+                    ShortCircuitExpr {
+                        prelude: cond_doc.prelude,
+                        expr: tmp,
+                    }
+                } else {
+                    let cond_prelude_empty = cond_doc.prelude.is_empty();
+                    let expr = if cond_prelude_empty {
+                        self.emit_rvalue(env, e)
+                    } else {
+                        parens(
+                            Doc::text("if ")
+                                .append(cond_doc.expr)
+                                .append(Doc::line())
+                                .append("then ")
+                                .append(self.emit_rvalue(env, then_expr))
+                                .append(Doc::line())
+                                .append("else ")
+                                .append(self.emit_rvalue(env, else_expr)),
+                        )
+                    };
+                    ShortCircuitExpr {
+                        prelude: cond_doc.prelude,
+                        expr,
+                    }
+                }
+            }
+            ExprT::UnOp(op, arg) => {
+                let arg_doc = self.emit_short_circuit_expr(env, arg);
+                if arg_doc.prelude.is_empty() {
+                    ShortCircuitExpr {
+                        prelude: vec![],
+                        expr: self.emit_rvalue(env, e),
+                    }
+                } else if let Ok(ty) = env.infer_expr(arg)
+                    && let Some(op_doc) = emit_unop(env, *op, ty)
+                {
+                    ShortCircuitExpr {
+                        prelude: arg_doc.prelude,
+                        expr: unaryfn(op_doc, arg_doc.expr),
+                    }
+                } else {
+                    ShortCircuitExpr {
+                        prelude: arg_doc.prelude,
+                        expr: self.emit_rvalue(env, e),
+                    }
+                }
+            }
+            ExprT::Cast(inner, to_ty) => {
+                let inner_doc = self.emit_short_circuit_expr(env, inner);
+                if inner_doc.prelude.is_empty() {
+                    ShortCircuitExpr {
+                        prelude: vec![],
+                        expr: self.emit_rvalue(env, e),
+                    }
+                } else {
+                    let expr = self.emit_cast_doc(env, inner, inner_doc.expr, to_ty);
+                    ShortCircuitExpr {
+                        prelude: inner_doc.prelude,
+                        expr,
+                    }
+                }
+            }
+            ExprT::FnCall(f, args) => {
+                let mut prelude = Vec::new();
+                let mut emitted_args = Vec::new();
+                for arg in args.iter() {
+                    let arg_doc = self.emit_short_circuit_expr(env, arg);
+                    prelude.extend(arg_doc.prelude);
+                    emitted_args.push(arg_doc.expr);
+                }
+                if prelude.is_empty() {
+                    ShortCircuitExpr {
+                        prelude,
+                        expr: self.emit_rvalue(env, e),
+                    }
+                } else {
+                    let args_doc = if emitted_args.is_empty() {
+                        Doc::text("()")
+                    } else {
+                        Doc::intersperse(emitted_args, Doc::line())
+                    };
+                    ShortCircuitExpr {
+                        prelude,
+                        expr: parens(
+                            self.emit_name(Name::Fn(f.val.clone()))
+                                .append(Doc::line())
+                                .append(args_doc),
+                        ),
+                    }
+                }
+            }
+            _ => ShortCircuitExpr {
+                prelude: vec![],
+                expr: self.emit_rvalue(env, e),
+            },
+        }
+    }
+
+    fn emit_short_circuit_condition(&mut self, env: &Env, e: &Expr) -> Doc {
+        if !self.expr_needs_short_circuit_lowering(env, e) {
+            return parens(self.emit_rvalue(env, e));
+        }
+        let lowered = self.emit_short_circuit_expr(env, e);
+        if lowered.prelude.is_empty() {
+            parens(lowered.expr)
+        } else {
+            parens(self.emit_if_statement_expr(
+                Doc::text("true"),
+                Self::block_with_final(lowered.prelude, lowered.expr),
+                Self::block_with_final(vec![], Doc::text("false")),
+            ))
+        }
+    }
+
+    fn maybe_prepend_short_circuit(
+        &mut self,
+        env: &Env,
+        e: &Expr,
+        cont: impl FnOnce(&mut Self, Doc) -> Doc,
+    ) -> Doc {
+        if !self.expr_needs_short_circuit_lowering(env, e) {
+            let expr = self.emit_rvalue(env, e);
+            return cont(self, expr);
+        }
+        let lowered = self.emit_short_circuit_expr(env, e);
+        if lowered.prelude.is_empty() {
+            cont(self, lowered.expr)
+        } else {
+            Self::concat_stmt_docs(lowered.prelude).append(cont(self, lowered.expr))
+        }
     }
 
     fn emit_assignment_from_doc(&mut self, env: &Env, x: &Rc<Expr>, rhs_doc: Doc) -> Doc {
@@ -5417,11 +5980,9 @@ impl<'a> Emitter<'a> {
                             return call_doc;
                         }
                     }
-                    discard_lead
-                        .append(self.emit_rvalue(env, v))
-                        .append(";")
-                        .nest(2)
-                        .group()
+                    self.maybe_prepend_short_circuit(env, v, |_, value_doc| {
+                        discard_lead.append(value_doc).append(";").nest(2).group()
+                    })
                 }
                 StmtT::Decl(x, ty) => {
                     if let TypeT::FixedArray(elem_ty, length) = &ty.val {
@@ -5527,18 +6088,20 @@ impl<'a> Emitter<'a> {
                             ))
                         });
                     }
-                    Doc::text("let ")
-                        .append(self.emit_name(Name::Var(x.val.clone())))
-                        .append(" :")
-                        .append(Doc::line())
-                        .append(self.emit_type(env, ty))
-                        .append(Doc::line())
-                        .append("=")
-                        .group()
-                        .append(Doc::line().append(self.emit_rvalue(env, value)).nest(2))
-                        .append(";")
-                        .nest(2)
-                        .group()
+                    self.maybe_prepend_short_circuit(env, value, |this, value_doc| {
+                        Doc::text("let ")
+                            .append(this.emit_name(Name::Var(x.val.clone())))
+                            .append(" :")
+                            .append(Doc::line())
+                            .append(this.emit_type(env, ty))
+                            .append(Doc::line())
+                            .append("=")
+                            .group()
+                            .append(Doc::line().append(value_doc).nest(2))
+                            .append(";")
+                            .nest(2)
+                            .group()
+                    })
                 }
                 StmtT::DeclStackArray {
                     name,
@@ -5642,6 +6205,13 @@ impl<'a> Emitter<'a> {
                         .append(Doc::concat(
                             postlude.into_iter().map(|doc| doc.append(Doc::hardline())),
                         ));
+                    }
+                    if self.expr_needs_short_circuit_lowering(env, t) {
+                        let lowered_rhs = self.emit_short_circuit_expr(env, t);
+                        if !lowered_rhs.prelude.is_empty() {
+                            return Self::concat_stmt_docs(lowered_rhs.prelude)
+                                .append(self.emit_assignment_from_doc(env, x, lowered_rhs.expr));
+                        }
                     }
                     // Function-pointer store (`fp = add`, `fp = other`, `fp = 0`,
                     // ...) needs no special handling: the ref keeps ordinary
@@ -5902,7 +6472,10 @@ impl<'a> Emitter<'a> {
                     else_branch,
                     ensures,
                 } => {
-                    let cond_doc = parens(self.emit_rvalue(env, cond));
+                    let lowered_cond = self.emit_short_circuit_expr(env, cond);
+                    let cond_has_prelude = !lowered_cond.prelude.is_empty();
+                    let cond_prelude = lowered_cond.prelude;
+                    let cond_doc = parens(lowered_cond.expr);
                     let ensures_doc = Doc::concat(ensures.iter().map(|e| {
                         Doc::line()
                             .append("ensures ")
@@ -5917,7 +6490,11 @@ impl<'a> Emitter<'a> {
                     // optional output starts uninitialized and becomes
                     // initialized part way through, and the translation has no
                     // reason to know which of those it is looking at.
-                    let (then_open, else_open, guard_env) = match self.nullable_guard(env, cond) {
+                    let (then_open, else_open, guard_env) = match if cond_has_prelude {
+                        None
+                    } else {
+                        self.nullable_guard(env, cond)
+                    } {
                         None => (None, None, None),
                         Some(guard) => {
                             // Name the pointer. Inside the body the parameter
@@ -6018,7 +6595,7 @@ impl<'a> Emitter<'a> {
                             self.emit_block_wrapping_with(benv, else_branch, open, close)
                         }
                     };
-                    Doc::text("if ")
+                    let if_doc = Doc::text("if ")
                         .append(cond_doc)
                         .nest(2)
                         .append(ensures_doc)
@@ -6027,7 +6604,12 @@ impl<'a> Emitter<'a> {
                         .append(" else ")
                         .append(else_doc)
                         .append(";")
-                        .group()
+                        .group();
+                    if cond_has_prelude {
+                        Self::concat_stmt_docs(cond_prelude).append(if_doc)
+                    } else {
+                        if_doc
+                    }
                 }
                 StmtT::Match {
                     scrutinee,
@@ -6035,6 +6617,9 @@ impl<'a> Emitter<'a> {
                     default_branch,
                     ensures,
                 } => {
+                    let lowered_scrutinee = self.emit_short_circuit_expr(env, scrutinee);
+                    let scrutinee_has_prelude = !lowered_scrutinee.prelude.is_empty();
+                    let scrutinee_prelude = lowered_scrutinee.prelude;
                     let mut branch_docs = Vec::new();
                     for branch in &**branches {
                         for pattern in &*branch.patterns {
@@ -6048,7 +6633,7 @@ impl<'a> Emitter<'a> {
                         }
                     }
                     let match_doc = Doc::text("match ")
-                        .append(parens(self.emit_rvalue(env, scrutinee)))
+                        .append(parens(lowered_scrutinee.expr))
                         .append(" {")
                         .append(Doc::concat(branch_docs))
                         .append(Doc::line())
@@ -6058,7 +6643,7 @@ impl<'a> Emitter<'a> {
                         .append(Doc::line())
                         .append("};")
                         .group();
-                    if ensures.is_empty() {
+                    let match_doc = if ensures.is_empty() {
                         match_doc
                     } else {
                         // A forward label fixes the join postcondition while
@@ -6074,6 +6659,11 @@ impl<'a> Emitter<'a> {
                             .append("label ")
                             .append(self.fresh_tmp("match_join"))
                             .append(":;")
+                    };
+                    if scrutinee_has_prelude {
+                        Self::concat_stmt_docs(scrutinee_prelude).append(match_doc)
+                    } else {
+                        match_doc
                     }
                 }
                 StmtT::While {
@@ -6084,7 +6674,7 @@ impl<'a> Emitter<'a> {
                     body,
                 } => {
                     let head = Doc::text("while ")
-                        .append(parens(self.emit_rvalue(env, cond)))
+                        .append(self.emit_short_circuit_condition(env, cond))
                         .append(Doc::line())
                         .append(Doc::concat(inv.iter().map(|inv| {
                             Doc::text("invariant ")
@@ -6153,12 +6743,14 @@ impl<'a> Emitter<'a> {
                             .nest(2);
                         }
                     }
-                    Doc::text("return")
-                        .append(Doc::line())
-                        .append(self.emit_rvalue(env, t))
-                        .append(";")
-                        .group()
-                        .nest(2)
+                    self.maybe_prepend_short_circuit(env, t, |_, ret_doc| {
+                        Doc::text("return")
+                            .append(Doc::line())
+                            .append(ret_doc)
+                            .append(";")
+                            .group()
+                            .nest(2)
+                    })
                 }
                 StmtT::Return(None) => Doc::text("return;"),
                 // `_assert(false)` is a claim that control never reaches this
@@ -6169,12 +6761,14 @@ impl<'a> Emitter<'a> {
                 // False` would instead leave the branch's own footprint in the
                 // join and make an unreachable arm the reason a proof fails.
                 StmtT::Assert(v) if is_statically_false(v) => Doc::text("unreachable ();"),
-                StmtT::Assert(v) => Doc::text("assert")
-                    .append(Doc::line())
-                    .append(self.emit_rvalue(env, v))
-                    .append(";")
-                    .group()
-                    .nest(2),
+                StmtT::Assert(v) => self.maybe_prepend_short_circuit(env, v, |_, value_doc| {
+                    Doc::text("assert")
+                        .append(Doc::line())
+                        .append(value_doc)
+                        .append(";")
+                        .group()
+                        .nest(2)
+                }),
                 StmtT::GhostStmt(code) => {
                     let env = &mut env.clone();
                     self.emit_inline_pulse_tokens(env, code).append(";")
