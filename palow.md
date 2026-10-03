@@ -1841,7 +1841,10 @@ new facts about memory.
    the answer is not just the ones its body mentions: calling a function that
    touches a global means holding that global at the call, so the sets close
    under the call graph. That is a least fixed point over a finite set, which
-   is why recursion is no obstacle.
+   is why recursion is no obstacle. A function defined in another file has no
+   body here, so its set is what its contract names: `_live(g)` on a prototype
+   is how a header says that the function takes `g`, and a function that is
+   both declared and defined here gets the union of the two.
 
    One rule fell out of running it. A global that nothing in the file can store
    through is immutable for the whole run whatever its declaration says, and

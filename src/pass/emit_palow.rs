@@ -8944,24 +8944,31 @@ pub fn emit_palow(
     let mut lived: HashSet<String> = HashSet::new();
     let mut decayed: HashSet<String> = HashSet::new();
     for decl in &tu.decls {
-        let DeclT::FnDefn(d) = &decl.val else {
-            continue;
+        // A declaration has no body, but its contract still names what the
+        // function holds, and a caller in this file has nothing else to go
+        // on: `_live(g)` on the prototype of a function defined elsewhere is
+        // the only way to say that it takes `g`. Leaving declarations out
+        // would publish a signature that does not mention `g`, `_live(g)`
+        // would read as `True`, and every caller here would be checked
+        // against a callee that leaves `g` alone.
+        let (fndecl, body) = match &decl.val {
+            DeclT::FnDefn(d) => (&d.decl, Some(&d.body)),
+            DeclT::FnDecl(d) => (d, None),
+            _ => continue,
         };
-        let mut t = Touched {
-            aliases: {
-                let mut e = base.clone();
-                e.push_fn_decl_args_for_body(&d.decl);
-                alias_map(&d.body, &|x| ptr_base(&tds, &e, x))
-            },
-            ..Touched::default()
-        };
-        touch_stmts(&d.body, &mut t);
-        touch_exprs(&d.decl.requires, &mut t);
-        touch_exprs(&d.decl.ensures, &mut t);
+        let mut t = Touched::default();
+        if let Some(body) = body {
+            let mut e = base.clone();
+            e.push_fn_decl_args_for_body(fndecl);
+            t.aliases = alias_map(body, &|x| ptr_base(&tds, &e, x));
+            touch_stmts(body, &mut t);
+        }
+        touch_exprs(&fndecl.requires, &mut t);
+        touch_exprs(&fndecl.ensures, &mut t);
         written.extend(t.written.iter().cloned());
         lived.extend(t.lived.iter().cloned());
         decayed.extend(t.refs.iter().cloned());
-        touched.push((d.decl.name.val.to_string(), t));
+        touched.push((fndecl.name.val.to_string(), t));
     }
     // A function's address can also be written down in a global's initialiser,
     // where no body mentions it. That is in fact the interesting case -- a
@@ -9011,16 +9018,16 @@ pub fn emit_palow(
         })
         .collect();
     globals.retain(|n, _| (written.contains(n) && !immutable.contains(n)) || lived.contains(n));
+    // The merge pass folds a declaration into its definition, and leaves both
+    // only when they disagree, which it reports. Their entries are merged
+    // rather than the second replacing the first, so that even then neither
+    // takes back what the other granted.
     for (name, t) in touched {
-        grants.insert(
-            name.clone(),
-            t.vars
-                .iter()
-                .filter(|v| globals.contains_key(*v))
-                .cloned()
-                .collect(),
-        );
-        calls.insert(name, t.calls);
+        grants
+            .entry(name.clone())
+            .or_default()
+            .extend(t.vars.iter().filter(|v| globals.contains_key(*v)).cloned());
+        calls.entry(name).or_default().extend(t.calls);
     }
     loop {
         let mut changed = false;
