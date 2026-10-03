@@ -1870,6 +1870,9 @@ impl<'a> Emitter<'a> {
                         .append(zero),
                 )
             }
+            // Same names as the `ExprT::Cast` arm of `emit_rvalue`: the
+            // `FStar.Int.Cast` family, which is total and reduces modulo the
+            // target width exactly as C's integer conversions do.
             (
                 TypeT::Int {
                     signed: signed1,
@@ -1880,51 +1883,19 @@ impl<'a> Emitter<'a> {
                     width: width2,
                 },
             ) => {
-                if signed1 == signed2 {
-                    if width1 < width2 {
-                        unaryfn(
-                            Doc::text(format!("int{}_to_int{}", width1, width2)),
-                            val_doc,
-                        )
-                    } else {
-                        unaryfn(
-                            Doc::text(format!("int{}_trunc_int{}", width2, width1)),
-                            val_doc,
-                        )
-                    }
-                } else if *signed1 {
-                    if width1 == width2 {
-                        unaryfn(
-                            Doc::text(format!("uint{}_of_int{}", width2, width1)),
-                            val_doc,
-                        )
-                    } else if width1 < width2 {
-                        unaryfn(
-                            Doc::text(format!("int{}_to_uint{}", width1, width2)),
-                            val_doc,
-                        )
-                    } else {
-                        unaryfn(
-                            Doc::text(format!("uint{}_trunc_int{}", width2, width1)),
-                            val_doc,
-                        )
-                    }
-                } else if width1 == width2 {
-                    unaryfn(
-                        Doc::text(format!("int{}_of_uint{}", width2, width1)),
-                        val_doc,
-                    )
-                } else if width1 < width2 {
-                    unaryfn(
-                        Doc::text(format!("uint{}_to_int{}", width1, width2)),
-                        val_doc,
-                    )
-                } else {
-                    unaryfn(
-                        Doc::text(format!("int{}_trunc_uint{}", width2, width1)),
-                        val_doc,
-                    )
+                fn abbrev(s: bool, w: u32) -> String {
+                    format!("{}int{}", if s { "" } else { "u" }, w)
                 }
+                let to_doc = self.emit_type(env, &to_ty);
+                unaryfn_with_type(
+                    Doc::text(format!(
+                        "Int.Cast.{}_to_{}",
+                        abbrev(*signed1, *width1),
+                        abbrev(*signed2, *width2)
+                    )),
+                    val_doc,
+                    to_doc,
+                )
             }
             (TypeT::Int { .. }, TypeT::SpecInt) => unaryfn(Doc::text("v"), val_doc),
             (TypeT::Int { .. }, TypeT::SpecNat) => {
