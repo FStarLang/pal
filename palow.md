@@ -351,11 +351,20 @@ Two practical consequences:
   their checked files are not where the library's are:
   `--already_cached Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore,-Pulse.Lib.C.Palow.Target,-Pulse.Lib.C.Palow.TargetFacts`,
   as `test/_templates/fstar.fst.config.json` does.
-- A bit-field on a big-endian target is refused for now. Its position in its
-  storage unit counts from the most significant bit there, which the emitter
-  does not yet compute, so the struct is reported (and skipped under
-  `--palow-permissive`) rather than translated with the little-endian
-  position.
+- A bit-field's position depends on the order too. clang reports where the
+  ABI *allocates* a bit-field, counting from the first byte of its storage
+  unit, and the ABI starts allocating at that byte's least significant bit on
+  a little-endian target and at its most significant bit on a big-endian one.
+  `Bits.get` and `Bits.put` count from the unit's least significant bit, so
+  the emitter converts: a field `w` bits wide allocated at bit `k` of a
+  `u`-bit unit is at `k` on a little-endian target and at `u - k - w` on a
+  big-endian one. `struct { uint32_t a:4, b:4, c:12, d:12; }` has `a` at 0
+  and `d` at 20 on mips64el, and `a` at 28 and `d` at 0 on mips64.
+  `test/bitfield_layout_be` and `test/bitfield_layout_le` read the fields of
+  four such structs, with units of one, two, four and eight bytes, out of the
+  bytes clang and GCC emit for them, which fails for either order if the
+  positions are swapped, and `test/bitfields_be` runs `test/bitfields` for
+  mips64.
 
 ### Alignment
 
@@ -1392,10 +1401,6 @@ new facts about memory.
   reports it -- rather than produce a model of a program other than the one
   the compiler builds. This is a restriction, not an unsoundness. Either byte
   order is modelled; see [Byte order](#byte-order).
-- **Bit-fields on a big-endian target are not modelled yet.** A struct with
-  one is reported rather than translated, because the position of a bit-field
-  in its storage unit counts from the other end there. This too is a
-  restriction, not an unsoundness.
 - Addresses are assumed to fit in 64 bits (`Ptr.addr_bound`), so that a stored
   pointer's address round-trips through `ptr_sizeof` bytes. This is a target
   property, and is the same LP64 assumption the scalar sizes already make.

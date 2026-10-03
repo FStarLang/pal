@@ -368,6 +368,8 @@ fn field_type(tds: &Typedefs, ty: &Type) -> Option<String> {
 struct BitPos {
     /// The unit's width in bits, which picks the `Bits` wrapper to call.
     unit_bits: u32,
+    /// The field's lowest bit, counted from the unit's least significant bit
+    /// whatever the target's byte order.
     off: u32,
     width: u32,
     /// A `_Bool` bit-field is a `bool` and not an integer, so it reads and
@@ -5173,15 +5175,6 @@ fn bit_unit(
     limit: u64,
     loc: &Rc<SourceInfo>,
 ) -> Result<(String, Rc<Type>, u64, Vec<(String, BitPos)>), String> {
-    // The positions below count from the unit's least significant bit, which
-    // is where the ABI starts allocating on a little-endian target. A
-    // big-endian one starts from the most significant bit.
-    if tds.big_endian {
-        return Err(format!(
-            "bit-field `{}` is on a big-endian target, where its position in the storage unit is not modelled yet",
-            run[0].0
-        ));
-    }
     let start_bit = run[0].2;
     if start_bit % 8 != 0 {
         return Err(format!(
@@ -5233,17 +5226,32 @@ fn bit_unit(
             run[0].0
         ));
     }
+    // clang counts a bit-field's offset in the order the ABI allocates bits,
+    // and `BitPos` counts from the unit's least significant bit. On a
+    // little-endian target allocation starts at the least significant bit of
+    // the first byte, which is the unit's least significant bit, so the two
+    // agree. On a big-endian target it starts at the most significant bit of
+    // the first byte, which is the unit's most significant bit, so allocation
+    // bit `k` is the unit's bit `us * 8 - 1 - k` and a field `w` wide at `k`
+    // starts at `us * 8 - k - w`. Neither depends on the unit being the width
+    // the ABI chose, only on it starting at the run's first byte.
+    let unit_bits = (us * 8) as u32;
     let mut members = Vec::new();
     for (n, ty, o, w) in run {
         let boolean = scalar_shape(tds, ty).unwrap().1;
         if boolean && *w != 1 {
             return Err(format!("`_Bool` bit-field `{}` is wider than one bit", n));
         }
+        let k = (o - start_bit) as u32;
         members.push((
             n.clone(),
             BitPos {
-                unit_bits: (us * 8) as u32,
-                off: (o - start_bit) as u32,
+                unit_bits,
+                off: if tds.big_endian {
+                    unit_bits - k - *w
+                } else {
+                    k
+                },
                 width: *w,
                 boolean,
             },
