@@ -584,6 +584,15 @@ val array_to_ref_is_null (#t: Type u#a) (r: array t)
 /// an `array_pts_to`, and an address alone has none.
 val ref_to_array (#t: Type u#a) (r: R.ref t) : array t
 
+/// `ref_to_array` preserves nullness in both directions, the mirror of
+/// `array_to_ref_is_null`. It is the identity on the shared handle, so this is
+/// a theorem, not an assumption. Without it a pointer known non-null as a
+/// `ref` (for example a `_plain T *` return with `_ensures(return != NULL)`)
+/// loses that fact when stored into an `_array T *` field.
+val ref_to_array_is_null (#t: Type u#a) (r: R.ref t)
+  : Lemma (array_is_null (ref_to_array r) == R.is_null r)
+          [SMTPat (array_is_null (ref_to_array r))]
+
 /// Drop an arrayptr_pts_to predicate (for scope exit / cleanup).
 ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
   requires arrayptr_pts_to x y
