@@ -133,10 +133,12 @@ pub fn decl_name(decl: &Decl) -> String {
 /// that is excluded is simply not propagated to array elements (it fails
 /// closed: the fact is missing, not wrong).
 ///
-/// The one exception is the name of a mutable array global, which decays to
-/// its address: the assumed handle `var_g`, a constant that no write changes.
-/// So `this.p == g` compares the field with a fixed address and is as much a
-/// fact about the value as `this.p == NULL`.
+/// Two kinds of global are allowed. A pure global (a `const` scalar or an
+/// enum constant) is an F* `let`, so naming it reads no memory. And the name
+/// of a mutable array global decays to its address: the assumed handle
+/// `var_g`, a constant that no write changes. So `this.p == g` compares the
+/// field with a fixed address and is as much a fact about the value as
+/// `this.p == NULL`.
 fn expr_is_value_pure(env: &Env, e: &Expr) -> bool {
     match &e.val {
         ExprT::Var(x) => {
@@ -144,7 +146,7 @@ fn expr_is_value_pure(env: &Env, e: &Expr) -> bool {
                 || (env.lookup_var(x).is_none()
                     && env
                         .lookup_global_var(x)
-                        .is_some_and(|gv| !gv.is_pure && global_var_is_array(gv)))
+                        .is_some_and(|gv| gv.is_pure || global_var_is_array(gv)))
         }
         ExprT::Member(base, _) => expr_is_value_pure(env, base),
         ExprT::BoolLit(_) | ExprT::IntLit(..) => true,

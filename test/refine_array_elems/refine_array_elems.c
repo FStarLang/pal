@@ -23,6 +23,7 @@
 //   N7 `struct slot` without its pool clause     -> Func_slot_pool
 //   N8 the global's `_live` without the element fact (no refinement on the
 //      `live_var_slots` predicate)                -> Func_slot_gid
+//   N9 `struct window` without its KIND_BIG clause -> Func_window_width
 
 struct _refine(this.v < 100) small {
   uint32_t v;
@@ -170,4 +171,26 @@ int slot_pool(struct slot *s)
     return 1;
   _assert(s->pool == pool_b);
   return 2;
+}
+
+//
+// A refinement may also name a constant: an enum constant (or other pure
+// global) is an F* `let`, so naming it reads no memory and the condition is
+// still a fact about the value. Before, the whole `_refine` was silently left
+// out of `struct_window__refine`, and `window_width` could not see it.
+enum window_kind { KIND_SMALL = 1, KIND_BIG = 8 };
+
+struct _refine(this.lo <= this.hi &&
+               ((this.kind & KIND_BIG) == 0 || this.hi - this.lo >= 100))
+       window {
+  enum window_kind kind;
+  uint64_t lo, hi;
+};
+
+uint64_t window_width(_array struct window *w, size_t i)
+  _requires(i < w._length)
+  _requires((w[i].kind & KIND_BIG) != 0)
+  _ensures(return >= 100)
+{
+  return w[i].hi - w[i].lo;
 }
