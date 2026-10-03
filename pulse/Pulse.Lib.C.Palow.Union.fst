@@ -37,6 +37,7 @@ open Pulse.Lib.C.Palow.Aggregate
 open Pulse.Lib.C.Palow.Machine
 
 module SZ = FStar.SizeT
+module Target = Pulse.Lib.C.Palow.Target
 module Seq = FStar.Seq
 module U32 = FStar.UInt32
 
@@ -91,7 +92,7 @@ ghost fn union_U_split_x (a: ptr) (#p: perm) (#v: U32.t)
   union_U_member_aligned a;
   with b. assert (mem_pts_to a p b ** pure (union_U_repr (U_x v) b));
   mem_split a 4sz;
-  Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v v));
+  Seq.lemma_eq_intro (slice b 0 4) (encode Target.byte_order 4 None (U32.v v));
   uint32_t_conceal a #p #_ #v;
   fold union_U_x_rest a p;
 }
@@ -104,8 +105,8 @@ ghost fn union_U_join_x (a: ptr) (#p: perm) (#v: U32.t)
   uint32_t_reveal a #p #v;
   unfold union_U_x_rest a p;
   with rest. assert (mem_pts_to (a +! 4sz) p rest);
-  mem_join a #p #(encode 4 None (U32.v v)) #rest 4sz;
-  append_slice_left (encode 4 None (U32.v v)) rest;
+  mem_join a #p #(encode Target.byte_order 4 None (U32.v v)) #rest 4sz;
+  append_slice_left (encode Target.byte_order 4 None (U32.v v)) rest;
   fold union_U_pts_to a p (U_x v);
 }
 

@@ -34,6 +34,7 @@ open Pulse.Lib.C.Palow.Array
 open Pulse.Lib.C.Palow.Machine
 
 module SZ = FStar.SizeT
+module Target = Pulse.Lib.C.Palow.Target
 module Seq = FStar.Seq
 module U8 = FStar.UInt8
 module U32 = FStar.UInt32
@@ -70,8 +71,8 @@ let struct_S_padding ([@@@mkey] a: ptr) (p: perm) : slprop =
 let struct_S_repr_elim (x: struct_S) (b: bytes)
   : Lemma (requires struct_S_repr x b)
           (ensures  len b == 8 /\
-                    slice b 0 4 == encode 4 None (U32.v x.f) /\
-                    slice b 4 5 == encode 1 None (U8.v x.g))
+                    slice b 0 4 == encode Target.byte_order 4 None (U32.v x.f) /\
+                    slice b 4 5 == encode Target.byte_order 1 None (U8.v x.g))
   = ()
 
 (* Reassembling a struct's byte range from its two fields and its padding. The
@@ -125,12 +126,12 @@ ghost fn struct_S_split (a: ptr) (#p: perm) (#x: struct_S)
   struct_S_field_aligned a;
 
   mem_split a 4sz;
-  Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v x.f));
+  Seq.lemma_eq_intro (slice b 0 4) (encode Target.byte_order 4 None (U32.v x.f));
   uint32_t_conceal a #p #_ #x.f;
 
   mem_split (a +! 4sz) 1sz;
   Seq.slice_slice b 4 8 0 1;
-  Seq.lemma_eq_intro (slice (slice b 4 (len b)) 0 1) (encode 1 None (U8.v x.g));
+  Seq.lemma_eq_intro (slice (slice b 4 (len b)) 0 1) (encode Target.byte_order 1 None (U8.v x.g));
   uint8_t_conceal (a +! struct_S_offsetof_g) #p #_ #x.g;
 
   Seq.slice_slice b 4 8 1 4;
@@ -157,13 +158,15 @@ ghost fn struct_S_join (a: ptr) (#p: perm) (#x: struct_S)
   struct_S_padptr a;
   rewrite (mem_pts_to (a +! struct_S_padoff) p pad)
        as (mem_pts_to ((a +! 4sz) +! 1sz) p pad);
-  rewrite (mem_pts_to (a +! struct_S_offsetof_g) p (encode 1 None (U8.v x.g)))
-       as (mem_pts_to (a +! 4sz) p (encode 1 None (U8.v x.g)));
+  rewrite (mem_pts_to (a +! struct_S_offsetof_g) p (encode Target.byte_order 1 None (U8.v x.g)))
+       as (mem_pts_to (a +! 4sz) p (encode Target.byte_order 1 None (U8.v x.g)));
 
-  mem_join (a +! 4sz) #p #(encode 1 None (U8.v x.g)) #pad 1sz;
-  mem_join a #p #(encode 4 None (U32.v x.f)) #(append (encode 1 None (U8.v x.g)) pad) 4sz;
+  mem_join (a +! 4sz) #p #(encode Target.byte_order 1 None (U8.v x.g)) #pad 1sz;
+  mem_join a #p #(encode Target.byte_order 4 None (U32.v x.f))
+             #(append (encode Target.byte_order 1 None (U8.v x.g)) pad) 4sz;
 
-  struct_S_repr_intro x (encode 4 None (U32.v x.f)) (encode 1 None (U8.v x.g)) pad;
+  struct_S_repr_intro x (encode Target.byte_order 4 None (U32.v x.f))
+                        (encode Target.byte_order 1 None (U8.v x.g)) pad;
   fold struct_S_pts_to a p x;
 }
 #pop-options
@@ -225,8 +228,8 @@ ghost fn struct_T_split (a: ptr) (#p: perm) (#x: struct_T)
   struct_T_field_aligned a;
   with b. assert (mem_pts_to a p b ** pure (struct_T_repr x b));
   mem_split a 4sz;
-  Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v x.y));
-  Seq.lemma_eq_intro (slice b 4 (len b)) (encode 4 None (U32.v x.z));
+  Seq.lemma_eq_intro (slice b 0 4) (encode Target.byte_order 4 None (U32.v x.y));
+  Seq.lemma_eq_intro (slice b 4 (len b)) (encode Target.byte_order 4 None (U32.v x.z));
   uint32_t_conceal a #p #_ #x.y;
   uint32_t_conceal (a +! struct_T_offsetof_z) #p #_ #x.z;
 }
@@ -238,10 +241,12 @@ ghost fn struct_T_join (a: ptr) (#p: perm) (#x: struct_T)
 {
   uint32_t_reveal a #p #x.y;
   uint32_t_reveal (a +! struct_T_offsetof_z) #p #x.z;
-  rewrite (mem_pts_to (a +! struct_T_offsetof_z) p (encode 4 None (U32.v x.z)))
-       as (mem_pts_to (a +! 4sz) p (encode 4 None (U32.v x.z)));
-  mem_join a #p #(encode 4 None (U32.v x.y)) #(encode 4 None (U32.v x.z)) 4sz;
-  struct_T_repr_intro x (encode 4 None (U32.v x.y)) (encode 4 None (U32.v x.z));
+  rewrite (mem_pts_to (a +! struct_T_offsetof_z) p (encode Target.byte_order 4 None (U32.v x.z)))
+       as (mem_pts_to (a +! 4sz) p (encode Target.byte_order 4 None (U32.v x.z)));
+  mem_join a #p #(encode Target.byte_order 4 None (U32.v x.y))
+             #(encode Target.byte_order 4 None (U32.v x.z)) 4sz;
+  struct_T_repr_intro x (encode Target.byte_order 4 None (U32.v x.y))
+                        (encode Target.byte_order 4 None (U32.v x.z));
   fold struct_T_pts_to a p x;
 }
 
@@ -272,8 +277,8 @@ let struct_V_pts_to ([@@@mkey] a: ptr) (p: perm) (n: U32.t) (xs: Seq.seq U32.t) 
   ** pure (U32.v n == Seq.length xs)
 
 (* Bridging the generic element view and the scalar points-to. `uint32_t_repr x b`
-   is by definition `b == encode 4 None (U32.v x)`, so both directions are a
-   fold/unfold pair; PAL emits one such pair per scalar type. *)
+   is by definition `b == encode Target.byte_order 4 None (U32.v x)`, so both
+   directions are a fold/unfold pair; PAL emits one such pair per scalar type. *)
 ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires elem_pts_to uint32_t_repr a p x
   requires pure (aligned a uint32_t_alignof)

@@ -33,6 +33,7 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 
 module SZ = FStar.SizeT
+module Target = Pulse.Lib.C.Palow.Target
 module U8 = FStar.UInt8
 module U32 = FStar.UInt32
 module M = FStar.Math.Lemmas
@@ -44,7 +45,7 @@ module M = FStar.Math.Lemmas
 
 
 let uint8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U8.t) : slprop =
-  mem_pts_to a p (encode (SZ.v uint8_t_sizeof) None (U8.v x))
+  mem_pts_to a p (encode Target.byte_order (SZ.v uint8_t_sizeof) None (U8.v x))
   ** pure (aligned a uint8_t_alignof)
 
 let uint8_t_repr_len (x: U8.t) (b: bytes)
@@ -75,7 +76,7 @@ ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U8.t)
 
 
 let uint32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U32.t) : slprop =
-  mem_pts_to a p (encode (SZ.v uint32_t_sizeof) None (U32.v x))
+  mem_pts_to a p (encode Target.byte_order (SZ.v uint32_t_sizeof) None (U32.v x))
   ** pure (aligned a uint32_t_alignof)
 
 let uint32_t_repr_len (x: U32.t) (b: bytes)
@@ -102,7 +103,7 @@ let uint32_t_repr_injective (x y: U32.t) (b: bytes)
   : Lemma (requires uint32_t_repr x b /\ uint32_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 4) == pow2 32);
-    encode_injective (SZ.v uint32_t_sizeof) None (U32.v x) (U32.v y)
+    encode_injective Target.byte_order (SZ.v uint32_t_sizeof) None (U32.v x) (U32.v y)
 
 (* ---------------------------------------------------------------------------
    Derived resource facts
@@ -130,7 +131,7 @@ ghost fn uint32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
   unfold uint32_t_pts_to a p1 x;
   unfold uint32_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  uint32_t_repr_injective x y (encode (SZ.v uint32_t_sizeof) None (U32.v x));
+  uint32_t_repr_injective x y (encode Target.byte_order (SZ.v uint32_t_sizeof) None (U32.v x));
   fold uint32_t_pts_to a p1 x;
   fold uint32_t_pts_to a p2 y;
 }
@@ -153,7 +154,7 @@ ghost fn uint32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
   unfold uint32_t_pts_to a p1 x;
   unfold uint32_t_pts_to a p2 y;
   mem_gather a;
-  uint32_t_repr_injective x y (encode (SZ.v uint32_t_sizeof) None (U32.v x));
+  uint32_t_repr_injective x y (encode Target.byte_order (SZ.v uint32_t_sizeof) None (U32.v x));
   fold uint32_t_pts_to a (p1 +. p2) x;
 }
 
@@ -239,7 +240,7 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
 
 
 let ptr_pts_to ([@@@mkey] dest: ptr) (p: perm) (a: ptr) : slprop =
-  mem_pts_to dest p (encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a))
+  mem_pts_to dest p (encode Target.byte_order (SZ.v ptr_sizeof) (prov_of a) (addr_of a))
   ** pure (aligned dest ptr_alignof)
 
 let ptr_repr_len (a: ptr) (b: bytes)
@@ -252,11 +253,12 @@ let ptr_repr_injective (a1 a2: ptr) (b: bytes)
   : Lemma (requires ptr_repr a1 b /\ ptr_repr a2 b)
           (ensures  a1 == a2)
   = assert_norm (pow2 (8 * 8) == pow2 64);
-    assert (get b 0 == byte_at (prov_of a1) (addr_of a1) 0);
-    assert (get b 0 == byte_at (prov_of a2) (addr_of a2) 0);
+    (* Every byte of a stored pointer carries its provenance, whatever the
+       byte order, so byte 0 is as good as any to read it from. *)
+    assert ((get b 0).prov == prov_of a1 /\ (get b 0).prov == prov_of a2);
     addr_bound a1;
     addr_bound a2;
-    encode_injective (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1) (addr_of a2);
+    encode_injective Target.byte_order (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1) (addr_of a2);
     ptr_ext a1 a2
 
 (* Writing an integer over a stored pointer strips the provenance of the bytes
@@ -286,7 +288,7 @@ ghost fn ptr_agree (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
   unfold ptr_pts_to dest p1 a1;
   unfold ptr_pts_to dest p2 a2;
   mem_pts_to_injective dest;
-  ptr_repr_injective a1 a2 (encode (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
+  ptr_repr_injective a1 a2 (encode Target.byte_order (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
   fold ptr_pts_to dest p1 a1;
   fold ptr_pts_to dest p2 a2;
 }
@@ -309,7 +311,7 @@ ghost fn ptr_gather (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
   unfold ptr_pts_to dest p1 a1;
   unfold ptr_pts_to dest p2 a2;
   mem_gather dest;
-  ptr_repr_injective a1 a2 (encode (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
+  ptr_repr_injective a1 a2 (encode Target.byte_order (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
   fold ptr_pts_to dest (p1 +. p2) a1;
 }
 

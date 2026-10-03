@@ -33,6 +33,7 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 
 module SZ = FStar.SizeT
+module Target = Pulse.Lib.C.Palow.Target
 module ET = Pulse.Lib.C.Palow.Etype
 module U8 = FStar.UInt8
 module U32 = FStar.UInt32
@@ -42,12 +43,14 @@ module M = FStar.Math.Lemmas
    what makes `calloc` different from `malloc`: the storage arrives already
    representing a value, so it may be read before it is written.
 
-   It carries no `SMTPat`. The fact is wanted at `encode n None (I32.v 0l)` and
-   the like, which is not syntactically `encode n None 0`, so a pattern would
-   not fire where it matters; the caller names it instead. *)
+   It carries no `SMTPat`. The fact is wanted at
+   `encode Target.byte_order n None (I32.v 0l)` and the like, which is not
+   syntactically `encode Target.byte_order n None 0`, so a pattern would not
+   fire where it matters; the caller names it instead. Zero is all-zero bytes
+   in either byte order, so this holds without knowing the target's. *)
 let encode_zero (n: nat)
-  : Lemma (encode n None 0 == zeroed n)
-  = Seq.lemma_eq_elim (encode n None 0) (zeroed n)
+  : Lemma (encode Target.byte_order n None 0 == zeroed n)
+  = encode_zero_in Target.byte_order n
 
 (* ---------------------------------------------------------------------------
    uint8_t
@@ -59,7 +62,7 @@ let uint8_t_alignof : SZ.t = 1sz
 let uint8_t_ctype : ET.ctype = ET.TScalar ET.SChar
 
 let uint8_t_repr (x: U8.t) (b: bytes) : prop =
-  b == encode (SZ.v uint8_t_sizeof) None (U8.v x)
+  b == encode Target.byte_order (SZ.v uint8_t_sizeof) None (U8.v x)
 
 val uint8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U8.t) : slprop
 
@@ -90,7 +93,7 @@ let uint32_t_alignof : SZ.t = 4sz
 let uint32_t_ctype : ET.ctype = ET.TScalar ET.SUInt32
 
 let uint32_t_repr (x: U32.t) (b: bytes) : prop =
-  b == encode (SZ.v uint32_t_sizeof) None (U32.v x)
+  b == encode Target.byte_order (SZ.v uint32_t_sizeof) None (U32.v x)
 
 val uint32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U32.t) : slprop
 
@@ -223,7 +226,7 @@ let ptr_alignof : SZ.t = 8sz
 let ptr_ctype : ET.ctype = ET.TScalar ET.SPtr
 
 let ptr_repr (a: ptr) (b: bytes) : prop =
-  b == encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a)
+  b == encode Target.byte_order (SZ.v ptr_sizeof) (prov_of a) (addr_of a)
 
 val ptr_pts_to ([@@@mkey] dest: ptr) (p: perm) (a: ptr) : slprop
 

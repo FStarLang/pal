@@ -1,0 +1,1 @@
+--target=mips64el-unknown-linux-gnuabi64 --clang-arg=-ffreestanding

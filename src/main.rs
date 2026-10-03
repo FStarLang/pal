@@ -369,15 +369,14 @@ fn main() {
     }
 
     if !cli.old_model {
-        // Palow puts a scalar into memory least significant byte first, and
-        // its pointers and `size_t` are eight bytes. For a target that does
-        // otherwise, the model would describe a different program from the one
-        // the compiler builds, so there is no translation to give.
-        if !combined_tu.target_triple.is_empty()
-            && (combined_tu.big_endian || combined_tu.pointer_size != 8)
-        {
+        // Palow's pointers and `size_t` are eight bytes. For a target whose
+        // are not, the model would describe a different program from the one
+        // the compiler builds, so there is no translation to give. The byte
+        // order is the target's either way: the translation states it, in
+        // `Pulse.Lib.C.Palow.Target`.
+        if !combined_tu.target_triple.is_empty() && combined_tu.pointer_size != 8 {
             eprintln!(
-                "error: the target is {}, and Palow models only little-endian targets with 8-byte pointers",
+                "error: the target is {}, and Palow models only targets with 8-byte pointers",
                 describe_target(&combined_tu)
             );
             std::process::exit(1);

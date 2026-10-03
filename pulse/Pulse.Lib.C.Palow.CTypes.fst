@@ -34,6 +34,7 @@ open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Float
 
 module SZ = FStar.SizeT
+module Target = Pulse.Lib.C.Palow.Target
 module U8 = FStar.UInt8
 module U16 = FStar.UInt16
 module U32 = FStar.UInt32
@@ -48,7 +49,7 @@ module I64 = FStar.Int64
 
 
 let bool_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: bool) : slprop =
-  mem_pts_to a p (encode (SZ.v bool_t_sizeof) None (if x then 1 else 0))
+  mem_pts_to a p (encode Target.byte_order (SZ.v bool_t_sizeof) None (if x then 1 else 0))
   ** pure (aligned a bool_t_alignof)
 
 let bool_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -64,7 +65,7 @@ let bool_t_repr_injective (x y: bool) (b: bytes)
   : Lemma (requires bool_t_repr x b /\ bool_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 1) == pow2 8);
-    encode_injective (SZ.v bool_t_sizeof) None (if x then 1 else 0) (if y then 1 else 0)
+    encode_injective Target.byte_order (SZ.v bool_t_sizeof) None (if x then 1 else 0) (if y then 1 else 0)
 
 ghost fn bool_t_pts_to_not_null (a: ptr) (#p: perm) (#x: bool)
   preserves bool_t_pts_to a p x
@@ -94,7 +95,7 @@ ghost fn bool_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: bool)
   unfold bool_t_pts_to a p1 x;
   unfold bool_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  bool_t_repr_injective x y (encode (SZ.v bool_t_sizeof) None (if x then 1 else 0));
+  bool_t_repr_injective x y (encode Target.byte_order (SZ.v bool_t_sizeof) None (if x then 1 else 0));
   fold bool_t_pts_to a p1 x;
   fold bool_t_pts_to a p2 y;
 }
@@ -117,7 +118,7 @@ ghost fn bool_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: bool)
   unfold bool_t_pts_to a p1 x;
   unfold bool_t_pts_to a p2 y;
   mem_gather a;
-  bool_t_repr_injective x y (encode (SZ.v bool_t_sizeof) None (if x then 1 else 0));
+  bool_t_repr_injective x y (encode Target.byte_order (SZ.v bool_t_sizeof) None (if x then 1 else 0));
   fold bool_t_pts_to a (p1 +. p2) x;
 }
 
@@ -174,7 +175,7 @@ ghost fn bool_t_reveal_uninit (a: ptr)
 
 
 let int8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I8.t) : slprop =
-  mem_pts_to a p (encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x)))
+  mem_pts_to a p (encode Target.byte_order (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x)))
   ** pure (aligned a int8_t_alignof)
 
 let int8_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -190,7 +191,7 @@ let int8_t_repr_injective (x y: I8.t) (b: bytes)
   : Lemma (requires int8_t_repr x b /\ int8_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 1) == pow2 8);
-    encode_injective (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x)) (to_bits 8 (I8.v y));
+    encode_injective Target.byte_order (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x)) (to_bits 8 (I8.v y));
     to_bits_injective 8 (I8.v x) (I8.v y)
 
 ghost fn int8_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I8.t)
@@ -221,7 +222,7 @@ ghost fn int8_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I8.t)
   unfold int8_t_pts_to a p1 x;
   unfold int8_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  int8_t_repr_injective x y (encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x)));
+  int8_t_repr_injective x y (encode Target.byte_order (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x)));
   fold int8_t_pts_to a p1 x;
   fold int8_t_pts_to a p2 y;
 }
@@ -244,7 +245,7 @@ ghost fn int8_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I8.t)
   unfold int8_t_pts_to a p1 x;
   unfold int8_t_pts_to a p2 y;
   mem_gather a;
-  int8_t_repr_injective x y (encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x)));
+  int8_t_repr_injective x y (encode Target.byte_order (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x)));
   fold int8_t_pts_to a (p1 +. p2) x;
 }
 
@@ -301,7 +302,7 @@ ghost fn int8_t_reveal_uninit (a: ptr)
 
 
 let int16_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I16.t) : slprop =
-  mem_pts_to a p (encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x)))
+  mem_pts_to a p (encode Target.byte_order (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x)))
   ** pure (aligned a int16_t_alignof)
 
 let int16_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -317,7 +318,7 @@ let int16_t_repr_injective (x y: I16.t) (b: bytes)
   : Lemma (requires int16_t_repr x b /\ int16_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 2) == pow2 16);
-    encode_injective (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x)) (to_bits 16 (I16.v y));
+    encode_injective Target.byte_order (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x)) (to_bits 16 (I16.v y));
     to_bits_injective 16 (I16.v x) (I16.v y)
 
 ghost fn int16_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I16.t)
@@ -348,7 +349,7 @@ ghost fn int16_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I16.t)
   unfold int16_t_pts_to a p1 x;
   unfold int16_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  int16_t_repr_injective x y (encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x)));
+  int16_t_repr_injective x y (encode Target.byte_order (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x)));
   fold int16_t_pts_to a p1 x;
   fold int16_t_pts_to a p2 y;
 }
@@ -371,7 +372,7 @@ ghost fn int16_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I16.t)
   unfold int16_t_pts_to a p1 x;
   unfold int16_t_pts_to a p2 y;
   mem_gather a;
-  int16_t_repr_injective x y (encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x)));
+  int16_t_repr_injective x y (encode Target.byte_order (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x)));
   fold int16_t_pts_to a (p1 +. p2) x;
 }
 
@@ -428,7 +429,7 @@ ghost fn int16_t_reveal_uninit (a: ptr)
 
 
 let int32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I32.t) : slprop =
-  mem_pts_to a p (encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x)))
+  mem_pts_to a p (encode Target.byte_order (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x)))
   ** pure (aligned a int32_t_alignof)
 
 let int32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -444,7 +445,7 @@ let int32_t_repr_injective (x y: I32.t) (b: bytes)
   : Lemma (requires int32_t_repr x b /\ int32_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 4) == pow2 32);
-    encode_injective (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x)) (to_bits 32 (I32.v y));
+    encode_injective Target.byte_order (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x)) (to_bits 32 (I32.v y));
     to_bits_injective 32 (I32.v x) (I32.v y)
 
 ghost fn int32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I32.t)
@@ -475,7 +476,7 @@ ghost fn int32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I32.t)
   unfold int32_t_pts_to a p1 x;
   unfold int32_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  int32_t_repr_injective x y (encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x)));
+  int32_t_repr_injective x y (encode Target.byte_order (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x)));
   fold int32_t_pts_to a p1 x;
   fold int32_t_pts_to a p2 y;
 }
@@ -498,7 +499,7 @@ ghost fn int32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I32.t)
   unfold int32_t_pts_to a p1 x;
   unfold int32_t_pts_to a p2 y;
   mem_gather a;
-  int32_t_repr_injective x y (encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x)));
+  int32_t_repr_injective x y (encode Target.byte_order (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x)));
   fold int32_t_pts_to a (p1 +. p2) x;
 }
 
@@ -555,7 +556,7 @@ ghost fn int32_t_reveal_uninit (a: ptr)
 
 
 let int64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I64.t) : slprop =
-  mem_pts_to a p (encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x)))
+  mem_pts_to a p (encode Target.byte_order (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x)))
   ** pure (aligned a int64_t_alignof)
 
 let int64_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -571,7 +572,7 @@ let int64_t_repr_injective (x y: I64.t) (b: bytes)
   : Lemma (requires int64_t_repr x b /\ int64_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 8) == pow2 64);
-    encode_injective (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x)) (to_bits 64 (I64.v y));
+    encode_injective Target.byte_order (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x)) (to_bits 64 (I64.v y));
     to_bits_injective 64 (I64.v x) (I64.v y)
 
 ghost fn int64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I64.t)
@@ -602,7 +603,7 @@ ghost fn int64_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
   unfold int64_t_pts_to a p1 x;
   unfold int64_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  int64_t_repr_injective x y (encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x)));
+  int64_t_repr_injective x y (encode Target.byte_order (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x)));
   fold int64_t_pts_to a p1 x;
   fold int64_t_pts_to a p2 y;
 }
@@ -625,7 +626,7 @@ ghost fn int64_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
   unfold int64_t_pts_to a p1 x;
   unfold int64_t_pts_to a p2 y;
   mem_gather a;
-  int64_t_repr_injective x y (encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x)));
+  int64_t_repr_injective x y (encode Target.byte_order (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x)));
   fold int64_t_pts_to a (p1 +. p2) x;
 }
 
@@ -682,7 +683,7 @@ ghost fn int64_t_reveal_uninit (a: ptr)
 
 
 let uint16_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U16.t) : slprop =
-  mem_pts_to a p (encode (SZ.v uint16_t_sizeof) None (U16.v x))
+  mem_pts_to a p (encode Target.byte_order (SZ.v uint16_t_sizeof) None (U16.v x))
   ** pure (aligned a uint16_t_alignof)
 
 let uint16_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -698,7 +699,7 @@ let uint16_t_repr_injective (x y: U16.t) (b: bytes)
   : Lemma (requires uint16_t_repr x b /\ uint16_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 2) == pow2 16);
-    encode_injective (SZ.v uint16_t_sizeof) None (U16.v x) (U16.v y)
+    encode_injective Target.byte_order (SZ.v uint16_t_sizeof) None (U16.v x) (U16.v y)
 
 ghost fn uint16_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U16.t)
   preserves uint16_t_pts_to a p x
@@ -728,7 +729,7 @@ ghost fn uint16_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U16.t)
   unfold uint16_t_pts_to a p1 x;
   unfold uint16_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  uint16_t_repr_injective x y (encode (SZ.v uint16_t_sizeof) None (U16.v x));
+  uint16_t_repr_injective x y (encode Target.byte_order (SZ.v uint16_t_sizeof) None (U16.v x));
   fold uint16_t_pts_to a p1 x;
   fold uint16_t_pts_to a p2 y;
 }
@@ -751,7 +752,7 @@ ghost fn uint16_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U16.t)
   unfold uint16_t_pts_to a p1 x;
   unfold uint16_t_pts_to a p2 y;
   mem_gather a;
-  uint16_t_repr_injective x y (encode (SZ.v uint16_t_sizeof) None (U16.v x));
+  uint16_t_repr_injective x y (encode Target.byte_order (SZ.v uint16_t_sizeof) None (U16.v x));
   fold uint16_t_pts_to a (p1 +. p2) x;
 }
 
@@ -808,7 +809,7 @@ ghost fn uint16_t_reveal_uninit (a: ptr)
 
 
 let uint64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U64.t) : slprop =
-  mem_pts_to a p (encode (SZ.v uint64_t_sizeof) None (U64.v x))
+  mem_pts_to a p (encode Target.byte_order (SZ.v uint64_t_sizeof) None (U64.v x))
   ** pure (aligned a uint64_t_alignof)
 
 let uint64_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -824,7 +825,7 @@ let uint64_t_repr_injective (x y: U64.t) (b: bytes)
   : Lemma (requires uint64_t_repr x b /\ uint64_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 8) == pow2 64);
-    encode_injective (SZ.v uint64_t_sizeof) None (U64.v x) (U64.v y)
+    encode_injective Target.byte_order (SZ.v uint64_t_sizeof) None (U64.v x) (U64.v y)
 
 ghost fn uint64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U64.t)
   preserves uint64_t_pts_to a p x
@@ -854,7 +855,7 @@ ghost fn uint64_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U64.t)
   unfold uint64_t_pts_to a p1 x;
   unfold uint64_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  uint64_t_repr_injective x y (encode (SZ.v uint64_t_sizeof) None (U64.v x));
+  uint64_t_repr_injective x y (encode Target.byte_order (SZ.v uint64_t_sizeof) None (U64.v x));
   fold uint64_t_pts_to a p1 x;
   fold uint64_t_pts_to a p2 y;
 }
@@ -877,7 +878,7 @@ ghost fn uint64_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U64.t)
   unfold uint64_t_pts_to a p1 x;
   unfold uint64_t_pts_to a p2 y;
   mem_gather a;
-  uint64_t_repr_injective x y (encode (SZ.v uint64_t_sizeof) None (U64.v x));
+  uint64_t_repr_injective x y (encode Target.byte_order (SZ.v uint64_t_sizeof) None (U64.v x));
   fold uint64_t_pts_to a (p1 +. p2) x;
 }
 
@@ -966,7 +967,7 @@ let size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < pow2 64) (ensures SZ.fi
 
 
 let size_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: SZ.t) : slprop =
-  mem_pts_to a p (encode (SZ.v size_t_sizeof) None (SZ.v x))
+  mem_pts_to a p (encode Target.byte_order (SZ.v size_t_sizeof) None (SZ.v x))
   ** pure (aligned a size_t_alignof)
 
 let size_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -982,7 +983,7 @@ let size_t_repr_injective (x y: SZ.t) (b: bytes)
   : Lemma (requires size_t_repr x b /\ size_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 8) == pow2 64);
-    encode_injective (SZ.v size_t_sizeof) None (SZ.v x) (SZ.v y)
+    encode_injective Target.byte_order (SZ.v size_t_sizeof) None (SZ.v x) (SZ.v y)
 
 ghost fn size_t_pts_to_not_null (a: ptr) (#p: perm) (#x: SZ.t)
   preserves size_t_pts_to a p x
@@ -1012,7 +1013,7 @@ ghost fn size_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: SZ.t)
   unfold size_t_pts_to a p1 x;
   unfold size_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  size_t_repr_injective x y (encode (SZ.v size_t_sizeof) None (SZ.v x));
+  size_t_repr_injective x y (encode Target.byte_order (SZ.v size_t_sizeof) None (SZ.v x));
   fold size_t_pts_to a p1 x;
   fold size_t_pts_to a p2 y;
 }
@@ -1035,7 +1036,7 @@ ghost fn size_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: SZ.t)
   unfold size_t_pts_to a p1 x;
   unfold size_t_pts_to a p2 y;
   mem_gather a;
-  size_t_repr_injective x y (encode (SZ.v size_t_sizeof) None (SZ.v x));
+  size_t_repr_injective x y (encode Target.byte_order (SZ.v size_t_sizeof) None (SZ.v x));
   fold size_t_pts_to a (p1 +. p2) x;
 }
 
@@ -1107,7 +1108,7 @@ let uint8_t_repr_injective (x y: U8.t) (b: bytes)
   : Lemma (requires uint8_t_repr x b /\ uint8_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 1) == pow2 8);
-    encode_injective (SZ.v uint8_t_sizeof) None (U8.v x) (U8.v y)
+    encode_injective Target.byte_order (SZ.v uint8_t_sizeof) None (U8.v x) (U8.v y)
 
 ghost fn uint8_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U8.t)
   preserves uint8_t_pts_to a p x
@@ -1137,7 +1138,7 @@ ghost fn uint8_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U8.t)
   uint8_t_reveal a #p1 #x;
   uint8_t_reveal a #p2 #y;
   mem_pts_to_injective a;
-  uint8_t_repr_injective x y (encode (SZ.v uint8_t_sizeof) None (U8.v x));
+  uint8_t_repr_injective x y (encode Target.byte_order (SZ.v uint8_t_sizeof) None (U8.v x));
   uint8_t_conceal a #p1 #_ #x;
   uint8_t_conceal a #p2 #_ #y;
 }
@@ -1160,7 +1161,7 @@ ghost fn uint8_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U8.t)
   uint8_t_reveal a #p1 #x;
   uint8_t_reveal a #p2 #y;
   mem_gather a;
-  uint8_t_repr_injective x y (encode (SZ.v uint8_t_sizeof) None (U8.v x));
+  uint8_t_repr_injective x y (encode Target.byte_order (SZ.v uint8_t_sizeof) None (U8.v x));
   uint8_t_conceal a #(p1 +. p2) #_ #x;
 }
 
@@ -1366,7 +1367,7 @@ ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
 
 
 let float32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float32) : slprop =
-  mem_pts_to a p (encode (SZ.v float32_t_sizeof) None (float32_bits x))
+  mem_pts_to a p (encode Target.byte_order (SZ.v float32_t_sizeof) None (float32_bits x))
   ** pure (aligned a float32_t_alignof)
 
 let float32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -1382,7 +1383,7 @@ let float32_t_repr_injective (x y: float32) (b: bytes)
   : Lemma (requires float32_t_repr x b /\ float32_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 4) == pow2 32);
-    encode_injective (SZ.v float32_t_sizeof) None (float32_bits x) (float32_bits y);
+    encode_injective Target.byte_order (SZ.v float32_t_sizeof) None (float32_bits x) (float32_bits y);
     float32_bits_injective x y
 
 ghost fn float32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: float32)
@@ -1413,7 +1414,7 @@ ghost fn float32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: float32)
   unfold float32_t_pts_to a p1 x;
   unfold float32_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  float32_t_repr_injective x y (encode (SZ.v float32_t_sizeof) None (float32_bits x));
+  float32_t_repr_injective x y (encode Target.byte_order (SZ.v float32_t_sizeof) None (float32_bits x));
   fold float32_t_pts_to a p1 x;
   fold float32_t_pts_to a p2 y;
 }
@@ -1436,7 +1437,7 @@ ghost fn float32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: float32)
   unfold float32_t_pts_to a p1 x;
   unfold float32_t_pts_to a p2 y;
   mem_gather a;
-  float32_t_repr_injective x y (encode (SZ.v float32_t_sizeof) None (float32_bits x));
+  float32_t_repr_injective x y (encode Target.byte_order (SZ.v float32_t_sizeof) None (float32_bits x));
   fold float32_t_pts_to a (p1 +. p2) x;
 }
 
@@ -1493,7 +1494,7 @@ ghost fn float32_t_reveal_uninit (a: ptr)
 
 
 let float64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float64) : slprop =
-  mem_pts_to a p (encode (SZ.v float64_t_sizeof) None (float64_bits x))
+  mem_pts_to a p (encode Target.byte_order (SZ.v float64_t_sizeof) None (float64_bits x))
   ** pure (aligned a float64_t_alignof)
 
 let float64_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
@@ -1509,7 +1510,7 @@ let float64_t_repr_injective (x y: float64) (b: bytes)
   : Lemma (requires float64_t_repr x b /\ float64_t_repr y b)
           (ensures  x == y)
   = assert_norm (pow2 (8 * 8) == pow2 64);
-    encode_injective (SZ.v float64_t_sizeof) None (float64_bits x) (float64_bits y);
+    encode_injective Target.byte_order (SZ.v float64_t_sizeof) None (float64_bits x) (float64_bits y);
     float64_bits_injective x y
 
 ghost fn float64_t_pts_to_not_null (a: ptr) (#p: perm) (#x: float64)
@@ -1540,7 +1541,7 @@ ghost fn float64_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: float64)
   unfold float64_t_pts_to a p1 x;
   unfold float64_t_pts_to a p2 y;
   mem_pts_to_injective a;
-  float64_t_repr_injective x y (encode (SZ.v float64_t_sizeof) None (float64_bits x));
+  float64_t_repr_injective x y (encode Target.byte_order (SZ.v float64_t_sizeof) None (float64_bits x));
   fold float64_t_pts_to a p1 x;
   fold float64_t_pts_to a p2 y;
 }
@@ -1563,7 +1564,7 @@ ghost fn float64_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: float64)
   unfold float64_t_pts_to a p1 x;
   unfold float64_t_pts_to a p2 y;
   mem_gather a;
-  float64_t_repr_injective x y (encode (SZ.v float64_t_sizeof) None (float64_bits x));
+  float64_t_repr_injective x y (encode Target.byte_order (SZ.v float64_t_sizeof) None (float64_bits x));
   fold float64_t_pts_to a (p1 +. p2) x;
 }
 

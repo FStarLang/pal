@@ -34,6 +34,7 @@ open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Float
 
 module SZ = FStar.SizeT
+module Target = Pulse.Lib.C.Palow.Target
 module ET = Pulse.Lib.C.Palow.Etype
 module U8 = FStar.UInt8
 module U16 = FStar.UInt16
@@ -51,7 +52,7 @@ let bool_t_alignof : SZ.t = 1sz
 let bool_t_ctype : ET.ctype = ET.TScalar ET.SBool
 
 let bool_t_repr (x: bool) (b: bytes) : prop =
-  b == encode (SZ.v bool_t_sizeof) None (if x then 1 else 0)
+  b == encode Target.byte_order (SZ.v bool_t_sizeof) None (if x then 1 else 0)
 
 val bool_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: bool) : slprop
 
@@ -145,7 +146,7 @@ let int8_t_alignof : SZ.t = 1sz
 let int8_t_ctype : ET.ctype = ET.TScalar ET.SChar
 
 let int8_t_repr (x: I8.t) (b: bytes) : prop =
-  b == encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x))
+  b == encode Target.byte_order (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x))
 
 val int8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I8.t) : slprop
 
@@ -238,7 +239,7 @@ let int16_t_alignof : SZ.t = 2sz
 let int16_t_ctype : ET.ctype = ET.TScalar ET.SInt16
 
 let int16_t_repr (x: I16.t) (b: bytes) : prop =
-  b == encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x))
+  b == encode Target.byte_order (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x))
 
 val int16_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I16.t) : slprop
 
@@ -331,7 +332,7 @@ let int32_t_alignof : SZ.t = 4sz
 let int32_t_ctype : ET.ctype = ET.TScalar ET.SInt32
 
 let int32_t_repr (x: I32.t) (b: bytes) : prop =
-  b == encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x))
+  b == encode Target.byte_order (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x))
 
 val int32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I32.t) : slprop
 
@@ -424,7 +425,7 @@ let int64_t_alignof : SZ.t = 8sz
 let int64_t_ctype : ET.ctype = ET.TScalar ET.SInt64
 
 let int64_t_repr (x: I64.t) (b: bytes) : prop =
-  b == encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x))
+  b == encode Target.byte_order (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x))
 
 val int64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I64.t) : slprop
 
@@ -517,7 +518,7 @@ let uint16_t_alignof : SZ.t = 2sz
 let uint16_t_ctype : ET.ctype = ET.TScalar ET.SUInt16
 
 let uint16_t_repr (x: U16.t) (b: bytes) : prop =
-  b == encode (SZ.v uint16_t_sizeof) None (U16.v x)
+  b == encode Target.byte_order (SZ.v uint16_t_sizeof) None (U16.v x)
 
 val uint16_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U16.t) : slprop
 
@@ -610,7 +611,7 @@ let uint64_t_alignof : SZ.t = 8sz
 let uint64_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
 
 let uint64_t_repr (x: U64.t) (b: bytes) : prop =
-  b == encode (SZ.v uint64_t_sizeof) None (U64.v x)
+  b == encode Target.byte_order (SZ.v uint64_t_sizeof) None (U64.v x)
 
 val uint64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U64.t) : slprop
 
@@ -734,7 +735,7 @@ let size_t_alignof : SZ.t = 8sz
 let size_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
 
 let size_t_repr (x: SZ.t) (b: bytes) : prop =
-  b == encode (SZ.v size_t_sizeof) None (SZ.v x)
+  b == encode Target.byte_order (SZ.v size_t_sizeof) None (SZ.v x)
 
 val size_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: SZ.t) : slprop
 
@@ -1065,7 +1066,7 @@ let float32_t_alignof : SZ.t = 4sz
 let float32_t_ctype : ET.ctype = ET.TScalar ET.SFloat32
 
 let float32_t_repr (x: float32) (b: bytes) : prop =
-  b == encode (SZ.v float32_t_sizeof) None (float32_bits x)
+  b == encode Target.byte_order (SZ.v float32_t_sizeof) None (float32_bits x)
 
 val float32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float32) : slprop
 
@@ -1158,7 +1159,7 @@ let float64_t_alignof : SZ.t = 8sz
 let float64_t_ctype : ET.ctype = ET.TScalar ET.SFloat64
 
 let float64_t_repr (x: float64) (b: bytes) : prop =
-  b == encode (SZ.v float64_t_sizeof) None (float64_bits x)
+  b == encode Target.byte_order (SZ.v float64_t_sizeof) None (float64_bits x)
 
 val float64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float64) : slprop
 

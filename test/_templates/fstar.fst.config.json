@@ -4,6 +4,6 @@
   "options": [
     "--cache_checked_modules",
     "--already_cached",
-    "Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore"
+    "Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore,-Pulse.Lib.C.Palow.Target,-Pulse.Lib.C.Palow.TargetFacts"
   ]
 }
