@@ -41,6 +41,8 @@ pub struct Ctx<'a> {
     input_file_name: String,
     include_paths: Vec<String>,
     defines: Vec<String>,
+    target: String,
+    clang_args: Vec<String>,
     interned_strs: HashSet<Rc<str>>,
     translation_unit: TranslationUnit,
     diagnostics: Diagnostics,
@@ -52,6 +54,8 @@ impl<'a> Ctx<'a> {
         input_file_name: String,
         include_paths: Vec<String>,
         defines: Vec<String>,
+        target: String,
+        clang_args: Vec<String>,
         vfs: &'a mut dyn VFS,
     ) -> Ctx<'a> {
         let input_fn: &str = &input_file_name;
@@ -61,12 +65,16 @@ impl<'a> Ctx<'a> {
             input_file_name,
             include_paths,
             defines,
+            target,
+            clang_args,
             interned_strs: HashSet::new(),
             translation_unit: TranslationUnit {
                 main_file_names: vec![main_file_name],
                 decls: vec![],
                 layouts: LayoutTable::new(),
                 pointer_size: 8,
+                target_triple: Rc::from(""),
+                big_endian: false,
             },
             diagnostics: Diagnostics::empty(),
             target_int_widths: TargetIntWidths::default(),
@@ -95,6 +103,27 @@ impl<'a> Ctx<'a> {
 
     fn get_define(&self, idx: usize) -> &str {
         &self.defines[idx]
+    }
+
+    /// The `--target` triple, or the empty string for clang's own default.
+    fn get_target(&self) -> &str {
+        &self.target
+    }
+
+    /// Arguments passed through to clang unchanged, after PAL's own.
+    fn get_clang_arg_count(&self) -> usize {
+        self.clang_args.len()
+    }
+
+    fn get_clang_arg(&self, idx: usize) -> &str {
+        &self.clang_args[idx]
+    }
+
+    /// The target clang settled on: its normalised triple, and whether it
+    /// stores the most significant byte of a scalar first.
+    fn set_target_info(&mut self, triple: &str, big_endian: bool) {
+        self.translation_unit.target_triple = self.intern_str(triple);
+        self.translation_unit.big_endian = big_endian;
     }
 
     fn set_target_int_widths(&mut self, widths: TargetIntWidths) {
@@ -1070,12 +1099,16 @@ pub fn parse_file(
     file_name: &str,
     include_paths: &[String],
     defines: &[String],
+    target: Option<&str>,
+    clang_args: &[String],
     vfs: &mut dyn VFS,
 ) -> (TranslationUnit, Diagnostics) {
     let mut ctx = Ctx::new(
         file_name.to_string(),
         include_paths.to_vec(),
         defines.to_vec(),
+        target.unwrap_or_default().to_string(),
+        clang_args.to_vec(),
         vfs,
     );
     generated::parse_file(&mut ctx);

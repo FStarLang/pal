@@ -50,6 +50,12 @@ check_one() {
     # shellcheck disable=SC2206
     inc+=($(cat "$tdir/extra_opts"))
   fi
+  # And the flags only PAL takes: a test translated for another target is
+  # written for that target, and says nothing translated for the host.
+  if [[ -f $tdir/pal_opts ]]; then
+    # shellcheck disable=SC2206
+    inc+=($(cat "$tdir/pal_opts"))
+  fi
 
   local cfiles=("$tdir"/*.c)
   # Run from the test's own directory: a flag list in `extra_opts` is written

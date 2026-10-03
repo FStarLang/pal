@@ -72,6 +72,21 @@ struct Cli {
     )]
     defines: Vec<String>,
 
+    #[arg(
+        long = "target",
+        value_name = "TRIPLE",
+        help = "Translate for this target, e.g. mips64-unknown-elf, instead of clang's default"
+    )]
+    target: Option<String>,
+
+    #[arg(
+        long = "clang-arg",
+        value_name = "ARG",
+        allow_hyphen_values = true,
+        help = "Pass an argument to clang unchanged; repeat for several"
+    )]
+    clang_args: Vec<String>,
+
     #[arg(help = "C source files to translate")]
     files: Vec<String>,
 }
@@ -142,6 +157,21 @@ fn serialize_diags(diags: &Diagnostics) -> String {
     serde_json::to_string_pretty(&result).unwrap()
 }
 
+fn same_target(a: &ir::TranslationUnit, b: &ir::TranslationUnit) -> bool {
+    a.target_triple == b.target_triple
+        && a.big_endian == b.big_endian
+        && a.pointer_size == b.pointer_size
+}
+
+fn describe_target(tu: &ir::TranslationUnit) -> String {
+    format!(
+        "`{}` ({}-endian, {}-byte pointers)",
+        tu.target_triple,
+        if tu.big_endian { "big" } else { "little" },
+        tu.pointer_size
+    )
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     set_default_sdkroot();
@@ -182,6 +212,8 @@ fn main() {
         decls: Vec::new(),
         layouts: ir::LayoutTable::new(),
         pointer_size: 8,
+        target_triple: "".into(),
+        big_endian: false,
     };
     let mut diags = Diagnostics::empty();
 
@@ -209,14 +241,39 @@ fn main() {
             std::process::exit(1);
         }
 
-        let (tu, file_diags) =
-            clang::parse_file(&file_name, &cli.include_paths, &defines, &mut *vfs);
+        let (tu, file_diags) = clang::parse_file(
+            &file_name,
+            &cli.include_paths,
+            &defines,
+            cli.target.as_deref(),
+            &cli.clang_args,
+            &mut *vfs,
+        );
+        // The files become one translation unit with one layout table, so they
+        // have to have been compiled for one target. Each finds its own
+        // compilation database, and two databases can disagree. A file clang
+        // gave up on before choosing a target has already said why.
+        if !tu.target_triple.is_empty() {
+            if combined_tu.target_triple.is_empty() {
+                combined_tu.target_triple = tu.target_triple.clone();
+                combined_tu.big_endian = tu.big_endian;
+                combined_tu.pointer_size = tu.pointer_size;
+            } else if !same_target(&combined_tu, &tu) {
+                eprintln!(
+                    "error: {} was compiled for {}, but {} for {}; pass --target to choose one",
+                    combined_tu.main_file_names[0],
+                    describe_target(&combined_tu),
+                    file_name,
+                    describe_target(&tu)
+                );
+                std::process::exit(1);
+            }
+        }
         combined_tu
             .main_file_names
             .push(tu.main_file_names[0].clone());
         combined_tu.decls.extend(tu.decls);
         combined_tu.layouts.extend(tu.layouts);
-        combined_tu.pointer_size = tu.pointer_size;
         diags.merge(file_diags);
     }
     if cli.time_passes {
@@ -312,6 +369,19 @@ fn main() {
     }
 
     if !cli.old_model {
+        // Palow puts a scalar into memory least significant byte first, and
+        // its pointers and `size_t` are eight bytes. For a target that does
+        // otherwise, the model would describe a different program from the one
+        // the compiler builds, so there is no translation to give.
+        if !combined_tu.target_triple.is_empty()
+            && (combined_tu.big_endian || combined_tu.pointer_size != 8)
+        {
+            eprintln!(
+                "error: the target is {}, and Palow models only little-endian targets with 8-byte pointers",
+                describe_target(&combined_tu)
+            );
+            std::process::exit(1);
+        }
         // A test whose hand-written Pulse is written against the *old* memory
         // model marks itself, and Palow leaves those fragments alone rather
         // than splicing text that names predicates it does not have.

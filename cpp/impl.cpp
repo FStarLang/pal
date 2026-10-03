@@ -283,6 +283,7 @@ public:
         TargetIntWidths(TI.getCharWidth(), TI.getShortWidth(), TI.getIntWidth(),
                         TI.getLongWidth(), TI.getLongLongWidth()));
     ctx.set_pointer_size(TI.getPointerWidth(LangAS::Default) / 8);
+    ctx.set_target_info(toStr(TI.getTriple().str()), TI.isBigEndian());
   }
 
   // Layout `kind` tags shared with `Ctx::set_type_layout` on the Rust side.
@@ -3786,8 +3787,10 @@ public:
 
   void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
                         const Diagnostic &Info) override {
-    if (!Info.hasSourceManager())
+    if (!Info.hasSourceManager()) {
+      reportUnlocated(DiagLevel, Info);
       return;
+    }
     auto &sm = Info.getSourceManager();
 
     SourceLocation begin, end;
@@ -3800,6 +3803,7 @@ public:
       begin = Info.getLocation();
       end = begin;
     } else {
+      reportUnlocated(DiagLevel, Info);
       return;
     }
 
@@ -3818,6 +3822,23 @@ public:
     ctx.report_diag(mk_original_location(std::move(file_name), begin_line,
                                          begin_col, end_line, end_col),
                     DiagLevel >= DiagnosticsEngine::Level::Error, toStr(out));
+  }
+
+  // A diagnostic about the command line or the target has no place in the
+  // source. An error of that kind -- an unknown `--target`, an argument clang
+  // does not accept -- stops clang before it has read a line, and dropping it
+  // would leave an empty translation with nothing to fail. It is charged to
+  // the start of the input file instead. Warnings of the kind stay dropped.
+  void reportUnlocated(DiagnosticsEngine::Level DiagLevel,
+                       const Diagnostic &Info) {
+    if (DiagLevel < DiagnosticsEngine::Level::Error)
+      return;
+    llvm::SmallString<0> out;
+    Info.FormatDiagnostic(out);
+    std::string fileName = toString(ctx.get_input_file_name());
+    ctx.report_diag(
+        mk_original_location(ctx.intern_str(toStr(fileName)), 1, 1, 1, 1), true,
+        toStr(out));
   }
 };
 
@@ -4009,6 +4030,19 @@ static void parse_file(RefMut<Ctx> ctx) {
     Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
         incPath.c_str(), ArgumentInsertPosition::BEGIN));
   }
+
+  // The target, and whatever else the caller wants clang to see, go last: a
+  // compilation database may name a target of its own, and for `--target` as
+  // for most flags it is the last occurrence that counts.
+  std::vector<std::string> trailing;
+  std::string target = toString(ctx.get_target());
+  if (!target.empty())
+    trailing.push_back("--target=" + target);
+  for (size_t i = 0, n = ctx.get_clang_arg_count(); i < n; ++i)
+    trailing.push_back(toString(ctx.get_clang_arg(i)));
+  if (!trailing.empty())
+    Tool.appendArgumentsAdjuster(
+        getInsertArgumentAdjuster(trailing, ArgumentInsertPosition::END));
 
   PALActionFactory factory(ctx, rangeMap);
   Tool.run(&factory);

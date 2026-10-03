@@ -191,8 +191,14 @@ mod crate::clang {
         fn get_define_count(&self) -> usize;
         fn get_define(&self, usize) -> &str;
 
+        fn get_target(&self) -> &str;
+
+        fn get_clang_arg_count(&self) -> usize;
+        fn get_clang_arg(&self, usize) -> &str;
+
         fn set_target_int_widths(&mut self, TargetIntWidths);
         fn set_pointer_size(&mut self, u64);
+        fn set_target_info(&mut self, &str, bool);
 
         fn set_type_layout(&mut self, u32, &str, u64, u64);
         fn set_field_offset(&mut self, u32, &str, &str, u64);

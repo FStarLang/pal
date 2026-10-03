@@ -268,7 +268,9 @@ val uint32_t_repr_len (x: UInt32.t) (b: bytes)
 The concrete values come from clang, so generated `.fst` files are
 target-dependent — which is already true today (`long` translates to `int64_t`
 on Linux and `int32_t` on Windows), so this is not a new constraint, but it
-should be documented.
+should be documented. The target is clang's default unless `--target` names
+another; `--clang-arg` passes anything else the target needs (a sysroot,
+`-ffreestanding`) through to clang.
 
 **Implemented.** The clang frontend records the size, alignment and field
 offsets of every named C type (`recordTypeLayout`/`recordFieldOffsets` in
@@ -1309,6 +1311,11 @@ new facts about memory.
   have to be non-empty, which is not a weakening but a fact: two zero-length
   ranges at the same address are not disjoint, and a zero-length range carries
   no ownership to separate them with.
+- **Only little-endian targets with 8-byte pointers.** The scalar encoding is
+  little-endian, and pointers and `size_t` are eight bytes. PAL refuses a
+  target that is big-endian or has pointers of another width -- clang reports
+  both -- rather than produce a model of a program other than the one the
+  compiler builds. This is a restriction, not an unsoundness.
 - Addresses are assumed to fit in 64 bits (`Ptr.addr_bound`), so that a stored
   pointer's address round-trips through `ptr_sizeof` bytes. This is a target
   property, and is the same LP64 assumption the scalar sizes already make.

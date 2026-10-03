@@ -44,6 +44,12 @@ EXTRA_OPTS := $(shell cat extra_opts)
 PAL_OPTS += $(EXTRA_OPTS)
 endif
 
+# Options for PAL alone -- `--target`, `--clang-arg` -- for a test translated
+# for a target other than the host. The C compiler still builds for the host.
+ifneq ($(wildcard pal_opts),)
+PAL_OPTS += $(shell cat pal_opts)
+endif
+
 # A test whose annotations are written against the Palow memory model cannot be
 # translated by the old emitter, and carries a `palow-only` marker file. Such a
 # test is still compiled by a real C compiler -- the annotations must stay
@@ -64,7 +70,7 @@ endif
 
 translate: $(OUT_DIR)/.stamp
 
-$(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
+$(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h $(wildcard extra_opts pal_opts)
 	@mkdir -p $(OUT_DIR)
 	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
 	@touch $@

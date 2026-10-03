@@ -119,6 +119,9 @@ pal [OPTIONS] <FILES>...
 
   -o, --outdir <DIR>     where to write .fst output
   -I <PATH>              extra include search paths
+  -D <NAME[=VALUE]>      preprocessor definitions
+      --target <TRIPLE>  translate for this target instead of the host
+      --clang-arg <ARG>  pass ARG to clang unchanged (repeatable)
       --print-ir         print IR and exit
       --time-passes      show per-pass timing
   -q, --quiet            suppress diagnostics on stderr

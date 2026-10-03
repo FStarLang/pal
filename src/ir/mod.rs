@@ -899,4 +899,10 @@ pub struct TranslationUnit {
     pub layouts: LayoutTable,
     /// Size of a data pointer in bytes, as reported by clang.
     pub pointer_size: u64,
+    /// The target triple clang compiled for, as clang normalised it. Empty if
+    /// clang stopped before it got as far as choosing a target.
+    pub target_triple: Rc<str>,
+    /// Whether the target stores the most significant byte of a multi-byte
+    /// scalar first, as clang reports it.
+    pub big_endian: bool,
 }
