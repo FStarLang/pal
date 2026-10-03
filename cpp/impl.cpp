@@ -3857,7 +3857,21 @@ std::string getBinaryForResourcesPath() {
 }
 
 std::string getResourcesPath() {
-  return GetResourcesPath(getBinaryForResourcesPath());
+  std::string path = GetResourcesPath(getBinaryForResourcesPath());
+  // The resource directory holds clang's own headers: <stddef.h>, <stdint.h>,
+  // <msa.h> and the rest. Debian and Ubuntu install libclang-cpp in the
+  // multiarch directory, /usr/lib/x86_64-linux-gnu, which the loader may also
+  // name /lib/x86_64-linux-gnu. The path above is then /usr/lib/lib/clang/N or
+  // /lib/lib/clang/N, and neither exists, so clang has none of its headers. A
+  // bare-metal target cannot find them at all, and a Linux target finds them
+  // only through a directory Debian adds. So fall back to the resource
+  // directory of the LLVM that PAL was built against.
+#ifdef PAL_CLANG_RESOURCE_DIR
+  if (!llvm::sys::fs::is_directory(path) &&
+      llvm::sys::fs::is_directory(PAL_CLANG_RESOURCE_DIR))
+    return PAL_CLANG_RESOURCE_DIR;
+#endif
+  return path;
 }
 
 llvm::vfs::Status mkStatus(Ref<rust::pal::vfs::VFSEntry> entry) {

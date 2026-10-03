@@ -71,6 +71,17 @@ fn main() {
     for flag in llvm_config_flags(&["--cxxflags"]) {
         build.flag(flag);
     }
+    // Clang's resource directory beside the LLVM we build against, for
+    // `getResourcesPath` in impl.cpp to fall back to.
+    let libdir = llvm_config_flags(&["--libdir"])
+        .into_iter()
+        .next()
+        .expect("Cannot parse `llvm-config --libdir` output");
+    let resource_dir = format!("{}/clang/{}", libdir, llvm_version);
+    build.define(
+        "PAL_CLANG_RESOURCE_DIR",
+        Some(format!("{:?}", resource_dir).as_str()),
+    );
     build.file("cpp/impl.cpp").compile("impls");
 
     for flag in llvm_config_flags(&["--ldflags", "--libs"]) {
