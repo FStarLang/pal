@@ -1083,6 +1083,44 @@ public:
     return isInertVariadicOperand(e);
   }
 
+  // A bitcast from a pointer to a non-byte object type to a byte pointer:
+  // the `(uint8_t *)p` of `(uint8_t *)p + n`.
+  bool isByteViewCast(const Expr *e) {
+    auto *c = dyn_cast<CastExpr>(e->IgnoreParens());
+    if (!c || c->getCastKind() != CK_BitCast)
+      return false;
+    auto *src = c->getSubExpr()->getType()->getAs<PointerType>();
+    auto *dst = c->getType()->getAs<PointerType>();
+    if (!src || !dst)
+      return false;
+    auto srcPointee = src->getPointeeType().getCanonicalType();
+    return dst->getPointeeType().getCanonicalType()->isCharType() &&
+           !srcPointee->isVoidType() && !srcPointee->isCharType() &&
+           !srcPointee->isFunctionType();
+  }
+
+  // Byte-pointer arithmetic `q + n` whose result is a byte pointer. (`q - n`
+  // is not included: PAL has no lowering for stepping a pointer backwards.)
+  bool isBytePointerArith(const Expr *e) {
+    auto *bo = dyn_cast<BinaryOperator>(e->IgnoreParens());
+    if (!bo || bo->getOpcode() != BO_Add)
+      return false;
+    auto *ptr = bo->getType()->getAs<PointerType>();
+    return ptr && ptr->getPointeeType().getCanonicalType()->isCharType();
+  }
+
+  // The pointer operand of byte arithmetic, keeping a byte-view bitcast that
+  // the generic BitCast rule below would otherwise drop.
+  Rc<ir::Expr> trBytePointerOperand(Expr *e) {
+    if (isByteViewCast(e)) {
+      auto *c = cast<CastExpr>(e->IgnoreParens());
+      return mk_rvalue_cast(getRange(c->getSourceRange()),
+                            trRValue(c->getSubExpr()),
+                            trQualType(c->getType(), c->getSourceRange()));
+    }
+    return trRValue(e);
+  }
+
   bool isInertVariadicOperand(Expr *e) {
     e = e->IgnoreParenImpCasts();
     if (isa<IntegerLiteral, CharacterLiteral, FloatingLiteral, StringLiteral>(
@@ -1544,6 +1582,18 @@ public:
                 std::move(loc), trRValue(ic->getSubExpr()),
                 trQualType(ic->getType(), ic->getSourceRange()));
           }
+          // `(T *)(q + n)` with `q` a byte pointer: the object found at a
+          // byte offset. Keep the cast so it can be lowered through the raw
+          // address rather than mistyping the byte pointer as a `T *`.
+          if (srcPtr && dstPtr &&
+              srcPtr->getPointeeType().getCanonicalType()->isCharType() &&
+              !dstPtr->getPointeeType().getCanonicalType()->isCharType() &&
+              !dstPtr->getPointeeType()->isFunctionType() &&
+              isBytePointerArith(ic->getSubExpr())) {
+            return mk_rvalue_cast(
+                std::move(loc), trRValue(ic->getSubExpr()),
+                trQualType(ic->getType(), ic->getSourceRange()));
+          }
           return trRValue(ic->getSubExpr());
         }
 
@@ -1650,6 +1700,11 @@ public:
       };
       switch (bo->getOpcode()) {
       case clang::BO_Add:
+        if (isBytePointerArith(bo)) {
+          return mk_rvalue_binop(std::move(loc), ir::BinOp::Add(),
+                                 trBytePointerOperand(bo->getLHS()),
+                                 trBytePointerOperand(bo->getRHS()));
+        }
         return m(ir::BinOp::Add());
       case clang::BO_Sub:
         return m(ir::BinOp::Sub());

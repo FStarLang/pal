@@ -326,13 +326,32 @@ impl<'a> Elaborator<'a> {
         let Ok(inner_ty) = env.infer_expr(inner).map(|t| env.vtype_whnf(t)) else {
             return false;
         };
+        let is_byte = |ty: &Rc<Type>| {
+            matches!(
+                env.vtype_whnf(ty.clone().into()).val,
+                TypeT::Int { width: 8, .. }
+            )
+        };
         let is_raw_pointer = match &inner_ty.val {
             TypeT::Pointer(_, PointerKind::Core) => true,
-            TypeT::Pointer(inner_pointee, PointerKind::Array | PointerKind::ArrayPtr) => {
-                matches!(
+            TypeT::Pointer(inner_pointee, PointerKind::Array | PointerKind::ArrayPtr)
+                if matches!(
                     env.vtype_whnf(inner_pointee.clone().into()).val,
                     TypeT::Void
-                )
+                ) =>
+            {
+                true
+            }
+            // `(uint8_t *)p + n` with `p` a typed object pointer: a byte view
+            // of `p`'s address (the frontend keeps this cast only as the
+            // pointer operand of byte arithmetic).
+            TypeT::Pointer(inner_pointee, _) => {
+                is_byte(pointee)
+                    && !is_byte(inner_pointee)
+                    && !matches!(
+                        env.vtype_whnf(inner_pointee.clone().into()).val,
+                        TypeT::Void
+                    )
             }
             _ => false,
         };

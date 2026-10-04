@@ -4450,6 +4450,36 @@ impl<'a> Emitter<'a> {
                         let inner_doc = self.emit_rvalue(env, inner);
                         return self.emit_core_as_ptr(env, to_kind, to_pointee, inner_doc);
                     }
+                    // Reinterpreting between a byte pointer and a pointer to
+                    // some other object type -- the two halves of
+                    // `(T2 *)((uint8_t *)p + n)`. Go through the raw address:
+                    // erase the source to a `core_ref`, then view it at the
+                    // target type. As with `void *`, the result carries no
+                    // ownership; the frontend keeps such casts only around
+                    // byte-pointer arithmetic.
+                    if let (
+                        TypeT::Pointer(from_pointee, from_kind),
+                        TypeT::Pointer(to_pointee, to_kind),
+                    ) = (&from_ty.val, &to_ty.val)
+                        && let from_p = env.vtype_whnf(from_pointee.clone().into())
+                        && let to_p = env.vtype_whnf(to_pointee.clone().into())
+                        && !matches!(from_p.val, TypeT::Void)
+                        && !matches!(to_p.val, TypeT::Void)
+                        && matches!(from_p.val, TypeT::Int { width: 8, .. })
+                            != matches!(to_p.val, TypeT::Int { width: 8, .. })
+                    {
+                        let core = match from_kind {
+                            PointerKind::Core => val_doc,
+                            PointerKind::Ref | PointerKind::Unknown => {
+                                unaryfn(Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"), val_doc)
+                            }
+                            PointerKind::Array | PointerKind::ArrayPtr => unaryfn(
+                                Doc::text("Pulse.Lib.C.CoreRef.ref_to_core"),
+                                unaryfn(Doc::text("Pulse.Lib.C.Array.array_to_ref"), val_doc),
+                            ),
+                        };
+                        return self.emit_core_as_ptr(env, to_kind, to_pointee, core);
+                    }
 
                     let default_msg = format!("unsupported cast from {} to {}", from_ty, to_ty);
                     match (&from_ty.val, &to_ty.val) {
@@ -6615,18 +6645,18 @@ impl<'a> Emitter<'a> {
                     // inlined borrow. PAL never guesses the cell's
                     // initialization state.
                     if let ExprT::Cast(inner, _) = &t.val
-                        && env
+                        && let Some(TypeT::Pointer(ap_pointee, PointerKind::ArrayPtr)) = env
                             .infer_expr(inner)
                             .ok()
-                            .map(|ty| env.vtype_whnf(ty))
-                            .is_some_and(|ty| {
-                                matches!(ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr))
-                            })
-                        && env
+                            .map(|ty| env.vtype_whnf(ty).val.clone())
+                        && let Some(TypeT::Pointer(x_pointee, PointerKind::Ref)) = env
                             .infer_expr(x)
                             .ok()
-                            .map(|ty| env.vtype_whnf(ty))
-                            .is_some_and(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Ref)))
+                            .map(|ty| env.vtype_whnf(ty).val.clone())
+                        // Only a borrow at the cell's own type; a cast that
+                        // also changes the pointee (`(T *)(bytes + n)`)
+                        // reinterprets the address instead, see the Cast arm.
+                        && env.vtype_eq(ap_pointee.clone().into(), x_pointee.clone().into())
                     {
                         let ap_doc = self.emit_rvalue(env, inner);
                         return self
