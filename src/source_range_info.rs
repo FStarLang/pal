@@ -80,7 +80,7 @@ fn to_module_info(module: &EmittedModule) -> ModuleInfo {
     }
 }
 
-fn path_to_uri(path: &str) -> String {
+pub(crate) fn path_to_uri(path: &str) -> String {
     if path.starts_with('/') {
         format!("file://{}", path)
     } else {

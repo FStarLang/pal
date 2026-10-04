@@ -252,6 +252,18 @@ the generated Pulse output back to positions in the original C file.
 This is written to `source_range_info.json` alongside the `.fst`
 output.
 
+The Palow emitter writes the target's data layout into its output as numbers:
+a struct's `_sizeof`, `_alignof` and `_offsetof_` definitions, a `sizeof` as
+the literal it evaluates to, an `offsetof` clang has already folded. Those are
+clang's numbers, and the program runs with the layout its own compiler chose.
+[`src/layout_info.rs`](../src/layout_info.rs) writes `layout_table.json`, the
+table they come from: the target, its byte order, and the size, alignment and
+field offsets of every struct, union and typedef the unit defines, with where
+each is defined, so that a build can ask its compiler the same questions. It is
+taken before pruning, because a folded `offsetof` leaves no trace of the type it
+came from. A test can pin it with a `layout-expect.json`
+([`test/check-layout.py`](../test/check-layout.py)).
+
 ---
 
 ## 5. Output Structure
@@ -267,6 +279,7 @@ out/
   TranslationErrors.fst     asserts False if any translation errors occurred
   diagnostics.json          LSP-compatible diagnostics
   source_range_info.json    Pulse-to-C position mapping
+  layout_table.json         clang's layout of every type the unit defines (Palow only)
 ```
 
 `TranslationErrors.fst` is a sentinel module. When the translation

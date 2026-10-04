@@ -68,6 +68,18 @@ else
 all: verify compile
 endif
 
+# A test with a `layout-expect.json` also checks the layout PAL reports for its
+# target, `layout_table.json`: every key the file gives must have that value
+# (see check-layout.py). The old model writes no table.
+ifneq ($(wildcard layout-expect.json),)
+ifneq ($(MODEL),old)
+.PHONY: layout-check
+all: layout-check
+layout-check: $(OUT_DIR)/.stamp
+	@../check-layout.py $(OUT_DIR)/layout_table.json layout-expect.json
+endif
+endif
+
 translate: $(OUT_DIR)/.stamp
 
 $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h $(wildcard extra_opts pal_opts)

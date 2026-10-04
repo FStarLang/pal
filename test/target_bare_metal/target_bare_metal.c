@@ -1,6 +1,7 @@
 #include "pal.h"
 #include <stddef.h>
 #include <stdint.h>
+#include "tagged.h"
 
 /*
  * Translating for a bare-metal target, through pal_opts:
@@ -26,4 +27,17 @@ uint64_t lp64_sizes(void)
   _ensures(return == 16)
 {
   return sizeof(size_t) + sizeof(uintptr_t);
+}
+
+/*
+ * clang folds `offsetof` to a number before PAL sees it, so this function's
+ * output is the literal 8, and `struct tagged` -- from a header, used nowhere
+ * else -- is pruned from the output. Where the 8 came from is recorded only in
+ * layout_table.json, which a build holds to its own compiler's layout, and
+ * which layout-expect.json pins here.
+ */
+size_t tagged_value_offset(void)
+  _ensures(return == 8)
+{
+  return offsetof(struct tagged, value);
 }

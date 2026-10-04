@@ -1,0 +1,17 @@
+{
+  "targetTriple": "mips64-unknown-unknown-elf",
+  "bigEndian": true,
+  "pointerSize": 8,
+  "types": [
+    {
+      "kind": "struct",
+      "name": "tagged",
+      "size": 16,
+      "align": 8,
+      "fieldOffsets": [
+        { "name": "tag", "offset": 0 },
+        { "name": "value", "offset": 8 }
+      ]
+    }
+  ]
+}

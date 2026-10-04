@@ -17,6 +17,7 @@ mod env;
 mod hauntedc;
 mod ir;
 mod layout;
+mod layout_info;
 mod mayberc;
 mod pass;
 mod prims;
@@ -285,6 +286,9 @@ fn main() {
         );
     }
 
+    // Before `prune`, which keeps only what the output uses: see layout_info.
+    let layout_snapshot = (!cli.old_model).then(|| layout_info::Snapshot::take(&combined_tu));
+
     // Run passes
     let t = Instant::now();
     pass::prune::prune(&mut combined_tu);
@@ -482,6 +486,9 @@ fn main() {
                 source_range_info::serialize_palow(&modules),
             )
             .unwrap();
+            if let Some(snapshot) = &layout_snapshot {
+                std::fs::write(outdir.join("layout_table.json"), snapshot.serialize()).unwrap();
+            }
             std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
             // A module that is no longer generated has to go, or the next
             // verification run picks up a stale one and succeeds on code that
