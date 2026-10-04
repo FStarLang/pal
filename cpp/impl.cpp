@@ -932,6 +932,69 @@ public:
     return mk_rvalue_err(std::move(loc), trQualType(qt, range));
   }
 
+  // The value of type `qt` whose object representation repeats the byte
+  // `fill`, i.e. what `memset(p, fill, sizeof(*p))` leaves in `*p`. Returns
+  // nullopt when that byte image is not a value PAL can state exactly: only
+  // integers, enumerations (modeled as their integer type), `_Bool` for a 0 or
+  // 1 byte, and structs of those (unsigned bit-fields included) are built.
+  // Pointers, floating point, unions and nested arrays are refused.
+  std::optional<Rc<ir::Expr>> trByteFillValue(QualType qt, uint8_t fill,
+                                              SourceRange range,
+                                              Rc<ir::SourceInfo> loc) {
+    auto desugared = qt.getDesugaredType(*astCtx);
+    if (desugared->isIncompleteType() || desugared->isDependentType())
+      return std::nullopt;
+    if (desugared->isBooleanType()) {
+      if (fill > 1)
+        return std::nullopt;
+      return mk_int_lit(std::move(loc), mk_bigint(fill ? "1"_rs : "0"_rs),
+                        trQualType(qt, range));
+    }
+    if (desugared->isIntegerType()) {
+      unsigned width = astCtx->getTypeSize(desugared);
+      llvm::APSInt value(llvm::APInt::getSplat(width, llvm::APInt(8, fill)),
+                         !desugared->isSignedIntegerOrEnumerationType());
+      return mk_int_lit(std::move(loc), toBigInt(value), trQualType(qt, range));
+    }
+    auto *rec = dyn_cast<RecordType>(desugared.getTypePtr());
+    if (!rec || astCtx->getTargetInfo().isBigEndian())
+      return std::nullopt;
+    auto *decl = rec->getDecl()->getDefinition();
+    if (!decl || decl->getTagKind() != TagTypeKind::Struct)
+      return std::nullopt;
+    auto it = structNames.find(recordKey(decl));
+    if (it == structNames.end())
+      return std::nullopt;
+    auto structName = ctx.mk_ident(toStr(it->second), loc.clone());
+    auto builder = StructInitBuilder::new_(loc.clone(), std::move(structName));
+    for (auto *field : decl->fields()) {
+      if (field->isUnnamedBitField())
+        continue;
+      std::optional<Rc<ir::Expr>> value;
+      if (field->isBitField()) {
+        if (!field->getType()->isUnsignedIntegerType())
+          return std::nullopt;
+        // Little-endian bit-field allocation: bit `j` of the field is bit
+        // `offset + j` of the record, and every byte of the record is `fill`.
+        uint64_t offset = astCtx->getFieldOffset(field);
+        unsigned width = field->getBitWidthValue();
+        llvm::APInt bits(std::max(width, 1u), 0);
+        for (unsigned j = 0; j < width; ++j)
+          if ((fill >> ((offset + j) % 8)) & 1)
+            bits.setBit(j);
+        value = mk_int_lit(loc.clone(), toBigInt(llvm::APSInt(bits, true)),
+                           trQualType(field->getType(), range));
+      } else {
+        value = trByteFillValue(field->getType(), fill, range, loc.clone());
+      }
+      if (!value)
+        return std::nullopt;
+      builder.field(ctx.mk_ident(toStr(fieldNameStr(field)), loc.clone()),
+                    std::move(*value));
+    }
+    return builder.build();
+  }
+
   Rc<ir::Expr> trInitList(InitListExpr *init, SourceRange range,
                           Rc<ir::SourceInfo> loc) {
     auto qt = init->getType().getDesugaredType(*astCtx);
@@ -1837,16 +1900,18 @@ public:
           }
           return mk_free(std::move(loc), trRValue(arg));
         }
-        // Detect memset(ptr, 0, ...). Only a zero fill value is supported:
-        // C `memset` writes raw bytes, and the only fill we can faithfully
-        // model for arbitrary types is the all-zero one. Two shapes are
-        // recognized:
+        // Detect memset(ptr, v, ...). The fill `v` must be a constant; C
+        // writes it, converted to unsigned char, into every byte. Shapes:
         //   * memset(ptr, 0, sizeof(T))      — zero a single object of type T
         //     (struct, scalar, ...), emitted as a whole-object write of
         //     `zero_default`.
-        //   * memset(ptr, 0, sizeof(T) * n)  — zero an array of byte-sized
+        //   * memset(arr, v, sizeof(arr))    — fill a whole fixed-size array.
+        //     Each cell gets the element value whose every byte is v (see
+        //     trByteFillValue), so integer, enumeration and struct-of-those
+        //     elements are modeled exactly for any fill byte.
+        //   * memset(ptr, v, sizeof(T) * n)  — fill an array of byte-sized
         //     element type (e.g. uint8_t, char).
-        // Non-zero fill values are rejected with a clear diagnostic.
+        // Any other non-zero fill is rejected with a clear diagnostic.
         // A platform's zeroing wrapper is the memset intrinsic under another
         // name and a shorter argument list: `zero_memory(ptr, size)`,
         // `RtlZeroMemory(ptr, size)`, `bzero(ptr, size)`. Declaring it
@@ -1883,22 +1948,31 @@ public:
           auto *sizeArg =
               c->getArg(isMemsetAlias ? 1 : 2)->IgnoreParenImpCasts();
           Expr::EvalResult valRes;
-          bool valIsZero =
-              isMemsetAlias || (valArg->EvaluateAsInt(valRes, *astCtx) &&
-                                valRes.Val.isInt() && valRes.Val.getInt() == 0);
-          if (!valIsZero) {
+          bool valIsConst =
+              isMemsetAlias ||
+              (valArg->EvaluateAsInt(valRes, *astCtx) && valRes.Val.isInt());
+          if (!valIsConst) {
             reportUnsupported(e->getSourceRange(), loc,
-                              "memset is only supported with a zero fill value",
+                              "memset is only supported with a constant fill "
+                              "value",
                               std::string());
             return mk_rvalue_err(std::move(loc),
                                  trQualType(c->getType(), c->getSourceRange()));
           }
+          // C converts the fill value to `unsigned char` (C11 7.24.6.1).
+          const uint8_t fill =
+              isMemsetAlias
+                  ? 0
+                  : static_cast<uint8_t>(
+                        valRes.Val.getInt().getLoBits(8).getZExtValue());
+          const bool valIsZero = fill == 0;
           // Zeroing a single object: memset(ptr, 0, sizeof(T)) where the size
           // is a bare sizeof (no multiplication) whose type matches the
           // pointee of `ptr`. Works for any type with a `has_zero_default`
           // instance (structs, scalars, ...): it is emitted as a whole-object
           // write of `zero_default`.
-          if (auto *szof = dyn_cast<UnaryExprOrTypeTraitExpr>(sizeArg)) {
+          if (auto *szof = dyn_cast<UnaryExprOrTypeTraitExpr>(sizeArg);
+              szof && valIsZero) {
             if (szof->getKind() == UETT_SizeOf) {
               auto objQt = szof->getTypeOfArgument();
               auto pointeeQt = ptrArg->getType()->getPointeeType();
@@ -1930,20 +2004,31 @@ public:
                   astCtx->getTypeSizeInChars(elemQt).getQuantity() == 1;
               const auto arrBytes =
                   astCtx->getTypeSizeInChars(destQt).getQuantity();
-              if (byteSized && sizeArg->EvaluateAsInt(szRes, *astCtx) &&
-                  szRes.Val.isInt() && szRes.Val.getInt() == arrBytes) {
-                auto elemTy = trQualType(elemQt, destObj->getSourceRange());
-                llvm::SmallString<20> countStr;
-                llvm::APInt(64, arrBytes, true).toStringSigned(countStr);
-                auto countExpr = mk_int_lit(
-                    loc.clone(), mk_bigint(toStr(StringRef(countStr))),
-                    trQualType(astCtx->getSizeType(), e->getSourceRange()));
-                auto zeroExpr =
-                    mk_int_lit(loc.clone(), mk_bigint("0"_rs),
-                               trQualType(elemQt, destObj->getSourceRange()));
-                return mk_memset(std::move(loc), std::move(elemTy),
-                                 trRValue(ptrArg), std::move(zeroExpr),
-                                 std::move(countExpr));
+              if (sizeArg->EvaluateAsInt(szRes, *astCtx) && szRes.Val.isInt() &&
+                  szRes.Val.getInt() == arrBytes) {
+                std::optional<Rc<ir::Expr>> fillExpr;
+                if (byteSized && valIsZero) {
+                  fillExpr =
+                      mk_int_lit(loc.clone(), mk_bigint("0"_rs),
+                                 trQualType(elemQt, destObj->getSourceRange()));
+                } else {
+                  // Any other element type, or a non-zero fill: every cell
+                  // ends up holding the element whose bytes are all `fill`.
+                  fillExpr = trByteFillValue(
+                      elemQt, fill, destObj->getSourceRange(), loc.clone());
+                }
+                if (fillExpr) {
+                  auto elemTy = trQualType(elemQt, destObj->getSourceRange());
+                  llvm::SmallString<20> countStr;
+                  llvm::APInt(64, arrTy->getSize().getZExtValue(), true)
+                      .toStringSigned(countStr);
+                  auto countExpr = mk_int_lit(
+                      loc.clone(), mk_bigint(toStr(StringRef(countStr))),
+                      trQualType(astCtx->getSizeType(), e->getSourceRange()));
+                  return mk_memset(std::move(loc), std::move(elemTy),
+                                   trRValue(ptrArg), std::move(*fillExpr),
+                                   std::move(countExpr));
+                }
               }
             }
           }
@@ -1987,13 +2072,18 @@ public:
                 bool byteSized =
                     !elemQt->isIncompleteType() && !elemQt->isDependentType() &&
                     astCtx->getTypeSizeInChars(elemQt).getQuantity() == 1;
-                if (byteSized) {
+                std::optional<Rc<ir::Expr>> byteFill;
+                if (byteSized && !valIsZero)
+                  byteFill = trByteFillValue(
+                      elemQt, fill, sizeofSide->getSourceRange(), loc.clone());
+                if (byteSized && (valIsZero || byteFill)) {
                   auto elemTy =
                       trQualType(elemQt, sizeofSide->getSourceRange());
                   auto countExpr = trRValue(countSide);
-                  return mk_memset(std::move(loc), std::move(elemTy),
-                                   trRValue(ptrArg), trRValue(valArg),
-                                   std::move(countExpr));
+                  return mk_memset(
+                      std::move(loc), std::move(elemTy), trRValue(ptrArg),
+                      valIsZero ? trRValue(valArg) : std::move(*byteFill),
+                      std::move(countExpr));
                 }
                 reportUnsupported(
                     e->getSourceRange(), loc,
@@ -2005,6 +2095,19 @@ public:
                     trQualType(c->getType(), c->getSourceRange()));
               }
             }
+          }
+          // A non-zero fill in any other shape would otherwise fall through to
+          // an uninterpreted call and lose the write.
+          if (!valIsZero) {
+            reportUnsupported(
+                e->getSourceRange(), loc,
+                "memset with a non-zero fill value is only supported on a "
+                "whole fixed-size array, or as memset(ptr, v, sizeof(T) * n) "
+                "for a byte-sized T; the element type must be an integer, "
+                "enumeration, or a struct of those",
+                std::string());
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
           }
         }
         auto fn = ctx.mk_ident(toStr(fd->getName()),

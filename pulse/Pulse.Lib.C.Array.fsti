@@ -229,9 +229,10 @@ fn calloc_array u#a (#a:Type u#a) {| small_type u#a |} {| has_zero_default a |} 
   ensures exists* y. array_pts_to r 1.0R y ** pure (y == array_spec_zeroed a (SZ.v sz) zero_default)
 
 // Fill every cell of an array with `v` (C `memset`).
-// Only byte-sized element types are translated to this (the transpiler rejects
-// multi-byte element types), so an element-wise fill matches C's byte-wise
-// semantics.
+// The transpiler only emits this when an element-wise fill matches C's
+// byte-wise semantics: for byte-sized element types, or with `v` built at
+// translation time as the element value whose every byte is the fill byte
+// (integers, enumerations, and structs of those). Other shapes are rejected.
 //
 // The array must be owned over its whole extent -- `array_spec_full_mask` --
 // but need not already hold values. Zeroing storage that has not been written

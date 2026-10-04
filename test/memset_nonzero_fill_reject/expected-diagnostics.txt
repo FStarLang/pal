@@ -1,0 +1,6 @@
+memset_nonzero_fill_reject.c:28: memset is only supported with a constant fill value
+memset_nonzero_fill_reject.c:35: memset with a non-zero fill value is only supported on a whole fixed-size array
+memset_nonzero_fill_reject.c:42: memset with a non-zero fill value is only supported on a whole fixed-size array
+memset_nonzero_fill_reject.c:49: memset with a non-zero fill value is only supported on a whole fixed-size array
+memset_nonzero_fill_reject.c:56: memset with a non-zero fill value is only supported on a whole fixed-size array
+memset_nonzero_fill_reject.c:63: memset is only supported on byte-sized element types

@@ -6623,14 +6623,20 @@ impl<'a> Emitter<'a> {
                     // struct field-by-field through `x`) and later returns it to
                     // the array with `array_return_cell`. The borrow call is
                     // stored directly into the (mutable) `ref` local `x`.
+                    //
+                    // A stack-local array (`T a[N];`) is borrowed from the same
+                    // way: it is held as an `array` in its own `ref` local, so
+                    // reading that local yields the array the cell comes from.
                     if let ExprT::Ref(inner) = &t.val
                         && let ExprT::Index(arr, idx) = &inner.val
                         && env
                             .infer_expr(arr)
                             .ok()
                             .map(|ty| env.vtype_whnf(ty))
-                            .is_some_and(|ty| {
-                                matches!(ty.val, TypeT::Pointer(_, PointerKind::Array))
+                            .is_some_and(|ty| match ty.val {
+                                TypeT::Pointer(_, PointerKind::Array) => true,
+                                TypeT::FixedArray(_, _) => matches!(arr.val, ExprT::Var(_)),
+                                _ => false,
                             })
                         && env
                             .infer_expr(x)
