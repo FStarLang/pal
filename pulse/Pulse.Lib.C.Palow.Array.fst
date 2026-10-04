@@ -193,6 +193,41 @@ let array_repr_join (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
 #pop-options
 
 (* ---------------------------------------------------------------------------
+   Reading an array out of bytes
+
+   The array form of a type's `_of_bytes` (CTypes, "Reading a value out of
+   bytes"): element `i` is what its own bytes read as, and the result
+   represents any initialised range of no provenance that is a whole number of
+   elements long. Nothing here knows the element type, so the type's reader is
+   passed in together with the lemma that makes it mean anything; the claim is
+   then `array_conceal`, at `array_of_bytes`.
+   --------------------------------------------------------------------------- *)
+
+let array_of_bytes (#t: Type) (of_bytes: bytes -> t) (esize: nat) (n: nat) (b: bytes)
+  : xs: Seq.seq t { Seq.length xs == n }
+  = Seq.init n (fun (i: nat { i < n }) -> of_bytes (elem_bytes esize b i))
+
+let array_of_bytes_repr (#t: Type) (t_repr: t -> bytes -> prop) (of_bytes: bytes -> t)
+                        (esize: nat)
+                        (of_bytes_repr: (b: bytes -> Lemma
+                          (requires len b == esize /\ initialized b /\ no_prov b)
+                          (ensures  t_repr (of_bytes b) b)))
+                        (n: nat) (b: bytes)
+  : Lemma (requires len b == esize * n /\ initialized b /\ no_prov b)
+          (ensures  array_repr t_repr esize (array_of_bytes of_bytes esize n b) b)
+  = let aux (i: nat)
+      : Lemma (i < n ==> t_repr (Seq.index (array_of_bytes of_bytes esize n b) i)
+                                (elem_bytes esize b i)) =
+      if i < n then begin
+        elem_fits esize n i;
+        initialized_slice b (esize * i) (esize * i + esize);
+        has_prov_slice None b (esize * i) (esize * i + esize);
+        of_bytes_repr (elem_bytes esize b i)
+      end
+    in
+    Classical.forall_intro aux
+
+(* ---------------------------------------------------------------------------
    Ownership split and join
 
    `off` is passed in rather than computed as `esize * n` so that the caller

@@ -65,6 +65,11 @@ let rev_index (b: bytes) (i: nat)
 let rev_involutive (b: bytes) : Lemma (rev (rev b) == b) =
   bytes_ext (rev (rev b)) b
 
+let rev_initialized (p: prov) (b: bytes)
+  : Lemma (requires initialized b /\ has_prov p b)
+          (ensures  initialized (rev b) /\ has_prov p (rev b))
+  = ()
+
 let encode_rev (n: nat) (p: prov) (x: nat)
   : Lemma (rev (encode BigEndian n p x) == encode LittleEndian n p x)
   = bytes_ext (rev (encode BigEndian n p x)) (encode LittleEndian n p x)
@@ -199,6 +204,106 @@ let encode_zero_in (bo: byte_order) (n: nat) : Lemma (encode bo n None 0 == zero
   bytes_ext (encode bo n None 0) (zeroed n)
 
 (* ---------------------------------------------------------------------------
+   Surjectivity: initialised bytes of one provenance encode the value they
+   decode to, in either order. `decode_encode` reads a value back out of its
+   encoding; this is the converse, and it is what lets a typed view be claimed
+   over bytes nobody has named a value for -- an ELF header in a guest image, a
+   table the firmware left in memory. *)
+
+#push-options "--z3rlimit 40 --fuel 1 --ifuel 1"
+let rec decode_le_bound (b: bytes)
+  : Lemma (requires initialized b)
+          (ensures  Some? (decode_le b) /\ Some?.v (decode_le b) < pow2 (8 * len b))
+          (decreases (len b))
+  = if len b = 0 then assert_norm (pow2 (8 * 0) == 1)
+    else begin
+      decode_le_bound (slice b 1 (len b));
+      pow2_step (len b)
+    end
+
+(* Kept out of `encode_decode_le`: in that context, with the induction
+   hypothesis and the arithmetic below, even `i - 1 >= 0` is a search. *)
+let head_tail_ext (e b: bytes)
+  : Lemma (requires len e == len b /\ len b > 0 /\ get e 0 == get b 0 /\
+                    slice e 1 (len e) == slice b 1 (len b))
+          (ensures  e == b)
+  = let n = len b in
+    let aux (i: nat { i < n }) : Lemma (get e i == get b i) =
+      if i = 0 then ()
+      else begin
+        Seq.lemma_index_slice e 1 n (i - 1);
+        Seq.lemma_index_slice b 1 n (i - 1)
+      end
+    in
+    Classical.forall_intro aux;
+    bytes_ext e b
+
+let rec encode_decode_le (p: prov) (b: bytes)
+  : Lemma (requires initialized b /\ has_prov p b)
+          (ensures  Some? (decode_le b) /\
+                    encode LittleEndian (len b) p (Some?.v (decode_le b)) == b)
+          (decreases (len b))
+  = decode_le_bound b;
+    let n = len b in
+    if n = 0 then bytes_ext (encode LittleEndian 0 p 0) b
+    else begin
+      let t = slice b 1 n in
+      encode_decode_le p t;
+      let r = Some?.v (decode_le t) in
+      let v = U8.v (Some?.v (get b 0).value) in
+      let x = v + 256 * r in
+      assert (decode_le b == Some x);
+      encode_head n p x;
+      M.lemma_mod_plus v r 256;
+      M.small_mod v 256;
+      assert (x % 256 == v);
+      M.lemma_div_plus v r 256;
+      M.small_div v 256;
+      assert (x / 256 == r);
+      encode_tail n p x;
+      let e = encode LittleEndian n p x in
+      assert (slice e 1 n == t);
+      assert (get e 0 == get b 0);
+      head_tail_ext e b
+    end
+#pop-options
+
+let encode_decode (bo: byte_order) (p: prov) (b: bytes)
+  : Lemma (requires initialized b /\ has_prov p b)
+          (ensures  Some? (decode bo b) /\
+                    Some?.v (decode bo b) < pow2 (8 * len b) /\
+                    encode bo (len b) p (Some?.v (decode bo b)) == b)
+  = match bo with
+    | LittleEndian -> decode_le_bound b; encode_decode_le p b
+    | BigEndian ->
+      rev_initialized p b;
+      decode_le_bound (rev b);
+      encode_decode_le p (rev b);
+      encode_be_as_rev (len b) p (Some?.v (decode_le (rev b)));
+      rev_involutive b
+
+(* The value a range of bytes holds, as a total function: what each scalar
+   type's `_of_bytes` reads. Bytes that do not hold a value -- some of them
+   uninitialised -- read as 0, and nothing can be concluded from that,
+   because the lemmas below only speak about initialised ranges. *)
+let decode_nat (bo: byte_order) (b: bytes) : nat =
+  match decode bo b with
+  | Some v -> v
+  | None -> 0
+
+(* The form every scalar's `_of_bytes_repr` uses: an `n`-byte range of one
+   provenance is the encoding of what it decodes to, and that value is in
+   range for an `n`-byte type, so reducing it modulo `pow2 (8 * n)` -- which is
+   how `_of_bytes` makes it fit the F* type -- changes nothing. *)
+let encode_decode_nat (bo: byte_order) (p: prov) (n: nat) (b: bytes)
+  : Lemma (requires len b == n /\ initialized b /\ has_prov p b)
+          (ensures  decode_nat bo b < pow2 (8 * n) /\
+                    decode_nat bo b % pow2 (8 * n) == decode_nat bo b /\
+                    encode bo n p (decode_nat bo b) == b)
+  = encode_decode bo p b;
+    M.small_mod (decode_nat bo b) (pow2 (8 * n))
+
+(* ---------------------------------------------------------------------------
    Signed integers
 
    C leaves the signed representation implementation-defined, but every target
@@ -220,4 +325,16 @@ let to_bits_injective (w: pos)
                       (y: int { -(pow2 (w - 1)) <= y /\ y < pow2 (w - 1) })
   : Lemma (requires to_bits w x == to_bits w y)
           (ensures  x == y)
+  = M.pow2_double_sum (w - 1)
+
+(* The way back: the signed value whose two's-complement residue is `n`. It is
+   what a signed scalar's `_of_bytes` applies to the bits it decodes, and
+   `to_bits_of_bits` is the fact that makes the result represent those bits. *)
+let of_bits (w: pos) (n: nat { n < pow2 w })
+  : x:int { -(pow2 (w - 1)) <= x /\ x < pow2 (w - 1) }
+  = M.pow2_double_sum (w - 1);
+    if n < pow2 (w - 1) then n else n - pow2 w
+
+let to_bits_of_bits (w: pos) (n: nat { n < pow2 w })
+  : Lemma (to_bits w (of_bits w n) == n)
   = M.pow2_double_sum (w - 1)

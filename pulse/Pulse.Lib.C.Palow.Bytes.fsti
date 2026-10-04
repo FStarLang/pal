@@ -103,6 +103,51 @@ let zeroed_slice (n: nat) (i: nat) (j: nat { i <= j /\ j <= n })
           [SMTPat (slice (zeroed n) i j)]
   = Seq.lemma_eq_elim (slice (zeroed n) i j) (zeroed (j - i))
 
+(* The same for the two pointwise facts that reading a value out of bytes
+   needs: a slice of initialised bytes is initialised, and a slice of bytes of
+   one provenance has that provenance. A struct's `_of_bytes` reads each field
+   out of a slice of the object, and this is how the field's bytes inherit
+   both facts from the object's. *)
+let initialized_slice (b: bytes) (i: nat) (j: nat { i <= j /\ j <= len b })
+  : Lemma (requires initialized b) (ensures initialized (slice b i j))
+  = ()
+
+let has_prov_slice (p: prov) (b: bytes) (i: nat) (j: nat { i <= j /\ j <= len b })
+  : Lemma (requires has_prov p b) (ensures has_prov p (slice b i j))
+  = ()
+
+(* The `n` bytes at offset `off`, as a total function: empty when the range is
+   not inside `b`, as `Array.elem_bytes` is for an element. A generated
+   struct's `_of_bytes` reads each field out of these, which is what lets it
+   be total -- and so be written in a specification -- without a length
+   condition on its argument. *)
+let field_bytes (b: bytes) (off: nat) (n: nat) : bytes =
+  if off + n <= len b then slice b off (off + n) else Seq.empty
+
+let field_bytes_slice (b: bytes) (off: nat) (n: nat)
+  : Lemma (requires off + n <= len b)
+          (ensures  field_bytes b off n == slice b off (off + n))
+  = ()
+
+(* One field of a struct's `_of_bytes_repr`: the field read out of its `n`
+   bytes at `off` is represented by them, given the lemma that says so for the
+   field's type. It is stated once here, rather than unrolled field by field in
+   each generated proof, so that the slice facts it needs are proved in a
+   context of their own. With all of them in one query, a struct of ten
+   integer fields was already past what the solver would do in its time. *)
+let field_of_bytes_repr (#t: Type) (t_repr: t -> bytes -> prop) (of_bytes: bytes -> t)
+                        (n: nat)
+                        (of_bytes_repr: (b: bytes -> Lemma
+                          (requires len b == n /\ initialized b /\ no_prov b)
+                          (ensures  t_repr (of_bytes b) b)))
+                        (b: bytes) (off: nat)
+  : Lemma (requires off + n <= len b /\ initialized b /\ no_prov b)
+          (ensures  t_repr (of_bytes (field_bytes b off n)) (slice b off (off + n)))
+  = field_bytes_slice b off n;
+    initialized_slice b off (off + n);
+    has_prov_slice None b off (off + n);
+    of_bytes_repr (slice b off (off + n))
+
 let slice_append (b: bytes) (i: nat { i <= len b })
   : Lemma (append (slice b 0 i) (slice b i (len b)) == b)
   = Seq.lemma_eq_intro (append (slice b 0 i) (slice b i (len b))) b

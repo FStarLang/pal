@@ -1049,6 +1049,163 @@ let size_t_repr_len (x: SZ.t) (b: bytes)
   = size_t_repr_no_prov x b
 
 (* ---------------------------------------------------------------------------
+   Reading a value out of bytes
+
+   Every block above goes from a value to its bytes: `T_conceal` turns bytes
+   into a typed view only for a value the caller already names, together with
+   a proof that those are its bytes. That covers everything a program wrote
+   through a typed pointer, and nothing it did not -- an ELF header in a guest
+   image, a table the firmware left in memory. For those the value has to come
+   from the bytes, and `T_of_bytes` is that value: it decodes the range in the
+   target's byte order (`Encoding.encode_decode`), so the proofs are the same
+   for either order and none of them asks which it is.
+
+   `T_of_bytes` is total, so that it can be written in a specification without
+   a side condition: bytes that do not hold a value read as junk, and
+   `T_of_bytes_repr`, which is what makes the result mean anything, asks for
+   exactly the facts every integer representation has (`T_repr_no_prov`). A
+   claim over such bytes is then the ordinary one,
+   `T_conceal a #p #b #(T_of_bytes b)` after `T_of_bytes_repr b`.
+   `T_of_bytes_inverse` is the other half of the bijection: bytes that
+   represent `x` read back as `x`.
+
+   `_Bool`, the floating types and pointers have none. Only two byte values
+   are a `_Bool`; a float's bits have no inverse in `Pulse.Lib.C.Palow.Float`;
+   and a pointer is not determined by an address and a provenance in this
+   model. A struct gets one exactly when every field does (palow.md).
+   --------------------------------------------------------------------------- *)
+
+let uint8_t_of_bytes (b: bytes) : U8.t =
+  U8.uint_to_t (decode_nat Target.byte_order b % pow2 8)
+
+let uint8_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v uint8_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  uint8_t_repr (uint8_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v uint8_t_sizeof) b
+
+let uint8_t_of_bytes_inverse (x: U8.t) (b: bytes)
+  : Lemma (requires uint8_t_repr x b) (ensures uint8_t_of_bytes b == x)
+  = uint8_t_repr_no_prov x b;
+    uint8_t_of_bytes_repr b;
+    uint8_t_repr_injective (uint8_t_of_bytes b) x b
+
+let uint16_t_of_bytes (b: bytes) : U16.t =
+  U16.uint_to_t (decode_nat Target.byte_order b % pow2 16)
+
+let uint16_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v uint16_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  uint16_t_repr (uint16_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v uint16_t_sizeof) b
+
+let uint16_t_of_bytes_inverse (x: U16.t) (b: bytes)
+  : Lemma (requires uint16_t_repr x b) (ensures uint16_t_of_bytes b == x)
+  = uint16_t_repr_no_prov x b;
+    uint16_t_of_bytes_repr b;
+    uint16_t_repr_injective (uint16_t_of_bytes b) x b
+
+let uint32_t_of_bytes (b: bytes) : U32.t =
+  U32.uint_to_t (decode_nat Target.byte_order b % pow2 32)
+
+let uint32_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v uint32_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  uint32_t_repr (uint32_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v uint32_t_sizeof) b
+
+let uint32_t_of_bytes_inverse (x: U32.t) (b: bytes)
+  : Lemma (requires uint32_t_repr x b) (ensures uint32_t_of_bytes b == x)
+  = uint32_t_repr_no_prov x b;
+    uint32_t_of_bytes_repr b;
+    uint32_t_repr_injective (uint32_t_of_bytes b) x b
+
+let uint64_t_of_bytes (b: bytes) : U64.t =
+  U64.uint_to_t (decode_nat Target.byte_order b % pow2 64)
+
+let uint64_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v uint64_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  uint64_t_repr (uint64_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v uint64_t_sizeof) b
+
+let uint64_t_of_bytes_inverse (x: U64.t) (b: bytes)
+  : Lemma (requires uint64_t_repr x b) (ensures uint64_t_of_bytes b == x)
+  = uint64_t_repr_no_prov x b;
+    uint64_t_of_bytes_repr b;
+    uint64_t_repr_injective (uint64_t_of_bytes b) x b
+
+let int8_t_of_bytes (b: bytes) : I8.t =
+  I8.int_to_t (of_bits 8 (decode_nat Target.byte_order b % pow2 8))
+
+let int8_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v int8_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  int8_t_repr (int8_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v int8_t_sizeof) b;
+    to_bits_of_bits 8 (decode_nat Target.byte_order b % pow2 8)
+
+let int8_t_of_bytes_inverse (x: I8.t) (b: bytes)
+  : Lemma (requires int8_t_repr x b) (ensures int8_t_of_bytes b == x)
+  = int8_t_repr_no_prov x b;
+    int8_t_of_bytes_repr b;
+    int8_t_repr_injective (int8_t_of_bytes b) x b
+
+let int16_t_of_bytes (b: bytes) : I16.t =
+  I16.int_to_t (of_bits 16 (decode_nat Target.byte_order b % pow2 16))
+
+let int16_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v int16_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  int16_t_repr (int16_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v int16_t_sizeof) b;
+    to_bits_of_bits 16 (decode_nat Target.byte_order b % pow2 16)
+
+let int16_t_of_bytes_inverse (x: I16.t) (b: bytes)
+  : Lemma (requires int16_t_repr x b) (ensures int16_t_of_bytes b == x)
+  = int16_t_repr_no_prov x b;
+    int16_t_of_bytes_repr b;
+    int16_t_repr_injective (int16_t_of_bytes b) x b
+
+let int32_t_of_bytes (b: bytes) : I32.t =
+  I32.int_to_t (of_bits 32 (decode_nat Target.byte_order b % pow2 32))
+
+let int32_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v int32_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  int32_t_repr (int32_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v int32_t_sizeof) b;
+    to_bits_of_bits 32 (decode_nat Target.byte_order b % pow2 32)
+
+let int32_t_of_bytes_inverse (x: I32.t) (b: bytes)
+  : Lemma (requires int32_t_repr x b) (ensures int32_t_of_bytes b == x)
+  = int32_t_repr_no_prov x b;
+    int32_t_of_bytes_repr b;
+    int32_t_repr_injective (int32_t_of_bytes b) x b
+
+let int64_t_of_bytes (b: bytes) : I64.t =
+  I64.int_to_t (of_bits 64 (decode_nat Target.byte_order b % pow2 64))
+
+let int64_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v int64_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  int64_t_repr (int64_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v int64_t_sizeof) b;
+    to_bits_of_bits 64 (decode_nat Target.byte_order b % pow2 64)
+
+let int64_t_of_bytes_inverse (x: I64.t) (b: bytes)
+  : Lemma (requires int64_t_repr x b) (ensures int64_t_of_bytes b == x)
+  = int64_t_repr_no_prov x b;
+    int64_t_of_bytes_repr b;
+    int64_t_repr_injective (int64_t_of_bytes b) x b
+
+let size_t_of_bytes (b: bytes) : SZ.t =
+  SZ.uint_to_t (decode_nat Target.byte_order b % pow2 64)
+
+let size_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v size_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  size_t_repr (size_t_of_bytes b) b)
+  = encode_decode_nat Target.byte_order None (SZ.v size_t_sizeof) b
+
+let size_t_of_bytes_inverse (x: SZ.t) (b: bytes)
+  : Lemma (requires size_t_repr x b) (ensures size_t_of_bytes b == x)
+  = size_t_repr_no_prov x b;
+    size_t_of_bytes_repr b;
+    size_t_repr_injective (size_t_of_bytes b) x b
+
+(* ---------------------------------------------------------------------------
    Floating point
 
    A C floating-point value is an object like any other: it has a size, an

@@ -6805,6 +6805,59 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         }
     }
 
+    // ---- of_bytes: a value from bytes nobody named one for ----
+    // `_conceal` needs a value and a proof that the bytes represent it, which
+    // is what a program has for an object it wrote. For one it did not -- a
+    // header in an image, a table the firmware left -- the value has to come
+    // from the bytes, and this reads it a field at a time. It is total, so a
+    // specification can mention it without a side condition, and the lemma
+    // after it is what makes it mean something; the padding is read by
+    // nobody, as `_repr` says nothing about it.
+    let of_bytes = struct_has_of_bytes(tds, si);
+    if of_bytes {
+        let vals: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| {
+                format!(
+                    "fld_{f} = {pn}_of_bytes (field_bytes b {off} {n})",
+                    f = f.name,
+                    pn = pn_of(f),
+                    off = f.offset,
+                    n = f.size
+                )
+            })
+            .collect();
+        c += &format!(
+            "let {sn}_of_bytes (b: bytes) : {sn} =\n  {{ {vals} }}\n\n",
+            sn = sn,
+            vals = record_fields(vals, false)
+        );
+        // One library lemma per field, so that each field's slice facts are
+        // proved apart from the others'; see `field_of_bytes_repr`.
+        let mut steps: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| {
+                format!(
+                    "field_of_bytes_repr {pn}_repr {pn}_of_bytes {n} {pn}_of_bytes_repr b {off};",
+                    pn = pn_of(f),
+                    n = f.size,
+                    off = f.offset
+                )
+            })
+            .collect();
+        steps.push("()".to_string());
+        c += &format!(
+            "let {sn}_of_bytes_repr (b: bytes)\n  \
+             : Lemma (requires len b == SizeT.v {sn}_sizeof /\\ initialized b /\\ no_prov b)\n          \
+             (ensures  {sn}_repr ({sn}_of_bytes b) b)\n  \
+             = {steps}\n\n",
+            sn = sn,
+            steps = steps.join("\n    ")
+        );
+    }
+
     // ---- reveal: fields to bytes ----
     let mut r = format!(
         "  unfold {sn}_pts_to a p x;\n  unfold {sn}_padding a p;\n",
@@ -6956,6 +7009,23 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         iv = struct_inv_req(si, &sn, "x"),
         w = w
     );
+
+    // The claim over bytes of unknown content: `_conceal` at the value the
+    // bytes hold. Any initialised range of the right length with no
+    // provenance holds one, so this asks for nothing about the contents --
+    // only that a program reading them through this view will be reading
+    // integers, which is what the absence of provenance says.
+    if of_bytes {
+        c += &format!(
+            "ghost fn {sn}_conceal_bytes (a: ptr) (#p: perm) (#b: bytes)\n\
+             \x20 requires mem_pts_to a p b\n\
+             \x20 requires pure (len b == SizeT.v {sn}_sizeof /\\ initialized b /\\ no_prov b)\n\
+             \x20 requires pure (aligned a {sn}_alignof)\n\
+             \x20 ensures  {sn}_pts_to a p ({sn}_of_bytes b)\n\
+             {{\n  {sn}_of_bytes_repr b;\n  {sn}_conceal a #p #b #({sn}_of_bytes b);\n}}\n\n",
+            sn = sn
+        );
+    }
 
     // The adapters that make the struct an array element. `elem_pts_to` is
     // the generic array layer's view of one slot, stated over the element's
@@ -17368,6 +17438,47 @@ fn static_zero(tds: &Typedefs, ty: &Type) -> Result<String, String> {
 /// block is only a pointer and a name.
 fn is_aggregate(pn: &str) -> bool {
     pn.starts_with("struct_") || pn.starts_with("union_")
+}
+
+/// Whether a value of this type can be read out of bytes nobody has named a
+/// value for -- the `_of_bytes` that the library provides for each integer
+/// type, and that `emit_struct_bytes` emits for a struct all of whose fields
+/// have one.
+///
+/// The cases without one are the ones where some initialised bytes are not
+/// the representation of any value: a `_Bool` is one of two byte values, a
+/// float's bits have no inverse in the library, a pointer is not determined
+/// by an address and a provenance, and a union's value is one member's,
+/// which the bytes do not say. A field invariant rules out values too, so a
+/// struct with one has no `_of_bytes` either.
+fn has_of_bytes(tds: &Typedefs, ty: &Type) -> bool {
+    // A `_type` stands for whatever F* type was written for it, which need
+    // not be the one the library reads.
+    if fstar_type(tds, ty) != fstar_type(tds, peel(tds, ty)) {
+        return false;
+    }
+    match &peel(tds, ty).val {
+        TypeT::Int {
+            width: 8 | 16 | 32 | 64,
+            ..
+        }
+        | TypeT::SizeT
+        | TypeT::PtrdiffT => true,
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
+            .structs
+            .get(&*n.val)
+            .is_some_and(|si| struct_has_of_bytes(tds, si)),
+        _ => false,
+    }
+}
+
+fn struct_has_of_bytes(tds: &Typedefs, si: &StructInfo) -> bool {
+    si.has_bytes
+        && si.inv.is_none()
+        && si
+            .fields
+            .iter()
+            .all(|f| f.inv.is_none() && has_of_bytes(tds, &f.ty))
 }
 
 fn zero_repr_proof(tds: &Typedefs, ty: &Type) -> Option<Vec<String>> {

@@ -293,7 +293,9 @@ which one it has only by asking.
 `Pulse.Lib.C.Palow.Encoding` is generic in the order. `encode bo n p x` puts
 the byte of significance `significance bo n i` at offset `i` -- `i` for
 `LittleEndian`, `n - 1 - i` for `BigEndian` -- and `decode`, the round trip,
-injectivity and `encode_zero_in` (zero is all-zero bytes) are proved for both.
+injectivity, surjectivity (`encode_decode`, see
+[Reading a value out of bytes](#reading-a-value-out-of-bytes)) and
+`encode_zero_in` (zero is all-zero bytes) are proved for both.
 A one-byte object has no order at all (`encode_one`).
 
 Every scalar representation is `encode Target.byte_order ...`, where
@@ -376,8 +378,8 @@ one, as `make big-endian-check`. The target is big-endian 64-bit MIPS Linux,
 `out.<triple>/` and `_cache.<triple>/`, and each test's `layout_table.json`
 must name the triple. `PAL_TARGET` and `PAL_SYSROOT` do the same for any one
 test and target. A test that names its own target in `pal_opts`, as the five
-above and three others do, is left to the host's pass. The other 211 all
-translate and verify for mips64. 210 of them emit the same F\* for both
+above and three others do, is left to the host's pass. The other 212 all
+translate and verify for mips64. 211 of them emit the same F\* for both
 targets, apart from `Target` and `TargetFacts`. The exception is
 `test/bitfields`, whose bit positions depend on the order.
 
@@ -477,12 +479,12 @@ let struct_S_field_aligned (a: ptr)
 ```
 
 and only the byte-facing entry points — `struct_S_conceal`,
-`struct_S_claim_uninit`, `struct_S_claim_*_flex`, `struct_S_of_elem` — ask the
-caller for `aligned a struct_S_alignof`. Every conjunct is
-`struct_S_offsetof_f % T_alignof == 0`, a fact about the layout clang gave us,
-true by construction and, since both sides are literals, discharged by
-computation — which is why the lemma proves by `()`. `unfocus` needs nothing:
-the field's alignment was never given up.
+`struct_S_conceal_bytes`, `struct_S_claim_uninit`, `struct_S_claim_*_flex`,
+`struct_S_of_elem` — ask the caller for `aligned a struct_S_alignof`. Every
+conjunct is `struct_S_offsetof_f % T_alignof == 0`, a fact about the layout
+clang gave us, true by construction and, since both sides are literals,
+discharged by computation — which is why the lemma proves by `()`. `unfocus`
+needs nothing: the field's alignment was never given up.
 
 A **union** is different, because `union_U_pts_to` is stated directly over
 `mem_pts_to` rather than over member points-to; there the conjunct really is
@@ -695,6 +697,97 @@ so we do not need a per-array-type axiomatization, and the existing
 `mem_split`/`mem_join` give array splitting for free. Flexible array members —
 today a dedicated `MallocFlex` special case — become an ordinary struct
 followed by an `array_repr` chunk, with no special support in the translator.
+
+### Reading a value out of bytes
+
+Every `_conceal` goes from a value to its bytes. It turns `mem_pts_to a p b`
+into `T_pts_to a p x` given `T_repr x b`, so the caller has to name `x` and
+know that `b` represents it, which covers everything a program stored through
+a typed pointer. It does not cover bytes the program did not write: a header
+in an image it was handed, a table the firmware left in memory, a packet.
+Those are known only to be initialised and to hold no pointers, and a typed
+view of them needs a value that comes from the bytes.
+
+The encoding is onto, and that is what makes such a value exist without an
+axiom. `Encoding.encode_decode` is the converse of the round trip: `n`
+initialised bytes, all of provenance `p`, are `encode bo n p v` for the
+`v < pow2 (8 * n)` they decode to, in either order. On top of it each integer
+type has a reader:
+
+```fstar
+let uint32_t_of_bytes (b: bytes) : U32.t =
+  U32.uint_to_t (decode_nat Target.byte_order b % pow2 32)
+
+val uint32_t_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SZ.v uint32_t_sizeof /\ initialized b /\ no_prov b)
+          (ensures  uint32_t_repr (uint32_t_of_bytes b) b)
+
+val uint32_t_of_bytes_inverse (x: U32.t) (b: bytes)
+  : Lemma (requires uint32_t_repr x b) (ensures uint32_t_of_bytes b == x)
+```
+
+and the same for the other widths, for the signed types through
+`Encoding.of_bits`, and for `size_t`. `_of_bytes` is total so that a
+specification can mention it without a side condition. Bytes that are not a
+value read as junk, and `_of_bytes_repr` is what gives the result a meaning.
+Its precondition is exactly what every integer representation satisfies
+(`T_repr_no_prov`), so it asks for nothing a caller could not have.
+`_of_bytes_inverse` is the other half of the bijection: bytes that represent
+`x` read back as `x`. None of these proofs asks which byte order the target
+has. The reader is `decode` at `Target.byte_order`, the order every writer
+encodes with.
+
+A struct gets the same when every field has it, generated:
+
+```fstar
+let struct_hdr_of_bytes (b: bytes) : struct_hdr =
+  { fld_kind = uint8_t_of_bytes (field_bytes b 0 1); fld_delta = int16_t_of_bytes (field_bytes b 2 2); ... }
+
+let struct_hdr_of_bytes_repr (b: bytes)
+  : Lemma (requires len b == SizeT.v struct_hdr_sizeof /\ initialized b /\ no_prov b)
+          (ensures  struct_hdr_repr (struct_hdr_of_bytes b) b)
+  = field_of_bytes_repr uint8_t_repr uint8_t_of_bytes 1 uint8_t_of_bytes_repr b 0;
+    field_of_bytes_repr int16_t_repr int16_t_of_bytes 2 int16_t_of_bytes_repr b 2;
+    ...
+
+ghost fn struct_hdr_conceal_bytes (a: ptr) (#p: perm) (#b: bytes)
+  requires mem_pts_to a p b
+  requires pure (len b == SizeT.v struct_hdr_sizeof /\ initialized b /\ no_prov b)
+  requires pure (aligned a struct_hdr_alignof)
+  ensures  struct_hdr_pts_to a p (struct_hdr_of_bytes b)
+```
+
+`Bytes.field_bytes b off n` is `slice b off (off + n)` when that range is
+inside `b` and empty otherwise, which is what keeps `_of_bytes` total. A field
+of struct type reads through its own `_of_bytes`, so nesting needs nothing
+more. `_conceal_bytes` is the claim, `_conceal` at the value the bytes hold.
+There is no struct `_inverse`: the padding is read by nobody, so two byte
+strings that differ only in padding are the same value.
+
+`_of_bytes_repr` calls the library's `Bytes.field_of_bytes_repr` once per
+field, rather than inlining what it proves, for the reason "Wide structs are
+the cost" gives for `_reveal`. With every field's slice facts in one query, a
+ten-field struct whose fields are all integers stopped at its ninth field;
+taken one field at a time, the largest query uses less than one unit of
+rlimit.
+
+An array needs nothing per type. `Array.array_of_bytes of_bytes esize n b`
+reads element `i` out of `elem_bytes esize b i`, and `array_of_bytes_repr`,
+given the element's `_of_bytes_repr`, says that it represents any initialised,
+provenance-free range of `esize * n` bytes. `array_conceal` at that value is
+the claim for an array.
+
+A type has no `_of_bytes` when not every byte string of its size is a value
+of it, or when the bytes do not determine the value. That rules out `_Bool`
+(two byte values out of 256), the floating types (`Float` axiomatizes the
+representation and gives it no inverse), pointers (an address and a
+provenance do not determine a `ptr` in this model) and unions. A struct also
+has none when it carries an invariant, has a refined field, has a field whose
+`_type` is not the F\* type the library reads, or has no byte-level view at
+all (for instance an array field, or more than sixteen fields).
+`test/of_bytes` claims a struct with interior padding, a nested struct, an ELF
+section header and an array of structs out of initialised, pointer-free bytes,
+and reads values back through them.
 
 ### Effective types
 
@@ -1316,10 +1409,10 @@ part of `make -C pulse`.
 
 | Module | Kind | Contents |
 | --- | --- | --- |
-| `Pulse.Lib.C.Palow.Bytes` | proved | `alloc_id`, `prov`, `byte`, `bytes`, `uninit`/`zeroed`, `strip_prov`, slice/append lemmas |
+| `Pulse.Lib.C.Palow.Bytes` | proved | `alloc_id`, `prov`, `byte`, `bytes`, `uninit`/`zeroed`, `strip_prov`, slice/append lemmas, `field_bytes` |
 | `Pulse.Lib.C.Palow.Ptr` | axiomatized | `ptr`, `addr_of`, `prov_of`, `ptr_ext`, `( +! )`, `disjoint_ranges` |
 | `Pulse.Lib.C.Palow` | axiomatized | `mem_pts_to`, `mem_split`/`mem_join`, disjointness, injectivity, share/gather |
-| `Pulse.Lib.C.Palow.Encoding` | proved | `encode`/`decode` in either byte order, round-trip and injectivity |
+| `Pulse.Lib.C.Palow.Encoding` | proved | `encode`/`decode` in either byte order, round-trip, injectivity and surjectivity |
 | `Pulse.Lib.C.Palow.Target` | interface | the target's byte order, abstract; `pal` generates the implementation, see [Byte order](#byte-order) |
 | `Pulse.Lib.C.Palow.Scalar` | proved | `uint8_t`/`uint32_t`/stored-pointer `*_repr`, `*_pts_to`, `*_sizeof`, agreement, share/gather, reveal/conceal |
 | `Pulse.Lib.C.Palow.Nullable` | proved | `unless_null` with its intro/elim pair |
@@ -1327,11 +1420,11 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Machine` | axiomatized | typed loads/stores, `memcpy`, stack alloc/free |
 | `Pulse.Lib.C.Palow.Expose` | axiomatized | `exposed`, `in_footprint`, `expose`, `ptr_to_uintptr`, `uintptr_to_ptr` |
 | `Pulse.Lib.C.Palow.Provenance` | proved | the `uintptr_t` round trip, and `memcpy` transporting a stored pointer |
-| `Pulse.Lib.C.Palow.CTypes` | proved | the remaining C scalar types (`_Bool`, `int8_t`..`int64_t`, `uint16_t`, `uint64_t`, `size_t`, `uint8_t`'s derived set) |
+| `Pulse.Lib.C.Palow.CTypes` | proved | the remaining C scalar types (`_Bool`, `int8_t`..`int64_t`, `uint16_t`, `uint64_t`, `size_t`, `uint8_t`'s derived set), and every integer type's `_of_bytes` reader |
 | `Pulse.Lib.C.Palow.Examples` | proved | hand-written Palow renditions of programs PAL already translates |
 | `Pulse.Lib.C.Palow.Etype` | proved | `ctype`, per-byte effective-type entries, `access_ok`, the store rule, and the union/array/punning theorems |
 | `Pulse.Lib.C.Palow.Aggregate` | proved | two structs (with and without padding), field split/join, flexible array members |
-| `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus |
+| `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus, `array_of_bytes` |
 | `Pulse.Lib.C.Palow.Union` | proved | `union U { uint32_t x; struct T t; }`, member views, the type-punning acceptance test |
 | `Pulse.Lib.C.Palow.Pool` | proved | bump allocator handing out `uint32_t`s from a byte range |
 | `Pulse.Lib.C.Palow.Float` | axiomatized | the injective map from a `float`/`double` to its object representation, and the two conversions between the widths |
