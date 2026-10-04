@@ -31,6 +31,13 @@ let sizet_fits_u64_pat (x:int)
     [SMTPat (fits x)]
   = FStar.SizeT.fits_u64_implies_fits x
 
+// We also assume size_t is at most 64 bits, so it is exactly uint64_t. FStar.SizeT keeps
+// the width abstract, but C's bitwise operators on size_t (`~x` above all)
+// depend on it; Pulse.Lib.C.SizeTBits defines them through uint64_t using this.
+// Consistent with FStar.SizeT's model, whose values are uint64_t values.
+val sizet_v_lt_pow2_64 (x: FStar.SizeT.t)
+  : Lemma (FStar.SizeT.v x < pow2 64)
+
 // Whether C assert() is enabled (i.e., NDEBUG is not defined).
 // Opaque so the verifier must handle both cases, exposing any
 // side effects in assert arguments that would change behavior

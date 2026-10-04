@@ -4062,6 +4062,7 @@ fn emit_unop(env: &Env, op: UnOp, ty: MaybeRc<Type>) -> Option<Doc> {
         (UnOp::BitNot, TypeT::Int { signed, width }) => {
             Doc::text(format!("{}.lognot", get_int_mod(signed, width)?))
         }
+        (UnOp::BitNot, TypeT::SizeT) => Doc::text("Pulse.Lib.C.SizeTBits.lognot"),
         (UnOp::BitNot, _) => return None,
     })
 }
@@ -4226,6 +4227,12 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
             Doc::text(format!("`{}.shift_right`", get_int_mod(signed, width)?))
         }
 
+        (BinOp::BitAnd, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.SizeTBits.logand`"),
+        (BinOp::BitOr, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.SizeTBits.logor`"),
+        (BinOp::BitXor, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.SizeTBits.logxor`"),
+        (BinOp::Shl, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.SizeTBits.shift_left`"),
+        (BinOp::Shr, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.SizeTBits.shift_right`"),
+
         (BinOp::LEq, TypeT::SpecInt | TypeT::SpecNat) => Doc::text("<="),
         (BinOp::Lt, TypeT::SpecInt | TypeT::SpecNat) => Doc::text("<"),
         (BinOp::Mul, TypeT::SpecInt | TypeT::SpecNat) => Doc::text("*"),
@@ -4280,7 +4287,7 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
         )
         | (
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr,
-            TypeT::Bool | TypeT::Float { .. } | TypeT::SizeT | TypeT::PtrdiffT,
+            TypeT::Bool | TypeT::Float { .. } | TypeT::PtrdiffT,
         )
         | (_, TypeT::SLProp)
         | (_, TypeT::Error)
