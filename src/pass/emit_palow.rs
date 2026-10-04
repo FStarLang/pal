@@ -89,6 +89,10 @@ fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
 /// The largest struct that gets a byte-level view. See `has_bytes`.
 const MAX_BYTE_LEVEL_FIELDS: usize = 16;
 
+/// The library lemma a struct's `_reveal` leaves out of its context. See
+/// `emit_struct_bytes`.
+const ENCODE_HAS_PROV: &str = "Pulse.Lib.C.Palow.Encoding.encode_has_prov";
+
 /// How a struct field is owned. A scalar or nested struct field is one
 /// points-to; a fixed-size array field is a whole `array_pts_to`, because in C
 /// `T f[N]` inside a struct is N elements of storage and not a pointer.
@@ -6891,11 +6895,17 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         sn = sn,
         acc = accs[regions.len() - 1]
     );
+    // `encode_has_prov` fires on every integer field's `encode`, and each fact
+    // it adds is a quantifier over that field's bytes. Nothing here is about
+    // provenance or initialisation, and with five integer fields and a gap
+    // the instances were already more than the solver would finish, so it is
+    // left out of the context.
     c += &format!(
-        "ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
+        "#push-options \"--using_facts_from '* -{ENCODE_HAS_PROV}'\"\n\
+         ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
          \x20 ensures  exists* b. mem_pts_to a p b ** pure ({sn}_repr x b)\n\
-         {{\n{r}}}\n\n",
+         {{\n{r}}}\n#pop-options\n\n",
         sn = sn,
         r = r
     );

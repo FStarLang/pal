@@ -1210,6 +1210,24 @@ costs nothing measurable. It is the aggregate *decomposition* that is
 expensive, and it is expensive in proportion to how wide the aggregate is, not
 to how many bytes it has.
 
+Width has a third cost, in the solver rather than in the text, and it starts
+well below the sixteen fields a byte-level view is limited to.
+`test/palow_struct`'s `struct wide` -- `uint8_t`, `int16_t`, `uint32_t`,
+`int64_t` and `size_t`, with a byte of padding after the first -- did not
+verify in its `_reveal`, and raising the limit to `--z3rlimit 100` only made it
+fail after 518 s. Z3's instantiation profile names the cause: the definitions
+of `Bytes.initialized` and `Bytes.has_prov` were each instantiated about
+120,000 times. Every integer field's `_repr` is a transparent
+`b == encode ...`, `Encoding.encode_has_prov` has an `SMTPat` on `encode`, and
+each fact it adds is a quantifier over the field's bytes, which the slices and
+appends of the reveal then multiply. Nothing in a reveal is about
+initialisation or provenance, so the generated `_reveal` leaves that lemma out
+of its context with `--using_facts_from`, and it then takes about 4 s. The
+pattern is the real problem, and taking it off `encode_has_prov` -- or making
+`initialized` and `has_prov` opaque behind lemmas -- would mend every proof
+that meets it rather than one. That changes what every proof in the library
+sees, so it is left for when another proof runs into it.
+
 ### Annotation overhead
 
 The suite's C and headers, excluding symlinks and generated output, are 192

@@ -101,6 +101,24 @@ uint8_t tag(const struct padded *p)
   return p->c;
 }
 
+// Five integer fields of four widths, and a byte of padding after `tag`. This
+// is the smallest shape found whose byte-level `_reveal` did not verify while
+// `Encoding.encode_has_prov` was in its context (palow.md, "Wide structs are
+// the cost").
+struct wide {
+  uint8_t  tag;
+  int16_t  delta;
+  uint32_t len;
+  int64_t  stamp;
+  size_t   count;
+};
+
+int64_t stamp(const struct wide *w)
+  _ensures(return == w->stamp)
+{
+  return w->stamp;
+}
+
 // A struct local. Its storage is carved out of one flat byte range by the
 // generated `struct_padded_stack_alloc`, field by field and gap by gap, and
 // handed back the same way at the end of the block.
