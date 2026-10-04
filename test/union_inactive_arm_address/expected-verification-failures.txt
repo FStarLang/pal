@@ -1,0 +1,2 @@
+Func_write_inactive
+Func_read_inactive

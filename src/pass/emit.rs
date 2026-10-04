@@ -163,6 +163,7 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::UnionFieldConstructor(u, _) => Some(format!("Union_{}", u)),
         Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
+        Name::UnionFieldAddr(u, _) => Some(format!("Union_{}", u)),
         Name::UnionAuxFn(u, _, _) => Some(format!("Union_{}", u)),
         Name::UnionActivateFn(u, _) => Some(format!("Union_{}", u)),
         Name::TypeRefDefault(TypeRef::Struct(s)) => Some(format!("Struct_{}", s)),
@@ -503,6 +504,9 @@ enum Name {
     UnionFieldConstructor(Rc<IdentT>, Rc<IdentT>),
     UnionGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
     UnionFieldProj(Rc<IdentT>, Rc<IdentT>),
+    /// Address of a union arm (`&u.arm`), computed without the arm being
+    /// active and without granting any ownership.
+    UnionFieldAddr(Rc<IdentT>, Rc<IdentT>),
     UnionAuxFn(Rc<IdentT>, &'static str, Rc<IdentT>),
     /// Ghost axiom (`assume val ... : stt_ghost ...`) that activates a union
     /// arm, used before a partial sub-field write `u->arm.field = v`.
@@ -585,6 +589,7 @@ impl Name {
             }
             Name::UnionGhostFieldProj(u, fld) => format!("{}__{}", union_to_string(u), fld),
             Name::UnionFieldProj(u, fld) => format!("{}__get_{}", union_to_string(u), fld),
+            Name::UnionFieldAddr(u, fld) => format!("{}__addr_{}", union_to_string(u), fld),
             Name::UnionAuxFn(u, f, fld) => format!("{}__aux_{}_{}", union_to_string(u), f, fld),
             Name::UnionActivateFn(u, fld) => {
                 format!("{}__activate_{}", union_to_string(u), fld)
@@ -4409,6 +4414,26 @@ impl<'a> Emitter<'a> {
                         && env.addressable_global(x).is_some()
                     {
                         return self.emit_name(Name::GlobalAddr(x.val.clone()));
+                    }
+                    // `&u.arm` takes the arm's address without needing the arm
+                    // to be active (C allows it whatever arm was last stored).
+                    if let ExprT::Member(base, fld) = &v.val
+                        && let Ok(base_ty) = env.infer_expr(base)
+                        && let TypeT::TypeRef(TypeRefKind::Union(union_name)) =
+                            &env.vtype_whnf(base_ty).val
+                        && env
+                            .lookup_union(union_name)
+                            .and_then(|u| u.fields.iter().find(|f| f.val.name().val == fld.val))
+                            .is_some_and(|f| !f.val.is_array())
+                        && let ExprKind::LValue(base_doc) = self.emit_expr(env, base)
+                    {
+                        return unaryfn(
+                            self.emit_name(Name::UnionFieldAddr(
+                                union_name.val.clone(),
+                                fld.val.clone(),
+                            )),
+                            base_doc,
+                        );
                     }
                     self.emit_lvalue(env, v)
                 }
@@ -9457,6 +9482,40 @@ impl<'a> Emitter<'a> {
                                 Doc::text("vx'"),
                                 unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                             ]),
+                        ]),
+                    ),
+                ]),
+            ))
+        }
+
+        // Address of each scalar arm, for `&u.arm`. In C this is address
+        // arithmetic, valid whichever arm was last stored, so it needs no
+        // resource: it only returns the arm's ghost projection, and grants no
+        // ownership. Reading or writing through the result still needs
+        // `pts_to (arm x)`, which only an active (unfolded) arm provides.
+        for f in fields.iter().filter(|f| !f.val.is_array()) {
+            let fld = f.val.name();
+            let ret_type = self.emit_field_projection_type(env, f);
+            ses.push(mk_assume_val(
+                vec![Doc::text("pulse_impure_spec_no_proof_required")],
+                self.emit_name(Name::UnionFieldAddr(name.val.clone(), fld.val.clone())),
+                &[parens(
+                    Doc::text("x:")
+                        .append(Doc::line())
+                        .append(ref_union_type.clone()),
+                )],
+                naryfn([
+                    Doc::text("stt_atomic"),
+                    ret_type,
+                    Doc::text("#PulseCore.Observability.Neutral"),
+                    Doc::text("emp_inames"),
+                    Doc::text("emp"),
+                    mk_fun(
+                        Doc::text("vx'"),
+                        naryfn([
+                            Doc::text("rewrites_to"),
+                            Doc::text("vx'"),
+                            unaryfn(self.emit_name(ghost_fld(fld)), Doc::text("x")),
                         ]),
                     ),
                 ]),
