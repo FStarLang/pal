@@ -80,6 +80,16 @@ layout-check: $(OUT_DIR)/.stamp
 endif
 endif
 
+# A test with a `preprocessor-expect.json` also checks what PAL records of
+# clang's preprocessing, `preprocessor.json` (see check-preprocessor.py). Both
+# models write it.
+ifneq ($(wildcard preprocessor-expect.json),)
+.PHONY: preprocessor-check
+all: preprocessor-check
+preprocessor-check: $(OUT_DIR)/.stamp
+	@../check-preprocessor.py $(OUT_DIR)/preprocessor.json preprocessor-expect.json
+endif
+
 translate: $(OUT_DIR)/.stamp
 
 $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h $(wildcard extra_opts pal_opts)

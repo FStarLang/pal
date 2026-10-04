@@ -1,0 +1,1 @@
+--target=mips64-unknown-elf --clang-arg=-nostdlibinc

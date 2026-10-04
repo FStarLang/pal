@@ -130,6 +130,12 @@ fn write_if_changed(path: &PathBuf, contents: &[u8]) {
     std::fs::write(path, contents).unwrap();
 }
 
+/// `preprocessor.json`: one record per compilation of an input file, each
+/// already JSON (see doc/internals.md).
+fn serialize_preprocessor_records(records: &[String]) -> String {
+    format!("{{\"units\":[\n{}\n]}}\n", records.join(",\n"))
+}
+
 fn serialize_diags(diags: &Diagnostics) -> String {
     use std::collections::{BTreeMap, HashMap};
 
@@ -217,6 +223,7 @@ fn main() {
         big_endian: false,
     };
     let mut diags = Diagnostics::empty();
+    let mut preprocessor_records: Vec<String> = Vec::new();
 
     // A source can be translated for either memory model, and hand-written
     // Pulse in it names predicates only one of them has. `PALOW` lets the
@@ -242,7 +249,7 @@ fn main() {
             std::process::exit(1);
         }
 
-        let (tu, file_diags) = clang::parse_file(
+        let (tu, file_diags, records) = clang::parse_file(
             &file_name,
             &cli.include_paths,
             &defines,
@@ -276,6 +283,7 @@ fn main() {
         combined_tu.decls.extend(tu.decls);
         combined_tu.layouts.extend(tu.layouts);
         diags.merge(file_diags);
+        preprocessor_records.extend(records);
     }
     if cli.time_passes {
         eprintln!(
@@ -489,6 +497,11 @@ fn main() {
             if let Some(snapshot) = &layout_snapshot {
                 std::fs::write(outdir.join("layout_table.json"), snapshot.serialize()).unwrap();
             }
+            std::fs::write(
+                outdir.join("preprocessor.json"),
+                serialize_preprocessor_records(&preprocessor_records),
+            )
+            .unwrap();
             std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
             // A module that is no longer generated has to go, or the next
             // verification run picks up a stale one and succeeds on code that
@@ -563,6 +576,12 @@ fn main() {
         std::fs::write(
             outdir.join("source_range_info.json"),
             source_range_info::serialize(&modules),
+        )
+        .unwrap();
+
+        std::fs::write(
+            outdir.join("preprocessor.json"),
+            serialize_preprocessor_records(&preprocessor_records),
         )
         .unwrap();
 

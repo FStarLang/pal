@@ -47,6 +47,7 @@ pub struct Ctx<'a> {
     translation_unit: TranslationUnit,
     diagnostics: Diagnostics,
     target_int_widths: TargetIntWidths,
+    preprocessor_records: Vec<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -78,6 +79,7 @@ impl<'a> Ctx<'a> {
             },
             diagnostics: Diagnostics::empty(),
             target_int_widths: TargetIntWidths::default(),
+            preprocessor_records: vec![],
         }
     }
 
@@ -124,6 +126,13 @@ impl<'a> Ctx<'a> {
     fn set_target_info(&mut self, triple: &str, big_endian: bool) {
         self.translation_unit.target_triple = self.intern_str(triple);
         self.translation_unit.big_endian = big_endian;
+    }
+
+    /// What clang's preprocessor made of a compilation of the file, as JSON:
+    /// see `preprocessor.json` in doc/internals.md. One per compilation, and
+    /// a compilation database can name a file more than once.
+    fn add_preprocessor_record(&mut self, record: &str) {
+        self.preprocessor_records.push(record.to_string());
     }
 
     fn set_target_int_widths(&mut self, widths: TargetIntWidths) {
@@ -1102,7 +1111,7 @@ pub fn parse_file(
     target: Option<&str>,
     clang_args: &[String],
     vfs: &mut dyn VFS,
-) -> (TranslationUnit, Diagnostics) {
+) -> (TranslationUnit, Diagnostics, Vec<String>) {
     let mut ctx = Ctx::new(
         file_name.to_string(),
         include_paths.to_vec(),
@@ -1112,5 +1121,9 @@ pub fn parse_file(
         vfs,
     );
     generated::parse_file(&mut ctx);
-    (ctx.translation_unit, ctx.diagnostics)
+    (
+        ctx.translation_unit,
+        ctx.diagnostics,
+        ctx.preprocessor_records,
+    )
 }

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "triple": "mips64-unknown-unknown-elf",
+  "includes": [],
+  "macro_includes": [],
+  "macros": [
+    { "text": "C2PULSE", "undef": false },
+    { "text": "PREPROCESSOR_RECORD_FLAG=3", "undef": false }
+  ],
+  "files": ["preprocessor_record.c", "stdint.h", "preprocessor_record.h"],
+  "consulted": [
+    "PREPROCESSOR_RECORD_UNSET",
+    "PREPROCESSOR_RECORD_FLAG",
+    "PREPROCESSOR_RECORD_TWICE",
+    "PREPROCESSOR_RECORD_POP",
+    "PREPROCESSOR_RECORD_LINE",
+    "__LINE__"
+  ],
+  "pragmas": [
+    { "file": "preprocessor_record.h", "line": 1, "kind": "#pragma",
+      "text": "once" },
+    { "file": "preprocessor_record.c", "line": 27, "kind": "#pragma",
+      "text": "push_macro(\"PREPROCESSOR_RECORD_TWICE\")" },
+    { "file": "preprocessor_record.c", "line": 30, "kind": "_Pragma",
+      "text": "pop_macro(\"PREPROCESSOR_RECORD_TWICE\")" }
+  ],
+  "tokens": [
+    ["preprocessor_record.c", 36, "x"],
+    ["preprocessor_record.c", 36, "+"],
+    ["preprocessor_record.c", 50, "51", 51]
+  ]
+}

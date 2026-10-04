@@ -3,11 +3,14 @@
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/MacroArgs.h"
+#include "clang/Lex/PreprocessorOptions.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/Support/JSON.h"
 #include <dlfcn.h>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
@@ -170,6 +173,267 @@ public:
       unsigned ctr = compilerInst.getPreprocessor().getCounterValue();
       toks.insert_into_map(ctr, snippets);
     }
+  }
+};
+
+// What clang's preprocessor did with the unit, for `preprocessor.json`.
+//
+// PAL reads a program through clang, and the program is built by whatever
+// compiler its project uses. Two compilers can preprocess one source into two
+// programs: they predefine different macros, answer `__has_attribute`
+// differently and ship different headers of their own, and a header may test
+// any of that. Nothing in F* can tell a proof of the wrong token stream from a
+// proof of the right one. So PAL writes down what its parser was given -- the
+// tokens, the files they came from, the configuration and predefined macros,
+// the macros the unit tested or expanded, and its pragmas -- and a build can
+// compare that with its own compiler's `-E`.
+struct PreprocessorRecord {
+  struct Pragma {
+    std::string file;
+    unsigned line;
+    std::string kind;
+    std::string text;
+  };
+  struct Tok {
+    unsigned file;
+    unsigned line;
+    // For a token a macro produced, the line the outermost invocation ends
+    // on, which is where clang puts `__LINE__`.
+    unsigned endLine;
+    std::string spelling;
+  };
+  std::vector<std::string> files;
+  std::unordered_set<std::string> seenFiles;
+  std::set<std::string> consulted;
+  std::vector<Pragma> pragmas;
+  std::vector<std::string> tokenFiles;
+  llvm::StringMap<unsigned> tokenFileIndex;
+  std::vector<Tok> tokens;
+
+  unsigned tokenFile(llvm::StringRef name) {
+    auto [it, fresh] = tokenFileIndex.try_emplace(name, tokenFiles.size());
+    if (fresh)
+      tokenFiles.push_back(name.str());
+    return it->second;
+  }
+
+  // The parser's own tokens: the expanded stream, without the ones it pushed
+  // back and lexed again, and without the annotations it makes of them.
+  void token(Preprocessor &pp, Token const &tok) {
+    if (tok.isAnnotation() || tok.is(tok::eof))
+      return;
+    SourceManager &sm = pp.getSourceManager();
+    SourceLocation loc = tok.getLocation();
+    PresumedLoc at = sm.getPresumedLoc(sm.getExpansionLoc(loc));
+    unsigned file = tokenFile(at.isValid() ? at.getFilename() : "");
+    unsigned line = at.isValid() ? at.getLine() : 0;
+    unsigned endLine = line;
+    if (loc.isMacroID()) {
+      PresumedLoc end = sm.getPresumedLoc(sm.getExpansionRange(loc).getEnd());
+      if (end.isValid())
+        endLine = end.getLine();
+    }
+    tokens.push_back({file, line, endLine, pp.getSpelling(tok)});
+  }
+
+  static std::string utf8(std::string s) {
+    return llvm::json::isUTF8(s) ? s : llvm::json::fixUTF8(s);
+  }
+
+  static char const *group(frontend::IncludeDirGroup g) {
+    switch (g) {
+    case frontend::Quoted:
+      return "quoted";
+    case frontend::Angled:
+      return "angled";
+    case frontend::System:
+      return "system";
+    case frontend::ExternCSystem:
+      return "externc-system";
+    case frontend::CSystem:
+      return "c-system";
+    case frontend::CXXSystem:
+      return "cxx-system";
+    case frontend::ObjCSystem:
+      return "objc-system";
+    case frontend::ObjCXXSystem:
+      return "objcxx-system";
+    case frontend::After:
+      return "after";
+    }
+    return "unknown";
+  }
+
+  // The directories `#include` searched, as clang settled them: the include
+  // paths asked for, less the ones that do not exist or repeat, and with the
+  // ones clang adds itself, like its resource directory.
+  static void searchPath(llvm::json::OStream &j, HeaderSearch const &hs) {
+    auto dirs = [&](char const *kind, ConstSearchDirIterator it,
+                    ConstSearchDirIterator end) {
+      for (; it != end; ++it)
+        j.object([&] {
+          j.attribute("path", utf8(it->getName().str()));
+          j.attribute("kind", kind);
+          j.attribute("system", it->isSystemHeaderDirectory());
+          j.attribute("lookup", it->isNormalDir()   ? "dir"
+                                : it->isFramework() ? "framework"
+                                                    : "headermap");
+        });
+    };
+    dirs("quoted", hs.quoted_dir_begin(), hs.quoted_dir_end());
+    dirs("angled", hs.angled_dir_begin(), hs.angled_dir_end());
+    dirs("system", hs.system_dir_begin(), hs.system_dir_end());
+  }
+
+  std::string serialize(CompilerInstance &ci) {
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    llvm::json::OStream j(os);
+    auto &ppOpts = ci.getPreprocessorOpts();
+    auto &hsOpts = ci.getHeaderSearchOpts();
+    auto strings = [&](char const *key, auto const &items) {
+      j.attributeArray(key, [&] {
+        for (auto const &s : items)
+          j.value(utf8(std::string(s)));
+      });
+    };
+    j.object([&] {
+      j.attribute("version", 1);
+      auto const &inputs = ci.getFrontendOpts().Inputs;
+      j.attribute("main_file",
+                  utf8(inputs.empty() ? "" : inputs[0].getFile().str()));
+      auto cwd = ci.getVirtualFileSystem().getCurrentWorkingDirectory();
+      j.attribute("working_dir", utf8(cwd ? *cwd : ""));
+      j.attribute("triple", ci.getTarget().getTriple().str());
+      j.attribute("resource_dir", utf8(hsOpts.ResourceDir));
+      strings("cc1_args", ci.getInvocation().getCC1CommandLine());
+      j.attributeArray("macros", [&] {
+        for (auto const &macro : ppOpts.Macros)
+          j.object([&] {
+            j.attribute("text", utf8(macro.first));
+            j.attribute("undef", macro.second);
+          });
+      });
+      j.attributeArray("include_paths", [&] {
+        for (auto const &e : hsOpts.UserEntries)
+          j.object([&] {
+            j.attribute("path", utf8(e.Path));
+            j.attribute("group", group(e.Group));
+          });
+      });
+      j.attributeArray("search_path", [&] {
+        searchPath(j, ci.getPreprocessor().getHeaderSearchInfo());
+      });
+      strings("includes", ppOpts.Includes);
+      strings("macro_includes", ppOpts.MacroIncludes);
+      j.attribute("predefines", utf8(ci.getPreprocessor().getPredefines()));
+      strings("files", files);
+      strings("consulted", consulted);
+      j.attributeArray("pragmas", [&] {
+        for (auto const &p : pragmas)
+          j.object([&] {
+            j.attribute("file", utf8(p.file));
+            j.attribute("line", p.line);
+            j.attribute("kind", p.kind);
+            j.attribute("text", utf8(p.text));
+          });
+      });
+      strings("token_files", tokenFiles);
+      j.attributeArray("tokens", [&] {
+        for (auto const &t : tokens)
+          j.array([&] {
+            j.value(t.file);
+            j.value(t.line);
+            j.value(utf8(t.spelling));
+            if (t.endLine != t.line)
+              j.value(t.endLine);
+          });
+      });
+    });
+    return out;
+  }
+};
+
+class PreprocessorRecorder : public PPCallbacks {
+public:
+  PreprocessorRecorder(std::shared_ptr<PreprocessorRecord> r, Preprocessor &p)
+      : record(std::move(r)), pp(p), sm(p.getSourceManager()) {}
+  std::shared_ptr<PreprocessorRecord> record;
+  Preprocessor &pp;
+  SourceManager &sm;
+
+  void FileChanged(SourceLocation loc, FileChangeReason reason,
+                   SrcMgr::CharacteristicKind, FileID) override {
+    if (reason != EnterFile)
+      return;
+    if (auto file = sm.getFileEntryRefForID(sm.getFileID(loc))) {
+      std::string name = file->getName().str();
+      if (record->seenFiles.insert(name).second)
+        record->files.push_back(name);
+    }
+  }
+
+  void note(Token const &name) {
+    if (auto *ident = name.getIdentifierInfo())
+      record->consulted.insert(ident->getName().str());
+  }
+  void MacroExpands(Token const &name, MacroDefinition const &, SourceRange,
+                    MacroArgs const *) override {
+    note(name);
+  }
+  void Defined(Token const &name, MacroDefinition const &,
+               SourceRange) override {
+    note(name);
+  }
+  void Ifdef(SourceLocation, Token const &name,
+             MacroDefinition const &) override {
+    note(name);
+  }
+  void Ifndef(SourceLocation, Token const &name,
+              MacroDefinition const &) override {
+    note(name);
+  }
+  using PPCallbacks::Elifdef;
+  using PPCallbacks::Elifndef;
+  void Elifdef(SourceLocation, Token const &name,
+               MacroDefinition const &) override {
+    note(name);
+  }
+  void Elifndef(SourceLocation, Token const &name,
+                MacroDefinition const &) override {
+    note(name);
+  }
+
+  // A pragma is not a token the parser sees, so it is recorded with its text.
+  // The preprocessor has just read `#pragma`, or has put the operand of a
+  // `_Pragma` in a buffer of its own, so the rest of the current line is the
+  // pragma. A `__pragma` is replayed from tokens, and its text is left blank.
+  void PragmaDirective(SourceLocation loc,
+                       PragmaIntroducerKind introducer) override {
+    PresumedLoc at = sm.getPresumedLoc(sm.getExpansionLoc(loc));
+    std::string text;
+    // Lexer is clang's only PreprocessorLexer; a token stream has none.
+    if (auto *lexer = static_cast<Lexer *>(pp.getCurrentLexer())) {
+      char const *p = lexer->getBufferLocation();
+      char const *end = lexer->getBuffer().end();
+      while (p < end && *p != '\n') {
+        if (*p == '\\' && p + 1 < end && p[1] == '\n') {
+          p += 2;
+        } else if (*p == '\\' && p + 2 < end && p[1] == '\r' && p[2] == '\n') {
+          p += 3;
+        } else if (*p == '\r') {
+          ++p;
+        } else {
+          text += *p++;
+        }
+      }
+    }
+    char const *kind = introducer == PIK_HashPragma ? "#pragma"
+                       : introducer == PIK__Pragma  ? "_Pragma"
+                                                    : "__pragma";
+    record->pragmas.push_back({at.isValid() ? at.getFilename() : "",
+                               at.isValid() ? at.getLine() : 0, kind,
+                               llvm::StringRef(text).trim().str()});
   }
 };
 
@@ -3750,10 +4014,15 @@ public:
   RefMut<Ctx> ctx;
   RangeMap &rangeMap;
   SnipMap snippets = SnipMap::default_();
+  std::shared_ptr<PreprocessorRecord> record;
 
   bool BeginSourceFileAction(CompilerInstance &CI) override {
-    CI.getPreprocessor().addPPCallbacks(
-        std::make_unique<MacroTracker>(rangeMap, snippets, CI));
+    Preprocessor &pp = CI.getPreprocessor();
+    pp.addPPCallbacks(std::make_unique<MacroTracker>(rangeMap, snippets, CI));
+    record = std::make_shared<PreprocessorRecord>();
+    pp.addPPCallbacks(std::make_unique<PreprocessorRecorder>(record, pp));
+    pp.setTokenWatcher(
+        [record = record, &pp](Token const &tok) { record->token(pp, tok); });
     return SyntaxOnlyAction::BeginSourceFileAction(CI);
   }
 
@@ -3763,6 +4032,9 @@ public:
   }
 
   void EndSourceFileAction() override {
+    if (record)
+      ctx.add_preprocessor_record(
+          toStr(record->serialize(getCompilerInstance())));
     SyntaxOnlyAction::EndSourceFileAction();
   }
 };

@@ -264,6 +264,36 @@ taken before pruning, because a folded `offsetof` leaves no trace of the type it
 came from. A test can pin it with a `layout-expect.json`
 ([`test/check-layout.py`](../test/check-layout.py)).
 
+The layout is not the only thing PAL takes from clang that the build compiler
+decides for itself. A project builds with whatever compiler it uses, and two
+compilers can preprocess one source into two programs: they predefine
+different macros, answer `__has_attribute` differently, and ship headers of
+their own, and a header may test any of that. A proof of the program clang saw
+says nothing about another one. So `preprocessor.json` records, for each
+compilation of an input file (`units`, normally one per file), what
+[`cpp/impl.cpp`](../cpp/impl.cpp) saw of the preprocessor:
+
+- the configuration: the target triple, the working directory, the resource
+  directory, the `-D`/`-U` macros, the include paths asked for and the search
+  path clang made of them (`search_path`, which adds its own directories and
+  drops missing ones), any `-include`, the predefined macros (`predefines`)
+  and the full `-cc1` command line;
+- `files`, every file the unit entered, in order of first entry;
+- `consulted`, every macro name the unit expanded or tested with `defined`,
+  `#ifdef`, `#ifndef`, `#elifdef` or `#elifndef`;
+- `pragmas`, each with its file, line, introducer (`#pragma` or `_Pragma`) and
+  text, since a pragma is not a token;
+- `tokens`, the stream the parser was given, as `[file, line, spelling]` with
+  the file an index into `token_files` and the line that of the outermost
+  macro call a token came from. A token a macro call produced that ends on a
+  later line has a fourth element, that line: clang expands `__LINE__` there
+  to the line a call ends on, and GCC 12 to the line it starts on.
+
+A build can preprocess the same source with its own compiler and compare.
+File names are as clang found them, relative to the working directory. A test
+can pin the record with a `preprocessor-expect.json`
+([`test/check-preprocessor.py`](../test/check-preprocessor.py)).
+
 ---
 
 ## 5. Output Structure
@@ -280,6 +310,7 @@ out/
   diagnostics.json          LSP-compatible diagnostics
   source_range_info.json    Pulse-to-C position mapping
   layout_table.json         clang's layout of every type the unit defines (Palow only)
+  preprocessor.json         what clang's preprocessor gave the parser, per input file
 ```
 
 `TranslationErrors.fst` is a sentinel module. When the translation
