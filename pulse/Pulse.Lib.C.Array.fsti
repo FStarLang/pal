@@ -538,6 +538,31 @@ val array_to_ref_is_null (#t: Type u#a) (r: array t)
 /// an `array_pts_to`, and an address alone has none.
 val ref_to_array (#t: Type u#a) (r: R.ref t) : array t
 
+/// A cell holding an array pointer, viewed as a cell holding a raw pointer:
+/// `(void **)&arrayLocal`, the array counterpart of `CR.core_cell`. It is how
+/// a caller hands an acquire-style callee its own array-pointer slot to write
+/// an address into. An array and a `ref` share one handle, so this is
+/// `CR.core_cell` at the element type and the shifts below are its shifts:
+/// nothing new is assumed. What comes back is the written address viewed as
+/// an array (`ref_to_array`), with no ownership and no length.
+val array_core_cell (#t: Type0) (r: R.ref (array t)) : R.ref CR.core_ref
+
+ghost fn to_array_core_cell (#t: Type0) (r: R.ref (array t)) (#p: perm) (#v: array t)
+  requires R.pts_to r #p v
+  ensures R.pts_to (array_core_cell r) #p (CR.ref_to_core (array_to_ref v))
+
+ghost fn of_array_core_cell (#t: Type0) (r: R.ref (array t)) (#p: perm) (#w: CR.core_ref)
+  requires R.pts_to (array_core_cell r) #p w
+  ensures R.pts_to r #p (ref_to_array (CR.core_to_ref t w))
+
+ghost fn to_array_core_cell_out (#t: Type0) (r: R.ref (array t))
+  requires CR.initialized_or_not r
+  ensures R.pts_to_uninit (array_core_cell r)
+
+ghost fn of_array_core_cell_uninit (#t: Type0) (r: R.ref (array t))
+  requires R.pts_to_uninit (array_core_cell r)
+  ensures R.pts_to_uninit r
+
 /// Drop an arrayptr_pts_to predicate (for scope exit / cleanup).
 ghost fn arrayptr_drop u#a (#t: Type u#a) (x: array t) (#y: array t)
   requires arrayptr_pts_to x y

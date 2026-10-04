@@ -6,6 +6,7 @@ module A = Pulse.Lib.Array
 module R = Pulse.Lib.Reference
 module MU = Pulse.Lib.C.MaybeUninit
 module SZ = FStar.SizeT
+module CR = Pulse.Lib.C.CoreRef
 #lang-pulse
 
 let array a = A.array a
@@ -661,6 +662,45 @@ let arrayptr_lt #t x z = admit ()
 let array_to_ref #t r = r
 let array_to_ref_is_null #t r = ()
 let ref_to_array #t r = r
+
+let array_core_cell #t r = CR.core_cell #t r
+
+ghost fn to_array_core_cell (#t: Type0) (r: R.ref (array t)) (#p: perm) (#v: array t)
+  requires R.pts_to r #p v
+  ensures R.pts_to (array_core_cell r) #p (CR.ref_to_core (array_to_ref v))
+{
+  CR.to_core_cell #t r;
+  rewrite R.pts_to (CR.core_cell #t r) #p (CR.ref_to_core #t v)
+       as R.pts_to (array_core_cell r) #p (CR.ref_to_core (array_to_ref v));
+}
+
+ghost fn of_array_core_cell (#t: Type0) (r: R.ref (array t)) (#p: perm) (#w: CR.core_ref)
+  requires R.pts_to (array_core_cell r) #p w
+  ensures R.pts_to r #p (ref_to_array (CR.core_to_ref t w))
+{
+  rewrite R.pts_to (array_core_cell r) #p w as R.pts_to (CR.core_cell #t r) #p w;
+  CR.of_core_cell #t r;
+  rewrite R.pts_to #(R.ref t) r #p (CR.core_to_ref t w)
+       as R.pts_to r #p (ref_to_array (CR.core_to_ref t w));
+}
+
+ghost fn to_array_core_cell_out (#t: Type0) (r: R.ref (array t))
+  requires CR.initialized_or_not r
+  ensures R.pts_to_uninit (array_core_cell r)
+{
+  rewrite CR.initialized_or_not r as CR.initialized_or_not #(R.ref t) r;
+  CR.to_core_cell_out #t r;
+  rewrite R.pts_to_uninit (CR.core_cell #t r) as R.pts_to_uninit (array_core_cell r);
+}
+
+ghost fn of_array_core_cell_uninit (#t: Type0) (r: R.ref (array t))
+  requires R.pts_to_uninit (array_core_cell r)
+  ensures R.pts_to_uninit r
+{
+  rewrite R.pts_to_uninit (array_core_cell r) as R.pts_to_uninit (CR.core_cell #t r);
+  CR.of_core_cell_uninit #t r;
+  rewrite R.pts_to_uninit #(R.ref t) r as R.pts_to_uninit r;
+}
 // An arrayptr/array and a `ref` share the same underlying handle
 // (`ref a == array a`, exposed here via `friend Pulse.Lib.Reference`), so this
 // coercion is the identity -- no primitive needed. It lets a mixed

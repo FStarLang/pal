@@ -4987,6 +4987,23 @@ impl<'a> Emitter<'a> {
                         {
                             unaryfn(Doc::text("Pulse.Lib.C.CoreRef.core_cell"), val_doc)
                         }
+                        // The same for a cell holding an array pointer:
+                        // `(void **)&arrayLocal`. The slot is retyped by
+                        // `array_core_cell`, and `core_cell_arg_ghosts` moves
+                        // the ownership across with the array shifts.
+                        (
+                            TypeT::Pointer(from_pointee, PointerKind::Ref | PointerKind::Unknown),
+                            TypeT::Pointer(to_pointee, PointerKind::Ref | PointerKind::Unknown),
+                        ) if matches!(
+                            env.vtype_whnf(from_pointee.clone().into()).val,
+                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
+                        ) && matches!(
+                            env.vtype_whnf(to_pointee.clone().into()).val,
+                            TypeT::Pointer(_, PointerKind::Core)
+                        ) =>
+                        {
+                            unaryfn(Doc::text("Pulse.Lib.C.Array.array_core_cell"), val_doc)
+                        }
                         // typed `ref T` → `core_ref`: erase the pointee type.
                         (
                             TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown),
@@ -5996,12 +6013,11 @@ impl<'a> Emitter<'a> {
             else {
                 continue;
             };
-            if !matches!(
-                env.vtype_whnf(arg_pointee.clone().into()).val,
-                TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
-            ) {
-                continue;
-            }
+            let is_array_slot = match env.vtype_whnf(arg_pointee.clone().into()).val {
+                TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown) => false,
+                TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => true,
+                _ => continue,
+            };
             let arg_doc = parens(self.emit_rvalue(env, inner));
             // An out-parameter is uninitialized going in and written by the
             // time it comes back, so the two halves of the shift are not
@@ -6009,14 +6025,24 @@ impl<'a> Emitter<'a> {
             // locals passed this way are usually initialized to NULL first, so
             // the empty slot is reached by forgetting that value rather than by
             // never having had one; `to_core_cell_out` takes either.
-            let (to_shift, of_shift) = match param.mode {
-                ParamMode::Out => (
+            // An array-pointer slot takes the array shifts, which are the
+            // same shifts at the element type.
+            let (to_shift, of_shift) = match (param.mode, is_array_slot) {
+                (ParamMode::Out, false) => (
                     "Pulse.Lib.C.CoreRef.to_core_cell_out ",
                     "Pulse.Lib.C.CoreRef.of_core_cell ",
                 ),
-                _ => (
+                (_, false) => (
                     "Pulse.Lib.C.CoreRef.to_core_cell ",
                     "Pulse.Lib.C.CoreRef.of_core_cell ",
+                ),
+                (ParamMode::Out, true) => (
+                    "Pulse.Lib.C.Array.to_array_core_cell_out ",
+                    "Pulse.Lib.C.Array.of_array_core_cell ",
+                ),
+                (_, true) => (
+                    "Pulse.Lib.C.Array.to_array_core_cell ",
+                    "Pulse.Lib.C.Array.of_array_core_cell ",
                 ),
             };
             out.before.push(
