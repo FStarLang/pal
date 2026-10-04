@@ -72,6 +72,19 @@ fn emit_sizet_literal(val: &BigInt) -> Doc {
     }
 }
 
+/// The `size_t` value of the C conversion `(size_t)lit`.
+///
+/// An unsigned literal's stored value is only meaningful modulo its own width
+/// (`4294967295U` can arrive as -1 at type `uint32_t`), and a negative signed
+/// literal converts modulo 2^64; either way the result must be reduced before
+/// it is printed, or the emitter produces a negative `Nsz` literal.
+fn int_lit_as_sizet(env: &Env, n: &BigInt, lit_ty: &Type) -> BigInt {
+    match env.vtype_whnf(lit_ty.clone().into()).val {
+        TypeT::Int { signed: false, width } => normalize_unsigned(n, width),
+        _ => normalize_unsigned(n, 64),
+    }
+}
+
 fn emit_machine_int_literal(val: &BigInt, signed: bool, width: u32) -> Doc {
     let normalized = if signed {
         val.clone()
@@ -1802,9 +1815,9 @@ impl<'a> Emitter<'a> {
         };
         let to_ty = env.vtype_whnf(to_ty.clone().into());
         if matches!(&to_ty.val, TypeT::SizeT)
-            && let ExprT::IntLit(n, _) = &val.val
+            && let ExprT::IntLit(n, lit_ty) = &val.val
         {
-            return emit_sizet_literal(n);
+            return emit_sizet_literal(&int_lit_as_sizet(env, n, lit_ty));
         }
         if env.vtype_eq(from_ty.clone(), to_ty.clone()) {
             return val_doc;
@@ -4408,8 +4421,8 @@ impl<'a> Emitter<'a> {
                     let to_ty = env.vtype_whnf(to_ty.clone().into());
                     // Special case: integer literal cast to SizeT → emit Nsz
                     if matches!(&to_ty.val, TypeT::SizeT) {
-                        if let ExprT::IntLit(n, _) = &val.val {
-                            return emit_sizet_literal(n);
+                        if let ExprT::IntLit(n, lit_ty) = &val.val {
+                            return emit_sizet_literal(&int_lit_as_sizet(env, n, lit_ty));
                         }
                     }
                     if env.vtype_eq(from_ty.clone(), to_ty.clone()) {
