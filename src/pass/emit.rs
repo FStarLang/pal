@@ -4429,6 +4429,27 @@ impl<'a> Emitter<'a> {
                         // Same underlying type, no cast necessary.
                         return val_doc;
                     }
+                    // `(T[]) (T*) p` with `p` a raw `core_ref`: a `void *`
+                    // stored into an array-typed slot. The frontend's implicit
+                    // `void * -> T *` lands on a plain pointer and elab then
+                    // retypes it to the slot's array kind, so view the raw
+                    // address as an array directly. Like every core_ref
+                    // coercion this carries no ownership.
+                    if let TypeT::Pointer(
+                        to_pointee,
+                        to_kind @ (PointerKind::Array | PointerKind::ArrayPtr),
+                    ) = &to_ty.val
+                        && matches!(
+                            from_ty.val,
+                            TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)
+                        )
+                        && let ExprT::Cast(inner, _) = &val.val
+                        && let Ok(inner_ty) = env.infer_expr(inner).map(|t| env.vtype_whnf(t))
+                        && matches!(inner_ty.val, TypeT::Pointer(_, PointerKind::Core))
+                    {
+                        let inner_doc = self.emit_rvalue(env, inner);
+                        return self.emit_core_as_ptr(env, to_kind, to_pointee, inner_doc);
+                    }
 
                     let default_msg = format!("unsupported cast from {} to {}", from_ty, to_ty);
                     match (&from_ty.val, &to_ty.val) {
