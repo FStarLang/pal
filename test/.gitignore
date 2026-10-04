@@ -1,7 +1,9 @@
 **/out/
 **/out_old/
+**/out.*/
 **/_cache/
 **/_cache_old/
+**/_cache.*/
 **/obj/
 **/.depend
 **/.depend.*

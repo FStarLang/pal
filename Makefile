@@ -24,6 +24,25 @@ old-model-check: rust lib
 palow-check: rust lib
 	./test/palow-check.sh
 
+# Palow stores a scalar in the target's byte order, and the host is
+# little-endian, so the suite runs once more translated for a big-endian
+# target: 64-bit MIPS, whose C library headers Debian and Ubuntu package as
+# libc6-dev-mips64-cross, under /usr/mips64-linux-gnuabi64. Every test the
+# host's pass verifies must verify for it too, except one that names its own
+# target, which the host's pass runs. Its output lives in
+# `out.$(BIG_ENDIAN_TARGET)/`.
+BIG_ENDIAN_TARGET ?= mips64-unknown-linux-gnuabi64
+BIG_ENDIAN_SYSROOT ?= /usr/mips64-linux-gnuabi64
+
+.PHONY: big-endian-check
+big-endian-check: rust lib
+	@test -f $(BIG_ENDIAN_SYSROOT)/include/stdlib.h || { \
+		echo "big-endian-check: no C library headers under $(BIG_ENDIAN_SYSROOT)." >&2; \
+		echo "Install libc6-dev-mips64-cross, or set BIG_ENDIAN_SYSROOT to a sysroot" >&2; \
+		echo "for $(BIG_ENDIAN_TARGET)." >&2; \
+		exit 1; }
+	$(MAKE) -C test PAL_TARGET=$(BIG_ENDIAN_TARGET) PAL_SYSROOT=$(BIG_ENDIAN_SYSROOT)
+
 .PHONY: comment-check
 # F* comments nest and quoted C code is full of accidental delimiters, so an
 # unbalanced comment silently swallows the rest of a file rather than failing.
@@ -36,7 +55,7 @@ format-check:
 	clang-format --dry-run --Werror cpp/impl.cpp
 
 .PHONY: test
-test: rust lib -testsuite old-model-check
+test: rust lib -testsuite old-model-check big-endian-check
 # Only run formatting checks when tests succeed
 	$(MAKE) comment-check format-check
 

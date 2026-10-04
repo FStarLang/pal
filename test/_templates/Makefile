@@ -7,9 +7,25 @@
 # finds.
 MODEL ?= palow
 
+# A test is translated for the host unless `PAL_TARGET` names another target.
+# Palow's byte order is the target's, as is every size and offset (palow.md,
+# "Byte order"), and the host is little-endian, so `make test` runs the suite
+# again for a big-endian target (see the top-level Makefile). `PAL_SYSROOT`
+# gives that target's C library headers. Each target, like each model, gets its
+# own output and cache directories.
+PAL_TARGET ?=
+PAL_SYSROOT ?=
+ifneq ($(PAL_TARGET),)
+ifeq ($(MODEL),old)
+$(error PAL_TARGET is for Palow: the old model stores no bytes, so has no byte order to test)
+endif
+endif
+OUT_TAG := $(if $(filter old,$(MODEL)),_old)$(if $(PAL_TARGET),.$(PAL_TARGET))
+DEPEND_FILE := .depend.$(MODEL)$(if $(PAL_TARGET),.$(PAL_TARGET))
+
 C2PULSE ?= ../../target/debug/pal
-CACHE_DIR ?= $(if $(filter old,$(MODEL)),_cache_old,_cache)
-OUT_DIR ?= $(if $(filter old,$(MODEL)),out_old,out)
+CACHE_DIR ?= _cache$(OUT_TAG)
+OUT_DIR ?= out$(OUT_TAG)
 OBJ_DIR ?= obj
 
 C_FILES := $(wildcard *.c)
@@ -47,8 +63,26 @@ endif
 # Options for PAL alone -- `--target`, `--clang-arg` -- for a test translated
 # for a target other than the host. The C compiler still builds for the host.
 ifneq ($(wildcard pal_opts),)
-PAL_OPTS += $(shell cat pal_opts)
+PAL_FILE_OPTS := $(shell cat pal_opts)
+PAL_OPTS += $(PAL_FILE_OPTS)
 endif
+
+# A test that names its own target is about that target, so `PAL_TARGET` does
+# not change it, and the host's pass already runs it. Any other test is
+# translated for `PAL_TARGET`, against that target's C library.
+OWN_TARGET := $(filter --target%,$(PAL_FILE_OPTS))
+ifneq ($(PAL_TARGET),)
+ifeq ($(OWN_TARGET),)
+PAL_OPTS += --target=$(PAL_TARGET)
+ifneq ($(PAL_SYSROOT),)
+PAL_OPTS += --clang-arg=--sysroot=$(PAL_SYSROOT)
+endif
+endif
+endif
+
+# The C compiler builds for the host, whatever the target, so only the host's
+# pass compiles.
+COMPILE := $(if $(PAL_TARGET),,compile)
 
 # A test whose annotations are written against the Palow memory model cannot be
 # translated by the old emitter, and carries a `palow-only` marker file. Such a
@@ -60,19 +94,23 @@ endif
 # and Palow does not yet. It names a gap rather than a difference of dialect,
 # so it should be a shrinking set, and the gap itself has to be written down
 # in palow.md. Only the default model skips it.
-ifeq ($(MODEL)$(wildcard palow-only),oldpalow-only)
-all: compile
+ifneq ($(and $(PAL_TARGET),$(OWN_TARGET)),)
+all:
+	@echo "Not translated for $(PAL_TARGET): $(notdir $(CURDIR)) names its own target"
+else ifeq ($(MODEL)$(wildcard palow-only),oldpalow-only)
+all: $(COMPILE)
 else ifeq ($(MODEL)$(wildcard old-only),palowold-only)
-all: compile
+all: $(COMPILE)
 else
-all: verify compile
+all: verify $(COMPILE)
 endif
 
 # A test with a `layout-expect.json` also checks the layout PAL reports for its
 # target, `layout_table.json`: every key the file gives must have that value
-# (see check-layout.py). The old model writes no table.
+# (see check-layout.py). The old model writes no table. The expected values are
+# the test's own target's, so `PAL_TARGET` does not check them.
 ifneq ($(wildcard layout-expect.json),)
-ifneq ($(MODEL),old)
+ifeq ($(MODEL)$(PAL_TARGET),palow)
 .PHONY: layout-check
 all: layout-check
 layout-check: $(OUT_DIR)/.stamp
@@ -82,12 +120,14 @@ endif
 
 # A test with a `preprocessor-expect.json` also checks what PAL records of
 # clang's preprocessing, `preprocessor.json` (see check-preprocessor.py). Both
-# models write it.
+# models write it. Like the layout, it is the test's own target's.
 ifneq ($(wildcard preprocessor-expect.json),)
+ifeq ($(PAL_TARGET),)
 .PHONY: preprocessor-check
 all: preprocessor-check
 preprocessor-check: $(OUT_DIR)/.stamp
 	@../check-preprocessor.py $(OUT_DIR)/preprocessor.json preprocessor-expect.json
+endif
 endif
 
 translate: $(OUT_DIR)/.stamp
@@ -95,6 +135,12 @@ translate: $(OUT_DIR)/.stamp
 $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h $(wildcard extra_opts pal_opts)
 	@mkdir -p $(OUT_DIR)
 	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
+ifneq ($(PAL_TARGET),)
+ifeq ($(OWN_TARGET),)
+	@grep -Eq '"targetTriple": *"$(PAL_TARGET)"' $(OUT_DIR)/layout_table.json || { \
+		echo "ERROR: $(CURDIR) was not translated for $(PAL_TARGET)" >&2; exit 1; }
+endif
+endif
 	@touch $@
 
 # A negative test carries a `should-fail` file: verification must fail, and
@@ -105,7 +151,7 @@ ifneq ($(wildcard should-fail),)
 verify: $(OUT_DIR)/.stamp
 	@if $(MAKE) --no-print-directory -f ../verify.mk \
 		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
-		HELPERS=$(HELPERS) DEPEND=.depend.$(MODEL) >$(OUT_DIR)/verify.log 2>&1; then \
+		HELPERS=$(HELPERS) DEPEND=$(DEPEND_FILE) >$(OUT_DIR)/verify.log 2>&1; then \
 		echo "ERROR: $(CURDIR) verified, but should-fail says it must not" >&2; \
 		exit 1; \
 	fi; \
@@ -122,7 +168,7 @@ else
 verify: $(OUT_DIR)/.stamp
 	@$(MAKE) --no-print-directory -f ../verify.mk \
 		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
-		HELPERS=$(HELPERS) DEPEND=.depend.$(MODEL)
+		HELPERS=$(HELPERS) DEPEND=$(DEPEND_FILE)
 endif
 
 compile: $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_FILES))
@@ -132,4 +178,5 @@ $(OBJ_DIR)/%.o: %.c $(C_FILES) $(H_FILES)
 	$(CC) $(INCLUDES) $(EXTRA_OPTS) -c $< -o $@
 
 clean:
-	rm -rf out _cache out_old _cache_old .depend.palow .depend.old $(OUT_DIR) $(CACHE_DIR) $(OBJ_DIR)
+	rm -rf out _cache out_old _cache_old .depend.palow .depend.old $(OUT_DIR) $(CACHE_DIR) $(OBJ_DIR) \
+		$(wildcard out.*/ _cache.*/ .depend.palow.*)

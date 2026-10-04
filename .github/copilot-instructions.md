@@ -20,6 +20,10 @@ make test -j8
 make -C test/swap
 make -C test/swap MODEL=old
 
+# The suite translated for big-endian mips64 (part of `make test`; needs
+# libc6-dev-mips64-cross, or BIG_ENDIAN_SYSROOT=<sysroot>)
+make big-endian-check
+
 # Palow coverage census (counts untranslated constructs instead of failing)
 make palow-check
 
@@ -34,7 +38,7 @@ clang-format -i cpp/impl.cpp
 
 The test suite (`test/Makefile`) runs `pal` on each `.c` file in `test/`, then verifies the generated `.fst` files using F*/Pulse.
 
-`pal` emits the **Palow** memory model (`src/pass/emit_palow.rs`, see `palow.md`) by default, into `out/`; `--old-model` selects the previous emitter (`src/pass/emit.rs`), which the suite still exercises via `make -C test MODEL=old` into `out_old/`. Anything Palow cannot translate is a hard error -- `--palow-permissive` downgrades those to comments for a coverage run.
+`pal` emits the **Palow** memory model (`src/pass/emit_palow.rs`, see `palow.md`) by default, into `out/`; `--old-model` selects the previous emitter (`src/pass/emit.rs`), which the suite still exercises via `make -C test MODEL=old` into `out_old/`. The byte order is the target's: `make test` also translates the suite for big-endian mips64 (`make big-endian-check`, `PAL_TARGET`/`PAL_SYSROOT` for one test) into `out.<triple>/`. Anything Palow cannot translate is a hard error -- `--palow-permissive` downgrades those to comments for a coverage run.
 
 ALWAYS RUN `make test -j8` TO MAKE SURE THE TESTS SUCCEED!!!
 

@@ -366,6 +366,21 @@ Two practical consequences:
   positions are swapped, and `test/bitfields_be` runs `test/bitfields` for
   mips64.
 
+The tests above are about the order, and the rest of the suite should not be.
+A proof that never asks `TargetFacts` cannot see the order, so it holds for
+both. What is left to check is that PAL translates for a big-endian target
+what it translates for the host. So `make test` runs the suite once more for
+one, as `make big-endian-check`. The target is big-endian 64-bit MIPS Linux,
+`mips64-unknown-linux-gnuabi64`, against glibc's headers for it
+(`libc6-dev-mips64-cross` on Debian and Ubuntu). The output goes to
+`out.<triple>/` and `_cache.<triple>/`, and each test's `layout_table.json`
+must name the triple. `PAL_TARGET` and `PAL_SYSROOT` do the same for any one
+test and target. A test that names its own target in `pal_opts`, as the five
+above and three others do, is left to the host's pass. The other 211 all
+translate and verify for mips64. 210 of them emit the same F\* for both
+targets, apart from `Target` and `TargetFacts`. The exception is
+`test/bitfields`, whose bit positions depend on the order.
+
 ### Alignment
 
 **Implemented** (milestone 16). Until then Palow modelled no alignment at

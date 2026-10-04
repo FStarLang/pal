@@ -21,6 +21,9 @@ jobs:
         sudo apt update
         sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev
 
+    - name: Install a big-endian C library's headers
+      run: sudo apt install -y libc6-dev-mips64-cross
+
     - name: Install F*
       run: ./opt/install-fstar.sh --link-dir /usr/local/bin
 

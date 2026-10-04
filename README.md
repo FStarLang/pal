@@ -63,6 +63,7 @@ it passes, the implementation satisfies the spec. More availabe at [`examples/`]
 | g++ | recent | builds the C++ FFI ([`cpp/impl.cpp`](cpp/impl.cpp)) |
 | Rust | 2024 edition | compiles the PAL binary |
 | F\*/Pulse | nightly 2026-09-25 | verifies generated `.fst` output |
+| `libc6-dev-mips64-cross` | any | C library headers for the suite's big-endian pass |
 
 ### Setup (Ubuntu / Debian)
 
@@ -76,6 +77,9 @@ chmod +x llvm.sh
 sudo ./llvm.sh 20
 sudo apt update
 sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev
+
+# Headers for the big-endian pass of the test suite
+sudo apt install -y libc6-dev-mips64-cross
 
 # F*/Pulse nightly (pinned to the version CI uses)
 ./opt/install-fstar.sh --link-dir /usr/local/bin
@@ -92,6 +96,7 @@ calls it to find LLVM libraries.
 ```bash
 make                    # Rust binary + Pulse support library
 make test -j8           # translate every test case, verify with F*
+make big-endian-check   # the same, translated for big-endian mips64 (part of make test)
 cd test/swap && make                       # one test
 cd test/swap && make MODEL=old             # the same test, previous memory model
 cargo run -- --print-ir test/swap/swap.c   # just the IR
@@ -100,6 +105,11 @@ cargo run -- --print-ir test/swap/swap.c   # just the IR
 PAL emits the [Palow](palow.md) memory model by default, into `out/`.
 `--old-model` selects the previous emitter, whose output goes to `out_old/`
 so the two never overwrite each other.
+`make test` runs the suite under both, and then translates it again for a
+big-endian target, into `out.mips64-unknown-linux-gnuabi64/`: the byte order
+is the target's (see [Byte order](palow.md#byte-order)), and the host's is
+little-endian. `make -C test/swap PAL_TARGET=<triple> PAL_SYSROOT=<dir>` does
+the same for one test and any target.
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
