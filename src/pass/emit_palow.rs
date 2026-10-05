@@ -11630,7 +11630,10 @@ impl<'a> Body<'a> {
             && let ExprT::Member(b3, f3) = &strip_vattr(b2).val
             && !self.in_pieces(b3)
             && let Ok(ty2) = self.ty_of(b2)
-            && matches!(&peel(self.tds, &ty2).val, TypeT::TypeRef(TypeRefKind::Struct(_)))
+            && matches!(
+                &peel(self.tds, &ty2).val,
+                TypeT::TypeRef(TypeRefKind::Struct(_))
+            )
             && let Some((_, cr, cw)) = self.nested_scatter_base(b3, f3, &ty2, writing)?
             && !(cr.is_empty() && cw.is_empty())
         {
@@ -11663,7 +11666,10 @@ impl<'a> Body<'a> {
             return Ok(Some((ff.at, ff.close_read, ff.close_write)));
         }
         if !writing {
-            return Err(format!("a read of `{}`, which has not been written", f2.val));
+            return Err(format!(
+                "a read of `{}`, which has not been written",
+                f2.val
+            ));
         }
         let (Some(pn), Some(fsty)) = (palow_name(self.tds, fty), fstar_type(self.tds, fty)) else {
             return Ok(None);
@@ -18448,10 +18454,12 @@ fn aux_fn_antiquot(
                 AuxFnKind::Unfold => Ok(format!("{}_focus_{}", un, f.val)),
                 AuxFnKind::Fold => Ok(format!("{}_unfocus_{}", un, f.val)),
                 AuxFnKind::Activate => Ok(format!("{}_switch_uninit_{}", un, f.val)),
-                AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit | AuxFnKind::Scattered => Err(format!(
-                    "`${}` of a union, which is uninitialised as a whole",
-                    kind.keyword()
-                )),
+                AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit | AuxFnKind::Scattered => {
+                    Err(format!(
+                        "`${}` of a union, which is uninitialised as a whole",
+                        kind.keyword()
+                    ))
+                }
             }
         }
         _ => Err(format!("`${}` of {}", kind.keyword(), describe(ty))),
@@ -18632,8 +18640,7 @@ fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
     if !matches!(
         aux_fn_kind(code),
         Some(AuxFnKind::UnfoldUninit | AuxFnKind::Scattered)
-    )
-        && !ghost_head(code).contains("__aux_raw_unfold_uninit")
+    ) && !ghost_head(code).contains("__aux_raw_unfold_uninit")
     {
         return None;
     }
