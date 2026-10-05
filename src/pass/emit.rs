@@ -80,7 +80,10 @@ fn emit_sizet_literal(val: &BigInt) -> Doc {
 /// it is printed, or the emitter produces a negative `Nsz` literal.
 fn int_lit_as_sizet(env: &Env, n: &BigInt, lit_ty: &Type) -> BigInt {
     match env.vtype_whnf(lit_ty.clone().into()).val {
-        TypeT::Int { signed: false, width } => normalize_unsigned(n, width),
+        TypeT::Int {
+            signed: false,
+            width,
+        } => normalize_unsigned(n, width),
         _ => normalize_unsigned(n, 64),
     }
 }
@@ -1965,6 +1968,18 @@ impl<'a> Emitter<'a> {
                         prelude: vec![],
                         expr: self.emit_rvalue(env, e),
                     };
+                }
+                // `g && A && B` parses as `(g && A) && B`. When `g` tests a
+                // `_nullable` pointer, only its own right operand would see the
+                // pointer opened, so `B` would read through it unguarded.
+                // `&&` is associative (same operands, same order, same
+                // short-circuiting), so evaluate it as `g && (A && B)`.
+                if is_and
+                    && matches!(&lhs.val, ExprT::BinOp(BinOp::LogAnd, _, _))
+                    && let Some((g, rest)) = self.split_nullable_guard_conjunct(env, e)
+                {
+                    let reassoc = ExprT::BinOp(BinOp::LogAnd, g, rest).with_loc(e.loc.clone());
+                    return self.emit_short_circuit_expr(env, &reassoc);
                 }
                 let nullable_guard = self.nullable_guard(env, lhs);
                 let mut lhs_doc = self.emit_short_circuit_expr(env, lhs);
@@ -6870,6 +6885,41 @@ impl<'a> Emitter<'a> {
                     else_branch,
                     requires,
                     ensures,
+                } if else_branch.is_empty()
+                    && requires.is_empty()
+                    && ensures.is_empty()
+                    && self.split_nullable_guard_conjunct(env, cond).is_some() =>
+                {
+                    let (guard, rest) = self.split_nullable_guard_conjunct(env, cond).unwrap();
+                    // `if (p != NULL && R) S` with no else: the body may read
+                    // through `p`, but a compound condition gets no null
+                    // guard opened around the branches. Nesting it as
+                    // `if (p != NULL) { if (R) S }` is the same program and
+                    // puts `S` under the guard.
+                    let inner = StmtT::If {
+                        cond: rest,
+                        then_branch: then_branch.clone(),
+                        else_branch: Rc::new(vec![]),
+                        requires: Rc::new(vec![]),
+                        ensures: Rc::new(vec![]),
+                    }
+                    .with_loc(stmt.loc.clone());
+                    let outer = StmtT::If {
+                        cond: guard,
+                        then_branch: Rc::new(vec![inner]),
+                        else_branch: Rc::new(vec![]),
+                        requires: Rc::new(vec![]),
+                        ensures: Rc::new(vec![]),
+                    }
+                    .with_loc(stmt.loc.clone());
+                    self.emit_stmt_core(env, &outer)
+                }
+                StmtT::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    requires,
+                    ensures,
                 } => {
                     let lowered_cond = self.emit_short_circuit_expr(env, cond);
                     let cond_has_prelude = !lowered_cond.prelude.is_empty();
@@ -7583,8 +7633,10 @@ impl<'a> Emitter<'a> {
         this: &Rc<Expr>,
     ) -> Option<Doc> {
         // `Consumed` hands the resource to the callee and has nothing to give
-        // back; anything not a parameter has no postcondition to match.
-        let mode = guard.mode?;
+        // back. A local has no postcondition to match, but the code after the
+        // test still expects the pointer's `unless_null` whole: a `_nullable`
+        // local holds its pointee outright, as a regular parameter does.
+        let mode = guard.mode.unwrap_or(ParamMode::Regular);
         let perm = match mode {
             ParamMode::Consumed => return None,
             ParamMode::Const => {
@@ -7632,6 +7684,39 @@ impl<'a> Emitter<'a> {
             return Some(parens(mk_star(props)));
         }
         Some(parens(wrap_exists(&bindings, props)))
+    }
+
+    /// Split `g && R`, where `g` tests a `_nullable` pointer for non-null and
+    /// is the leftmost operand of an `&&` chain, into `g` and the rest
+    /// (re-associated left to right).
+    fn split_nullable_guard_conjunct(
+        &self,
+        env: &Env,
+        cond: &Expr,
+    ) -> Option<(Rc<Expr>, Rc<Expr>)> {
+        fn conjuncts(e: &Expr, out: &mut Vec<Rc<Expr>>) {
+            match &e.val {
+                ExprT::BinOp(BinOp::LogAnd, a, b) => {
+                    conjuncts(a, out);
+                    conjuncts(b, out);
+                }
+                _ => out.push(Rc::new(e.clone())),
+            }
+        }
+        let mut cs = vec![];
+        conjuncts(cond, &mut cs);
+        if cs.len() < 2 {
+            return None;
+        }
+        let guard = self.nullable_guard(env, &cs[0])?;
+        if !guard.then_is_nonnull {
+            return None;
+        }
+        let mut it = cs.into_iter();
+        let g = it.next()?;
+        let rest =
+            it.reduce(|acc, c| ExprT::BinOp(BinOp::LogAnd, acc, c).with_loc(cond.loc.clone()))?;
+        Some((g, rest))
     }
 
     /// Recognize a condition that tests a `_nullable` pointer against null, so
