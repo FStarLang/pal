@@ -72,6 +72,22 @@ val mem_pts_to_timeless (a: ptr) (p: perm) (b: bytes)
    A zero-length range carries no information, which is deliberate: `malloc(0)`
    may return a non-null pointer that cannot be dereferenced, and one-past-the-end
    pointers are legal to form. *)
+(* ... and, as the flip side of that, a zero-length range *is* `emp`. Every
+   axiom in this file that says something about an address is guarded by
+   `len b > 0` for exactly this reason, and `mem_pts_to_fits` -- which is not --
+   says nothing new at length zero, because `addr_of_bound` already puts every
+   address below `pow2 64`.
+
+   This matters because C has objects of size zero: GCC and Clang both accept
+   a struct with no members, and real code uses them. Without this equation the
+   points-to of such an object would be underivable -- there would be no way to
+   obtain the zero-length range it is made of -- and PAL would have to special-
+   case empty structs all the way down instead of generating them like any
+   other aggregate. *)
+val mem_pts_to_empty (a: ptr) (p: perm) (b: bytes)
+  : Lemma (requires len b == 0)
+          (ensures  mem_pts_to a p b == emp)
+
 ghost fn mem_pts_to_not_null (a: ptr) (#p: perm) (#b: bytes)
   preserves mem_pts_to a p b
   requires  pure (len b > 0)
