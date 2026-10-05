@@ -689,6 +689,11 @@ pub enum AuxFnKind {
     /// Palow-only; it emits nothing, and only tells the emitter to fill the
     /// remaining fields by address instead of opening the object.
     Scattered,
+    /// `$gathered(struct S) $(p)` — the closing form of `$scattered`: says
+    /// that `*p` is a whole object again, because a ghost step of the
+    /// author's put it back together. Palow-only, and emits nothing; it only
+    /// tells the emitter to stop treating the object as a heap of fields.
+    Gathered,
 }
 
 impl AuxFnKind {
@@ -700,6 +705,7 @@ impl AuxFnKind {
             AuxFnKind::FoldUninit => "fold-uninit",
             AuxFnKind::Activate => "activate",
             AuxFnKind::Scattered => "scattered",
+            AuxFnKind::Gathered => "gathered",
         }
     }
 
@@ -711,7 +717,7 @@ impl AuxFnKind {
             AuxFnKind::UnfoldUninit => Some("raw_unfold_uninit"),
             AuxFnKind::Fold => Some("raw_fold"),
             AuxFnKind::FoldUninit => Some("raw_fold_uninit"),
-            AuxFnKind::Activate | AuxFnKind::Scattered => None,
+            AuxFnKind::Activate | AuxFnKind::Scattered | AuxFnKind::Gathered => None,
         }
     }
 
@@ -722,7 +728,8 @@ impl AuxFnKind {
             AuxFnKind::UnfoldUninit
             | AuxFnKind::FoldUninit
             | AuxFnKind::Activate
-            | AuxFnKind::Scattered => None,
+            | AuxFnKind::Scattered
+            | AuxFnKind::Gathered => None,
         }
     }
 }

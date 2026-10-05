@@ -1775,6 +1775,13 @@ pub fn process_inline_pulse(
             kind: AuxFnKind::Scattered,
         });
 
+    let gathered_antiquot =
+        dollar_keyword("gathered").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
+            dollar_span,
+            body_span,
+            kind: AuxFnKind::Gathered,
+        });
+
     // $`ident → emits 'ident (F* implicit/ticked argument)
     let tick_antiquot = just(Token::Punct(Punct::Dollar))
         .map_with(|_, extra| extra.span())
@@ -1813,6 +1820,7 @@ pub fn process_inline_pulse(
         fold_antiquot,
         activate_antiquot,
         scattered_antiquot,
+        gathered_antiquot,
         ident_tick_antiquot,
         tick_antiquot,
         antiquot,

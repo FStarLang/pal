@@ -3106,8 +3106,12 @@ new facts about memory.
    that hands over some fields as storage and others with values -- the
    `$scattered(struct T) $(p)` hint says so: the writes then fill the
    remaining fields by address without scattering again, and the object is
-   gathered only if every field gets written. `test/nested_scatter` covers
-   both.
+   gathered only if every field gets written. Its closing form is
+   `$gathered(struct T) $(p)`, which says the author's own ghost step has
+   made the object whole again: without it the emitter would go on treating
+   the object as a heap of fields, and the next write through it would be
+   lowered as a write into storage that the author's gather has already
+   consumed. `test/nested_scatter` covers all of it.
 
    This is what the old model's source-level `$unfold-uninit` was for, so
    under `PALOW` that annotation is now a no-op macro in the one test that

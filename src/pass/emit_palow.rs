@@ -9807,6 +9807,11 @@ struct Callee {
     allocated: Option<RetBlock>,
 }
 
+/// Cloneable so that a speculative attempt can be rolled back *in full*
+/// (`attempt` below). Every field is either owned data or a borrow of
+/// something that outlives the body, so the clone is a snapshot of exactly
+/// the state lowering a statement can change.
+#[derive(Clone)]
 struct Body<'a> {
     tds: &'a Typedefs<'a>,
     env: Env,
@@ -10036,6 +10041,7 @@ struct Body<'a> {
 
 /// What a subscript through an array parameter needs: the element's Palow type
 /// name, and its size as a `size_t` literal.
+#[derive(Clone)]
 struct ArrayParam {
     pn: String,
     esize: String,
@@ -11609,19 +11615,37 @@ impl<'a> Body<'a> {
         fty: &Type,
         writing: bool,
     ) -> Result<Option<(String, Vec<String>, Vec<String>)>, String> {
+        // `Ok(None)` means "not my case, the caller does the ordinary focus",
+        // and the caller will then name the same place again -- so everything
+        // this attempt did has to be gone. Restoring the whole body rather
+        // than a chosen few of its fields is what makes that total: naming a
+        // place can open deep ownership, note a slot or launder a pointer,
+        // and a field added later would otherwise have to be remembered here.
+        let saved = self.clone();
+        match self.nested_scatter_base_inner(b2, f2, fty, writing) {
+            Ok(None) => {
+                *self = saved;
+                Ok(None)
+            }
+            r => r,
+        }
+    }
+
+    fn nested_scatter_base_inner(
+        &mut self,
+        b2: &Expr,
+        f2: &Ident,
+        fty: &Type,
+        writing: bool,
+    ) -> Result<Option<(String, Vec<String>, Vec<String>)>, String> {
         // Naming the object must cost nothing to find out whether it is
-        // storage being filled; anything that takes steps is rolled back.
+        // storage being filled. The rollback is the caller's (`attempt`), so
+        // the steps are simply abandoned here.
         let mark = self.lines.len();
         let closing = self.pending_close.len();
-        let tmp = self.tmp;
         let a = match self.addr_only(b2) {
             Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => a,
-            _ => {
-                self.lines.truncate(mark);
-                self.pending_close.truncate(closing);
-                self.tmp = tmp;
-                return Ok(None);
-            }
+            _ => return Ok(None),
         };
         // `o.f.g.h`: `o.f` becomes storage being filled only once something
         // is written into it, and this may be that write -- so the level
@@ -16091,6 +16115,55 @@ impl<'a> Body<'a> {
                 self.prescattered.insert(a);
                 Ok(())
             }
+            StmtT::GhostStmt(code) if matches!(aux_fn_kind(code), Some(AuxFnKind::Gathered)) => {
+                // The closing form of `$scattered`. A ghost step of the
+                // author's has put the object back together -- typically
+                // because the fields the body did not write already held
+                // values, so the emitter could not know when the last piece
+                // went in. Without this the object would stay a heap of
+                // fields in the emitter's view, and the next write through it
+                // would be lowered as a write into storage that the author's
+                // gather has already consumed.
+                let Some(e) = uninit_open_arg(code) else {
+                    return Err("`$gathered` without an object".to_string());
+                };
+                // Naming the address must cost nothing: this is bookkeeping,
+                // not an access.
+                let mark = self.lines.len();
+                let closing = self.pending_close.len();
+                let addr = match self.inline(e) {
+                    Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => a,
+                    _ => {
+                        self.lines.truncate(mark);
+                        self.pending_close.truncate(closing);
+                        return Err("`$gathered` of something that is not a struct this body                                     can name by address"
+                            .to_string());
+                    }
+                };
+                let Some(t) = self.scatter_target(&addr) else {
+                    return Err(
+                        "`$gathered` of something this body is not filling one field at a time"
+                            .to_string(),
+                    );
+                };
+                // A struct-typed field still being filled is part of what the
+                // author's step gathered, so it is forgotten rather than put
+                // back: emitting the steps to put it back would undo what the
+                // author just did.
+                self.drop_nested(&addr);
+                self.scattered_set_mut(t).clear();
+                self.prescattered.remove(&addr);
+                match t {
+                    Scattering::Slot(i) => self.slots[i].init = true,
+                    Scattering::Block(i) => self.blocks[i].init = true,
+                }
+                // If the object was itself a field of something being filled,
+                // it now counts as written there, and may complete it.
+                let mut close = Vec::new();
+                self.gather_enclosing(&addr, &mut close);
+                self.lines.extend(close);
+                Ok(())
+            }
             StmtT::GhostStmt(code) if ghost_replaced(code) => {
                 // `$unfold-uninit` is the one member of the pair that says
                 // something Palow cannot see for itself: that the object is
@@ -16859,6 +16932,27 @@ impl<'a> Body<'a> {
             self.slots[j].scattered.clear();
         }
         any
+    }
+
+    /// Forget that the object at `a` has any struct-typed field still being
+    /// filled, emitting nothing. This is `unwind_nested` for the case where
+    /// something else -- the author's own ghost step -- has already accounted
+    /// for those fields.
+    fn drop_nested(&mut self, a: &str) {
+        let kids: Vec<String> = self
+            .nested_scatter
+            .iter()
+            .filter(|(_, (pa, _, _))| pa == a)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in kids {
+            self.nested_scatter.remove(&k);
+            self.drop_nested(&k);
+            if let Some(j) = self.slots.iter().rposition(|s| s.addr == k && !s.init) {
+                self.slots[j].scattered.clear();
+                self.slots[j].init = true;
+            }
+        }
     }
 
     fn release_from(&mut self, mark: usize) {
@@ -18440,9 +18534,10 @@ fn aux_fn_antiquot(
                 AuxFnKind::Activate => {
                     Err("`$activate` of a struct, which has no arms".to_string())
                 }
-                AuxFnKind::Scattered => {
-                    Err("`$scattered` other than as a statement of its own".to_string())
-                }
+                AuxFnKind::Scattered | AuxFnKind::Gathered => Err(format!(
+                    "`${}` other than as a statement of its own",
+                    kind.keyword()
+                )),
             }
         }
         TypeT::TypeRef(TypeRefKind::Union(n)) if tds.unions.contains_key(&*n.val) => {
@@ -18454,12 +18549,13 @@ fn aux_fn_antiquot(
                 AuxFnKind::Unfold => Ok(format!("{}_focus_{}", un, f.val)),
                 AuxFnKind::Fold => Ok(format!("{}_unfocus_{}", un, f.val)),
                 AuxFnKind::Activate => Ok(format!("{}_switch_uninit_{}", un, f.val)),
-                AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit | AuxFnKind::Scattered => {
-                    Err(format!(
-                        "`${}` of a union, which is uninitialised as a whole",
-                        kind.keyword()
-                    ))
-                }
+                AuxFnKind::UnfoldUninit
+                | AuxFnKind::FoldUninit
+                | AuxFnKind::Scattered
+                | AuxFnKind::Gathered => Err(format!(
+                    "`${}` of a union, which is uninitialised as a whole",
+                    kind.keyword()
+                )),
             }
         }
         _ => Err(format!("`${}` of {}", kind.keyword(), describe(ty))),
@@ -18639,7 +18735,7 @@ fn aux_activate(code: &InlinePulseCode) -> Option<(&Type, &Ident, &Expr)> {
 fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
     if !matches!(
         aux_fn_kind(code),
-        Some(AuxFnKind::UnfoldUninit | AuxFnKind::Scattered)
+        Some(AuxFnKind::UnfoldUninit | AuxFnKind::Scattered | AuxFnKind::Gathered)
     ) && !ghost_head(code).contains("__aux_raw_unfold_uninit")
     {
         return None;

@@ -131,6 +131,27 @@ _ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
 	_ghost_stmt(struct_head_gather $(h));
 }
 
+/* The same, but the body goes on using the object afterwards. The author's
+   own gather is what makes it whole -- the emitter cannot see that, because
+   the field it never writes was already a value -- so `$gathered` says so,
+   and the write that follows focuses the field instead of filling it. */
+void fill_rest_then_use(_plain struct head *h)
+_requires(_inline_pulse(
+	struct_head_padding $(h) 1.0R **
+	struct_lnk_pts_to_uninit ($(h) +! struct_head_offsetof_list) **
+	uint32_t_pts_to_uninit ($(h) +! struct_head_offsetof_qlen) **
+	(exists* (l: Int32.t). int32_t_pts_to ($(h) +! struct_head_offsetof_lock) 1.0R l)))
+_ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
+{
+	_ghost_stmt($scattered(struct head) $(h));
+	h->list.next = (struct lnk *)h;
+	h->list.prev = (struct lnk *)h;
+	h->qlen = 0;
+	_ghost_stmt(struct_head_gather $(h));
+	_ghost_stmt($gathered(struct head) $(h));
+	h->qlen = h->qlen + 1;
+}
+
 /* Every field written -- each one storage until then -- and the object is a
    value again, so it is gathered. */
 void fill_all(_plain struct head *h)
