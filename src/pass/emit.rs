@@ -6084,7 +6084,12 @@ impl<'a> Emitter<'a> {
                 let Some(fn_decl) = env.lookup_fn(f) else {
                     return;
                 };
+                // A slot cast to a nullable `void **` comes back under
+                // `unless_null (core_cell r) ..`, so its shift back from the
+                // core cell has to wait for the elimination emitted below.
+                let cell_mark = out.after.len();
                 self.core_cell_arg_ghosts(env, args, &fn_decl, out);
+                let cell_after: Vec<_> = out.after.drain(cell_mark..).collect();
                 for (i, arg) in args.iter().enumerate() {
                     let Some(param) = fn_decl.args.get(i) else {
                         continue;
@@ -6247,6 +6252,7 @@ impl<'a> Emitter<'a> {
                             .append(Doc::text(";")),
                     );
                 }
+                out.after.extend(cell_after);
             }
             _ => {}
         }
