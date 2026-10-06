@@ -60,11 +60,15 @@ _preserves(_inline_pulse(Sl_shim.q_zero $(q)))
 int32_t call_via_o(_plain int32_t *q)
 {
 	_ghost_stmt(Sl_shim.of_fn_div_valid _ _ Funcptr_impl_both.func_impl_both__fp);
+#ifndef PALOW
 	_ghost_stmt(Global_o.acquire_var_o ());
+#endif
 	const struct ops *p = &o;
 	return p->g(q);
 	_ghost_stmt(Sl_shim.drop_is_valid _ _ _);
+#ifndef PALOW
 	_ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+#endif
 }
 
 _requires(n > 0 && n < 100)
@@ -73,9 +77,13 @@ _preserves(_inline_pulse(Sl_shim.q_zero $(q)))
 int32_t call_via_o_mixed(_plain int32_t *q, int32_t n)
 {
 	_ghost_stmt(Sl_shim.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
+#ifndef PALOW
 	_ghost_stmt(Global_o.acquire_var_o ());
+#endif
 	const struct ops *p = &o;
 	return p->h(q, n);
 	_ghost_stmt(Sl_shim.drop_is_valid _ _ _);
+#ifndef PALOW
 	_ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+#endif
 }

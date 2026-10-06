@@ -1810,6 +1810,26 @@ new facts about memory.
    the replacements itself, and still refuses every other ghost statement,
    which says something it has no other way to learn.
 
+   **Superseded.** Sound is not the same as right. Recognising a statement by
+   the library name at its head and discarding it throws away what the author
+   wrote without saying so, and it pins the emitter to a list of names
+   belonging to a model that is going to be removed. The list is gone. A ghost
+   statement that means something only to the old model is now gated out of
+   the C with `#ifndef PALOW`, which states in the source what was previously
+   inferred in the emitter; `test/packet_space_connection` had already been
+   doing this with a pair of `#ifdef PALOW` macros. What Palow still reads for
+   itself it recognises *structurally*, as an antiquotation token rather than
+   as a string: `$unfold-uninit`, `$fold`, `$scattered`, `$gathered`,
+   `$activate`. Everything else is emitted as written, so a statement Palow
+   cannot honour fails loudly instead of vanishing.
+
+   One string match survives, and it is not a discard: the eta hint
+   `Pulse.Lib.C.FuncPtr.eta_expanded_erased`, which names the witness of an
+   indirect call. That is information only the author has, and Palow consumes
+   it rather than dropping it -- but it is still spelled as a call to the old
+   model's eager-intro rule, so it should become an antiquotation of its own
+   before the old model goes.
+
    Together these are worth thirteen bodies -- the transfer described above,
    reversed and then some. It is not testable in-tree for the same reason the
    written global is not: a `test/palow_*` file has to verify under the

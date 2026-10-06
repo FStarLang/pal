@@ -8,7 +8,9 @@ void write_via_ptr(_array int *a)
 {
   _arrayptr int *p = a + 3;
   *p = 42;
+#ifndef PALOW
   _ghost_stmt(arrayptr_drop $(p));
+#endif
 }
 
 #ifdef PALOW

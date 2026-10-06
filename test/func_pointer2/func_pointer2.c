@@ -62,9 +62,13 @@ _pure binop g_fp = add1;
 int32_t call_via_global_fp(void)
     _ensures(return == 5)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add1.func_add1__fp);
+#endif
     return g_fp(2, 3);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 
 /* (2) Struct global: `StructInit`. */
@@ -77,9 +81,13 @@ _pure ops g_ops = { .op = add2 };
 int32_t call_via_global_struct(void)
     _ensures(return == 5)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add2.func_add2__fp);
+#endif
     return g_ops.op(2, 3);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 
 /* (3) Union global: `UnionInit`. */
@@ -93,9 +101,13 @@ _pure uops g_uops = { .op = add3 };
 int32_t call_via_global_union(void)
     _ensures(return == 5)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add3.func_add3__fp);
+#endif
     return g_uops.op(2, 3);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 
 /* (4) Array global: `ArrayInit`, with two different functions so a walk that
@@ -110,9 +122,13 @@ _pure binop g_arr[2] = { add4, add5 };
 int32_t call_via_local_struct(void)
     _ensures(return == 5)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add6.func_add6__fp);
+#endif
     ops o = { .op = add6 };
     return o.op(2, 3);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 

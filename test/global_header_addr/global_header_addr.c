@@ -73,10 +73,14 @@ bool infile_struct_addr(void) _ensures(return == true) {
 uint32_t *const p_to_h_mut = &h_mut;
 
 bool header_addr_via_global(void) _ensures(return == true) {
+#ifndef PALOW
   _ghost_stmt(Global_p_to_h_mut.acquire_var_p_to_h_mut());
+#endif
   uint32_t *const *pp = &p_to_h_mut;
   uint32_t *v = *pp;
+#ifndef PALOW
   _ghost_stmt(drop_ (exists* q. pts_to Global_p_to_h_mut.addr_var_p_to_h_mut #q _));
+#endif
   return v == &h_mut;
 }
 
@@ -84,10 +88,14 @@ bool header_addr_via_global(void) _ensures(return == true) {
 uint32_t *const p_to_m_mut = &m_mut;
 
 bool infile_addr_via_global(void) _ensures(return == true) {
+#ifndef PALOW
   _ghost_stmt(Global_p_to_m_mut.acquire_var_p_to_m_mut());
+#endif
   uint32_t *const *pp = &p_to_m_mut;
   uint32_t *v = *pp;
+#ifndef PALOW
   _ghost_stmt(drop_ (exists* q. pts_to Global_p_to_m_mut.addr_var_p_to_m_mut #q _));
+#endif
   return v == &m_mut;
 }
 
@@ -101,27 +109,39 @@ bool infile_addr_via_global(void) _ensures(return == true) {
 
 /* 4.1 */
 uint32_t read_header_const(void) _ensures(return == h_const) {
+#ifndef PALOW
   _ghost_stmt(Global_h_const.acquire_var_h_const());
+#endif
   const uint32_t *p = &h_const;
   return *p;
+#ifndef PALOW
   _ghost_stmt(drop_ (exists* q. pts_to Global_h_const.addr_var_h_const #q _));
+#endif
 }
 
 /* 4.2 Control. */
 uint32_t read_infile_const(void) _ensures(return == m_const) {
+#ifndef PALOW
   _ghost_stmt(Global_m_const.acquire_var_m_const());
+#endif
   const uint32_t *p = &m_const;
   return *p;
+#ifndef PALOW
   _ghost_stmt(drop_ (exists* q. pts_to Global_m_const.addr_var_m_const #q _));
+#endif
 }
 
 /* 4.3 A global named in a *specification* is a variable reference too. Losing
  * it degraded the whole body to `admit()` rather than to a dangling name. */
 uint32_t header_const_in_spec(void) _requires(h_const < 100) _ensures(return == h_const) {
+#ifndef PALOW
   _ghost_stmt(Global_h_const.acquire_var_h_const());
+#endif
   const uint32_t *p = &h_const;
   return *p;
+#ifndef PALOW
   _ghost_stmt(drop_ (exists* q. pts_to Global_h_const.addr_var_h_const #q _));
+#endif
 }
 
 /* ===========================================================================

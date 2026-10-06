@@ -23,10 +23,14 @@ void caller(_array int *a, size_t i)
   _requires(i < a._length)
 {
     int *p = &a[i];
+#ifndef PALOW
     _ghost_stmt(array_cell_read $(a) $(i));
+#endif
     write_to(p);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v $(i))));
     _ghost_stmt(array_return_cell $(a));
+#endif
 }
 
 // `init_cell` takes an `_out int *` — an *uninitialized* `ref`
@@ -46,10 +50,14 @@ void caller_out(_array int *a, size_t i)
   _requires(i < a._length)
 {
     int *p = &a[i];
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(p));
+#endif
     init_cell(p);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v $(i))));
     _ghost_stmt(array_return_cell $(a));
+#endif
 }
 
 // Borrow a *genuinely uninitialized* array cell and write through it.
@@ -63,10 +71,14 @@ void fill_first(_out _array int *a)
   _requires(a._length == 1)
 {
     int *p = &a[0];
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(p));
+#endif
     init_cell(p);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v 0sz)));
     _ghost_stmt(array_return_cell $(a));
+#endif
 }
 
 

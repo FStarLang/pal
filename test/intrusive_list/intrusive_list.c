@@ -30,10 +30,12 @@
 void list_init(_plain struct list_node *head)
 {
     _ghost_stmt(unfold (IntrusiveListContext.init_pre LIST_CTX $(head)));
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold_uninit $(head));
+    _ghost_stmt($unfold-uninit(struct list_node) $(head));
     head->next = head;
     head->prev = head;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
+#endif
     _ghost_stmt(IntrusiveListIndexed.ring_intro_empty LIST_CTX.IntrusiveListContext.resource $(head));
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_CTX.IntrusiveListContext.resource
         $(head) 1.0R []) as (IntrusiveListIndexed.is_list_ring_ix LIST_CTX.IntrusiveListContext.resource
@@ -45,9 +47,13 @@ bool list_empty(_plain const struct list_node *head)
 {
     _ghost_stmt(IntrusiveListContext.finish_ring LIST_CTX $(head));
     _ghost_stmt(IntrusiveListIndexed.ring_open LIST_CTX.IntrusiveListContext.resource $(head));
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
+#endif
     return head->next == head;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
+#endif
     _ghost_stmt(IntrusiveListIndexed.ring_close LIST_CTX.IntrusiveListContext.resource $(head));
     _ghost_stmt(IntrusiveListContext.prepare_ring LIST_CTX $(head));
     _ghost_stmt(fold (IntrusiveListContext.empty_post LIST_CTX $(head) $(return)));
@@ -81,23 +87,37 @@ void list_insert_after(_plain struct list_node *position, _plain struct list_nod
     list_validate(position);
     _ghost_stmt(IntrusiveListContext.finish_validation LIST_PAYLOAD LIST_HEAD $(position) LIST_FRONT LIST_BACK);
     _ghost_stmt(IntrusiveListOps.position_open LIST_PAYLOAD LIST_HEAD $(position) LIST_FRONT LIST_BACK);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(position));
+#endif
     struct list_node *next = position->next;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(position));
+#endif
     _ghost_stmt(IntrusiveListOps.position_close LIST_PAYLOAD LIST_HEAD $(position) $(next) LIST_FRONT LIST_BACK);
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold_uninit $(entry));
+    _ghost_stmt($unfold-uninit(struct list_node) $(entry));
     entry->prev = position;
     entry->next = next;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(entry));
+#endif
     _ghost_stmt(IntrusiveListOps.add_expose_next LIST_PAYLOAD LIST_HEAD $(position) $(next) LIST_FRONT LIST_BACK);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(next));
+#endif
     next->prev = entry;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(next));
+#endif
     _ghost_stmt(IntrusiveListOps.add_reseat LIST_PAYLOAD LIST_HEAD $(position) $(next) $(entry)
         LIST_DESCRIPTION LIST_FRONT LIST_BACK);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(position));
+#endif
     position->next = entry;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(position));
+#endif
     _ghost_stmt(IntrusiveListOps.add_close LIST_PAYLOAD LIST_HEAD $(position) $(next) $(entry)
         LIST_DESCRIPTION LIST_FRONT LIST_BACK);
     _ghost_stmt(fold (IntrusiveListContext.insert_after_post LIST_CTX $(entry)));
@@ -126,9 +146,13 @@ void list_insert_tail(_plain struct list_node *head, _plain struct list_node *en
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD $(head) 1.0R LIST_APPEND([], LIST_ENTRIES))
         as (IntrusiveListIndexed.is_list_ring_ix LIST_PAYLOAD $(head) 1.0R LIST_ENTRIES));
     _ghost_stmt(IntrusiveListIndexed.ring_open LIST_PAYLOAD $(head));
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
+#endif
     struct list_node *tail = head->prev;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
+#endif
     _ghost_stmt(IntrusiveListIndexed.ring_close LIST_PAYLOAD $(head));
     _ghost_stmt(IntrusiveListContext.prepare_ring LIST_MODEL $(head));
     _ghost_stmt(FStar.List.Tot.Properties.append_l_nil LIST_ENTRIES);
@@ -160,22 +184,34 @@ bool list_remove(_plain struct list_node *entry)
             LIST_APPEND(LIST_FRONT, (($(entry), LIST_DESCRIPTION) :: LIST_BACK))));
     _ghost_stmt(IntrusiveListOps.del_open LIST_PAYLOAD LIST_HEAD $(entry)
         LIST_DESCRIPTION LIST_FRONT LIST_BACK);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(entry));
+#endif
     struct list_node *previous = entry->prev;
     struct list_node *next = entry->next;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(entry));
+#endif
     _ghost_stmt(IntrusiveListOps.del_cut_pin LIST_PAYLOAD LIST_HEAD $(previous) $(next) $(entry)
         LIST_DESCRIPTION LIST_FRONT LIST_BACK);
     _ghost_stmt(IntrusiveListOps.del_expose_prev LIST_PAYLOAD LIST_HEAD $(previous) $(next) $(entry)
         LIST_DESCRIPTION LIST_FRONT LIST_BACK);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(previous));
+#endif
     previous->next = next;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(previous));
+#endif
     _ghost_stmt(IntrusiveListOps.del_reseat_next LIST_PAYLOAD LIST_HEAD $(previous) $(next) $(entry)
         LIST_DESCRIPTION LIST_FRONT LIST_BACK);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(next));
+#endif
     next->prev = previous;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(next));
+#endif
     _ghost_stmt(IntrusiveListOps.del_close_next LIST_PAYLOAD LIST_HEAD $(previous) $(next) $(entry)
         LIST_DESCRIPTION LIST_FRONT LIST_BACK);
     return previous == next;
@@ -194,9 +230,13 @@ _plain struct list_node *list_remove_head(_plain struct list_node *head)
     _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R LIST_APPEND([], LIST_RING_ENTRIES))
         as (IntrusiveListIndexed.is_list_ring_ix LIST_RING_PAYLOAD $(head) 1.0R LIST_RING_ENTRIES));
     _ghost_stmt(IntrusiveListIndexed.ring_open LIST_RING_PAYLOAD $(head));
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
+#endif
     struct list_node *first = head->next;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
+#endif
     _ghost_stmt(IntrusiveListIndexed.ring_close LIST_RING_PAYLOAD $(head));
     _ghost_stmt(IntrusiveListContext.prepare_ring LIST_CTX $(head));
     _ghost_stmt(fold (IntrusiveListContext.remove_pre
@@ -241,36 +281,60 @@ void list_move(_plain struct list_node *source, _plain struct list_node *destina
 
     _ghost_stmt(IntrusiveListOps.nonempty_elim LIST_SOURCE_PAYLOAD $(source) LIST_SOURCE_ENTRIES);
     _ghost_stmt(IntrusiveListIndexed.ring_open LIST_SOURCE_PAYLOAD $(source));
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(source));
+#endif
     struct list_node *first = source->next;
     struct list_node *last = source->prev;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(source));
+#endif
     _ghost_stmt(IntrusiveListIndexed.ring_close LIST_SOURCE_PAYLOAD $(source));
     _ghost_stmt(IntrusiveListIndexed.ring_open LIST_SOURCE_PAYLOAD $(destination));
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(destination));
+#endif
     struct list_node *tail = destination->prev;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(destination));
+#endif
     _ghost_stmt(IntrusiveListIndexed.ring_close LIST_SOURCE_PAYLOAD $(destination));
     _ghost_stmt(IntrusiveListOps.move_open LIST_SOURCE_PAYLOAD $(source) $(destination) $(first) $(last) $(tail)
         LIST_SOURCE_ENTRIES LIST_DESTINATION_ENTRIES);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(tail));
+#endif
     tail->next = first;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(tail));
+#endif
     _ghost_stmt(IntrusiveListOps.move_first LIST_SOURCE_PAYLOAD $(source) $(destination) $(first) $(last) $(tail)
         LIST_SOURCE_ENTRIES LIST_DESTINATION_ENTRIES);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(first));
+#endif
     first->prev = tail;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(first));
+#endif
     _ghost_stmt(IntrusiveListOps.move_last LIST_SOURCE_PAYLOAD $(source) $(destination) $(first) $(last) $(tail)
         LIST_SOURCE_ENTRIES LIST_DESTINATION_ENTRIES);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(last));
+#endif
     last->next = destination;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(last));
+#endif
     _ghost_stmt(IntrusiveListOps.move_destination LIST_SOURCE_PAYLOAD $(source) $(destination) $(first) $(last) $(tail)
         LIST_SOURCE_ENTRIES LIST_DESTINATION_ENTRIES);
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(destination));
+#endif
     destination->prev = last;
+#ifndef PALOW
     _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(destination));
+#endif
     _ghost_stmt(IntrusiveListOps.move_close LIST_SOURCE_PAYLOAD $(source) $(destination) $(first) $(last) $(tail)
         LIST_SOURCE_ENTRIES LIST_DESTINATION_ENTRIES);
     _ghost_stmt(IntrusiveListContext.prepare_init (IntrusiveListContext.make LIST_SOURCE_PAYLOAD []) $(source));

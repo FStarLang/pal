@@ -146,7 +146,9 @@ void store_no_call(void)
 void take_pointer(void)
 {
     void (*fp)(void) = ghost_only;
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_ghost_only.func_ghost_only__fp);
+#endif
 #ifdef PALOW
     /* Palow's call witness is the tuple of ghost arguments alone: ownership
        is named in the contract, so there is no leading unit component. */
@@ -155,7 +157,9 @@ void take_pointer(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), 0ul)));
 #endif
     fp();
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 
 /* Multiple ghosts must be forwarded from the same witness into pre and post. */
@@ -164,14 +168,18 @@ uint32_t take_pointer_ghost_args(void)
     _ensures(return == 42)
 {
     uint32_t (*fp)(uint32_t) = ghost_next;
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Funcptr_ghost_next.func_ghost_next__fp);
+#endif
 #ifdef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide (41ul, 42ul)));
 #else
     _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), (41ul, 42ul))));
 #endif
     uint32_t result = fp(41);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
     return result;
 }
 
@@ -1597,9 +1605,13 @@ void global_live_call(void)
 #endif
 {
     void (*fp)(void) = global_live_bump;
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_bump.func_global_live_bump__fp);
+#endif
     fp();
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 
 /* Keep direct _live coverage with a fixed-value postcondition. */
@@ -1618,9 +1630,13 @@ void global_live_set_call(void)
 {
     global_live_counter = 10;
     void (*fp)(void) = global_live_set;
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_set.func_global_live_set__fp);
+#endif
     fp();
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 
 /* Snapshot both globals and the updated pointee; preserve q's saved value. */
@@ -1709,9 +1725,13 @@ void global_live_mixed_call(_plain uint32_t *p, _plain uint32_t *q)
 #endif
 {
     void (*fp)(_plain uint32_t *, _plain uint32_t *) = global_live_mixed;
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
+#endif
     fp(p, q);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 
 /* Distinct values expose swapped witnesses and vacuous postconditions. */
@@ -1725,9 +1745,13 @@ void global_live_distinct(void)
     uint32_t p = 30;
     uint32_t q = 40;
     void (*fp)(_plain uint32_t *, _plain uint32_t *) = global_live_mixed;
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_global_live_mixed.func_global_live_mixed__fp);
+#endif
     fp(&p, &q);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
     _assert(p == 31 && q == 40);
 }
 

@@ -8655,7 +8655,7 @@ fn ghost_stmt_names(body: &Stmts, out: &mut HashSet<String>) {
     fn go(body: &Stmts, out: &mut HashSet<String>) {
         for s in body.iter() {
             match &s.val {
-                StmtT::GhostStmt(c) if !ghost_replaced(c) => code(c, out),
+                StmtT::GhostStmt(c) if !ghost_interpreted(c) => code(c, out),
                 StmtT::If {
                     then_branch,
                     else_branch,
@@ -16676,7 +16676,7 @@ impl<'a> Body<'a> {
                 self.lines.extend(close);
                 Ok(())
             }
-            StmtT::GhostStmt(code) if ghost_replaced(code) => {
+            StmtT::GhostStmt(code) if ghost_handled(code) => {
                 // `$unfold-uninit` is the one member of the pair that says
                 // something Palow cannot see for itself: that the object is
                 // storage the function owns but whose contents are not yet
@@ -19288,8 +19288,7 @@ fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
     if !matches!(
         aux_fn_kind(code),
         Some(AuxFnKind::UnfoldUninit | AuxFnKind::Scattered | AuxFnKind::Gathered)
-    ) && !ghost_head(code).contains("__aux_raw_unfold_uninit")
-    {
+    ) {
         return None;
     }
     code.tokens.iter().find_map(|t| match t {
@@ -19299,72 +19298,52 @@ fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
     })
 }
 
-/// Whether a ghost statement is about a part of the *old* memory model that
-/// Palow replaces with something the emitter writes itself.
-///
-/// Dropping a proof hint is sound in one direction only, and it is the safe
-/// one: a hint can make a proof succeed that would otherwise fail, so removing
-/// one can only cause a failure, never let a wrong proof through. What makes
-/// it right rather than merely safe is that for each of these the emitter
-/// already writes the replacement:
-///
-///   * the old function-pointer model -- Palow emits `of_fn_div_valid` before
-///     an indirect call and `drop_is_valid` after it;
-///   * the array-cell borrow discipline -- Palow has no `_arrayptr` and no
-///     borrowed cell, only `array_focus`/`array_unfocus` around each access;
-///   * the maybe-uninitialised discipline -- Palow writes `write_uninit` and
-///     `forget` where the initialisation state changes;
-///   * acquiring a global's storage, and the `drop_` that releases it again --
-///     in Palow a global's ownership arrives in the contract, so there is
-///     nothing to acquire and nothing to give back;
-///   * opening a struct into one reference per field, which the old model
-///     needs before it can touch a field at all -- Palow addresses a field as
-///     the object's address plus an offset, and the emitter writes the
-///     `focus`/`unfocus` pair around each access itself, so there is nothing
-///     to open.
-///
-/// Every other ghost statement says something Palow has no other way to learn,
-/// and is still refused rather than silently discarded.
 /// The hint that names the witness of an indirect call. It is not code Palow
 /// emits -- it is the one thing at such a call site that only the author
 /// knows -- but it arrives spelled as a call to the old model's eager-intro
 /// rule, so it is read there and turned into the witness argument.
 const ETA_HINT: &str = "Pulse.Lib.C.FuncPtr.eta_expanded_erased";
 
-fn ghost_replaced(code: &InlinePulseCode) -> bool {
-    let head = ghost_head(code);
-    const REPLACED: &[&str] = &[
-        "Pulse.Lib.C.FuncPtr.",
-        "arrayptr_drop",
-        "array_borrow_cell",
-        "array_cell_read",
-        "array_return_cell",
-        "Pulse.Lib.C.MaybeUninit.",
-    ];
-    if REPLACED.iter().any(|p| head.starts_with(p)) {
-        return true;
-    }
-    // `$unfold`/`$fold` and their uninitialised variants, whether the source
-    // wrote the antiquotation or the generated name it stands for.
-    if head.contains("__aux_raw_unfold") || head.contains("__aux_raw_fold") {
-        return true;
-    }
-    if matches!(
-        aux_fn_kind(code),
-        Some(AuxFnKind::Unfold | AuxFnKind::UnfoldUninit | AuxFnKind::Fold | AuxFnKind::FoldUninit)
-    ) {
-        return true;
-    }
-    if head.starts_with("Global_") && head.contains(".acquire_var_") {
-        return true;
-    }
-    // The matching release. `drop_` on its own says nothing about which model
-    // it belongs to, so the global's address has to appear in it.
-    head.starts_with("drop_")
-        && code.tokens.iter().any(|t| match t {
-            InlinePulseToken::Verbatim(tok) => tok.text.val.contains("addr_var_"),
-            _ => false,
-        })
+/// Whether this ghost statement is one Palow *reads* instead of emitting.
+///
+/// There are two, and each says something Palow has no other way to learn:
+/// the witness of an indirect call, and `$unfold-uninit`, which says the
+/// object is storage the function owns but whose contents are not yet valid.
+/// Palow spells the latter as an uninitialised slot, so the statement becomes
+/// a note rather than code.
+///
+/// Everything else is emitted as the author wrote it. A ghost statement that
+/// belongs to the old model alone -- acquiring a global, dropping an
+/// `_arrayptr`, the maybe-uninitialised discipline, opening a struct into one
+/// reference per field -- has no meaning here and must be gated out of the
+/// source with `#ifndef PALOW`, the way `test/packet_space_connection` does.
+/// Palow does not recognise such statements by name and quietly drop them:
+/// that loses the author's intent without saying so, and it makes the
+/// emitter's behaviour depend on a list of library names that will outlive
+/// the model they belong to.
+fn ghost_handled(code: &InlinePulseCode) -> bool {
+    ghost_head(code).starts_with(ETA_HINT)
+        || matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
+}
+
+/// Whether the emitter reads this ghost statement structurally rather than
+/// taking it as opaque author Pulse.
+///
+/// The open/close brackets and the witness hint are the emitter's own
+/// vocabulary: it knows what each one does, so there is nothing to learn from
+/// the C objects they name. Every other ghost statement is the author's, and
+/// naming an object in one is what grants the body the right to touch it.
+fn ghost_interpreted(code: &InlinePulseCode) -> bool {
+    ghost_head(code).starts_with(ETA_HINT)
+        || matches!(
+            aux_fn_kind(code),
+            Some(
+                AuxFnKind::Unfold
+                    | AuxFnKind::UnfoldUninit
+                    | AuxFnKind::Fold
+                    | AuxFnKind::FoldUninit
+            )
+        )
 }
 
 fn stmt_kind(s: &Stmt) -> &'static str {

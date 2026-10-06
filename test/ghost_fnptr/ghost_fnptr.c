@@ -250,12 +250,16 @@ _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
 #endif
 int32_t call_via_o_one(_plain int32_t *q)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_one.func_impl_one__fp);
     _ghost_stmt(Global_o.acquire_var_o ());
+#endif
     const struct ops *p = &o;
     return p->f(q);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+#endif
 }
 
 #ifdef PALOW
@@ -270,12 +274,16 @@ _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
 #endif
 int32_t call_via_o_two(_plain int32_t *q, _plain int32_t *r)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_two.func_impl_two__fp);
     _ghost_stmt(Global_o.acquire_var_o ());
+#endif
     const struct ops *p = &o;
     return p->g(q, r);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+#endif
 }
 
 /* The mixed case through the pointer: `hide ((!a, !b), (_, _))`. */
@@ -293,24 +301,32 @@ _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
 int32_t call_via_o_mixed(int32_t *a, int32_t *b,
                          _plain int32_t *q, _plain int32_t *r)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
     _ghost_stmt(Global_o.acquire_var_o ());
+#endif
     const struct ops *p = &o;
     return p->m(a, b, q, r);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+#endif
 }
 
 /* Control: the same two owned pointers with no ghost arguments. */
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
 int32_t call_via_o_elim_two(int32_t *a, int32_t *b)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_elim_two.func_impl_elim_two__fp);
     _ghost_stmt(Global_o.acquire_var_o ());
+#endif
     const struct ops *p = &o;
     return p->e(a, b);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
     _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+#endif
 }
 
 /* One variable, four different witness shapes written into it. Assignment is
@@ -347,31 +363,45 @@ int32_t call_across_shapes(int32_t *a, int32_t *b)
 {
     int32_t (*fp)(int32_t *, int32_t *);
 
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_elim_two.func_impl_elim_two__fp);
+#endif
     fp = impl_elim_two;
     int32_t r1 = fp(a, b);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
 
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_plain_two.func_impl_plain_two__fp);
+#endif
     fp = impl_plain_two;
     int32_t r2 = fp(a, b);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 
     /* One ghost. Its value is recovered by matching `pts_to a` against the
        caller's context, so the call site never names it. */
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_one_of_two.func_impl_one_of_two__fp);
+#endif
     fp = impl_one_of_two;
     int32_t r3 = fp(a, b);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 
     /* Two ghosts, so the ghost half of the witness is itself a pair. The
        result is discarded: `impl_two` states no `_ensures`, so folding it into
        the sum below would be an unprovable `int32` overflow check and nothing
        to do with witnesses. */
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_two.func_impl_two__fp);
+#endif
     fp = impl_two;
     fp(a, b);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 
     return r1 + r2 + r3;
 }
@@ -395,10 +425,14 @@ _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
 int32_t call_via_local_fp(int32_t *a, int32_t *b,
                           _plain int32_t *q, _plain int32_t *r)
 {
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
+#endif
     int32_t (*fp)(int32_t *, int32_t *, _plain int32_t *, _plain int32_t *) = impl_mixed;
     return fp(a, b, q, r);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
+#endif
 }
 
 /* ---------------------------------------------------------------------------

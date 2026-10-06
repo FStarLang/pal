@@ -49,8 +49,10 @@ void pass_arrayptr_as_ref(_array int* a)
   _arrayptr int* p = a + 1;
   int* c = p;
   fill(c);
+#ifndef PALOW
   _ghost_stmt(array_return_cell $(a));
   _ghost_stmt(arrayptr_drop $(p));
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -177,11 +179,15 @@ void assign_cell_address_to_ref(_out _array SUBRANGE* a)
   _requires(a._length == 1)
 {
     SUBRANGE* Sub = &a[0];
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(Sub));
+#endif
     _ghost_stmt($unfold-uninit(SUBRANGE) $(Sub));
     Sub->Low = 10;
     Sub->Count = 5;
     _ghost_stmt($fold(SUBRANGE) $(Sub) _ _);
+#ifndef PALOW
     _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some $(Sub));
     _ghost_stmt(array_return_cell $(a));
+#endif
 }
