@@ -3182,23 +3182,31 @@ new facts about memory.
    parameter can still receive just the address, while a read-only `_array`
    parameter receives a fractional share of the ordinary `array_pts_to`.
 
-   That share is introduced by the trusted ghost function `literal_share` in
-   `Pulse.Lib.C.Palow.Array`. Its specification is an ordinary fractional
-   array predicate at `literal_addr xs`; the trust boundary is how the
-   fraction is chosen. The model is a hidden static token for each literal
-   that gives out 1/2, then 1/4, then 1/8, and so on. All shares are ordinary
-   array shares, so callees read through the same `const _array` contract they
-   use for non-literals, but the total permission ever handed out remains
+   That share is assumed *per literal*, in the module that uses it, as an
+   `acquire_literal_<n>` beside the function -- the same device an immutable
+   global's `acquire_var_*` already uses, and read back with
+   `literal_share_drop`, which is proved rather than assumed. Each assumption
+   names the element type's own representation and one literal's contents, so
+   it says one true thing about one piece of static data. The permission is
+   existential: the model is a hidden static token for each literal that gives
+   out 1/2, then 1/4, then 1/8, and so on, so the total ever handed out stays
    strictly below 1.0R. Gathering shares can therefore never produce the full
-   permission required for a write, and `literal_share` never grants
-   `freeable` authority.
+   permission required for a write, and no `freeable` authority is produced.
+
+   It is *not* a single trusted library function taking the element's
+   representation as a parameter. Such a function is false: `array_repr`
+   conjoins `t_repr` at every element, so instantiating it with a relation no
+   byte string satisfies makes the postcondition `pure False`, derivable from
+   `emp` -- and a `_ghost_stmt` can write that instantiation in C. Keeping the
+   representation out of the parameters is what makes the assumption a
+   statement about this program rather than a claim about all possible ones.
 
    That is a deliberate divergence from the old model, which stack-allocates a
    fresh array, copies the literal into it, and frees it after the call. That
    works for mutable `_array` parameters, which really do need writable
    storage, but it hands a read-only callee a writable object where C has a
    read-only one, and it gives the literal automatic storage where C gives it
-   static. Read-only literal calls now use `literal_share`; calls that only
+   static. Read-only literal calls now take a share; calls that only
    need the address -- a returned name, a `_plain` argument, a `switch`
    selecting one of several names -- still translate as `literal_addr`.
    Array-to-pointer decay became
@@ -3448,8 +3456,8 @@ new facts about memory.
    string literal. A `_plain` parameter is content with the literal's address
    and asks for nothing else, which is what `literal_addr` has always given it.
    A read-only `_array` parameter wants the elements but not the right to
-   write them, so PAL now emits `literal_share` and lets the callee consume and
-   preserve the resulting fractional `array_pts_to`. A mutable `_array`
+   write them, so PAL now emits a per-literal `acquire_literal_<n>` and lets
+   the callee consume and preserve the resulting fractional `array_pts_to`. A mutable `_array`
    parameter still gets storage exactly as a declared local array would:
    allocate, write the elements, free it with the rest.
 

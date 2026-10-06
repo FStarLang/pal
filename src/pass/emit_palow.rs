@@ -9448,6 +9448,11 @@ pub fn emit_palow(
                 it.uses.remove(&it.name);
             }
             let mut out = String::new();
+            if let Ok(b) = &body {
+                for d in &b.decls {
+                    out += d;
+                }
+            }
             match &body {
                 Ok(b) if b.divergent => out += "divergent\n",
                 _ => {}
@@ -10275,6 +10280,10 @@ struct Body<'a> {
     /// Storage `$scattered` said is already in pieces, by address, until it
     /// is gathered: the first write into it must not scatter it again.
     prescattered: HashSet<String>,
+    /// The module-level `assume val`s this body needs: one per literal it
+    /// shares read-only, naming that literal's element representation. See
+    /// `literal_share_arg`.
+    lit_shares: Vec<(String, String)>,
     /// Parameters whose `_own` is currently unfolded. Deep ownership is held
     /// folded, because that is the form a contract states and a call passes;
     /// a statement that reaches through a pointer field scatters it, uses the
@@ -14670,10 +14679,35 @@ impl<'a> Body<'a> {
         }
         let xs = format!("[{}]", vs.join("; "));
         let addr = format!("(Pulse.Lib.C.Palow.Ptr.literal_addr {})", xs);
-        self.lines.push(format!(
-            "literal_share {}_repr {}sz {}_alignof {};",
-            pn, esize, pn, xs
-        ));
+        // The ownership is assumed here rather than taken from a library
+        // function, because a library function would have to take the
+        // element's representation as a parameter and a trusted one that
+        // produces `array_pts_to t_repr ...` for an arbitrary `t_repr` proves
+        // `False`: see the note in `Pulse.Lib.C.Palow.Array`. Written out per
+        // literal, the representation is the element type's own and the
+        // assumption says one true thing about one piece of static data --
+        // the same trust an immutable global's `acquire_var_*` asks for.
+        let own = format!(
+            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Seq.seq_of_list {})",
+            pn, esize, pn, addr, xs
+        );
+        let name = match self.lit_shares.iter().find(|(o, _)| *o == own) {
+            Some((_, d)) => d
+                .split_whitespace()
+                .nth(2)
+                .expect("a declaration we wrote")
+                .to_string(),
+            None => {
+                let name = format!("acquire_literal_{}", self.lit_shares.len());
+                let decl = format!(
+                    "assume val {} : unit -> stt_ghost unit emp_inames emp\n  (fun _ -> {})\n\n",
+                    name, own
+                );
+                self.lit_shares.push((own, decl));
+                name
+            }
+        };
+        self.lines.push(format!("{} ();", name));
         self.pending_close.push(format!(
             "literal_share_drop {}_repr {}sz {}_alignof {};",
             pn, esize, pn, xs
@@ -18202,6 +18236,8 @@ fn expr_kind_of(e: &ExprT) -> &'static str {
 struct TranslatedBody {
     lines: Vec<String>,
     divergent: bool,
+    /// Declarations that have to be written above the function itself.
+    decls: Vec<String>,
     /// The functions in this file the body calls, which is what fixes the
     /// order they have to be written out in.
     uses: HashSet<String>,
@@ -18674,6 +18710,7 @@ fn emit_body(
         open_elems: Vec::new(),
         nested_scatter: BTreeMap::new(),
         prescattered: HashSet::new(),
+        lit_shares: Vec::new(),
         own_open: Vec::new(),
         loop_mark: None,
         mirrors: HashMap::new(),
@@ -18781,6 +18818,7 @@ fn emit_body(
     Ok(TranslatedBody {
         lines: b.lines,
         divergent: b.divergent,
+        decls: b.lit_shares.into_iter().map(|(_, d)| d).collect(),
         uses: b.uses,
     })
 }
