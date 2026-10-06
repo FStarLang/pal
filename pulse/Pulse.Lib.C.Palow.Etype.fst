@@ -74,6 +74,42 @@ type ctype =
 
 let tchar : ctype = TScalar SChar
 
+(* 6.5p7 bullet 3: "the signed or unsigned type corresponding to the effective
+   type of the object". Reading an `int` object through `unsigned int *` is
+   explicitly permitted, so the two have to be interchangeable in `access_ok`.
+
+   `SChar` is its own counterpart, and so is everything else that has none:
+   `int8_t` and `uint8_t` are both character types and are both `SChar`
+   already, so there is no eight-bit pair to relate, and the floating and
+   pointer types have no signedness to flip. Identity is the right answer for
+   all of them -- the disjunct it feeds is then simply `ty = u`, which is
+   already there. *)
+let counterpart (s: scalar) : scalar =
+  match s with
+  | SInt16 -> SUInt16 | SUInt16 -> SInt16
+  | SInt32 -> SUInt32 | SUInt32 -> SInt32
+  | SInt64 -> SUInt64 | SUInt64 -> SInt64
+  | s -> s
+
+let counterpart_involutive (s: scalar)
+  : Lemma (counterpart (counterpart s) == s)
+          [SMTPat (counterpart (counterpart s))]
+  = ()
+
+(* A type and its counterpart have the same width, which is what lets the
+   disjunct be added to `access_ok` without disturbing the bounds check. *)
+let counterpart_size (s: scalar)
+  : Lemma (scalar_size (counterpart s) == scalar_size s)
+          [SMTPat (scalar_size (counterpart s))]
+  = ()
+
+(* The relation lifted to `ctype`, so that `access_ok` can test it in one
+   place. `counterpart_involutive` is what makes it symmetric. *)
+let counterpart_ok (ty: ctype) (u: ctype) : bool =
+  match ty, u with
+  | TScalar a, TScalar b -> b = counterpart a
+  | _ -> false
+
 let rec csize (t: ctype) : Tot nat (decreases t) =
   match t with
   | TScalar s -> scalar_size s
@@ -107,7 +143,8 @@ let emod (x: int) (m: nat) : int = if m = 0 then x else x % m
    condition of 6.5p7, spelled out by cases:
 
    - a character type may access anything;
-   - a type may access itself at offset 0;
+   - a type may access itself at offset 0, and so may the signed or unsigned
+     type corresponding to it (6.5p7 bullet 3, `counterpart_ok`);
    - an array delegates to its element type, modulo the element size, which is
      what makes `a[i]` an access to the element rather than to the array; and
    - an aggregate delegates to each member at that member's offset. For a
@@ -130,6 +167,7 @@ let rec access_ok (ty: ctype) (off: int) (u: ctype) : Tot bool (decreases %[ctyp
   0 < csize u && 0 <= off && off + csize u <= csize ty &&
   (u = tchar ||
   (off = 0 && ty = u) ||
+  (off = 0 && counterpart_ok ty u) ||
   (match ty with
    | TArr e n -> 0 <= off && off < csize e * n && access_ok e (emod off (csize e)) u
    | TStruct _ _ ms -> access_ok_members ms off u
@@ -164,7 +202,7 @@ let rec access_ok_trans (ty: ctype) (d: int) (s: ctype) (off: int) (fld: ctype)
   : Lemma (requires access_ok ty d s /\ access_ok s off fld)
           (ensures  access_ok ty (d + off) fld)
           (decreases %[ctype_size ty; 0])
-  = if s = tchar || (d = 0 && ty = s) then () else
+  = if s = tchar || (d = 0 && ty = s) || (d = 0 && counterpart_ok ty s) then () else
     match ty with
     | TScalar _ -> ()
     | TArr e n ->
@@ -248,11 +286,74 @@ let store_entry (en: option etype_entry) (u: ctype) (k: nat) : option etype_entr
 let store_etypes (e: etypes) (u: ctype { elen e == csize u }) : e':etypes { elen e' == elen e } =
   Seq.init (elen e) (fun k -> store_entry (eget e k) u k)
 
+(* `store_etypes` says how a store *moves* the index. It does not say whether
+   the store is *allowed*, and those are different questions: a store at an
+   incompatible type into a declared object is undefined behaviour (6.5p7),
+   not a relabelling, and `store_entry` quietly leaves such a byte alone.
+
+   `store_ok` is the missing side condition. A byte admits a store at `u` when
+   it has no effective type yet, or belongs to allocated storage -- which may
+   always be re-typed -- or already licenses the access. Only the third
+   disjunct is available to a declared object, which is precisely 6.5p6's "if
+   the object has a declared type, that is its effective type" read as a
+   restriction on stores. *)
+let store_ok (e: etypes) (u: ctype) : prop =
+  elen e == csize u /\
+  (forall (k: nat). k < elen e ==>
+    (match eget e k with
+     | None -> True
+     | Some en -> b2t (not en.fixed) \/ b2t (access_ok en.ty (en.off - k) u)))
+
+(* The load-bearing theorem for enforcement: a permitted store leaves the bytes
+   readable at the type that was stored. Without it a typed write could not
+   re-establish its own points-to, and every `T_write` in the generated code
+   would be stuck. `store_none_read_ok` below is its all-`None` special case --
+   the `malloc` one -- and is kept because it names that case. *)
+let store_ok_read_ok (e: etypes) (u: ctype)
+  : Lemma (requires store_ok e u)
+          (ensures  read_ok (store_etypes e u) u)
+  = let e' = store_etypes e u in
+    let aux (k: nat { k < elen e' })
+      : Lemma (match eget e' k with
+               | None -> True
+               | Some en -> b2t (access_ok en.ty (en.off - k) u))
+      = (* Either the byte kept its entry, in which case `store_entry`'s test
+           or `store_ok` says that entry licenses `u`, or it was relabelled to
+           `u` at offset `k`, and `access_ok u 0 u` is immediate. *)
+        assert (eget e' k == store_entry (eget e k) u k)
+    in
+    FStar.Classical.forall_intro aux
+
 (* `memcpy` transports the entries along with the bytes, matching the C rule
-   that a byte-copied object inherits the source object's effective type. That
-   is just "the destination index becomes the source index", so there is no
-   separate definition -- it is the same transport that gives `memcpy` its byte
-   spec in `Pulse.Lib.C.Palow.Machine`. *)
+   that a byte-copied object inherits the source object's effective type.
+
+   It is *not* plain transport, which is the trap this definition exists to
+   avoid. 6.5p6's third rule applies only to "an object having no declared
+   type"; copying a `double` over a declared `int` does not make it a `double`
+   (case 13.1 of `test/effective_type`). So a `fixed` destination byte keeps
+   its entry and only the rest follows the source -- the same asymmetry
+   `store_entry` has, and for the same reason.
+
+   The copied entry is also stripped of `fixed`. R3 gives the destination the
+   source's effective *type*; it does not give it a declared type, which is a
+   property of how the destination was created and not of what was written
+   into it. Without the strip, `memcpy`ing a declared object into `malloc`ed
+   storage would make that storage permanently un-re-typeable, and case 5.3
+   followed by case 4.2 -- copy into allocated storage, then store a new type
+   over it -- would stop being legal C. *)
+let unfix (en: option etype_entry) : option etype_entry =
+  match en with
+  | Some e0 -> Some ({ e0 with fixed = false })
+  | None -> None
+
+let copy_entry (d: option etype_entry) (s: option etype_entry) : option etype_entry =
+  match d with
+  | Some d0 -> if d0.fixed then Some d0 else unfix s
+  | None -> unfix s
+
+let copy_etypes (dst: etypes) (src: etypes { elen src == elen dst })
+  : e:etypes { elen e == elen dst } =
+  Seq.init (elen dst) (fun k -> copy_entry (eget dst k) (eget src k))
 
 (* ---------------------------------------------------------------------------
    Theorems
@@ -365,6 +466,206 @@ let retype_allocated ()
 let retype_declared ()
   : Lemma (store_etypes (etypes_of ct_T true) ct_S == etypes_of ct_T true)
   = Seq.lemma_eq_intro (store_etypes (etypes_of ct_T true) ct_S) (etypes_of ct_T true)
+
+(* ---------------------------------------------------------------------------
+   The acceptance tests, transcribed from `test/effective_type`
+
+   One theorem per case transcribed, named after it, so that the rules are
+   pinned here -- by computation, with no memory model and no translator in the
+   way -- before anything depends on them. A `[DEFINED]` case becomes a
+   positive theorem and a `[UB]` case a negative one, and a rule that stops
+   being enforced breaks this module rather than silently widening what PAL
+   accepts.
+
+   These are the cases that bear on the rules this module states, not the whole
+   corpus. Sections 19-22 are about `volatile`, `_Atomic`, `restrict` and
+   object lifetime, which are not 6.5p6/p7 and are not what this module is for;
+   and within sections 1-18, cases that differ from one already transcribed
+   only in the scalar type involved are left to the corpus. *)
+
+let ct_i16 : ctype = TScalar SInt16
+let ct_i32 : ctype = TScalar SInt32
+let ct_i64 : ctype = TScalar SInt64
+let ct_f32 : ctype = TScalar SFloat32
+let ct_f64 : ctype = TScalar SFloat64
+
+(* struct point { int x; int y; } and struct nested { double d; struct point pt; } *)
+let ct_point  : ctype = TStruct "point" 8 [(0, ct_i32); (4, ct_i32)]
+let ct_nested : ctype = TStruct "nested" 16 [(0, ct_f64); (8, ct_point)]
+
+(* Two distinct struct types with identical layout (case 12.3). *)
+let ct_a : ctype = TStruct "a" 8 [(0, ct_i32); (4, ct_i32)]
+let ct_b : ctype = TStruct "b" 8 [(0, ct_i32); (4, ct_i32)]
+
+(* [DEFINED] 1.2: an `int` object read through `unsigned int *`. This is the
+   case the counterpart rule exists for; before it was added the model
+   rejected a program the standard explicitly permits. *)
+let case_1_2_signed_unsigned_counterpart ()
+  : Lemma (read_ok (etypes_of ct_i32 true) ct_u32 /\
+           read_ok (etypes_of ct_u32 true) ct_i32)
+  = ()
+
+(* [DEFINED] 2.1: every byte of a declared `double` is readable as a character,
+   at every offset. *)
+let case_2_1_inspect_any_object_as_bytes (k: nat { k < 8 })
+  : Lemma (read_ok (Seq.slice (etypes_of ct_f64 true) k (k + 1)) tchar)
+  = ()
+
+(* [DEFINED] 3.3: a store through `struct point *` into allocated storage gives
+   it that effective type, and the members are then readable at `int`. *)
+let case_3_3_struct_effective_type_then_member_access ()
+  : Lemma (read_ok (Seq.slice (store_etypes (etypes_none 8) ct_point) 0 4) ct_i32 /\
+           read_ok (Seq.slice (store_etypes (etypes_none 8) ct_point) 4 8) ct_i32)
+  = ()
+
+(* [DEFINED] 4.1: allocated storage is re-typed by each store in turn, and each
+   read is paired with the store that installed its type. *)
+let case_4_1_change_effective_type_repeatedly ()
+  : Lemma (let e1 = store_etypes (etypes_none 4) ct_i32 in
+           let e2 = store_etypes e1 ct_f32 in
+           read_ok e1 ct_i32 /\ store_ok e1 ct_f32 /\ read_ok e2 ct_f32)
+  = let e1 = store_etypes (etypes_none 4) ct_i32 in
+    store_ok_read_ok (etypes_none 4) ct_i32;
+    store_ok_read_ok e1 ct_f32
+
+(* [DEFINED] 5.1 and 5.3: `memcpy` propagates the source's effective type into
+   allocated storage -- and leaves it allocated, so 4.2 can still re-type it
+   afterwards. *)
+let case_5_1_memcpy_propagates_effective_type ()
+  : Lemma (copy_etypes (etypes_none 8) (etypes_of ct_f64 true) == etypes_of ct_f64 false /\
+           read_ok (copy_etypes (etypes_none 8) (etypes_of ct_f64 true)) ct_f64 /\
+           store_ok (copy_etypes (etypes_none 8) (etypes_of ct_f64 true)) ct_i64)
+  = Seq.lemma_eq_intro (copy_etypes (etypes_none 8) (etypes_of ct_f64 true))
+                       (etypes_of ct_f64 false)
+
+(* [DEFINED] 6.1: untouched allocated bytes have no effective type, so the
+   first store may be at any type at all. *)
+let case_6_1_fresh_malloc_write_is_always_legal (u: ctype)
+  : Lemma (store_ok (etypes_none (csize u)) u)
+  = ()
+
+(* [UB] 12.1: an object declared `int`, read through `float *`. `float` is not
+   compatible with `int`, is not its counterpart, and is not a character
+   type. *)
+let case_12_1_read_int_as_float ()
+  : Lemma (~(read_ok (etypes_of ct_i32 true) ct_f32))
+  = assert (eget (etypes_of ct_i32 true) 0 == Some ({ ty = ct_i32; off = 0; fixed = true }))
+
+(* [UB] 12.2: an object declared `int`, *written* through `short *`. The store
+   covers the first two bytes, and this is the case `store_ok` exists for: the
+   relabelling function alone would make it a silent no-op. *)
+let case_12_2_write_int_through_short ()
+  : Lemma (~(store_ok (Seq.slice (etypes_of ct_i32 true) 0 2) ct_i16))
+  = assert (eget (Seq.slice (etypes_of ct_i32 true) 0 2) 0
+            == Some ({ ty = ct_i32; off = 0; fixed = true }))
+
+(* [UB] 12.3: two struct types with identical layout are still different types.
+   C compares tags, not shapes. *)
+let case_12_3_struct_pun_between_layout_compatible_types ()
+  : Lemma (~(read_ok (etypes_of ct_a true) ct_b))
+  = assert (eget (etypes_of ct_a true) 0 == Some ({ ty = ct_a; off = 0; fixed = true }));
+    assert (~(access_ok ct_a 0 ct_b))
+
+(* [UB] 12.4 and 13.3: storage with a *declared* character-array type cannot be
+   re-typed, which is what separates a `static char buf[]` arena from a
+   `malloc`ed one. The character rule is about the type of the *lvalue*, not
+   the type of the object, so it does not rescue this. *)
+let case_12_4_char_array_used_as_int_storage ()
+  : Lemma (~(store_ok (Seq.slice (etypes_of (TArr tchar 8) true) 0 4) ct_i32))
+  = assert (eget (Seq.slice (etypes_of (TArr tchar 8) true) 0 4) 0
+            == Some ({ ty = TArr tchar 8; off = 0; fixed = true }))
+
+let case_13_3_reuse_of_a_declared_array_as_another_type ()
+  : Lemma (~(store_ok (Seq.slice (etypes_of (TArr tchar 128) true) 0 8) ct_point))
+  = assert (eget (Seq.slice (etypes_of (TArr tchar 128) true) 0 8) 0
+            == Some ({ ty = TArr tchar 128; off = 0; fixed = true }))
+
+(* [UB] 13.1: `memcpy` into a declared object does not re-type it. The copy
+   itself is character-wise and so is permitted; what stays undefined is
+   reading the result at the source's type. This is the case `copy_entry`'s
+   `fixed` test exists for -- plain transport would relabel `dst`. *)
+let case_13_1_memcpy_cannot_retype_a_declared_object ()
+  : Lemma (copy_etypes (etypes_of ct_i32 true) (Seq.slice (etypes_of ct_f64 true) 0 4)
+           == etypes_of ct_i32 true /\
+           ~(read_ok (etypes_of ct_i32 true) ct_f32))
+  = case_12_1_read_int_as_float ();
+    Seq.lemma_eq_intro
+      (copy_etypes (etypes_of ct_i32 true) (Seq.slice (etypes_of ct_f64 true) 0 4))
+      (etypes_of ct_i32 true)
+
+(* [UB] 13.2: storing a `float` into a declared `int` does not install `float`.
+   A naive reading of 6.5p6's second rule says it does; `store_ok` is what says
+   the store was undefined in the first place. *)
+let case_13_2_store_does_not_retype_automatic_storage ()
+  : Lemma (~(store_ok (etypes_of ct_i32 true) ct_f32))
+  = assert (eget (etypes_of ct_i32 true) 0 == Some ({ ty = ct_i32; off = 0; fixed = true }))
+
+(* [UB] 14.1: allocated storage typed `int` by a store, then read as `float`.
+   The read is non-modifying, so it does not re-type anything. *)
+let case_14_1_installed_int_read_as_float ()
+  : Lemma (~(read_ok (store_etypes (etypes_none 4) ct_i32) ct_f32))
+  = assert (eget (store_etypes (etypes_none 4) ct_i32) 0
+            == Some ({ ty = ct_i32; off = 0; fixed = false }))
+
+(* [UB] 14.2: allocated storage typed `struct point`, read as the larger and
+   unrelated `struct nested`. *)
+let case_14_2_installed_struct_read_as_unrelated_struct ()
+  : Lemma (~(read_ok (Seq.append (store_etypes (etypes_none 8) ct_point) (etypes_none 8))
+                     ct_nested))
+  = assert (eget (Seq.append (store_etypes (etypes_none 8) ct_point) (etypes_none 8)) 0
+            == Some ({ ty = ct_point; off = 0; fixed = false }))
+
+(* [UB] 14.3: the effective type installed by `memcpy` binds just as the one
+   installed by a store does. *)
+let case_14_3_memcpy_installed_type_then_wrong_read ()
+  : Lemma (~(read_ok (copy_etypes (etypes_none 8) (etypes_of ct_f64 true)) ct_i64))
+  = assert (eget (copy_etypes (etypes_none 8) (etypes_of ct_f64 true)) 0
+            == Some ({ ty = ct_f64; off = 0; fixed = false }))
+
+(* [UB] 15.4: a partial store re-types only some of the bytes, and the larger
+   object does not survive it. This is the case that justifies the index being
+   per *byte* rather than per object. *)
+let case_15_4_partial_overwrite_invalidates_the_whole ()
+  : Lemma (let e0 = store_etypes (etypes_none 8) ct_f64 in
+           let e1 = Seq.append (store_etypes (Seq.slice e0 0 4) ct_i32) (Seq.slice e0 4 8) in
+           read_ok e0 ct_f64 /\ ~(read_ok e1 ct_f64))
+  = let e0 = store_etypes (etypes_none 8) ct_f64 in
+    let e1 = Seq.append (store_etypes (Seq.slice e0 0 4) ct_i32) (Seq.slice e0 4 8) in
+    assert (eget e1 0 == Some ({ ty = ct_i32; off = 0; fixed = false }))
+
+(* [UB] 17.1: R3's "if it has one" -- copying from a source that has no
+   effective type installs none, so the destination is still untyped. That is
+   *permissive* here rather than an error: an all-`None` index satisfies
+   `read_ok` at every type, so the model accepts 17.1 where C calls it
+   undefined. The value read is indeterminate, which is what actually makes
+   17.1 undefined, and that is `uninit`'s job in `Pulse.Lib.C.Palow.Bytes` --
+   no `_repr` relates a value to a range containing an uninitialized byte --
+   not this module's. *)
+let case_17_1_memcpy_from_an_untyped_source ()
+  : Lemma (copy_etypes (etypes_none 8) (etypes_none 8) == etypes_none 8)
+  = Seq.lemma_eq_intro (copy_etypes (etypes_none 8) (etypes_none 8)) (etypes_none 8)
+
+(* [UB] 17.2, and a *known incompleteness*, recorded as a theorem so that it
+   cannot be mistaken for enforcement.
+
+   Copying the first half of one `double` over the first half of another leaves
+   a chimera: C says no complete `double` object lives there any more. The
+   model accepts it, and cannot do otherwise -- an entry records a type and an
+   offset within an object, but no object *identity*, so bytes 0-3 of one
+   `double` and bytes 4-7 of another are indistinguishable from the eight bytes
+   of one.
+
+   Detecting it would mean giving every object a ghost identity and threading
+   it through every split and join, which is a large cost for a case no
+   compiler's alias analysis exploits: the bytes agree with their claimed type,
+   so no type-based optimisation is misled. The permissiveness is therefore
+   deliberate, and is the reason this is a positive theorem. *)
+let case_17_2_partial_memcpy_leaves_a_hybrid_is_accepted ()
+  : Lemma (let e0 = store_etypes (etypes_none 8) ct_f64 in
+           let src = Seq.slice (etypes_of ct_f64 true) 0 4 in
+           let e1 = Seq.append (copy_etypes (Seq.slice e0 0 4) src) (Seq.slice e0 4 8) in
+           read_ok e1 ct_f64)
+  = ()
 
 (* ---------------------------------------------------------------------------
    Where the index has to be visible
