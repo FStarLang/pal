@@ -17,6 +17,14 @@ for an incidental reason locks the incidental reason in, so these should not
 become `should-fail` tests until the rejection actually comes from the
 effective-type rule.
 
+Four tests do state the rule directly, by writing the ghost step a typed
+access will become and putting the obligation on layer 0's `mem_pts_to_at`:
+`test/etype_access_ok` (positive) and `test/etype_pun_bad`,
+`test/etype_store_bad`, `test/etype_memcpy_bad` (negative, each pinned on the
+rule it tests). See "Testing a rule that is not enforced yet" in `palow.md`
+for why the positive one is not optional, and for the two ways a test here can
+look like it passes while testing nothing.
+
 Sections 19-22 -- `volatile`, `_Atomic`, `restrict`, object lifetime, and
 modifying a `const` object or a string literal -- are not 6.5p6/p7 and belong
 with the features they name rather than here.

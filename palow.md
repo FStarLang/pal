@@ -729,6 +729,55 @@ gives what `restrict` promises, and the literal machinery already gives
 
 *Stage 3 -- enforcement* is not done. See below.
 
+#### Testing a rule that is not enforced yet
+
+`test/_effective_type` cannot be run as a test suite: almost none of its
+defined-behaviour cases translate, and almost all of its undefined ones are
+already rejected -- but by the ownership and alias analysis, not by 6.5p7.
+`*(float *)&i` fails because the contract does not grant the dereferenced
+target, and would fail for that reason if effective types did not exist. A
+`should-fail` pinned on that message would pass without testing anything, and
+would keep passing if the rule were deleted.
+
+Four tests state the obligation where enforcement will actually sit -- on
+layer 0's `mem_pts_to_at` -- using `_include_pulse` to write the ghost step
+that a typed read or write will become. They go under the translator's
+analysis rather than through it, so the only thing that can reject them is the
+rule:
+
+| test | obligation | outcome |
+| --- | --- | --- |
+| `test/etype_access_ok` | `read_ok`, four defined cases | verifies |
+| `test/etype_pun_bad` | `read_ok (etypes_of ct_i32 true) ct_f32` | `should-fail` |
+| `test/etype_store_bad` | `store_ok (etypes_of ct_i32 true) ct_f32` | `should-fail` |
+| `test/etype_memcpy_bad` | `read_ok (copy_etypes …) ct_f32` | `should-fail` |
+
+The positive one is not optional. A negative test alone would pass just as
+well if `read_ok` were unprovable for *every* type, which is what a
+too-strong rule looks like, so `etype_access_ok` discharges the *same*
+obligation through the *same* ghost function on the *same* index: reading a
+declared `int32_t` at `uint32_t` succeeds where reading it at `float`
+fails. That is the discrimination being tested, and neither half shows it
+alone.
+
+Two traps are worth recording, because both produced a test that passed while
+testing nothing.
+
+- **Widths have to match.** `read_ok` and `store_ok` both require the index to
+  cover exactly `csize u` bytes, so punning a 4-byte `int32_t` as an 8-byte
+  `double` fails on the width and proves nothing about effective types. The
+  negative tests all pun between `int32_t` and `float`, which are the same
+  width, leaving the type rule as the only thing that can reject them.
+- **One failing obligation per directory.** F* stops at the first error, so a
+  second failing ghost function in the same module is shadowed and is never
+  tested -- which is why the read, store and memcpy rules have a directory
+  each rather than sharing one.
+
+The tests also pay for themselves beyond what the theorems in `Etype` cover:
+`store_etypes`'s refinement has to be carried in the binder of any ghost step
+that wraps it, which no pure lemma exposes and which the store test found
+immediately.
+
 Layer 0 carries the index on the *primitive* points-to, `mem_pts_to_at`, and
 ties the index-free one to it by an slprop equality:
 
