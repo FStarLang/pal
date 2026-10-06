@@ -1,3 +1,3 @@
 Error 19 at out/Func_bad_literal.fst(
-Int8.v (Seq.index (Seq.seq_of_list [110y; 111y; 0y]) 0) == 104
+Int8.v (Seq.index (Seq.seq_of_list literal_0) 0) == 104
 Assertion failed

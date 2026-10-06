@@ -10280,10 +10280,13 @@ struct Body<'a> {
     /// Storage `$scattered` said is already in pieces, by address, until it
     /// is gathered: the first write into it must not scatter it again.
     prescattered: HashSet<String>,
-    /// The module-level `assume val`s this body needs: one per literal it
-    /// shares read-only, naming that literal's element representation. See
-    /// `literal_share_arg`.
-    lit_shares: Vec<(String, String)>,
+    /// The declarations written above the function, as (key, name, text).
+    /// Two kinds live here: a name for a constant term a literal or a
+    /// constant array initialiser would otherwise repeat at every mention,
+    /// and the per-literal `assume val` that acquires a read-only share. Both
+    /// are keyed by what they stand for, so one is written per distinct term
+    /// however many times it is used.
+    decls: Vec<(String, String, String)>,
     /// Parameters whose `_own` is currently unfolded. Deep ownership is held
     /// folded, because that is the form a contract states and a call passes;
     /// a statement that reaches through a pointer field scatters it, uses the
@@ -13568,10 +13571,8 @@ impl<'a> Body<'a> {
                 for x in elems {
                     vs.push(self.init_value(&elem, x)?);
                 }
-                Ok(format!(
-                    "(Pulse.Lib.C.Palow.Ptr.literal_addr [{}])",
-                    vs.join("; ")
-                ))
+                let xs = self.named_const("literal", &format!("[{}]", vs.join("; ")));
+                Ok(format!("(Pulse.Lib.C.Palow.Ptr.literal_addr {})", xs))
             }
             // C says the value of an assignment is the value stored, after
             // the conversion to the left operand's type -- which elaboration
@@ -14610,6 +14611,7 @@ impl<'a> Body<'a> {
             return Err(format!("local `{}` has no stack slot", name));
         };
         let addr = self.slots[i].addr.clone();
+        let term = self.named_const("const_array", term);
         self.lines.push(format!(
             "{}_from {} {} 0sz;",
             fill_name(&pn, esize, *n),
@@ -14617,7 +14619,7 @@ impl<'a> Body<'a> {
             term
         ));
         self.slots[i].array = Some((format!("{}sz", esize), false));
-        self.slots[i].array_value = Some(term.to_string());
+        self.slots[i].array_value = Some(term);
         self.slots[i].fstar_ty = format!("(s: Seq.seq {} {{ Seq.length s == {} }})", ety, n);
         self.slots[i].init = true;
         Ok(())
@@ -14654,6 +14656,51 @@ impl<'a> Body<'a> {
         Ok(addr)
     }
 
+    /// Give a constant term a name at module level. A literal's element list
+    /// is mentioned once per slprop that speaks about the array -- the fill,
+    /// every call that passes it, every annotation that names its value --
+    /// and writing it out each time makes the generated file grow with the
+    /// literal's length times the number of mentions. Naming it once costs a
+    /// definition F* unfolds on demand. Identical terms share a name, so a
+    /// literal used twice in one function is still written once.
+    fn named_const(&mut self, prefix: &str, term: &str) -> String {
+        if let Some((_, n, _)) = self.decls.iter().find(|(k, _, _)| k == term) {
+            return n.clone();
+        }
+        let name = self.fresh_decl_name(prefix);
+        let text = format!("let {} = {}\n\n", name, term);
+        self.decls.push((term.to_string(), name.clone(), text));
+        name
+    }
+
+    /// The next unused name under `prefix`. Counted per prefix rather than
+    /// over all declarations, so the literal `acquire_literal_0` acquires is
+    /// `literal_0` rather than whatever number the shared count had reached.
+    fn fresh_decl_name(&self, prefix: &str) -> String {
+        let p = format!("{}_", prefix);
+        let n = self
+            .decls
+            .iter()
+            .filter(|(_, name, _)| name.starts_with(&p))
+            .count();
+        format!("{}{}", p, n)
+    }
+
+    /// Assume a slprop at module level, under a fresh name, and return the
+    /// name. Used for the per-literal read-only share.
+    fn assumed_slprop(&mut self, prefix: &str, own: &str) -> String {
+        if let Some((_, n, _)) = self.decls.iter().find(|(k, _, _)| k == own) {
+            return n.clone();
+        }
+        let name = self.fresh_decl_name(prefix);
+        let text = format!(
+            "assume val {} : unit -> stt_ghost unit emp_inames emp\n  (fun _ -> {})\n\n",
+            name, own
+        );
+        self.decls.push((own.to_string(), name.clone(), text));
+        name
+    }
+
     fn literal_share_arg(&mut self, a: &Expr) -> Result<String, String> {
         let mut lit = Rc::new(strip_vattr(a).clone());
         while let ExprT::Cast(inner, _) = &lit.clone().val {
@@ -14677,7 +14724,7 @@ impl<'a> Body<'a> {
         for x in elems {
             vs.push(self.init_value(elem, x)?);
         }
-        let xs = format!("[{}]", vs.join("; "));
+        let xs = self.named_const("literal", &format!("[{}]", vs.join("; ")));
         let addr = format!("(Pulse.Lib.C.Palow.Ptr.literal_addr {})", xs);
         // The ownership is assumed here rather than taken from a library
         // function, because a library function would have to take the
@@ -14691,22 +14738,7 @@ impl<'a> Body<'a> {
             "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Seq.seq_of_list {})",
             pn, esize, pn, addr, xs
         );
-        let name = match self.lit_shares.iter().find(|(o, _)| *o == own) {
-            Some((_, d)) => d
-                .split_whitespace()
-                .nth(2)
-                .expect("a declaration we wrote")
-                .to_string(),
-            None => {
-                let name = format!("acquire_literal_{}", self.lit_shares.len());
-                let decl = format!(
-                    "assume val {} : unit -> stt_ghost unit emp_inames emp\n  (fun _ -> {})\n\n",
-                    name, own
-                );
-                self.lit_shares.push((own, decl));
-                name
-            }
-        };
+        let name = self.assumed_slprop("acquire_literal", &own);
         self.lines.push(format!("{} ();", name));
         self.pending_close.push(format!(
             "literal_share_drop {}_repr {}sz {}_alignof {};",
@@ -18710,7 +18742,7 @@ fn emit_body(
         open_elems: Vec::new(),
         nested_scatter: BTreeMap::new(),
         prescattered: HashSet::new(),
-        lit_shares: Vec::new(),
+        decls: Vec::new(),
         own_open: Vec::new(),
         loop_mark: None,
         mirrors: HashMap::new(),
@@ -18818,7 +18850,7 @@ fn emit_body(
     Ok(TranslatedBody {
         lines: b.lines,
         divergent: b.divergent,
-        decls: b.lit_shares.into_iter().map(|(_, d)| d).collect(),
+        decls: b.decls.into_iter().map(|(_, _, d)| d).collect(),
         uses: b.uses,
     })
 }
