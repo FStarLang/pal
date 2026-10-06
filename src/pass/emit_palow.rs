@@ -8025,6 +8025,223 @@ fn const_array(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<(String, u64, Stri
     ))
 }
 
+fn array_fill_shape(tds: &Typedefs, elem: &Type, len: u64) -> Option<(String, String, u64, u64)> {
+    Some((
+        palow_name(tds, elem)?,
+        fstar_type(tds, elem)?,
+        palow_sizeof(tds, elem)?,
+        len,
+    ))
+}
+
+fn collect_array_fill_type(tds: &Typedefs, ty: &Type, out: &mut BTreeMap<String, String>) {
+    match &peel(tds, ty).val {
+        TypeT::FixedArray(elem, len) => {
+            if let Some((pn, elem, esize, len)) = array_fill_shape(tds, elem, *len) {
+                out.entry(fill_name(&pn, esize, len))
+                    .or_insert_with(|| emit_fill(&pn, &elem, esize, len));
+            }
+            collect_array_fill_type(tds, elem, out);
+        }
+        TypeT::Pointer(inner, _)
+        | TypeT::Plain(inner)
+        | TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, ..)
+        | TypeT::Nullable(inner) => {
+            collect_array_fill_type(tds, inner, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, String>) {
+    match &strip_vattr(e).val {
+        ExprT::ArrayInit { elem_ty, elems, .. } => {
+            if let Some((pn, elem, esize, len)) = array_fill_shape(tds, elem_ty, elems.len() as u64)
+            {
+                out.entry(fill_name(&pn, esize, len))
+                    .or_insert_with(|| emit_fill(&pn, &elem, esize, len));
+            }
+            for x in elems {
+                collect_array_fill_expr(tds, x, out);
+            }
+        }
+        ExprT::FnCall(_, args) | ExprT::FnPtrCall(_, args) => {
+            for x in args.iter() {
+                collect_array_fill_expr(tds, x, out);
+            }
+        }
+        ExprT::BinOp(_, l, r) | ExprT::Index(l, r) => {
+            collect_array_fill_expr(tds, l, out);
+            collect_array_fill_expr(tds, r, out);
+        }
+        ExprT::UnOp(_, x)
+        | ExprT::Cast(x, _)
+        | ExprT::Ref(x)
+        | ExprT::Deref(x)
+        | ExprT::Member(x, _)
+        | ExprT::Live(x)
+        | ExprT::Old(x)
+        | ExprT::ContainerOf(x, _, _)
+        | ExprT::VAttr(_, x) => collect_array_fill_expr(tds, x, out),
+        ExprT::Cond(c, t, f) => {
+            collect_array_fill_expr(tds, c, out);
+            collect_array_fill_expr(tds, t, out);
+            collect_array_fill_expr(tds, f, out);
+        }
+        ExprT::StructInit(_, fields) => {
+            for (_, x) in fields {
+                collect_array_fill_expr(tds, x, out);
+            }
+        }
+        ExprT::UnionInit(_, _, x)
+        | ExprT::MallocArray(_, x)
+        | ExprT::CallocArray(_, x)
+        | ExprT::MallocFlex(_, x)
+        | ExprT::CallocFlex(_, x)
+        | ExprT::PreIncr(x)
+        | ExprT::PostIncr(x)
+        | ExprT::PreDecr(x)
+        | ExprT::PostDecr(x) => collect_array_fill_expr(tds, x, out),
+        ExprT::Memset(_, a, b, c) => {
+            collect_array_fill_expr(tds, a, out);
+            collect_array_fill_expr(tds, b, out);
+            collect_array_fill_expr(tds, c, out);
+        }
+        ExprT::MemsetZero(_, x) | ExprT::Free(x) => collect_array_fill_expr(tds, x, out),
+        ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
+            collect_array_fill_type(tds, ty, out);
+            collect_array_fill_expr(tds, body, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_array_fill_stmts(tds: &Typedefs, ss: &Stmts, out: &mut BTreeMap<String, String>) {
+    for s in ss {
+        match &s.val {
+            StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => {
+                collect_array_fill_expr(tds, e, out)
+            }
+            StmtT::Let(_, ty, e) => {
+                collect_array_fill_type(tds, ty, out);
+                collect_array_fill_expr(tds, e, out);
+            }
+            StmtT::Decl(_, ty) => collect_array_fill_type(tds, ty, out),
+            StmtT::DeclStackArray {
+                elem_type, size, ..
+            } => {
+                collect_array_fill_type(tds, elem_type, out);
+                collect_array_fill_expr(tds, size, out);
+            }
+            StmtT::Assign(a, b) => {
+                collect_array_fill_expr(tds, a, out);
+                collect_array_fill_expr(tds, b, out);
+            }
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                collect_array_fill_expr(tds, cond, out);
+                collect_array_fill_stmts(tds, then_branch, out);
+                collect_array_fill_stmts(tds, else_branch, out);
+                for e in ensures.iter() {
+                    collect_array_fill_expr(tds, e, out);
+                }
+            }
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => {
+                collect_array_fill_expr(tds, cond, out);
+                for e in inv.iter().chain(requires.iter()).chain(ensures.iter()) {
+                    collect_array_fill_expr(tds, e, out);
+                }
+                collect_array_fill_stmts(tds, body, out);
+            }
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => {
+                collect_array_fill_expr(tds, scrutinee, out);
+                for br in branches.iter() {
+                    for p in br.patterns.iter() {
+                        collect_array_fill_expr(tds, p, out);
+                    }
+                    collect_array_fill_stmts(tds, &br.body, out);
+                }
+                collect_array_fill_stmts(tds, default_branch, out);
+                for e in ensures.iter() {
+                    collect_array_fill_expr(tds, e, out);
+                }
+            }
+            StmtT::GhostStmt(_) => {}
+            StmtT::GotoBlock { body, ensures, .. } => {
+                collect_array_fill_stmts(tds, body, out);
+                for e in ensures.iter() {
+                    collect_array_fill_expr(tds, e, out);
+                }
+            }
+            StmtT::Label { ensures, .. } => {
+                for e in ensures.iter() {
+                    collect_array_fill_expr(tds, e, out);
+                }
+            }
+            StmtT::Return(None)
+            | StmtT::Break
+            | StmtT::Continue
+            | StmtT::Goto(..)
+            | StmtT::Error => {}
+        }
+    }
+}
+
+fn emit_array_fill_helpers(tds: &Typedefs, tu: &TranslationUnit) -> Option<Chunk> {
+    let mut fills = BTreeMap::new();
+    for decl in &tu.decls {
+        match &decl.val {
+            DeclT::GlobalVar(g) => {
+                collect_array_fill_type(tds, &g.ty, &mut fills);
+                if let Some(e) = &g.init {
+                    collect_array_fill_expr(tds, e, &mut fills);
+                }
+            }
+            DeclT::FnDecl(f) => {
+                collect_array_fill_type(tds, &f.ret_type, &mut fills);
+                for a in &f.args {
+                    collect_array_fill_type(tds, &a.ty, &mut fills);
+                }
+            }
+            DeclT::FnDefn(d) => {
+                collect_array_fill_type(tds, &d.decl.ret_type, &mut fills);
+                for a in &d.decl.args {
+                    collect_array_fill_type(tds, &a.ty, &mut fills);
+                }
+                collect_array_fill_stmts(tds, &d.body, &mut fills);
+            }
+            _ => {}
+        }
+    }
+    if fills.is_empty() {
+        None
+    } else {
+        Some(Chunk {
+            module: "ArrayFill".to_string(),
+            code: fills.into_values().collect::<Vec<_>>().join("\n"),
+            origin: None,
+        })
+    }
+}
+
 /// A subscript's index when it is a constant, after the casts C wraps it in.
 fn const_index(e: &ExprT) -> Option<u64> {
     match e {
@@ -8655,6 +8872,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     },
                     init: true,
                     array: Some((format!("{}sz", esize), false)),
+                    array_value: None,
                     global: true,
                     union_arm: None,
                     filling: None,
@@ -8683,6 +8901,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     fstar_ty: fty,
                     init: true,
                     array: None,
+                    array_value: None,
                     global: true,
                     union_arm: None,
                     filling: None,
@@ -8784,6 +9003,9 @@ pub fn emit_palow(
     let mut chunks: Vec<Chunk> = structs;
     // Module name -> the interface body to put in its `.fsti`.
     let mut ifaces: HashMap<String, String> = HashMap::new();
+    if let Some(ch) = emit_array_fill_helpers(&tds, tu) {
+        chunks.push(ch);
+    }
     chunks.extend(emit_globals(&tds, tu));
 
     // A `_type` is a hand-written F* type expression with a C name attached.
@@ -9150,6 +9372,11 @@ pub fn emit_palow(
                     .map(|a| a.mode == ParamMode::Out)
                     .collect(),
                 plain_ptrs: fndecl.args.iter().map(|a| is_plain(&tds, &a.ty)).collect(),
+                const_args: fndecl
+                    .args
+                    .iter()
+                    .map(|a| a.mode == ParamMode::Const)
+                    .collect(),
                 arrayptr_args: fndecl
                     .args
                     .iter()
@@ -9603,6 +9830,9 @@ struct Slot {
     /// time. A global's are not, because static storage is zero-initialised
     /// before the program starts, so every element already holds a value.
     array: Option<(String, bool)>,
+    /// The exact sequence held by a fully initialised local array when the
+    /// emitter produced it as one constant write.
+    array_value: Option<String>,
     /// Set when the slot is a mutable global. Its storage outlives the
     /// function, so the ownership arrives in the contract and must not be
     /// allocated on entry or released on exit.
@@ -9856,6 +10086,9 @@ struct Callee {
     /// Which parameters are `_plain`, by position. A literal has no ownership
     /// to give, so its address may only be passed to one of these.
     plain_ptrs: Vec<bool>,
+    /// Which parameters are read-only borrows; array borrows have an explicit
+    /// permission witness before their erased value witness.
+    const_args: Vec<bool>,
     /// Which parameters are `_array`s, and so want a whole sequence's
     /// ownership rather than a single pointee's.
     arr_args: Vec<bool>,
@@ -10261,6 +10494,7 @@ impl<'a> Body<'a> {
                 fstar_ty: ety,
                 init: false,
                 array: Some((format!("{}sz", esize), true)),
+                array_value: None,
                 global: true,
                 union_arm: Some((un, arm.val.to_string())),
                 holds_fn: BTreeMap::new(),
@@ -10288,6 +10522,7 @@ impl<'a> Body<'a> {
             fstar_ty: fty,
             init: false,
             array: None,
+            array_value: None,
             // The union's own storage is released by whoever owns it; this
             // slot only records what is in it.
             global: true,
@@ -10364,6 +10599,7 @@ impl<'a> Body<'a> {
                 fstar_ty: fty,
                 init: false,
                 array: None,
+                array_value: None,
                 global: true,
                 union_arm: None,
                 filling: None,
@@ -10397,6 +10633,7 @@ impl<'a> Body<'a> {
             fstar_ty: fty,
             init: false,
             array: None,
+            array_value: None,
             global: true,
             union_arm: None,
             filling: None,
@@ -10779,6 +11016,7 @@ impl<'a> Body<'a> {
             fstar_ty,
             init: true,
             array: None,
+            array_value: None,
             global: false,
             union_arm: None,
             filling: None,
@@ -11801,6 +12039,7 @@ impl<'a> Body<'a> {
             fstar_ty: fsty,
             init: false,
             array: None,
+            array_value: None,
             global: true,
             union_arm: None,
             filling: None,
@@ -12354,6 +12593,9 @@ impl<'a> Body<'a> {
         } else {
             format!("{}_repr", pn)
         };
+        if writing && let Some(s) = self.slots.iter_mut().find(|s| s.addr == arr) {
+            s.array_value = None;
+        }
         self.lines.push(format!(
             "array_offset_fits {} {} {} {}_alignof {};",
             repr, arr, esize, pn, i
@@ -14019,10 +14261,12 @@ impl<'a> Body<'a> {
         }
         let outs = c.outs.clone();
         let plain_ptrs = c.plain_ptrs.clone();
+        let const_args = c.const_args.clone();
         let arr_args = c.arr_args.clone();
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
         let mut out = format!("func_{}", name.val);
+        let mut implicit_args: Vec<String> = Vec::new();
         for (i, a) in args.iter().enumerate() {
             // A literal's address carries nothing, so a parameter that wants
             // ownership -- an `_array`, or any pointer that is not `_plain` --
@@ -14129,7 +14373,19 @@ impl<'a> Body<'a> {
                 let held: Vec<String> = slot.holds_fn.values().cloned().collect();
                 self.laundered.extend(held);
             }
+            if arr_args.get(i) == Some(&true)
+                && let Some(slot) = self.slots.iter().find(|s| s.addr == v)
+                && let Some(value) = &slot.array_value
+            {
+                if const_args.get(i) == Some(&true) {
+                    implicit_args.push("#1.0R".to_string());
+                }
+                implicit_args.push(format!("#(hide {})", value));
+            }
             out += &format!(" {}", v);
+        }
+        for a in implicit_args {
+            out += &format!(" {}", a);
         }
         if args.is_empty() {
             out += " ()";
@@ -14294,6 +14550,10 @@ impl<'a> Body<'a> {
         self.env
             .push_var_decl(&id, ty.clone(), crate::env::LocalDeclKind::LValue);
         self.alloc_slot(&id, &ty)?;
+        if let Some((_, _, term)) = const_array(self.tds, &ty, e) {
+            self.const_init_array_slot(&name, &ty, &term)?;
+            return Ok(name.to_string());
+        }
         let elems = elems.clone();
         let base = ExprT::Var(id).with_loc(e.loc.clone());
         for (i, x) in elems.iter().enumerate() {
@@ -14307,6 +14567,38 @@ impl<'a> Body<'a> {
             self.stmt(&st)?;
         }
         Ok(name.to_string())
+    }
+
+    fn const_init_array_slot(&mut self, name: &str, ty: &Type, term: &str) -> Result<(), String> {
+        let TypeT::FixedArray(elem, n) = &self.tds.resolve(ty).val else {
+            return Err(format!("local `{}` is not an array", name));
+        };
+        let (Some(pn), Some(esize), Some(ety)) = (
+            palow_name(self.tds, elem),
+            palow_sizeof(self.tds, elem),
+            fstar_type(self.tds, elem),
+        ) else {
+            return Err(format!(
+                "local `{}` is an array of {}",
+                name,
+                describe(self.tds.resolve(elem))
+            ));
+        };
+        let Some(i) = self.slots.iter().rposition(|s| s.name == name) else {
+            return Err(format!("local `{}` has no stack slot", name));
+        };
+        let addr = self.slots[i].addr.clone();
+        self.lines.push(format!(
+            "{}_from {} {} 0sz;",
+            fill_name(&pn, esize, *n),
+            addr,
+            term
+        ));
+        self.slots[i].array = Some((format!("{}sz", esize), false));
+        self.slots[i].array_value = Some(term.to_string());
+        self.slots[i].fstar_ty = format!("(s: Seq.seq {} {{ Seq.length s == {} }})", ety, n);
+        self.slots[i].init = true;
+        Ok(())
     }
 
     /// A literal handed to a parameter that wants ownership. A `_plain`
@@ -14383,6 +14675,7 @@ impl<'a> Body<'a> {
                 fstar_ty: format!("(s: Seq.seq (option {}) {{ Seq.length s == {} }})", ety, n),
                 init: true,
                 array: Some((format!("{}sz", esize), true)),
+                array_value: None,
                 global: false,
                 union_arm: None,
                 filling: None,
@@ -14414,6 +14707,7 @@ impl<'a> Body<'a> {
                 .ok_or_else(|| format!("local `{}` has no F* type", name.val))?,
             init: false,
             array: None,
+            array_value: None,
             global: false,
             union_arm: None,
             filling: None,
@@ -15884,6 +16178,7 @@ impl<'a> Body<'a> {
                     ),
                     init: true,
                     array: Some((format!("{}sz", esize), true)),
+                    array_value: None,
                     global: false,
                     union_arm: None,
                     filling: None,
@@ -15944,6 +16239,12 @@ impl<'a> Body<'a> {
                     if let ExprT::ArrayInit { elems, .. } = &strip_vattr(rhs).val {
                         if elems.len() as u64 != *n {
                             return Err("an array initialiser of another length".to_string());
+                        }
+                        if let ExprT::Var(name) = &strip_vattr(lhs).val
+                            && let Some((_, _, term)) = const_array(self.tds, &ty, rhs)
+                        {
+                            self.const_init_array_slot(&name.val, &ty, &term)?;
+                            return Ok(());
                         }
                         let elems = elems.clone();
                         for (i, e) in elems.iter().enumerate() {
@@ -17133,11 +17434,19 @@ impl<'a> Body<'a> {
             }
             // An array's storage view already covers whatever its elements
             // hold, so there is nothing to forget first.
-            if let Some((esize, _)) = array {
-                self.lines.push(format!(
-                    "array_stack_free {}_repr {} {} {}_alignof;",
-                    pn, addr, esize, pn
-                ));
+            if let Some((esize, maybe)) = array {
+                if maybe {
+                    self.lines.push(format!(
+                        "array_stack_free {}_repr {} {} {}_alignof;",
+                        pn, addr, esize, pn
+                    ));
+                } else {
+                    self.lines.push(format!(
+                        "array_forget_full {}_repr {} {} {}_alignof;",
+                        pn, addr, esize, pn
+                    ));
+                    self.lines.push(format!("mem_stack_free {};", addr));
+                }
                 continue;
             }
             // A struct-typed field left half-built is put back first, so
@@ -18398,6 +18707,7 @@ fn emit_body(
                     fstar_ty: fty,
                     init: false,
                     array: None,
+                    array_value: None,
                     // Not ours to release: the caller allocated it.
                     global: true,
                     union_arm: None,
