@@ -9802,6 +9802,9 @@ struct BranchResult {
     /// Whether the arm ends in a call that does not return.
     diverged: bool,
     inits: Vec<bool>,
+    /// Which fields of each enclosing slot have been written while the slot
+    /// is still scattered into uninitialised storage.
+    scattered: Vec<BTreeSet<String>>,
     /// Which function, and which allocated block, each enclosing slot is
     /// known to hold on this path.
     holds: Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>,
@@ -10838,6 +10841,18 @@ impl<'a> Body<'a> {
                         .find(|b| b.var == *v.val && b.checked && !b.freed)
                         .unwrap();
                     Ok(b.tmp.clone())
+                }
+                ExprT::Var(v)
+                    if self
+                        .slots
+                        .iter()
+                        .rev()
+                        .any(|s| s.name == format!("*{}", v.val)) =>
+                {
+                    // A single-object `_out` struct parameter is tracked as a
+                    // slot for its pointee (`*p`) even though the contract
+                    // does not grant ordinary dereference ownership for `p`.
+                    self.rvalue(inner)
                 }
                 ExprT::Var(v)
                     if self.params.contains(&*v.val.to_string())
@@ -16029,19 +16044,22 @@ impl<'a> Body<'a> {
                 // the reference.
                 let (_, last) = arms.last().unwrap();
                 let inits = last.inits.clone();
+                let scattered = last.scattered.clone();
                 let outs = last.out_params.clone();
-                if arms
-                    .iter()
-                    .any(|(_, a)| a.inits != inits || a.out_params != outs)
-                {
+                if arms.iter().any(|(_, a)| {
+                    a.inits != inits || a.scattered != scattered || a.out_params != outs
+                }) {
                     return Err(
                         "a `switch` whose cases leave different variables initialised".to_string(),
                     );
                 }
                 restore(self);
                 self.out_params = outs;
-                for (slot, init) in self.slots.iter_mut().zip(&inits) {
+                for (slot, (init, scattered)) in
+                    self.slots.iter_mut().zip(inits.iter().zip(scattered))
+                {
                     slot.init = *init;
+                    slot.scattered = scattered;
                 }
                 // As for an `if`: a slot only still holds a known function
                 // after the join if every case left the same one in it.
@@ -16481,15 +16499,22 @@ impl<'a> Body<'a> {
                 }
                 let live_res = if then.diverged { &els } else { &then };
                 if surviving.is_none()
-                    && (then.inits != els.inits || then.out_params != els.out_params)
+                    && (then.inits != els.inits
+                        || then.scattered != els.scattered
+                        || then.out_params != els.out_params)
                 {
                     return Err(
                         "an `if` whose branches leave different variables initialised".to_string(),
                     );
                 }
                 self.out_params = live_res.out_params.clone();
-                for (slot, init) in self.slots.iter_mut().zip(&live_res.inits) {
+                for (slot, (init, scattered)) in self
+                    .slots
+                    .iter_mut()
+                    .zip(live_res.inits.iter().zip(&live_res.scattered))
+                {
                     slot.init = *init;
+                    slot.scattered = scattered.clone();
                 }
                 // Which function a slot holds is only known after the join if
                 // both arms left the same one in it. Without this, a pointer
@@ -16891,6 +16916,10 @@ impl<'a> Body<'a> {
                 lines: std::mem::take(&mut self.lines),
                 diverged,
                 inits: self.slots[..mark].iter().map(|s| s.init).collect(),
+                scattered: self.slots[..mark]
+                    .iter()
+                    .map(|s| s.scattered.clone())
+                    .collect(),
                 holds: self.slots[..mark]
                     .iter()
                     .map(|s| (s.holds_fn.clone(), s.holds_block.clone()))

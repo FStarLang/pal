@@ -1362,9 +1362,12 @@ new facts about memory.
   that.
 - An `if`'s two arms must agree on which locals and `_out` parameters hold a
   value and which still hold uninitialised storage; those are different
-  slprops and there is nothing to join them to. This is a real restriction on
-  the C we accept rather than an artefact. The `_ensures` a user writes on an
-  `if` is ignored, since Pulse infers the join without it.
+  slprops and there is nothing to join them to. For a single-object `_out`
+  struct, the tracked slot is the pointee `*p`: writing `p->f` in both arms
+  leaves the same scattered-field set, and writing every field in both arms
+  leaves the same gathered value. This is a real restriction on the C we
+  accept rather than an artefact. The `_ensures` a user writes on an `if` is
+  ignored, since Pulse infers the join without it.
 - The layer-1 points-to predicates are abstract (`CTypes.fsti`,
   `Scalar.fsti`). This is not a matter of taste: a transparent definition
   makes F\* unfold to `encode` when it has to equate two branch-joined values,
@@ -4077,13 +4080,17 @@ new facts about memory.
    Three translator changes came out of the port. A `requires` clause is now
    emitted one per line rather than joined with `**`, because a spliced clause
    may be a top-level `exists*`, which does not parse to the right of a `**`.
-   A single-object `_out` parameter is registered as an uninitialised slot, so
-   the field writes scatter into the caller's storage and gather at the end
-   exactly as they do for a local -- which deletes the last two ghost
-   statements from `PalPacketSpaceInitialize`. And such a parameter no longer
-   promises its points-to back when the author's `_ensures` states ownership
-   itself: the mode constrains what arrives, the contract says what leaves,
-   and promising the object twice is promising it once too often.
+   A single-object `_out` parameter is registered as an uninitialised slot for
+   the pointee address `var_p`, so the field writes through `p->f` scatter into
+   the caller's storage and gather at the end exactly as they do for a local --
+   including nested struct fields and reads of fields already written. The
+   address rule that normally rejects dereferencing an ungranted pointer first
+   checks for that `*p` slot; scalar `_out` parameters and `_out` arrays keep
+   their existing paths. This deletes the last two ghost statements from
+   `PalPacketSpaceInitialize`. And such a parameter no longer promises its
+   points-to back when the author's `_ensures` states ownership itself: the
+   mode constrains what arrives, the contract says what leaves, and promising
+   the object twice is promising it once too often.
 
    The second real-code example, `intrusive_list`, went the same way. The
    first surprise was that removing its backlog marker did not add work but
