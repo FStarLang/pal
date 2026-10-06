@@ -7950,6 +7950,19 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
                 return None;
             }
             let si = tds.structs.get(&*n.val)?;
+            // Every initialiser has to land in a field that is published.
+            // A bit-field does not: it lives in `si.bitfields` and is packed
+            // into a synthetic storage unit that appears in `si.fields` under
+            // another name, so looking the designator up by name would miss
+            // it, the unit would silently take its zero value, and `acquire`
+            // would then assume that memory holds a value the program never
+            // wrote. Publishing nothing is always sound, so give up instead.
+            if inits
+                .iter()
+                .any(|(i, _)| !si.fields.iter().any(|f| *i.val == *f.name))
+            {
+                return None;
+            }
             let mut vals = Vec::new();
             for f in &si.fields {
                 let v = match inits.iter().find(|(i, _)| *i.val == *f.name) {
