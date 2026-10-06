@@ -820,17 +820,38 @@ keeps the matcher exactly as it was: the whole suite is unchanged.
 only because layer 0 has no implementation module to derive them in.
 
 In this first cut the index is still not *enforced*: no layer-1 predicate
-constrains it, so no existing proof changes.
+constrains it, so no existing proof changes. It is worth being precise about
+what that leaves open, because it sets the shape of the work. Every typed
+predicate is *defined* as an existential over bytes, and `mem_pts_to` is
+itself an existential over the index, so the index a typed object hides is
+completely unconstrained. Nothing stops this:
+
+```fstar
+ghost fn launder (a: ptr) (#x: Int32.t) (y: float32)
+  requires int32_t_pts_to a 1.0R x
+  requires pure (forall (b: bytes). int32_t_repr x b ==> float32_t_repr y b)
+  ensures  float32_t_pts_to a 1.0R y
+{ int32_t_reveal a; with b. assert (mem_pts_to a 1.0R b);
+  float32_t_conceal a #1.0R #b #y; }
+```
+
+which typechecks today. The hypothesis is about *bits* -- it says the two
+values share an object representation, which is what a pun means -- and
+`float32_t_conceal` asks for nothing about the index, so the effective type is
+dropped unconditionally. Two things follow. There is no distinguished "pun"
+operation to guard: `reveal` followed by `conceal` is the pun, and `claim` is
+not involved. And enforcement cannot be a side condition carried next to a
+typed points-to, because `reveal` would spend the points-to and leave the side
+condition describing nothing.
 
 #### What enforcement will cost
 
-Switching it on is the disruptive part, and the shape is now clear. The index
-is state, so the fact that these bytes are accessible at type `T` cannot be a
-duplicable side condition -- it has to live inside `T_pts_to`. But it need not
-live there *precisely*: the typed layer never needs to know the index, only
-that `read_ok e T_ctype` holds of it. That predicate is established once, by
-`T_claim`, and preserved by every `T`-write, so each typed points-to grows one
-existential and one `pure` conjunct:
+Switching it on is the disruptive part. The index is state, so the fact that
+these bytes are accessible at type `T` cannot be a duplicable side condition --
+it has to live inside `T_pts_to`. For *reads* it need not live there
+precisely: `read_ok` never looks at `fixed`, so knowing `read_ok e T_ctype`
+of the hidden index is enough, and each typed points-to grows one existential
+and one `pure` conjunct:
 
 ```fstar
 let uint32_t_pts_to a p x =
@@ -843,6 +864,21 @@ changes is what `T_reveal` and `T_conceal` say, and the fact that they hand
 out `mem_pts_to_at` rather than `mem_pts_to`. That is the churn -- every
 byte-facing step in the aggregate, array and union machinery has to use the
 index-carrying split and join.
+
+*Stores* are the part that is not settled, and the open question is where
+`fixed` lives. `store_ok` is the side condition on a store, and it is the only
+rule that consults `fixed`, so a typed write has to be able to see it. The
+obvious cheap answer -- a `declared a u` token issued at the start of a
+lifetime, in the manner of `freeable` -- does not work, because blocking a
+retype means requiring the token's *absence*, which separation logic cannot
+express. Nor is the `read_ok e T_ctype` above enough: it leaves `e`
+unconstrained in the other direction too, so an allocated object cannot prove
+`fixed = false` about itself and legal retyping would be blocked along with
+the illegal kind. What a typed points-to has to pin is therefore
+`e == etypes_of T_ctype fx` for a *known* `fx`, which means `fx` appears
+somewhere in the signature -- as a boolean parameter, as a full index
+parameter, or by splitting each predicate into declared and allocated forms.
+All three churn every hand-written contract, and the choice is open.
 
 Where the rule bites is *re-typing*. Fresh `malloc` storage has an all-`None`
 index, which satisfies `read_ok` at every type, so claiming it costs nothing.
