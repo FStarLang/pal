@@ -1,5 +1,6 @@
 #include "pal.h"
 #include <stdbool.h>
+#include <string.h>
 
 struct pt {
   int x;
@@ -62,4 +63,17 @@ int caller(void) _ensures(return == 3) {
   struct pt p;
   mk_flat(&p);
   return p.x + p.y;
+}
+
+/* A whole write initialises the `_out` object, so the field writes after it
+   are ordinary writes rather than writes into uninitialised storage. */
+void zero_then_fields(_out struct pt *p, int y) _ensures(p->x == 0 && p->y == y) {
+  memset(p, 0, sizeof(struct pt));
+  p->y = y;
+}
+
+void whole_then_field(_out struct pt *p) _ensures(p->x == 13 && p->y == 14) {
+  struct pt q = {13, 0};
+  *p = q;
+  p->y = 14;
 }

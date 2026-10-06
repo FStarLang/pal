@@ -100,11 +100,11 @@ let array_pts_to (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat) (ealign: n
 ghost fn literal_share_drop (#t: Type0) (t_repr: t -> bytes -> prop)
                             (esize: SZ.t) (ealign: SZ.t) (xs: list t)
   requires exists* p. array_pts_to t_repr (SZ.v esize) (SZ.v ealign)
-             (literal_addr xs) p (Seq.seq_of_list xs)
+             (literal_addr xs) p (Pulse.Lib.C.Palow.ConstSeq.const_seq xs)
   ensures  emp
 {
   drop_ (exists* p. array_pts_to t_repr (SZ.v esize) (SZ.v ealign)
-           (literal_addr xs) p (Seq.seq_of_list xs))
+           (literal_addr xs) p (Pulse.Lib.C.Palow.ConstSeq.const_seq xs))
 }
 
 (* The two directions between an array's ownership and the bytes under it.

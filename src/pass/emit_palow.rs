@@ -8026,6 +8026,11 @@ fn const_array(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<(String, u64, Stri
 }
 
 fn array_fill_shape(tds: &Typedefs, elem: &Type, len: u64) -> Option<(String, String, u64, u64)> {
+    // A fill is stated over the element's `_repr`, which a struct with an
+    // array field does not have; such an array is never filled this way.
+    if !has_repr(tds, elem) {
+        return None;
+    }
     Some((
         palow_name(tds, elem)?,
         fstar_type(tds, elem)?,
@@ -8374,8 +8379,27 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
             // abstract rather than refused. A reader learns that every read
             // yields *the same* value, which is the whole content of `const`
             // at an unknown initialiser.
+            // `_pulse_opaque_to_smt` means the same as for an array: the value
+            // is there for a proof to reveal, not for the solver to unfold
+            // unasked. It matters for a table of function pointers above all.
+            // Each entry's `pre_of`/`post_of` unfolds to the callee's
+            // contract, so a transparent table puts every one of those
+            // ownership predicates in front of the solver in every module
+            // that can see the table -- whether or not it ever reads it.
             match value {
-                Some((_, v)) => out += &format!("let var_{} : {} = {}\n", name, fty, v),
+                Some((_, v)) => {
+                    out += &format!(
+                        "{}let var_{} : {} = {}\n",
+                        if gv.opaque_to_smt {
+                            "[@@\"opaque_to_smt\"]\n"
+                        } else {
+                            ""
+                        },
+                        name,
+                        fty,
+                        v
+                    )
+                }
                 None => out += &format!("assume val var_{} : {}\n", name, fty),
             }
             // The permission is existentially quantified, so a client can read
@@ -9731,6 +9755,12 @@ fn into_modules(chunks: Vec<Chunk>, ifaces: &HashMap<String, String>) -> Vec<Pal
     let mut deps: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut out: Vec<PalowModule> = Vec::new();
     for ch in chunks {
+        // A name the chunk defines itself is its own, even when an earlier
+        // module defines the same one: each function that shares a literal
+        // declares its own `acquire_literal_<n>`, and resolving those to the
+        // first module that happened to use the name would make every later
+        // one open it, and everything it opens.
+        let own: HashSet<String> = defined_names(&ch.code).into_iter().collect();
         let mut opens: BTreeSet<String> = BTreeSet::new();
         let mut word = String::new();
         for c in ch.code.chars().chain(std::iter::once(' ')) {
@@ -9739,7 +9769,7 @@ fn into_modules(chunks: Vec<Chunk>, ifaces: &HashMap<String, String>) -> Vec<Pal
                 continue;
             }
             if !word.is_empty() {
-                if let Some(m) = owner.get(&word) {
+                if let Some(m) = owner.get(&word).filter(|_| !own.contains(&word)) {
                     if *m != ch.module {
                         opens.insert(m.clone());
                     }
@@ -10284,6 +10314,9 @@ struct Body<'a> {
     /// shares read-only, naming that literal's element representation. See
     /// `literal_share_arg`.
     lit_shares: Vec<(String, String)>,
+    /// The module-level `let`s naming each literal's element list, by the
+    /// list they name. See `literal_list`.
+    lit_lists: Vec<(String, String)>,
     /// Parameters whose `_own` is currently unfolded. Deep ownership is held
     /// folded, because that is the form a contract states and a call passes;
     /// a statement that reaches through a pointer field scatters it, uses the
@@ -13568,10 +13601,8 @@ impl<'a> Body<'a> {
                 for x in elems {
                     vs.push(self.init_value(&elem, x)?);
                 }
-                Ok(format!(
-                    "(Pulse.Lib.C.Palow.Ptr.literal_addr [{}])",
-                    vs.join("; ")
-                ))
+                let xs = self.literal_list(&elem, &vs);
+                Ok(format!("(Pulse.Lib.C.Palow.Ptr.literal_addr {})", xs))
             }
             // C says the value of an assignment is the value stored, after
             // the conversion to the left operand's type -- which elaboration
@@ -14654,6 +14685,27 @@ impl<'a> Body<'a> {
         Ok(addr)
     }
 
+    /// A literal's elements, named by a module-level `let`. Written inline,
+    /// a list of machine-integer constants is re-checked wherever a term
+    /// mentions it -- one range condition per element, posed to the solver in
+    /// the full context of the body -- and in a body that holds a wide
+    /// structure those trivial conditions can time out. The top-level
+    /// definition is checked once, without the solver, and the name is all
+    /// the body then has to type.
+    fn literal_list(&mut self, elem: &Type, vs: &[String]) -> String {
+        let xs = format!("[{}]", vs.join("; "));
+        let xs = match fstar_type(self.tds, elem) {
+            Some(t) => format!("({} <: list ({}))", xs, t),
+            None => xs,
+        };
+        if let Some((_, n)) = self.lit_lists.iter().find(|(l, _)| *l == xs) {
+            return n.clone();
+        }
+        let n = format!("literal_list_{}", self.lit_lists.len());
+        self.lit_lists.push((xs, n.clone()));
+        n
+    }
+
     fn literal_share_arg(&mut self, a: &Expr) -> Result<String, String> {
         let mut lit = Rc::new(strip_vattr(a).clone());
         while let ExprT::Cast(inner, _) = &lit.clone().val {
@@ -14677,8 +14729,13 @@ impl<'a> Body<'a> {
         for x in elems {
             vs.push(self.init_value(elem, x)?);
         }
-        let xs = format!("[{}]", vs.join("; "));
+        let xs = self.literal_list(elem, &vs);
         let addr = format!("(Pulse.Lib.C.Palow.Ptr.literal_addr {})", xs);
+        // The contents are `const_seq`, as for an initialised stack array or
+        // an immutable global, so the same indexing lemmas apply to all three
+        // and a specification can name one sequence for whichever it is given.
+        // As for a stack array, the length rides along in the type from
+        // `const_seq_with_len`: the solver cannot count a list literal itself.
         // The ownership is assumed here rather than taken from a library
         // function, because a library function would have to take the
         // element's representation as a parameter and a trusted one that
@@ -14688,8 +14745,13 @@ impl<'a> Body<'a> {
         // assumption says one true thing about one piece of static data --
         // the same trust an immutable global's `acquire_var_*` asks for.
         let own = format!(
-            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Seq.seq_of_list {})",
-            pn, esize, pn, addr, xs
+            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Pulse.Lib.C.Palow.ConstSeq.const_seq_with_len {} {})",
+            pn,
+            esize,
+            pn,
+            addr,
+            xs,
+            vs.len()
         );
         let name = match self.lit_shares.iter().find(|(o, _)| *o == own) {
             Some((_, d)) => d
@@ -15633,6 +15695,15 @@ impl<'a> Body<'a> {
                     self.out_params.remove(i);
                     self.lines
                         .push(format!("{}_write_uninit var_{} {};", pn, v.val, value));
+                    // A struct `_out` pointee is also tracked as the slot
+                    // `*p`, so that its fields can be written one at a time.
+                    // After a whole write -- `*p = v`, or the zeroing a
+                    // `memset` is lowered to -- the object is initialised,
+                    // and a later field write is an ordinary one.
+                    let star = format!("*{}", v.val);
+                    if let Some(s) = self.slots.iter_mut().rev().find(|s| s.name == star) {
+                        s.init = true;
+                    }
                     return Ok(());
                 }
             }
@@ -18711,6 +18782,7 @@ fn emit_body(
         nested_scatter: BTreeMap::new(),
         prescattered: HashSet::new(),
         lit_shares: Vec::new(),
+        lit_lists: Vec::new(),
         own_open: Vec::new(),
         loop_mark: None,
         mirrors: HashMap::new(),
@@ -18818,7 +18890,12 @@ fn emit_body(
     Ok(TranslatedBody {
         lines: b.lines,
         divergent: b.divergent,
-        decls: b.lit_shares.into_iter().map(|(_, d)| d).collect(),
+        decls: b
+            .lit_lists
+            .into_iter()
+            .map(|(xs, n)| format!("let {} = {}\n\n", n, xs))
+            .chain(b.lit_shares.into_iter().map(|(_, d)| d))
+            .collect(),
         uses: b.uses,
     })
 }
