@@ -1362,9 +1362,12 @@ new facts about memory.
   that.
 - An `if`'s two arms must agree on which locals and `_out` parameters hold a
   value and which still hold uninitialised storage; those are different
-  slprops and there is nothing to join them to. This is a real restriction on
-  the C we accept rather than an artefact. The `_ensures` a user writes on an
-  `if` is ignored, since Pulse infers the join without it.
+  slprops and there is nothing to join them to. For a single-object `_out`
+  struct, the tracked slot is the pointee `*p`: writing `p->f` in both arms
+  leaves the same scattered-field set, and writing every field in both arms
+  leaves the same gathered value. This is a real restriction on the C we
+  accept rather than an artefact. The `_ensures` a user writes on an `if` is
+  ignored, since Pulse infers the join without it.
 - The layer-1 points-to predicates are abstract (`CTypes.fsti`,
   `Scalar.fsti`). This is not a matter of taste: a transparent definition
   makes F\* unfold to `encode` when it has to equate two branch-joined values,
@@ -1560,11 +1563,12 @@ new facts about memory.
    Assuming the address rather than allocating it is what C says -- a global
    has one fixed address for the whole run -- and it is why `&g == &g` holds
    definitionally rather than needing a lemma. The one thing that had to be
-   separated is the address from the value: a struct or array global still has
-   an address even though the model has no constant for its contents, so `&g`
-   is translated for every addressable global while reads are translated only
-   where a value was published. An access *through* a global's address is
-   refused, because nothing here owns the storage behind it.
+   separated is the address from the value: every addressable global has an
+   address, while reads are translated only where a value was published. Scalar
+   constants, constant arrays, and now constant structs whose initialisers are
+   closed all publish that value; anything outside the syntactic constant
+   subset remains an abstract `assume val`. An access *through* a global's
+   address is refused, because nothing here owns the storage behind it.
 
    This was the largest single unblocking so far -- 17 bodies -- mostly because
    a great many test functions mention a constant in passing.
@@ -1970,6 +1974,17 @@ new facts about memory.
    pointer, which is a statement about values rather than about bytes, so
    unlike the `memset` case it has an answer for a pointer and that answer is
    `null` on every target.
+
+   Struct-valued constants use the same static-initialisation rule field by
+   field. A `static const struct` with a brace initialiser is published as the
+   generated record literal when every named field is itself a closed constant:
+   integer and boolean literals, null pointers, global addresses, function
+   designators (as the Palow `of_fn_div` value of the generated `Funcptr_*`
+   wrapper), nested structs and fixed arrays. Fields the initializer omits are
+   filled with the C static zero for their type, so omitted callback fields are
+   `null`, omitted integer fields are typed zeroes, and omitted nested structs
+   are recursively zeroed. If any field falls outside that subset, the global
+   keeps the old abstract value instead of rejecting the program.
 
    `extern const T g;` stays refused. It is immutable, but which value it is
    was decided in another translation unit, and Palow emits one module per unit
@@ -3111,7 +3126,12 @@ new facts about memory.
    made the object whole again: without it the emitter would go on treating
    the object as a heap of fields, and the next write through it would be
    lowered as a write into storage that the author's gather has already
-   consumed. `test/nested_scatter` covers all of it.
+   consumed. A branch carries all of this: which fields of each slot have
+   been written, which objects are scattered one level further in, and the
+   slots standing for a nested field's own storage all cross the join, and
+   the two arms must agree on them. Without that, the code after the join
+   started the fill over, scattering storage that was already out of its
+   parent. `test/nested_scatter` covers all of it.
 
    This is what the old model's source-level `$unfold-uninit` was for, so
    under `PALOW` that annotation is now a no-op macro in the one test that
@@ -3186,6 +3206,17 @@ new facts about memory.
    Palow names an array by the address of its first element, and the
    ownership, which is what really differs between the two, is not part of
    the value.
+
+   A local fixed-size array whose initializer is already a constant sequence is
+   filled by one emitted call to the generated array-fill recursion for that
+   element type and length. The argument is the same `const_seq_with_len [...]`
+   term used for immutable array globals, including the implicit NUL and any
+   trailing zero-fill clang put into a string or brace initializer. The helper
+   still writes each element in Pulse, using the ordinary focus / write-uninit /
+   unfocus path, but the function body sees the post-state as a plain
+   `array_pts_to ... (const_seq_with_len [...])` rather than as a chain of
+   `Seq.upd` over `option` cells. If any element is not a `const_expr`, the
+   emitter keeps the old per-element assignment path.
 
    A struct field whose type is an array now decays like any other array: to
    the address of its first element, which under Palow is the field's own
@@ -4073,13 +4104,17 @@ new facts about memory.
    Three translator changes came out of the port. A `requires` clause is now
    emitted one per line rather than joined with `**`, because a spliced clause
    may be a top-level `exists*`, which does not parse to the right of a `**`.
-   A single-object `_out` parameter is registered as an uninitialised slot, so
-   the field writes scatter into the caller's storage and gather at the end
-   exactly as they do for a local -- which deletes the last two ghost
-   statements from `PalPacketSpaceInitialize`. And such a parameter no longer
-   promises its points-to back when the author's `_ensures` states ownership
-   itself: the mode constrains what arrives, the contract says what leaves,
-   and promising the object twice is promising it once too often.
+   A single-object `_out` parameter is registered as an uninitialised slot for
+   the pointee address `var_p`, so the field writes through `p->f` scatter into
+   the caller's storage and gather at the end exactly as they do for a local --
+   including nested struct fields and reads of fields already written. The
+   address rule that normally rejects dereferencing an ungranted pointer first
+   checks for that `*p` slot; scalar `_out` parameters and `_out` arrays keep
+   their existing paths. This deletes the last two ghost statements from
+   `PalPacketSpaceInitialize`. And such a parameter no longer promises its
+   points-to back when the author's `_ensures` states ownership itself: the
+   mode constrains what arrives, the contract says what leaves, and promising
+   the object twice is promising it once too often.
 
    The second real-code example, `intrusive_list`, went the same way. The
    first surprise was that removing its backlog marker did not add work but

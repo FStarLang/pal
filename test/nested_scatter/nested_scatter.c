@@ -168,3 +168,22 @@ _ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
 	h->list.next = 0;
 	h->list.prev = 0;
 }
+
+/* A branch that leaves an object part-way through being filled, with the
+   storage of a nested field still out of its parent, has to carry that across
+   the join. The arms agree, so the code after the `if` continues the fill it
+   started rather than scattering what is already scattered. */
+unsigned int join_nested(int c)
+{
+	struct outer o;
+	o.tag = 0;
+	if (c) {
+		o.h.list.next = 0;
+	} else {
+		o.h.list.next = 0;
+	}
+	o.h.list.prev = 0;
+	o.h.qlen = 1;
+	o.h.lock = 0;
+	return o.h.qlen;
+}
