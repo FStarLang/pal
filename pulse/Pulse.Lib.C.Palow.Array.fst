@@ -83,6 +83,30 @@ let array_pts_to (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat) (ealign: n
   exists* b. mem_pts_to a p b
              ** pure (array_repr t_repr esize xs b /\ array_aligned esize ealign a)
 
+(* Giving a read-only share of literal storage back. Literal storage is
+   static and nobody owns it, so a share of it is simply dropped; this is
+   proved, not assumed.
+
+   Acquiring one is *not* here. It would have to read `t_repr`, `esize` and
+   `ealign` as parameters, and a trusted function that produces
+   `array_pts_to t_repr ...` for a `t_repr` of the caller's choosing is false:
+   instantiate it with a relation no byte string satisfies and `array_repr`
+   -- which conjoins `t_repr` at every element -- is `False`, so the
+   postcondition yields `pure False` from `emp`. A `_ghost_stmt` can say that
+   in C. The acquisition is therefore emitted per literal, with the element
+   type's own representation written in, next to the function that uses it:
+   each such assumption is a statement about one piece of static data, in the
+   same way an immutable global's `acquire_var_*` is. *)
+ghost fn literal_share_drop (#t: Type0) (t_repr: t -> bytes -> prop)
+                            (esize: SZ.t) (ealign: SZ.t) (xs: list t)
+  requires exists* p. array_pts_to t_repr (SZ.v esize) (SZ.v ealign)
+             (literal_addr xs) p (Seq.seq_of_list xs)
+  ensures  emp
+{
+  drop_ (exists* p. array_pts_to t_repr (SZ.v esize) (SZ.v ealign)
+           (literal_addr xs) p (Seq.seq_of_list xs))
+}
+
 (* The two directions between an array's ownership and the bytes under it.
    Every scalar type publishes this pair under its own name, and a union arm
    or a structure field has to be able to ask for it without knowing which

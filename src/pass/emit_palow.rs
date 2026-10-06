@@ -9371,6 +9371,11 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| a.mode == ParamMode::Out)
                     .collect(),
+                consts: fndecl
+                    .args
+                    .iter()
+                    .map(|a| a.mode == ParamMode::Const)
+                    .collect(),
                 plain_ptrs: fndecl.args.iter().map(|a| is_plain(&tds, &a.ty)).collect(),
                 const_args: fndecl
                     .args
@@ -9443,6 +9448,11 @@ pub fn emit_palow(
                 it.uses.remove(&it.name);
             }
             let mut out = String::new();
+            if let Ok(b) = &body {
+                for d in &b.decls {
+                    out += d;
+                }
+            }
             match &body {
                 Ok(b) if b.divergent => out += "divergent\n",
                 _ => {}
@@ -10083,6 +10093,9 @@ struct Callee {
     /// Which parameters are `_out`, by position. Those arguments are not
     /// evaluated: what is passed is storage, not a value.
     outs: Vec<bool>,
+    /// Which parameters are read-only, by position. A literal may be shared
+    /// directly with these instead of copied to writable stack storage.
+    consts: Vec<bool>,
     /// Which parameters are `_plain`, by position. A literal has no ownership
     /// to give, so its address may only be passed to one of these.
     plain_ptrs: Vec<bool>,
@@ -10267,6 +10280,10 @@ struct Body<'a> {
     /// Storage `$scattered` said is already in pieces, by address, until it
     /// is gathered: the first write into it must not scatter it again.
     prescattered: HashSet<String>,
+    /// The module-level `assume val`s this body needs: one per literal it
+    /// shares read-only, naming that literal's element representation. See
+    /// `literal_share_arg`.
+    lit_shares: Vec<(String, String)>,
     /// Parameters whose `_own` is currently unfolded. Deep ownership is held
     /// folded, because that is the form a contract states and a call passes;
     /// a statement that reaches through a pointer field scatters it, uses the
@@ -14260,6 +14277,7 @@ impl<'a> Body<'a> {
             return Err(format!("`{}`'s contract was dropped", name.val));
         }
         let outs = c.outs.clone();
+        let consts = c.consts.clone();
         let plain_ptrs = c.plain_ptrs.clone();
         let const_args = c.const_args.clone();
         let arr_args = c.arr_args.clone();
@@ -14268,11 +14286,10 @@ impl<'a> Body<'a> {
         let mut out = format!("func_{}", name.val);
         let mut implicit_args: Vec<String> = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            // A literal's address carries nothing, so a parameter that wants
-            // ownership -- an `_array`, or any pointer that is not `_plain` --
-            // cannot be handed one. Saying so here rather than emitting the
-            // address keeps the refusal visible instead of leaving F* to fail
-            // on a missing points-to.
+            // A literal's address carries no writable ownership. A const
+            // array parameter can receive a fractional read-only share of the
+            // static storage; a mutable array parameter still gets the old
+            // stack copy, because it may write.
             // The array behind a *pointer field* is owned by the struct's
             // deep predicate, so handing it to a callee means unfolding that
             // predicate for the length of the statement -- the same borrow a
@@ -14352,6 +14369,11 @@ impl<'a> Body<'a> {
             }
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
+            } else if is_literal(a)
+                && arr_args.get(i) == Some(&true)
+                && consts.get(i) == Some(&true)
+            {
+                self.literal_share_arg(a)?
             } else if is_literal(a) && plain_ptrs.get(i) != Some(&true) {
                 self.literal_arg(a)?
             } else if arrayptr_args.get(i) == Some(&true) {
@@ -14629,6 +14651,67 @@ impl<'a> Body<'a> {
                 pn, addr, esize, pn
             ));
         }
+        Ok(addr)
+    }
+
+    fn literal_share_arg(&mut self, a: &Expr) -> Result<String, String> {
+        let mut lit = Rc::new(strip_vattr(a).clone());
+        while let ExprT::Cast(inner, _) = &lit.clone().val {
+            lit = Rc::new(strip_vattr(inner).clone());
+        }
+        let ty = self.ty_of(&lit)?;
+        let TypeT::FixedArray(elem, _) = &peel(self.tds, &ty).val else {
+            return Err("a literal that is not a fixed array".to_string());
+        };
+        let ExprT::ArrayInit { elems, .. } = &strip_vattr(&lit).val else {
+            return Err("a literal that is not an initialiser".to_string());
+        };
+        let (Some(pn), Some(esize)) = (palow_name(self.tds, elem), palow_sizeof(self.tds, elem))
+        else {
+            return Err(format!("a literal of {}", describe(self.tds.resolve(elem))));
+        };
+        if !has_repr(self.tds, elem) {
+            return Err(format!("a literal of {}", describe(self.tds.resolve(elem))));
+        }
+        let mut vs = Vec::new();
+        for x in elems {
+            vs.push(self.init_value(elem, x)?);
+        }
+        let xs = format!("[{}]", vs.join("; "));
+        let addr = format!("(Pulse.Lib.C.Palow.Ptr.literal_addr {})", xs);
+        // The ownership is assumed here rather than taken from a library
+        // function, because a library function would have to take the
+        // element's representation as a parameter and a trusted one that
+        // produces `array_pts_to t_repr ...` for an arbitrary `t_repr` proves
+        // `False`: see the note in `Pulse.Lib.C.Palow.Array`. Written out per
+        // literal, the representation is the element type's own and the
+        // assumption says one true thing about one piece of static data --
+        // the same trust an immutable global's `acquire_var_*` asks for.
+        let own = format!(
+            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Seq.seq_of_list {})",
+            pn, esize, pn, addr, xs
+        );
+        let name = match self.lit_shares.iter().find(|(o, _)| *o == own) {
+            Some((_, d)) => d
+                .split_whitespace()
+                .nth(2)
+                .expect("a declaration we wrote")
+                .to_string(),
+            None => {
+                let name = format!("acquire_literal_{}", self.lit_shares.len());
+                let decl = format!(
+                    "assume val {} : unit -> stt_ghost unit emp_inames emp\n  (fun _ -> {})\n\n",
+                    name, own
+                );
+                self.lit_shares.push((own, decl));
+                name
+            }
+        };
+        self.lines.push(format!("{} ();", name));
+        self.pending_close.push(format!(
+            "literal_share_drop {}_repr {}sz {}_alignof {};",
+            pn, esize, pn, xs
+        ));
         Ok(addr)
     }
 
@@ -18153,6 +18236,8 @@ fn expr_kind_of(e: &ExprT) -> &'static str {
 struct TranslatedBody {
     lines: Vec<String>,
     divergent: bool,
+    /// Declarations that have to be written above the function itself.
+    decls: Vec<String>,
     /// The functions in this file the body calls, which is what fixes the
     /// order they have to be written out in.
     uses: HashSet<String>,
@@ -18625,6 +18710,7 @@ fn emit_body(
         open_elems: Vec::new(),
         nested_scatter: BTreeMap::new(),
         prescattered: HashSet::new(),
+        lit_shares: Vec::new(),
         own_open: Vec::new(),
         loop_mark: None,
         mirrors: HashMap::new(),
@@ -18732,6 +18818,7 @@ fn emit_body(
     Ok(TranslatedBody {
         lines: b.lines,
         divergent: b.divergent,
+        decls: b.lit_shares.into_iter().map(|(_, d)| d).collect(),
         uses: b.uses,
     })
 }
