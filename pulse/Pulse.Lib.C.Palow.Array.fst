@@ -104,7 +104,8 @@ ghost fn literal_share_drop (#t: Type0) (t_repr: t -> bytes -> prop)
              (literal_addr xs) p (Seq.seq_of_list xs)
   ensures  emp
 {
-  admit ()
+  drop_ (exists* p. array_pts_to t_repr (SZ.v esize) (SZ.v ealign)
+           (literal_addr xs) p (Seq.seq_of_list xs))
 }
 
 (* The two directions between an array's ownership and the bytes under it.

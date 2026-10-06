@@ -62,8 +62,3 @@ void mutable_literal_still_copies(void) {
     observe_mut((char[]){'h', 'i', '\0'});
 }
 
-/* Expected to fail if enabled: first byte is not 'h'.
-void bad_literal(void) {
-    observe_literal("no");
-}
-*/
