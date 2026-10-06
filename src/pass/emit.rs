@@ -1476,6 +1476,7 @@ impl<'a> Emitter<'a> {
                 | InlinePulseToken::TypeAntiquot { .. }
                 | InlinePulseToken::FieldAntiquot { .. }
                 | InlinePulseToken::AuxFnAntiquot { .. }
+                | InlinePulseToken::WitnessAntiquot(_)
                 | InlinePulseToken::Declare { .. } => {}
                 InlinePulseToken::RValueAntiquot { expr, .. }
                 | InlinePulseToken::LValueAntiquot { expr, .. } => {
@@ -1524,6 +1525,20 @@ impl<'a> Emitter<'a> {
                             Doc::text(*before).append("(* $field: not a struct or union type *)")
                         }
                     }
+                }
+                InlinePulseToken::WitnessAntiquot(ct) => {
+                    // Palow derives a call's pre- and postcondition from the
+                    // contract, so the witness is the ghost arguments alone.
+                    // This model builds it differently and spells it as a
+                    // call to `eta_expanded_erased`, so there is nothing to
+                    // translate the marker into.
+                    self.report(
+                        "`$witness` is Palow-only; this model spells the call witness as \
+                         `Pulse.Lib.C.FuncPtr.eta_expanded_erased`"
+                            .to_string(),
+                        &ct.text.loc,
+                    );
+                    Doc::text(ct.before).append("(* $witness: Palow-only *)")
                 }
                 InlinePulseToken::AuxFnAntiquot {
                     before,

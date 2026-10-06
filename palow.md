@@ -1823,12 +1823,17 @@ new facts about memory.
    `$activate`. Everything else is emitted as written, so a statement Palow
    cannot honour fails loudly instead of vanishing.
 
-   One string match survives, and it is not a discard: the eta hint
-   `Pulse.Lib.C.FuncPtr.eta_expanded_erased`, which names the witness of an
-   indirect call. That is information only the author has, and Palow consumes
-   it rather than dropping it -- but it is still spelled as a call to the old
-   model's eager-intro rule, so it should become an antiquotation of its own
-   before the old model goes.
+   The last string match was the one thing on that list Palow *reads* rather
+   than emits: the witness of an indirect call, which is information only the
+   author has, and which was spelled as a call to the old model's eager-intro
+   rule `Pulse.Lib.C.FuncPtr.eta_expanded_erased`. It is now `$witness`, an
+   antiquotation of its own, so no part of the emitter's behaviour depends on
+   a library name any more. Like `$scattered` and `$gathered` it is
+   Palow-only, and for the same reason: the two models need *different*
+   witnesses at the same call -- Palow's is the tuple of ghost arguments
+   alone, the old model's pairs it with a resource witness -- so the call site
+   has to say which it means regardless. The old emitter refuses it with a
+   diagnostic rather than mis-reading it.
 
    Together these are worth thirteen bodies -- the transfer described above,
    reversed and then some. It is not testable in-tree for the same reason the
@@ -4769,7 +4774,7 @@ new facts about memory.
    wrapper was calling its own target without instantiating the ghost
    arguments, which only appear inside a `pure` and so cannot be read off any
    slprop; the witness of an indirect call has the same problem one level up,
-   and is now taken from the author's `eta_expanded_erased` hint, which is
+   and is now taken from the author's `$witness` hint, which is
    what that hint was always for; and a spliced contract clause was going in
    unparenthesised, so an author who wrote one whose top level is an `if`
    either had it refused or had it swallow everything stated after it. A

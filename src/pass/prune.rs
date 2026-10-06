@@ -154,6 +154,7 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
                     deps.insert(DeclName::IncludeModule(tok.text.val.clone()));
                 }
             }
+            InlinePulseToken::WitnessAntiquot(_) => {}
             InlinePulseToken::FieldAntiquot { ty, .. } => {
                 scan_type(deps, ty);
             }

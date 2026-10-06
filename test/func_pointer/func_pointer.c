@@ -152,7 +152,7 @@ void take_pointer(void)
 #ifdef PALOW
     /* Palow's call witness is the tuple of ghost arguments alone: ownership
        is named in the contract, so there is no leading unit component. */
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide 0ul));
+    _ghost_stmt($witness (hide 0ul));
 #else
     _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), 0ul)));
 #endif
@@ -172,7 +172,7 @@ uint32_t take_pointer_ghost_args(void)
     _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_valid _ _ Funcptr_ghost_next.func_ghost_next__fp);
 #endif
 #ifdef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide (41ul, 42ul)));
+    _ghost_stmt($witness (hide (41ul, 42ul)));
 #else
     _ghost_stmt(Pulse.Lib.C.FuncPtr.eta_expanded_erased (hide ((), (41ul, 42ul))));
 #endif

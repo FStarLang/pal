@@ -764,6 +764,13 @@ pub enum InlinePulseToken {
         ident: Rc<Ident>,
         ty: Rc<Type>,
     },
+    /// `$witness` — the ghost arguments that instantiate the contract of the
+    /// indirect call that follows. It stands at the head of the statement and
+    /// emits nothing; the rest of the statement is the witness term. Only the
+    /// author knows it, so there is nothing for the emitter to derive.
+    /// Palow-only: the old model spells the same thing as a call to
+    /// `Pulse.Lib.C.FuncPtr.eta_expanded_erased`, and wants a different tuple.
+    WitnessAntiquot(CodeToken),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]

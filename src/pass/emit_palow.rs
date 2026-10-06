@@ -2261,6 +2261,11 @@ impl<'a> Spec<'a> {
                     out.push_str(ct.before);
                     out.push_str(&ct.text.val);
                 }
+                InlinePulseToken::WitnessAntiquot(_) => {
+                    return Err("`$witness` names the ghost arguments of a call, so it \
+                                belongs to a ghost statement in the body, not to a contract"
+                        .to_string());
+                }
                 InlinePulseToken::RValueAntiquot { before, expr } => {
                     let v = self.value(expr, w)?;
                     out.push_str(before);
@@ -13127,6 +13132,9 @@ impl<'a> Body<'a> {
                     out.push_str(ct.before);
                     out.push_str(&ct.text.val);
                 }
+                // The marker itself is not code: what follows it is the
+                // witness, and the caller takes the rendered remainder.
+                InlinePulseToken::WitnessAntiquot(ct) => out.push_str(ct.before),
                 InlinePulseToken::RValueAntiquot { before, expr } => {
                     // `inline` rather than `rvalue`: a fragment is a single
                     // term, so the loads it needs belong inside it, and a call
@@ -16687,10 +16695,9 @@ impl<'a> Body<'a> {
                 if let Some(e) = uninit_open_arg(code) {
                     self.note_uninit(e);
                 }
-                if ghost_head(code).starts_with(ETA_HINT) {
+                if witness_hint(code) {
                     let t = self.inline_pulse(code)?;
-                    self.fp_witness =
-                        Some(t.trim().trim_start_matches(ETA_HINT).trim().to_string());
+                    self.fp_witness = Some(t.trim().to_string());
                 }
                 Ok(())
             }
@@ -18980,6 +18987,13 @@ fn include_pulse_scoped(
             InlinePulseToken::Declare { ident, ty } => {
                 declared.insert(ident.val.to_string(), ty.clone());
             }
+            InlinePulseToken::WitnessAntiquot(_) => {
+                return Err(
+                    "`$witness` names the ghost arguments of a call, so it belongs \
+                            to a ghost statement in a body, not to an `_include_pulse`"
+                        .to_string(),
+                );
+            }
             InlinePulseToken::RValueAntiquot { before, expr }
             | InlinePulseToken::LValueAntiquot { before, expr } => {
                 let v = declared_expr(tds, declared, expr)?;
@@ -19298,19 +19312,30 @@ fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
     })
 }
 
-/// The hint that names the witness of an indirect call. It is not code Palow
-/// emits -- it is the one thing at such a call site that only the author
-/// knows -- but it arrives spelled as a call to the old model's eager-intro
-/// rule, so it is read there and turned into the witness argument.
-const ETA_HINT: &str = "Pulse.Lib.C.FuncPtr.eta_expanded_erased";
+/// Whether this statement is a `$witness`: the ghost arguments that
+/// instantiate the contract of the indirect call that follows.
+///
+/// It is the one thing at such a call site that the emitter cannot derive --
+/// only the author knows it -- so Palow reads it rather than emitting it. The
+/// marker renders as nothing, which leaves the rendered statement equal to the
+/// witness term.
+fn witness_hint(code: &InlinePulseCode) -> bool {
+    matches!(
+        code.tokens.first(),
+        Some(InlinePulseToken::WitnessAntiquot(_))
+    )
+}
 
 /// Whether this ghost statement is one Palow *reads* instead of emitting.
 ///
 /// There are two, and each says something Palow has no other way to learn:
-/// the witness of an indirect call, and `$unfold-uninit`, which says the
-/// object is storage the function owns but whose contents are not yet valid.
-/// Palow spells the latter as an uninitialised slot, so the statement becomes
-/// a note rather than code.
+/// `$witness`, the ghost arguments of an indirect call, and `$unfold-uninit`,
+/// which says the object is storage the function owns but whose contents are
+/// not yet valid. Palow spells the latter as an uninitialised slot, so the
+/// statement becomes a note rather than code.
+///
+/// Both are recognised by their antiquotation token rather than by the name of
+/// a library function, so the test is structural and says what it means.
 ///
 /// Everything else is emitted as the author wrote it. A ghost statement that
 /// belongs to the old model alone -- acquiring a global, dropping an
@@ -19322,8 +19347,7 @@ const ETA_HINT: &str = "Pulse.Lib.C.FuncPtr.eta_expanded_erased";
 /// emitter's behaviour depend on a list of library names that will outlive
 /// the model they belong to.
 fn ghost_handled(code: &InlinePulseCode) -> bool {
-    ghost_head(code).starts_with(ETA_HINT)
-        || matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
+    witness_hint(code) || matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
 }
 
 /// Whether the emitter reads this ghost statement structurally rather than
@@ -19334,7 +19358,7 @@ fn ghost_handled(code: &InlinePulseCode) -> bool {
 /// the C objects they name. Every other ghost statement is the author's, and
 /// naming an object in one is what grants the body the right to touch it.
 fn ghost_interpreted(code: &InlinePulseCode) -> bool {
-    ghost_head(code).starts_with(ETA_HINT)
+    witness_hint(code)
         || matches!(
             aux_fn_kind(code),
             Some(
