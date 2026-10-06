@@ -1560,11 +1560,12 @@ new facts about memory.
    Assuming the address rather than allocating it is what C says -- a global
    has one fixed address for the whole run -- and it is why `&g == &g` holds
    definitionally rather than needing a lemma. The one thing that had to be
-   separated is the address from the value: a struct or array global still has
-   an address even though the model has no constant for its contents, so `&g`
-   is translated for every addressable global while reads are translated only
-   where a value was published. An access *through* a global's address is
-   refused, because nothing here owns the storage behind it.
+   separated is the address from the value: every addressable global has an
+   address, while reads are translated only where a value was published. Scalar
+   constants, constant arrays, and now constant structs whose initialisers are
+   closed all publish that value; anything outside the syntactic constant
+   subset remains an abstract `assume val`. An access *through* a global's
+   address is refused, because nothing here owns the storage behind it.
 
    This was the largest single unblocking so far -- 17 bodies -- mostly because
    a great many test functions mention a constant in passing.
@@ -1970,6 +1971,17 @@ new facts about memory.
    pointer, which is a statement about values rather than about bytes, so
    unlike the `memset` case it has an answer for a pointer and that answer is
    `null` on every target.
+
+   Struct-valued constants use the same static-initialisation rule field by
+   field. A `static const struct` with a brace initialiser is published as the
+   generated record literal when every named field is itself a closed constant:
+   integer and boolean literals, null pointers, global addresses, function
+   designators (as the Palow `of_fn_div` value of the generated `Funcptr_*`
+   wrapper), nested structs and fixed arrays. Fields the initializer omits are
+   filled with the C static zero for their type, so omitted callback fields are
+   `null`, omitted integer fields are typed zeroes, and omitted nested structs
+   are recursively zeroed. If any field falls outside that subset, the global
+   keeps the old abstract value instead of rejecting the program.
 
    `extern const T g;` stays refused. It is immutable, but which value it is
    was decided in another translation unit, and Palow emits one module per unit

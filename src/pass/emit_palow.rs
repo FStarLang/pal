@@ -7892,14 +7892,38 @@ fn storable_struct(tds: &Typedefs, ty: &Type) -> bool {
     }
 }
 
-/// A global's initialiser, as a closed F* term. Only literals qualify: a
-/// global whose value has to be computed has an initialiser the emitter would
-/// have to evaluate, and C's constant expressions are not the subset this pass
-/// covers.
+fn const_fn_ptr(g: &str) -> String {
+    format!(
+        "(of_fn_div (pre_of Funcptr_{g}.func_{g}__fp) \
+         (post_of Funcptr_{g}.func_{g}__fp) Funcptr_{g}.func_{g}__fp)"
+    )
+}
+
+/// A global's initialiser, as a closed F* term. The subset is deliberately
+/// syntactic: literals, null pointers, function designators, global addresses,
+/// and aggregate literals built from those. Anything that would require
+/// evaluating C falls back to an abstract global value.
 fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
+    let target = peel(tds, ty);
+    if matches!(target.val, TypeT::Pointer(..) | TypeT::FnPtr { .. }) {
+        return match &strip_vattr(e).val {
+            ExprT::IntLit(n, _) if **n == BigInt::ZERO => Some("null".to_string()),
+            ExprT::Cast(inner, _) => const_expr(tds, ty, inner),
+            ExprT::FnRef(g) => Some(const_fn_ptr(&g.val)),
+            // `&g` is a closed term: a global's address is fixed for the whole run.
+            ExprT::Ref(inner) => match &strip_vattr(inner).val {
+                ExprT::Var(v) if tds.global_addrs.contains(&*v.val.to_string()) => {
+                    Some(format!("addr_var_{}", v.val))
+                }
+                ExprT::FnRef(g) => Some(const_fn_ptr(&g.val)),
+                _ => None,
+            },
+            _ => None,
+        };
+    }
     // `_Bool b = true;` reaches the IR as a cast of `1`, so the target type
     // decides how the literal reads, not the literal itself.
-    if matches!(tds.resolve(ty).val, TypeT::Bool) {
+    if matches!(target.val, TypeT::Bool) {
         return match &strip_vattr(e).val {
             ExprT::BoolLit(b) => Some(if *b { "true" } else { "false" }.to_string()),
             ExprT::IntLit(n, _) => {
@@ -7918,13 +7942,25 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
             _ => None,
         },
         ExprT::Cast(inner, _) => const_expr(tds, ty, inner),
-        // `&g` is a closed term: a global's address is fixed for the whole run.
-        ExprT::Ref(inner) => match &strip_vattr(inner).val {
-            ExprT::Var(v) if tds.global_addrs.contains(&*v.val.to_string()) => {
-                Some(format!("addr_var_{}", v.val))
+        ExprT::StructInit(n, inits) => {
+            let TypeT::TypeRef(TypeRefKind::Struct(tn)) = &target.val else {
+                return None;
+            };
+            if *tn.val != *n.val {
+                return None;
             }
-            _ => None,
-        },
+            let si = tds.structs.get(&*n.val)?;
+            let mut vals = Vec::new();
+            for f in &si.fields {
+                let v = match inits.iter().find(|(i, _)| *i.val == *f.name) {
+                    Some((_, x)) => const_expr(tds, &f.ty, x)?,
+                    None => static_zero(tds, &f.ty).ok()?,
+                };
+                vals.push(format!("fld_{} = {}", f.name, v));
+            }
+            Some(format!("({{ {} }})", record_fields(vals, false)))
+        }
+        ExprT::ArrayInit { .. } => const_array(tds, ty, e).map(|(_, _, v)| v),
         _ => None,
     }
 }
@@ -17323,6 +17359,9 @@ fn static_zero(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     let t = peel(tds, ty);
     if matches!(&t.val, TypeT::Pointer(..) | TypeT::FnPtr { .. }) {
         return Ok("null".to_string());
+    }
+    if let TypeT::FixedArray(elem, n) = &t.val {
+        return Ok(format!("Seq.create {} {}", n, static_zero(tds, elem)?));
     }
     if let TypeT::TypeRef(TypeRefKind::Struct(name)) = &t.val {
         let Some(si) = tds.structs.get(&*name.val) else {
