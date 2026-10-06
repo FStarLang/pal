@@ -9583,7 +9583,7 @@ use num_bigint::BigInt;
 /// `_write`, and releasing one must not `_forget` a value it never held.
 /// Tracking this with a flag is only sound because the translated subset is
 /// straight-line; a branch would need a join.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Slot {
     name: String,
     /// Where the storage is. A local's is a stack allocation bound to
@@ -9805,6 +9805,20 @@ struct BranchResult {
     /// Which fields of each enclosing slot have been written while the slot
     /// is still scattered into uninitialised storage.
     scattered: Vec<BTreeSet<String>>,
+    /// Which objects the arm left scattered one level further in, and which
+    /// of those it found already scattered on entry. These say which steps a
+    /// later write still owes, so an arm that changed them has changed what
+    /// the code after the join has to emit, exactly as `scattered` does.
+    nested_scatter: BTreeMap<String, (String, String, String)>,
+    prescattered: HashSet<String>,
+    /// The slots the arm opened past the `if` and still has out: the storage
+    /// of a struct-typed field it is part-way through filling, which belongs
+    /// to the enclosing object and so is not given back at the end of a block.
+    /// Only those are carried -- a local the arm declared is released with the
+    /// block and must not escape. Dropping these would make the code after the
+    /// join believe the field's storage is still inside its parent and scatter
+    /// it a second time.
+    extra_slots: Vec<Slot>,
     /// Which function, and which allocated block, each enclosing slot is
     /// known to hold on this path.
     holds: Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>,
@@ -10846,12 +10860,16 @@ impl<'a> Body<'a> {
                     if self
                         .slots
                         .iter()
-                        .rev()
-                        .any(|s| s.name == format!("*{}", v.val)) =>
+                        .any(|s| s.addr == format!("var_{}", v.val)) =>
                 {
                     // A single-object `_out` struct parameter is tracked as a
-                    // slot for its pointee (`*p`) even though the contract
-                    // does not grant ordinary dereference ownership for `p`.
+                    // slot for its pointee, whose storage is the parameter's
+                    // own value and so is recorded at the address `var_<p>`.
+                    // The contract does not grant ordinary dereference
+                    // ownership for `p`, so without this the arms below would
+                    // refuse the access. The test is on the slot's address
+                    // rather than on its display name because the address is
+                    // what identifies the storage.
                     self.rvalue(inner)
                 }
                 ExprT::Var(v)
@@ -16045,9 +16063,17 @@ impl<'a> Body<'a> {
                 let (_, last) = arms.last().unwrap();
                 let inits = last.inits.clone();
                 let scattered = last.scattered.clone();
+                let nested = last.nested_scatter.clone();
+                let pre = last.prescattered.clone();
+                let last_extra = last.extra_slots.clone();
                 let outs = last.out_params.clone();
                 if arms.iter().any(|(_, a)| {
-                    a.inits != inits || a.scattered != scattered || a.out_params != outs
+                    a.inits != inits
+                        || a.scattered != scattered
+                        || a.nested_scatter != nested
+                        || a.prescattered != pre
+                        || a.extra_slots != last_extra
+                        || a.out_params != outs
                 }) {
                     return Err(
                         "a `switch` whose cases leave different variables initialised".to_string(),
@@ -16055,6 +16081,8 @@ impl<'a> Body<'a> {
                 }
                 restore(self);
                 self.out_params = outs;
+                self.nested_scatter = nested;
+                self.prescattered = pre;
                 for (slot, (init, scattered)) in
                     self.slots.iter_mut().zip(inits.iter().zip(scattered))
                 {
@@ -16070,6 +16098,7 @@ impl<'a> Body<'a> {
                         slot.holds_block.clear();
                     }
                 }
+                self.slots.extend(last_extra);
 
                 // Pulse infers the join of an `if` but not of a `match`, so
                 // the frame at the join has to be written out. `switch` is the
@@ -16501,6 +16530,9 @@ impl<'a> Body<'a> {
                 if surviving.is_none()
                     && (then.inits != els.inits
                         || then.scattered != els.scattered
+                        || then.nested_scatter != els.nested_scatter
+                        || then.prescattered != els.prescattered
+                        || then.extra_slots != els.extra_slots
                         || then.out_params != els.out_params)
                 {
                     return Err(
@@ -16508,6 +16540,8 @@ impl<'a> Body<'a> {
                     );
                 }
                 self.out_params = live_res.out_params.clone();
+                self.nested_scatter = live_res.nested_scatter.clone();
+                self.prescattered = live_res.prescattered.clone();
                 for (slot, (init, scattered)) in self
                     .slots
                     .iter_mut()
@@ -16529,6 +16563,7 @@ impl<'a> Body<'a> {
                         slot.holds_block = b.clone();
                     }
                 }
+                self.slots.extend(live_res.extra_slots.iter().cloned());
 
                 let (then_pre, else_pre) = match nt {
                     Some((i, null_when_true)) => {
@@ -16919,6 +16954,13 @@ impl<'a> Body<'a> {
                 scattered: self.slots[..mark]
                     .iter()
                     .map(|s| s.scattered.clone())
+                    .collect(),
+                nested_scatter: self.nested_scatter.clone(),
+                prescattered: self.prescattered.clone(),
+                extra_slots: self.slots[mark..]
+                    .iter()
+                    .filter(|s| self.nested_scatter.contains_key(&s.addr))
+                    .cloned()
                     .collect(),
                 holds: self.slots[..mark]
                     .iter()

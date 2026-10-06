@@ -3126,7 +3126,12 @@ new facts about memory.
    made the object whole again: without it the emitter would go on treating
    the object as a heap of fields, and the next write through it would be
    lowered as a write into storage that the author's gather has already
-   consumed. `test/nested_scatter` covers all of it.
+   consumed. A branch carries all of this: which fields of each slot have
+   been written, which objects are scattered one level further in, and the
+   slots standing for a nested field's own storage all cross the join, and
+   the two arms must agree on them. Without that, the code after the join
+   started the fill over, scattering storage that was already out of its
+   parent. `test/nested_scatter` covers all of it.
 
    This is what the old model's source-level `$unfold-uninit` was for, so
    under `PALOW` that annotation is now a no-op macro in the one test that
