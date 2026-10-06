@@ -161,6 +161,39 @@ int32_t read_s_decl_then_def(void) _ensures(return == 5) {
   _ghost_stmt(drop_ (exists* q. pts_to Global_s_decl_then_def.addr_var_s_decl_then_def #q _));
 }
 
+/* --- Reads that do not fold. ---------------------------------------------
+ *
+ * Selecting a field of a pure global is resolved at emit time, so each reader
+ * above is emitted as its answer -- `read_s_const_init` is just `4l` -- and
+ * none of them names the emitted `var_s_*` at all. They pin the folding, not
+ * the value. Copying the whole object does name it, because the copy needs
+ * storage to write into, so these are what pin the struct value itself.
+ * ======================================================================== */
+
+/* 2.4 The value of 2.1, read through a copy. */
+int32_t copy_s_const_init(void) _ensures(return == 4) {
+  _ghost_stmt(Global_s_const_init.acquire_var_s_const_init ());
+  struct point q = s_const_init;
+  _ghost_stmt(drop_ (exists* r. pts_to Global_s_const_init.addr_var_s_const_init #r _));
+  return q.y;
+}
+
+/* 2.5 The value of 2.2, which is zero in every field. */
+int32_t copy_s_pure_tentative(void) _ensures(return == 0) {
+  _ghost_stmt(Global_s_pure_tentative.acquire_var_s_pure_tentative ());
+  struct point q = s_pure_tentative;
+  _ghost_stmt(drop_ (exists* r. pts_to Global_s_pure_tentative.addr_var_s_pure_tentative #r _));
+  return q.x;
+}
+
+/* 2.6 The value of 2.3, which comes from the second declaration. */
+int32_t copy_s_decl_then_def(void) _ensures(return == 5) {
+  _ghost_stmt(Global_s_decl_then_def.acquire_var_s_decl_then_def ());
+  struct point q = s_decl_then_def;
+  _ghost_stmt(drop_ (exists* r. pts_to Global_s_decl_then_def.addr_var_s_decl_then_def #r _));
+  return q.x;
+}
+
 /* ===========================================================================
  * Part 3 -- arrays
  *
@@ -183,6 +216,29 @@ const uint32_t a_decl_then_def[3];
 const uint32_t a_decl_then_def[3] = {7, 8, 9};
 
 uint32_t read_a_decl_then_def(void) _ensures(return == 8) { return a_decl_then_def[1]; }
+
+/* --- Reads that do not fold. ---------------------------------------------
+ *
+ * A constant subscript folds just as a field selection does, so 3.1-3.3 are
+ * emitted as their answer and never name the emitted `var_a_*`. An index that
+ * is only known at run time cannot fold, so these are what pin the element
+ * values; the precondition keeps the expected answer a single number.
+ * ======================================================================== */
+
+/* 3.4 The elements of 3.1. */
+uint32_t index_a_const_init(size_t i) _requires(i == 1) _ensures(return == 20) {
+  return a_const_init[i];
+}
+
+/* 3.5 The elements of 3.2, which are all zero. */
+uint32_t index_a_pure_tentative(size_t i) _requires(i == 1) _ensures(return == 0) {
+  return a_pure_tentative[i];
+}
+
+/* 3.6 The elements of 3.3, which come from the second declaration. */
+uint32_t index_a_decl_then_def(size_t i) _requires(i == 1) _ensures(return == 8) {
+  return a_decl_then_def[i];
+}
 
 /* ===========================================================================
  * Part 4 -- pointers
