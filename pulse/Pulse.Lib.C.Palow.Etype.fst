@@ -272,8 +272,23 @@ let read_ok (e: etypes) (u: ctype) : prop =
    struct, and it does not, because `access_ok struct_a_ctype 0 int32_t_ctype`
    already holds. Only a store the current type does *not* license -- writing
    a `struct b` over storage that held a `struct a` -- moves the index, which
-   is exactly the case 6.5p6 is about. *)
+   is exactly the case 6.5p6 is about.
+
+   A store through a character lvalue moves nothing at all. 6.5p6 installs the
+   lvalue's type only "through an lvalue having a type that is not a character
+   type", so writing a byte into fresh `malloc`ed storage leaves that storage
+   *untyped* rather than making it a one-byte `char` object. The difference is
+   not academic: without the guard, the usual idiom of clearing a buffer and
+   then storing a struct into it would have to re-type every byte, and the
+   `None` entries that make `calloc`ed storage readable at any type would be
+   gone after the first byte-wise write.
+
+   Carving the rule out here rather than in the emitter is deliberate. Every
+   character type in the model is `TScalar SChar` -- `uint8_t`, `int8_t` and
+   `char` all are -- so `u = tchar` catches all three, and a typed write can
+   be emitted uniformly instead of having a special case for one type. *)
 let store_entry (en: option etype_entry) (u: ctype) (k: nat) : option etype_entry =
+  if u = tchar then en else
   match en with
   | Some e0 ->
     if e0.fixed || access_ok e0.ty (e0.off - k) u then Some e0
@@ -296,13 +311,22 @@ let store_etypes (e: etypes) (u: ctype { elen e == csize u }) : e':etypes { elen
    always be re-typed -- or already licenses the access. Only the third
    disjunct is available to a declared object, which is precisely 6.5p6's "if
    the object has a declared type, that is its effective type" read as a
-   restriction on stores. *)
+   restriction on stores.
+
+   Character stores take only the third disjunct, which at `tchar` amounts to
+   the byte being in bounds of the object it belongs to. That is not a
+   restriction on what C permits -- a character store is always allowed -- but
+   on what this lemma can conclude afterwards: since a character store moves
+   nothing, the only way the bytes are readable at `tchar` after it is for
+   them to have been readable at `tchar` before, and the `not fixed` disjunct
+   does not say that. *)
 let store_ok (e: etypes) (u: ctype) : prop =
   elen e == csize u /\
   (forall (k: nat). k < elen e ==>
     (match eget e k with
      | None -> True
-     | Some en -> b2t (not en.fixed) \/ b2t (access_ok en.ty (en.off - k) u)))
+     | Some en -> b2t (access_ok en.ty (en.off - k) u) \/
+                  (u =!= tchar /\ b2t (not en.fixed))))
 
 (* The load-bearing theorem for enforcement: a permitted store leaves the bytes
    readable at the type that was stored. Without it a typed write could not
@@ -387,6 +411,28 @@ let read_char_ok (e: etypes)
 let store_none_read_ok (u: ctype)
   : Lemma (read_ok (store_etypes (etypes_none (csize u)) u) u)
   = ()
+
+(* ...except through a character lvalue, which installs nothing at all. This is
+   the half of 6.5p6 that is easy to drop, and dropping it would break more
+   than the character cases: a `memset`-then-store idiom types the storage at
+   `char` on the first byte written, and the later store at the real type then
+   has to re-type storage that should still have been untyped.
+
+   Stated as an equality on the whole index rather than as a fact about
+   `read_ok`, because the point is that *nothing moves*: the storage is as
+   untyped after a character store as it was before, and so is still readable
+   at every type. Case 6.2 of `test/_effective_type` is this theorem. *)
+let store_char_identity (e: etypes { elen e == csize tchar })
+  : Lemma (store_etypes e tchar == e)
+  = Seq.lemma_eq_intro (store_etypes e tchar) e
+
+(* The consequence that matters: bytes written through a character lvalue stay
+   untyped, so storage filled byte-by-byte is still claimable at any type
+   afterwards -- which is what makes a hand-written allocator, or a decoder
+   that assembles an object from a byte buffer, legal C rather than a pun. *)
+let store_char_keeps_none ()
+  : Lemma (store_etypes (etypes_none 1) tchar == etypes_none 1)
+  = store_char_identity (etypes_none 1)
 
 (* A declared object keeps its type: storing at a different type through a
    pointer does not relabel it. *)

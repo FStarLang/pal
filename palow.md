@@ -751,6 +751,7 @@ rule:
 | `test/etype_pun_bad` | `read_ok (etypes_of ct_i32 true) ct_f32` | `should-fail` |
 | `test/etype_store_bad` | `store_ok (etypes_of ct_i32 true) ct_f32` | `should-fail` |
 | `test/etype_memcpy_bad` | `read_ok (copy_etypes …) ct_f32` | `should-fail` |
+| `test/etype_char_store` | `store_etypes … tchar` is the identity | verifies |
 
 The positive one is not optional. A negative test alone would pass just as
 well if `read_ok` were unprovable for *every* type, which is what a
@@ -907,6 +908,85 @@ pair was rejected for. So:
 None of the three can land before the typed layer carries the index, because
 each of them would otherwise be either dead or unsound on its own.
 
+#### What has been built so far, and what the next domino is
+
+Three pieces of the machinery above are in the tree and verified, chosen
+because each is sound and useful on its own:
+
+- **The character exception** (6.5p6, last sentence). `store_entry` now
+  short-circuits at `tchar`, so a store through a character lvalue installs
+  no effective type. This is not a nicety: without it `malloc` + `memset` +
+  use-as-`int32_t` would be undefined, because clearing the buffer would
+  retype every byte as `char` and no wider read could cross one. Every
+  character type in the model is `TScalar SChar` — `uint8_t`, `int8_t` and
+  `char` all are — so one test catches all three and the emitter needs no
+  special case. `store_ok` had to move with it: the `not fixed` disjunct is
+  now guarded by `u =!= tchar`, because at `tchar` nothing moves, so the only
+  way bytes can be readable at `tchar` afterwards is to have been readable
+  before. Without that guard `store_ok_read_ok` breaks at `tchar`.
+  `store_char_identity` is the canary: replace the guard with `false` and it
+  stops verifying. `test/etype_char_store` pins the same rule one layer up,
+  through `mem_store_etypes` on a *slice* of a larger object.
+
+- **`Pulse.Lib.C.Palow.Index`**, the hide/show pair, derived from
+  `mem_pts_to_at_eq` with no new axioms. `mem_hide_etypes` forgets the index,
+  `mem_show_etypes` recovers an existential one. Two observations
+  (`not_null`, `fits`) are lifted to the indexed form by share / observe /
+  gather. Two are deliberately absent: `perm_bound` survives sharing only in
+  its halved form, and `disjoint` needs the whole `1.0R` range, leaving
+  nothing behind to retain the index with.
+
+- **`mem_share_at` / `mem_gather_at`** at layer 0, and a strengthened
+  `mem_pts_to_at_injective` that also concludes `b1 == b2` under a length
+  hypothesis. The sharing pair genuinely cannot be derived: going out to
+  `mem_pts_to`, sharing, and coming back gives two halves with *existential*
+  indices, provably equal to each other but not to the `e` you started with,
+  because the resource that knew `e` was spent on the rewrite. That inability
+  is exactly what makes `hide` → `show` safe, so it is not a defect to work
+  around. Folding bytes-injectivity into the existing axiom avoided a third.
+
+What is *not* done is the threading itself, and the reason is worth recording
+so the next attempt does not rediscover it. The design works — converting
+`uint32_t_pts_to` to carry the index does block the pun, by an asymmetry:
+`reveal` drops the index, `conceal` demands one *and* demands `read_ok` of it
+at the new type, so `int32_t_reveal` → `float32_t_conceal` stops typechecking,
+and code needing a round trip uses a new `_reveal_at`. `_pts_to_uninit` must
+carry it too, or `forget` → `reveal_uninit` is a laundering path around
+`reveal`.
+
+The obstacle is that it cannot stop at the scalars. `uint8_t_of_elem` goes
+through `elem_pts_to`, which is generic over an element representation and
+carries no `ctype`:
+
+```fstar
+let elem_pts_to (#t) (t_repr: t -> bytes -> prop) a p x =
+  exists* b. mem_pts_to a p b ** pure (t_repr x b)
+```
+
+So a `conceal` that demands an index cannot be reached from a focused array
+element, and `array_pts_to` is the same shape. Threading the index means a
+`ctype` parameter on both and propagating it through `Array` and every array
+consumer — about 330 mention sites — then `Aggregate`, `Union`, `Pool`,
+`Provenance` and `Examples`, then the ten scalar groups in `CTypes` that
+generated code actually uses, then 47 `conceal`/`claim` sites in
+`emit_palow.rs`, then the contracts in the test corpus. The library cannot be
+green part-way through, so this is one large change rather than a sequence of
+small ones.
+
+Aggregate join is the hard problem waiting at the end of it. `struct_S_join`
+rebuilds a struct from separated field predicates with no trade and no memory
+of the enclosing index, and from the fields' `read_ok … field_ctype` you
+cannot recover `read_ok e struct_ctype` — `read_ok (etypes_of ct_i32 false ++
+etypes_of ct_i32 false) ct_T` is simply false. The way out is for the struct
+predicate to carry a generated **`fields_ok e`** — each field slice readable
+at its own field type — rather than `read_ok e ct_S`. That is derivable from
+`read_ok e ct_S` (via `read_ok_slice` and `access_ok_trans`) *and*
+re-establishable from the fields, so split and join both work. Its
+incompleteness is narrow and worth paying: two tags with identical scalar
+layouts stay interchangeable, but any pun differing at a scalar leaf —
+int↔float, int↔pointer — is still caught. Retyping at join was rejected
+because `mem_store_etypes` needs `p == 1.0R` and join is at arbitrary `p`.
+
 #### How fine is the index?
 
 A per-byte index invites a second worry: if each byte's entry moves
@@ -922,6 +1002,7 @@ does not already license the store.**
 
 ```fstar
 let store_entry (en: option etype_entry) (u: ctype) (k: nat) : option etype_entry =
+  if u = tchar then en else
   match en with
   | Some e0 -> if e0.fixed || access_ok e0.ty (e0.off - k) u then Some e0
                else Some ({ ty = u; off = k; fixed = false })

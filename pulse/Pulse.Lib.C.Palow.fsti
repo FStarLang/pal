@@ -206,12 +206,19 @@ ghost fn mem_split_at (a: ptr) (#p: perm) (#b: bytes)
 (* The bytes at an address determine their index, just as they determine each
    other (`mem_pts_to_injective`). This is what makes the equality above safe
    to use in both directions: eliminating the existential gives you *the*
-   index, not merely *an* index. *)
+   index, not merely *an* index.
+
+   It concludes the byte half as well, under the same length hypothesis
+   `mem_pts_to_injective` uses. That is not a second axiom so much as the
+   indexed reading of the first: a caller holding two indexed views cannot
+   reach the unindexed fact without spending one of them on a rewrite, and
+   then has no way to recover the index it gave up. *)
+[@@allow_ambiguous]
 ghost fn mem_pts_to_at_injective (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
                                  (#e1 #e2: Etype.etypes)
   preserves mem_pts_to_at a p1 b1 e1
   preserves mem_pts_to_at a p2 b2 e2
-  ensures   pure (e1 == e2)
+  ensures   pure (e1 == e2 /\ (len b1 == len b2 ==> b1 == b2))
 
 ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
                      (#e1: Etype.etypes { Etype.elen e1 == len b1 })
@@ -219,6 +226,37 @@ ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
                      (n: SZ.t { SZ.v n == len b1 })
   requires mem_pts_to_at a p b1 e1 ** mem_pts_to_at (a +! n) p b2 e2
   ensures  mem_pts_to_at a p (append b1 b2) (Seq.append e1 e2)
+
+(* Sharing and gathering carry the index along unchanged. These two cannot be
+   derived from `mem_pts_to_at_eq` the way the splitting lemmas can, and the
+   reason is worth recording, because it is the same reason the equality is
+   safe in the first place.
+
+   Going `mem_pts_to_at a p b e` -> `mem_pts_to a p b` -> share -> and back
+   produces two halves whose indices are existentially quantified. They can be
+   shown equal to each other, by `mem_pts_to_at_injective`, but not to `e`:
+   the resource that knew about `e` was spent by the rewrite, and an
+   existential cannot be forced to a particular witness after the fact. That
+   inability is precisely what stops `hide` followed by `show` from being a
+   laundering step -- so it is not a defect to be worked around here, and the
+   honest response is to state the indexed forms as primitive.
+
+   Everything else that merely *observes* a range -- nullness, bounds,
+   disjointness, injectivity -- is derived from these in
+   `Pulse.Lib.C.Palow.Index`, by sharing, observing through one half, and
+   gathering back. *)
+ghost fn mem_share_at (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  requires mem_pts_to_at a p b e
+  ensures  mem_pts_to_at a (p /. 2.0R) b e ** mem_pts_to_at a (p /. 2.0R) b e
+
+[@@allow_ambiguous]
+ghost fn mem_gather_at (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
+                       (#e1 #e2: Etype.etypes)
+  requires mem_pts_to_at a p1 b1 e1
+  requires mem_pts_to_at a p2 b2 e2
+  requires pure (len b1 == len b2)
+  ensures  mem_pts_to_at a (p1 +. p2) b1 e1
+  ensures  pure (b1 == b2 /\ e1 == e2)
 
 (* A store at type `u` relabels allocated storage and leaves declared objects
    alone; a read at `u` requires the covered entries to be compatible with it.
