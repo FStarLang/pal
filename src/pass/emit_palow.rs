@@ -7892,14 +7892,38 @@ fn storable_struct(tds: &Typedefs, ty: &Type) -> bool {
     }
 }
 
-/// A global's initialiser, as a closed F* term. Only literals qualify: a
-/// global whose value has to be computed has an initialiser the emitter would
-/// have to evaluate, and C's constant expressions are not the subset this pass
-/// covers.
+fn const_fn_ptr(g: &str) -> String {
+    format!(
+        "(of_fn_div (pre_of Funcptr_{g}.func_{g}__fp) \
+         (post_of Funcptr_{g}.func_{g}__fp) Funcptr_{g}.func_{g}__fp)"
+    )
+}
+
+/// A global's initialiser, as a closed F* term. The subset is deliberately
+/// syntactic: literals, null pointers, function designators, global addresses,
+/// and aggregate literals built from those. Anything that would require
+/// evaluating C falls back to an abstract global value.
 fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
+    let target = peel(tds, ty);
+    if matches!(target.val, TypeT::Pointer(..) | TypeT::FnPtr { .. }) {
+        return match &strip_vattr(e).val {
+            ExprT::IntLit(n, _) if **n == BigInt::ZERO => Some("null".to_string()),
+            ExprT::Cast(inner, _) => const_expr(tds, ty, inner),
+            ExprT::FnRef(g) => Some(const_fn_ptr(&g.val)),
+            // `&g` is a closed term: a global's address is fixed for the whole run.
+            ExprT::Ref(inner) => match &strip_vattr(inner).val {
+                ExprT::Var(v) if tds.global_addrs.contains(&*v.val.to_string()) => {
+                    Some(format!("addr_var_{}", v.val))
+                }
+                ExprT::FnRef(g) => Some(const_fn_ptr(&g.val)),
+                _ => None,
+            },
+            _ => None,
+        };
+    }
     // `_Bool b = true;` reaches the IR as a cast of `1`, so the target type
     // decides how the literal reads, not the literal itself.
-    if matches!(tds.resolve(ty).val, TypeT::Bool) {
+    if matches!(target.val, TypeT::Bool) {
         return match &strip_vattr(e).val {
             ExprT::BoolLit(b) => Some(if *b { "true" } else { "false" }.to_string()),
             ExprT::IntLit(n, _) => {
@@ -7918,13 +7942,38 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
             _ => None,
         },
         ExprT::Cast(inner, _) => const_expr(tds, ty, inner),
-        // `&g` is a closed term: a global's address is fixed for the whole run.
-        ExprT::Ref(inner) => match &strip_vattr(inner).val {
-            ExprT::Var(v) if tds.global_addrs.contains(&*v.val.to_string()) => {
-                Some(format!("addr_var_{}", v.val))
+        ExprT::StructInit(n, inits) => {
+            let TypeT::TypeRef(TypeRefKind::Struct(tn)) = &target.val else {
+                return None;
+            };
+            if *tn.val != *n.val {
+                return None;
             }
-            _ => None,
-        },
+            let si = tds.structs.get(&*n.val)?;
+            // Every initialiser has to land in a field that is published.
+            // A bit-field does not: it lives in `si.bitfields` and is packed
+            // into a synthetic storage unit that appears in `si.fields` under
+            // another name, so looking the designator up by name would miss
+            // it, the unit would silently take its zero value, and `acquire`
+            // would then assume that memory holds a value the program never
+            // wrote. Publishing nothing is always sound, so give up instead.
+            if inits
+                .iter()
+                .any(|(i, _)| !si.fields.iter().any(|f| *i.val == *f.name))
+            {
+                return None;
+            }
+            let mut vals = Vec::new();
+            for f in &si.fields {
+                let v = match inits.iter().find(|(i, _)| *i.val == *f.name) {
+                    Some((_, x)) => const_expr(tds, &f.ty, x)?,
+                    None => static_zero(tds, &f.ty).ok()?,
+                };
+                vals.push(format!("fld_{} = {}", f.name, v));
+            }
+            Some(format!("({{ {} }})", record_fields(vals, false)))
+        }
+        ExprT::ArrayInit { .. } => const_array(tds, ty, e).map(|(_, _, v)| v),
         _ => None,
     }
 }
@@ -9761,7 +9810,7 @@ use num_bigint::BigInt;
 /// `_write`, and releasing one must not `_forget` a value it never held.
 /// Tracking this with a flag is only sound because the translated subset is
 /// straight-line; a branch would need a join.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Slot {
     name: String,
     /// Where the storage is. A local's is a stack allocation bound to
@@ -9983,6 +10032,23 @@ struct BranchResult {
     /// Whether the arm ends in a call that does not return.
     diverged: bool,
     inits: Vec<bool>,
+    /// Which fields of each enclosing slot have been written while the slot
+    /// is still scattered into uninitialised storage.
+    scattered: Vec<BTreeSet<String>>,
+    /// Which objects the arm left scattered one level further in, and which
+    /// of those it found already scattered on entry. These say which steps a
+    /// later write still owes, so an arm that changed them has changed what
+    /// the code after the join has to emit, exactly as `scattered` does.
+    nested_scatter: BTreeMap<String, (String, String, String)>,
+    prescattered: HashSet<String>,
+    /// The slots the arm opened past the `if` and still has out: the storage
+    /// of a struct-typed field it is part-way through filling, which belongs
+    /// to the enclosing object and so is not given back at the end of a block.
+    /// Only those are carried -- a local the arm declared is released with the
+    /// block and must not escape. Dropping these would make the code after the
+    /// join believe the field's storage is still inside its parent and scatter
+    /// it a second time.
+    extra_slots: Vec<Slot>,
     /// Which function, and which allocated block, each enclosing slot is
     /// known to hold on this path.
     holds: Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>,
@@ -11027,6 +11093,22 @@ impl<'a> Body<'a> {
                         .find(|b| b.var == *v.val && b.checked && !b.freed)
                         .unwrap();
                     Ok(b.tmp.clone())
+                }
+                ExprT::Var(v)
+                    if self
+                        .slots
+                        .iter()
+                        .any(|s| s.addr == format!("var_{}", v.val)) =>
+                {
+                    // A single-object `_out` struct parameter is tracked as a
+                    // slot for its pointee, whose storage is the parameter's
+                    // own value and so is recorded at the address `var_<p>`.
+                    // The contract does not grant ordinary dereference
+                    // ownership for `p`, so without this the arms below would
+                    // refuse the access. The test is on the slot's address
+                    // rather than on its display name because the address is
+                    // what identifies the storage.
+                    self.rvalue(inner)
                 }
                 ExprT::Var(v)
                     if self.params.contains(&*v.val.to_string())
@@ -16281,19 +16363,32 @@ impl<'a> Body<'a> {
                 // the reference.
                 let (_, last) = arms.last().unwrap();
                 let inits = last.inits.clone();
+                let scattered = last.scattered.clone();
+                let nested = last.nested_scatter.clone();
+                let pre = last.prescattered.clone();
+                let last_extra = last.extra_slots.clone();
                 let outs = last.out_params.clone();
-                if arms
-                    .iter()
-                    .any(|(_, a)| a.inits != inits || a.out_params != outs)
-                {
+                if arms.iter().any(|(_, a)| {
+                    a.inits != inits
+                        || a.scattered != scattered
+                        || a.nested_scatter != nested
+                        || a.prescattered != pre
+                        || a.extra_slots != last_extra
+                        || a.out_params != outs
+                }) {
                     return Err(
                         "a `switch` whose cases leave different variables initialised".to_string(),
                     );
                 }
                 restore(self);
                 self.out_params = outs;
-                for (slot, init) in self.slots.iter_mut().zip(&inits) {
+                self.nested_scatter = nested;
+                self.prescattered = pre;
+                for (slot, (init, scattered)) in
+                    self.slots.iter_mut().zip(inits.iter().zip(scattered))
+                {
                     slot.init = *init;
+                    slot.scattered = scattered;
                 }
                 // As for an `if`: a slot only still holds a known function
                 // after the join if every case left the same one in it.
@@ -16304,6 +16399,7 @@ impl<'a> Body<'a> {
                         slot.holds_block.clear();
                     }
                 }
+                self.slots.extend(last_extra);
 
                 // Pulse infers the join of an `if` but not of a `match`, so
                 // the frame at the join has to be written out. `switch` is the
@@ -16733,15 +16829,27 @@ impl<'a> Body<'a> {
                 }
                 let live_res = if then.diverged { &els } else { &then };
                 if surviving.is_none()
-                    && (then.inits != els.inits || then.out_params != els.out_params)
+                    && (then.inits != els.inits
+                        || then.scattered != els.scattered
+                        || then.nested_scatter != els.nested_scatter
+                        || then.prescattered != els.prescattered
+                        || then.extra_slots != els.extra_slots
+                        || then.out_params != els.out_params)
                 {
                     return Err(
                         "an `if` whose branches leave different variables initialised".to_string(),
                     );
                 }
                 self.out_params = live_res.out_params.clone();
-                for (slot, init) in self.slots.iter_mut().zip(&live_res.inits) {
+                self.nested_scatter = live_res.nested_scatter.clone();
+                self.prescattered = live_res.prescattered.clone();
+                for (slot, (init, scattered)) in self
+                    .slots
+                    .iter_mut()
+                    .zip(live_res.inits.iter().zip(&live_res.scattered))
+                {
                     slot.init = *init;
+                    slot.scattered = scattered.clone();
                 }
                 // Which function a slot holds is only known after the join if
                 // both arms left the same one in it. Without this, a pointer
@@ -16756,6 +16864,7 @@ impl<'a> Body<'a> {
                         slot.holds_block = b.clone();
                     }
                 }
+                self.slots.extend(live_res.extra_slots.iter().cloned());
 
                 let (then_pre, else_pre) = match nt {
                     Some((i, null_when_true)) => {
@@ -17143,6 +17252,17 @@ impl<'a> Body<'a> {
                 lines: std::mem::take(&mut self.lines),
                 diverged,
                 inits: self.slots[..mark].iter().map(|s| s.init).collect(),
+                scattered: self.slots[..mark]
+                    .iter()
+                    .map(|s| s.scattered.clone())
+                    .collect(),
+                nested_scatter: self.nested_scatter.clone(),
+                prescattered: self.prescattered.clone(),
+                extra_slots: self.slots[mark..]
+                    .iter()
+                    .filter(|s| self.nested_scatter.contains_key(&s.addr))
+                    .cloned()
+                    .collect(),
                 holds: self.slots[..mark]
                     .iter()
                     .map(|s| (s.holds_fn.clone(), s.holds_block.clone()))
@@ -17632,6 +17752,9 @@ fn static_zero(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     let t = peel(tds, ty);
     if matches!(&t.val, TypeT::Pointer(..) | TypeT::FnPtr { .. }) {
         return Ok("null".to_string());
+    }
+    if let TypeT::FixedArray(elem, n) = &t.val {
+        return Ok(format!("Seq.create {} {}", n, static_zero(tds, elem)?));
     }
     if let TypeT::TypeRef(TypeRefKind::Struct(name)) = &t.val {
         let Some(si) = tds.structs.get(&*name.val) else {
