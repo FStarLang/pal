@@ -9100,6 +9100,11 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| a.mode == ParamMode::Out)
                     .collect(),
+                consts: fndecl
+                    .args
+                    .iter()
+                    .map(|a| a.mode == ParamMode::Const)
+                    .collect(),
                 plain_ptrs: fndecl.args.iter().map(|a| is_plain(&tds, &a.ty)).collect(),
                 arrayptr_args: fndecl
                     .args
@@ -9787,6 +9792,9 @@ struct Callee {
     /// Which parameters are `_out`, by position. Those arguments are not
     /// evaluated: what is passed is storage, not a value.
     outs: Vec<bool>,
+    /// Which parameters are read-only, by position. A literal may be shared
+    /// directly with these instead of copied to writable stack storage.
+    consts: Vec<bool>,
     /// Which parameters are `_plain`, by position. A literal has no ownership
     /// to give, so its address may only be passed to one of these.
     plain_ptrs: Vec<bool>,
@@ -13936,17 +13944,17 @@ impl<'a> Body<'a> {
             return Err(format!("`{}`'s contract was dropped", name.val));
         }
         let outs = c.outs.clone();
+        let consts = c.consts.clone();
         let plain_ptrs = c.plain_ptrs.clone();
         let arr_args = c.arr_args.clone();
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
         let mut out = format!("func_{}", name.val);
         for (i, a) in args.iter().enumerate() {
-            // A literal's address carries nothing, so a parameter that wants
-            // ownership -- an `_array`, or any pointer that is not `_plain` --
-            // cannot be handed one. Saying so here rather than emitting the
-            // address keeps the refusal visible instead of leaving F* to fail
-            // on a missing points-to.
+            // A literal's address carries no writable ownership. A const
+            // array parameter can receive a fractional read-only share of the
+            // static storage; a mutable array parameter still gets the old
+            // stack copy, because it may write.
             // The array behind a *pointer field* is owned by the struct's
             // deep predicate, so handing it to a callee means unfolding that
             // predicate for the length of the statement -- the same borrow a
@@ -14026,6 +14034,11 @@ impl<'a> Body<'a> {
             }
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
+            } else if is_literal(a)
+                && arr_args.get(i) == Some(&true)
+                && consts.get(i) == Some(&true)
+            {
+                self.literal_share_arg(a)?
             } else if is_literal(a) && plain_ptrs.get(i) != Some(&true) {
                 self.literal_arg(a)?
             } else if arrayptr_args.get(i) == Some(&true) {
@@ -14255,6 +14268,42 @@ impl<'a> Body<'a> {
                 pn, addr, esize, pn
             ));
         }
+        Ok(addr)
+    }
+
+    fn literal_share_arg(&mut self, a: &Expr) -> Result<String, String> {
+        let mut lit = Rc::new(strip_vattr(a).clone());
+        while let ExprT::Cast(inner, _) = &lit.clone().val {
+            lit = Rc::new(strip_vattr(inner).clone());
+        }
+        let ty = self.ty_of(&lit)?;
+        let TypeT::FixedArray(elem, _) = &peel(self.tds, &ty).val else {
+            return Err("a literal that is not a fixed array".to_string());
+        };
+        let ExprT::ArrayInit { elems, .. } = &strip_vattr(&lit).val else {
+            return Err("a literal that is not an initialiser".to_string());
+        };
+        let (Some(pn), Some(esize)) = (palow_name(self.tds, elem), palow_sizeof(self.tds, elem))
+        else {
+            return Err(format!("a literal of {}", describe(self.tds.resolve(elem))));
+        };
+        if !has_repr(self.tds, elem) {
+            return Err(format!("a literal of {}", describe(self.tds.resolve(elem))));
+        }
+        let mut vs = Vec::new();
+        for x in elems {
+            vs.push(self.init_value(elem, x)?);
+        }
+        let xs = format!("[{}]", vs.join("; "));
+        let addr = format!("(Pulse.Lib.C.Palow.Ptr.literal_addr {})", xs);
+        self.lines.push(format!(
+            "literal_share {}_repr {}sz {}_alignof {};",
+            pn, esize, pn, xs
+        ));
+        self.pending_close.push(format!(
+            "literal_share_drop {}_repr {}sz {}_alignof {};",
+            pn, esize, pn, xs
+        ));
         Ok(addr)
     }
 

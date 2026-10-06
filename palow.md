@@ -3157,22 +3157,31 @@ new facts about memory.
    expression denotes is nothing more than an address: `literal_addr xs` in
    the pointer layer, indexed by the contents rather than by the occurrence,
    since C leaves it unspecified whether two identical literals share storage
-   and a program may rely on neither answer. Deliberately no ownership comes
-   with it. A literal is read-only and shared, and the only use of one this
-   model can justify is handing the pointer to a callee that promised to hold
-   nothing -- so the translator refuses a literal in any argument position
-   whose parameter is not `_plain`, which is visible as a refusal rather than
-   left for F\* to discover as a missing points-to.
+   and a program may rely on neither answer. Deliberately no writable
+   ownership comes with it. A literal is read-only and shared, so a `_plain`
+   parameter can still receive just the address, while a read-only `_array`
+   parameter receives a fractional share of the ordinary `array_pts_to`.
+
+   That share is introduced by the trusted ghost function `literal_share` in
+   `Pulse.Lib.C.Palow.Array`. Its specification is an ordinary fractional
+   array predicate at `literal_addr xs`; the trust boundary is how the
+   fraction is chosen. The model is a hidden static token for each literal
+   that gives out 1/2, then 1/4, then 1/8, and so on. All shares are ordinary
+   array shares, so callees read through the same `const _array` contract they
+   use for non-literals, but the total permission ever handed out remains
+   strictly below 1.0R. Gathering shares can therefore never produce the full
+   permission required for a write, and `literal_share` never grants
+   `freeable` authority.
 
    That is a deliberate divergence from the old model, which stack-allocates a
    fresh array, copies the literal into it, and frees it after the call. That
-   works, and it is what lets `write("hello", 6)` go through today, but it
-   hands the callee a writable object where C has a read-only one, and it
-   gives the literal automatic storage where C gives it static. The two calls
-   in `stringlit` that need ownership of a literal stay admitted until there
-   is a read-only sharing predicate to give them; the three that only need the
-   address -- a returned name, a `_plain` argument, a `switch` selecting one
-   of several names -- now translate in full. Array-to-pointer decay became
+   works for mutable `_array` parameters, which really do need writable
+   storage, but it hands a read-only callee a writable object where C has a
+   read-only one, and it gives the literal automatic storage where C gives it
+   static. Read-only literal calls now use `literal_share`; calls that only
+   need the address -- a returned name, a `_plain` argument, a `switch`
+   selecting one of several names -- still translate as `literal_addr`.
+   Array-to-pointer decay became
    the identity in the process, which it already was for every other array:
    Palow names an array by the address of its first element, and the
    ownership, which is what really differs between the two, is not part of
@@ -3405,14 +3414,13 @@ new facts about memory.
    is, and an ascription does that.
 
    The same lvalue-with-no-name shows up as an argument, and there it is a
-   string literal: `write("hello", 6)` passes an anonymous array with automatic
-   storage. A `_plain` parameter is content with the literal's address and
-   asks for nothing else, which is what `literal_addr` has always given it, but
-   an `_array` parameter wants the elements -- and the only thing that can hand
-   those over is storage. So the literal now gets storage, and the translation
-   is exactly the one a declared local array already had: allocate, write the
-   elements, free it with the rest. The name it is allocated under is invented
-   here, because C never gave it one.
+   string literal. A `_plain` parameter is content with the literal's address
+   and asks for nothing else, which is what `literal_addr` has always given it.
+   A read-only `_array` parameter wants the elements but not the right to
+   write them, so PAL now emits `literal_share` and lets the callee consume and
+   preserve the resulting fractional `array_pts_to`. A mutable `_array`
+   parameter still gets storage exactly as a declared local array would:
+   allocate, write the elements, free it with the rest.
 
    Two of the tests whose hand-written Pulse was written for the old model are
    now written for this one, and what they had to say came out shorter. PAL's

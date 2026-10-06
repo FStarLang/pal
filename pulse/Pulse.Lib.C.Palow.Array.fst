@@ -83,6 +83,30 @@ let array_pts_to (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat) (ealign: n
   exists* b. mem_pts_to a p b
              ** pure (array_repr t_repr esize xs b /\ array_aligned esize ealign a)
 
+(* Read-only literal sharing. This is trusted, but still uses ordinary
+   fractional array ownership: operationally, literal storage has a hidden
+   static token from which this ghost function hands out a fresh fraction
+   (1/2, then 1/4, and so on). The sum of all shares is always strictly below
+   full permission, so clients can read and gather compatible shares but can
+   never obtain 1.0R write authority. No `freeable` authority is produced. *)
+ghost fn literal_share (#t: Type0) (t_repr: t -> bytes -> prop)
+                       (esize: SZ.t) (ealign: SZ.t) (xs: list t)
+  requires emp
+  ensures  exists* p. array_pts_to t_repr (SZ.v esize) (SZ.v ealign)
+             (literal_addr xs) p (Seq.seq_of_list xs)
+{
+  admit ()
+}
+
+ghost fn literal_share_drop (#t: Type0) (t_repr: t -> bytes -> prop)
+                            (esize: SZ.t) (ealign: SZ.t) (xs: list t)
+  requires exists* p. array_pts_to t_repr (SZ.v esize) (SZ.v ealign)
+             (literal_addr xs) p (Seq.seq_of_list xs)
+  ensures  emp
+{
+  admit ()
+}
+
 (* The two directions between an array's ownership and the bytes under it.
    Every scalar type publishes this pair under its own name, and a union arm
    or a structure field has to be able to ask for it without knowing which
