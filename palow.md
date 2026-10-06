@@ -3178,6 +3178,17 @@ new facts about memory.
    ownership, which is what really differs between the two, is not part of
    the value.
 
+   A local fixed-size array whose initializer is already a constant sequence is
+   filled by one emitted call to the generated array-fill recursion for that
+   element type and length. The argument is the same `const_seq_with_len [...]`
+   term used for immutable array globals, including the implicit NUL and any
+   trailing zero-fill clang put into a string or brace initializer. The helper
+   still writes each element in Pulse, using the ordinary focus / write-uninit /
+   unfocus path, but the function body sees the post-state as a plain
+   `array_pts_to ... (const_seq_with_len [...])` rather than as a chain of
+   `Seq.upd` over `option` cells. If any element is not a `const_expr`, the
+   emitter keeps the old per-element assignment path.
+
    A struct field whose type is an array now decays like any other array: to
    the address of its first element, which under Palow is the field's own
    address. Nothing is read by taking one and no ownership changes hands --
