@@ -5893,3 +5893,22 @@ new facts about memory.
     its own. `test/fnptr_spec`'s `ops_mixed` now names
     `Pulse.Lib.C.Palow.FnPtr`, and gained `call_via`, `make_ops` and
     `call_via_made` to exercise both ends.
+
+25. **`_plain` on a value.** `_plain` was only read on pointers. On a scalar
+    it was worse than ignored: `int_module` looked through typedefs but not
+    annotations, so a contract compared `UInt64.v ret` with a bare
+    `var_x`. It now `peel`s. On a struct passed by value, `_plain` now
+    says what it says on a pointer -- the function takes the bare value --
+    so the contract drops the struct's `_own`, its struct- and typedef-level
+    `_refine`s and its fields' `_refine`s, keeping only refinements written
+    on the parameter itself, above the `_plain`. A pure field refinement is
+    still part of the record type (`fld_f: v:t{p v}`), so the value
+    satisfies it regardless; what goes away is the contract-level clause,
+    which matters for slprop refinements such as `is_valid`.
+
+    Writing the test for that found that an slprop field refinement on a
+    struct passed by value was required but never ensured, so a callee that
+    did not use it was left holding it. Like a refinement on a scalar, it is
+    now stated at both ends unless the parameter is `_consumes`.
+    `test/plain_value` and `test/fnptr_spec`'s `ignore_ops`/`pass_ops`
+    cover both.

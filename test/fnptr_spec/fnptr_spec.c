@@ -160,3 +160,16 @@ struct ops_byval {
 };
 
 static const struct ops_byval o_byval = {.fn = use_byval};
+
+/* `_plain` on a struct passed by value drops the field refinement from the
+   contract: no `is_valid` is asked of the caller, and the callee cannot call
+   through `o.m`. */
+int32_t ignore_ops(_plain struct ops_mixed o)
+{
+  return 0;
+}
+
+int32_t pass_ops(struct ops_mixed o)
+{
+  return ignore_ops(o);
+}

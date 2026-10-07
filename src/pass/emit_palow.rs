@@ -827,7 +827,8 @@ struct Chunk {
 /// and `_sizeof` definitions. `None` for types the model does not cover yet.
 /// The F* module whose `v` takes a machine integer to a mathematical one.
 fn int_module(tds: &Typedefs, ty: &Type) -> Option<String> {
-    match &tds.resolve(ty).val {
+    // `peel`: a `_plain` or refined scalar is still that scalar.
+    match &peel(tds, ty).val {
         TypeT::Int { signed, width } => {
             Some(format!("{}Int{}", if *signed { "" } else { "U" }, width))
         }
@@ -1147,6 +1148,33 @@ fn refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
             Ok((v, u, b))
         }
         TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => refinements(tds, t),
+        _ => Ok((Vec::new(), Vec::new(), Vec::new())),
+    }
+}
+
+/// The refinements written on a parameter itself, above any `_plain`. A
+/// `_plain` value -- a scalar or a struct passed by value -- says the function
+/// takes the bare value, so what its type would contribute (a typedef's or a
+/// struct's `_refine`, a field's) is not part of the contract.
+fn refinements_above_plain(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
+    match &tds.resolve(ty).val {
+        TypeT::Plain(_) => Ok((Vec::new(), Vec::new(), Vec::new())),
+        TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
+            let (mut v, u, b) = refinements_above_plain(tds, t)?;
+            v.push(p.clone());
+            Ok((v, u, b))
+        }
+        TypeT::RefineUninit(t, p) => {
+            let (v, mut u, b) = refinements_above_plain(tds, t)?;
+            u.push(p.clone());
+            Ok((v, u, b))
+        }
+        TypeT::RefineValue(t, n, vty, p) => {
+            let (v, u, mut b) = refinements_above_plain(tds, t)?;
+            b.push((n.clone(), vty.clone(), p.clone()));
+            Ok((v, u, b))
+        }
+        TypeT::Nullable(t) => refinements_above_plain(tds, t),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
@@ -3320,6 +3348,19 @@ fn emit_fn(
         if matches!(arg.mode, ParamMode::Consumed) {
             consumed.insert(pname.trim_start_matches("var_").to_string());
         }
+        // A `_plain` value is taken bare: none of the invariants its type
+        // carries -- the struct's, its fields', the ownership its pointer
+        // fields reach -- are part of this contract.
+        let plain_value =
+            pointee(tds, &arg.ty).is_none() && (is_plain(tds, &arg.ty) || is_plain_chain(&arg.ty));
+        if plain_value {
+            if let Ok((ps, _, bs)) = refinements_above_plain(tds, &arg.ty) {
+                let base = pname.trim_start_matches("var_").to_string();
+                refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+                collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
+            }
+            continue;
+        }
         if pointee(tds, &arg.ty).is_none()
             && let Ok((ps, _, bs)) = refinements(tds, &arg.ty)
         {
@@ -4208,7 +4249,8 @@ fn emit_fn(
                       fname: &str,
                       fty: &Rc<Type>,
                       via: bool,
-                      w: When|
+                      w: When,
+                      both: bool|
      -> Option<(String, Option<String>, Vec<(String, String, Rc<Type>)>)> {
         let this = if via {
             let (pre, post) = spec.pointees.get(base)?;
@@ -4217,7 +4259,7 @@ fn emit_fn(
                 _ => pre.clone()?,
             }
         } else {
-            if !stated(base, w) {
+            if !both && !stated(base, w) {
                 return None;
             }
             format!("var_{}", base)
@@ -4296,7 +4338,7 @@ fn emit_fn(
             if slprop_refine(tds, p).is_some() {
                 continue;
             }
-            if let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w) {
+            if let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w, false) {
                 out.push(refine_clause(
                     base,
                     Some((&this, own.as_deref(), false)),
@@ -4391,7 +4433,11 @@ fn emit_fn(
             let Some(code) = slprop_refine(tds, p) else {
                 continue;
             };
-            let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w) else {
+            // As for a refinement on the parameter itself: ownership in a
+            // field of a struct passed by value is handed back, unless the
+            // struct is consumed.
+            let both = !*via && spec.pointees.get(base).is_none() && !consumed.contains(base);
+            let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w, both) else {
                 continue;
             };
             out.push(with_this(
