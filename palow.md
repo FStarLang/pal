@@ -5966,10 +5966,9 @@ new facts about memory.
 
 28. **`~` on a signed operand** (#349). The body translation of `~` only
     knew unsigned widths; a signed operand (including the `int` that
-    `~FLAG_X` promotes to) now uses `FStar.Int{w}.lognot`. As with the
-    unsigned form, SMT knows nothing about the resulting value, so a
-    contract about it would need a lemma. `test/bitnot_signed` covers
-    `x &= ~FLAG` and `x = ~x`.
+    `~FLAG_X` promotes to) is now translated too. Entry 33 changed both
+    forms to arithmetic, so SMT can reason about the result.
+    `test/bitnot_signed` covers `x &= ~FLAG` and `x = ~x`.
 
 29. **Arbitrary variadic arguments** (#354). A variadic argument was
     only accepted if it was inert (a local, a constant). Since Palow drops
@@ -6015,3 +6014,32 @@ new facts about memory.
     struct that only contains a packed one. Any other packed layout is
     skipped with the misaligned field named, since Palow has no unaligned
     accesses. `test/packed_struct` covers these.
+
+33. **Operators in contracts.** `~`, `&`, `|`, `^`, `<<`, `>>`, `/`
+    and `%` now translate in contracts as well as in bodies.
+    - `~x` is written arithmetically in both places: `-1 - x` for signed
+      types and `MAX - x` for unsigned ones. SMT knows nothing about
+      `lognot`, but it can do arithmetic.
+    - A contract literal is a spec int, so `x & ~4` reaches the emitter as
+      a bitwise expression lifted to `_specint`. Such an expression is
+      lowered back to the machine type of its operands, promoted to at
+      least `int` as C does. Its literals become machine literals: wrapped
+      for unsigned types, range-checked for signed ones. A machine cast
+      around it stays a real conversion, so
+      `return == (uint8_t)(x & ~4)` means what C means.
+    - Each partial operator states its definedness as a conjunct next to
+      the claim:
+      - `/` and `%` need a non-zero divisor, and on signed types a
+        quotient in range (`INT_MIN / -1`).
+      - A signed `<<` needs a non-negative operand whose product with
+        `2^s` fits.
+      - In a body these are checked at the operation. `/` and `%` are
+        therefore refused in a body whose contract did not translate.
+    - The `*` overflow guards for signed and `size_t` multiplication were
+      spelled `` `op_Multiply` ``, which does not resolve. They now use
+      `*`.
+    - Limit: SMT still knows nothing about `logand`, `logor` and
+      `logxor`. `x & 0xff <= 255` and commutativity therefore need a
+      lemma.
+
+    `test/contract_ops` covers these.

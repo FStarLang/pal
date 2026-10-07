@@ -2164,6 +2164,118 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// A bitwise expression that elaboration lifted to `_specint` because a
+    /// literal in it is one -- `x & 4`, `flags & ~FLAG` -- translated at the
+    /// machine type C computes it at instead. Bitwise operators mean nothing
+    /// on unbounded integers, but the machine operands say which width C
+    /// meant, and a literal at that width is the same bits.
+    fn spec_bits(&self, e: &Expr, w: When) -> Option<Result<String, String>> {
+        let lowered = self.lowered_bits(e)?;
+        Some(self.num(&lowered, w))
+    }
+
+    /// A cast of such an expression to a machine type: the cast is a real
+    /// conversion of the lowered value, not the number-it-already-is reading
+    /// a cast of a specification integer otherwise gets.
+    fn cast_bits(&self, e: &Expr) -> Option<Rc<Expr>> {
+        let ExprT::Cast(inner, to) = &strip_vattr(e).val else {
+            return None;
+        };
+        if !matches!(self.tds.resolve(to).val, TypeT::Int { .. }) {
+            return None;
+        }
+        let lowered = self.lowered_bits(inner)?;
+        Some(ExprT::Cast(lowered, to.clone()).with_loc(e.loc.clone()))
+    }
+
+    fn lowered_bits(&self, e: &Expr) -> Option<Rc<Expr>> {
+        if !matches!(
+            strip_vattr(e).val,
+            ExprT::UnOp(UnOp::BitNot, _)
+                | ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ..)
+        ) {
+            return None;
+        }
+        let ety = self.ty_of(e).ok()?;
+        if !matches!(self.tds.resolve(&ety).val, TypeT::SpecInt | TypeT::SpecNat) {
+            return None;
+        }
+        let (signed, width) = self.bits_ty(e)?;
+        // C's integer promotion: nothing narrower than `int` is operated on.
+        let (signed, width) = if width < 32 {
+            (true, 32)
+        } else {
+            (signed, width)
+        };
+        let ty = TypeT::Int { signed, width }.with_loc(e.loc.clone());
+        self.lower_bits(e, &ty)
+    }
+
+    fn bits_ty(&self, e: &Expr) -> Option<(bool, u32)> {
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, to)
+                if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) =>
+            {
+                let t = self.ty_of(inner).ok()?;
+                match peel(self.tds, &t).val {
+                    TypeT::Int { signed, width } => Some((signed, width)),
+                    _ => None,
+                }
+            }
+            ExprT::UnOp(UnOp::BitNot, x) => self.bits_ty(x),
+            ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, l, r) => {
+                match (self.bits_ty(l), self.bits_ty(r)) {
+                    (Some((s1, w1)), Some((s2, w2))) => Some(if w1 != w2 {
+                        if w1 > w2 { (s1, w1) } else { (s2, w2) }
+                    } else {
+                        (s1 && s2, w1)
+                    }),
+                    (a, b) => a.or(b),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn lower_bits(&self, e: &Expr, ty: &Rc<Type>) -> Option<Rc<Expr>> {
+        let loc = e.loc.clone();
+        let lit = |n: BigInt| -> Option<Rc<Expr>> {
+            let TypeT::Int { signed, width } = ty.val else {
+                return None;
+            };
+            let m = BigInt::from(1) << width;
+            let n = if signed {
+                let half = BigInt::from(1) << (width - 1);
+                if n < -half.clone() || n >= half {
+                    return None;
+                }
+                n
+            } else {
+                ((n % &m) + &m) % &m
+            };
+            Some(ExprT::IntLit(Rc::new(n), ty.clone()).with_loc(loc.clone()))
+        };
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, to)
+                if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) =>
+            {
+                Some(ExprT::Cast(inner.clone(), ty.clone()).with_loc(loc))
+            }
+            ExprT::IntLit(n, _) => lit((**n).clone()),
+            ExprT::UnOp(UnOp::Neg, x) => match &strip_vattr(x).val {
+                ExprT::IntLit(n, _) => lit(-(**n).clone()),
+                _ => None,
+            },
+            ExprT::UnOp(UnOp::BitNot, x) => {
+                Some(ExprT::UnOp(UnOp::BitNot, self.lower_bits(x, ty)?).with_loc(loc))
+            }
+            ExprT::BinOp(op @ (BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor), l, r) => Some(
+                ExprT::BinOp(*op, self.lower_bits(l, ty)?, self.lower_bits(r, ty)?).with_loc(loc),
+            ),
+            _ => None,
+        }
+    }
+
     /// What has to hold for a partial machine operator to be defined: a shift
     /// count below the width, and no overflow for signed arithmetic. These are
     /// C's own rules, so stating them costs the contract nothing it did not
@@ -2176,10 +2288,7 @@ impl<'a> Spec<'a> {
             return match op {
                 BinOp::Add => Some(format!("SizeT.fits (SizeT.v {} + SizeT.v {})", a, b)),
                 BinOp::Sub => Some(format!("SizeT.v {} >= SizeT.v {}", a, b)),
-                BinOp::Mul => Some(format!(
-                    "SizeT.fits (SizeT.v {} `op_Multiply` SizeT.v {})",
-                    a, b
-                )),
+                BinOp::Mul => Some(format!("SizeT.fits (SizeT.v {} * SizeT.v {})", a, b)),
                 _ => None,
             };
         }
@@ -2207,11 +2316,39 @@ impl<'a> Spec<'a> {
                     width
                 );
                 // A shift of a negative signed value is undefined in C, and
-                // F* refuses it too.
+                // F* refuses it too; so is a left shift whose result does not
+                // fit.
                 if signed {
-                    g = format!(r"{} /\ {}.v {} >= 0", g, m, self.value(l, w).ok()?);
+                    let a = self.value(l, w).ok()?;
+                    g = format!(r"{} /\ {}.v {} >= 0", g, m, a);
+                    if op == BinOp::Shl {
+                        g = format!(
+                            r"{} /\ ({}.v {} * pow2 ({}Int{}.v {})) <= FStar.Int.max_int {}",
+                            g,
+                            m,
+                            a,
+                            if rs { "" } else { "U" },
+                            rw,
+                            self.value(r, w).ok()?,
+                            width
+                        );
+                    }
                 }
                 Some(g)
+            }
+            // Division by zero is undefined, and so is the one signed
+            // quotient that overflows, `INT_MIN / -1` -- for `%` as well.
+            BinOp::Div | BinOp::Mod => {
+                let (a, b) = (self.value(l, w).ok()?, self.value(r, w).ok()?);
+                let nz = format!("{}.v {} <> 0", m, b);
+                Some(if signed {
+                    format!(
+                        r"{} /\ FStar.Int.size (FStar.Int.({}.v {} /- {}.v {})) {}",
+                        nz, m, a, m, b, width
+                    )
+                } else {
+                    nz
+                })
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul if signed => Some(format!(
                 "FStar.Int.size ({}.v {} {} {}.v {}) {}",
@@ -2220,7 +2357,7 @@ impl<'a> Spec<'a> {
                 match op {
                     BinOp::Add => "+",
                     BinOp::Sub => "-",
-                    _ => "`op_Multiply`",
+                    _ => "*",
                 },
                 m,
                 self.value(r, w).ok()?,
@@ -2263,6 +2400,9 @@ impl<'a> Spec<'a> {
         // the clause has no way to discharge: a guard conjoined at the top of
         // the clause cannot mention a variable the clause binds itself, which
         // is exactly where these casts appear.
+        if let Some(c) = self.cast_bits(e) {
+            return self.num(&c, w);
+        }
         if let ExprT::Cast(inner, _) = &strip_vattr(e).val
             && matches!(
                 self.tds.resolve(&ty).val,
@@ -2436,6 +2576,7 @@ impl<'a> Spec<'a> {
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
+            ExprT::Cast(..) if let Some(c) = self.cast_bits(e) => self.value(&c, w),
             ExprT::Cast(inner, to) => {
                 let to = self.tds.resolve(to);
                 match &to.val {
@@ -2448,7 +2589,9 @@ impl<'a> Spec<'a> {
                         }
                         let ity = self.ty_of(inner)?;
                         match self.int_module(&ity) {
-                            Some(m) => Ok(format!("({}.v {})", m, self.value(inner, w)?)),
+                            // `num` reads signed arithmetic mathematically,
+                            // which is what `(_specint) (-x - 1)` means.
+                            Some(_) => self.num(inner, w),
                             None if matches!(
                                 self.tds.resolve(&ity).val,
                                 TypeT::SpecInt | TypeT::SpecNat
@@ -2639,6 +2782,12 @@ impl<'a> Spec<'a> {
                     &f.val.to_string(),
                 ))
             }
+            ExprT::UnOp(UnOp::BitNot, _)
+            | ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ..)
+                if let Some(r) = self.spec_bits(e, w) =>
+            {
+                r
+            }
             ExprT::UnOp(op, inner) => {
                 let ety = self.ty_of(e)?;
                 let ty = self.tds.resolve(&ety);
@@ -2671,20 +2820,11 @@ impl<'a> Spec<'a> {
                         width,
                         self.value(inner, w)?
                     )),
-                    // The bitwise complement is total on the whole unsigned
-                    // range, so it needs nothing said about it and is the same
-                    // function the body emits.
-                    (
-                        UnOp::BitNot,
-                        TypeT::Int {
-                            signed: false,
-                            width,
-                        },
-                    ) => Ok(format!(
-                        "(FStar.UInt{}.lognot {})",
-                        width,
-                        self.value(inner, w)?
-                    )),
+                    // The bitwise complement is total, so it needs nothing said
+                    // about it and is the same term the body emits.
+                    (UnOp::BitNot, TypeT::Int { .. }) => {
+                        Ok(bitnot(self.tds, ty, &self.value(inner, w)?).unwrap())
+                    }
                     _ => Err(format!(
                         "`{}` on {} in a contract",
                         op.to_str(),
@@ -14340,19 +14480,8 @@ impl<'a> Body<'a> {
             ExprT::UnOp(UnOp::BitNot, inner) => {
                 let ty = self.ty_of(e)?;
                 let a = self.rvalue(inner)?;
-                match &self.tds.resolve(&ty).val {
-                    TypeT::Int {
-                        signed: false,
-                        width,
-                    } => Ok(format!("(FStar.UInt{}.lognot {})", width, a)),
-                    // Unlike `-`, `~` cannot overflow: it is total on every
-                    // two's-complement width, which is what F*'s `lognot` is.
-                    TypeT::Int {
-                        signed: true,
-                        width,
-                    } => Ok(format!("(FStar.Int{}.lognot {})", width, a)),
-                    _ => Err(format!("a bitwise complement of {}", describe(&ty))),
-                }
+                bitnot(self.tds, &ty, &a)
+                    .ok_or_else(|| format!("a bitwise complement of {}", describe(&ty)))
             }
             ExprT::Ref(inner) => match &strip_vattr(inner).val {
                 // A global's address is a constant of type `ptr`, so it needs
@@ -18544,6 +18673,24 @@ fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String
     Ok(format!("({}.of_literal \"{}\")", m, digits))
 }
 
+/// `~a`, written as the subtraction it equals in two's complement: `-1 - a`
+/// for a signed type, `MAX - a` for an unsigned one. Neither can overflow,
+/// and unlike F*'s `lognot` the solver can reason about either -- including
+/// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
+fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
+    let TypeT::Int { signed, width } = peel(tds, ty).val else {
+        return None;
+    };
+    let all = if signed {
+        BigInt::from(-1)
+    } else {
+        (BigInt::from(1) << width) - 1
+    };
+    let lit = int_literal(tds, &all, ty).ok()?;
+    let m = format!("FStar.{}Int{}", if signed { "" } else { "U" }, width);
+    Some(format!("({}.sub {} {})", m, lit, a))
+}
+
 fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
     Ok(match (signed, width) {
         (true, 8) => "y",
@@ -18828,6 +18975,13 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     } = &t.val
     {
         let wrap = format!("Pulse.Lib.C.UInt{}", width);
+        // Division is partial at either signedness: by zero it is undefined.
+        if matches!(op, BinOp::Div | BinOp::Mod) && !signed_ok {
+            return Err(
+                "a division, whose definedness obligation needs the untranslated `_requires`"
+                    .to_string(),
+            );
+        }
         return Ok(match op {
             BinOp::Add => format!("`{}.add_wrap`", wrap),
             BinOp::Sub => format!("`{}.sub_wrap`", wrap),
@@ -18838,7 +18992,7 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         });
     }
     match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul if !signed_ok => Err(
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod if !signed_ok => Err(
             "signed arithmetic, whose overflow obligation needs the untranslated `_requires`"
                 .to_string(),
         ),
