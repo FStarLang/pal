@@ -32,7 +32,9 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Array
 open Pulse.Lib.C.Palow.Machine
+open Pulse.Lib.C.Palow.Index
 
+module ET = Pulse.Lib.C.Palow.Etype
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module U8 = FStar.UInt8
@@ -54,8 +56,33 @@ let struct_S_repr (x: struct_S) (b: bytes) : prop =
   (len b == SZ.v struct_S_sizeof ==>
      (uint32_t_repr x.f (slice b 0 4) /\ uint8_t_repr x.g (slice b 4 5)))
 
+let struct_S_ctype : ET.ctype =
+  ET.TStruct "S" 8 [(0, uint32_t_ctype); (4, uint8_t_ctype)]
+
+(* The effective-type side condition a struct predicate carries: each field's
+   slice of the index admits a read at that field's type. Like `elems_ok` for
+   arrays it is stated *pointwise*, so it splits and joins by construction --
+   which is what lets `struct_S_split` and `struct_S_join` stay provable. The
+   padding bytes are deliberately unconstrained: nothing reads them. *)
+let struct_S_fields_ok (e: ET.etypes) : prop =
+  ET.elen e == SZ.v struct_S_sizeof /\
+  ET.read_ok (Seq.slice e 0 4) uint32_t_ctype /\
+  ET.read_ok (Seq.slice e 4 5) uint8_t_ctype
+
+(* The join side: a field slice of the concatenated index is the field's own
+   index back. Pure, and the only reason `struct_S_join` goes through. *)
+let struct_S_fields_ok_intro (ef eg epad: ET.etypes)
+  : Lemma (requires ET.elen ef == 4 /\ ET.elen eg == 1 /\ ET.elen epad == 3
+                    /\ ET.read_ok ef uint32_t_ctype /\ ET.read_ok eg uint8_t_ctype)
+          (ensures  struct_S_fields_ok (Seq.append ef (Seq.append eg epad)))
+  = let e = Seq.append ef (Seq.append eg epad) in
+    Seq.lemma_eq_intro (Seq.slice e 0 4) ef;
+    Seq.lemma_eq_intro (Seq.slice e 4 5) eg
+
 let struct_S_pts_to ([@@@mkey] a: ptr) (p: perm) (x: struct_S) : slprop =
-  exists* b. mem_pts_to a p b ** pure (struct_S_repr x b /\ aligned a struct_S_alignof)
+  exists* b e. mem_pts_to_at a p b e
+            ** pure (struct_S_repr x b /\ aligned a struct_S_alignof
+                     /\ struct_S_fields_ok e)
 
 (* Ownership of the padding, which the split hands back separately so that the
    join can put the struct together again. *)
@@ -120,20 +147,24 @@ ghost fn struct_S_split (a: ptr) (#p: perm) (#x: struct_S)
   ensures  struct_S_padding a p
 {
   unfold struct_S_pts_to a p x;
-  with b. assert (mem_pts_to a p b ** pure (struct_S_repr x b));
+  with b e. assert (mem_pts_to_at a p b e
+                    ** pure (struct_S_repr x b /\ struct_S_fields_ok e));
   struct_S_repr_elim x b;
   struct_S_field_aligned a;
 
-  mem_split a 4sz;
+  mem_split_at a 4sz;
   Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v x.f));
-  uint32_t_conceal a #p #_ #x.f;
+  uint32_t_conceal a #p #_ #_ #x.f;
 
-  mem_split (a +! 4sz) 1sz;
+  mem_split_at (a +! 4sz) 1sz;
   Seq.slice_slice b 4 8 0 1;
+  Seq.slice_slice e 4 8 0 1;
   Seq.lemma_eq_intro (slice (slice b 4 (len b)) 0 1) (encode 1 None (U8.v x.g));
-  uint8_t_conceal (a +! struct_S_offsetof_g) #p #_ #x.g;
+  uint8_t_conceal (a +! struct_S_offsetof_g) #p #_ #_ #x.g;
 
   Seq.slice_slice b 4 8 1 4;
+  Seq.slice_slice e 4 8 1 4;
+  mem_hide_etypes ((a +! 4sz) +! 1sz);
   struct_S_padptr a;
   rewrite (mem_pts_to ((a +! 4sz) +! 1sz) p
                       (slice (slice b 4 (len b)) 1 (len (slice b 4 (len b)))))
@@ -150,20 +181,27 @@ ghost fn struct_S_join (a: ptr) (#p: perm) (#x: struct_S)
   ensures  struct_S_pts_to a p x
 {
   uint32_t_reveal a #p #x.f;
+  with ef. assert (mem_pts_to_at a p (encode 4 None (U32.v x.f)) ef);
   uint8_t_reveal (a +! struct_S_offsetof_g) #p #x.g;
+  with eg. assert (mem_pts_to_at (a +! struct_S_offsetof_g) p
+                                 (encode 1 None (U8.v x.g)) eg);
   unfold struct_S_padding a p;
   with pad. assert (mem_pts_to (a +! struct_S_padoff) p pad);
+  mem_show_etypes (a +! struct_S_padoff);
+  with epad. assert (mem_pts_to_at (a +! struct_S_padoff) p pad epad);
 
   struct_S_padptr a;
-  rewrite (mem_pts_to (a +! struct_S_padoff) p pad)
-       as (mem_pts_to ((a +! 4sz) +! 1sz) p pad);
-  rewrite (mem_pts_to (a +! struct_S_offsetof_g) p (encode 1 None (U8.v x.g)))
-       as (mem_pts_to (a +! 4sz) p (encode 1 None (U8.v x.g)));
+  rewrite (mem_pts_to_at (a +! struct_S_padoff) p pad epad)
+       as (mem_pts_to_at ((a +! 4sz) +! 1sz) p pad epad);
+  rewrite (mem_pts_to_at (a +! struct_S_offsetof_g) p (encode 1 None (U8.v x.g)) eg)
+       as (mem_pts_to_at (a +! 4sz) p (encode 1 None (U8.v x.g)) eg);
 
-  mem_join (a +! 4sz) #p #(encode 1 None (U8.v x.g)) #pad 1sz;
-  mem_join a #p #(encode 4 None (U32.v x.f)) #(append (encode 1 None (U8.v x.g)) pad) 4sz;
+  mem_join_at (a +! 4sz) #p #(encode 1 None (U8.v x.g)) #pad #eg #epad 1sz;
+  mem_join_at a #p #(encode 4 None (U32.v x.f)) #(append (encode 1 None (U8.v x.g)) pad)
+                 #ef #(Seq.append eg epad) 4sz;
 
   struct_S_repr_intro x (encode 4 None (U32.v x.f)) (encode 1 None (U8.v x.g)) pad;
+  struct_S_fields_ok_intro ef eg epad;
   fold struct_S_pts_to a p x;
 }
 #pop-options
@@ -199,8 +237,26 @@ let struct_T_repr (x: struct_T) (b: bytes) : prop =
   (len b == SZ.v struct_T_sizeof ==>
      (uint32_t_repr x.y (slice b 0 4) /\ uint32_t_repr x.z (slice b 4 8)))
 
+let struct_T_ctype : ET.ctype =
+  ET.TStruct "T" 8 [(0, uint32_t_ctype); (4, uint32_t_ctype)]
+
+let struct_T_fields_ok (e: ET.etypes) : prop =
+  ET.elen e == SZ.v struct_T_sizeof /\
+  ET.read_ok (Seq.slice e 0 4) uint32_t_ctype /\
+  ET.read_ok (Seq.slice e 4 8) uint32_t_ctype
+
+let struct_T_fields_ok_intro (ey ez: ET.etypes)
+  : Lemma (requires ET.elen ey == 4 /\ ET.elen ez == 4
+                    /\ ET.read_ok ey uint32_t_ctype /\ ET.read_ok ez uint32_t_ctype)
+          (ensures  struct_T_fields_ok (Seq.append ey ez))
+  = let e = Seq.append ey ez in
+    Seq.lemma_eq_intro (Seq.slice e 0 4) ey;
+    Seq.lemma_eq_intro (Seq.slice e 4 8) ez
+
 let struct_T_pts_to ([@@@mkey] a: ptr) (p: perm) (x: struct_T) : slprop =
-  exists* b. mem_pts_to a p b ** pure (struct_T_repr x b /\ aligned a struct_T_alignof)
+  exists* b e. mem_pts_to_at a p b e
+            ** pure (struct_T_repr x b /\ aligned a struct_T_alignof
+                     /\ struct_T_fields_ok e)
 
 let struct_T_field_aligned (a: ptr)
   : Lemma (requires aligned a struct_T_alignof)
@@ -223,12 +279,14 @@ ghost fn struct_T_split (a: ptr) (#p: perm) (#x: struct_T)
 {
   unfold struct_T_pts_to a p x;
   struct_T_field_aligned a;
-  with b. assert (mem_pts_to a p b ** pure (struct_T_repr x b));
-  mem_split a 4sz;
+  with b e. assert (mem_pts_to_at a p b e
+                    ** pure (struct_T_repr x b /\ struct_T_fields_ok e));
+  mem_split_at a 4sz;
   Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v x.y));
   Seq.lemma_eq_intro (slice b 4 (len b)) (encode 4 None (U32.v x.z));
-  uint32_t_conceal a #p #_ #x.y;
-  uint32_t_conceal (a +! struct_T_offsetof_z) #p #_ #x.z;
+  Seq.lemma_eq_intro (Seq.slice e 4 (ET.elen e)) (Seq.slice e 4 8);
+  uint32_t_conceal a #p #_ #_ #x.y;
+  uint32_t_conceal (a +! struct_T_offsetof_z) #p #_ #_ #x.z;
 }
 
 ghost fn struct_T_join (a: ptr) (#p: perm) (#x: struct_T)
@@ -237,11 +295,15 @@ ghost fn struct_T_join (a: ptr) (#p: perm) (#x: struct_T)
   ensures  struct_T_pts_to a p x
 {
   uint32_t_reveal a #p #x.y;
+  with ey. assert (mem_pts_to_at a p (encode 4 None (U32.v x.y)) ey);
   uint32_t_reveal (a +! struct_T_offsetof_z) #p #x.z;
-  rewrite (mem_pts_to (a +! struct_T_offsetof_z) p (encode 4 None (U32.v x.z)))
-       as (mem_pts_to (a +! 4sz) p (encode 4 None (U32.v x.z)));
-  mem_join a #p #(encode 4 None (U32.v x.y)) #(encode 4 None (U32.v x.z)) 4sz;
+  with ez. assert (mem_pts_to_at (a +! struct_T_offsetof_z) p
+                                 (encode 4 None (U32.v x.z)) ez);
+  rewrite (mem_pts_to_at (a +! struct_T_offsetof_z) p (encode 4 None (U32.v x.z)) ez)
+       as (mem_pts_to_at (a +! 4sz) p (encode 4 None (U32.v x.z)) ez);
+  mem_join_at a #p #(encode 4 None (U32.v x.y)) #(encode 4 None (U32.v x.z)) #ey #ez 4sz;
   struct_T_repr_intro x (encode 4 None (U32.v x.y)) (encode 4 None (U32.v x.z));
+  struct_T_fields_ok_intro ey ez;
   fold struct_T_pts_to a p x;
 }
 
@@ -280,7 +342,7 @@ ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
   ensures  uint32_t_pts_to a p x
 {
   unfold elem_pts_to uint32_t_repr uint32_t_ctype a p x;
-  uint32_t_conceal a #p #_ #x;
+  uint32_t_conceal a #p #_ #_ #x;
 }
 
 ghost fn uint32_t_to_elem (a: ptr) (#p: perm) (#x: U32.t)

@@ -30,6 +30,7 @@ open Pulse.Lib.C.Palow.Bytes
 open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow
+open Pulse.Lib.C.Palow.Index
 open Pulse.Lib.C.Palow.Array
 
 module SZ = FStar.SizeT
@@ -71,13 +72,16 @@ val uint8_t_repr_len (x: U8.t) (b: bytes)
 
 ghost fn uint8_t_reveal (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (uint8_t_repr x b /\ aligned a uint8_t_alignof)
+  ensures  exists* b e. mem_pts_to_at a p b e
+             ** pure (uint8_t_repr x b /\ aligned a uint8_t_alignof
+                      /\ ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
 
 
-ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U8.t)
-  requires mem_pts_to a p b
+ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U8.t)
+  requires mem_pts_to_at a p b e
   requires pure (uint8_t_repr x b)
   requires pure (aligned a uint8_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
   ensures  uint8_t_pts_to a p x
 
 
@@ -156,13 +160,16 @@ ghost fn uint32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
    an axiom. *)
 ghost fn uint32_t_reveal (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (uint32_t_repr x b /\ aligned a uint32_t_alignof)
+  ensures  exists* b e. mem_pts_to_at a p b e
+             ** pure (uint32_t_repr x b /\ aligned a uint32_t_alignof
+                      /\ ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
 
 
-ghost fn uint32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U32.t)
-  requires mem_pts_to a p b
+ghost fn uint32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U32.t)
+  requires mem_pts_to_at a p b e
   requires pure (uint32_t_repr x b)
   requires pure (aligned a uint32_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
   ensures  uint32_t_pts_to a p x
 
 
@@ -174,19 +181,21 @@ ghost fn uint32_t_forget (a: ptr) (#x: U32.t)
   ensures  uint32_t_pts_to_uninit a
 
 
-ghost fn uint32_t_claim_uninit (a: ptr) (#b: bytes)
-  requires mem_pts_to a 1.0R b
+ghost fn uint32_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
   ensures  uint32_t_pts_to_uninit a
 
 
 (* Raw storage of the right size can be claimed as a `uint32_t` object as soon as
    we can exhibit a value it represents. This is the step a custom allocator
    takes when it hands out a chunk of a block it carved up. *)
-ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
-  requires mem_pts_to a 1.0R b
+ghost fn uint32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U32.t)
+  requires mem_pts_to_at a 1.0R b e
   requires pure (uint32_t_repr x b)
   requires pure (aligned a uint32_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
   ensures  uint32_t_pts_to a 1.0R x
 
 
@@ -273,13 +282,16 @@ ghost fn ptr_gather (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
 
 ghost fn ptr_reveal (dest: ptr) (#p: perm) (#a: ptr)
   requires ptr_pts_to dest p a
-  ensures  exists* b. mem_pts_to dest p b ** pure (ptr_repr a b /\ aligned dest ptr_alignof)
+  ensures  exists* b e. mem_pts_to_at dest p b e
+             ** pure (ptr_repr a b /\ aligned dest ptr_alignof
+                      /\ ET.elen e == len b /\ ET.read_ok e ptr_ctype)
 
 
-ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
-  requires mem_pts_to dest p b
+ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#a: ptr)
+  requires mem_pts_to_at dest p b e
   requires pure (ptr_repr a b)
   requires pure (aligned dest ptr_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ptr_ctype)
   ensures  ptr_pts_to dest p a
 
 
@@ -294,9 +306,10 @@ ghost fn ptr_forget (dest: ptr) (#a: ptr)
   ensures  ptr_pts_to_uninit dest
 
 
-ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes)
-  requires mem_pts_to dest 1.0R b
+ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at dest 1.0R b e
   requires pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ptr_ctype)
   ensures  ptr_pts_to_uninit dest
 
 

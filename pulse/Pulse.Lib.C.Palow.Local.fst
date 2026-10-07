@@ -28,13 +28,14 @@ module ET = Pulse.Lib.C.Palow.Etype
 fn array_stack_alloc (#t: Type0) (t_repr: t -> bytes -> prop) (ect: ET.ctype) (esize: SZ.t) (ealign: SZ.t { SZ.v ealign > 0 }) (n: SZ.t)
                      (nbytes: SZ.t { SZ.v nbytes == SZ.v esize * SZ.v n })
   requires pure (SZ.v esize % SZ.v ealign == 0 /\ SZ.v max_align % SZ.v ealign == 0
-                 /\ SZ.v esize > 0)
+                 /\ SZ.v esize > 0 /\ ET.csize ect == SZ.v esize)
   returns a : ptr
   ensures array_pts_to (maybe_repr t_repr (SZ.v esize)) ect (SZ.v esize) (SZ.v ealign) a 1.0R
                        (Seq.create (SZ.v n) (None #t))
 {
   let a = mem_stack_alloc nbytes;
   aligned_divides a max_align ealign;
+  elems_ok_none ect (SZ.v esize) (SZ.v n);
   array_claim_uninit t_repr ect a esize ealign n;
   a
 }

@@ -249,6 +249,14 @@ let etypes_wf (e: etypes) : prop =
 (* Freshly allocated storage: no effective type anywhere. *)
 let etypes_none (n: nat) : e:etypes { elen e == n } = Seq.create n None
 
+(* Untyped storage stays untyped when it is cut up. Used wherever a block is
+   handed out piecewise -- `mem_split_at` on `malloc`ed or pool storage. *)
+let etypes_none_slice (n: nat) (i: nat) (j: nat)
+  : Lemma (requires i <= j /\ j <= n)
+          (ensures  Seq.slice (etypes_none n) i j == etypes_none (j - i))
+          [SMTPat (Seq.slice (etypes_none n) i j)]
+  = Seq.lemma_eq_intro (Seq.slice (etypes_none n) i j) (etypes_none (j - i))
+
 (* A declared (`fixed`) or stored-into object of type `t` occupying its own
    bytes, each byte tagged with its offset within the object. *)
 let etypes_of (t: ctype) (fx: bool) : e:etypes { elen e == csize t } =

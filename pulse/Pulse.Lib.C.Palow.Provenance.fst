@@ -33,10 +33,12 @@ open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow.Scalar
+open Pulse.Lib.C.Palow.Index
 open Pulse.Lib.C.Palow.Machine
 open Pulse.Lib.C.Palow.Expose
 
 module U32 = FStar.UInt32
+module ET = Pulse.Lib.C.Palow.Etype
 module SZ = FStar.SizeT
 
 (* `(uintptr_t) a` followed by a cast back yields `a` itself. Note where the
@@ -49,12 +51,22 @@ fn round_trip (a: ptr) (#p: perm) (#x: erased U32.t)
   ensures   pure (b == a)
 {
   uint32_t_reveal a;
+  with b e. assert (mem_pts_to_at a p b e);
+  (* `expose` and `mem_pts_to_footprint` are byte-level, so the index has to be
+     put down to call them. Halving the permission first keeps one indexed copy
+     in hand; `mem_pts_to_at_injective` then names the index the other half
+     comes back with, and the gather restores the full permission. *)
+  mem_share_at a;
+  mem_hide_etypes a;
   expose a;
   mem_pts_to_footprint a;
   let n = ptr_to_uintptr a;
   let b = uintptr_to_ptr n (hide (prov_of a));
   ptr_ext a b;
-  uint32_t_conceal a #p #_ #(reveal x);
+  mem_show_etypes a;
+  mem_pts_to_at_injective a;
+  mem_gather_at a;
+  uint32_t_conceal a #p #_ #_ #(reveal x);
   drop_ (exposed (prov_of a));
   b
 }
@@ -63,10 +75,14 @@ fn round_trip (a: ptr) (#p: perm) (#x: erased U32.t)
    bytes of storage of no particular type. After copying the bytes across, the
    pointer read back out of `dst` can be dereferenced -- and `rewrites_to` on
    `ptr_read` means we never have to say that it equals `target`, it just is. *)
-fn transport (src dst: ptr) (#target: ptr) (#bd: bytes) (#x: erased U32.t)
+fn transport (src dst: ptr) (#target: ptr) (#bd: bytes) (#ed: ET.etypes)
+             (#x: erased U32.t)
   requires ptr_pts_to src 1.0R target
-  requires mem_pts_to dst 1.0R bd
+  requires mem_pts_to_at dst 1.0R bd ed
   requires pure (len bd == SZ.v ptr_sizeof /\ aligned dst ptr_alignof)
+  (* `memcpy` keeps the destination's index, so reading the copy back as a
+     pointer needs the destination to have admitted pointers already. *)
+  requires pure (ET.elen ed == SZ.v ptr_sizeof /\ ET.read_ok ed ptr_ctype)
   preserves uint32_t_pts_to target 1.0R x
   returns   y : U32.t
   ensures   ptr_pts_to src 1.0R target ** ptr_pts_to dst 1.0R target
@@ -74,8 +90,8 @@ fn transport (src dst: ptr) (#target: ptr) (#bd: bytes) (#x: erased U32.t)
 {
   ptr_reveal src #1.0R #target;
   memcpy dst src ptr_sizeof;
-  ptr_conceal src #1.0R #_ #target;
-  ptr_conceal dst #1.0R #_ #target;
+  ptr_conceal src #1.0R #_ #_ #target;
+  ptr_conceal dst #1.0R #_ #_ #target;
   let p = ptr_read dst;
   uint32_t_read p;
 }

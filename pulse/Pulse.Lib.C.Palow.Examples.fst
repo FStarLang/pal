@@ -36,6 +36,7 @@ open Pulse.Lib.C.Palow.Array
 open Pulse.Lib.C.Palow.Nullable
 open Pulse.Lib.C.Palow.Alloc
 module Seq = FStar.Seq
+module ET = Pulse.Lib.C.Palow.Etype
 module SZ = FStar.SizeT
 module U32 = FStar.UInt32
 
@@ -239,7 +240,7 @@ fn alloc_ne_null ()
 {
   let p = malloc uint32_t_sizeof;
   if (not (is_null p)) {
-    elim_unless_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof ** pure (aligned p max_align));
+    elim_unless_null p (mem_pts_to_at p 1.0R (uninit (SZ.v uint32_t_sizeof)) (ET.etypes_none (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof ** pure (aligned p max_align));
     aligned_divides p max_align uint32_t_alignof;
     uint32_t_claim_uninit p;
     uint32_t_write_uninit p 7ul;
@@ -247,6 +248,6 @@ fn alloc_ne_null ()
     uint32_t_reveal_uninit p;
     free p;
   } else {
-    elim_unless_null_null p (mem_pts_to p 1.0R (uninit (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof ** pure (aligned p max_align));
+    elim_unless_null_null p (mem_pts_to_at p 1.0R (uninit (SZ.v uint32_t_sizeof)) (ET.etypes_none (SZ.v uint32_t_sizeof)) ** freeable p uint32_t_sizeof ** pure (aligned p max_align));
   };
 }

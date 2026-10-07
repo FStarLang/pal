@@ -25,6 +25,7 @@ open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Float
 open Pulse.Lib.C.Palow.CTypes
 
+module ET = Pulse.Lib.C.Palow.Etype
 module SZ = FStar.SizeT
 module U8 = FStar.UInt8
 module U16 = FStar.UInt16
@@ -93,24 +94,40 @@ fn ptr_write (a: ptr) (y: ptr) (#x: erased ptr)
    means the same provenance too, so a pointer copied through `memcpy` remains
    dereferenceable. Nothing extra has to be said to get that; see
    `Pulse.Lib.C.Palow.Provenance`.
+
+   Both are stated over `mem_pts_to_at` and leave the *destination's*
+   effective-type index alone. 6.5p6 says more than that -- a `memcpy` into
+   storage with no declared type takes on the source's effective type -- but
+   PAL deliberately does not model the transfer. Keeping the destination's
+   index means a caller that wants to read the copy at some type has to show
+   the destination already admitted that type, which is the same obligation
+   every other claim carries, and is never unsound: it only rejects programs
+   the transfer rule would have accepted.
    --------------------------------------------------------------------------- *)
 
 fn memcpy (dst src: ptr) (n: SZ.t) (#p: perm) (#bs #bd: erased bytes)
-  preserves mem_pts_to src p bs
-  requires  mem_pts_to dst 1.0R bd
-  requires  pure (len bs == SZ.v n /\ len bd == SZ.v n)
-  ensures   mem_pts_to dst 1.0R bs
+          (#es #ed: erased ET.etypes)
+  preserves mem_pts_to_at src p bs es
+  requires  mem_pts_to_at dst 1.0R bd ed
+  requires  pure (len bs == SZ.v n /\ len bd == SZ.v n
+                  /\ ET.elen es == SZ.v n /\ ET.elen ed == SZ.v n)
+  ensures   mem_pts_to_at dst 1.0R bs ed
 
 (* `memset` to zero, which is the only fill C code reliably means: filling with
    anything else is only well defined for byte-sized types, and the C that does
    it is rare enough not to pay for here. Like `memcpy` this says what the
    destination ends up holding rather than anything about types, and what it
    ends up holding is `zeroed`, which is a representation of 0 for every
-   arithmetic type -- see `encode_zero`. *)
-fn memset_zero (dst: ptr) (n: SZ.t) (#bd: erased bytes)
-  requires mem_pts_to dst 1.0R bd
-  requires pure (len bd == SZ.v n)
-  ensures  mem_pts_to dst 1.0R (zeroed (SZ.v n))
+   arithmetic type -- see `encode_zero`.
+
+   It is stated over `mem_pts_to_at` and leaves the effective-type index
+   alone. That is 6.5p6's character-type carve-out, not a convenience: a
+   byte-wise fill never installs a type, so clearing a declared `int` leaves
+   it an `int` and clearing fresh `malloc`ed storage leaves it untyped. *)
+fn memset_zero (dst: ptr) (n: SZ.t) (#bd: erased bytes) (#e: erased ET.etypes)
+  requires mem_pts_to_at dst 1.0R bd e
+  requires pure (len bd == SZ.v n /\ ET.elen e == SZ.v n)
+  ensures  mem_pts_to_at dst 1.0R (zeroed (SZ.v n)) e
 
 (* ---------------------------------------------------------------------------
    Automatic storage
@@ -150,7 +167,7 @@ fn ptr_stack_free (a: ptr)
    from `mem_split` rather than another axiom. *)
 fn mem_stack_alloc (n: SZ.t)
   returns  a : ptr
-  ensures  exists* b. mem_pts_to a 1.0R b
+  ensures  exists* b. mem_pts_to_at a 1.0R b (ET.etypes_none (SZ.v n))
                       ** pure (len b == SZ.v n /\ aligned a max_align)
 
 fn mem_stack_free (a: ptr) (#b: erased bytes)
