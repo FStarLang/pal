@@ -14649,7 +14649,17 @@ impl<'a> Body<'a> {
         let consumes = c.consumes.clone();
         let mut out = format!("func_{}", name.val);
         let mut implicit_args: Vec<String> = Vec::new();
+        let opened = self.field_args(args, &outs, |i| {
+            !(arr_args.get(i) == Some(&true)
+                || arrayptr_args.get(i) == Some(&true)
+                || plain_ptrs.get(i) == Some(&true)
+                || consumes.get(i) == Some(&true))
+        })?;
         for (i, a) in args.iter().enumerate() {
+            if let Some(at) = opened.get(&i) {
+                out += &format!(" {}", at);
+                continue;
+            }
             // A literal's address carries no writable ownership. A const
             // array parameter can receive a fractional read-only share of the
             // static storage; a mutable array parameter still gets the old
@@ -14777,6 +14787,130 @@ impl<'a> Body<'a> {
             out += " ()";
         }
         Ok(format!("({})", out))
+    }
+
+    /// Open the fields whose addresses a call's arguments are, for the length
+    /// of the statement.
+    ///
+    /// `f(&s->a)` hands the callee the field's storage, which this function
+    /// holds only as part of `*s`: a single field is focused and unfocused
+    /// afterwards, exactly as a store through it would be. Two fields of one
+    /// object cannot both be focused -- a focus leaves a hole where the rest
+    /// of the object was -- so the object is scattered into all its fields
+    /// instead and gathered again after the call. An `_out` field gives up
+    /// its value first, as `out_arg` does for one on its own.
+    ///
+    /// Returns the address passed for each argument handled here. Storage that
+    /// holds no value yet is left to `out_arg`, which already fills such an
+    /// object field by field.
+    fn field_args(
+        &mut self,
+        args: &Exprs,
+        outs: &[bool],
+        owns_one: impl Fn(usize) -> bool,
+    ) -> Result<HashMap<usize, String>, String> {
+        let mut groups: Vec<(String, Rc<Expr>, Vec<(usize, Rc<Ident>)>)> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let out = outs.get(i) == Some(&true);
+            if !out && !owns_one(i) {
+                continue;
+            }
+            let ExprT::Ref(inner) = &strip_vattr(a).val else {
+                continue;
+            };
+            let ExprT::Member(base, f) = &strip_vattr(inner).val else {
+                continue;
+            };
+            if self.union_of(base).is_some()
+                || self.in_pieces(base)
+                || self
+                    .ty_of(inner)
+                    .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
+            {
+                continue;
+            }
+            let mark = self.lines.len();
+            let key = self.addr_only(base);
+            if self.lines.len() != mark {
+                self.lines.truncate(mark);
+                continue;
+            }
+            let Ok(key) = key else {
+                continue;
+            };
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => g.2.push((i, f.clone())),
+                None => groups.push((key, base.clone(), vec![(i, f.clone())])),
+            }
+        }
+        let mut opened = HashMap::new();
+        for (key, base, fields) in groups {
+            // Storage still being filled is scattered already, or will be by
+            // the first `_out` that reaches it.
+            let filling = self
+                .slots
+                .iter()
+                .any(|s| s.addr == key && !s.init && s.array.is_none())
+                || self
+                    .blocks
+                    .iter()
+                    .any(|b| b.tmp == key && b.checked && !b.freed && !b.init);
+            if filling {
+                continue;
+            }
+            if fields.len() == 1 {
+                let (i, f) = &fields[0];
+                if outs.get(*i) == Some(&true) {
+                    continue;
+                }
+                let place = ExprT::Member(base.clone(), f.clone()).with_loc(base.loc.clone());
+                let fo = self.place(&place, true)?;
+                if fo.bits.is_some() {
+                    return Err(format!("the address of bit-field `{}`", f.val));
+                }
+                self.lines.extend(fo.open_write.iter().cloned());
+                self.pending_close.extend(fo.close_write);
+                opened.insert(*i, fo.at);
+                continue;
+            }
+            let (sn, bty) = self.struct_of(&base)?;
+            for (n, (_, f)) in fields.iter().enumerate() {
+                if fields[..n].iter().any(|(_, g)| g.val == f.val) {
+                    return Err(format!("field `{}` passed twice to one call", f.val));
+                }
+                if bitfield_at(self.tds, &bty, &f.val).is_some() {
+                    return Err(format!("the address of bit-field `{}`", f.val));
+                }
+            }
+            let sname = sn.strip_prefix("struct_").unwrap_or(&sn);
+            let splittable = self.tds.structs.get(sname).is_some_and(|si| {
+                si.fields.iter().all(|x| match &x.shape {
+                    FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+                    FieldShape::Array { .. } => true,
+                    FieldShape::Flex { .. } => false,
+                })
+            });
+            if !splittable {
+                return Err(format!(
+                    "two fields of one `{}` passed to a call, which cannot be split into its fields",
+                    sname
+                ));
+            }
+            let ff = self.open_field(&base, &fields[0].1, true)?;
+            self.no_value_yet(&ff.a)?;
+            self.lines.push(format!("{}_scatter {};", sn, ff.a));
+            for (i, f) in &fields {
+                let at = format!("({} +! {}_offsetof_{})", ff.a, sn, f.val);
+                if outs.get(*i) == Some(&true) {
+                    let pn = self.field_pn(&base, f)?;
+                    self.lines.push(format!("{}_forget {};", pn, at));
+                }
+                opened.insert(*i, at);
+            }
+            self.pending_close.push(format!("{}_gather {};", sn, ff.a));
+            self.pending_close.extend(ff.close_write);
+        }
+        Ok(opened)
     }
 
     /// Stop accounting for an object whose ownership a `_consumes` parameter

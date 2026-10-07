@@ -5990,3 +5990,15 @@ new facts about memory.
     refused, since the invariant would have to say that the storage may or
     may not hold a value. Struct and array `_out` parameters are still
     refused at a loop. `test/out_loop` covers these.
+
+31. **Field addresses as call arguments** (#348). `f(&s->a)` passed the
+    field's address without opening `*s`, so the callee's points-to was
+    never found unless the parameter was `_out`, and two `_out` fields of
+    one object failed: the first focus leaves a hole, and the second focus
+    needs the whole object. `field_args` now groups a call's field-address
+    arguments by the object they belong to. A lone field is focused for the
+    statement. Two or more are handled by `scatter` on the object, a
+    `forget` on each `_out` field, the call, and then `gather`. A
+    local that holds no value yet keeps the field-by-field fill it already
+    had. `test/out_field` covers `_out` and borrowing parameters, a nested
+    struct, and a local.
