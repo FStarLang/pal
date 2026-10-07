@@ -695,7 +695,7 @@ and cited to the standard. Transcribing the nineteen of them that bear on
 - **There was a relabelling function but no store rule.** `store_etypes` says
   how a store *moves* the index; it does not say whether the store is
   *allowed*, and storing at an incompatible type into a declared object is
-  undefined behaviour rather than a no-op (cases 12.2, 13.2). `store_ok` is
+  undefined behaviour rather than a no-op (cases 13.2, 14.2). `store_ok` is
   that side condition, and `store_ok_read_ok` — a permitted store leaves the
   bytes readable at the type stored — is the load-bearing theorem for
   enforcement: without it a generated `T_write` cannot re-establish its own
@@ -703,7 +703,7 @@ and cited to the standard. Transcribing the nineteen of them that bear on
 
 - **`memcpy` as plain index transport is unsound.** R3 applies only to an
   object with no declared type, so copying a `double` over a declared `int`
-  must not relabel it (case 13.1). `copy_etypes` keeps a `fixed` destination
+  must not relabel it (case 14.1). `copy_etypes` keeps a `fixed` destination
   entry and takes the source's otherwise — and strips `fixed` from what it
   copies, since R3 gives the destination the source's effective *type* and not
   a declared one. Without the strip, `memcpy`ing a declared object into
@@ -717,7 +717,7 @@ another leaves a chimera; an entry records a type and an offset within an
 object but no object *identity*, so the two halves are indistinguishable from
 one whole. Detecting it would mean a ghost identity threaded through every
 split and join, for a case no alias analysis exploits — the bytes do agree with
-their claimed type. Cases 17.1 and 18 are likewise not this module's business:
+their claimed type. Cases 18.1 and 19 are likewise not this module's business:
 what makes them undefined is an indeterminate value, which `uninit` already
 blocks because no `_repr` relates a value to a range containing an
 uninitialized byte.
@@ -903,7 +903,7 @@ pair was rejected for. So:
 - a ghost `mem_declare a u`, taking an all-`None` range to
   `etypes_of u true`, is what a local, a global, a compound literal or a
   string literal emits when it comes into existence — and is what makes case
-  12.4 (`static char buf[]` reused as an `int`) fail;
+  13.4 (`static char buf[]` reused as an `int`) fail;
 - `memcpy` needs an index-carrying spec producing `copy_etypes`.
 
 None of the three can land before the typed layer carries the index, because

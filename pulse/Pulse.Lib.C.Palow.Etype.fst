@@ -354,7 +354,7 @@ let store_ok_read_ok (e: etypes) (u: ctype)
    It is *not* plain transport, which is the trap this definition exists to
    avoid. 6.5p6's third rule applies only to "an object having no declared
    type"; copying a `double` over a declared `int` does not make it a `double`
-   (case 13.1 of `test/effective_type`). So a `fixed` destination byte keeps
+   (case 14.1 of `test/effective_type`). So a `fixed` destination byte keeps
    its entry and only the rest follows the source -- the same asymmetry
    `store_entry` has, and for the same reason.
 
@@ -539,7 +539,7 @@ let ct_f64 : ctype = TScalar SFloat64
 let ct_point  : ctype = TStruct "point" 8 [(0, ct_i32); (4, ct_i32)]
 let ct_nested : ctype = TStruct "nested" 16 [(0, ct_f64); (8, ct_point)]
 
-(* Two distinct struct types with identical layout (case 12.3). *)
+(* Two distinct struct types with identical layout (case 13.3). *)
 let ct_a : ctype = TStruct "a" 8 [(0, ct_i32); (4, ct_i32)]
 let ct_b : ctype = TStruct "b" 8 [(0, ct_i32); (4, ct_i32)]
 
@@ -590,88 +590,88 @@ let case_6_1_fresh_malloc_write_is_always_legal (u: ctype)
   : Lemma (store_ok (etypes_none (csize u)) u)
   = ()
 
-(* [UB] 12.1: an object declared `int`, read through `float *`. `float` is not
+(* [UB] 13.1: an object declared `int`, read through `float *`. `float` is not
    compatible with `int`, is not its counterpart, and is not a character
    type. *)
-let case_12_1_read_int_as_float ()
+let case_13_1_read_int_as_float ()
   : Lemma (~(read_ok (etypes_of ct_i32 true) ct_f32))
   = assert (eget (etypes_of ct_i32 true) 0 == Some ({ ty = ct_i32; off = 0; fixed = true }))
 
-(* [UB] 12.2: an object declared `int`, *written* through `short *`. The store
+(* [UB] 13.2: an object declared `int`, *written* through `short *`. The store
    covers the first two bytes, and this is the case `store_ok` exists for: the
    relabelling function alone would make it a silent no-op. *)
-let case_12_2_write_int_through_short ()
+let case_13_2_write_int_through_short ()
   : Lemma (~(store_ok (Seq.slice (etypes_of ct_i32 true) 0 2) ct_i16))
   = assert (eget (Seq.slice (etypes_of ct_i32 true) 0 2) 0
             == Some ({ ty = ct_i32; off = 0; fixed = true }))
 
-(* [UB] 12.3: two struct types with identical layout are still different types.
+(* [UB] 13.3: two struct types with identical layout are still different types.
    C compares tags, not shapes. *)
-let case_12_3_struct_pun_between_layout_compatible_types ()
+let case_13_3_struct_pun_between_layout_compatible_types ()
   : Lemma (~(read_ok (etypes_of ct_a true) ct_b))
   = assert (eget (etypes_of ct_a true) 0 == Some ({ ty = ct_a; off = 0; fixed = true }));
     assert (~(access_ok ct_a 0 ct_b))
 
-(* [UB] 12.4 and 13.3: storage with a *declared* character-array type cannot be
+(* [UB] 13.4 and 14.3: storage with a *declared* character-array type cannot be
    re-typed, which is what separates a `static char buf[]` arena from a
    `malloc`ed one. The character rule is about the type of the *lvalue*, not
    the type of the object, so it does not rescue this. *)
-let case_12_4_char_array_used_as_int_storage ()
+let case_13_4_char_array_used_as_int_storage ()
   : Lemma (~(store_ok (Seq.slice (etypes_of (TArr tchar 8) true) 0 4) ct_i32))
   = assert (eget (Seq.slice (etypes_of (TArr tchar 8) true) 0 4) 0
             == Some ({ ty = TArr tchar 8; off = 0; fixed = true }))
 
-let case_13_3_reuse_of_a_declared_array_as_another_type ()
+let case_14_3_reuse_of_a_declared_array_as_another_type ()
   : Lemma (~(store_ok (Seq.slice (etypes_of (TArr tchar 128) true) 0 8) ct_point))
   = assert (eget (Seq.slice (etypes_of (TArr tchar 128) true) 0 8) 0
             == Some ({ ty = TArr tchar 128; off = 0; fixed = true }))
 
-(* [UB] 13.1: `memcpy` into a declared object does not re-type it. The copy
+(* [UB] 14.1: `memcpy` into a declared object does not re-type it. The copy
    itself is character-wise and so is permitted; what stays undefined is
    reading the result at the source's type. This is the case `copy_entry`'s
    `fixed` test exists for -- plain transport would relabel `dst`. *)
-let case_13_1_memcpy_cannot_retype_a_declared_object ()
+let case_14_1_memcpy_cannot_retype_a_declared_object ()
   : Lemma (copy_etypes (etypes_of ct_i32 true) (Seq.slice (etypes_of ct_f64 true) 0 4)
            == etypes_of ct_i32 true /\
            ~(read_ok (etypes_of ct_i32 true) ct_f32))
-  = case_12_1_read_int_as_float ();
+  = case_13_1_read_int_as_float ();
     Seq.lemma_eq_intro
       (copy_etypes (etypes_of ct_i32 true) (Seq.slice (etypes_of ct_f64 true) 0 4))
       (etypes_of ct_i32 true)
 
-(* [UB] 13.2: storing a `float` into a declared `int` does not install `float`.
+(* [UB] 14.2: storing a `float` into a declared `int` does not install `float`.
    A naive reading of 6.5p6's second rule says it does; `store_ok` is what says
    the store was undefined in the first place. *)
-let case_13_2_store_does_not_retype_automatic_storage ()
+let case_14_2_store_does_not_retype_automatic_storage ()
   : Lemma (~(store_ok (etypes_of ct_i32 true) ct_f32))
   = assert (eget (etypes_of ct_i32 true) 0 == Some ({ ty = ct_i32; off = 0; fixed = true }))
 
-(* [UB] 14.1: allocated storage typed `int` by a store, then read as `float`.
+(* [UB] 15.1: allocated storage typed `int` by a store, then read as `float`.
    The read is non-modifying, so it does not re-type anything. *)
-let case_14_1_installed_int_read_as_float ()
+let case_15_1_installed_int_read_as_float ()
   : Lemma (~(read_ok (store_etypes (etypes_none 4) ct_i32) ct_f32))
   = assert (eget (store_etypes (etypes_none 4) ct_i32) 0
             == Some ({ ty = ct_i32; off = 0; fixed = false }))
 
-(* [UB] 14.2: allocated storage typed `struct point`, read as the larger and
+(* [UB] 15.2: allocated storage typed `struct point`, read as the larger and
    unrelated `struct nested`. *)
-let case_14_2_installed_struct_read_as_unrelated_struct ()
+let case_15_2_installed_struct_read_as_unrelated_struct ()
   : Lemma (~(read_ok (Seq.append (store_etypes (etypes_none 8) ct_point) (etypes_none 8))
                      ct_nested))
   = assert (eget (Seq.append (store_etypes (etypes_none 8) ct_point) (etypes_none 8)) 0
             == Some ({ ty = ct_point; off = 0; fixed = false }))
 
-(* [UB] 14.3: the effective type installed by `memcpy` binds just as the one
+(* [UB] 15.3: the effective type installed by `memcpy` binds just as the one
    installed by a store does. *)
-let case_14_3_memcpy_installed_type_then_wrong_read ()
+let case_15_3_memcpy_installed_type_then_wrong_read ()
   : Lemma (~(read_ok (copy_etypes (etypes_none 8) (etypes_of ct_f64 true)) ct_i64))
   = assert (eget (copy_etypes (etypes_none 8) (etypes_of ct_f64 true)) 0
             == Some ({ ty = ct_f64; off = 0; fixed = false }))
 
-(* [UB] 15.4: a partial store re-types only some of the bytes, and the larger
+(* [UB] 16.4: a partial store re-types only some of the bytes, and the larger
    object does not survive it. This is the case that justifies the index being
    per *byte* rather than per object. *)
-let case_15_4_partial_overwrite_invalidates_the_whole ()
+let case_16_4_partial_overwrite_invalidates_the_whole ()
   : Lemma (let e0 = store_etypes (etypes_none 8) ct_f64 in
            let e1 = Seq.append (store_etypes (Seq.slice e0 0 4) ct_i32) (Seq.slice e0 4 8) in
            read_ok e0 ct_f64 /\ ~(read_ok e1 ct_f64))
@@ -679,19 +679,19 @@ let case_15_4_partial_overwrite_invalidates_the_whole ()
     let e1 = Seq.append (store_etypes (Seq.slice e0 0 4) ct_i32) (Seq.slice e0 4 8) in
     assert (eget e1 0 == Some ({ ty = ct_i32; off = 0; fixed = false }))
 
-(* [UB] 17.1: R3's "if it has one" -- copying from a source that has no
+(* [UB] 18.1: R3's "if it has one" -- copying from a source that has no
    effective type installs none, so the destination is still untyped. That is
    *permissive* here rather than an error: an all-`None` index satisfies
-   `read_ok` at every type, so the model accepts 17.1 where C calls it
+   `read_ok` at every type, so the model accepts 18.1 where C calls it
    undefined. The value read is indeterminate, which is what actually makes
-   17.1 undefined, and that is `uninit`'s job in `Pulse.Lib.C.Palow.Bytes` --
+   18.1 undefined, and that is `uninit`'s job in `Pulse.Lib.C.Palow.Bytes` --
    no `_repr` relates a value to a range containing an uninitialized byte --
    not this module's. *)
-let case_17_1_memcpy_from_an_untyped_source ()
+let case_18_1_memcpy_from_an_untyped_source ()
   : Lemma (copy_etypes (etypes_none 8) (etypes_none 8) == etypes_none 8)
   = Seq.lemma_eq_intro (copy_etypes (etypes_none 8) (etypes_none 8)) (etypes_none 8)
 
-(* [UB] 17.2, and a *known incompleteness*, recorded as a theorem so that it
+(* [UB] 18.2, and a *known incompleteness*, recorded as a theorem so that it
    cannot be mistaken for enforcement.
 
    Copying the first half of one `double` over the first half of another leaves
@@ -706,7 +706,7 @@ let case_17_1_memcpy_from_an_untyped_source ()
    compiler's alias analysis exploits: the bytes agree with their claimed type,
    so no type-based optimisation is misled. The permissiveness is therefore
    deliberate, and is the reason this is a positive theorem. *)
-let case_17_2_partial_memcpy_leaves_a_hybrid_is_accepted ()
+let case_18_2_partial_memcpy_leaves_a_hybrid_is_accepted ()
   : Lemma (let e0 = store_etypes (etypes_none 8) ct_f64 in
            let src = Seq.slice (etypes_of ct_f64 true) 0 4 in
            let e1 = Seq.append (copy_etypes (Seq.slice e0 0 4) src) (Seq.slice e0 4 8) in

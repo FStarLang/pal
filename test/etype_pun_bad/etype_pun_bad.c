@@ -45,7 +45,7 @@ _include_pulse(Etype_pun_bad_include,
     ()
   }
 
-  (* [UB] 14.1 of `test/_effective_type`: an object whose effective type is
+  (* [UB] 15.1 of `test/_effective_type`: an object whose effective type is
      `int32_t` read as a `float`. The precondition says the bytes are a
      *declared* `int32_t` -- `fixed = true` -- which is what a local variable
      or a global has, and what the first rule of 6.5p6 makes permanent.

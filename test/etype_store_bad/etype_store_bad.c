@@ -1,7 +1,7 @@
 #include "pal.h"
 #include <stdint.h>
 
-/* [UB] 13.2 and 12.2 of `test/_effective_type`: a store at the wrong type into
+/* [UB] 14.2 and 13.2 of `test/_effective_type`: a store at the wrong type into
  * an object that has a declared type.
  *
  * This is the rule that `store_etypes` alone does not give. `store_etypes`

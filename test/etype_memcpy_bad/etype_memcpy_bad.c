@@ -1,7 +1,7 @@
 #include "pal.h"
 #include <stdint.h>
 
-/* [UB] 13.1 of `test/_effective_type`: `memcpy` cannot retype a declared
+/* [UB] 14.1 of `test/_effective_type`: `memcpy` cannot retype a declared
  * object.
  *
  * The third rule of 6.5p6 -- a byte copy gives the destination the source's
