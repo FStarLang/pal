@@ -641,16 +641,10 @@ impl Env {
     }
 
     /// Whether pointer arithmetic is allowed on a value of type `t` (already
-    /// in whnf): array pointers, and -- as the GNU extension that takes
-    /// `sizeof(void)` to be 1 -- any `void *`.
+    /// in whnf). C allows it on any object pointer; GNU C also on `void *`,
+    /// taking `sizeof(void)` to be 1. A function pointer is not a `Pointer`.
     pub fn is_arith_ptr(&self, t: &Type) -> bool {
-        match &t.val {
-            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => true,
-            TypeT::Pointer(pt, _) => {
-                matches!(self.vtype_whnf(pt.clone().into()).val, TypeT::Void)
-            }
-            _ => false,
-        }
+        matches!(t.val, TypeT::Pointer(..))
     }
 
     pub fn vtype_whnf(&self, a: MaybeRc<Type>) -> MaybeRc<Type> {

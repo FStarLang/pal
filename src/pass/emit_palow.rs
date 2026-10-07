@@ -2356,6 +2356,42 @@ impl<'a> Spec<'a> {
         Ok((self.value(base, w)?, i))
     }
 
+    /// Pointer arithmetic in a specification: `p + i` and `p - i`, in bytes.
+    /// Subtraction is spelled with the total `-?`, which coincides with the
+    /// body's `-!` wherever that is defined: a contract clause is typed on its
+    /// own, with nothing in scope to discharge `-!`'s side condition.
+    fn ptr_arith_value(
+        &self,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        lt: &Type,
+        w: When,
+    ) -> Result<Option<String>, String> {
+        if !matches!(op, BinOp::Add | BinOp::Sub) {
+            return Ok(None);
+        }
+        let rt = self.ty_of(r)?;
+        let (p, i, n, sym) = match (
+            op,
+            ptr_elem_size(self.tds, lt),
+            ptr_elem_size(self.tds, &rt),
+        ) {
+            (BinOp::Add, Some(n), None) => (l, r, n, "+!"),
+            (BinOp::Add, None, Some(n)) => (r, l, n, "+!"),
+            (BinOp::Sub, Some(n), None) => (l, r, n, "-?"),
+            _ => return Ok(None),
+        };
+        let off = if let Some(k) = const_index(&strip_vattr(i).val) {
+            format!("{}sz", k * n)
+        } else if n == 1 {
+            self.value(i, w)?
+        } else {
+            return Err("pointer arithmetic by a computed index in a contract".to_string());
+        };
+        Ok(Some(format!("({} {} {})", self.value(p, w)?, sym, off)))
+    }
+
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
@@ -2643,6 +2679,9 @@ impl<'a> Spec<'a> {
                     ));
                 }
                 let ty = self.ty_of(l)?;
+                if let Some(t) = self.ptr_arith_value(*op, l, r, &ty, w)? {
+                    return Ok(t);
+                }
                 if matches!(self.tds.resolve(&ty).val, TypeT::SpecInt | TypeT::SpecNat)
                     && let Some(o) = match op {
                         BinOp::Eq => Some("="),
@@ -11040,6 +11079,27 @@ impl<'a> Body<'a> {
                         && !self.slots.iter().any(|s| s.name == *v.val))
             }
             ExprT::ContainerOf(inner, _, _) | ExprT::Cast(inner, _) => self.stable_ptr(inner),
+            // `p + i` with both fixed for the call is one address for the
+            // whole call, as `p` is: an MMIO register at `base + OFFSET`.
+            ExprT::BinOp(BinOp::Add | BinOp::Sub, p, i)
+                if self.ty_of(p).is_ok_and(|t| self.elem_size(&t).is_some()) =>
+            {
+                self.stable_ptr(p) && self.stable_int(i)
+            }
+            _ => false,
+        }
+    }
+
+    /// An integer that has one value for the whole call: a constant, or a
+    /// parameter the body never gave storage to (and so never writes).
+    fn stable_int(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::IntLit(..) | ExprT::SizeOf(_) | ExprT::AlignOf(_) => true,
+            ExprT::Cast(inner, _) => self.stable_int(inner),
+            ExprT::Var(v) => {
+                self.params.contains(&*v.val.to_string())
+                    && !self.slots.iter().any(|s| s.name == *v.val)
+            }
             _ => false,
         }
     }
@@ -13391,27 +13451,8 @@ impl<'a> Body<'a> {
         )
     }
 
-    /// The size of what a pointer type points at, when arithmetic on it means
-    /// anything: C measures a pointer offset in elements, and the model in
-    /// bytes.
     fn elem_size(&self, ty: &Type) -> Option<u64> {
-        // `pointee` stops at `_plain`, because that annotation says the
-        // translation grants no ownership through the pointer. Arithmetic on
-        // it is still arithmetic on a C pointer, and how far one step moves is
-        // a question about the type and not about who owns what.
-        let pt = match pointee(self.tds, ty) {
-            Some(pt) => pt.clone(),
-            None => match &peel(self.tds, ty).val {
-                TypeT::Pointer(pt, _) => pt.clone(),
-                _ => return None,
-            },
-        };
-        // GNU C takes `sizeof(void)` to be 1, so arithmetic on a `void *` --
-        // ubiquitous on kernel MMIO bases -- moves by bytes.
-        if matches!(peel(self.tds, &pt).val, TypeT::Void) {
-            return Some(1);
-        }
-        palow_sizeof(self.tds, &pt).filter(|n| *n > 0)
+        ptr_elem_size(self.tds, ty)
     }
 
     /// An offset in bytes, as a `size_t`, for a subscript-like operand.
@@ -18035,6 +18076,29 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
         }
         _ => Err(format!("a zeroed {}", describe(t))),
     }
+}
+
+/// The size of what a pointer type points at, when arithmetic on it means
+/// anything: C measures a pointer offset in elements, and the model in
+/// bytes.
+fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
+    // `pointee` stops at `_plain`, because that annotation says the
+    // translation grants no ownership through the pointer. Arithmetic on
+    // it is still arithmetic on a C pointer, and how far one step moves is
+    // a question about the type and not about who owns what.
+    let pt = match pointee(tds, ty) {
+        Some(pt) => pt.clone(),
+        None => match &peel(tds, ty).val {
+            TypeT::Pointer(pt, _) => pt.clone(),
+            _ => return None,
+        },
+    };
+    // GNU C takes `sizeof(void)` to be 1, so arithmetic on a `void *` --
+    // ubiquitous on kernel MMIO bases -- moves by bytes.
+    if matches!(peel(tds, &pt).val, TypeT::Void) {
+        return Some(1);
+    }
+    palow_sizeof(tds, &pt).filter(|n| *n > 0)
 }
 
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {

@@ -204,6 +204,14 @@ val addr_of_sub_wrap (a: ptr) (n: SZ.t)
                    prov_of (a -? n) == prov_of a)
           [SMTPat (addr_of (a -? n))]
 
+(* Wherever `( -! )` is defined, it is `( -? )`. A contract states a pointer
+   subtraction with the total `( -? )`, having nothing in scope to discharge
+   `( -! )`'s side condition, and the body computes it with `( -! )`. *)
+let sub_eq_sub_wrap (a: ptr) (n: SZ.t { SZ.v n <= addr_of a })
+  : Lemma (a -! n == a -? n)
+          [SMTPat (a -! n)]
+  = ptr_ext (a -! n) (a -? n)
+
 (* Derivable from the two lemmas above by `ptr_ext` -- `addr_of (a +! n)` is at
    least `SZ.v n`, so the offset fits -- and stated here so that it fires
    without one. *)

@@ -761,7 +761,7 @@ impl<'a> Elaborator<'a> {
                     | BinOp::BitAnd
                     | BinOp::BitOr
                     | BinOp::BitXor => {
-                        // Pointer arithmetic: array/arrayptr/void* ± integer → cast integer to SizeT
+                        // Pointer arithmetic: pointer ± integer → cast integer to SizeT
                         let lhs_w = env.vtype_whnf(lhs_ty.clone());
                         let rhs_w = env.vtype_whnf(rhs_ty.clone());
                         let lhs_is_ptr = env.is_arith_ptr(&lhs_w);

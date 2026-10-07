@@ -1445,8 +1445,24 @@ public:
         }
 
         // BitCast (e.g., T* → void*): pass through after malloc/calloc
-        // detection. F* functions like memcpy are type-polymorphic.
+        // detection. F* functions like memcpy are type-polymorphic. A cast
+        // *to* a different object pointer type is kept, though: it changes
+        // what a dereference reads (`*(uint32_t *)base` is a 4-byte read,
+        // not a read of `void` or of a byte).
         if (ic->getCastKind() == CK_BitCast) {
+          auto from = ic->getSubExpr()->getType();
+          auto to = ic->getType();
+          if (from->isPointerType() && to->isPointerType()) {
+            auto fromPt =
+                from->getPointeeType().getCanonicalType().getUnqualifiedType();
+            auto toPt =
+                to->getPointeeType().getCanonicalType().getUnqualifiedType();
+            if (!toPt->isVoidType() && !toPt->isFunctionType() &&
+                !toPt->isIncompleteType() && fromPt != toPt) {
+              return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                                    trQualType(to, e->getSourceRange()));
+            }
+          }
           return trRValue(ic->getSubExpr());
         }
 

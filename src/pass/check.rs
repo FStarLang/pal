@@ -373,7 +373,7 @@ impl<'a> Checker<'a> {
                         | BinOp::BitAnd
                         | BinOp::BitOr
                         | BinOp::BitXor => {
-                            // Allow pointer arithmetic: array/arrayptr/void* ± integer
+                            // Allow pointer arithmetic: pointer ± integer
                             let lhs_w = env.vtype_whnf(lhs_ty.clone().into());
                             let rhs_w = env.vtype_whnf(rhs_ty.clone().into());
                             let is_ptr_arith = matches!(bin_op, BinOp::Add | BinOp::Sub)

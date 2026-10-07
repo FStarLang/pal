@@ -5827,3 +5827,32 @@ new facts about memory.
     `test/empty_struct`'s `old-only` marker is gone and `get_x` has a body.
     Census: 1169 specifications, 1141 with bodies, 0 admitted, 28 external,
     0 skipped -- the first time Palow has no gaps at all.
+
+22. **Pointer arithmetic and pointer casts, from porting linux-pal.** Kernel
+    code computes MMIO register addresses as `base + OFFSET` on a `void *`
+    (#352), names layout with `offsetof` as a value (#351), and reads a
+    register as `*(u32 *)(base + OFFSET)`. Each of the three had its own gap.
+
+    - `offsetof(T, designator)` is a constant clang has already computed from
+      the same layout the `struct_T_offsetof_f` constants come from, so it is
+      emitted as that `SizeT` literal.
+    - Elab typed pointer arithmetic only on `_array` pointers, and reported
+      the rest as an error that the passes after it then tripped over. Any
+      object pointer now takes `± integer` (the integer cast to `size_t`), and
+      `void *` steps by one byte, GNU C's `sizeof(void) == 1`. A local bound
+      to `base + i` of a `void *` is a pointer value, not an alias of
+      `base[i]`: there is no `void` element for it to name.
+    - The frontend dropped every pointer bitcast, so `*(uint32_t *)base` read
+      whatever `base` pointed at -- a `void`, or a single byte -- and then
+      converted the value. A cast to a different object pointer type is now
+      kept; it is the identity on `ptr`, but it decides the type a
+      dereference reads at.
+    - A contract can state pointer arithmetic: `p + i` is `( +! )`, and
+      `p - i` is the total `( -? )`, since a clause is typed with nothing in
+      scope to discharge `( -! )`'s side condition. The new
+      `sub_eq_sub_wrap` lemma identifies the two wherever `( -! )` is defined.
+      An antiquotation `$(base + 0x10)` is the same term, so ownership of an
+      MMIO register is stated in Pulse as `uint32_t_pts_to $(base + 0x10) ..`.
+      In a body, `p ± i` with both fixed for the call is as stable as `p`
+      itself, so dereferencing it is left to slprop matching like any other
+      fixed function of the parameters.
