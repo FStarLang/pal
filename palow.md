@@ -5962,3 +5962,21 @@ new facts about memory.
     whose guard also encloses a `_refine` is not opened, since the payload
     would have to restate it. Contracts still cannot mention `*p`.
     `test/nullable_deref` covers these.
+
+28. **`~` on a signed operand** (#349). The body translation of `~` only
+    knew unsigned widths; a signed operand (including the `int` that
+    `~FLAG_X` promotes to) now uses `FStar.Int{w}.lognot`. As with the
+    unsigned form, SMT knows nothing about the resulting value, so a
+    contract about it would need a lemma. `test/bitnot_signed` covers
+    `x &= ~FLAG` and `x = ~x`.
+
+29. **Arbitrary variadic arguments** (#354). A variadic argument was
+    only accepted if it was inert (a local, a constant). Since Palow drops
+    variadic arguments at the call, the frontend now hoists each one that
+    is evaluated unconditionally into `let __pal_vararg_N = arg;` ahead of
+    the statement: a field read, arithmetic, or a call, with its proof
+    obligations (overflow, liveness, preconditions) checked as usual. A
+    comma operator hoists only its left side; its right side is a
+    statement of its own. Arguments that are evaluated conditionally (in a
+    `?:` arm or behind `&&`) are still refused. `test/variadic_args` covers
+    these.

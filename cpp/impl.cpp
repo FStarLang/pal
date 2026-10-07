@@ -1898,12 +1898,14 @@ public:
         for (unsigned i = 0; i < c->getNumArgs(); ++i) {
           auto *arg = c->getArg(i);
           if (fd->isVariadic() && i >= fd->getNumParams()) {
-            if (!canOmitVariadicArgument(arg)) {
+            if (!canOmitVariadicArgument(arg) && !hoistedVarargs.count(arg)) {
               reportUnsupported(
                   arg->getSourceRange(), getRange(arg->getSourceRange()),
-                  "unsupported ignored variadic argument: expected a literal, "
-                  "a non-volatile local value or address, or wrapping "
-                  "integer arithmetic over those",
+                  "unsupported ignored variadic argument: one that is "
+                  "evaluated only conditionally (in a `?:` arm or on the "
+                  "right of `&&`/`||`) must be a literal, a non-volatile "
+                  "local value or address, or wrapping integer arithmetic "
+                  "over those",
                   "");
               return mk_rvalue_err(
                   std::move(loc),
@@ -2177,6 +2179,9 @@ public:
   /// from them, keyed by the call expression.
   std::map<const Expr *, std::string> hoistedRValues;
   int rvalueHoistCounter = 0;
+  /// Variadic arguments evaluated ahead of their statement; see
+  /// `hoistRValueMembers`. The call itself then drops them.
+  std::set<const Expr *> hoistedVarargs;
 
   /// Bind a structure-valued call that a member projection reads from to a
   /// uniquely named local, ahead of the statement that contains it.
@@ -2202,7 +2207,10 @@ public:
       return;
     }
     if (auto *bo = dyn_cast<BinaryOperator>(e)) {
-      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr) {
+      // The right operand of a comma runs after the left, and `trStmt`
+      // translates it as a statement of its own, which hoists it there.
+      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr ||
+          bo->getOpcode() == BO_Comma) {
         hoistRValueMembers(stmts, bo->getLHS());
         return;
       }
@@ -2210,6 +2218,31 @@ public:
     for (auto *child : e->children()) {
       if (auto *ce = dyn_cast_or_null<Expr>(child)) {
         hoistRValueMembers(stmts, ce);
+      }
+    }
+    // A variadic argument has no parameter to be passed to, so its value is
+    // dropped. What evaluating it obliges -- ownership of a field it reads,
+    // no overflow in arithmetic -- is not dropped with it: an argument that is
+    // not trivially inert is bound to a local ahead of the statement, which
+    // is where those obligations are checked. C evaluates every argument
+    // before the call, in an unspecified order, so this is one of the orders
+    // it allows.
+    if (auto *call = dyn_cast<CallExpr>(e)) {
+      auto *fd = call->getDirectCallee();
+      if (fd && fd->isVariadic()) {
+        for (unsigned i = fd->getNumParams(); i < call->getNumArgs(); ++i) {
+          auto *arg = call->getArg(i);
+          if (canOmitVariadicArgument(arg) || hoistedVarargs.count(arg))
+            continue;
+          auto argLoc = getRange(arg->getSourceRange());
+          auto ty = trQualType(arg->getType(), arg->getSourceRange());
+          auto name = "__pal_vararg_" + std::to_string(rvalueHoistCounter++);
+          auto id = ctx.mk_ident(toStr(StringRef(name)), argLoc.clone());
+          auto rval = trRValue(arg);
+          stmts.push(mk_let_stmt(argLoc.clone(), std::move(id), std::move(ty),
+                                 std::move(rval)));
+          hoistedVarargs.insert(arg);
+        }
       }
     }
     auto *m = dyn_cast<MemberExpr>(e);
