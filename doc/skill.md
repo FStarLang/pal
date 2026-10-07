@@ -31,19 +31,28 @@ naming suggestions.
 
 - **PAL binary**: `${PAL_DIR}/target/release/pal`. The PAL repo is typically a
   sibling clone, *not* a submodule. Set `PAL_DIR` before any make/verify command.
-- **Translator role**: PAL parses annotated C and emits one F* file per C
-  function (`Func_*.fst{,i}`), per struct (`Struct_*.fst`), and per typedef
-  (`Typedef_*.fst`) into a generated output directory (e.g. `build/pal-core/`).
+- **Translator role**: PAL parses annotated C and emits one F* module per
+  declaration into the output directory (e.g. `build/pal-core/`):
+  `Func_X.fst{,i}` per function, `Struct_X.fst` / `Union_X.fst` per aggregate,
+  `Global_X.fst` per global, `Funcptr_X.fst` for a function whose address is
+  taken, `Let_X.fst` / `Type_X.fst` for `_let` / `_type` declarations, plus the
+  `TranslationErrors.fst` sentinel (it fails to verify if PAL reported any
+  translation error).
+- **Memory model**: PAL emits code against the **Palow** model: memory is bytes
+  at addresses, every C pointer is a `ptr`, and ownership is a typed points-to
+  predicate per C type (`int32_t_pts_to p perm v`, `struct_X_pts_to p perm v`,
+  `array_pts_to …`). Read `palow.md` in the PAL repo for the design; the
+  library is `pulse/Pulse.Lib.C.Palow*.fst{,i}`.
 - **Pulse**: F*'s separation-logic DSL (`#lang-pulse`). All ownership/heap
-  reasoning runs in Pulse; pure math is plain F*. The C-interop types you will
-  meet (`ref`/`pts_to`, `array`, the integer modules) come from PAL's
-  hand-written support library — see §6 (The Pulse Support Library) of `doc/internals.md` in the PAL repo.
+  reasoning runs in Pulse; pure math is plain F*.
 - **Hand-authored helpers**: put your Pulse proof lemmas/ghost fns in a
   `Helpers_<MODULE>.fst` next to the generated output (e.g. under
   `src/core/proofs/`). The build picks them up via a proofs include dir. Prefer
   this over `_inline_pulse(...)` blobs in the C file — easier to edit, reuse,
   and re-verify. Helper names appear in goals and error messages, so keep them
-  small and descriptive (`struct_inv`, `loop_inv`, `foo_fold`).
+  small and descriptive (`struct_inv`, `loop_inv`, `foo_fold`). A helper can
+  name generated modules (`open Struct_container`) as long as it does not
+  create a dependency cycle.
 
 ## 2. Build / verify commands
 
@@ -93,7 +102,8 @@ invocation when `--ext fly_deps` is on. Verify each file with a separate call.
 ### 3.1 Understanding the problem
 First, understand the C code you are analyzing and the properties you want to prove about it. Ask the user if needed for clarification on whether the target is memory safety or full functional correctness.
 ### 3.2 Phase 1: Translation
-Next, having identified the target of verification, first use PAL to only translate the relevant C code into F*. This may generate some `admit()` calls for the features that PAL does not yet support. Report these admits to the user before beginning any verification work.
+Next, having identified the target of verification, first use PAL to only translate the relevant C code into F*. Anything PAL cannot translate faithfully is reported as an **error** naming the construct (and the function's contract or body it affects); PAL never silently weakens a contract. To survey everything at once, run with `--palow-permissive`, which turns those errors into comments in the generated code. Report the untranslated constructs to the user before beginning any verification work.
+
 ### 3.3 Phase 2: Verification
 Next, analyze the verification target function by function. Identify the easiest entry point and narrow down the scope of the verification to that function first. Functions that operate on complex data structures such as structs and unions often require invariants on these structures first. Add these invariants using the appropriate annotation syntax before starting with verifying the function.
 When verifying a function, start with the simplest spec and gradually increase the complexity as you gain confidence in the proof. Latter parts of the guide give information on writing good specifications and guidelines for progressing the proof by defining and applying helper lemmas.
@@ -107,42 +117,58 @@ When verifying a function, start with the simplest spec and gradually increase t
 Stating the correctness of C code involves stating the specification for functions as annotations in the C code. These annotations encode the pre and postconditions for the functions. Additionally, PAL annotations can also be used to state invariants on data types such as structs, unions, typedefs etc. Finally, all loops in the C code need to be annotated with appropriate loop invariants (covered in [§6](#6-loops-invariants-ensures-and-break)). For the full annotation reference — contracts, ownership, refinements, ghost code — see `doc/pal_surface_syntax.md` in the PAL repo.
 
 ### 4.1 Differentiating between raw pointers and arrays
-The first step in writing specifications is to distinguish array pointers from single-element references: PAL treats every `T*` as a reference by default, so tag array parameters with `_array` (a full array) or `_arrayptr` (a sub-array pointer). See `palow.md` in the PAL repo for the representation; the PAL tests `test/arrayptrs` and `test/array_test` are worked examples.
+The first step in writing specifications is to distinguish array pointers from single-element pointers: PAL treats every `T*` as pointing at one object by default, so tag array parameters with `_array` (a whole array) or `_arrayptr` (a pointer into one). A single object is owned by `T_pts_to p perm v`; an array by `array_pts_to T_repr <elem size> (SizeT.v T_alignof) p perm s` where `s : Seq.seq T`, and `x._length` in a spec is `Seq.length s`. See `palow.md` in the PAL repo for the representation; the PAL tests `test/arrayptrs` and `test/array_test` are worked examples.
 
 The second step can be either to add the type invariants or to write the function specifications. Suppose the module under consideration heavily involves passing around and modifying a complex data structure then first write the invariant for that data structure. Both of these involve writing accompanying Pulse code. First, we take a look at best practices for writing such code.
 
 ### 4.2 Writing Pulse code used in function definitions
-Writing specifications often involves writing pure pulse code for definitions and possible accompanying unfolding and folding lemmas. These definitions and accompanying lemmas must be stated in a separate helper file.
+Writing specifications often involves writing pure Pulse code for definitions and possible accompanying unfolding and folding lemmas. These definitions and accompanying lemmas must be stated in a separate helper file.
+
+The vocabulary to build from is what PAL generates for your types (§5.2): `struct_X` is an F* record with one `fld_<name>` per field, `struct_X_pts_to a p v` owns the bytes of a `struct X` at `a` holding `v`, and for a struct with owned pointer fields `struct_X_own v p o` owns what those pointers reach (`o : struct_X_own_spec`). Pointers are `ptr`; use `is_null`, `+!` and `unless_null p P` (P holds unless `p` is null).
 
 Every custom slprop definition that you add needs to either be declared auto unfold or have associated unfolding and folding lemmas. Use `[@@pulse_unfold]` / `[@@pulse_eager_unfold]` tags
 for slprop definitions you want Pulse to silently unfold at use sites.
-Without one of these, loop-condition reads (e.g., `obj->Count > 0`) fail with
-**Error 228** because the opaque slprop hides the `pts_to`.
+Without one of these, reads such as `obj->Count > 0` fail with
+**Error 228** because the opaque slprop hides the `struct_X_pts_to` the read
+needs.
 
 However, sometimes making definitions auto unfold can lead to performance issues or make the proof more difficult to manage. In such cases, it might be better to explicitly unfold the slprop at specific points in the code. An example:
 
 ```fst
-[@@pulse_unfold]
-let loop_inv (r: ref ...) (...) : slprop =
-  exists* v e spec.
-    pts_to r v ** array_pts_to_full e spec **
-    pure (v.elems == e /\ inv_pure v spec ...)
+let container_inv (a: ptr) (v: struct_container) (s: Seq.seq struct_elem) : slprop =
+  struct_container_pts_to a 1.0R v **
+  array_pts_to struct_elem_repr 16 (SizeT.v struct_elem_alignof) v.fld_Elems 1.0R s **
+  pure (UInt32.v v.fld_Count <= Seq.length s /\ Seq.length s == UInt32.v v.fld_Capacity)
 
-ghost fn loop_inv_unfold r ... requires loop_inv r ... ensures (exists* v e spec. ...)
-{ unfold (loop_inv r ...) }
+ghost fn container_inv_unfold (a: ptr) (#v: struct_container) (#s: Seq.seq struct_elem)
+  requires container_inv a v s
+  ensures  struct_container_pts_to a 1.0R v **
+           array_pts_to struct_elem_repr 16 (SizeT.v struct_elem_alignof) v.fld_Elems 1.0R s **
+           pure (UInt32.v v.fld_Count <= Seq.length s /\ Seq.length s == UInt32.v v.fld_Capacity)
+{ unfold (container_inv a v s) }
 
-ghost fn loop_inv_fold (#v) (#e) (#spec) r ...
-  requires (pts_to r v ** array_pts_to_full e spec ** pure (v.elems == e /\ inv_pure v spec ...))
-  ensures loop_inv r ...
-{ fold (loop_inv r ...) }
+ghost fn container_inv_fold (a: ptr) (#v: struct_container) (#s: Seq.seq struct_elem)
+  requires struct_container_pts_to a 1.0R v **
+           array_pts_to struct_elem_repr 16 (SizeT.v struct_elem_alignof) v.fld_Elems 1.0R s **
+           pure (UInt32.v v.fld_Count <= Seq.length s /\ Seq.length s == UInt32.v v.fld_Capacity)
+  ensures  container_inv a v s
+{ fold (container_inv a v s) }
 ```
+
+Copy the exact predicate spellings (element size, `_repr`, `_alignof`) from a generated `.fsti` rather than writing them from memory.
 
 ### 4.3 Writing struct invariants
 When writing struct invariants, first deeply understand the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components separately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For the `_refine` family (`_refine`, `_refine_always`, `_refine_uninit`, `_refine_value`) and exactly where the predicate fires, see the *Refinements for data types* section of `doc/pal_surface_syntax.md` in the PAL repo; the PAL tests `test/refine_typedef_pred` and `test/refine_always` are worked examples.
 
+Where a refinement goes matters:
+
+- A **pure refinement on a field** (`_refine(this > 0) int32_t n;`) becomes part of the field's type in the generated record (`fld_n: (v: Int32.t { … })`), so it holds of every value of the struct, everywhere — and every write to the field must prove it.
+- An **ownership refinement on a field** (`_refine((_slprop) _inline_pulse(…)) T *f;`) cannot live in a type, so PAL states it in the contract of every function whose parameter or result is, or points at, the struct. A function-pointer field carrying its own `Pulse.Lib.C.Palow.FnPtr.is_valid $(this) …` is how a dispatch table becomes callable (`test/fnptr_spec`, `test/ghost_fnptr`).
+- A refinement on the **struct or typedef** itself (`struct _refine(…) S`) is re-attached at every use site of the type.
+
 ### 4.4 Annotations for functions
-The last step in adding specs is to add each function's pre- and post-conditions. By default PAL requires full ownership of every argument and returns it; override that per-argument when the default is too strong: `_consumes` (require ownership but do **not** return it), `_out` (require only *uninitialized* storage — a `pts_to_uninit` precondition — and return it initialized), or `_plain` (emit no ownership annotation at all). See the *Annotating function arguments* section of `doc/pal_surface_syntax.md` in the PAL repo for the exact pre/post each tag generates; in the PAL repo, `test/out_param` exercises `_out` and `test/refine_typedef_pred` uses `_plain`.
-With `_plain`, supply the argument's contract yourself via the `_requires` and `_ensures` annotations.
+The last step in adding specs is to add each function's pre- and post-conditions. By default PAL requires full ownership of every pointer argument's target and returns it; override that per-argument when the default is too strong: `_consumes` (require ownership but do **not** return it), `_out` (require only *uninitialized* storage — `T_pts_to_uninit p` — and return it initialized), `const T *` (any permission, preserved), or `_plain` (emit no ownership at all). For pointer results and parameters, `_nullable` wraps the ownership in `unless_null p (…)` and `_allocated` adds the `freeable p n` that `free` needs. See the *Annotating function arguments* section of `doc/pal_surface_syntax.md` in the PAL repo; in the PAL repo, `test/out_param` exercises `_out` and `test/refine_typedef_pred` uses `_plain`.
+With `_plain`, supply the argument's contract yourself via the `_requires` and `_ensures` annotations, e.g. `_preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R 0l))`.
 
 ### 4.5 Importance of readable specification
 A good specification is not just the most precise one but also a readable and accessible one. To that end, never use numeric constants directly in the specifications. Instead use named constants to express the maximum values for each type. These are easily available in F* as well as in the header exported by PAL.
@@ -151,10 +177,10 @@ A good specification is not just the most precise one but also a readable and ac
 ## 5. Progressing the Proof
 PAL is an automated tool and ideally proofs should be generated automatically. However, in many cases, manual intervention is often required to guide the proof. Remember that proving is an iterative process and may require changing the approach or adding more detailed specifications.
 
-To manually help along the proof, you can 
-(1)define additional lemmas and apply them by using `_ghost_stmt(...)` in the C function body, 
-(2)insert the right asserts and 
-(3) do manual rewrites using `_ghost_stmt(rewrite x as y in ...)`.
+To manually help along the proof, you can
+(1) define additional lemmas and apply them by using `_ghost_stmt(...)` in the C function body,
+(2) insert the right asserts and
+(3) do manual rewrites using `_ghost_stmt(rewrite x as y)`.
 Doing any of this requires understanding the methods PAL provides for referring to the variables in the code. (`_ghost_stmt` and `_ghost_arg` are defined in the *Ghost code* section of `doc/pal_surface_syntax.md` in the PAL repo.)
 
 > **⚠️ `_ghost_stmt` is ghost-only — it must NEVER perform effectful code.**
@@ -163,17 +189,16 @@ Doing any of this requires understanding the methods PAL provides for referring 
 > any other computationally effectful operation. Ghost code is erased and cannot
 > change the running program's state; using it to do so is unsound.
 >
-> **Not allowed** — here `force_zero` is an *effectful* fn (it does `r := ...`),
+> **Not allowed** — here `force_zero` is an *effectful* fn (it writes memory),
 > so invoking it from a `_ghost_stmt` is an unsound misuse:
 >
 > ```c
 > _include_pulse(ForceZero,
->   fn force_zero (r: (ref Int32.t)) (#v: Ghost.erased Int32.t)
->     requires Pulse.Lib.Reference.pts_to r #1.0R v
->     returns _: unit
->     ensures Pulse.Lib.Reference.pts_to r #1.0R (Int32.int_to_t 0)
+>   fn force_zero (p: ptr) (#v: erased Int32.t)
+>     requires int32_t_pts_to p 1.0R v
+>     ensures  int32_t_pts_to p 1.0R 0l
 >   {
->     r := Int32.int_to_t 0;
+>     int32_t_write p 0l;
 >   }
 > )
 >
@@ -186,15 +211,22 @@ Doing any of this requires understanding the methods PAL provides for referring 
 > ```
 
 ### 5.1 Antiquotation inside `_inline_pulse(...)`
-For the full antiquotation reference — `$(expr)`, `$&(expr)`, `$type`, `$field`, `` $`tick ``, `$declare`, and the `$fold` / `$unfold` families — see the **Antiquotation** section of `doc/pal_surface_syntax.md` in the PAL repo.
+For the full antiquotation reference see the **Antiquotation** section of `doc/pal_surface_syntax.md` in the PAL repo. The forms you will use most:
+
+- `$(e)` — the *value* of the C expression `e`. For a parameter that is `var_e`; for a local, PAL reads the local first and substitutes the result. `$(p)` of a pointer is the `ptr`, so `int32_t_pts_to $(p) 1.0R v` talks about what `p` points at.
+- `$&(x)` — the *address* of the C lvalue `x`. Use it to talk about a local's own storage (`uint32_t_pts_to $&(n) 1.0R v`) or a field's (`$&(s->len)`).
+- `$(this)` — the value being refined, inside a `_refine`.
+- `$type(T)` / `$field(T::f)` — the generated F* type for a C type, and a field accessor.
+- `$unfold(T)` / `$fold(T)` — the name of the ghost step that opens a struct into its fields / closes it again (Palow's `struct_T_scatter` / `struct_T_gather`), e.g. `_ghost_stmt($unfold(my_pair) $(p))`. Rarely needed: PAL focuses on a field around each access itself.
+- `$scattered(struct T) $(p)` / `$gathered(struct T) $(p)` — tell PAL that your own ghost step has taken the object apart / put it back, so its field-by-field initialisation tracking stays in sync (`test/nested_scatter`).
 
 Pulse ghost-fn body syntax you will write inside `_ghost_stmt(...)`:
 
 - `let x = e;` (statement form, semicolon, **not** `let x = e in`).
 - `fold (P args)` / `unfold (P args)` — must include args, not a bare name.
 - `rewrite slprop1 as slprop2` — spatial rewrite using a `pure` equality already
-  in scope.
-- `with x. P` and `introduce exists* ... with ...` for explicit existentials
+  in scope; `with v. rewrite (P v) as (Q v)` names the value first.
+- `with x. assert P` and `introduce exists* ... with ...` for explicit existentials
   (see §7).
 
 ### 5.2 Debugging a stuck proof
@@ -205,47 +237,57 @@ annotation is concise, but the generated F* is what Pulse actually checks. For t
 
 | Generated file | Contains |
 |---|---|
-| `Func_X.fst` / `.fsti` | the function body (`.fst`) and its spec/contract (`.fsti`). Callers see only the `.fsti`. |
-| `Struct_X.fst` | the record type for `struct X` plus its `__aux_raw_*` and `__pred` fold/unfold lemmas |
-| `Typedef_X.fst` | a typedef's predicate `ty_X__pred` and its reps |
+| `Func_X.fst` / `.fsti` | the function body (`.fst`) and its contract (`.fsti`). Callers see only the `.fsti`. |
+| `Struct_X.fst` | the record `struct_X`, its layout (`struct_X_sizeof`, `_alignof`, `_offsetof_f`), `struct_X_pts_to` / `_pts_to_uninit`, and the ghost steps between the whole and its fields (`focus_f` / `unfocus_f`, `scatter` / `gather`, `claim_uninit`, …); plus `struct_X_own` if it has owned pointer fields |
+| `Union_X.fst` | the same for a union, with one view per member |
+| `Global_X.fst` | the global's address `addr_var_X`, its value (if immutable) and how to acquire permission |
+| `Funcptr_X.fst` | the function-pointer wrapper `func_X__fp` used with `Pulse.Lib.C.Palow.FnPtr` |
 
 Naming conventions you will meet constantly:
 
-- **`var_X`** — PAL's mutable *cell* for C param/local `X` (from
-  `let mut var_X = var_X;`). `(!var_X)` reads it; the bare signature param is also
-  `var_X` (the shadow gotcha, §6.5).
-- **`val_X_0`, `val_X_1`** — erased *spec* (ghost) views of a value/typedef,
-  existentially bound in the auto-emitted predicate.
-- **`ty_X__pred ptr p val`** — the predicate owning a typedef-`X` value at
-  permission `p` with spec view `val`; `val` is in scope inside a `_refine`.
-- **`Struct_X__aux_raw_unfolded` / `…__pred`** — per-field and whole-value
-  ownership predicates for a struct.
+- **`var_X`** — a parameter `X`'s value (an F* value; pointers are `ptr`).
+- **`loc_X`** — the stack address of local `X`; the body reads it with
+  `T_read loc_X` into a fresh `tmpN_X`.
+- **`val_X`** — the erased value behind pointer parameter `X` at entry;
+  **`val_X'`** the one at exit. **`perm_X`** is the permission of a `const`
+  parameter; **`own_X`** the `struct_T_own_spec` of what its pointers reach.
+- **`ret_X`** — the result of function `X` in its `ensures`.
+- **`struct_X`, `fld_f`** — the record type for `struct X` and its field `f`.
 - **`func_X`** — the generated Pulse `fn` for C function `X`.
 
 ### 5.3 Bridges for slprop "shape" mismatches
-A common issue in proofs is the mismatch between the shape of the specification and the shape of the code. This often occurs when an invariant carries `array_pts_to_full e spec` but the body needs `array_pts_to_full v.elems spec` (or vice versa), write a ghost that does a
-single `rewrite` using the pure equality:
+A common issue in proofs is the mismatch between the shape of the specification and the shape of the code. Ownership predicates are keyed on the *pointer term*, so two names for the same address do not match syntactically: an invariant may carry `array_pts_to … e 1.0R s` while the body needs `array_pts_to … v.fld_Elems 1.0R s`. Write a ghost step that does a single `rewrite` using the pure equality:
 
 ```fst
-ghost fn bridge_e_to_v (#v) (#e) (#spec) (r: ref ...)
-  requires pts_to r v ** array_pts_to_full e spec ** pure (v.elems == e)
-  ensures  pts_to r v ** array_pts_to_full v.elems spec ** pure (v.elems == e)
-{ rewrite (array_pts_to_full e spec) as (array_pts_to_full v.elems spec) }
+ghost fn bridge_e_to_v (#v: struct_container) (#e: ptr) (#s: Seq.seq struct_elem) (a: ptr)
+  requires struct_container_pts_to a 1.0R v **
+           array_pts_to struct_elem_repr 16 (SizeT.v struct_elem_alignof) e 1.0R s **
+           pure (v.fld_Elems == e)
+  ensures  struct_container_pts_to a 1.0R v **
+           array_pts_to struct_elem_repr 16 (SizeT.v struct_elem_alignof) v.fld_Elems 1.0R s
+{ rewrite (array_pts_to struct_elem_repr 16 (SizeT.v struct_elem_alignof) e 1.0R s)
+       as (array_pts_to struct_elem_repr 16 (SizeT.v struct_elem_alignof) v.fld_Elems 1.0R s) }
 ```
+
+The same happens after a cast (`(T *)p`): the result is the same address under a new name, and `with v. rewrite (T_pts_to $(p) 1.0R v) as (T_pts_to $(q) 1.0R v)` moves the ownership over (`test/void_pointer`).
 
 Avoid bridging the direction that requires Pulse to *invent* the hoisted
 existential — you'll get **Error 339** ("can't infer implicit argument").
 Instead fold the full loop invariant directly; its precondition gives Pulse the
 names it needs.
 
-### 5.4 `[@@pulse_intro]`: which fold/unfold lemmas Pulse applies for you
+### 5.4 What PAL does around field accesses for you
 
-PAL tags most generated struct fold/unfold lemmas (`__aux_raw_fold` / `__aux_raw_unfold`, `__pred_fold` / `__pred_unfold`) with `[@@pulse_intro]`, so Pulse applies them **automatically** whenever it needs the corresponding shape — you rarely invoke them by hand.
+A field access `s->f` compiles to a `focus_f` (trade the struct's points-to for
+the field's plus a "hole"), the read or write, and an `unfocus_f`. Writing every
+field of fresh storage one by one (after `malloc`, or into an `_out` parameter)
+is tracked too: PAL scatters the uninitialised object, fills each field, and
+gathers it once the last one is written. You normally write none of these steps.
 
-**The one exception**: `Struct_X__aux_raw_unfold_uninit` is emitted **without**
-`[@@pulse_intro]`. To open a *fresh, uninitialized* struct you must apply it by
-hand — that is exactly what `$unfold-uninit(X) $&(local)` does. Forgetting
-this is a common "why won't my per-field writes type-check" stall.
+When you *do* take an object apart in your own ghost code, tell PAL with
+`$scattered(...)` / `$gathered(...)` (§5.1); otherwise the next access is
+generated against a shape that is no longer in the context, and fails with
+**Error 228** naming `struct_X_pts_to`.
 
 You can add `[@@pulse_intro]` to your *own* helper lemmas to have Pulse apply them
 automatically — handy for a recurring bridge, but use sparingly: too many
@@ -311,166 +353,96 @@ Adding the right loop invariants is part of both writing the specification and p
 
 ```
 while (cond)
-  _invariant(slprop_or_pure)   // one or more
-  _ensures(pure_prop)          // pure prop (Prims.prop), NOT slprop
+  _invariant(pure_or_slprop)   // one or more
+  _ensures(pure_prop)          // optional: what holds after the loop
 { body }
 ```
 
 Key facts:
 
-- **`_invariant` accepts slprop or pure** (wrap a slprop with `_inline_pulse`).
-  Holds at top of every iteration and after each iteration.
-- **`_ensures` on a loop is a `Prims.prop`, not a slprop.** Wrapping a slprop
-  fails **Error 12**.
-- **Omitting `_ensures` defaults the loop-exit pure obligation to `¬cond`.**
-  Natural exit satisfies this, but `break` doesn't (you exit with `cond = true`)
-  → `false == cond` VC at the break — **Error 19** with the body's `_if_hyp` in
-  context.
-- **Fix for `break`**: add an `_ensures(p)` stating a fact that holds at the
-  break (`_ensures(true)` works; a useful fact is better). The slprop invariant
-  is preserved at break automatically; only the pure exit prop needs restating.
-
-The slprop loop invariant survives both natural exit and `break`; no need to
-restate it as `_ensures`.
+- **PAL writes the ownership frame for you.** The emitted `invariant` binds one
+  existential per live local and per parameter pointee
+  (`exists* inv_i inv_acc. uint32_t_pts_to loc_i 1.0R inv_i ** …`) and then
+  adds your clauses, with each C name read as its bound value (`$(i)` and a bare
+  `i` both become `inv_i`). So `_live(x)` is unnecessary (it is translated to
+  `True`), and an `_invariant` usually only needs the *pure* facts:
+  `_invariant(i <= n && acc == i * y)`.
+- **Ownership PAL does not generate goes in an slprop invariant**:
+  `_invariant(_inline_pulse(Helpers_X.loop_inv $(obj) $(i)))` — for example a
+  helper predicate over an `_arrayptr` range, or your own struct invariant.
+  Use `` $`name `` for an existential the invariant should quantify
+  (`test/arrayptrs`).
+- **`_ensures` on a loop is a pure prop**, checked right after the loop: PAL
+  asserts it there rather than putting it in Pulse's `ensures`, because the
+  loop's values are only named inside the invariant. Without one, Pulse gives
+  you `¬cond` after a loop that exits normally.
+- **`break`**: a loop containing a `break` gets `ensures true` automatically
+  (a `break` leaves while `cond` still holds). The invariant must hold at the
+  `break` itself. State what you need at the exit with the loop's `_ensures`.
+  A `break`/`continue` that would skip the release of a local declared inside
+  the loop body is reported as untranslatable; declare such locals outside the
+  loop.
 
 ### A non-tail `if` that contains a `break`
 
-Inside a loop, a non-tail `if` whose body `break`s needs its `_ensures` to
-describe the **fall-through (else) continuation, not the break path**. The `break`
-jumps to loop exit and must re-establish the *loop invariant* at the `break;`
-itself — fold the invariant (plus any `loop_inv_fold` ghost) right before the
-`break`. So the if-`_ensures` states the shape the *next in-loop statement* needs,
-typically the **open** (`[@@pulse_unfold]`) twin of the invariant when the
-following code still reads through the struct. The pts_to re-listing and
-free-existential rules of §6.5 apply unchanged.
+The `break` jumps to loop exit and must re-establish the *loop invariant* at the
+`break;` itself — if your invariant uses a folded helper predicate, fold it (and
+any `loop_inv_fold` ghost) right before the `break`.
 
 ### Back-edge bound: fold a non-strict-counter invariant *after* the increment
 
-If the loop invariant bundles the spec existentially and carries only a
+If an slprop loop invariant bundles the spec existentially and carries only a
 **non-strict** counter bound (e.g. it keeps `i <= len`), re-establish it *after*
 the `i++`, not before:
 
 ```c
-_ghost_stmt(fold Helpers_X.inner_inv $(Obj));
+_ghost_stmt(fold (Helpers_X.inner_inv $(obj)));
 i++;
-_ghost_stmt(Helpers_X.loop_inv_fold $(Obj) $(i));   // AFTER i++
+_ghost_stmt(Helpers_X.loop_inv_fold $(obj) $(i));   // AFTER i++
 ```
 
-Folding the invariant *before* `i++` discards the strict `i < len` fact (carried
-by the surrounding if-`_ensures`) that you need to re-prove `i + 1 <= len` at the
-back-edge. Fold with the post-increment `i` while the open spec is still explicit,
-and the non-strict bound discharges directly.
+Folding the invariant *before* `i++` discards the strict `i < len` fact (from the
+loop condition) that you need to re-prove `i + 1 <= len` at the back-edge. Fold
+with the post-increment `i` while the open spec is still explicit, and the
+non-strict bound discharges directly.
 
-## 6.5. Non-tail `if`: always add `_ensures`
+## 6.5. `if` statements and the join
 
-When a C `if` (with or without `else`) is **not the last statement of its
-enclosing function body**, Pulse infers the if's post-state by joining the two
-branches and unifying them. The unifier wraps shared `pure` slprops as
-`match cond with | true -> p | false -> p` **even when both branches end in the
-identical state**. The wrap survives across opaque slprop boundaries
-(`[@@"opaque_to_smt"]` definitions like the case-split helpers) and
-walls off every downstream helper call whose precondition expects a clean
-`pure p` — Error 228 fires at the next call site with the printed wrap visible
-in the "In the context" dump.
+Pulse computes the state after an `if` itself: Palow's points-to predicates are
+keyed on the address, so the two arms' slprops are matched by location and a
+value that differs is joined into a `match` on the condition. You normally
+annotate nothing. Consequently:
 
-**Fix**: ascribe the if's post-state with `_ensures(_inline_pulse(...))`
-(requires a recent PAL with the if-`_ensures` feature). Pulse then checks each
-branch directly against the ensures, skipping the inferred join. See the PAL test `test/if_ensures` for a worked if-`_ensures` example.
+- **A pure `_ensures` on an `if` is not emitted** — it would only be a check.
+  Put the fact in an `_assert` after the `if`, or in a helper's precondition.
+- **An ownership `_ensures` on an `if` is emitted, and it is the join.** Use
+  one when the arms establish ownership in different words that only you can
+  reconcile — the typical case is a function-pointer local assigned a different
+  callee in each arm, joined by an `is_valid` clause. Pulse does not frame an
+  `if`'s annotation, so PAL adds the generated points-to for every live slot
+  your clause does not mention. A slot counts as mentioned when the clause
+  names its *address* with `$&(x)`; `$(x)` is just a read.
 
 ```c
-if (cond)
-    _ensures(_inline_pulse(<post-state slprop>))
-{
-    ...
-}
-```
-
-Gotchas in the ensures body:
-
-1. **`$(X)` expands to `(!var_X)` (an stt action) in body context**, which
-   slprop position rejects with Error 12. **Refer to PAL's internal local names
-   directly**: `var_X` (the ref bound by PAL's `let mut var_X = var_X;` shadow),
-   ghost args (not shadowed), etc. The `_inline_pulse(...)` body is parsed with
-   the local scope in effect, so unqualified names resolve correctly.
-
-2. **Every local ref's `pts_to` must be re-introduced** via existential
-   bindings, even for refs the branch doesn't touch — Pulse does **not**
-   auto-frame across an if-ensures. Bind values with fresh names and carry any
-   safety facts the downstream code needs in pure form:
-
-   ```c
-   _ensures(_inline_pulse(
-       exists* val_mid obj_v idx cnt.
-           Pulse.Lib.Reference.pts_to var_obj   obj_v **
-           Pulse.Lib.Reference.pts_to var_index idx **
-           Pulse.Lib.Reference.pts_to var_count cnt **
-           Helpers_X.obj_inv obj_v 1.0R val_mid **
-           pure (UInt32.v idx + UInt32.v cnt <= UInt32.v val_mid.count
-              /\ val_mid.count == var_val_pre.count)))
-   ```
-
-3. **`DBG_ASSERT(...)`-style macros are themselves non-tail ifs.** PAL lifts each
-   into `if (assert_enabled()) { assert (with_pure ...) } else {}` — both
-   branches are slprop no-ops, but the if-join still wraps, and consecutive
-   asserts produce compounding nested wraps. Cleanest fix: **delete the assert
-   from the proof source** — `_requires` already enforces the property
-   statically, and the assert is a runtime no-op under `NDEBUG`.
-
-4. **Bind the post-state via a free top-level existential, *not* via a
-   record-update expression.** Write
-   `exists* val_post. ... obj_inv obj_v 1.0R val_post ** pure (val_post.X == var_val_pre.X /\ ...)`
-   with one pure equation per unchanged field. **Avoid**
-   `exists* elems_0_post. obj_inv obj_v 1.0R ({ var_val_pre with elems_0 = elems_0_post })`
-   — the nested record-update makes Pulse pre-introduce a synthetic spec name
-   (e.g. `_rs_post206 := {var_val_pre with elems_0 = elems_0_post}`) into the
-   body's symbolic state. Subsequent ghost-helper calls whose implicit `val_pre`
-   is unified by the matcher (not by Z3 pure equalities) then fail with Error 228
-   "cannot prove `case_split (UInt32.v var_val_pre.capacity <= N) ...`" because
-   the in-context slprop reads `_rs_post206.capacity` and the matcher is
-   syntactic. The free-existential form sidesteps this entirely.
-
-**Tail-position ifs are exempt.** When an if is the last statement of a function
-body, Pulse checks each branch against the function's own `_ensures` directly —
-no synthesised join, no wrap. Place assertion-style ifs at the tail when feasible.
-
-**Unannotated `let mut x : T;` for uninitialised C locals.** PAL emits
-`let mut var_X : T;` (no initialiser) for declarations like `_array ELEM* New;`,
-and Error 228 ("Allocating a mutable local variable expects an annotated
-post-condition") fires at the binder. The same `_ensures(_inline_pulse(...))` on
-the enclosing `if` lets the post-condition propagate to the binder. Wrap any
-scope containing an uninitialised `let mut` in an if-ensures (or move the
-declaration into an initialised form if the code permits).
-
-
-### 6.6 Outer if-`_ensures` is mandatory when both branches return
-
-When **both** branches of an if `return` (so the if has no fall-through join),
-Pulse still synthesises a match-shaped post and tries to unify it with the
-function's outer ensures:
-
-```
-* Error 228: Cannot prove
-    match cond with | true -> <TRUE-arm post> | false -> <FALSE-arm post>
-```
-
-The error fires at the if's location even though every path returns. **Fix**: add
-an explicit `_ensures(_inline_pulse(...))` to the outer if. Each `return` branch
-discharges its own function-level post directly, and the outer `_ensures` only
-needs to describe the non-returning fall-through state (or, if both branches
-return, any consistent state — e.g. the preserved pre-state).
-
-```c
-if (cond_for_outer_dispatch)
+if (use_fast)
     _ensures(_inline_pulse(
-        exists* val_mid. obj_inv var_obj 1.0R val_mid
-                      ** pure (val_mid.count == ... /\ val_mid.capacity == ...)))
-{
-    if (inner) { ... return TRUE; }
-    else        { ... return TRUE; }
-}
-// outer-if FALSE arm continues here
-return FALSE;
+        exists* f. ptr_pts_to $&(op) 1.0R f **
+                   Pulse.Lib.C.Palow.FnPtr.is_valid f true My_spec.pre My_spec.post))
+{ op = fast_op; } else { op = slow_op; }
 ```
+
+- **The join of a condition that is a call** is fine: PAL binds the call to a
+  name first, which is what lets Pulse reduce the `match` inside each arm.
+- **A `match cond with | true -> … | false -> …` that a later step cannot
+  see through** (Error 228 with the match visible in the context) usually
+  means *your* helper predicate took different arguments in the two arms. Give
+  the arms the same shape — fold the same helper with the same arguments at the
+  end of both — or state the joined state with an ownership `_ensures` as
+  above.
+
+**Tail-position ifs** — the last statement of a function, or one where both
+arms `return` — are checked arm by arm against the function's own `ensures`, so
+no join is computed at all.
 
 ## 7. Manipulating existentials (early returns + disjunctive posts)
 
@@ -480,29 +452,27 @@ and solving them. This breaks down in a few common situations, addressed below. 
 ### 7.1 Disjunctive post with `if-then-else` and early `return`
 
 If a function's post is
-`exists* val_post. (if cond_on_return then sl_failure else sl_success) ** ...`
-and the body has `return array_null` (or similar) inside a nested branch, Pulse
-tries to discharge the post with `cond := array_is_null array_null`. The matcher
-cannot reduce `match array_is_null array_null with | true -> A | _ -> B` to `A`,
-even though it is definitionally `true`, because the witness for `val_post` is
-still a uvar.
+`exists* val_post. (if is_null ret then sl_failure else sl_success) ** ...`
+and the body has `return NULL` inside a nested branch, Pulse tries to
+discharge the post with the condition `is_null null`. The matcher cannot reduce
+`if is_null null then A else B` to `A` while the witness for `val_post` is still
+a uvar, even though the condition is definitionally `true`.
 
 **Fix.** Before the early `return`, **explicitly introduce the existential with
 the failure witnesses**:
 
 ```c
-_ghost_stmt(introduce exists* (val_post: Helpers_X.obj_spec) (idx_post: nat).
-              (if Pulse.Lib.C.Array.array_is_null array_null
-               then Helpers_X.obj_inv var_obj 1.0R val_post
-                 ** pure (val_post == reveal var_val_pre /\ idx_post == UInt32.v var_index_pre)
+_ghost_stmt(introduce exists* (val_post: Helpers_X.obj_spec).
+              (if is_null null
+               then Helpers_X.obj_inv $(obj) 1.0R val_post
+                 ** pure (val_post == reveal val_obj)
                else <success>)
-              ** pure (idx_post == UInt32.v val_index_0)
-            with var_val_pre (UInt32.v var_index_pre));
+            with (reveal val_obj));
 return NULL;
 ```
 
-Once witnesses are explicit, the `match` reduces and the matcher only has to match
-`obj_inv var_obj 1.0R var_val_pre` against the context. For the **consumer** side, eliminate such a disjunctive post in the *caller* via per-arm ghost helpers.
+Once witnesses are explicit, the `if` reduces and the matcher only has to match
+`obj_inv … (reveal val_obj)` against the context. For the **consumer** side, eliminate such a disjunctive post in the *caller* via per-arm ghost helpers. Where the contract is simply "ownership unless null", prefer `_nullable` on the result, which emits `unless_null ret (…)` and comes with the elimination steps.
 
 ### 7.2 Eliminating an existential to give it a name (`with x. assert ...`)
 
