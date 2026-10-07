@@ -51,19 +51,21 @@
  *
  * Expect warnings from GCC/Clang on the UB cases (-Warray-bounds,
  * -Wmaybe-uninitialized, -Wstrict-aliasing): that is the point.  The "ub" run
- * ends with SIGSEGV in case 22.2, which writes to a string literal -- that is
+ * ends with SIGSEGV in case 23.2, which writes to a string literal -- that is
  * the last case for exactly that reason.  Try also:
- *     cc -std=c11 -O1 -g -fsanitize=undefined,address  (catches 12.5/16.1/16.2/22.2)
+ *     cc -std=c11 -O1 -g -fsanitize=undefined,address  (catches 13.5/17.1/17.2/23.2)
  *     cc -std=c11 -O2 -Wstrict-aliasing=2 -fstrict-aliasing
  *
  * Things actually observed on x86-64 GCC 13 at -O2:
- *   - 15.1 prints bad2=5 even though `*pd = 1.5` was stored first: the compiler
+ *   - 16.1 prints bad2=5 even though `*pd = 1.5` was stored first: the compiler
  *     assumed `int *` and `double *` cannot alias and reordered.
- *   - 15.4 prints 9.75 after `*(int *)p = 1` clobbered the low half.
- *   - 20.1 returns 1 although memory holds 2: `restrict` let the compiler keep
+ *   - 16.4 prints 9.75 after `*(int *)p = 1` clobbered the low half.
+ *   - 21.1 returns 1 although memory holds 2: `restrict` let the compiler keep
  *     the stale value, with no type mismatch anywhere in sight.
- *   - 21.2 prints 2 rather than 7: the dead stack slot was recycled.
+ *   - 22.2 prints 2 rather than 7: the dead stack slot was recycled.
  *   - 10.2's memcmp reports DIFFERENT for two structs with identical members.
+ *   - 24.6 still reports the old union payload after a `double` was stored
+ *     over it: the union effective type is exactly as fragile as any other.
  *
  * ---------------------------------------------------------------------------
  * SECTION INDEX
@@ -78,22 +80,26 @@
  *    9  impl-def  enum vs its compatible integer type; the 3 character types
  *   10  defined   flexible array members, padding bytes, memset
  *   11  defined   the sanctioned ways to type-pun (plus may_alias, which isn't)
- *   12  UB        fixed type, forbidden lvalue type
- *   13  UB        trying to change a type that R1 has pinned
- *   14  UB        installed type, then an incompatible access
- *   15  UB        re-typed at the WRONG TIME
- *   16  UB        re-typed to a PROBLEMATIC type
- *   17  UB        R3 subtleties: untyped sources, partial copies
- *   18  UB        R4 allows the type, but the value is indeterminate
- *   19  UB        qualifier / atomicity mismatches (volatile, _Atomic)
- *   20  UB        types match perfectly, `restrict` promise broken
- *   21  UB        the object is gone (freed, out of scope, temporary lifetime)
- *   22  UB        declared objects that may not be modified at all
+ *   12  defined   effective type set to a UNION, then punned through it
+ *   13  UB        fixed type, forbidden lvalue type
+ *   14  UB        trying to change a type that R1 has pinned
+ *   15  UB        installed type, then an incompatible access
+ *   16  UB        re-typed at the WRONG TIME
+ *   17  UB        re-typed to a PROBLEMATIC type
+ *   18  UB        R3 subtleties: untyped sources, partial copies
+ *   19  UB        R4 allows the type, but the value is indeterminate
+ *   20  UB        qualifier / atomicity mismatches (volatile, _Atomic)
+ *   21  UB        types match perfectly, `restrict` promise broken
+ *   22  UB        the object is gone (freed, out of scope, temporary lifetime)
+ *   23  UB        declared objects that may not be modified at all
+ *   24  UB        union punning that does NOT work
  *
  * Every case below is tagged:
  *     [DEFINED]  strictly conforming
  *     [UB]       undefined behavior, per the cited rule
  *     [UNSPEC]   defined as far as 6.5p6/p7 go, but another rule bites
+ *     [IMPL-DEF] the implementation chooses, and may choose badly
+ *     [UB?]      a genuinely contested corner; see the case's own note
  * ---------------------------------------------------------------------------
  */
 
@@ -343,7 +349,7 @@ static void case_4_1_change_effective_type_repeatedly(void)
 
     /* Key point: each read above is paired with the store that *immediately*
        preceded it and installed that type.  No read ever looks back past a
-       re-typing store.  That is what makes 4.1 defined and 15.1 (below) not. */
+       re-typing store.  That is what makes 4.1 defined and 16.1 (below) not. */
     free(p);
 }
 
@@ -540,7 +546,7 @@ static void case_7_3_compound_literals_have_a_declared_type(void)
     printf("   compound struct : {%d,%d}\n", sp->x, sp->y);
     sink_u((unsigned)sp->y);
 
-    /* Consequently `*(float *)p` would be UB exactly as in section 12 -- a
+    /* Consequently `*(float *)p` would be UB exactly as in section 13 -- a
        compound literal can NOT be re-typed. */
 }
 
@@ -570,7 +576,7 @@ union  cis   { struct cis_a a; struct cis_b b; };   /* declaration visible */
 
 static void case_8_1_common_initial_sequence(void)
 {
-    BANNER("DEFINED", "8.1: union common initial sequence (6.5.2.3p6) -- the exception to 12.3");
+    BANNER("DEFINED", "8.1: union common initial sequence (6.5.2.3p6) -- the exception to 13.3");
 
     union cis u;
     u.b.tag = 7;
@@ -582,7 +588,7 @@ static void case_8_1_common_initial_sequence(void)
     printf("   wrote via .b, read via .a: tag = %d\n", u.a.tag);
     sink_u((unsigned)u.a.tag);
 
-    /* Contrast with 12.3: without the union, two layout-identical struct types
+    /* Contrast with 13.3: without the union, two layout-identical struct types
        are simply incompatible and punning between them is UB. */
 }
 
@@ -651,7 +657,7 @@ static void case_9_2_the_three_character_types(void)
     sink_u(*up);
 
     /* Note the asymmetry: a character lvalue may access ANY object, but a
-       non-character lvalue may never access a `char` object (see 12.4). */
+       non-character lvalue may never access a `char` object (see 13.4). */
 }
 
 /* ================================================================== */
@@ -770,14 +776,170 @@ static void case_11_1_escape_hatches(void)
 }
 
 /* ================================================================== */
-/* SECTION 12                                                         */
+/* SECTION 12                                                          */
+/* [DEFINED] The effective type is set to a UNION type, and the object  */
+/*           is then type-punned through that union.                    */
+/*                                                                      */
+/*           This is the one place where R2 and 6.5.2.3 cooperate: once  */
+/*           allocated storage has acquired a union effective type, the  */
+/*           object really IS a union, so footnote 95's "the bytes are   */
+/*           reinterpreted" licence applies exactly as it would to a     */
+/*           declared union (cf. 2.3).  The access is legal; only the    */
+/*           resulting VALUE is unspecified.                             */
+/* ================================================================== */
+
+union upun {
+    int32_t  i;
+    float    f;
+    uint8_t  b[4];
+};
+_Static_assert(sizeof(float) == 4 && sizeof(int32_t) == 4,
+               "section 12 assumes 32-bit float and int32_t");
+
+static void case_12_1_store_whole_union_then_pun(void)
+{
+    BANNER("DEFINED", "12.1: storing a WHOLE union into malloc'd storage installs the union type");
+
+    union upun *u = malloc(sizeof *u);
+    if (!u) return;
+
+    /* The lvalue being assigned is `*u`, whose type is `union upun`, and the
+       object has no declared type -- so R2 installs `union upun` as the
+       effective type of those 4 bytes.  Note the whole-union store: that is
+       what makes this case work (contrast 24.1). */
+    *u = (union upun){ .f = 1.5f };
+
+    /* The object's effective type is now a union type, so reading a member
+       other than the one last stored is ordinary union punning (6.5.2.3p3 and
+       footnote 95), not an aliasing violation. */
+    printf("   stored .f=1.5f, read .i = %#" PRIx32 "   (value unspecified, access legal)\n",
+           (uint32_t)u->i);
+    sink_u((unsigned)u->i);
+
+    /* The uint8_t member is doubly safe: it is both a member of the union AND
+       a character type, so 6.5p7's final bullet covers it unconditionally. */
+    printf("   bytes = %02x %02x %02x %02x\n", u->b[0], u->b[1], u->b[2], u->b[3]);
+    sink_u(u->b[3]);
+    free(u);
+}
+
+static void case_12_2_memcpy_propagates_a_union_type(void)
+{
+    BANNER("DEFINED", "12.2: R3 propagates a UNION effective type, and punning still works");
+
+    union upun src;
+    src.f = -2.5f;                 /* declared object: effective type is the
+                                      union type by R1 */
+    void *dst = malloc(sizeof src);
+    if (!dst) return;
+
+    memcpy(dst, &src, sizeof src); /* R3: "the effective type of the object
+                                      from which the value is copied" --
+                                      i.e. `union upun`, not `uint8_t[4]`. */
+    union upun *u = dst;
+    printf("   copied union, read .i = %#" PRIx32 "   (legal: dst IS a union now)\n",
+           (uint32_t)u->i);
+    sink_u((unsigned)u->i);
+    free(dst);
+}
+
+static void case_12_3_union_of_structs_with_cis_in_allocated_storage(void)
+{
+    BANNER("DEFINED", "12.3: a union effective type also carries the common-initial-sequence licence");
+
+    /* 8.1 showed the CIS rule on a declared union.  Here the union type is
+       acquired by an allocated object via R2 -- and because a declaration of
+       the complete union type is visible, 6.5.2.3p6 applies just the same. */
+    union cis *u = malloc(sizeof *u);
+    if (!u) return;
+
+    *u = (union cis){ .b = { .tag = 7, .y = 1.5 } };   /* whole-union store */
+    printf("   wrote .b, read .a.tag = %d   (common initial sequence)\n", u->a.tag);
+    sink_u((unsigned)u->a.tag);
+    free(u);
+}
+
+static void case_12_4_endianness_probe_through_an_allocated_union(void)
+{
+    BANNER("DEFINED", "12.4: the classic endianness probe, on allocated storage");
+
+    union endian { uint32_t u32; uint8_t b[4]; };
+
+    union endian *u = malloc(sizeof *u);
+    if (!u) return;
+
+    *u = (union endian){ .u32 = 0x01020304u };   /* R2: effective type := union endian */
+    printf("   0x01020304 byte order: %02x %02x %02x %02x  (%s-endian)\n",
+           u->b[0], u->b[1], u->b[2], u->b[3],
+           u->b[0] == 0x04 ? "little" : u->b[0] == 0x01 ? "big" : "mixed");
+    sink_u(u->b[0]);
+    free(u);
+}
+
+static void case_12_5_union_type_installed_then_replaced(void)
+{
+    BANNER("DEFINED", "12.5: a union effective type is no stickier than any other -- re-type at will");
+
+    void *p = malloc(sizeof(union upun) > sizeof(double)
+                     ? sizeof(union upun) : sizeof(double));
+    if (!p) return;
+
+    *(union upun *)p = (union upun){ .i = 7 };     /* effective type := union upun */
+    printf("   as union : .i = %" PRId32 "\n", ((union upun *)p)->i);
+
+    *(double *)p = 3.25;                           /* effective type := double    */
+    printf("   as double: %g\n", *(double *)p);
+
+    *(union upun *)p = (union upun){ .f = 0.5f };  /* effective type := union upun */
+    printf("   as union : .f = %g\n", (double)((union upun *)p)->f);
+    sink_d((double)((union upun *)p)->f);
+
+    /* The object never had a declared type, so each whole-object store simply
+       re-applies R2.  Reading with the type installed by the *immediately
+       preceding* store is always correct. */
+    free(p);
+}
+
+static void case_12_6_anonymous_and_nested_unions(void)
+{
+    BANNER("DEFINED", "12.6: punning through a union nested inside an allocated struct");
+
+    struct tagged {
+        int kind;
+        union { int32_t i; float f; } val;      /* named union member     */
+    };
+    struct anon {
+        int kind;
+        union { int32_t i; float f; };          /* C11 anonymous union    */
+    };
+
+    struct tagged *t = malloc(sizeof *t);
+    if (!t) return;
+    /* Whole-struct store: R2 installs `struct tagged`, and the `.val`
+       subobject's type within it is the union type -- so punning inside it is
+       as legal as in 12.1. */
+    *t = (struct tagged){ .kind = 1, .val = { .f = 1.5f } };
+    printf("   nested union : wrote .val.f, read .val.i = %#" PRIx32 "\n", (uint32_t)t->val.i);
+    sink_u((unsigned)t->val.i);
+    free(t);
+
+    struct anon *a = malloc(sizeof *a);
+    if (!a) return;
+    *a = (struct anon){ .kind = 2, .f = 1.5f };
+    printf("   anon  union : wrote .f,     read .i     = %#" PRIx32 "\n", (uint32_t)a->i);
+    sink_u((unsigned)a->i);
+    free(a);
+}
+
+/* ================================================================== */
+/* SECTION 13                                                         */
 /* [UB] Effective type IS defined (declared) and CANNOT change, and the */
 /*      access uses a disallowed lvalue type.                           */
 /* ================================================================== */
 
-static void case_12_1_read_int_as_float(void)
+static void case_13_1_read_int_as_float(void)
 {
-    BANNER("UB", "12.1: object declared `int`, read through `float *`");
+    BANNER("UB", "13.1: object declared `int`, read through `float *`");
 
     int n = 0x3f800000;
     float *pf = (float *)opaque(&n);
@@ -788,9 +950,9 @@ static void case_12_1_read_int_as_float(void)
     sink_d(*pf);
 }
 
-static void case_12_2_write_int_through_short(void)
+static void case_13_2_write_int_through_short(void)
 {
-    BANNER("UB", "12.2: object declared `int`, written through `short *`");
+    BANNER("UB", "13.2: object declared `int`, written through `short *`");
 
     int n = 1;
     short *ps = (short *)opaque(&n);
@@ -803,9 +965,9 @@ static void case_12_2_write_int_through_short(void)
     sink_u((unsigned)n);
 }
 
-static void case_12_3_struct_pun_between_layout_compatible_types(void)
+static void case_13_3_struct_pun_between_layout_compatible_types(void)
 {
-    BANNER("UB", "12.3: two distinct struct types with identical layout are NOT compatible");
+    BANNER("UB", "13.3: two distinct struct types with identical layout are NOT compatible");
 
     struct a { int x, y; };
     struct b { int x, y; };          /* same layout, DIFFERENT type */
@@ -818,9 +980,9 @@ static void case_12_3_struct_pun_between_layout_compatible_types(void)
     sink_u((unsigned)pb->x);
 }
 
-static void case_12_4_char_array_used_as_int_storage(void)
+static void case_13_4_char_array_used_as_int_storage(void)
 {
-    BANNER("UB", "12.4: `static char buf[]` reused as an int -- the classic bug");
+    BANNER("UB", "13.4: `static char buf[]` reused as an int -- the classic bug");
 
     static char buf[sizeof(int) * 2];  /* DECLARED type: char[8].  R1 pins the
                                           effective type of every byte to
@@ -834,9 +996,9 @@ static void case_12_4_char_array_used_as_int_storage(void)
     sink_u((unsigned)*pi);
 }
 
-static void case_12_5_alignment_of_declared_char_buffer(void)
+static void case_13_5_alignment_of_declared_char_buffer(void)
 {
-    BANNER("UB", "12.5: same as 12.4 plus an alignment violation");
+    BANNER("UB", "13.5: same as 13.4 plus an alignment violation");
 
     static char buf[32];
     /* Even with _Alignas this would still be an effective-type violation;
@@ -849,13 +1011,13 @@ static void case_12_5_alignment_of_declared_char_buffer(void)
 }
 
 /* ================================================================== */
-/* SECTION 13                                                         */
+/* SECTION 14                                                         */
 /* [UB] Attempting to CHANGE an effective type that is fixed by R1.     */
 /* ================================================================== */
 
-static void case_13_1_memcpy_cannot_retype_a_declared_object(void)
+static void case_14_1_memcpy_cannot_retype_a_declared_object(void)
 {
-    BANNER("UB", "13.1: memcpy into a DECLARED object does not re-type it (R3 needs 'no declared type')");
+    BANNER("UB", "14.1: memcpy into a DECLARED object does not re-type it (R3 needs 'no declared type')");
 
     double src = 1.0;
     int    dst = 0;        /* declared type int -- permanently */
@@ -876,9 +1038,9 @@ static void case_13_1_memcpy_cannot_retype_a_declared_object(void)
     sink_d(*pd);
 }
 
-static void case_13_2_store_does_not_retype_automatic_storage(void)
+static void case_14_2_store_does_not_retype_automatic_storage(void)
 {
-    BANNER("UB", "13.2: storing a float into an `int` variable does not install `float`");
+    BANNER("UB", "14.2: storing a float into an `int` variable does not install `float`");
 
     int n = 0;
     float *pf = (float *)opaque(&n);
@@ -891,9 +1053,9 @@ static void case_13_2_store_does_not_retype_automatic_storage(void)
     sink_u((unsigned)n);
 }
 
-static void case_13_3_reuse_of_a_declared_struct_as_another_struct(void)
+static void case_14_3_reuse_of_a_declared_struct_as_another_struct(void)
 {
-    BANNER("UB", "13.3: an arena carved out of a declared array cannot be re-typed");
+    BANNER("UB", "14.3: an arena carved out of a declared array cannot be re-typed");
 
     /* A very common "custom allocator" mistake: the backing store has a
        declared type, so every object carved out of it is permanently
@@ -909,14 +1071,14 @@ static void case_13_3_reuse_of_a_declared_struct_as_another_struct(void)
 }
 
 /* ================================================================== */
-/* SECTION 14                                                         */
+/* SECTION 15                                                         */
 /* [UB] No declared type, an effective type WAS installed, and a later  */
 /*      access uses an incompatible lvalue type without re-typing.      */
 /* ================================================================== */
 
-static void case_14_1_installed_int_read_as_float(void)
+static void case_15_1_installed_int_read_as_float(void)
 {
-    BANNER("UB", "14.1: allocated object typed `int` by a store, then read as `float`");
+    BANNER("UB", "15.1: allocated object typed `int` by a store, then read as `float`");
 
     void *p = malloc(sizeof(float) > sizeof(int) ? sizeof(float) : sizeof(int));
     if (!p) return;
@@ -932,9 +1094,9 @@ static void case_14_1_installed_int_read_as_float(void)
     free(p);
 }
 
-static void case_14_2_installed_struct_read_as_unrelated_struct(void)
+static void case_15_2_installed_struct_read_as_unrelated_struct(void)
 {
-    BANNER("UB", "14.2: allocated object typed `struct point`, read as `struct nested`");
+    BANNER("UB", "15.2: allocated object typed `struct point`, read as `struct nested`");
 
     void *p = malloc(sizeof(struct nested));
     if (!p) return;
@@ -946,9 +1108,9 @@ static void case_14_2_installed_struct_read_as_unrelated_struct(void)
     free(p);
 }
 
-static void case_14_3_memcpy_installed_type_then_wrong_read(void)
+static void case_15_3_memcpy_installed_type_then_wrong_read(void)
 {
-    BANNER("UB", "14.3: R3 installed `double`; reading as `long long` is still UB");
+    BANNER("UB", "15.3: R3 installed `double`; reading as `long long` is still UB");
 
     double src = 1.0;
     void  *dst = malloc(sizeof(double));
@@ -962,14 +1124,14 @@ static void case_14_3_memcpy_installed_type_then_wrong_read(void)
 }
 
 /* ================================================================== */
-/* SECTION 15                                                         */
+/* SECTION 16                                                         */
 /* [UB] The effective type CAN change, but the change happens at the    */
 /*      WRONG TIME relative to the accesses.                            */
 /* ================================================================== */
 
-static void case_15_1_read_before_the_retyping_store(void)
+static void case_16_1_read_before_the_retyping_store(void)
 {
-    BANNER("UB", "15.1: reading through the NEW type before the re-typing store happens");
+    BANNER("UB", "16.1: reading through the NEW type before the re-typing store happens");
 
     void *p = malloc(sizeof(double));
     if (!p) return;
@@ -988,9 +1150,9 @@ static void case_15_1_read_before_the_retyping_store(void)
     free(p);
 }
 
-static void case_15_2_interleaved_accesses_across_a_call(void)
+static void case_16_2_interleaved_accesses_across_a_call(void)
 {
-    BANNER("UB", "15.2: a live pointer of the OLD type used after a re-typing store");
+    BANNER("UB", "16.2: a live pointer of the OLD type used after a re-typing store");
 
     void *p = malloc(sizeof(double));
     if (!p) return;
@@ -1008,9 +1170,9 @@ static void case_15_2_interleaved_accesses_across_a_call(void)
     free(p);
 }
 
-static void case_15_3_retype_within_one_full_expression(void)
+static void case_16_3_retype_within_one_full_expression(void)
 {
-    BANNER("UB", "15.3: re-typing and reading inside a single full expression");
+    BANNER("UB", "16.3: re-typing and reading inside a single full expression");
 
     void *p = malloc(sizeof(double));
     if (!p) return;
@@ -1028,9 +1190,9 @@ static void case_15_3_retype_within_one_full_expression(void)
     free(p);
 }
 
-static void case_15_4_partial_overwrite_invalidates_the_whole(void)
+static void case_16_4_partial_overwrite_invalidates_the_whole(void)
 {
-    BANNER("UB", "15.4: a partial store re-types only SOME bytes, shredding the larger object");
+    BANNER("UB", "16.4: a partial store re-types only SOME bytes, shredding the larger object");
 
     void *p = malloc(sizeof(double));
     if (!p) return;
@@ -1047,14 +1209,14 @@ static void case_15_4_partial_overwrite_invalidates_the_whole(void)
 }
 
 /* ================================================================== */
-/* SECTION 16                                                         */
+/* SECTION 17                                                         */
 /* [UB] The effective type CAN change, but it is changed to a           */
 /*      PROBLEMATIC type.                                               */
 /* ================================================================== */
 
-static void case_16_1_retype_beyond_the_allocation(void)
+static void case_17_1_retype_beyond_the_allocation(void)
 {
-    BANNER("UB", "16.1: re-typing to a type larger than the allocated object");
+    BANNER("UB", "17.1: re-typing to a type larger than the allocated object");
 
     void *p = malloc(sizeof(int));     /* only sizeof(int) bytes exist */
     if (!p) return;
@@ -1068,9 +1230,9 @@ static void case_16_1_retype_beyond_the_allocation(void)
     free(p);
 }
 
-static void case_16_2_retype_at_a_misaligned_offset(void)
+static void case_17_2_retype_at_a_misaligned_offset(void)
 {
-    BANNER("UB", "16.2: re-typing an interior, insufficiently aligned offset");
+    BANNER("UB", "17.2: re-typing an interior, insufficiently aligned offset");
 
     unsigned char *raw = malloc(64);
     if (!raw) return;
@@ -1085,9 +1247,9 @@ static void case_16_2_retype_at_a_misaligned_offset(void)
     free(raw);
 }
 
-static void case_16_3_retype_to_a_type_with_trap_representations(void)
+static void case_17_3_retype_to_a_type_with_trap_representations(void)
 {
-    BANNER("UB", "16.3: bytes typed by one type, then read as a type that may trap");
+    BANNER("UB", "17.3: bytes typed by one type, then read as a type that may trap");
 
     void *p = malloc(sizeof(double) > sizeof(_Bool) ? sizeof(double) : sizeof(_Bool));
     if (!p) return;
@@ -1104,9 +1266,9 @@ static void case_16_3_retype_to_a_type_with_trap_representations(void)
     free(p);
 }
 
-static void case_16_4_retype_pointer_to_integer_bytes(void)
+static void case_17_4_retype_pointer_to_integer_bytes(void)
 {
-    BANNER("UB", "16.4: object typed `void *`, then read as an integer type");
+    BANNER("UB", "17.4: object typed `void *`, then read as an integer type");
 
     void *p = malloc(sizeof(void *) > sizeof(uintptr_t) ? sizeof(void *) : sizeof(uintptr_t));
     if (!p) return;
@@ -1121,9 +1283,9 @@ static void case_16_4_retype_pointer_to_integer_bytes(void)
     free(p);
 }
 
-static void case_16_5_retype_to_a_const_qualified_incompatible_type(void)
+static void case_17_5_retype_to_a_const_qualified_incompatible_type(void)
 {
-    BANNER("UB", "16.5: writing through a type that is not a *qualified version* but a different type");
+    BANNER("UB", "17.5: writing through a type that is not a *qualified version* but a different type");
 
     void *p = malloc(sizeof(long));
     if (!p) return;
@@ -1147,14 +1309,14 @@ static void case_16_5_retype_to_a_const_qualified_incompatible_type(void)
 }
 
 /* ================================================================== */
-/* SECTION 17                                                         */
+/* SECTION 18                                                         */
 /* [UB] R3 subtleties: copying from a source that has NO effective      */
 /*      type, and copying only part of an object.                       */
 /* ================================================================== */
 
-static void case_17_1_memcpy_from_an_untyped_source(void)
+static void case_18_1_memcpy_from_an_untyped_source(void)
 {
-    BANNER("UB", "17.1: R3's 'if it has one' -- copying from an object with no effective type");
+    BANNER("UB", "18.1: R3's 'if it has one' -- copying from an object with no effective type");
 
     void *src = malloc(sizeof(int));
     void *dst = malloc(sizeof(int));
@@ -1171,9 +1333,9 @@ static void case_17_1_memcpy_from_an_untyped_source(void)
     free(src); free(dst);
 }
 
-static void case_17_2_partial_memcpy_leaves_a_hybrid(void)
+static void case_18_2_partial_memcpy_leaves_a_hybrid(void)
 {
-    BANNER("UB", "17.2: copying only part of an object produces a half-typed object");
+    BANNER("UB", "18.2: copying only part of an object produces a half-typed object");
 
     double whole = 1.5;
     void  *dst   = malloc(sizeof(double));
@@ -1191,14 +1353,14 @@ static void case_17_2_partial_memcpy_leaves_a_hybrid(void)
 }
 
 /* ================================================================== */
-/* SECTION 18                                                         */
+/* SECTION 19                                                         */
 /* [UB] No effective type was ever installed, but the operation         */
 /*      performed requires a determinate value.                         */
 /* ================================================================== */
 
-static void case_18_1_read_indeterminate_malloc_bytes(void)
+static void case_19_1_read_indeterminate_malloc_bytes(void)
 {
-    BANNER("UB", "18.1: R4 permits the lvalue type, but the VALUE is indeterminate");
+    BANNER("UB", "19.1: R4 permits the lvalue type, but the VALUE is indeterminate");
 
     void *p = malloc(sizeof(int));
     if (!p) return;
@@ -1215,9 +1377,9 @@ static void case_18_1_read_indeterminate_malloc_bytes(void)
     free(p);
 }
 
-static void case_18_2_read_indeterminate_then_branch(void)
+static void case_19_2_read_indeterminate_then_branch(void)
 {
-    BANNER("UB", "18.2: branching on an indeterminate value (classic 'unstable value')");
+    BANNER("UB", "19.2: branching on an indeterminate value (classic 'unstable value')");
 
     void *p = malloc(sizeof(int));
     if (!p) return;
@@ -1233,7 +1395,7 @@ static void case_18_2_read_indeterminate_then_branch(void)
 }
 
 /* ================================================================== */
-/* SECTION 19                                                         */
+/* SECTION 20                                                         */
 /* [UB] Qualification/atomicity mismatches that 6.5p7 does NOT forgive. */
 /*      6.5p7 permits "a qualified version OF the effective type" --    */
 /*      that direction only.  Dropping a qualifier is a different rule. */
@@ -1241,9 +1403,9 @@ static void case_18_2_read_indeterminate_then_branch(void)
 
 static volatile int g_volatile = 1;
 
-static void case_19_1_volatile_object_via_nonvolatile_lvalue(void)
+static void case_20_1_volatile_object_via_nonvolatile_lvalue(void)
 {
-    BANNER("UB", "19.1: object declared `volatile int`, accessed through a plain `int` lvalue");
+    BANNER("UB", "20.1: object declared `volatile int`, accessed through a plain `int` lvalue");
 
     int *p = (int *)(uintptr_t)opaque((void *)(uintptr_t)&g_volatile);
     *p = 2;     /* UB twice over:
@@ -1261,9 +1423,9 @@ static void case_19_1_volatile_object_via_nonvolatile_lvalue(void)
 #include <stdatomic.h>
 static _Atomic int g_atomic = 1;
 
-static void case_19_2_atomic_object_via_nonatomic_lvalue(void)
+static void case_20_2_atomic_object_via_nonatomic_lvalue(void)
 {
-    BANNER("UB", "19.2: object declared `_Atomic int`, accessed through a plain `int` lvalue");
+    BANNER("UB", "20.2: object declared `_Atomic int`, accessed through a plain `int` lvalue");
 
     /* 6.2.5p27: an atomic type's size, representation and alignment need not
        match the corresponding unqualified type -- there may be a lock word
@@ -1276,32 +1438,32 @@ static void case_19_2_atomic_object_via_nonatomic_lvalue(void)
     sink_u((unsigned)*p);
 }
 #else
-static void case_19_2_atomic_object_via_nonatomic_lvalue(void)
+static void case_20_2_atomic_object_via_nonatomic_lvalue(void)
 {
-    BANNER("UB", "19.2: skipped -- no atomics on this implementation");
+    BANNER("UB", "20.2: skipped -- no atomics on this implementation");
 }
 #endif
 
 /* ================================================================== */
-/* SECTION 20                                                         */
+/* SECTION 21                                                         */
 /* [UB] Effective types agree PERFECTLY and the access is still UB,     */
 /*      because `restrict` is an orthogonal promise (6.7.3.1).          */
 /* ================================================================== */
 
-static int case_20_helper(int *restrict a, int *restrict b)
+static int case_21_helper(int *restrict a, int *restrict b)
 {
     *a = 1;
     *b = 2;      /* the programmer has promised `b` does not alias `a` */
     return *a;   /* the compiler may fold this to 1 */
 }
 
-static void case_20_1_restrict_violation_with_matching_types(void)
+static void case_21_1_restrict_violation_with_matching_types(void)
 {
-    BANNER("UB", "20.1: identical effective types, but a `restrict` promise is broken");
+    BANNER("UB", "21.1: identical effective types, but a `restrict` promise is broken");
 
     int x = 0;
     int *p = opaque(&x);
-    int r = case_20_helper(p, p);     /* UB: both parameters are restrict-qualified
+    int r = case_21_helper(p, p);     /* UB: both parameters are restrict-qualified
                                    and designate the same object, yet both are
                                    used to modify it.  6.5p6/p7 are entirely
                                    satisfied -- the effective type is `int` on
@@ -1312,21 +1474,21 @@ static void case_20_1_restrict_violation_with_matching_types(void)
 }
 
 /* ================================================================== */
-/* SECTION 21                                                         */
+/* SECTION 22                                                         */
 /* [UB] The object is gone: lifetime, not type, is the problem.         */
 /* ================================================================== */
 
 static int *g_dangling_auto;
 
-static void case_21_stash_local(void)
+static void case_22_stash_local(void)
 {
     int local = 7;
     g_dangling_auto = opaque(&local);   /* escapes its lifetime */
 }
 
-static void case_21_1_use_a_freed_pointer_VALUE(void)
+static void case_22_1_use_a_freed_pointer_VALUE(void)
 {
-    BANNER("UB", "21.1: even READING a freed pointer's value is UB (not just dereferencing)");
+    BANNER("UB", "22.1: even READING a freed pointer's value is UB (not just dereferencing)");
 
     int *p = malloc(sizeof(int));
     if (!p) return;
@@ -1340,11 +1502,11 @@ static void case_21_1_use_a_freed_pointer_VALUE(void)
     if (p != NULL) sink_p(p);
 }
 
-static void case_21_2_dangling_automatic_object(void)
+static void case_22_2_dangling_automatic_object(void)
 {
-    BANNER("UB", "21.2: dereferencing a pointer to an automatic object whose block exited");
+    BANNER("UB", "22.2: dereferencing a pointer to an automatic object whose block exited");
 
-    case_21_stash_local();
+    case_22_stash_local();
     /* The object no longer exists, so it has no effective type to speak of;
        6.5p6 never gets a chance to apply. */
     printf("   *g_dangling_auto = %d   <-- UB\n", *g_dangling_auto);
@@ -1352,29 +1514,29 @@ static void case_21_2_dangling_automatic_object(void)
 }
 
 struct wrap { int a[4]; };
-static struct wrap case_21_make(void) { struct wrap w = { { 1, 2, 3, 4 } }; return w; }
+static struct wrap case_22_make(void) { struct wrap w = { { 1, 2, 3, 4 } }; return w; }
 
-static void case_21_3_temporary_lifetime_object(void)
+static void case_22_3_temporary_lifetime_object(void)
 {
-    BANNER("UB", "21.3: objects with TEMPORARY lifetime (6.2.4p8)");
+    BANNER("UB", "22.3: objects with TEMPORARY lifetime (6.2.4p8)");
 
     /* A non-lvalue structure containing an array member creates an object
        with temporary lifetime.  Its lifetime ends at the end of the full
        expression, and -- note -- any attempt to MODIFY it is UB even while
        it is alive. */
-    const int *p = case_21_make().a;     /* lifetime ends at this semicolon */
+    const int *p = case_22_make().a;     /* lifetime ends at this semicolon */
     printf("   p[0] after the full expression = %d   <-- UB\n", p[0]);
     sink_u((unsigned)p[0]);
 }
 
 /* ================================================================== */
-/* SECTION 22                                                         */
+/* SECTION 23                                                         */
 /* [UB] Declared objects that may not be modified at all.               */
 /* ================================================================== */
 
-static void case_22_1_modify_a_const_object(void)
+static void case_23_1_modify_a_const_object(void)
 {
-    BANNER("UB", "22.1: modifying an object whose declared type is const-qualified");
+    BANNER("UB", "23.1: modifying an object whose declared type is const-qualified");
 
     const int n = 1;
     const int *cp = &n;
@@ -1387,9 +1549,9 @@ static void case_22_1_modify_a_const_object(void)
     sink_u((unsigned)n);
 }
 
-static void case_22_2_modify_a_string_literal(void)
+static void case_23_2_modify_a_string_literal(void)
 {
-    BANNER("UB", "22.2: modifying a string literal (declared type char[N])");
+    BANNER("UB", "23.2: modifying a string literal (declared type char[N])");
 
     char *s = (char *)opaque((void *)"hello");
     s[0] = 'H';             /* UB: 6.4.5p7.  The literal's declared type is
@@ -1398,6 +1560,149 @@ static void case_22_2_modify_a_string_literal(void)
                                effective-type violation. */
     printf("   %s   <-- UB\n", s);
     sink_p(s);
+}
+
+/* ================================================================== */
+/* SECTION 24                                                          */
+/* [UB] Union punning that does NOT work: the ways an object fails to   */
+/*      actually acquire -- or fails to keep -- a union effective type. */
+/* ================================================================== */
+
+static void case_24_1_member_store_does_not_install_the_union(void)
+{
+    BANNER("UB?", "24.1: storing through a MEMBER lvalue installs the MEMBER's type, not the union's");
+
+    union upun *u = malloc(sizeof *u);
+    if (!u) return;
+
+    /* Compare 12.1, which stored `*u`.  Here the lvalue being assigned is
+       `u->f`, whose type is `float` -- and R2 says "the type of the lvalue
+       becomes the effective type".  Read literally, that installs `float`,
+       not `union upun`.                                                   */
+    u->f = 1.5f;
+
+    /* ...which makes the next access a 6.5p7 violation: the effective type is
+       `float` and the lvalue `u->i` has type `int32_t`.  Bullet 4 ("an
+       aggregate or union type that includes one of the aforementioned types
+       among its members") does not rescue it, because that bullet describes
+       the type of the LVALUE, and this lvalue is an int, not a union.
+
+       Honesty note: this is a genuinely contested corner.  Many readers
+       (and, in practice, GCC and Clang) treat any access through a `->`
+       applied to a union pointer as a union access, which would make this
+       fine.  The committee has never said so normatively.  The portable
+       habit is the one in 12.1: assign the whole union. */
+    printf("   wrote u->f, read u->i = %#" PRIx32 "   <-- UB on a literal reading of R2\n",
+           (uint32_t)u->i);
+    sink_u((unsigned)u->i);
+    free(u);
+}
+
+static void case_24_2_casting_a_pointer_into_a_union_launders_nothing(void)
+{
+    BANNER("UB", "24.2: you cannot 'wrap it in a union' after the fact");
+
+    float f = 1.5f;              /* DECLARED type float.  R1 pins it. */
+
+    /* The single most common union-punning misconception: casting an existing
+       object's address to a union pointer does not create a union object.
+       No union ever comes into existence here, so 6.5.2.3 has nothing to say;
+       the effective type is still `float` and reading `->i` is a plain
+       aliasing violation, identical in kind to 13.1. */
+    union upun *u = (union upun *)opaque(&f);
+    printf("   (union upun *)&f then ->i = %#" PRIx32 "   <-- UB\n", (uint32_t)u->i);
+    sink_u((unsigned)u->i);
+
+    /* The union trick only works when the OBJECT is a union: either declared
+       as one (2.3) or given a union effective type by R2/R3 (12.1, 12.2). */
+}
+
+static void case_24_3_reading_a_member_larger_than_the_one_stored(void)
+{
+    BANNER("UB", "24.3: punning to a LARGER member reads bytes that were never set");
+
+    union big { char c; double d; };
+
+    union big *u = malloc(sizeof *u);
+    if (!u) return;
+
+    *u = (union big){ .c = 'x' };    /* R2 installs `union big` correctly -- so
+                                        far this is exactly case 12.1. */
+
+    /* The access below is legal (it IS a union), but 6.2.6.1p7 says the bytes
+       that do not correspond to the member last stored take UNSPECIFIED
+       values.  Only byte 0 was written; bytes 1..7 are whatever malloc left
+       there.  A double assembled from arbitrary bytes may be a trap
+       representation, and reading a trap representation is UB (6.2.6.1p5). */
+    printf("   stored 1-byte .c, read 8-byte .d = %g   <-- UB: 7 indeterminate bytes\n", u->d);
+    sink_d(u->d);
+    free(u);
+}
+
+static void case_24_4_reading_past_the_common_initial_sequence(void)
+{
+    BANNER("UB", "24.4: the CIS licence stops where the common initial sequence stops");
+
+    /* 8.1 and 12.3 used `union cis`, whose members are
+          struct cis_a { int tag; int    x; };
+          struct cis_b { int tag; double y; };
+       The common initial sequence is `int tag` and nothing more: `x` and `y`
+       have different types, so the sequence ends after the first member. */
+    union cis *u = malloc(sizeof *u);
+    if (!u) return;
+
+    *u = (union cis){ .b = { .tag = 7, .y = 1.5 } };
+
+    printf("   .a.tag = %d   (inside the CIS -- fine)\n", u->a.tag);
+    /* 6.5.2.3p6 permits inspecting the common initial part.  `x` is past it,
+       so this is an ordinary read of a member that was never stored, with the
+       extra problem that the bytes hold half of a double. */
+    printf("   .a.x   = %d   <-- UB: past the common initial sequence\n", u->a.x);
+    sink_u((unsigned)u->a.x);
+    free(u);
+}
+
+static void case_24_5_union_type_does_not_permit_non_member_types(void)
+{
+    BANNER("UB", "24.5: a union effective type licenses its MEMBERS, not every type");
+
+    void *p = malloc(sizeof(double));
+    if (!p) return;
+
+    *(union upun *)p = (union upun){ .i = 1 };   /* effective type := union upun */
+
+    /* `double` is not a member of `union upun`, is not compatible with it, is
+       not a qualified or signed/unsigned variant of it, and is not a
+       character type.  Acquiring a union effective type is not a licence to
+       read the bytes as anything at all. */
+    double *pd = (double *)opaque(p);
+    printf("   read as double = %g   <-- UB\n", *pd);
+    sink_d(*pd);
+    free(p);
+}
+
+static void case_24_6_retyping_out_from_under_the_union(void)
+{
+    BANNER("UB", "24.6: a non-member store destroys the union effective type (16.x meets unions)");
+
+    void *p = malloc(sizeof(union upun) > sizeof(double)
+                     ? sizeof(union upun) : sizeof(double));
+    if (!p) return;
+
+    union upun *u = p;
+    *u = (union upun){ .f = 1.5f };   /* effective type := union upun */
+    sink_u((unsigned)u->i);           /* legal union punning (12.1)   */
+
+    *(double *)p = 2.5;               /* R2 again: effective type := double.
+                                         The union object is gone; `u` is
+                                         now a stale pointer of the old type. */
+
+    printf("   u->i after a double store = %#" PRIx32 "   <-- UB\n", (uint32_t)u->i);
+    sink_u((unsigned)u->i);
+
+    /* Contrast 12.5, where every read followed the store that installed its
+       own type.  A union effective type is exactly as fragile as any other. */
+    free(p);
 }
 
 /* ================================================================== */
@@ -1460,6 +1765,14 @@ static void run_defined(void)
 
     puts("\n--- 11. How to type-pun without violating 6.5p7 ---");
     case_11_1_escape_hatches();
+
+    puts("\n--- 12. Effective type set to a UNION, then punned through it ---");
+    case_12_1_store_whole_union_then_pun();
+    case_12_2_memcpy_propagates_a_union_type();
+    case_12_3_union_of_structs_with_cis_in_allocated_storage();
+    case_12_4_endianness_probe_through_an_allocated_union();
+    case_12_5_union_type_installed_then_replaced();
+    case_12_6_anonymous_and_nested_unions();
 }
 
 static void run_undefined(void)
@@ -1468,59 +1781,67 @@ static void run_undefined(void)
     puts("# UNDEFINED-BEHAVIOR CASES  (output below proves nothing)  #");
     puts("###########################################################");
 
-    puts("\n--- 12. Effective type fixed by R1; access through a forbidden lvalue type ---");
-    case_12_1_read_int_as_float();
-    case_12_2_write_int_through_short();
-    case_12_3_struct_pun_between_layout_compatible_types();
-    case_12_4_char_array_used_as_int_storage();
-    case_12_5_alignment_of_declared_char_buffer();
+    puts("\n--- 13. Effective type fixed by R1; access through a forbidden lvalue type ---");
+    case_13_1_read_int_as_float();
+    case_13_2_write_int_through_short();
+    case_13_3_struct_pun_between_layout_compatible_types();
+    case_13_4_char_array_used_as_int_storage();
+    case_13_5_alignment_of_declared_char_buffer();
 
-    puts("\n--- 13. Trying to CHANGE an effective type that R1 has pinned ---");
-    case_13_1_memcpy_cannot_retype_a_declared_object();
-    case_13_2_store_does_not_retype_automatic_storage();
-    case_13_3_reuse_of_a_declared_struct_as_another_struct();
+    puts("\n--- 14. Trying to CHANGE an effective type that R1 has pinned ---");
+    case_14_1_memcpy_cannot_retype_a_declared_object();
+    case_14_2_store_does_not_retype_automatic_storage();
+    case_14_3_reuse_of_a_declared_struct_as_another_struct();
 
-    puts("\n--- 14. Effective type installed on allocated storage; incompatible access ---");
-    case_14_1_installed_int_read_as_float();
-    case_14_2_installed_struct_read_as_unrelated_struct();
-    case_14_3_memcpy_installed_type_then_wrong_read();
+    puts("\n--- 15. Effective type installed on allocated storage; incompatible access ---");
+    case_15_1_installed_int_read_as_float();
+    case_15_2_installed_struct_read_as_unrelated_struct();
+    case_15_3_memcpy_installed_type_then_wrong_read();
 
-    puts("\n--- 15. Re-typing is allowed, but it happens at the WRONG TIME ---");
-    case_15_1_read_before_the_retyping_store();
-    case_15_2_interleaved_accesses_across_a_call();
-    case_15_3_retype_within_one_full_expression();
-    case_15_4_partial_overwrite_invalidates_the_whole();
+    puts("\n--- 16. Re-typing is allowed, but it happens at the WRONG TIME ---");
+    case_16_1_read_before_the_retyping_store();
+    case_16_2_interleaved_accesses_across_a_call();
+    case_16_3_retype_within_one_full_expression();
+    case_16_4_partial_overwrite_invalidates_the_whole();
 
-    puts("\n--- 16. Re-typing is allowed, but to a PROBLEMATIC type ---");
-    case_16_1_retype_beyond_the_allocation();
-    case_16_2_retype_at_a_misaligned_offset();
-    case_16_3_retype_to_a_type_with_trap_representations();
-    case_16_4_retype_pointer_to_integer_bytes();
-    case_16_5_retype_to_a_const_qualified_incompatible_type();
+    puts("\n--- 17. Re-typing is allowed, but to a PROBLEMATIC type ---");
+    case_17_1_retype_beyond_the_allocation();
+    case_17_2_retype_at_a_misaligned_offset();
+    case_17_3_retype_to_a_type_with_trap_representations();
+    case_17_4_retype_pointer_to_integer_bytes();
+    case_17_5_retype_to_a_const_qualified_incompatible_type();
 
-    puts("\n--- 17. R3 subtleties: untyped sources and partial copies ---");
-    case_17_1_memcpy_from_an_untyped_source();
-    case_17_2_partial_memcpy_leaves_a_hybrid();
+    puts("\n--- 18. R3 subtleties: untyped sources and partial copies ---");
+    case_18_1_memcpy_from_an_untyped_source();
+    case_18_2_partial_memcpy_leaves_a_hybrid();
 
-    puts("\n--- 18. No effective type, but a determinate value was required ---");
-    case_18_1_read_indeterminate_malloc_bytes();
-    case_18_2_read_indeterminate_then_branch();
+    puts("\n--- 19. No effective type, but a determinate value was required ---");
+    case_19_1_read_indeterminate_malloc_bytes();
+    case_19_2_read_indeterminate_then_branch();
 
-    puts("\n--- 19. Qualifier / atomicity mismatches that 6.5p7 does NOT forgive ---");
-    case_19_1_volatile_object_via_nonvolatile_lvalue();
-    case_19_2_atomic_object_via_nonatomic_lvalue();
+    puts("\n--- 20. Qualifier / atomicity mismatches that 6.5p7 does NOT forgive ---");
+    case_20_1_volatile_object_via_nonvolatile_lvalue();
+    case_20_2_atomic_object_via_nonatomic_lvalue();
 
-    puts("\n--- 20. Matching effective types, broken `restrict` promise ---");
-    case_20_1_restrict_violation_with_matching_types();
+    puts("\n--- 21. Matching effective types, broken `restrict` promise ---");
+    case_21_1_restrict_violation_with_matching_types();
 
-    puts("\n--- 21. The object is gone: lifetime, not type, is the problem ---");
-    case_21_1_use_a_freed_pointer_VALUE();
-    case_21_2_dangling_automatic_object();
-    case_21_3_temporary_lifetime_object();
+    puts("\n--- 22. The object is gone: lifetime, not type, is the problem ---");
+    case_22_1_use_a_freed_pointer_VALUE();
+    case_22_2_dangling_automatic_object();
+    case_22_3_temporary_lifetime_object();
 
-    puts("\n--- 22. Declared objects that may not be modified at all ---");
-    case_22_1_modify_a_const_object();
-    case_22_2_modify_a_string_literal();
+    puts("\n--- 24. Union punning that does NOT work ---");
+    case_24_1_member_store_does_not_install_the_union();
+    case_24_2_casting_a_pointer_into_a_union_launders_nothing();
+    case_24_3_reading_a_member_larger_than_the_one_stored();
+    case_24_4_reading_past_the_common_initial_sequence();
+    case_24_5_union_type_does_not_permit_non_member_types();
+    case_24_6_retyping_out_from_under_the_union();
+
+    puts("\n--- 23. Declared objects that may not be modified at all ---");
+    case_23_1_modify_a_const_object();
+    case_23_2_modify_a_string_literal();
 }
 
 int main(int argc, char **argv)
