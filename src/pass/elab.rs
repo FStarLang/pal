@@ -1146,25 +1146,12 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Lower complex expressions at the top of statements.
-    /// - `Cond` in Assign/Return/Call → If statement
+    /// - `Cond` in Return/Call → If statement (an assignment's is left to
+    ///   the emitter, which knows whether the value is a number)
     fn lower_expr(stmt: &mut Rc<Stmt>) -> bool {
         let s = Rc::make_mut(stmt);
         let loc = s.loc.clone();
         match &s.val {
-            StmtT::Assign(lhs, rhs) => {
-                if let ExprT::Cond(c, a, b) = &rhs.val {
-                    let (c, a, b, lhs) = (c.clone(), a.clone(), b.clone(), lhs.clone());
-                    s.val = StmtT::If {
-                        cond: c,
-                        then_branch: Rc::new(vec![
-                            StmtT::Assign(lhs.clone(), a).with_loc(loc.clone()),
-                        ]),
-                        else_branch: Rc::new(vec![StmtT::Assign(lhs, b).with_loc(loc)]),
-                        ensures: Rc::new(vec![]),
-                    };
-                    return true;
-                }
-            }
             StmtT::Return(Some(rhs)) => {
                 if let ExprT::Cond(c, a, b) = &rhs.val {
                     let (c, a, b) = (c.clone(), a.clone(), b.clone());

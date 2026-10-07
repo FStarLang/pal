@@ -1498,6 +1498,21 @@ fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
 /// than a single match. It deliberately does not look through `_plain`: that
 /// annotation already says the function owns nothing, so there is nothing for
 /// a nullness test to guard.
+/// Whether the lines an arm of `?:`, `&&` or `||` needs are only loads of
+/// whole objects. Those need nothing but the ownership the frame already has
+/// and change nothing, so running them on both paths is harmless -- and
+/// keeping them out of a Pulse `if` keeps its join from turning every value
+/// after it into a `match` on the condition.
+fn only_loads(lines: &[String]) -> bool {
+    lines.iter().all(|l| {
+        l.strip_prefix("let ")
+            .and_then(|r| r.strip_suffix(';'))
+            .and_then(|r| r.split_once(" = "))
+            .and_then(|(_, d)| d.split_whitespace().next())
+            .is_some_and(|h| h.ends_with("_read"))
+    })
+}
+
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Nullable(_) => true,
@@ -10280,6 +10295,10 @@ struct Body<'a> {
     /// Whether the expression being translated is a loop guard rather than a
     /// specification. A guard is real code, so a call may stay in it.
     in_guard: bool,
+    /// How deep inside `inline` the translation is. There every line is
+    /// folded back into one value, so `?:`, `&&` and `||` keep their arms as
+    /// values rather than giving each its own branch.
+    inlining: usize,
     /// Variables bound by a quantifier in an assertion. They have no storage,
     /// so they resolve to their own name rather than through a slot.
     spec_binders: HashMap<String, String>,
@@ -12879,7 +12898,10 @@ impl<'a> Body<'a> {
             }
         }
         let before = self.lines.len();
-        let mut v = match self.rvalue(e) {
+        self.inlining += 1;
+        let r = self.rvalue(e);
+        self.inlining -= 1;
+        let mut v = match r {
             Ok(v) => v,
             // A ghost fragment wants the *value* of an object, and a load is
             // only one way to get one -- the expensive way, which needs the
@@ -13647,6 +13669,34 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    /// Translate one arm of a conditional expression into its own lines.
+    ///
+    /// The arm is one path, so whatever it borrows it gives back before the
+    /// join, and it may not change what the enclosing state knows -- which
+    /// slots are initialised, which blocks are live -- since the other arm
+    /// would then leave a different state behind.
+    fn cond_arm(&mut self, e: &Expr) -> Result<(Vec<String>, String), String> {
+        let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+        let nslots = self.slots.len();
+        let blocks: Vec<(bool, bool)> = self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
+        let outer = std::mem::take(&mut self.lines);
+        let v = self.rvalue(e);
+        let close = std::mem::take(&mut self.pending_close);
+        self.lines.extend(close);
+        self.close_own();
+        let lines = std::mem::replace(&mut self.lines, outer);
+        let v = v?;
+        let now: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+        let now_blocks: Vec<(bool, bool)> =
+            self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
+        if self.slots.len() != nslots || now != inits || now_blocks != blocks {
+            return Err(
+                "a conditional expression whose arm changes what is initialised".to_string(),
+            );
+        }
+        Ok((lines, v))
+    }
+
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
             return self.rvalue(&p);
@@ -13990,6 +14040,43 @@ impl<'a> Body<'a> {
                 // wrappers would otherwise hide that.
                 convert(peel(self.tds, &from), peel(self.tds, to), &v)
             }
+            // C evaluates exactly one arm of `c ? a : b`. When neither arm
+            // needs a statement of its own the two are just values and F*'s
+            // `if` is the whole translation. Otherwise each arm's statements
+            // go inside its own branch of a Pulse `if`, so that a read or a
+            // call in the arm not taken never happens -- `p ? *p : 0` is the
+            // case that matters.
+            ExprT::Cond(c, t, f) => {
+                let ty = self.ty_of(e)?;
+                let fty = fstar_type(self.tds, &ty)
+                    .ok_or_else(|| format!("a conditional expression of {}", describe(&ty)))?;
+                let cv = self.rvalue(c)?;
+                if self.inlining > 0 {
+                    let tv = self.rvalue(t)?;
+                    let fv = self.rvalue(f)?;
+                    return Ok(format!("(if {} then {} else {})", cv, tv, fv));
+                }
+                let close = std::mem::take(&mut self.pending_close);
+                self.lines.extend(close);
+                self.close_own();
+                let (tl, tv) = self.cond_arm(t)?;
+                let (fl, fv) = self.cond_arm(f)?;
+                if only_loads(&tl) && only_loads(&fl) {
+                    self.lines.extend(tl);
+                    self.lines.extend(fl);
+                    return Ok(format!("(if {} then {} else {})", cv, tv, fv));
+                }
+                let r = self.fresh("cond");
+                self.lines
+                    .push(format!("let {} : {} = if ({}) {{", r, fty, cv));
+                self.lines.extend(tl.iter().map(|l| indent(l)));
+                self.lines.push(format!("  {}", tv));
+                self.lines.push("} else {".to_string());
+                self.lines.extend(fl.iter().map(|l| indent(l)));
+                self.lines.push(format!("  {}", fv));
+                self.lines.push("};".to_string());
+                Ok(r)
+            }
             ExprT::BinOp(op, l, r) => {
                 if let Some(x) = self.ptr_binop(*op, l, r)? {
                     return Ok(x);
@@ -13997,6 +14084,41 @@ impl<'a> Body<'a> {
                 let ty = self.ty_of(l)?;
                 let opstr = binop(self.tds, *op, &ty, self.signed_ok)?;
                 let a = self.rvalue(l)?;
+                // `&&` and `||` evaluate their right side only when the left
+                // has not decided: `n > 0 && a[n - 1] == 0` must not read
+                // when `n` is zero. A right side that is just a value can sit
+                // in F*'s `&&`; one that needs statements goes in its own arm.
+                if matches!(op, BinOp::LogAnd | BinOp::LogOr) && self.inlining == 0 {
+                    let close = std::mem::take(&mut self.pending_close);
+                    self.lines.extend(close);
+                    self.close_own();
+                    let (rl, b) = self.cond_arm(r)?;
+                    if only_loads(&rl) {
+                        self.lines.extend(rl);
+                        return Ok(format!("({} {} {})", a, opstr, b));
+                    }
+                    let (on_true, on_false) = match op {
+                        BinOp::LogAnd => (None, Some("false")),
+                        _ => (Some("true"), None),
+                    };
+                    let t = self.fresh("cond");
+                    self.lines.push(format!("let {} : bool = if ({}) {{", t, a));
+                    let rhs = |ls: &mut Vec<String>| {
+                        ls.extend(rl.iter().map(|l| indent(l)));
+                        ls.push(format!("  {}", b));
+                    };
+                    match on_true {
+                        Some(v) => self.lines.push(format!("  {}", v)),
+                        None => rhs(&mut self.lines),
+                    }
+                    self.lines.push("} else {".to_string());
+                    match on_false {
+                        Some(v) => self.lines.push(format!("  {}", v)),
+                        None => rhs(&mut self.lines),
+                    }
+                    self.lines.push("};".to_string());
+                    return Ok(t);
+                }
                 let b = self.rvalue(r)?;
                 Ok(format!("({} {} {})", a, opstr, b))
             }
@@ -16513,6 +16635,31 @@ impl<'a> Body<'a> {
                     }
                 }
                 let ty = self.ty_of(lhs)?;
+                // `x = c ? a : b` of a number is a value, and `rvalue` binds
+                // it before the store, so the store is one and Pulse never
+                // has to join two slots holding different things. Anything
+                // else -- a pointer above all, whose target this translation
+                // tracks -- is an `if` with one store per arm.
+                if let ExprT::Cond(c, a, b) = &strip_vattr(rhs).val {
+                    if !matches!(
+                        self.tds.resolve(&ty).val,
+                        TypeT::Bool | TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT
+                    ) {
+                        let arm = |e: &Rc<Expr>| {
+                            Rc::new(vec![
+                                StmtT::Assign(lhs.clone(), e.clone()).with_loc(s.loc.clone()),
+                            ])
+                        };
+                        let st = StmtT::If {
+                            cond: c.clone(),
+                            then_branch: arm(a),
+                            else_branch: arm(b),
+                            ensures: Rc::new(vec![]),
+                        }
+                        .with_loc(s.loc.clone());
+                        return self.stmt(&st);
+                    }
+                }
                 // An array is not assignable in C; this is the initialiser of
                 // a local array, which clang has already padded out to the
                 // declared length. It means one store per element, and saying
@@ -18903,6 +19050,7 @@ fn emit_body(
         },
         tail_branch: false,
         in_guard: false,
+        inlining: 0,
         spec_binders: HashMap::new(),
         ret_binding: None,
         fp_witness: None,

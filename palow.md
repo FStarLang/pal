@@ -5912,3 +5912,31 @@ new facts about memory.
     now stated at both ends unless the parameter is `_consumes`.
     `test/plain_value` and `test/fnptr_spec`'s `ignore_ops`/`pass_ops`
     cover both.
+
+26. **Conditional expressions (#350).** `c ? a : b` in a body was not
+    translated at all. When neither arm needs a statement it is F*'s
+    `if c then a else b`. When one does -- a read, a call -- each arm's
+    statements go inside its own branch of a Pulse `let t : T = if (c) {...}
+    else {...}`, so the arm not taken is not evaluated: `n > 0 ? a[n - 1] : 0`
+    must not read when `n` is zero. An arm may not change which slots are
+    initialised or which blocks are live, since the other arm would then leave
+    a different state behind.
+
+    `&&` and `||` had the same problem in a milder form: the right side was
+    evaluated unconditionally, so `n > 0 && a[n - 1] == 0` failed to verify.
+    A right side that needs statements now goes in its own arm the same way.
+
+    An arm whose only statements are loads of whole objects stays eager: a
+    load needs only ownership the frame already has, and putting it in a
+    Pulse `if` makes every later value a `match` on the condition. The
+    `hit || scrut == K` a `switch` lowers to is the case that showed it.
+    Inside `inline` (loop guards, specifications) every arm stays a value.
+
+    elab used to lower every `x = c ? a : b` to an `if` with a store in each
+    arm. For a number that is worse than the value: Pulse joins the two
+    stores, and when one arm's value comes from a call it cannot (the join is
+    a `match` on the condition, with the call's result under an
+    existential). The emitter now keeps the lowering for non-numeric targets
+    only -- a pointer, whose target it tracks, above all -- and a number is
+    bound once and stored once. `return c ? a : b` is still lowered, since
+    a return has no join. `test/cond_expr` covers all of these.
