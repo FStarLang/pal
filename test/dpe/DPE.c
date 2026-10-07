@@ -39,13 +39,13 @@ _include_pulse(DPE_predicates0,
 
   [@@pulse_eager_unfold]
   let uds_pred (uds: $type(uds_array)) (uds_data: Seq.seq UInt8.t) : slprop =
-    array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) uds 1.0R uds_data **
+    array_pts_to uint8_t_repr uint8_t_ctype 1 (SizeT.v uint8_t_alignof) uds 1.0R uds_data **
     pure (Seq.length uds_data == 32) **
     freeable uds 32sz
 
   [@@pulse_eager_unfold]
   let cdi_pred (cdi: $type(dice_digest)) (cdi_data: Seq.seq UInt8.t) : slprop =
-    array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) cdi 1.0R cdi_data **
+    array_pts_to uint8_t_repr uint8_t_ctype 1 (SizeT.v uint8_t_alignof) cdi 1.0R cdi_data **
     pure (Seq.length cdi_data == 64) **
     freeable cdi 64sz
 )
@@ -124,11 +124,11 @@ _include_pulse(DPE_predicates,
 // binder in the contract rather than something read off the pointer, so the
 // ownership is spelled by hand and `a2` ends up holding `a1`'s sequence.
 void memcpy_(size_t len, _plain _array const uint8_t *a1, _plain _out _array uint8_t *a2)
-  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(a1) $`p_a1 $`v_a1))
-  _requires(_inline_pulse(array_pts_to (maybe_repr uint8_t_repr 1) 1 (SizeT.v uint8_t_alignof) $(a2) 1.0R $`v_a2))
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr uint8_t_ctype 1 (SizeT.v uint8_t_alignof) $(a1) $`p_a1 $`v_a1))
+  _requires(_inline_pulse(array_pts_to (maybe_repr uint8_t_repr 1) uint8_t_ctype 1 (SizeT.v uint8_t_alignof) $(a2) 1.0R $`v_a2))
   _requires((bool) _inline_pulse(Seq.length $`v_a1 == SizeT.v $(len)))
   _requires((bool) _inline_pulse(Seq.length $`v_a2 == SizeT.v $(len)))
-  _ensures(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(a2) 1.0R $`v_a1))
+  _ensures(_inline_pulse(array_pts_to uint8_t_repr uint8_t_ctype 1 (SizeT.v uint8_t_alignof) $(a2) 1.0R $`v_a1))
 {
   _ghost_stmt(admit());
 }
@@ -148,7 +148,7 @@ _letimpure(context_full_data engine_state(const context_obj ctx),
 // Two allocations, either of which can fail, so the Palow spelling returns a
 // `_nullable` handle and the grant it makes is under that guard.
 _nullable _allocated context_obj init_engine_context(_plain const _array uint8_t *uds)
-  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(uds) $`p_uds $`v_uds))
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr uint8_t_ctype 1 (SizeT.v uint8_t_alignof) $(uds) $`p_uds $`v_uds))
   _requires((bool) _inline_pulse(Seq.length $`v_uds == 32))
   _ensures((bool) _inline_pulse($(engine_state(return)) == DPE_context_full_data.PL_Engine $`v_uds))
 {
@@ -178,7 +178,7 @@ _let(bool is_pl_l0(context_full_data state), _inline_pulse(DPE_context_full_data
 // the Palow spelling reports the failure the way `derive_child_from_context`
 // does: a boolean result, with the state left alone when it is false.
 bool init_l0_context(context_obj ctx, _plain const _array uint8_t *cdi)
-  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(cdi) $`p_cdi $`v_cdi))
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr uint8_t_ctype 1 (SizeT.v uint8_t_alignof) $(cdi) $`p_cdi $`v_cdi))
   _requires((bool) _inline_pulse(Seq.length $`v_cdi == 64))
   _requires(is_pl_engine(engine_state(ctx)))
   _ensures(return ==> (bool) _inline_pulse($(engine_state(ctx)) == DPE_context_full_data.PL_L0 $`v_cdi))
@@ -209,7 +209,7 @@ void destroy_uds_context(_consumes _allocated context_obj ctx)
 }
 
 void mk_l0_context(context_obj ctx, _plain _consumes _array uint8_t *cdi)
-  _requires(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(cdi) 1.0R $`v_cdi ** freeable $(cdi) 64sz))
+  _requires(_inline_pulse(array_pts_to uint8_t_repr uint8_t_ctype 1 (SizeT.v uint8_t_alignof) $(cdi) 1.0R $`v_cdi ** freeable $(cdi) 64sz))
   _requires((bool) _inline_pulse(Seq.length $`v_cdi == 64))
   _requires(ctx->tag == 0)
   _ensures((bool) _inline_pulse($(engine_state(ctx)) == DPE_context_full_data.PL_L0 $`v_cdi))

@@ -307,7 +307,7 @@ ghost fn ptr_reveal_uninit (dest: ptr)
 (* ---------------------------------------------------------------------------
    Elements of an array
 
-   `array_focus` hands back an `elem_pts_to t_repr`, which is the generic
+   `array_focus` hands back an `elem_pts_to t_repr ect`, which is the generic
    "there exist bytes representing this value" form. Every scalar type has its
    own points-to predicate instead, so each one gets a pair of ghost functions
    trading between the two. They are what makes an emitted subscript short: the
@@ -315,38 +315,38 @@ ghost fn ptr_reveal_uninit (dest: ptr)
    --------------------------------------------------------------------------- *)
 
 ghost fn uint8_t_of_elem (a: ptr) (#p: perm) (#x: U8.t)
-  requires elem_pts_to uint8_t_repr a p x
+  requires elem_pts_to uint8_t_repr uint8_t_ctype a p x
   requires pure (aligned a uint8_t_alignof)
   ensures  uint8_t_pts_to a p x
 
 
 ghost fn uint8_t_to_elem (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
-  ensures  elem_pts_to uint8_t_repr a p x
+  ensures  elem_pts_to uint8_t_repr uint8_t_ctype a p x
   ensures  pure (aligned a uint8_t_alignof)
 
 
 ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
-  requires elem_pts_to uint32_t_repr a p x
+  requires elem_pts_to uint32_t_repr uint32_t_ctype a p x
   requires pure (aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to a p x
 
 
 ghost fn uint32_t_to_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
-  ensures  elem_pts_to uint32_t_repr a p x
+  ensures  elem_pts_to uint32_t_repr uint32_t_ctype a p x
   ensures  pure (aligned a uint32_t_alignof)
 
 
 ghost fn ptr_of_elem (a: ptr) (#p: perm) (#x: ptr)
-  requires elem_pts_to ptr_repr a p x
+  requires elem_pts_to ptr_repr ptr_ctype a p x
   requires pure (aligned a ptr_alignof)
   ensures  ptr_pts_to a p x
 
 
 ghost fn ptr_to_elem (a: ptr) (#p: perm) (#x: ptr)
   requires ptr_pts_to a p x
-  ensures  elem_pts_to ptr_repr a p x
+  ensures  elem_pts_to ptr_repr ptr_ctype a p x
   ensures  pure (aligned a ptr_alignof)
 
 

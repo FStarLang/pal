@@ -1199,7 +1199,7 @@ ghost fn uint8_t_reveal_uninit (a: ptr)
 (* ---------------------------------------------------------------------------
    Elements of an array
 
-   `array_focus` hands back an `elem_pts_to t_repr`, which is the generic
+   `array_focus` hands back an `elem_pts_to t_repr ect`, which is the generic
    "there exist bytes representing this value" form. Every scalar type has its
    own points-to predicate instead, so each one gets a pair of ghost functions
    trading between the two. They are what makes an emitted subscript short: the
@@ -1207,147 +1207,147 @@ ghost fn uint8_t_reveal_uninit (a: ptr)
    --------------------------------------------------------------------------- *)
 
 ghost fn bool_t_of_elem (a: ptr) (#p: perm) (#x: bool)
-  requires elem_pts_to bool_t_repr a p x
+  requires elem_pts_to bool_t_repr bool_t_ctype a p x
   requires pure (aligned a bool_t_alignof)
   ensures  bool_t_pts_to a p x
 {
-  elem_reveal bool_t_repr a;
+  elem_reveal bool_t_repr bool_t_ctype a;
   bool_t_conceal a #p #_ #x;
 }
 
 ghost fn bool_t_to_elem (a: ptr) (#p: perm) (#x: bool)
   requires bool_t_pts_to a p x
-  ensures  elem_pts_to bool_t_repr a p x
+  ensures  elem_pts_to bool_t_repr bool_t_ctype a p x
   ensures  pure (aligned a bool_t_alignof)
 {
   bool_t_reveal a;
-  elem_conceal bool_t_repr a #p #_ #x;
+  elem_conceal bool_t_repr bool_t_ctype a #p #_ #x;
 }
 
 ghost fn int8_t_of_elem (a: ptr) (#p: perm) (#x: I8.t)
-  requires elem_pts_to int8_t_repr a p x
+  requires elem_pts_to int8_t_repr int8_t_ctype a p x
   requires pure (aligned a int8_t_alignof)
   ensures  int8_t_pts_to a p x
 {
-  elem_reveal int8_t_repr a;
+  elem_reveal int8_t_repr int8_t_ctype a;
   int8_t_conceal a #p #_ #x;
 }
 
 ghost fn int8_t_to_elem (a: ptr) (#p: perm) (#x: I8.t)
   requires int8_t_pts_to a p x
-  ensures  elem_pts_to int8_t_repr a p x
+  ensures  elem_pts_to int8_t_repr int8_t_ctype a p x
   ensures  pure (aligned a int8_t_alignof)
 {
   int8_t_reveal a;
-  elem_conceal int8_t_repr a #p #_ #x;
+  elem_conceal int8_t_repr int8_t_ctype a #p #_ #x;
 }
 
 ghost fn int16_t_of_elem (a: ptr) (#p: perm) (#x: I16.t)
-  requires elem_pts_to int16_t_repr a p x
+  requires elem_pts_to int16_t_repr int16_t_ctype a p x
   requires pure (aligned a int16_t_alignof)
   ensures  int16_t_pts_to a p x
 {
-  elem_reveal int16_t_repr a;
+  elem_reveal int16_t_repr int16_t_ctype a;
   int16_t_conceal a #p #_ #x;
 }
 
 ghost fn int16_t_to_elem (a: ptr) (#p: perm) (#x: I16.t)
   requires int16_t_pts_to a p x
-  ensures  elem_pts_to int16_t_repr a p x
+  ensures  elem_pts_to int16_t_repr int16_t_ctype a p x
   ensures  pure (aligned a int16_t_alignof)
 {
   int16_t_reveal a;
-  elem_conceal int16_t_repr a #p #_ #x;
+  elem_conceal int16_t_repr int16_t_ctype a #p #_ #x;
 }
 
 ghost fn int32_t_of_elem (a: ptr) (#p: perm) (#x: I32.t)
-  requires elem_pts_to int32_t_repr a p x
+  requires elem_pts_to int32_t_repr int32_t_ctype a p x
   requires pure (aligned a int32_t_alignof)
   ensures  int32_t_pts_to a p x
 {
-  elem_reveal int32_t_repr a;
+  elem_reveal int32_t_repr int32_t_ctype a;
   int32_t_conceal a #p #_ #x;
 }
 
 ghost fn int32_t_to_elem (a: ptr) (#p: perm) (#x: I32.t)
   requires int32_t_pts_to a p x
-  ensures  elem_pts_to int32_t_repr a p x
+  ensures  elem_pts_to int32_t_repr int32_t_ctype a p x
   ensures  pure (aligned a int32_t_alignof)
 {
   int32_t_reveal a;
-  elem_conceal int32_t_repr a #p #_ #x;
+  elem_conceal int32_t_repr int32_t_ctype a #p #_ #x;
 }
 
 ghost fn int64_t_of_elem (a: ptr) (#p: perm) (#x: I64.t)
-  requires elem_pts_to int64_t_repr a p x
+  requires elem_pts_to int64_t_repr int64_t_ctype a p x
   requires pure (aligned a int64_t_alignof)
   ensures  int64_t_pts_to a p x
 {
-  elem_reveal int64_t_repr a;
+  elem_reveal int64_t_repr int64_t_ctype a;
   int64_t_conceal a #p #_ #x;
 }
 
 ghost fn int64_t_to_elem (a: ptr) (#p: perm) (#x: I64.t)
   requires int64_t_pts_to a p x
-  ensures  elem_pts_to int64_t_repr a p x
+  ensures  elem_pts_to int64_t_repr int64_t_ctype a p x
   ensures  pure (aligned a int64_t_alignof)
 {
   int64_t_reveal a;
-  elem_conceal int64_t_repr a #p #_ #x;
+  elem_conceal int64_t_repr int64_t_ctype a #p #_ #x;
 }
 
 ghost fn uint16_t_of_elem (a: ptr) (#p: perm) (#x: U16.t)
-  requires elem_pts_to uint16_t_repr a p x
+  requires elem_pts_to uint16_t_repr uint16_t_ctype a p x
   requires pure (aligned a uint16_t_alignof)
   ensures  uint16_t_pts_to a p x
 {
-  elem_reveal uint16_t_repr a;
+  elem_reveal uint16_t_repr uint16_t_ctype a;
   uint16_t_conceal a #p #_ #x;
 }
 
 ghost fn uint16_t_to_elem (a: ptr) (#p: perm) (#x: U16.t)
   requires uint16_t_pts_to a p x
-  ensures  elem_pts_to uint16_t_repr a p x
+  ensures  elem_pts_to uint16_t_repr uint16_t_ctype a p x
   ensures  pure (aligned a uint16_t_alignof)
 {
   uint16_t_reveal a;
-  elem_conceal uint16_t_repr a #p #_ #x;
+  elem_conceal uint16_t_repr uint16_t_ctype a #p #_ #x;
 }
 
 ghost fn uint64_t_of_elem (a: ptr) (#p: perm) (#x: U64.t)
-  requires elem_pts_to uint64_t_repr a p x
+  requires elem_pts_to uint64_t_repr uint64_t_ctype a p x
   requires pure (aligned a uint64_t_alignof)
   ensures  uint64_t_pts_to a p x
 {
-  elem_reveal uint64_t_repr a;
+  elem_reveal uint64_t_repr uint64_t_ctype a;
   uint64_t_conceal a #p #_ #x;
 }
 
 ghost fn uint64_t_to_elem (a: ptr) (#p: perm) (#x: U64.t)
   requires uint64_t_pts_to a p x
-  ensures  elem_pts_to uint64_t_repr a p x
+  ensures  elem_pts_to uint64_t_repr uint64_t_ctype a p x
   ensures  pure (aligned a uint64_t_alignof)
 {
   uint64_t_reveal a;
-  elem_conceal uint64_t_repr a #p #_ #x;
+  elem_conceal uint64_t_repr uint64_t_ctype a #p #_ #x;
 }
 
 ghost fn size_t_of_elem (a: ptr) (#p: perm) (#x: SZ.t)
-  requires elem_pts_to size_t_repr a p x
+  requires elem_pts_to size_t_repr size_t_ctype a p x
   requires pure (aligned a size_t_alignof)
   ensures  size_t_pts_to a p x
 {
-  elem_reveal size_t_repr a;
+  elem_reveal size_t_repr size_t_ctype a;
   size_t_conceal a #p #_ #x;
 }
 
 ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
   requires size_t_pts_to a p x
-  ensures  elem_pts_to size_t_repr a p x
+  ensures  elem_pts_to size_t_repr size_t_ctype a p x
   ensures  pure (aligned a size_t_alignof)
 {
   size_t_reveal a;
-  elem_conceal size_t_repr a #p #_ #x;
+  elem_conceal size_t_repr size_t_ctype a #p #_ #x;
 }
 
 (* ---------------------------------------------------------------------------
@@ -1617,38 +1617,38 @@ ghost fn float64_t_reveal_uninit (a: ptr)
 
 
 ghost fn float32_t_of_elem (a: ptr) (#p: perm) (#x: float32)
-  requires elem_pts_to float32_t_repr a p x
+  requires elem_pts_to float32_t_repr float32_t_ctype a p x
   requires pure (aligned a float32_t_alignof)
   ensures  float32_t_pts_to a p x
 {
-  elem_reveal float32_t_repr a;
+  elem_reveal float32_t_repr float32_t_ctype a;
   float32_t_conceal a #p #_ #x;
 }
 
 ghost fn float32_t_to_elem (a: ptr) (#p: perm) (#x: float32)
   requires float32_t_pts_to a p x
-  ensures  elem_pts_to float32_t_repr a p x
+  ensures  elem_pts_to float32_t_repr float32_t_ctype a p x
   ensures  pure (aligned a float32_t_alignof)
 {
   float32_t_reveal a;
-  elem_conceal float32_t_repr a #p #_ #x;
+  elem_conceal float32_t_repr float32_t_ctype a #p #_ #x;
 }
 
 
 ghost fn float64_t_of_elem (a: ptr) (#p: perm) (#x: float64)
-  requires elem_pts_to float64_t_repr a p x
+  requires elem_pts_to float64_t_repr float64_t_ctype a p x
   requires pure (aligned a float64_t_alignof)
   ensures  float64_t_pts_to a p x
 {
-  elem_reveal float64_t_repr a;
+  elem_reveal float64_t_repr float64_t_ctype a;
   float64_t_conceal a #p #_ #x;
 }
 
 ghost fn float64_t_to_elem (a: ptr) (#p: perm) (#x: float64)
   requires float64_t_pts_to a p x
-  ensures  elem_pts_to float64_t_repr a p x
+  ensures  elem_pts_to float64_t_repr float64_t_ctype a p x
   ensures  pure (aligned a float64_t_alignof)
 {
   float64_t_reveal a;
-  elem_conceal float64_t_repr a #p #_ #x;
+  elem_conceal float64_t_repr float64_t_ctype a #p #_ #x;
 }

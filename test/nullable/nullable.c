@@ -48,13 +48,13 @@ void call_ref(void) {
 }
 // _array owns a sequence of elements, so the guarded predicate is array_pts_to.
 void call_array(void) {
-    _ghost_stmt(intro_unless_null_null null (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) null 1.0R (Seq.empty #Int32.t)));
+    _ghost_stmt(intro_unless_null_null null (array_pts_to int32_t_repr int32_t_ctype 4 (SizeT.v int32_t_alignof) null 1.0R (Seq.empty #Int32.t)));
     takes_nullable_array(NULL);
     _ghost_stmt(elim_unless_null_null null _);
 }
 // Palow has no separate _arrayptr, so this is the same shape as _array.
 void call_arrayptr(void) {
-    _ghost_stmt(intro_unless_null_null null (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) null 1.0R (Seq.empty #Int32.t)));
+    _ghost_stmt(intro_unless_null_null null (array_pts_to int32_t_repr int32_t_ctype 4 (SizeT.v int32_t_alignof) null 1.0R (Seq.empty #Int32.t)));
     takes_nullable_arrayptr(NULL);
     _ghost_stmt(elim_unless_null_null null _);
 }
