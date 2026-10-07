@@ -2,18 +2,13 @@
 
 PAL programs are C files annotated with macros declared in `pal.h`. Under `-DC2PULSE` each macro expands to a Clang `__attribute__((annotate("pal-...")))`; without it the macros vanish and the file compiles as ordinary C.
 These macros are used to give specifications to types and functions.
-This document explains how to write these specifications using PAL.
-
+This document explains how to write these specifications using PAL; `palow.md` describes the memory model the generated Pulse is written in.
 
 In the following, we differentiate between two kinds of annotations:
 1. `_requires` / `_ensures` / `_invariant` / `_refine` are used to add specifications for functions and types as well as loop invariants.
 2. When these annotations are not enough for specifying some function or for progressing the proof then PAL provides annotations such as `_ghost_arg`, `_ghost_stmt`, `_assert`, `_inline_pulse`, `_include_pulse` that reach the Pulse layer directly when the surface syntax isn't enough.
 
-<!-- 3. **Default ownership** — for every non-`_plain` parameter PAL implicitly threads an in-memory resource (e.g. `pts_to`, `array_pts_to_full`) into both `requires` and `ensures`.
-4. **User contracts** — `_requires` / `_ensures` / `_invariant` / `_refine*` add pure or spatial predicates over those resources.
-5. **Ghost glue** — `_ghost_arg`, `_ghost_stmt`, `_assert`, `_inline_pulse`, `_include_pulse` reach the Pulse layer directly when the surface syntax isn't enough.
-
-To suppress the default ownership for one parameter, prefix it with `_plain`. -->
+Ownership is generated: every pointer parameter's contract owns what it points at, every struct passed by value owns what its pointer fields reach, and every loop invariant carries the locals and pointees that are live across it. The annotations below change that default or add to it.
 
 ## Variadic calls with an ignored tail
 
@@ -41,15 +36,30 @@ call. See `test/variadic_call/variadic_call.c`.
 ## Syntax for specifications
 
 ### Annotating function arguments
-For every function, PAL by default adds pre and post conditions for every argument: the precondition requires ownership of the argument and the post returns it. The default fits most cases; the annotations below override it when a parameter is consumed, returned-only, or treated as an array.
+For every function, PAL by default adds pre and post conditions for every argument: the precondition requires ownership of what the argument points at, and the postcondition returns it (with an existentially quantified new value). The default fits most cases; the annotations below override it. Pointers are `ptr`, and ownership is stated with the predicate generated for the pointee's type (`int32_t_pts_to`, `struct_s_pts_to`, `array_pts_to`, ...). For `T *x` the default is
 
-| C syntax                  | implicit resource in `requires` / `ensures`         |
-|---------------------------|-----------------------------------------------------|
-| `_plain T x`              | suppresses the auto-generated spec for this parameter; user supplies its own pre / post |
-| `_consumes T *x`          | `pts_to` in `requires` only — not returned          |
-| `_out T *x`               | `pts_to_uninit` in `requires`, `pts_to` in `ensures`|
-| `_array T *x` / `T x[]`   | `array_pts_to_full var_x 1.0R val_x_0`              |
-| `_arrayptr T *x`          | `arrayptr_pts_to var_x parent`                      |
+```
+fn func_f (var_x: ptr) (#val_x: erased T)
+  requires T_pts_to var_x 1.0R val_x
+  ensures  exists* (val_x': T). T_pts_to var_x 1.0R val_x'
+```
+
+| C syntax                  | implicit resource in `requires` / `ensures` |
+|---------------------------|---------------------------------------------|
+| `T *x`                    | `T_pts_to var_x 1.0R val_x` at both ends (new value `val_x'` on the way out) |
+| `const T *x`              | `preserves T_pts_to var_x perm_x val_x`: a fraction, and the value is unchanged |
+| `_plain T *x`             | nothing: `x` is a bare address; the user supplies any ownership in `_requires` / `_ensures` |
+| `_plain T x` (a value)    | nothing: for a struct, neither the `_own` of its pointer fields nor its type's or fields' `_refine`s; only refinements written on the parameter itself are stated |
+| `_consumes T *x`          | `T_pts_to` in `requires` only — not returned |
+| `_out T *x`               | `T_pts_to_uninit var_x` in `requires`, `T_pts_to` in `ensures` |
+| `_nullable T *x`          | `unless_null var_x (T_pts_to var_x 1.0R val_x)` at both ends |
+| `_allocated T *x`         | adds `freeable var_x <size>`: the block came from `malloc` and may be freed (usually with `_consumes`) |
+| `_array T *x` / `T x[]`   | `array_pts_to T_repr <size> (SizeT.v T_alignof) var_x 1.0R val_x`, `val_x : Seq.seq T` |
+| `_arrayptr T *x`          | nothing: a pointer into an array owned elsewhere (stated by hand, see `test/arrayptrs`) |
+| `struct s x` (by value)   | `struct_s_own var_x 1.0R own_x` when `struct s` has owned pointer fields |
+| `_core_ref T *f` (a field)| nothing: a non-owning back-pointer, left out of the struct's `_own` |
+
+`_nullable` and `_allocated` also apply to the return value: `_allocated _nullable T *f(...)` is the shape of an allocator.
 
 Beyond ownership, the user typically also wants to constrain values. PAL provides the following annotations for adding extra contract clauses:
 
@@ -63,19 +73,22 @@ Beyond ownership, the user typically also wants to constrain values. PAL provide
 Inside any of these predicates the following spec-only constructs are available:
 
 - `_old(x)` — value of `x` at function entry.
-- `_live(x)` — slprop asserting `x`'s resource is currently owned.
-- `x._length` — runtime length of an array.
-- `_specint` — arbitrary-precision integer (ghost arithmetic).
-- `_slprop` — type cast used in `_refine` to declare a separation-logic predicate.
+- `*p`, `p->f`, `a[i]` — the value behind a pointer, read off the contract's existential (`val_p`, `(val_p).fld_f`, `Seq.index val_a i`); no read is performed.
+- `x._length` — length of an `_array`'s sequence (`Seq.length val_x`).
+- `_live(x)` — the storage of `x` exists. For a local in a loop invariant, or a parameter, the generated frame already says so, and `_live` translates to `True`; for a mutable global it is the global's points-to (see below).
+- `_specint` — arbitrary-precision integer (ghost arithmetic); `(_specint) e` turns a machine integer into a mathematical one, so overflow bounds can be stated.
+- `_slprop` — type cast that declares a separation-logic predicate (in `_refine`, or on an `_inline_pulse` clause).
 - `$(...)` — antiquotation: splice a C-level entity into an `_inline_pulse` body (see the Antiquotation section under Pulse interop).
+
+Builtins with a Pulse model may be used in specifications too, e.g. `__builtin_bswap64(x)` is `Pulse.Lib.C.UInt64.bswap64 x`.
 
 ### Loop invariants
 
-Loops (`while` / `for` / `do-while`) carry their own contracts via `_invariant` and `_ensures`. Each occurrence of `_invariant(p)` becomes one Pulse `invariant` clause; stacking is the standard way to combine a separation-logic invariant with one or more pure invariants:
+Loops (`while` / `for` / `do-while`) carry their own contracts via `_invariant` and `_ensures`. PAL generates the ownership part of the invariant — one existential per live local and pointee — and adds every `_invariant(p)` clause, reading each C name as the existential's value. So an invariant usually states only the facts:
 
 ```c
+uint32_t acc = 0;
 for (uint32_t ctr = 0; ctr < x; ctr = ctr + 1)
-  _invariant(_live(ctr) && _live(acc))
   _invariant(ctr <= x && acc == ctr * y)
 {
   acc = acc + y;
@@ -85,57 +98,56 @@ for (uint32_t ctr = 0; ctr < x; ctr = ctr + 1)
 lowers to:
 
 ```
-while (...)
-  invariant ((live var_ctr) ** (live var_acc))
-  invariant (with_pure ((!var_ctr `UInt32.lte` !var_x) && (!var_acc = !var_ctr `UInt32.mul` !var_y)))
+while (((uint32_t_read loc_ctr) `UInt32.lt` var_x))
+  invariant exists* (inv_acc: UInt32.t) (inv_ctr: UInt32.t).
+    uint32_t_pts_to loc_acc 1.0R inv_acc **
+    uint32_t_pts_to loc_ctr 1.0R inv_ctr **
+    pure ((UInt32.v inv_ctr <= UInt32.v var_x) /\ (UInt32.v inv_acc == UInt32.v (inv_ctr `mul_wrap` var_y)))
 { ... }
 ```
 
 Inside `_invariant`:
 
-- Parameters and locals are in scope by name; there is no `this`.
-- `_live(x)` asserts the points-to permission for a C local `x` (e.g. `ctr` and `acc` above) — it must appear in the invariant for every local the loop body reads or writes.
-- Read a local's current value with `*x` or `!x`; both are accepted.
+- Parameters and locals are in scope by name; there is no `this`. `_old(x)` is the value at function entry.
+- `_live(x)` is accepted but unnecessary (the frame is generated).
+- Ownership PAL does not generate — a helper predicate, part of an array named through an `_arrayptr` — goes in an slprop clause: `_invariant(_inline_pulse(Helpers.claim $(lo) $`arr))`. `` $`name `` there is quantified by the invariant (see `test/arrayptrs`).
 
-`_ensures(p)` may also be attached to a loop. It records the condition that must hold when the loop exits via `break`: write one `_ensures` per `break` site (each becomes a separate disjunct of the loop's post-condition). Each `_ensures` lowers to one Pulse `ensures` clause on the `while`. Example from `test/break_continue/break_continue.c`:
+`_ensures(p)` may also be attached to a loop. It states what holds when the loop exits. Without a `break` the loop exits only when the condition is false, and the clause is asserted after the loop. With a `break`, Pulse no longer knows the condition is false on exit, so:
+
+- if the loop body contains no nested loop, PAL mirrors the locals the `_ensures` names in ghost references and states it as the loop's Pulse `ensures`: it is proved at every `break` and at the normal exit;
+- otherwise the loop gets `ensures true`, and the `_ensures` must follow from the invariant alone.
 
 ```c
 while (i < n)
-  _invariant(_live(i))
   _invariant(i <= n)
-  _ensures(i <= n)            // discharged at the single `break`
+  _ensures(i <= n)            // proved at the `break` and at the normal exit
 {
   if (i == limit) { break; }
   i = i + 1;
 }
 ```
 
-lowers to:
+A `break` or `continue` that would skip the release of a local declared inside the loop body is not translated; declare such locals before the loop.
 
-```
-while (...)
-  invariant (live var_i)
-  invariant (with_pure ((!var_i) `UInt32.lte` (!var_n)))
-  ensures ((!var_i) `UInt32.lte` (!var_n))
-{ ... }
-```
+For `do { ... } while (cond)`, PAL desugars to `while (first || cond)` with a fresh boolean flag. Use `_do_while_first(name)` to name that flag explicitly when the invariant needs to refer to it, or `_do_while_cond(name)` to name the continuation flag (see `test/do_while/do_while.c`).
 
-A loop with two `break` sites would carry two `_ensures` clauses, one for each.
+### `if` statements
 
-For `do { ... } while (cond)`, PAL desugars to `while (first || cond)` with a fresh boolean flag. Use `_do_while_first(name)` to name that flag explicitly when the invariant needs to refer to it (see `test/do_while/do_while.c`).
+Pulse computes the state after an `if` itself, so an `if` needs no annotation. An `_ensures` on an `if` is emitted only when it states ownership (an `_slprop` clause): it is then the join, and PAL frames in the points-to of every live slot the clause does not name with `$&(x)`. A pure `_ensures` on an `if` is not emitted; use `_assert` after it instead.
 
 ### Refinements for data types
 
-As explained in `palow.md`, PAL auto-generates predicates for compound types. These can be further enriched with user-supplied predicates carried by the type itself:
+PAL generates predicates for compound types (`palow.md`). These can be further enriched with user-supplied predicates carried by the type itself:
 
 | annotation                  | when the predicate must hold              |
 |-----------------------------|-------------------------------------------|
 | `_refine(p)`                | when the value is initialized             |
 | `_refine_always(p)`         | always, even when uninitialised           |
-| `_refine_uninit(p)`         | only when uninitialised                   |
+| `_refine_uninit(p)`         | only when uninitialised (`_out` parameters) |
 | `_refine_value(bind, pred)` | as `_refine`, but binding name is `bind`  |
+| `_refines(p)` (on a field)  | as `_refine`, with the struct's other fields in scope by name |
 
-A refinement does *not* change the runtime representation. It is attached to the **type** at every site where the type appears (parameter, struct field, return value, …) and is materialised as an extra pure conjunct in any slprop emitted for a value of that type — e.g. in the implicit `pts_to` of a function parameter. Whether that conjunct ends up *inside* the type's auto-generated `__pred` or *alongside* it at each use site depends on where the refinement is written: a field-level refinement is folded into the struct's `__pred` (see below), whereas a refinement on a struct or typedef declaration itself is kept separate and re-attached at every use site, leaving `struct_S__pred` unchanged (see below). Folding a record/typedef-level refinement directly into `struct_S__pred` instead is potential future work, not current behavior.
+A refinement does *not* change the runtime representation. A pure refinement is stated as a `pure` conjunct beside the ownership of a value of that type, wherever the contract states that ownership (parameter, pointee, return value), at both ends. A refinement cast to `_slprop` is ownership: it is stated in `requires`, and also in `ensures` unless the parameter is `_consumes`.
 
 **On a typedef** — the refinement fires for every use of the typedef.
 
@@ -143,32 +155,38 @@ A refinement does *not* change the runtime representation. It is attached to the
 _refine(this._length == 32) typedef _array uint8_t *uds_array;
 
 void f(uds_array a) { ... }
-// requires: array_pts_to_full var_a 1.0R val_a_0 ** pure (length_of var_a == 32)
+// requires array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) var_a 1.0R val_a
+// requires pure (Seq.length (reveal val_a) == 32)
 ```
 
 `_refine_always` on a typedef is the form to use when the type also appears in `_out` position, since the refinement then has to hold in the uninit precondition too.
 
-**On a struct declaration** — `this` is the whole record; reach into fields with `this.<field>`. PAL parses the declaration's type attributes once, stores the attributed self type on the struct definition, and reuses it whenever `struct S` is referenced. Thus the refinement fires at every use while `struct_S__pred` itself remains unchanged; repeated mentions do not reparse the annotation. The annotation must be written *after* the `struct` keyword, otherwise clang ignores it.
+**On a struct declaration** — `this` is the whole record; reach into fields with `this.<field>`. The annotation must be written *after* the `struct` keyword, otherwise clang ignores it.
 
 ```c
 struct _refine(0 < this.x) simpler { int x; };
 
-void f(struct simpler s) { ... }
-// requires: struct_simpler__pred var_s 1.0R val_s_0
-//        ** with_pure (0 < var_s.struct_simpler__x)
+void f(struct simpler *s) { ... }
+// requires struct_simpler_pts_to var_s 1.0R val_s
+// requires pure (0 < Int32.v (reveal val_s).fld_x)
 ```
 
-`_plain` composes here too, which is how a record-level `_refine(_inline_pulse ...)` can replace the default ownership predicate outright — see [`test/refine_struct/refine_struct.c`](../test/refine_struct/refine_struct.c). Record-level annotations on `union` declarations are not supported yet; use a typedef for those.
+`_plain` on a struct declaration suppresses the generated `_own` predicate, which is how a record-level `_refine(_inline_pulse ...)` can replace it outright — see [`test/refine_struct/refine_struct.c`](../test/refine_struct/refine_struct.c):
 
-**On a field type** — the refinement applies to that field's value; inside the predicate `this` is the field, not the surrounding record. The refinement is added to the per-field clause of the struct's pred when emitted.
+```c
+struct _refine(_inline_pulse (int32_t_pts_to $(this.y) 1.0R $(this.x)))
+    _plain selfref { int x; int *y; };
+```
+
+Record-level annotations on `union` declarations are not supported yet; use a typedef for those.
+
+**On a field type** — the refinement applies to that field's value; `this` is the field, not the surrounding record. A pure field refinement is also part of the generated record type (`fld_x: v:Int32.t{0 < Int32.v v}`), so every value of the struct satisfies it. A field refinement cast to `_slprop` — typically `Pulse.Lib.C.Palow.FnPtr.is_valid` on a function-pointer field — is stated in the contract of every function holding the struct, and makes calls through the field possible (see `test/fnptr_spec`).
 
 ```c
 struct s {
     _refine(0 < this) int x;
 };
 ```
-
-The record-level and field-level forms differ in scope: record-level binds `this` to the whole struct value (so the predicate may relate several fields), while field-level binds `this` to that one field and is folded into the field's clause of the struct's pred.
 
 ### Ghost code
 
@@ -185,43 +203,45 @@ See `test/func_pointer/func_pointer.c` for examples.
 
 ## Pulse interop
 
-- `_inline_pulse(expr)` — embed a Pulse expression in a spec position.
+- `_inline_pulse(expr)` — embed a Pulse expression in a spec position. Cast it to `_slprop` (or `(bool)`) to say what it is when that is not clear from context.
 - `_include_pulse(Mod, snippet)` — drop a verbatim Pulse block (definitions, lemmas, helpers) into a module `Mod`.
 - `_let(sig, body)` / `_let_rec(sig, body)` / `_letimpure(sig, body)` — Pulse-level top-level bindings.
 - `_type(name, body)` — Pulse-level type definition.
 
 ### Antiquotation
 
-Inside an `_inline_pulse(...)` body — and the spec macros built on it — text is emitted to Pulse **verbatim**; antiquotations are the `$`-prefixed forms PAL rewrites into C-level entities (`pts_to`, `exists*`, `**`, `pure`, module names, etc. pass through untouched).
+Inside an `_inline_pulse(...)` body — and the spec macros built on it — text is emitted to Pulse **verbatim**; antiquotations are the `$`-prefixed forms PAL rewrites into C-level entities (`exists*`, `**`, `pure`, module names, etc. pass through untouched).
 
 | form | emits |
 |------|-------|
-| `$(expr)`                                 | the **value** (rvalue) of a C expression — variable, `*p`, `x.f`, `_container_of(...)`, `this`, `return` |
-| `$&(expr)`                                | the **reference cell** (`ref a`), not dereferenced — e.g. for a `pts_to` over a local |
-| `$type(c-type)`                           | the F* type for a C type (`$type(int *)`, `$type(struct s)`) |
-| `$field(Type::f)`                         | a struct field accessor, or a union field constructor |
+| `$(expr)`                                 | the **value** of a C expression — variable, `*p`, `x.f`, `_container_of(...)`, `this`, `return`. A pointer's value is its `ptr`, so `int32_t_pts_to $(p) 1.0R v` is about what `p` points at |
+| `$&(expr)`                                | the **address** of a C lvalue — a local's storage (`uint32_t_pts_to $&(n) 1.0R v`), or a field's (`$&(s->len)`) |
+| `$type(c-type)`                           | the F* type for a C type (`$type(int *)` is `ptr`, `$type(struct s)` is `struct_s`) |
+| `$field(Type::f)`                         | a struct field accessor (`fld_f`), or a union field constructor |
 | `` $`ident ``                             | `'ident` (an F* implicit / ticked name); in an `exists*` position, a fresh existential of inferred type. Infix: `` pfx$`sfx `` → `pfx'sfx` |
 | `$declare(Type id)`                       | nothing — binds `id : Type` in the annotation's scope so a later `$(id)` resolves |
-| `$unfold(T)` / `$fold(T)`                 | the generated raw unfold / fold lemma for `T`'s ownership predicate |
-| `$unfold-uninit(T)` / `$fold-uninit(T)`   | the uninit-variant lemma (struct only; **not** auto-applied) |
-| `$unfold(U::f)` / `$fold(U::f)`           | the unfold / fold lemma for union field `f` |
-| `$scattered(struct T) $(p)`               | nothing (Palow only) — says `*p` is already in pieces, as after `T_scatter_uninit`, possibly with fields the body does not write holding values; the body's field writes then fill the rest by address (`write_uninit`), and `*p` is gathered only if every field gets written |
-| `$gathered(struct T) $(p)`                | nothing (Palow only) — the closing form of `$scattered`: says a ghost step has made `*p` whole again, so later accesses focus its fields instead of filling them |
-| `$witness <term>`                         | nothing (Palow only) — in a `_ghost_stmt` immediately before an indirect call, `<term>` is the tuple of ghost arguments that instantiates the callee's contract; only the author knows it, so the call site has to say it. The two models need different witnesses at the same call, so gate it with `#ifdef PALOW` |
+| `$unfold(T)` / `$fold(T)`                 | the ghost step that splits a struct into its fields / joins them again (`struct_T_scatter` / `struct_T_gather`) |
+| `$unfold-uninit(T)` / `$fold-uninit(T)`   | the same for uninitialised storage (`struct_T_scatter_uninit` / `struct_T_gather_uninit`) |
+| `$unfold(U::f)` / `$fold(U::f)`           | the unfold / fold step for union field `f` |
+| `$scattered(struct T) $(p)`               | nothing — says `*p` is already in pieces, as after `T_scatter_uninit`, possibly with fields the body does not write holding values; the body's field writes then fill the rest by address (`write_uninit`), and `*p` is gathered only if every field gets written |
+| `$gathered(struct T) $(p)`                | nothing — the closing form of `$scattered`: says a ghost step has made `*p` whole again, so later accesses focus its fields instead of filling them |
+| `$witness <term>`                         | nothing — in a `_ghost_stmt` immediately before an indirect call, `<term>` is the tuple of ghost arguments that instantiates the callee's contract; only the author knows it, so the call site has to say it |
 
 Notes:
 
-- **Context sensitivity.** A parameter `p` is rebound as `let mut var_p = var_p;`, so `$(p)` is the parameter *value*: `var_p` in a function's own `_requires` / `_ensures`, and `(!var_p)` in body position (a block / `if` `_ensures`, or a `_ghost_stmt`). In an `_inline_pulse` slprop-term position, name the cell `var_p` directly and bind its value via an existential — `$(p)` there is a read action, not a term.
-- **View suppression.** Inside inline Pulse the default `_pointer_view` substitution is off, so `$type(node *)` stays the bare `ref node`.
+- **Context sensitivity.** A parameter is a value (`var_p`), and a local lives at an address (`loc_x`). `$(x)` of a local in body position (a block / `if` `_ensures`, a `_ghost_stmt`) reads it first and substitutes the result; in a loop invariant it is the invariant's existential (`inv_x`). Use `$&(x)` to talk about a local's storage.
 - **Special names.** `this` (inside `_refine*`, the value being refined; reach fields with `this.f`) and `return` (inside `_ensures`, the returned value).
+- **Field accesses are automatic.** PAL focuses a field before reading or writing it and unfocuses afterwards, and scatters / gathers a struct being initialised field by field; `$unfold` / `$fold` are only needed when your own ghost code wants the pieces.
 
 `test/antiquot/antiquot.c` exercises every form.
 
 ## Function attributes
 
 - `_pure` — function has no effects; callable in spec position.
+- `_total` — the function terminates. Accepted, but currently ignored: function pointers are always the divergent kind (`of_fn_div`, `call_div`).
 - `_rec` — recursive (must be paired with `_decreases`).
-- `_pulse_eager_unfold_predicate` — on a struct/union, emit `[@@pulse_eager_unfold]` on the generated `__pred`.
+- `_memset_zero` — the function is a `memset(p, 0, n)` wrapper, and calls to it are translated as such (`test/memset`).
+- `_pulse_opaque_to_smt` — on a pure global, emit its value `opaque_to_smt`, so that a large initializer is not unfolded by the SMT solver (`test/global_array_tactic`).
 
 ## Global variables
 
@@ -229,8 +249,8 @@ A global is either **pure** (immutable) or **mutable**, and the two are modeled
 very differently. A global is pure when *either*:
 
 - it is annotated `_pure`, or
-- it is `const`-qualified — this is implicit, no annotation needed
-  (`cpp/impl.cpp`: `isConstQualified()`). An initializer is *not* required.
+- it is `const`-qualified — this is implicit, no annotation needed. An
+  initializer is *not* required.
 
 A global with no initializer is still pure if it is `const` or `_pure`: with no
 initializer anywhere in the translation unit it is a *tentative definition*
@@ -240,9 +260,6 @@ value the emitted definition takes, so such a global reads as `0` and PAL can
 prove it. An incomplete initializer is filled out the same way, so
 `const struct point s = {.x = 1};` reads as `{1, 0}`.
 
-Mutable means a global that is neither `const` nor `_pure`; those are handled by
-the bring-your-own-permission model below.
-
 ```c
 _pure uint32_t g_a = 42;      /* pure, explicit  */
 const uint32_t g_b = 7;       /* pure, implicit — same treatment as g_a */
@@ -250,133 +267,59 @@ const uint32_t g_c;           /* pure: tentative definition, reads as 0 */
 uint32_t       g_d = 1;       /* mutable: not const, not _pure */
 ```
 
-Because a pure global is immutable, it is not an lvalue: writing it is a
-constraint violation in C (6.5.16p2 with 6.3.2.1p1, "not a modifiable lvalue")
-and PAL rejects it, as does `_live(g)` — there is no permission to thread.
-
-A pure global lowers to a plain top-level F* value, and every read of it
-is **ownership-free** — the read just evaluates to `var_g`, with nothing in the
-`requires`:
+Every global has an address, published as an assumed `ptr` in its module
+`Global_g`:
 
 ```fstar
-let var_g_b : ty_uint32_t = 7ul
-let var_g_c : ty_uint32_t = zero_default     // tentative definition
+assume val addr_var_g : ptr
+assume val addr_var_g_not_null : squash (not (is_null addr_var_g))
 ```
 
-Aggregates are zeroed the same way, element- and field-wise, so
-`const uint32_t a[3];` emits
-`array_spec_zeroed ty_uint32_t (SizeT.v 3sz) zero_default`.
+Assuming the address is what C says — a global has one fixed address for the
+whole run — and it is why `&g == &g` holds definitionally. `&g` is supported
+in any expression position.
 
-`extern` is the one case where no value may be assumed. `extern const T g;`
-without a definition in this translation unit is a *declaration*, not a
-tentative definition: the object lives elsewhere and C constrains its value not
-at all. PAL emits `assume val var_g` instead of a zero, so nothing about its
-value is provable here.
+### Pure globals
 
-**Address-of (`&g`)** is supported for scalar and struct globals (pure or
-mutable). For a pure global, because reads are ownership-free, any pointer to it
-must be read-only forever — a writable alias would let a callee store a value
-that PAL-emitted reads do not observe, which is unsound. So alongside `var_g`,
-PAL emits
+A pure global is also a plain F* value, and every read of it is
+**ownership-free**: the read evaluates to `var_g`, with nothing in the
+`requires`. A read through `&g` is resolved to the same value:
 
 ```fstar
-assume val addr_var_g : ref ty                          // keyed on the global's identity
-assume val addr_var_g_not_null : squash (~(is_null addr_var_g))
-assume val acquire_var_g
-  : unit -> stt_ghost unit emp_inames emp
-      (fun _ -> exists* (p: perm). pts_to addr_var_g #p var_g)
+let var_g_b : UInt32.t = 7ul
+assume val acquire_var_g_b : unit -> stt_ghost unit emp_inames emp
+  (fun _ -> exists* (p: perm). uint32_t_pts_to addr_var_g_b p var_g_b)
 ```
 
-The fraction stays existentially quantified, so reads typecheck, writes (which
-need `1.0R`) do not, and `&g` may be taken any number of times. A *fixed*
-fraction would be unsound to hand out repeatedly: acquiring `k` some `n` times
-and gathering yields `n * k`, and `pts_to_perm_bound` (`p <=. 1.0R`) then proves
-`False` for `n > 1/k`. `&g` itself is just the address, so it works in any
-expression position.
+An array global's value is a `const_seq_with_len [...] N`, indexed with
+`Seq.index` (see `test/global_array_tactic`).
 
-The acquire is an axiom (`assume val`) rather than a proven ghost function: the
-ownership is *assumed* to exist, being a fraction of the one reserved for the
-global at program start.
-
-Acquiring and releasing that ownership is **explicit**, via `_ghost_stmt`:
+Because a pure global is immutable, writing it is rejected (C11 6.5.16p2),
+and `_live(g)` is meaningless. If the storage itself is needed — to pass `&g`
+to a function that asks for ownership of it — `acquire_var_g ()` hands out an
+existentially quantified fraction: reads typecheck, writes (which need `1.0R`)
+do not, and it can be acquired any number of times. It is an axiom (the
+fraction is part of the one reserved for the global at program start), and it
+is never applied automatically:
 
 ```c
-uint32_t read_via_addr_of_global(void)
-    _ensures(return == 42)
-{
-    _ghost_stmt(Global_g_const.acquire_var_g_const ());
-    const uint32_t *p = &g_const;
-    return *p;
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_const.addr_var_g_const #q _));
-}
+_ghost_stmt(Global_g.acquire_var_g ());
 ```
 
-The release goes *after* the `return`. A ghost statement in that position is
-lowered to `let return_1 = <expr>; <ghosts>; return return_1;`, so the returned
-expression is evaluated — still holding the ownership it needs — before the
-drop. Releasing earlier would fail if the returned expression reads through the
-pointer. This is the same discipline the function-pointer cases use with
-`of_fn_div_valid` / `drop_is_valid`.
-
-Omitting either annotation is a verification error (`Leftover resources`, or a
-missing-ownership failure at the read), never unsoundness.
-
-Release uses Pulse's generic `drop_`, which resolves unqualified (generated
-modules `open Pulse`). Its argument mirrors the acquire's postcondition, but
-the stored value and the binder's `perm` type are both inferable, leaving
-`drop_ (exists* q. pts_to addr_var_g #q _)`. The two parts that must be written
-out are:
-
-- **the ref.** A bare `drop_ _` fails with `Cannot prove: (*?u*)_`, because the
-  local holding the address contributes a second `pts_to` and nothing picks
-  between them.
-- **the existential.** Collapsing it to `drop_ (pts_to addr_var_g #_ _)` fails
-  in the SMT solver: the acquire hands out an existentially quantified
-  fraction, and a bare `#_` does not stand for one.
-
-Name the bound permission something other than a local in scope (`q` above,
-since `p` is the C pointer).
-
-Reads through the pointer yield the same pure value that specs already use, so
-`_ensures(return == 42)` follows from `var_g = 42` with no extra reasoning.
-
-`addr_var_g_not_null` gives non-nullness, which does *not* follow from the
-points-to alone; use it by comparing the pointer against `NULL` as usual:
-
-```c
-bool addr_of_global_is_not_null(void)
-    _ensures(return == true)
-{
-    _ghost_stmt(Global_g_const.acquire_var_g_const ());
-    const uint32_t *p = &g_const;
-    return p != NULL;
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_const.addr_var_g_const #q _));
-}
-```
-
-Array globals are out of scope for `&g` (they have no pointer path at all —
-`const int *p = g_arr;` is rejected), which keeps the ownership-free
-`array_spec_idx` model of `test/global_array_tactic` unaffected.
-
-See `test/addr_global/addr_global.c`.
+Release it with `drop_` once done. `extern const T g;` without a definition is
+a declaration of an object that lives elsewhere, so no value is assumed:
+`var_g` is an `assume val`. See `test/addr_global/addr_global.c` and
+`test/global_purity`.
 
 ### Mutable globals: bring your own permission
 
 A mutable global has no pure value — its contents change — so PAL emits *only*
-its storage, and no ownership of it. For a scalar or struct global that storage
-is the cell at its address (arrays are [below](#mutable-array-globals)):
-
-```fstar
-assume val addr_var_g : ref ty
-assume val addr_var_g_not_null : squash (~(is_null addr_var_g))
-```
-
-There is no `var_g` and, deliberately, no `acquire_var_g`: handing out ownership
-of writable storage for free would let two callers each take full permission and
-race. Instead the global behaves exactly like a pointer parameter whose
-permission the caller supplies — **bring your own permission**. Reads and writes
-go through the address (`!addr_var_g`, `addr_var_g := ..`), and every function
-that touches `g` names the permission in its contract with `_live(g)`:
+its address, and no ownership of it. There is deliberately no `acquire`:
+handing out ownership of writable storage for free would let two callers each
+take full permission and race. Instead the global behaves exactly like a
+pointer parameter whose permission the caller supplies — **bring your own
+permission**. Every function that touches `g` names the permission in its
+contract with `_live(g)`:
 
 ```c
 uint32_t counter;
@@ -389,10 +332,20 @@ void bump(void)
 }
 ```
 
-`_live(g)` is `live addr_var_g`, i.e. `exists* v. addr_var_g |-> v`; in spec
-position `g` reads as `!addr_var_g`, and `_old(g)` as its pre-state value.
-Ownership threads through calls like any other: a caller holding `_live(g)`
-hands it to the callee and gets it back.
+lowers to
+
+```
+fn func_bump () (#gval_counter: erased UInt32.t)
+  requires uint32_t_pts_to addr_var_counter 1.0R gval_counter
+  requires pure (UInt32.v (reveal gval_counter) < 100)
+  ensures  exists* (gval_counter': UInt32.t).
+             uint32_t_pts_to addr_var_counter 1.0R gval_counter' **
+             pure (UInt32.v gval_counter' == UInt32.v (reveal gval_counter) + 1)
+```
+
+In spec position `g` reads as the contract's value `gval_g`, and `_old(g)` as
+its pre-state value. Ownership threads through calls like any other: a caller
+holding `_live(g)` hands it to the callee and gets it back.
 
 The permission has to enter the program somewhere, and that somewhere is the
 entrypoint: `main` (or whatever the build treats as one) simply *assumes* it in
@@ -410,61 +363,27 @@ int main(void)
 Consequences worth knowing:
 
 - A function that omits `_live(g)` does not fail *silently*: the read or write
-  fails to verify for want of the `pts_to`, exactly as for a pointer parameter.
+  fails to verify for want of the points-to, exactly as for a pointer parameter.
 - An initializer on a mutable global is ignored; what the storage holds is
   whatever the supplied permission says it holds. State it in a `_requires` if
   a function depends on it.
-- Nothing forces two globals' permissions to be held together, and nothing ties
-  `_live(g)` to `&g` aliases beyond the fact that `&g` *is* `addr_var_g` — so
-  writing through a pointer to `g` while holding `_live(g)` works.
+- `&g` *is* `addr_var_g`, so writing through a pointer to `g` while holding
+  `_live(g)` works.
 
-See `test/global_mutable/global_mutable.c`, and
+A mutable **array** global (`T g[N]`, `extern T g[]`) works the same way, with
+`_live(g)` standing for the array's ownership:
+`array_pts_to T_repr <size> (SizeT.v T_alignof) addr_var_g 1.0R gval_g`. When
+`N` is known, `gval_g` is a `s: Seq.seq T { Seq.length s == N }`, so `g[N-1]`
+needs no bounds precondition; otherwise state `i < g._length` as for an array
+parameter.
+
+See `test/global_mutable/global_mutable.c`,
+`test/global_mutable_array/global_mutable_array.c`, and
 `test/global_non_const_addr/global_non_const_addr.c` for the address-identity
 side.
-
-### Mutable array globals
-
-A mutable array global (`T g[N]`, `extern T g[]`, or the `_array T *g` spelling)
-is the array *object*, so it is modeled as an assumed handle rather than a cell
-at an address, and behaves in every other respect like an `_array T *`
-parameter — `g[i]` is `array_read` / `array_write`, `g._length` is
-`reveal #nat (length_of var_g)`, and `g` decays to an array pointer:
-
-```fstar
-assume val var_g : (array t)
-[@@pulse_eager_unfold]
-let live_var_g : slprop =
-  exists* (s: full_array_lspec t N). array_pts_to var_g 1.0R s
-```
-
-`_live(g)` is that named slprop. It is named rather than the library's
-`live_array` because it also pins the extent: an `array`'s length lives in its
-spec, so `N` can only be stated by the existential's binder. That is what makes
-
-```c
-uint32_t buf[4];
-
-void set_last(uint32_t v)
-    _requires(_live(buf)) _ensures(_live(buf)) _ensures(buf[3] == v)
-{ buf[3] = v; }
-```
-
-go through with no length precondition of its own. `1.0R` is full ownership —
-unlike a `_pure` global's existential fraction, a mutable array must be
-writable, so only one holder of the permission can exist at a time.
-
-When the extent is unknown here (`extern T g[]`, `_array T *g`) the binder is a
-plain `full_array_spec`, and a contract that needs the length states it, as for
-an array parameter: `_requires(i < g._length)` plus
-`_preserves_value(g._length)`.
-
-A *pure* array global is unaffected: it keeps the ownership-free
-`full_array_lspec` spec model (`array_spec_idx`), which is why it is excluded
-from `&g`.
-
-See `test/global_mutable_array/global_mutable_array.c`.
 
 ## See also
 
 - `palow.md` — the memory model: how structs, unions, arrays and pointers are represented.
+- `doc/skill.md` — a guide to writing specifications and proofs with PAL.
 - `src/pass/emit_palow.rs` — the authoritative lowering when in doubt.

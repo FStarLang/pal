@@ -372,16 +372,17 @@ Key facts:
   helper predicate over an `_arrayptr` range, or your own struct invariant.
   Use `` $`name `` for an existential the invariant should quantify
   (`test/arrayptrs`).
-- **`_ensures` on a loop is a pure prop**, checked right after the loop: PAL
-  asserts it there rather than putting it in Pulse's `ensures`, because the
-  loop's values are only named inside the invariant. Without one, Pulse gives
-  you `¬cond` after a loop that exits normally.
-- **`break`**: a loop containing a `break` gets `ensures true` automatically
-  (a `break` leaves while `cond` still holds). The invariant must hold at the
-  `break` itself. State what you need at the exit with the loop's `_ensures`.
-  A `break`/`continue` that would skip the release of a local declared inside
-  the loop body is reported as untranslatable; declare such locals outside the
-  loop.
+- **`_ensures` on a loop is a pure prop** about the exit. A loop without a
+  `break` exits only when `cond` is false; Pulse knows `¬cond` there, and PAL
+  asserts the `_ensures` right after the loop.
+- **`break`**: a `break` leaves while `cond` still holds, so Pulse loses
+  `¬cond`. If the body has no nested loop, PAL mirrors the locals the
+  `_ensures` names in ghost references (`gm_i`) and makes it the loop's Pulse
+  `ensures`, proved at each `break` and at the normal exit. Otherwise the loop
+  gets `ensures true` and the `_ensures` must follow from the invariant. The
+  invariant must hold at the `break` itself. A `break`/`continue` that would
+  skip the release of a local declared inside the loop body is reported as
+  untranslatable; declare such locals outside the loop.
 
 ### A non-tail `if` that contains a `break`
 
