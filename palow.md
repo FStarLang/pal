@@ -470,10 +470,11 @@ its own), and a hand-written shim that steps a pointer has to call
   from clang. But `malloc` does *not* guarantee it, so claiming such a type on
   `malloc`ed storage should fail — correctly — and `aligned_alloc` needs a
   model. Worth doing, since it is the only way to write the program at all.
-- **Packed structs.** `__attribute__((packed))` gives fields alignment 1, which
-  the layout table already reports; the field-offset side condition then holds
-  trivially. The reads and writes are a separate question the model does not
-  address today either.
+- **Packed structs.** A packed struct whose fields still sit at naturally
+  aligned offsets, and whose size is a multiple of their alignment, is proved
+  with its fields' alignment rather than C's (entry 32). A really misaligned
+  field would need unaligned reads and writes, which the model does not have,
+  so such a struct is skipped.
 - **`char` access is free.** `uint8_t_alignof` is `1sz` and `aligned a 1sz` is
   `addr_of a % 1 == 0`, which is trivially true, so no byte-level code pays
   anything. This is not an accident, and it is the reason the byte layer can
@@ -6002,3 +6003,15 @@ new facts about memory.
     local that holds no value yet keeps the field-by-field fill it already
     had. `test/out_field` covers `_out` and borrowing parameters, a nested
     struct, and a local.
+
+32. **Packed structs** (#353). A field's points-to states that the field is
+    aligned, which a packed struct's alignment of 1 cannot supply, so the
+    generated `field_aligned` lemma failed. When every field of a struct
+    sits at an offset that its own alignment divides, and the size is a
+    multiple of the largest of those alignments, the struct is now given that
+    alignment in `struct_<T>_alignof`. This asks more of whoever claims the
+    storage than C does, and never less, so it is sound. C's value is still
+    what `_Alignof` evaluates to (`c_alignof`). The same rule covers a
+    struct that only contains a packed one. Any other packed layout is
+    skipped with the misaligned field named, since Palow has no unaligned
+    accesses. `test/packed_struct` covers these.

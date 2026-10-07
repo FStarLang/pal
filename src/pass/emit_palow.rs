@@ -1067,6 +1067,19 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     }
 }
 
+/// The alignment C reports, which for a packed struct is less than the one
+/// Palow proves with: see `collect_structs`.
+fn c_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
+    match &tds.resolve(ty).val {
+        TypeT::FixedArray(t, _) => c_alignof(tds, t),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
+            .aggregate_layout(&format!("struct {}", n.val))
+            .map(|l| l.1)
+            .or_else(|| palow_alignof(tds, ty)),
+        _ => palow_alignof(tds, ty),
+    }
+}
+
 /// Whether a parameter type carries a `_refine`, anywhere under the wrappers
 /// or through the pointer.
 /// The propositions a `_refine` attaches to a parameter's pointee, and whether
@@ -2879,7 +2892,7 @@ impl<'a> Spec<'a> {
                 Ok(format!("{}sz", n))
             }
             ExprT::AlignOf(t) => {
-                let n = palow_alignof(self.tds, t)
+                let n = c_alignof(self.tds, t)
                     .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
                 Ok(format!("{}sz", n))
             }
@@ -5622,6 +5635,40 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 shape,
                 inv,
             });
+        }
+        // A packed struct -- or one with a packed struct inside -- is less
+        // aligned than its fields, and a field's points-to states that the
+        // field is aligned. Where every field still sits at an offset its own
+        // alignment divides, and the size keeps an array's elements just as
+        // aligned, the struct is given its fields' alignment instead: that
+        // asks more of whoever claims the storage than C does, never less.
+        // C's own value is still what `_Alignof` says. A field that is really
+        // misaligned would need unaligned accesses, which Palow has none of.
+        let mut align = align;
+        if ok {
+            let natural = fields
+                .iter()
+                .filter_map(|f| palow_alignof(tds, &f.ty))
+                .max()
+                .unwrap_or(1);
+            if natural > align {
+                match fields
+                    .iter()
+                    .find(|f| palow_alignof(tds, &f.ty).is_some_and(|a| f.offset % a != 0))
+                {
+                    Some(f) => {
+                        ok = false;
+                        bad = format!("field `{}` is not aligned, as the struct is packed", f.name);
+                    }
+                    None if size % natural != 0 => {
+                        ok = false;
+                        bad =
+                            "its size is not a multiple of its fields' alignment, as it is packed"
+                                .to_string();
+                    }
+                    None => align = natural,
+                }
+            }
         }
         if !ok {
             code.push(Chunk {
@@ -14603,7 +14650,7 @@ impl<'a> Body<'a> {
                 Ok(format!("{}sz", n))
             }
             ExprT::AlignOf(t) => {
-                let n = palow_alignof(self.tds, t)
+                let n = c_alignof(self.tds, t)
                     .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
                 Ok(format!("{}sz", n))
             }
