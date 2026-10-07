@@ -5940,3 +5940,25 @@ new facts about memory.
     only -- a pointer, whose target it tracks, above all -- and a number is
     bound once and stored once. `return c ? a : b` is still lowered, since
     a return has no join. `test/cond_expr` covers all of these.
+
+27. **Dereferencing a `_nullable` parameter.** Palow kept a
+    nullable parameter out of the body's grants entirely, so every read
+    through one was refused, even under `if (p)`. A null test on such a
+    parameter now opens the guard on the side where the pointer is not null:
+    the arm starts with `elim_unless_null var_p (T_pts_to var_p perm _)`,
+    the parameter counts as granted inside it, and an arm that falls through
+    ends with `intro_unless_null`, so both arms of the `if` leave the same
+    `unless_null` behind. This covers statement `if`s, early returns,
+    `?:`, and the right side of `p && ...` and `p == NULL || ...`.
+
+    At a `return` no explicit intro is emitted: `intro_unless_null` is a
+    `pulse_intro`, so Pulse restores the guard while checking the
+    postcondition. An explicit step there would follow whatever `if` ends
+    the function, and Pulse would then have to join that `if` on its own --
+    which fails as soon as one arm's value comes from a call (`if (*p < 100)
+    bump(p);`), the same join problem as in entry 26.
+
+    The payload is the points-to with its value left as `_`; a parameter
+    whose guard also encloses a `_refine` is not opened, since the payload
+    would have to restate it. Contracts still cannot mention `*p`.
+    `test/nullable_deref` covers these.

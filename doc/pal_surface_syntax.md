@@ -61,6 +61,8 @@ fn func_f (var_x: ptr) (#val_x: erased T)
 
 `_nullable` and `_allocated` also apply to the return value: `_allocated _nullable T *f(...)` is the shape of an allocator.
 
+The body may dereference a `_nullable` parameter only where a null test on it has settled that it is not null: in the matching arm of `if (p)`, `if (p != NULL)` or `if (!p) return ...;`, of `p ? ... : ...`, or on the right of `p && ...` / `p == NULL || ...`. The translation opens the guard there (`elim_unless_null`) and closes it again where the arm ends. A contract still cannot mention `*p`, and a `_refine` behind the guard keeps the body from opening it.
+
 Beyond ownership, the user typically also wants to constrain values. PAL provides the following annotations for adding extra contract clauses:
 
 - `_requires(p)` / `_ensures(p)` — extra pre / post predicates on a function.

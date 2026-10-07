@@ -1553,6 +1553,11 @@ struct FnSurface {
     owned: Vec<OwnedParam>,
     /// Parameters whose ownership sits behind a nullness guard.
     guarded: HashSet<String>,
+    /// For each guarded parameter the body may open: the slprop the guard
+    /// encloses, with the value left as `_` for Pulse to find. A parameter
+    /// whose guard also encloses a refinement is not here -- the payload would
+    /// have to restate it -- so a body still cannot dereference one.
+    null_payload: HashMap<String, String>,
     /// Parameters whose pointee the emitted `requires` really owns. A `_plain`
     /// pointer owns nothing by itself: what ownership it has comes from a
     /// `_refine_value`, and the all-or-nothing contract drop takes that away
@@ -3326,6 +3331,7 @@ fn emit_fn(
     let mut refine_err: Option<String> = None;
     // Parameters whose ownership the contract puts behind `unless_null`.
     let mut guarded: HashSet<String> = HashSet::new();
+    let mut null_payload: HashMap<String, String> = HashMap::new();
 
     for (i, arg) in decl.args.iter().enumerate() {
         let pname = match &arg.name {
@@ -3568,6 +3574,13 @@ fn emit_fn(
             .flatten();
         let oname = format!("own_{}", base);
 
+        if null_guard && arg.mode != ParamMode::Out {
+            let perm = match arg.mode {
+                ParamMode::Const => format!("perm_{}", base),
+                _ => "1.0R".to_string(),
+            };
+            null_payload.insert(base.clone(), pts_to(&perm, "_"));
+        }
         let pts_to: Box<dyn Fn(&str, &str) -> String> = if null_guard {
             let p = pname.clone();
             Box::new(move |perm: &str, v: &str| format!("unless_null {} ({})", p, pts_to(perm, v)))
@@ -3596,6 +3609,7 @@ fn emit_fn(
                             continue;
                         }
                         null_wrap.insert(base.clone(), pname.clone());
+                        null_payload.remove(&base);
                         // A parameter with no pointee -- an `_arrayptr`, say --
                         // had its refinements collected above already.
                         if !refines
@@ -5164,6 +5178,7 @@ fn emit_fn(
         piece_types,
         owned,
         guarded,
+        null_payload,
         granted,
         spliced_own: contract_ok
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
@@ -10158,6 +10173,8 @@ struct ArrayBlock {
 /// the enclosing scope in.
 struct BranchResult {
     lines: Vec<String>,
+    /// Whether the arm ends in a `return`, so that nothing may follow it.
+    returned: bool,
     /// Whether the arm ends in a call that does not return.
     diverged: bool,
     inits: Vec<bool>,
@@ -10345,6 +10362,17 @@ struct Body<'a> {
     /// Parameters whose ownership sits behind a nullness guard, so a loop
     /// invariant claiming their storage is claiming the guard is discharged.
     guarded: &'a HashSet<String>,
+    /// See `FnSurface::null_payload`.
+    null_payload: &'a HashMap<String, String>,
+    /// Guarded parameters a null test has opened on the current path: their
+    /// pointee is owned as if the contract had granted it. The guard is put
+    /// back where an arm that falls through ends, so that both arms of the
+    /// `if` leave the same state; at a `return` Pulse puts it back itself,
+    /// since `intro_unless_null` is a `pulse_intro`. That matters: an explicit
+    /// step there would follow whatever `if` ends the function, and Pulse would
+    /// then have to join that `if` on its own rather than check each arm
+    /// against the postcondition.
+    unguarded: Vec<String>,
     /// Parameters the contract hands an `is_valid` for, and so the only
     /// pointers this body may call through without knowing the target.
     valid_fps: &'a HashSet<String>,
@@ -11278,7 +11306,8 @@ impl<'a> Body<'a> {
                 }
                 ExprT::Var(v)
                     if self.params.contains(&*v.val.to_string())
-                        && self.granted.contains(&*v.val.to_string()) =>
+                        && (self.granted.contains(&*v.val.to_string())
+                            || self.unguarded.contains(&v.val.to_string())) =>
                 {
                     self.rvalue(inner)
                 }
@@ -13669,6 +13698,27 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    /// `cond_arm`, for an arm on the side of a null test where the nullable
+    /// parameter `opened` is not null: the arm opens its guard and closes it
+    /// again, so that what it leaves behind is what the other arm does.
+    fn cond_arm_opened(
+        &mut self,
+        e: &Expr,
+        opened: Option<String>,
+    ) -> Result<(Vec<String>, String), String> {
+        let Some(p) = opened else {
+            return self.cond_arm(e);
+        };
+        self.unguarded.push(p.clone());
+        let r = self.cond_arm(e);
+        self.unguarded.pop();
+        let (mut lines, v) = r?;
+        let payload = &self.null_payload[&p];
+        lines.insert(0, format!("elim_unless_null var_{} ({});", p, payload));
+        lines.push(format!("intro_unless_null var_{} ({});", p, payload));
+        Ok((lines, v))
+    }
+
     /// Translate one arm of a conditional expression into its own lines.
     ///
     /// The arm is one path, so whatever it borrows it gives back before the
@@ -14050,7 +14100,13 @@ impl<'a> Body<'a> {
                 let ty = self.ty_of(e)?;
                 let fty = fstar_type(self.tds, &ty)
                     .ok_or_else(|| format!("a conditional expression of {}", describe(&ty)))?;
-                let cv = self.rvalue(c)?;
+                let pt = (self.inlining == 0)
+                    .then(|| self.param_null_test(c))
+                    .flatten();
+                let cv = match &pt {
+                    Some((p, when)) => Self::null_cond(&format!("var_{}", p), *when),
+                    None => self.rvalue(c)?,
+                };
                 if self.inlining > 0 {
                     let tv = self.rvalue(t)?;
                     let fv = self.rvalue(f)?;
@@ -14059,8 +14115,10 @@ impl<'a> Body<'a> {
                 let close = std::mem::take(&mut self.pending_close);
                 self.lines.extend(close);
                 self.close_own();
-                let (tl, tv) = self.cond_arm(t)?;
-                let (fl, fv) = self.cond_arm(f)?;
+                let live_then = matches!(pt, Some((_, false)));
+                let opened = |live: bool| pt.as_ref().filter(|_| live).map(|(p, _)| p.clone());
+                let (tl, tv) = self.cond_arm_opened(t, opened(live_then))?;
+                let (fl, fv) = self.cond_arm_opened(f, opened(!live_then))?;
                 if only_loads(&tl) && only_loads(&fl) {
                     self.lines.extend(tl);
                     self.lines.extend(fl);
@@ -14083,7 +14141,16 @@ impl<'a> Body<'a> {
                 }
                 let ty = self.ty_of(l)?;
                 let opstr = binop(self.tds, *op, &ty, self.signed_ok)?;
-                let a = self.rvalue(l)?;
+                // `p && *p > 3`: the right side runs only where `p` is not
+                // null, so it may open the guard. `p == NULL || ...` likewise.
+                let pt = (matches!(op, BinOp::LogAnd | BinOp::LogOr) && self.inlining == 0)
+                    .then(|| self.param_null_test(l))
+                    .flatten()
+                    .filter(|(_, null_when_true)| *null_when_true == matches!(op, BinOp::LogOr));
+                let a = match &pt {
+                    Some((p, when)) => Self::null_cond(&format!("var_{}", p), *when),
+                    None => self.rvalue(l)?,
+                };
                 // `&&` and `||` evaluate their right side only when the left
                 // has not decided: `n > 0 && a[n - 1] == 0` must not read
                 // when `n` is zero. A right side that is just a value can sit
@@ -14092,7 +14159,7 @@ impl<'a> Body<'a> {
                     let close = std::mem::take(&mut self.pending_close);
                     self.lines.extend(close);
                     self.close_own();
-                    let (rl, b) = self.cond_arm(r)?;
+                    let (rl, b) = self.cond_arm_opened(r, pt.map(|(p, _)| p))?;
                     if only_loads(&rl) {
                         self.lines.extend(rl);
                         return Ok(format!("({} {} {})", a, opstr, b));
@@ -15632,6 +15699,45 @@ impl<'a> Body<'a> {
         Some((i, null_when_true))
     }
 
+    /// A test of a `_nullable` parameter against null, as the parameter and
+    /// whether it is the *then* arm that runs when the pointer is null.
+    ///
+    /// The arm where it is not null owns the pointee: it opens the guard, the
+    /// body reads and writes through the parameter as through any other, and
+    /// the guard is closed again (see `unguarded`). The null arm has `emp`
+    /// behind the guard and leaves it alone.
+    fn param_null_test(&self, cond: &Expr) -> Option<(String, bool)> {
+        fn peel(e: &Expr) -> &Expr {
+            match &strip_vattr(e).val {
+                ExprT::Cast(inner, _) => peel(inner),
+                _ => strip_vattr(e),
+            }
+        }
+        let (cond, negated) = match &peel(cond).val {
+            ExprT::UnOp(UnOp::Not, inner) => (peel(inner), true),
+            _ => (peel(cond), false),
+        };
+        let is_zero = |e: &Expr| matches!(&peel(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO);
+        let (var, null_when_true) = match &cond.val {
+            ExprT::Var(_) => (cond, negated),
+            ExprT::BinOp(BinOp::Eq, a, b) if is_zero(b) => (peel(a), !negated),
+            ExprT::BinOp(BinOp::Eq, a, b) if is_zero(a) => (peel(b), !negated),
+            _ => return None,
+        };
+        let ExprT::Var(v) = &var.val else {
+            return None;
+        };
+        let name = v.val.to_string();
+        if !self.params.contains(&*name)
+            || !self.null_payload.contains_key(&name)
+            || self.unguarded.contains(&name)
+            || self.slots.iter().any(|s| s.name == name)
+        {
+            return None;
+        }
+        Some((name, null_when_true))
+    }
+
     /// The emitted condition of a null test, in the polarity the C source
     /// wrote it, so that the arms stay where the source put them.
     fn null_cond(tmp: &str, null_when_true: bool) -> String {
@@ -17155,9 +17261,15 @@ impl<'a> Body<'a> {
                 let states_own = ensures.iter().any(|e| is_slprop_clause(self.tds, e));
                 let mut fps: Vec<(String, String)> = Vec::new();
                 let nt = self.null_test(cond);
-                let c = match nt {
-                    Some((i, when)) => Self::null_cond(&self.blocks[i].tmp, when),
-                    None => {
+                let pt = if nt.is_none() {
+                    self.param_null_test(cond)
+                } else {
+                    None
+                };
+                let c = match (nt, &pt) {
+                    (Some((i, when)), _) => Self::null_cond(&self.blocks[i].tmp, when),
+                    (None, Some((p, when))) => Self::null_cond(&format!("var_{}", p), *when),
+                    (None, None) => {
                         let cty = self.ty_of(cond)?;
                         if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
                             return Err("an `if` on a non-boolean condition".to_string());
@@ -17165,6 +17277,7 @@ impl<'a> Body<'a> {
                         self.rvalue(cond)?
                     }
                 };
+                let pt_live_then = matches!(pt, Some((_, false)));
                 // Pulse joins an `if` by matching on the condition, and it can
                 // only reduce that match inside an arm if the condition is a
                 // name. A call is not: two `if`s on the same call nest into a
@@ -17209,7 +17322,14 @@ impl<'a> Body<'a> {
                 if let Some((i, _)) = nt {
                     self.mark_checked(i, live_then);
                 }
-                let then = self.branch(then_branch)?;
+                if let Some((p, _)) = pt.as_ref().filter(|_| pt_live_then) {
+                    self.unguarded.push(p.clone());
+                }
+                let then = self.branch(then_branch);
+                if pt.is_some() && pt_live_then {
+                    self.unguarded.pop();
+                }
+                let mut then = then?;
                 let then_blocks = self.blocks.clone();
                 self.blocks = entry_blocks.clone();
                 self.out_params = entry_out;
@@ -17219,7 +17339,24 @@ impl<'a> Body<'a> {
                 if let Some((i, _)) = nt {
                     self.mark_checked(i, !live_then);
                 }
-                let els = self.branch(else_branch)?;
+                if let Some((p, _)) = pt.as_ref().filter(|_| !pt_live_then) {
+                    self.unguarded.push(p.clone());
+                }
+                let els = self.branch(else_branch);
+                if pt.is_some() && !pt_live_then {
+                    self.unguarded.pop();
+                }
+                let mut els = els?;
+                if let Some((p, _)) = &pt {
+                    let payload = &self.null_payload[p];
+                    let live = if pt_live_then { &mut then } else { &mut els };
+                    live.lines
+                        .insert(0, format!("elim_unless_null var_{} ({});", p, payload));
+                    if !live.returned && !live.diverged {
+                        live.lines
+                            .push(format!("intro_unless_null var_{} ({});", p, payload));
+                    }
+                }
                 let els_blocks = self.blocks.clone();
                 self.blocks = entry_blocks;
                 // An arm that does not come back has no state to join. What
@@ -17424,9 +17561,15 @@ impl<'a> Body<'a> {
                     // owns the block, so each arm opens by eliminating the
                     // guard in the direction the test settled.
                     let nt = self.null_test(cond);
-                    let c = match nt {
-                        Some((i, when)) => Self::null_cond(&self.blocks[i].tmp, when),
-                        None => {
+                    let pt = if nt.is_none() {
+                        self.param_null_test(cond)
+                    } else {
+                        None
+                    };
+                    let c = match (nt, &pt) {
+                        (Some((i, when)), _) => Self::null_cond(&self.blocks[i].tmp, when),
+                        (None, Some((p, when))) => Self::null_cond(&format!("var_{}", p), *when),
+                        (None, None) => {
                             let cty = self.ty_of(cond)?;
                             if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
                                 return Err("an `if` on a non-boolean condition".to_string());
@@ -17468,12 +17611,45 @@ impl<'a> Body<'a> {
                     if let Some((i, _)) = nt {
                         self.mark_checked(i, live_then);
                     }
-                    let (then_lines, then_val) = self.tail_arm(&then_stmts)?;
+                    let pt_live_then = matches!(pt, Some((_, false)));
+                    let open = |b: &mut Self, live: bool| {
+                        if let Some((p, _)) = pt.as_ref().filter(|_| live) {
+                            b.unguarded.push(p.clone());
+                        }
+                    };
+                    let close = |b: &mut Self, live: bool, lines: &mut Vec<String>| {
+                        if let Some((p, _)) = pt.as_ref().filter(|_| live) {
+                            b.unguarded.pop();
+                            lines.insert(
+                                0,
+                                format!("elim_unless_null var_{} ({});", p, b.null_payload[p]),
+                            );
+                        }
+                    };
+                    open(self, pt_live_then);
+                    let r = self.tail_arm(&then_stmts);
+                    let (mut then_lines, then_val) = match r {
+                        Ok(r) => r,
+                        Err(e) => {
+                            close(self, pt_live_then, &mut Vec::new());
+                            return Err(e);
+                        }
+                    };
+                    close(self, pt_live_then, &mut then_lines);
                     self.blocks = entry_blocks.clone();
                     if let Some((i, _)) = nt {
                         self.mark_checked(i, !live_then);
                     }
-                    let (else_lines, else_val) = self.tail_arm(&else_stmts)?;
+                    open(self, !pt_live_then);
+                    let r = self.tail_arm(&else_stmts);
+                    let (mut else_lines, else_val) = match r {
+                        Ok(r) => r,
+                        Err(e) => {
+                            close(self, !pt_live_then, &mut Vec::new());
+                            return Err(e);
+                        }
+                    };
+                    close(self, !pt_live_then, &mut else_lines);
                     self.blocks = entry_blocks;
                     let then_lines: Vec<String> = then_pre.into_iter().chain(then_lines).collect();
                     let else_lines: Vec<String> = else_pre.into_iter().chain(else_lines).collect();
@@ -17670,12 +17846,14 @@ impl<'a> Body<'a> {
             // A diverging arm has `pure False` in hand, which subsumes every
             // frame it is still holding; releasing them would be emitting
             // steps after the program has stopped.
-            if !result? && !diverged {
+            let returned = result?;
+            if !returned && !diverged {
                 self.release_from(mark);
             }
             self.seeded = outer_seeded;
             Ok(BranchResult {
                 lines: std::mem::take(&mut self.lines),
+                returned,
                 diverged,
                 inits: self.slots[..mark].iter().map(|s| s.init).collect(),
                 scattered: self.slots[..mark]
@@ -19063,6 +19241,8 @@ fn emit_body(
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
         guarded: &sig.guarded,
+        null_payload: &sig.null_payload,
+        unguarded: Vec::new(),
         valid_fps: &sig.valid_fps,
         valid_fp_fields: &sig.valid_fp_fields,
         local_valid_fps: HashSet::new(),
