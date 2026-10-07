@@ -840,6 +840,32 @@ struct Emitter<'a> {
     /// of a call, keyed by the address of the argument expression. See
     /// `nullable_arg_ghosts_expr`.
     null_arg_names: HashMap<usize, Doc>,
+    /// Bindings that must be emitted as `let`s *before* the statement currently
+    /// being emitted. Pulse resolves a stateful call's implicits against the
+    /// resource context, and for a NESTED stateful call it resolves them
+    /// against the enclosing call's post-state -- so a nested borrow sees the
+    /// spec it is itself about to produce. Anything that consumes or rewrites
+    /// a resource therefore has to be bound to a name first. (A nested call
+    /// that merely `preserves` its resource, such as `array_read`, is
+    /// unaffected, which is why this only appeared with row borrows.)
+    /// Flushed by `emit_stmt`, and saved/restored around it so that a borrow
+    /// inside an `if` or `while` body stays inside that body.
+    pending_prelude: Vec<Doc>,
+    /// Non-zero while emitting an array operand that has to be a live handle
+    /// -- the target of a write, or the array a cell is borrowed out of. Only
+    /// then does an intermediate subscript of a multidimensional array have to
+    /// borrow a row: `a[i][j]` read as a value is `array_spec_idx (array_read a
+    /// i) j`, which needs no ownership beyond what reading `a` already needs
+    /// and works at a fractional permission, so a `const` 2-D read stays
+    /// provable. A subscript passes it on to its array operand only when the
+    /// subscript itself yields a row; an element read out by value is already
+    /// a value. See the `ExprT::Index` arm.
+    want_live_row: usize,
+    /// The parent array of each row borrow currently held in
+    /// `pending_prelude`, innermost last. A statement that provably retains
+    /// nothing pointing into the rows it borrowed -- a complete array write --
+    /// gives them straight back, in reverse order. See `emit_row_returns`.
+    pending_rows: Vec<Doc>,
 }
 
 impl<'a> Emitter<'a> {
@@ -1076,10 +1102,10 @@ impl<'a> Emitter<'a> {
         })
     }
 
-    fn emit_array_cell_read(&mut self, env: &Env, arr: &Rc<Expr>, idx: &Rc<Expr>) -> Doc {
+    fn emit_array_cell_read(&mut self, env: &Env, arr_doc: Doc, idx: &Rc<Expr>) -> Doc {
         naryfn([
             Doc::text("array_cell_read"),
-            self.emit_rvalue(env, arr),
+            arr_doc,
             self.emit_rvalue(env, idx),
         ])
         .append(";")
@@ -1087,8 +1113,7 @@ impl<'a> Emitter<'a> {
         .group()
     }
 
-    fn emit_array_cell_return(&mut self, env: &Env, arr: &Rc<Expr>, idx: &Rc<Expr>) -> Doc {
-        let arr_doc = self.emit_rvalue(env, arr);
+    fn emit_array_cell_return(&mut self, env: &Env, arr_doc: Doc, idx: &Rc<Expr>) -> Doc {
         let idx_doc = self.emit_rvalue(env, idx);
         let cell_ref = naryfn([
             Doc::text("array_cell_ref"),
@@ -1105,13 +1130,7 @@ impl<'a> Emitter<'a> {
             .group()
     }
 
-    fn emit_array_cell_return_unchanged(
-        &mut self,
-        env: &Env,
-        arr: &Rc<Expr>,
-        idx: &Rc<Expr>,
-    ) -> Doc {
-        let arr_doc = self.emit_rvalue(env, arr);
+    fn emit_array_cell_return_unchanged(&mut self, env: &Env, arr_doc: Doc, idx: &Rc<Expr>) -> Doc {
         let idx_doc = self.emit_rvalue(env, idx);
         let cell_ref = naryfn([
             Doc::text("array_cell_ref"),
@@ -1324,10 +1343,22 @@ impl<'a> Emitter<'a> {
             }
         }
 
+        // The array a cell is carved out of must be a live handle, so an
+        // intermediate subscript of a multidimensional array borrows its row
+        // (`emit_array_rvalue`). When it does, the cell is read and returned
+        // through that same row handle, and the rows are given back after the
+        // cells, innermost first. Otherwise the array is re-emitted at each
+        // use as before.
+        let rows_mark = self.pending_rows.len();
+        let mut live_arrs: HashMap<(String, String), Doc> = HashMap::new();
         let mut prelude = Vec::new();
         for key in &group_order {
             let group = groups.get(key).unwrap();
-            let arr_doc = self.emit_rvalue(env, &group.arr);
+            let group_rows_mark = self.pending_rows.len();
+            let arr_doc = self.emit_array_rvalue(env, &group.arr);
+            if self.pending_rows.len() > group_rows_mark {
+                live_arrs.insert(key.clone(), arr_doc.clone());
+            }
             let idx_doc = self.emit_rvalue(env, &group.idx);
             prelude.push(
                 Doc::text("let ")
@@ -1340,7 +1371,11 @@ impl<'a> Emitter<'a> {
                     .group(),
             );
             if group.needs_read {
-                prelude.push(self.emit_array_cell_read(env, &group.arr, &group.idx));
+                let arr_doc = match live_arrs.get(key) {
+                    Some(arr_doc) => arr_doc.clone(),
+                    None => self.emit_rvalue(env, &group.arr),
+                };
+                prelude.push(self.emit_array_cell_read(env, arr_doc, &group.idx));
             }
         }
 
@@ -1366,11 +1401,18 @@ impl<'a> Emitter<'a> {
         let mut postlude: Vec<Doc> = Vec::new();
         for key in group_order.into_iter().rev() {
             let group = groups.get(&key).unwrap();
+            let arr_doc = match live_arrs.get(&key) {
+                Some(arr_doc) => arr_doc.clone(),
+                None => self.emit_rvalue(env, &group.arr),
+            };
             if group.writable {
-                postlude.push(self.emit_array_cell_return(env, &group.arr, &group.idx));
+                postlude.push(self.emit_array_cell_return(env, arr_doc, &group.idx));
             } else {
-                postlude.push(self.emit_array_cell_return_unchanged(env, &group.arr, &group.idx));
+                postlude.push(self.emit_array_cell_return_unchanged(env, arr_doc, &group.idx));
             }
+        }
+        for parent in self.pending_rows.split_off(rows_mark).into_iter().rev() {
+            postlude.push(naryfn([Doc::text("array_return_row"), parent]).append(";"));
         }
 
         Some((prelude, emitted_args, postlude))
@@ -2242,7 +2284,10 @@ impl<'a> Emitter<'a> {
                 } else {
                     "array_update"
                 };
-                let arr_doc = match self.emit_expr(env, &arr) {
+                // As in `emit_stmt_core`: the rows the target's subscripts
+                // borrow are used by this write alone, so give them back.
+                let rows_mark = self.pending_rows.len();
+                let arr_doc = match self.emit_array_operand(env, &arr) {
                     ExprKind::ArrayLValue(arr_doc) => arr_doc,
                     arr_doc => arr_doc.to_rvalue(),
                 };
@@ -2256,10 +2301,12 @@ impl<'a> Emitter<'a> {
                     }
                     None => rhs_doc,
                 };
+                let returns = self.emit_row_returns(rows_mark);
                 return naryfn([Doc::text(fn_name), arr_doc, idx_doc, upd_fn, rhs])
                     .append(";")
                     .nest(2)
-                    .group();
+                    .group()
+                    .append(returns);
             }
         }
         if let ExprT::Index(arr, idx) = &x.val {
@@ -2277,19 +2324,18 @@ impl<'a> Emitter<'a> {
             } else {
                 "array_write"
             };
-            let arr_doc = match self.emit_expr(env, arr) {
+            let rows_mark = self.pending_rows.len();
+            let arr_doc = match self.emit_array_operand(env, arr) {
                 ExprKind::ArrayLValue(arr_doc) => arr_doc,
                 arr_doc => arr_doc.to_rvalue(),
             };
-            return naryfn([
-                Doc::text(fn_name),
-                arr_doc,
-                self.emit_rvalue(env, idx),
-                rhs_doc,
-            ])
-            .append(";")
-            .nest(2)
-            .group();
+            let idx_doc = self.emit_rvalue(env, idx);
+            let returns = self.emit_row_returns(rows_mark);
+            return naryfn([Doc::text(fn_name), arr_doc, idx_doc, rhs_doc])
+                .append(";")
+                .nest(2)
+                .group()
+                .append(returns);
         }
         if let ExprT::Deref(inner) = &x.val {
             let write_fn = env
@@ -3982,18 +4028,57 @@ impl<'a> Emitter<'a> {
                     .as_ref()
                     .is_some_and(|ty| matches!(&ty.val, TypeT::Pointer(_, PointerKind::ArrayPtr)));
 
+                // Whether this subscript yields a ROW: the element of the indexed
+                // array is itself a fixed array -- i.e. the outer index of a
+                // multidimensional access. That covers `T a[M][N]`, and the same
+                // array decayed to an `array` of rows, which is how a mutable
+                // array global is seen (`Env::lookup_var_type`).
+                let yields_row = arr_ty.as_ref().is_some_and(|ty| match &ty.val {
+                    TypeT::FixedArray(elem, _) | TypeT::Pointer(elem, PointerKind::Array) => {
+                        matches!(
+                            &env.vtype_whnf(elem.clone().into()).val,
+                            TypeT::FixedArray(_, _)
+                        )
+                    }
+                    _ => false,
+                });
                 // A fixed-array value is a *pure* `array_spec` only when it is an
                 // RValue (e.g. a global pure array or a by-value struct field), in
                 // which case it must be indexed with `array_spec_idx`. A stack-local
                 // array is an LValue holding a runtime `array` handle, so it must be
                 // read with `array_read`/`arrayptr_read` like any other live array.
-                let arr_kind = self.emit_expr(env, arr);
+                //
+                // Only a row needs its parent live. An element read out by value
+                // -- a pointer in a 2-D array of pointers, say -- is itself the
+                // live handle a `want_live_row` position wants, so the array it is
+                // read from is emitted as an ordinary rvalue: borrowing a row
+                // merely to read an element out of it would leave the parent's
+                // spec as `array_spec_set s i (Some (array_spec_idx s i))` after
+                // the row is returned.
+                let arr_kind = if yields_row {
+                    self.emit_expr(env, arr)
+                } else {
+                    let saved = std::mem::take(&mut self.want_live_row);
+                    let k = self.emit_expr(env, arr);
+                    self.want_live_row = saved;
+                    k
+                };
                 let use_spec_idx = is_fixed_array && matches!(arr_kind, ExprKind::RValue(_));
+                // A live (not by-value) array whose element is a row.
+                // `is_arrayptr` is excluded: an arrayptr into a 2-D array is a
+                // different lowering and is not yet handled.
+                let is_multidim_live_array =
+                    self.want_live_row > 0 && !use_spec_idx && !is_arrayptr && yields_row;
                 let arr_doc = match arr_kind {
                     ExprKind::ArrayLValue(arr_doc) => arr_doc,
                     other => other.to_rvalue(),
                 };
-                let idx_doc = self.emit_rvalue(env, idx);
+                let idx_doc = {
+                    let saved = std::mem::take(&mut self.want_live_row);
+                    let d = self.emit_rvalue(env, idx);
+                    self.want_live_row = saved;
+                    d
+                };
 
                 if use_spec_idx {
                     // Pure FixedArray value (e.g., global pure array or by-value struct field);
@@ -4005,6 +4090,37 @@ impl<'a> Emitter<'a> {
                             parens(Doc::text("SizeT.v").append(Doc::line()).append(idx_doc)),
                         ]))
                     }))
+                } else if is_multidim_live_array {
+                    // Indexing a LIVE multidimensional array yields a ROW, and
+                    // a row is memory, not a value: in C, `a[i]` of a
+                    // `T a[M][N]` is the array of N elements at `a + i*N`.
+                    //
+                    // Neither of the two branches around this one can express
+                    // that. `array_read` would read the entire row out by
+                    // value, and `array_spec_idx` yields a pure `array_spec`
+                    // where the *next* index needs a live handle -- which is
+                    // what PAL used to emit, producing an ill-typed term that
+                    // surfaced only as an unprovable Pulse resource.
+                    //
+                    // Borrow the row out of its parent's mask instead. The
+                    // result is a real `array` handle, so the next index reads,
+                    // subscripts or borrows a cell from it exactly as it would
+                    // for a one-dimensional array, and the parent demonstrably
+                    // no longer owns the row.
+                    let tmp = self.fresh_tmp("row");
+                    let arr_doc_for_return = arr_doc.clone();
+                    self.pending_prelude.push(
+                        Doc::text("let ")
+                            .append(tmp.clone())
+                            .append(Doc::text(" ="))
+                            .append(Doc::line())
+                            .append(naryfn([Doc::text("array_borrow_row"), arr_doc, idx_doc]))
+                            .append(";")
+                            .nest(2)
+                            .group(),
+                    );
+                    self.pending_rows.push(arr_doc_for_return);
+                    ExprKind::ArrayLValue(annotated(v, || tmp.clone()))
                 } else {
                     let fn_name = if is_arrayptr {
                         "arrayptr_read"
@@ -5959,7 +6075,7 @@ impl<'a> Emitter<'a> {
                         } else {
                             "array_assign_ret"
                         };
-                        let arr_doc = match self.emit_expr(env, arr) {
+                        let arr_doc = match self.emit_array_operand(env, arr) {
                             ExprKind::ArrayLValue(arr_doc) => arr_doc,
                             arr_doc => arr_doc.to_rvalue(),
                         };
@@ -6379,13 +6495,75 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Emit an array operand in a position that requires a live handle, so an
+    /// intermediate subscript borrows a row rather than reading one out by
+    /// value. The flag is a counter rather than a bool because these positions
+    /// nest: `a[i][j][k]` as a write target needs `a[i]` and `a[i][j]` live.
+    fn emit_array_operand(&mut self, env: &Env, arr: &Expr) -> ExprKind {
+        self.want_live_row += 1;
+        let r = self.emit_expr(env, arr);
+        self.want_live_row -= 1;
+        r
+    }
+
+    /// `emit_array_operand` for the sites that want the operand as a plain
+    /// rvalue document -- the `array_borrow_cell` paths (`x = &a[i]` and the
+    /// call-argument cell borrows of `plan_borrowed_array_cell_call`), where
+    /// the array a cell is carved out of must be a live handle for the same
+    /// reason.
+    fn emit_array_rvalue(&mut self, env: &Env, arr: &Expr) -> Doc {
+        self.want_live_row += 1;
+        let d = self.emit_rvalue(env, arr);
+        self.want_live_row -= 1;
+        d
+    }
+
+    /// Give back every row borrowed since `mark`, innermost first. The rows
+    /// are dropped from `pending_rows` so a later statement in the same block
+    /// can borrow them again; the `let` bindings themselves stay in
+    /// `pending_prelude`, since the returns refer to the row handles by name.
+    fn emit_row_returns(&mut self, mark: usize) -> Doc {
+        let parents = self.pending_rows.split_off(mark);
+        parents.into_iter().rev().fold(Doc::nil(), |acc, parent| {
+            acc.append(Doc::line())
+                .append(naryfn([Doc::text("array_return_row"), parent]))
+                .append(";")
+                .group()
+        })
+    }
+
+    /// Emit a statement, flushing any `let` bindings that emitting its
+    /// expressions hoisted out (see `pending_prelude`), and wrapping it in the
+    /// ghost steps its calls owe for `_nullable` arguments (see
+    /// `nullable_arg_ghosts`).
+    ///
+    /// The hoisted bindings come first: they are part of evaluating the
+    /// statement's operands (a row borrowed for a write target, say), and
+    /// nothing the ghost steps mention is ever hoisted, since those are
+    /// emitted outside any live-array position. The "before" ghosts then sit
+    /// immediately in front of the statement whose calls consume the
+    /// resources they draw facts from, and the "after" ghosts follow it --
+    /// after any rows the statement gave back, which are part of the
+    /// statement itself (`emit_row_returns`) and are disjoint from the
+    /// resources a call hands back under `unless_null`.
+    ///
+    /// The prelude buffer is saved and restored so that a nested statement's
+    /// hoists land in the nested block rather than escaping to the enclosing
+    /// one.
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
+        let saved = std::mem::take(&mut self.pending_prelude);
+        let saved_rows = std::mem::take(&mut self.pending_rows);
         let (before, after) = self.nullable_arg_ghosts(env, stmt);
-        let mut doc = Doc::nil();
+        let core = self.emit_stmt_core(env, stmt);
+        let prelude = std::mem::replace(&mut self.pending_prelude, saved);
+        self.pending_rows = saved_rows;
+        let mut doc = prelude
+            .into_iter()
+            .fold(Doc::nil(), |acc, p| acc.append(p).append(Doc::line()));
         for g in before {
             doc = doc.append(g).append(Doc::hardline());
         }
-        doc = doc.append(self.emit_stmt_core(env, stmt));
+        doc = doc.append(core);
         for g in after {
             doc = doc.append(Doc::hardline()).append(g);
         }
@@ -6731,7 +6909,7 @@ impl<'a> Emitter<'a> {
                         // not describe, so leave it to the generic path.
                         && elems.len() as u64 == length
                     {
-                        let arr_doc = match self.emit_expr(env, x) {
+                        let arr_doc = match self.emit_array_operand(env, x) {
                             ExprKind::ArrayLValue(arr_doc) => arr_doc,
                             arr_doc => arr_doc.to_rvalue(),
                         };
@@ -6812,7 +6990,7 @@ impl<'a> Emitter<'a> {
                             .map(|ty| env.vtype_whnf(ty))
                             .is_some_and(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Ref)))
                     {
-                        let arr_doc = self.emit_rvalue(env, arr);
+                        let arr_doc = self.emit_array_rvalue(env, arr);
                         let idx_doc = self.emit_rvalue(env, idx);
                         return self
                             .emit_lvalue(env, x)
@@ -6895,7 +7073,16 @@ impl<'a> Emitter<'a> {
                             } else {
                                 "array_update"
                             };
-                            let arr_doc = match self.emit_expr(env, &arr) {
+                            // A complete write to `a[i][j].f`. Any row
+                            // borrows the subscripts hoist are used only by
+                            // this statement -- nothing here retains a
+                            // pointer into them -- so give them straight
+                            // back, innermost first. Otherwise a second
+                            // write to the same row fails to borrow it,
+                            // correctly but uselessly: the first statement
+                            // still holds it.
+                            let rows_mark = self.pending_rows.len();
+                            let arr_doc = match self.emit_array_operand(env, &arr) {
                                 ExprKind::ArrayLValue(arr_doc) => arr_doc,
                                 arr_doc => arr_doc.to_rvalue(),
                             };
@@ -6911,10 +7098,12 @@ impl<'a> Emitter<'a> {
                                 ]),
                                 None => self.emit_rvalue(env, t),
                             };
+                            let returns = self.emit_row_returns(rows_mark);
                             return naryfn([Doc::text(fn_name), arr_doc, idx_doc, upd_fn, rhs])
                                 .append(";")
                                 .nest(2)
-                                .group();
+                                .group()
+                                .append(returns);
                         }
                     }
                     if let ExprT::Index(arr, idx) = &x.val {
@@ -6932,16 +7121,21 @@ impl<'a> Emitter<'a> {
                         } else {
                             "array_write"
                         };
-                        let arr_doc = match self.emit_expr(env, arr) {
+                        // As for `a[i][j].f = v` above: rows borrowed for
+                        // the target are used by this write alone.
+                        let rows_mark = self.pending_rows.len();
+                        let arr_doc = match self.emit_array_operand(env, arr) {
                             ExprKind::ArrayLValue(arr_doc) => arr_doc,
                             arr_doc => arr_doc.to_rvalue(),
                         };
                         let idx_doc = self.emit_rvalue(env, idx);
                         let val_doc = self.emit_rvalue(env, t);
+                        let returns = self.emit_row_returns(rows_mark);
                         naryfn([Doc::text(fn_name), arr_doc, idx_doc, val_doc])
                             .append(";")
                             .nest(2)
                             .group()
+                            .append(returns)
                     } else if let ExprT::Deref(inner) = &x.val {
                         // *array     = val → array_write    p 0sz val
                         // *arrayptr  = val → arrayptr_write p 0sz val
@@ -11909,6 +12103,9 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         emit_old_params_as_entries: false,
         tmp_counter: 0,
         null_arg_names: HashMap::new(),
+        pending_prelude: Vec::new(),
+        pending_rows: Vec::new(),
+        want_live_row: 0,
     };
 
     let addr_taken = collect_addr_taken(&tu.decls);
