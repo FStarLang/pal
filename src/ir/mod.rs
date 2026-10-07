@@ -556,35 +556,12 @@ impl FieldT {
             FieldT::BitField { name, .. } => name,
         }
     }
-    pub fn is_array(&self) -> bool {
-        match self {
-            FieldT::Plain { ty, .. } => {
-                matches!(
-                    peel_type(ty).val,
-                    TypeT::FixedArray(_, _) | TypeT::FlexArray(_)
-                )
-            }
-            FieldT::BitField { .. } => false,
-        }
-    }
-
     /// For a bit-field, the number of bits in its declared width; `None` for a
     /// plain field. Doubles as a "this is a bit-field" predicate.
     pub fn bit_width(&self) -> Option<u32> {
         match self {
             FieldT::BitField { width, .. } => Some(*width),
             FieldT::Plain { .. } => None,
-        }
-    }
-
-    /// For array fields, return the element type and length.
-    pub fn fixed_array_info(&self) -> Option<(&Rc<Type>, u64)> {
-        match self {
-            FieldT::Plain { ty, .. } => match &peel_type(ty).val {
-                TypeT::FixedArray(elem_ty, length) => Some((elem_ty, *length)),
-                _ => None,
-            },
-            FieldT::BitField { .. } => None,
         }
     }
 
@@ -708,30 +685,6 @@ impl AuxFnKind {
             AuxFnKind::Gathered => "gathered",
         }
     }
-
-    /// The struct-level aux fn infix, if this kind has a struct form.
-    /// `Activate` is union-only and has none.
-    pub fn struct_aux_name(self) -> Option<&'static str> {
-        match self {
-            AuxFnKind::Unfold => Some("raw_unfold"),
-            AuxFnKind::UnfoldUninit => Some("raw_unfold_uninit"),
-            AuxFnKind::Fold => Some("raw_fold"),
-            AuxFnKind::FoldUninit => Some("raw_fold_uninit"),
-            AuxFnKind::Activate | AuxFnKind::Scattered | AuxFnKind::Gathered => None,
-        }
-    }
-
-    pub fn union_aux_name(self) -> Option<&'static str> {
-        match self {
-            AuxFnKind::Unfold => Some("raw_unfold"),
-            AuxFnKind::Fold => Some("raw_fold"),
-            AuxFnKind::UnfoldUninit
-            | AuxFnKind::FoldUninit
-            | AuxFnKind::Activate
-            | AuxFnKind::Scattered
-            | AuxFnKind::Gathered => None,
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -764,6 +717,13 @@ pub enum InlinePulseToken {
         ident: Rc<Ident>,
         ty: Rc<Type>,
     },
+    /// `$witness` — the ghost arguments that instantiate the contract of the
+    /// indirect call that follows. It stands at the head of the statement and
+    /// emits nothing; the rest of the statement is the witness term. Only the
+    /// author knows it, so there is nothing for the emitter to derive.
+    /// Palow-only: the old model spells the same thing as a call to
+    /// `Pulse.Lib.C.FuncPtr.eta_expanded_erased`, and wants a different tuple.
+    WitnessAntiquot(CodeToken),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -857,8 +817,7 @@ pub enum DeclT {
 /// Identifies a named C type whose layout is recorded in [`LayoutTable`].
 ///
 /// Only named types need an entry: the size and alignment of every other type
-/// (scalars, pointers, arrays) is computed structurally by
-/// [`crate::layout::size_of_type`].
+/// (scalars, pointers, arrays) follows from its structure.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
 pub enum LayoutKey {
     Typedef(Rc<str>),

@@ -436,7 +436,7 @@ accidentally correct today, will also then be correct for a reason.
 
 Pinning that down as a regression test rather than a story needs a way to
 write a test that *must not* verify, so one landed with this work.
-`test/misaligned` carries a `should-fail` file alongside `palow-only`; the
+`test/misaligned` carries a `should-fail` file; the
 template `Makefile` then requires the F\* run to fail *and* requires every line
 of `should-fail` to appear in its output, so a test cannot start failing for
 some unrelated reason and still look like it is doing its job. The file there
@@ -470,10 +470,11 @@ its own), and a hand-written shim that steps a pointer has to call
   from clang. But `malloc` does *not* guarantee it, so claiming such a type on
   `malloc`ed storage should fail — correctly — and `aligned_alloc` needs a
   model. Worth doing, since it is the only way to write the program at all.
-- **Packed structs.** `__attribute__((packed))` gives fields alignment 1, which
-  the layout table already reports; the field-offset side condition then holds
-  trivially. The reads and writes are a separate question the model does not
-  address today either.
+- **Packed structs.** A packed struct whose fields still sit at naturally
+  aligned offsets, and whose size is a multiple of their alignment, is proved
+  with its fields' alignment rather than C's (entry 32). A really misaligned
+  field would need unaligned reads and writes, which the model does not have,
+  so such a struct is skipped.
 - **`char` access is free.** `uint8_t_alignof` is `1sz` and `aligned a 1sz` is
   `addr_of a % 1 == 0`, which is trivially true, so no byte-level code pays
   anything. This is not an accident, and it is the reason the byte layer can
@@ -2044,6 +2045,31 @@ new facts about memory.
    precisely the hints about the old function-pointer model, because it emits
    the replacements itself, and still refuses every other ghost statement,
    which says something it has no other way to learn.
+
+   **Superseded.** Sound is not the same as right. Recognising a statement by
+   the library name at its head and discarding it throws away what the author
+   wrote without saying so, and it pins the emitter to a list of names
+   belonging to a model that is going to be removed. The list is gone. A ghost
+   statement that means something only to the old model is now gated out of
+   the C with `#ifndef PALOW`, which states in the source what was previously
+   inferred in the emitter; `test/packet_space_connection` had already been
+   doing this with a pair of `#ifdef PALOW` macros. What Palow still reads for
+   itself it recognises *structurally*, as an antiquotation token rather than
+   as a string: `$unfold-uninit`, `$fold`, `$scattered`, `$gathered`,
+   `$activate`. Everything else is emitted as written, so a statement Palow
+   cannot honour fails loudly instead of vanishing.
+
+   The last string match was the one thing on that list Palow *reads* rather
+   than emits: the witness of an indirect call, which is information only the
+   author has, and which was spelled as a call to the old model's eager-intro
+   rule `Pulse.Lib.C.FuncPtr.eta_expanded_erased`. It is now `$witness`, an
+   antiquotation of its own, so no part of the emitter's behaviour depends on
+   a library name any more. Like `$scattered` and `$gathered` it is
+   Palow-only, and for the same reason: the two models need *different*
+   witnesses at the same call -- Palow's is the tuple of ghost arguments
+   alone, the old model's pairs it with a resource witness -- so the call site
+   has to say which it means regardless. The old emitter refuses it with a
+   diagnostic rather than mis-reading it.
 
    Together these are worth thirteen bodies -- the transfer described above,
    reversed and then some. It is not testable in-tree for the same reason the
@@ -4984,7 +5010,7 @@ new facts about memory.
    wrapper was calling its own target without instantiating the ghost
    arguments, which only appear inside a `pure` and so cannot be read off any
    slprop; the witness of an indirect call has the same problem one level up,
-   and is now taken from the author's `eta_expanded_erased` hint, which is
+   and is now taken from the author's `$witness` hint, which is
    what that hint was always for; and a spliced contract clause was going in
    unparenthesised, so an author who wrote one whose top level is an `if`
    either had it refused or had it swallow everything stated after it. A
@@ -6037,3 +6063,190 @@ new facts about memory.
     `test/empty_struct`'s `old-only` marker is gone and `get_x` has a body.
     Census: 1169 specifications, 1141 with bodies, 0 admitted, 28 external,
     0 skipped -- the first time Palow has no gaps at all.
+
+22. **Pointer arithmetic and pointer casts, from porting linux-pal.** Kernel
+    code computes MMIO register addresses as `base + OFFSET` on a `void *`
+    (#352), names layout with `offsetof` as a value (#351), and reads a
+    register as `*(u32 *)(base + OFFSET)`. Each of the three had its own gap.
+
+    - `offsetof(T, designator)` is a constant clang has already computed from
+      the same layout the `struct_T_offsetof_f` constants come from, so it is
+      emitted as that `SizeT` literal.
+    - Elab typed pointer arithmetic only on `_array` pointers, and reported
+      the rest as an error that the passes after it then tripped over. Any
+      object pointer now takes `± integer` (the integer cast to `size_t`), and
+      `void *` steps by one byte, GNU C's `sizeof(void) == 1`. A local bound
+      to `base + i` of a `void *` is a pointer value, not an alias of
+      `base[i]`: there is no `void` element for it to name.
+    - The frontend dropped every pointer bitcast, so `*(uint32_t *)base` read
+      whatever `base` pointed at -- a `void`, or a single byte -- and then
+      converted the value. A cast to a different object pointer type is now
+      kept; it is the identity on `ptr`, but it decides the type a
+      dereference reads at.
+    - A contract can state pointer arithmetic: `p + i` is `( +! )`, and
+      `p - i` is the total `( -? )`, since a clause is typed with nothing in
+      scope to discharge `( -! )`'s side condition. The new
+      `sub_eq_sub_wrap` lemma identifies the two wherever `( -! )` is defined.
+      An antiquotation `$(base + 0x10)` is the same term, so ownership of an
+      MMIO register is stated in Pulse as `uint32_t_pts_to $(base + 0x10) ..`.
+      In a body, `p ± i` with both fixed for the call is as stable as `p`
+      itself, so dereferencing it is left to slprop matching like any other
+      fixed function of the parameters.
+
+23. **The old model is gone.** Palow is the only memory model PAL emits.
+    `src/pass/emit.rs` and `--old-model` are deleted, and so is everything
+    that existed to keep the two side by side: the suite's second pass
+    (`MODEL=old`, `out_old/`), the `palow-only` markers, the `helpers_old/`
+    copies of test helpers, the inert `palow-old-annotations` and
+    `palow-model-specific` markers, and the `#ifndef PALOW` halves of the
+    tests, which were resolved with `unifdef -DPALOW`. `pal` still defines
+    `PALOW`, so sources outside this repository that test it keep working.
+    The Pulse library keeps only what generated code and the Palow modules
+    use: `Pulse.Lib.C.Palow.*`, the `Pulse.Lib.C.UInt*` arithmetic helpers,
+    `Pulse.Lib.C.Casts.Bool` and `Pulse.Lib.C.Inhabited`; `Ref`, `Array`,
+    `CoreRef`, `FuncPtr`, `MaybeUninit` and the rest of the old vocabulary are
+    deleted, as are `doc/structs.md` and `doc/arrays.md`, which described it.
+
+24. **`__builtin_bswap64`, and calls through a refined field.** The builtin
+    had a primitive (`prims.rs`) but no Palow translation, and a
+    specification could not name it at all. Each primitive now records the
+    builtin it stands for and the Pulse definition behind it; the spec parser
+    maps the builtin's name to the primitive, and the emitter writes a call as
+    an application of `Pulse.Lib.C.UInt64.bswap64` in bodies, contracts and
+    ghost code alike. Unfolding the definition does not help Z3, so the
+    library proves `bswap64_involutive` (an `SMTPat`) by restating it over
+    `FStar.UInt.uint_t 64` and handing that to the bit-vector tactic.
+    `test/bswap64` uses it in code, contracts and assertions.
+
+    A field-level `_refine((_slprop) ...)` on a function-pointer field was
+    already stated in the contract of every parameter that is, or points at,
+    the struct -- and recorded in a set that nothing read. So a body could not
+    call through `p->m` even though the contract handed it the `is_valid`.
+    That set now reaches the body, and such a call goes through `call_div` on
+    a load of the field, as for a table returned by a call. The witness guess
+    for a call through a field also counts the deep half of a struct with
+    owned pointer fields, which a known target's wrapper has as a component of
+    its own. `test/fnptr_spec`'s `ops_mixed` now names
+    `Pulse.Lib.C.Palow.FnPtr`, and gained `call_via`, `make_ops` and
+    `call_via_made` to exercise both ends.
+
+25. **`_plain` on a value.** `_plain` was only read on pointers. On a scalar
+    it was worse than ignored: `int_module` looked through typedefs but not
+    annotations, so a contract compared `UInt64.v ret` with a bare
+    `var_x`. It now `peel`s. On a struct passed by value, `_plain` now
+    says what it says on a pointer -- the function takes the bare value --
+    so the contract drops the struct's `_own`, its struct- and typedef-level
+    `_refine`s and its fields' `_refine`s, keeping only refinements written
+    on the parameter itself, above the `_plain`. A pure field refinement is
+    still part of the record type (`fld_f: v:t{p v}`), so the value
+    satisfies it regardless; what goes away is the contract-level clause,
+    which matters for slprop refinements such as `is_valid`.
+
+    Writing the test for that found that an slprop field refinement on a
+    struct passed by value was required but never ensured, so a callee that
+    did not use it was left holding it. Like a refinement on a scalar, it is
+    now stated at both ends unless the parameter is `_consumes`.
+    `test/plain_value` and `test/fnptr_spec`'s `ignore_ops`/`pass_ops`
+    cover both.
+
+26. **Conditional expressions (#350).** `c ? a : b` in a body was not
+    translated at all. When neither arm needs a statement it is F*'s
+    `if c then a else b`. When one does -- a read, a call -- each arm's
+    statements go inside its own branch of a Pulse `let t : T = if (c) {...}
+    else {...}`, so the arm not taken is not evaluated: `n > 0 ? a[n - 1] : 0`
+    must not read when `n` is zero. An arm may not change which slots are
+    initialised or which blocks are live, since the other arm would then leave
+    a different state behind.
+
+    `&&` and `||` had the same problem in a milder form: the right side was
+    evaluated unconditionally, so `n > 0 && a[n - 1] == 0` failed to verify.
+    A right side that needs statements now goes in its own arm the same way.
+
+    An arm whose only statements are loads of whole objects stays eager: a
+    load needs only ownership the frame already has, and putting it in a
+    Pulse `if` makes every later value a `match` on the condition. The
+    `hit || scrut == K` a `switch` lowers to is the case that showed it.
+    Inside `inline` (loop guards, specifications) every arm stays a value.
+
+    elab used to lower every `x = c ? a : b` to an `if` with a store in each
+    arm. For a number that is worse than the value: Pulse joins the two
+    stores, and when one arm's value comes from a call it cannot (the join is
+    a `match` on the condition, with the call's result under an
+    existential). The emitter now keeps the lowering for non-numeric targets
+    only -- a pointer, whose target it tracks, above all -- and a number is
+    bound once and stored once. `return c ? a : b` is still lowered, since
+    a return has no join. `test/cond_expr` covers all of these.
+
+27. **Dereferencing a `_nullable` parameter.** Palow kept a
+    nullable parameter out of the body's grants entirely, so every read
+    through one was refused, even under `if (p)`. A null test on such a
+    parameter now opens the guard on the side where the pointer is not null:
+    the arm starts with `elim_unless_null var_p (T_pts_to var_p perm _)`,
+    the parameter counts as granted inside it, and an arm that falls through
+    ends with `intro_unless_null`, so both arms of the `if` leave the same
+    `unless_null` behind. This covers statement `if`s, early returns,
+    `?:`, and the right side of `p && ...` and `p == NULL || ...`.
+
+    At a `return` no explicit intro is emitted: `intro_unless_null` is a
+    `pulse_intro`, so Pulse restores the guard while checking the
+    postcondition. An explicit step there would follow whatever `if` ends
+    the function, and Pulse would then have to join that `if` on its own --
+    which fails as soon as one arm's value comes from a call (`if (*p < 100)
+    bump(p);`), the same join problem as in entry 26.
+
+    The payload is the points-to with its value left as `_`; a parameter
+    whose guard also encloses a `_refine` is not opened, since the payload
+    would have to restate it. Contracts still cannot mention `*p`.
+    `test/nullable_deref` covers these.
+
+28. **`~` on a signed operand** (#349). The body translation of `~` only
+    knew unsigned widths; a signed operand (including the `int` that
+    `~FLAG_X` promotes to) now uses `FStar.Int{w}.lognot`. As with the
+    unsigned form, SMT knows nothing about the resulting value, so a
+    contract about it would need a lemma. `test/bitnot_signed` covers
+    `x &= ~FLAG` and `x = ~x`.
+
+29. **Arbitrary variadic arguments** (#354). A variadic argument was
+    only accepted if it was inert (a local, a constant). Since Palow drops
+    variadic arguments at the call, the frontend now hoists each one that
+    is evaluated unconditionally into `let __pal_vararg_N = arg;` ahead of
+    the statement: a field read, arithmetic, or a call, with its proof
+    obligations (overflow, liveness, preconditions) checked as usual. A
+    comma operator hoists only its left side; its right side is a
+    statement of its own. Arguments that are evaluated conditionally (in a
+    `?:` arm or behind `&&`) are still refused. `test/variadic_args` covers
+    these.
+
+30. **Loops in functions with `_out` parameters** (#347). `loop_` used to
+    refuse any loop in such a function. A single, non-struct `_out` is now
+    handled like an owned pointee: once written, `*p` may be read, and a
+    loop that touches it restates it in its invariant with a binder of its
+    own. A loop that leaves it alone needs nothing, written or not, since
+    Pulse's frame carries it. A loop that touches one not yet written is
+    refused, since the invariant would have to say that the storage may or
+    may not hold a value. Struct and array `_out` parameters are still
+    refused at a loop. `test/out_loop` covers these.
+
+31. **Field addresses as call arguments** (#348). `f(&s->a)` passed the
+    field's address without opening `*s`, so the callee's points-to was
+    never found unless the parameter was `_out`, and two `_out` fields of
+    one object failed: the first focus leaves a hole, and the second focus
+    needs the whole object. `field_args` now groups a call's field-address
+    arguments by the object they belong to. A lone field is focused for the
+    statement. Two or more are handled by `scatter` on the object, a
+    `forget` on each `_out` field, the call, and then `gather`. A
+    local that holds no value yet keeps the field-by-field fill it already
+    had. `test/out_field` covers `_out` and borrowing parameters, a nested
+    struct, and a local.
+
+32. **Packed structs** (#353). A field's points-to states that the field is
+    aligned, which a packed struct's alignment of 1 cannot supply, so the
+    generated `field_aligned` lemma failed. When every field of a struct
+    sits at an offset that its own alignment divides, and the size is a
+    multiple of the largest of those alignments, the struct is now given that
+    alignment in `struct_<T>_alignof`. This asks more of whoever claims the
+    storage than C does, and never less, so it is sound. C's value is still
+    what `_Alignof` evaluates to (`c_alignof`). The same rule covers a
+    struct that only contains a packed one. Any other packed layout is
+    skipped with the misaligned field named, since Palow has no unaligned
+    accesses. `test/packed_struct` covers these.

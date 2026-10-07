@@ -12,7 +12,6 @@ typedef struct R {
 
 /* In Palow an allocation may fail, so a constructor's return type says so and
    what the `_ensures` promises holds only when there is an object. */
-#ifdef PALOW
 _allocated _nullable typedef R *R_optr;
 
 R_optr whole_struct_assign(void)
@@ -51,37 +50,6 @@ R_optr field_by_field_cast(void)
     t->y = 7;
     return t;
 }
-#else
-_allocated typedef R *R_ptr;
-
-R_ptr whole_struct_assign(void)
-    _ensures(return->x == 6 && return->y == 7)
-{
-    R *t = malloc(sizeof(*t));
-    *t = (R) { .x = 6, .y = 7 };
-    return t;
-}
-
-R_ptr field_by_field(void)
-    _ensures(return->x == 6 && return->y == 7)
-{
-    R *t = malloc(sizeof(*t));
-    _ghost_stmt($unfold-uninit(R) $(t));
-    t->x = 6;
-    t->y = 7;
-    return t;
-}
-
-R_ptr field_by_field_cast(void)
-    _ensures(return->x == 6 && return->y == 7)
-{
-    R *t = (R *) malloc(sizeof(*t));
-    _ghost_stmt($unfold-uninit(R) $(t));
-    t->x = 6;
-    t->y = 7;
-    return t;
-}
-#endif
 
 void scalar_alloc(void) {
     int *p = malloc(sizeof(*p));

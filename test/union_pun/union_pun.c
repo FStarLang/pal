@@ -27,11 +27,7 @@
  *
  * The union is declared at file scope because a type declared inside a
  * function body is not translated; that is the only difference from the C in
- * `palow.md`.
- *
- * `palow-only`, because the whole point is a program the old model has no way
- * to verify. The C is still compiled, which is what keeps the annotations
- * honest as no-ops. */
+ * `palow.md`. */
 
 union pun_u {
   uint32_t x;

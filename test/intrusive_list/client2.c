@@ -38,9 +38,7 @@ _plain struct item2 *items2_find(_plain struct list_node *head, int priority)
 {
     _ghost_stmt(IntrusiveListIndexed.head_open IntrusiveListExample2.item_ipl
         $(head) (reveal $(entries)));
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
     _plain struct list_node *node = head->next;
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
     _ghost_stmt(IntrusiveListItems.find_start IntrusiveListExample2.item_ipl
         (IntrusiveListExample2.matches_priority $(priority)) $(head) $(node) (reveal $(entries)));
     while (node != head)
@@ -52,12 +50,10 @@ _plain struct item2 *items2_find(_plain struct list_node *head, int priority)
             (IntrusiveListExample2.matches_priority $(priority))
             $(head) $(node) (reveal $(entries)));
         _ghost_stmt(with description. assert IntrusiveListExample2.item_ipl $(node) description);
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
         /* The successor is read while the node is still a node: opening the
            payload joins the link back into the item it belongs to, and there
            is no reading `node->next` once it is a field of that. */
         _plain struct list_node *next = node->next;
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
         _plain struct item2 *item = containing_record(node, struct item2, link);
         _ghost_stmt(IntrusiveListExample2.value_open $(node) $(item));
         int current_priority = item->priority;
@@ -138,9 +134,7 @@ void items2_insert_sorted(_plain struct list_node *head, _plain struct item2 *it
     _ghost_stmt(IntrusiveListExample2.prepare_item $(item) $(entry) (reveal $(description)));
     _ghost_stmt(IntrusiveListIndexed.head_open IntrusiveListExample2.item_ipl
         $(head) (reveal $(entries)));
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
     _plain struct list_node *node = head->next;
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
     _ghost_stmt(IntrusiveListInsert.start IntrusiveListExample2.item_ipl
         IntrusiveListExample2.priority_le $(head) $(node) $(entry)
         (reveal $(description)) (reveal $(entries)));
@@ -175,9 +169,7 @@ void items2_insert_sorted(_plain struct list_node *head, _plain struct item2 *it
             _ghost_stmt(Pulse.Lib.GhostReference.write stopped (hide (0 = 0)));
             break;
         } else {
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
             _plain struct list_node *next = node->next;
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
             _ghost_stmt(IntrusiveListInsert.mid_repack IntrusiveListExample2.item_ipl
                 IntrusiveListExample2.priority_le $(head) $(node) $(entry)
                 (reveal $(description)) (reveal $(entries)));
@@ -206,9 +198,7 @@ void items2_insert_sorted(_plain struct list_node *head, _plain struct item2 *it
         _ghost_stmt(IntrusiveListInsert.head_open IntrusiveListExample2.item_ipl
             IntrusiveListExample2.priority_le $(head) $(node) $(entry)
             (reveal $(description)) (reveal $(entries)));
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
         _plain struct list_node *first = head->next;
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
         _ghost_stmt(IntrusiveListInsert.head_close IntrusiveListExample2.item_ipl
             IntrusiveListExample2.priority_le $(head) $(node) $(entry)
             (reveal $(description)) (reveal $(entries)));
@@ -224,9 +214,7 @@ void items2_insert_sorted(_plain struct list_node *head, _plain struct item2 *it
             _ghost_stmt(IntrusiveListInsert.position_open IntrusiveListExample2.item_ipl
                 IntrusiveListExample2.priority_le $(head) $(node) $(entry)
                 (reveal $(description)) (reveal $(entries)));
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
             _plain struct list_node *previous = node->prev;
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
             _ghost_stmt(IntrusiveListInsert.position_close IntrusiveListExample2.item_ipl
                 IntrusiveListExample2.priority_le $(head) $(node) $(previous) $(entry)
                 (reveal $(description)) (reveal $(entries)));

@@ -19,10 +19,7 @@
  * spends exactly that -- so `free(p)` on a pool chunk is not merely bad
  * practice here, it is unprovable. That is the reason `freeable` does not
  * split, and it is why a pool that wants its chunks back publishes its own
- * release function (`pool_return` below) rather than borrowing `free`.
- *
- * `palow-only`: the old model has no vocabulary for any of this. The C is
- * still compiled, which is what keeps the annotations honest as no-ops. */
+ * release function (`pool_return` below) rather than borrowing `free`. */
 
 _include_pulse(Pool_shim,
   include Pulse.Lib.C.Palow.Ptr

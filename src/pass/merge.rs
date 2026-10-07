@@ -184,7 +184,7 @@ fn rename_inline_pulse_in_place(code: &mut InlinePulseCode, renames: &HashMap<Rc
             | InlinePulseToken::Declare { ty, .. } => {
                 rename_type_in_place(Rc::make_mut(ty), renames);
             }
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::WitnessAntiquot(_) => {}
         }
     }
 }
@@ -228,7 +228,7 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
     }
 }
 
-pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit, palow: bool) {
+pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // === Phase 1: Deduplicate identical declarations from shared headers ===
     // For each declaration kind+name, keep the most complete content at the
     // earliest (first) position. This preserves the source ordering so that later
@@ -570,7 +570,7 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit, palow: bool) {
     declare_implicit_structs(tu);
 
     // === Phase 3: Order type definitions before their dependents ===
-    reorder_type_deps(tu, palow);
+    reorder_type_deps(tu);
 }
 
 /// A key uniquely identifying a type-defining declaration. The first component
@@ -737,7 +737,7 @@ fn collect_refs_inline(code: &InlinePulseCode, out: &mut Vec<TypeKey>) {
             | InlinePulseToken::FieldAntiquot { ty, .. }
             | InlinePulseToken::AuxFnAntiquot { ty, .. }
             | InlinePulseToken::Declare { ty, .. } => collect_type_refs(ty, out),
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::WitnessAntiquot(_) => {}
         }
     }
 }
@@ -834,7 +834,7 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
 /// position of an earlier forward declaration (e.g. introduced by a forward
 /// `typedef`), which would otherwise place a struct before an anonymous struct
 /// lifted out of one of its fields.
-fn reorder_type_deps(tu: &mut TranslationUnit, palow: bool) {
+fn reorder_type_deps(tu: &mut TranslationUnit) {
     let n = tu.decls.len();
     if n == 0 {
         return;
@@ -858,7 +858,7 @@ fn reorder_type_deps(tu: &mut TranslationUnit, palow: bool) {
     let mut prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, d) in tu.decls.iter().enumerate() {
         let mut refs: Vec<TypeKey> = Vec::new();
-        collect_decl_type_refs(d, palow, &mut refs);
+        collect_decl_type_refs(d, true, &mut refs);
         for r in refs {
             if let Some(&j) = node_of_key.get(&r) {
                 if j != i {
@@ -982,20 +982,19 @@ fn declare_implicit_structs(tu: &mut TranslationUnit) {
 /// apart. They ask the same question -- which types does this declaration name
 /// -- and a tag missed here becomes a dangling module reference in one pass or
 /// a bad emission order in the other.
-fn collect_decl_type_refs(d: &Decl, palow: bool, refs: &mut Vec<TypeKey>) {
+fn collect_decl_type_refs(d: &Decl, skip_plain_ptrs: bool, refs: &mut Vec<TypeKey>) {
     match &d.val {
         DeclT::Typedef(t) => collect_type_refs(&t.body, refs),
         DeclT::StructDefn(s) => {
             collect_type_refs(&s.refines, refs);
             for f in &s.fields {
                 let fty = f.val.logical_type(&f.loc);
-                // In Palow a pointer field's F* type is `ptr`, so the only
-                // reason a struct has to follow the one it points at is the
-                // ownership predicate -- and a `_plain` pointer has none.
-                // Dropping the edge is what lets a pair of mutually
-                // referential structs be emitted at all, which is the job
-                // `_core_ref` used to do.
-                if palow && is_plain_ptr(&fty) {
+                // A pointer field's F* type is `ptr`, so the only reason a
+                // struct has to follow the one it points at is the ownership
+                // predicate -- and a `_plain` pointer has none. Dropping the
+                // edge is what lets a pair of mutually referential structs be
+                // emitted at all.
+                if skip_plain_ptrs && is_plain_ptr(&fty) {
                     continue;
                 }
                 collect_type_refs(&fty, refs);

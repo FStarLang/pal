@@ -526,18 +526,6 @@ struct Typedefs<'a> {
     /// by-value struct -- which has no ownership at all, and for which the
     /// refinement is the only thing its contract could say.
     refined_structs: HashMap<String, Rc<Type>>,
-    /// Whether hand-written Pulse from `_ghost_stmt`, `_inline_pulse` and
-    /// `_include_pulse` is spliced into the output. A test whose fragments are
-    /// written against the old memory model marks itself beside its source,
-    /// and they are dropped instead -- the same weakening the emitter already
-    /// reports for anything it cannot translate.
-    splice_inline: bool,
-    /// Whether that marker was `palow-model-specific` rather than
-    /// `palow-old-annotations`: the fragment names something this model does
-    /// not have *by design*, so the resulting admit is a floor and not a
-    /// backlog item. The two say so differently in the generated file, because
-    /// otherwise the census counts them as one thing.
-    model_specific: bool,
     /// `_pure` functions that were successfully emitted as F* definitions, and
     /// so may appear in a specification and in a body without being sequenced.
     pure_fns: HashSet<String>,
@@ -573,17 +561,7 @@ impl<'a> Typedefs<'a> {
         self.aggregate_layouts.get(key).copied()
     }
 
-    /// Why a fragment was not spliced, phrased so the two markers stay
-    /// distinguishable in a census of the generated files.
-    fn no_splice(&self) -> String {
-        if self.model_specific {
-            "inline Pulse for a model this one deliberately does not have".to_string()
-        } else {
-            "inline Pulse written for the old memory model".to_string()
-        }
-    }
-
-    fn new(tu: &'a TranslationUnit, splice_inline: bool, model_specific: bool) -> Self {
+    fn new(tu: &'a TranslationUnit) -> Self {
         let mut m = HashMap::new();
         for decl in &tu.decls {
             if let DeclT::Typedef(td) = &decl.val {
@@ -592,8 +570,6 @@ impl<'a> Typedefs<'a> {
         }
         Typedefs {
             typedefs: m,
-            splice_inline,
-            model_specific,
             structs: HashMap::new(),
             unions: HashMap::new(),
             aggregate_layouts: HashMap::new(),
@@ -819,7 +795,7 @@ fn origin_of(decl: &Decl) -> Option<Origin> {
     Some(Origin {
         file: loc.file_name.clone(),
         range: loc.range,
-        name: crate::pass::emit::decl_name(decl),
+        name: decl_name(decl),
     })
 }
 
@@ -851,7 +827,8 @@ struct Chunk {
 /// and `_sizeof` definitions. `None` for types the model does not cover yet.
 /// The F* module whose `v` takes a machine integer to a mathematical one.
 fn int_module(tds: &Typedefs, ty: &Type) -> Option<String> {
-    match &tds.resolve(ty).val {
+    // `peel`: a `_plain` or refined scalar is still that scalar.
+    match &peel(tds, ty).val {
         TypeT::Int { signed, width } => {
             Some(format!("{}Int{}", if *signed { "" } else { "U" }, width))
         }
@@ -1090,6 +1067,19 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     }
 }
 
+/// The alignment C reports, which for a packed struct is less than the one
+/// Palow proves with: see `collect_structs`.
+fn c_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
+    match &tds.resolve(ty).val {
+        TypeT::FixedArray(t, _) => c_alignof(tds, t),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
+            .aggregate_layout(&format!("struct {}", n.val))
+            .map(|l| l.1)
+            .or_else(|| palow_alignof(tds, ty)),
+        _ => palow_alignof(tds, ty),
+    }
+}
+
 /// Whether a parameter type carries a `_refine`, anywhere under the wrappers
 /// or through the pointer.
 /// The propositions a `_refine` attaches to a parameter's pointee, and whether
@@ -1171,6 +1161,33 @@ fn refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
             Ok((v, u, b))
         }
         TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => refinements(tds, t),
+        _ => Ok((Vec::new(), Vec::new(), Vec::new())),
+    }
+}
+
+/// The refinements written on a parameter itself, above any `_plain`. A
+/// `_plain` value -- a scalar or a struct passed by value -- says the function
+/// takes the bare value, so what its type would contribute (a typedef's or a
+/// struct's `_refine`, a field's) is not part of the contract.
+fn refinements_above_plain(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
+    match &tds.resolve(ty).val {
+        TypeT::Plain(_) => Ok((Vec::new(), Vec::new(), Vec::new())),
+        TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
+            let (mut v, u, b) = refinements_above_plain(tds, t)?;
+            v.push(p.clone());
+            Ok((v, u, b))
+        }
+        TypeT::RefineUninit(t, p) => {
+            let (v, mut u, b) = refinements_above_plain(tds, t)?;
+            u.push(p.clone());
+            Ok((v, u, b))
+        }
+        TypeT::RefineValue(t, n, vty, p) => {
+            let (v, u, mut b) = refinements_above_plain(tds, t)?;
+            b.push((n.clone(), vty.clone(), p.clone()));
+            Ok((v, u, b))
+        }
+        TypeT::Nullable(t) => refinements_above_plain(tds, t),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
@@ -1494,6 +1511,21 @@ fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
 /// than a single match. It deliberately does not look through `_plain`: that
 /// annotation already says the function owns nothing, so there is nothing for
 /// a nullness test to guard.
+/// Whether the lines an arm of `?:`, `&&` or `||` needs are only loads of
+/// whole objects. Those need nothing but the ownership the frame already has
+/// and change nothing, so running them on both paths is harmless -- and
+/// keeping them out of a Pulse `if` keeps its join from turning every value
+/// after it into a `match` on the condition.
+fn only_loads(lines: &[String]) -> bool {
+    lines.iter().all(|l| {
+        l.strip_prefix("let ")
+            .and_then(|r| r.strip_suffix(';'))
+            .and_then(|r| r.split_once(" = "))
+            .and_then(|(_, d)| d.split_whitespace().next())
+            .is_some_and(|h| h.ends_with("_read"))
+    })
+}
+
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Nullable(_) => true,
@@ -1532,8 +1564,16 @@ struct FnSurface {
     /// A function body never has to restate this -- Pulse carries it -- except
     /// at a loop, whose invariant Pulse cannot invent.
     owned: Vec<OwnedParam>,
+    /// The single, non-struct `_out` parameters. Once written, one is owned
+    /// like any other pointee, and a loop that touches it has to restate it.
+    outs: Vec<OwnedParam>,
     /// Parameters whose ownership sits behind a nullness guard.
     guarded: HashSet<String>,
+    /// For each guarded parameter the body may open: the slprop the guard
+    /// encloses, with the value left as `_` for Pulse to find. A parameter
+    /// whose guard also encloses a refinement is not here -- the payload would
+    /// have to restate it -- so a body still cannot dereference one.
+    null_payload: HashMap<String, String>,
     /// Parameters whose pointee the emitted `requires` really owns. A `_plain`
     /// pointer owns nothing by itself: what ownership it has comes from a
     /// `_refine_value`, and the all-or-nothing contract drop takes that away
@@ -1569,6 +1609,10 @@ struct FnSurface {
     /// what it does -- so this is exactly the set of pointers the body may call
     /// through without knowing which function it is calling.
     valid_fps: HashSet<String>,
+    /// Function-pointer fields, as (parameter, field), whose `is_valid` the
+    /// contract hands in through a field-level `_refine` on the struct the
+    /// parameter is or points at.
+    valid_fp_fields: HashSet<(String, String)>,
     /// Parameters the caller hands over *with* the right to free them: an
     /// `_allocated` pointer taken `_consumes`. The block is the callee's to
     /// return, and a `free` of one is as ordinary as a `free` of a block this
@@ -2251,15 +2295,17 @@ impl<'a> Spec<'a> {
     /// is the parameter's own address, which a contract can only name for
     /// something it was handed directly.
     fn inline_pulse(&self, code: &InlinePulseCode, w: When) -> Result<String, String> {
-        if !self.tds.splice_inline {
-            return Err(self.tds.no_splice());
-        }
         let mut out = String::new();
         for tok in &code.tokens {
             match tok {
                 InlinePulseToken::Verbatim(ct) => {
                     out.push_str(ct.before);
                     out.push_str(&ct.text.val);
+                }
+                InlinePulseToken::WitnessAntiquot(_) => {
+                    return Err("`$witness` names the ghost arguments of a call, so it \
+                                belongs to a ghost statement in the body, not to a contract"
+                        .to_string());
                 }
                 InlinePulseToken::RValueAntiquot { before, expr } => {
                     let v = self.value(expr, w)?;
@@ -2349,6 +2395,42 @@ impl<'a> Spec<'a> {
             ));
         }
         Ok((self.value(base, w)?, i))
+    }
+
+    /// Pointer arithmetic in a specification: `p + i` and `p - i`, in bytes.
+    /// Subtraction is spelled with the total `-?`, which coincides with the
+    /// body's `-!` wherever that is defined: a contract clause is typed on its
+    /// own, with nothing in scope to discharge `-!`'s side condition.
+    fn ptr_arith_value(
+        &self,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        lt: &Type,
+        w: When,
+    ) -> Result<Option<String>, String> {
+        if !matches!(op, BinOp::Add | BinOp::Sub) {
+            return Ok(None);
+        }
+        let rt = self.ty_of(r)?;
+        let (p, i, n, sym) = match (
+            op,
+            ptr_elem_size(self.tds, lt),
+            ptr_elem_size(self.tds, &rt),
+        ) {
+            (BinOp::Add, Some(n), None) => (l, r, n, "+!"),
+            (BinOp::Add, None, Some(n)) => (r, l, n, "+!"),
+            (BinOp::Sub, Some(n), None) => (l, r, n, "-?"),
+            _ => return Ok(None),
+        };
+        let off = if let Some(k) = const_index(&strip_vattr(i).val) {
+            format!("{}sz", k * n)
+        } else if n == 1 {
+            self.value(i, w)?
+        } else {
+            return Err("pointer arithmetic by a computed index in a contract".to_string());
+        };
+        Ok(Some(format!("({} {} {})", self.value(p, w)?, sym, off)))
     }
 
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
@@ -2638,6 +2720,9 @@ impl<'a> Spec<'a> {
                     ));
                 }
                 let ty = self.ty_of(l)?;
+                if let Some(t) = self.ptr_arith_value(*op, l, r, &ty, w)? {
+                    return Ok(t);
+                }
                 if matches!(self.tds.resolve(&ty).val, TypeT::SpecInt | TypeT::SpecNat)
                     && let Some(o) = match op {
                         BinOp::Eq => Some("="),
@@ -2711,12 +2796,7 @@ impl<'a> Spec<'a> {
             // slprop is ownership, not a proposition, and it goes into the
             // `requires` and `ensures` clauses directly rather than under a
             // `pure`.
-            ExprT::InlinePulse(code, _) => {
-                if !self.tds.splice_inline {
-                    return Err(self.tds.no_splice());
-                }
-                self.inline_pulse(code, w)
-            }
+            ExprT::InlinePulse(code, _) => self.inline_pulse(code, w),
             // A `_letimpure` accessor is not a function that can be called in
             // a specification -- it is impure, which is the whole reason it
             // exists. What it denotes, though, is a ghost value the contract
@@ -2783,6 +2863,15 @@ impl<'a> Spec<'a> {
                     },
                 }
             }
+            // A PAL primitive is a total F* function of machine values, so in
+            // a contract it is applied exactly as in a body.
+            ExprT::FnCall(name, args) if crate::prims::fstar_name(&name.val).is_some() => {
+                let mut out = crate::prims::fstar_name(&name.val).unwrap().to_string();
+                for a in args.iter() {
+                    out += &format!(" {}", self.value(a, w)?);
+                }
+                Ok(format!("({})", out))
+            }
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
                 let mut out = format!("func_{}", name.val);
                 for a in args.iter() {
@@ -2803,7 +2892,7 @@ impl<'a> Spec<'a> {
                 Ok(format!("{}sz", n))
             }
             ExprT::AlignOf(t) => {
-                let n = palow_alignof(self.tds, t)
+                let n = c_alignof(self.tds, t)
                     .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
                 Ok(format!("{}sz", n))
             }
@@ -3164,6 +3253,7 @@ fn emit_fn(
     let mut fresh: Vec<(String, String, String)> = Vec::new();
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut owned: Vec<OwnedParam> = Vec::new();
+    let mut outs: Vec<OwnedParam> = Vec::new();
     let mut arrays: HashSet<String> = HashSet::new();
     let mut olens: HashMap<String, String> = HashMap::new();
     let mut owns: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
@@ -3258,6 +3348,7 @@ fn emit_fn(
     let mut refine_err: Option<String> = None;
     // Parameters whose ownership the contract puts behind `unless_null`.
     let mut guarded: HashSet<String> = HashSet::new();
+    let mut null_payload: HashMap<String, String> = HashMap::new();
 
     for (i, arg) in decl.args.iter().enumerate() {
         let pname = match &arg.name {
@@ -3294,6 +3385,19 @@ fn emit_fn(
         // code, and neither has a pointee to hang from.
         if matches!(arg.mode, ParamMode::Consumed) {
             consumed.insert(pname.trim_start_matches("var_").to_string());
+        }
+        // A `_plain` value is taken bare: none of the invariants its type
+        // carries -- the struct's, its fields', the ownership its pointer
+        // fields reach -- are part of this contract.
+        let plain_value =
+            pointee(tds, &arg.ty).is_none() && (is_plain(tds, &arg.ty) || is_plain_chain(&arg.ty));
+        if plain_value {
+            if let Ok((ps, _, bs)) = refinements_above_plain(tds, &arg.ty) {
+                let base = pname.trim_start_matches("var_").to_string();
+                refines.extend(ps.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
+                collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
+            }
+            continue;
         }
         if pointee(tds, &arg.ty).is_none()
             && let Ok((ps, _, bs)) = refinements(tds, &arg.ty)
@@ -3487,6 +3591,13 @@ fn emit_fn(
             .flatten();
         let oname = format!("own_{}", base);
 
+        if null_guard && arg.mode != ParamMode::Out {
+            let perm = match arg.mode {
+                ParamMode::Const => format!("perm_{}", base),
+                _ => "1.0R".to_string(),
+            };
+            null_payload.insert(base.clone(), pts_to(&perm, "_"));
+        }
         let pts_to: Box<dyn Fn(&str, &str) -> String> = if null_guard {
             let p = pname.clone();
             Box::new(move |perm: &str, v: &str| format!("unless_null {} ({})", p, pts_to(perm, v)))
@@ -3515,6 +3626,7 @@ fn emit_fn(
                             continue;
                         }
                         null_wrap.insert(base.clone(), pname.clone());
+                        null_payload.remove(&base);
                         // A parameter with no pointee -- an `_arrayptr`, say --
                         // had its refinements collected above already.
                         if !refines
@@ -3568,6 +3680,14 @@ fn emit_fn(
             // uninitialised points-to.
             ParamMode::Out if extent(tds, &arg.ty) == Some(Extent::One) => {
                 req.push(format!("{}_pts_to_uninit {}", pn, pname));
+                if !storable_struct(tds, pt) {
+                    outs.push(OwnedParam {
+                        base: base.clone(),
+                        vty: vty.clone(),
+                        pre: pts_to("1.0R", ""),
+                        entry: String::new(),
+                    });
+                }
                 // The mode is a statement about the *pre*condition: what
                 // arrives is storage. What leaves is the initialised object,
                 // unless the author wrote an `_ensures` that states ownership
@@ -4183,7 +4303,8 @@ fn emit_fn(
                       fname: &str,
                       fty: &Rc<Type>,
                       via: bool,
-                      w: When|
+                      w: When,
+                      both: bool|
      -> Option<(String, Option<String>, Vec<(String, String, Rc<Type>)>)> {
         let this = if via {
             let (pre, post) = spec.pointees.get(base)?;
@@ -4192,7 +4313,7 @@ fn emit_fn(
                 _ => pre.clone()?,
             }
         } else {
-            if !stated(base, w) {
+            if !both && !stated(base, w) {
                 return None;
             }
             format!("var_{}", base)
@@ -4271,7 +4392,7 @@ fn emit_fn(
             if slprop_refine(tds, p).is_some() {
                 continue;
             }
-            if let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w) {
+            if let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w, false) {
                 out.push(refine_clause(
                     base,
                     Some((&this, own.as_deref(), false)),
@@ -4366,7 +4487,11 @@ fn emit_fn(
             let Some(code) = slprop_refine(tds, p) else {
                 continue;
             };
-            let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w) else {
+            // As for a refinement on the parameter itself: ownership in a
+            // field of a struct passed by value is handed back, unless the
+            // struct is consumed.
+            let both = !*via && spec.pointees.get(base).is_none() && !consumed.contains(base);
+            let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w, both) else {
                 continue;
             };
             out.push(with_this(
@@ -5077,7 +5202,9 @@ fn emit_fn(
         pieces,
         piece_types,
         owned,
+        outs,
         guarded,
+        null_payload,
         granted,
         spliced_own: contract_ok
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
@@ -5090,6 +5217,11 @@ fn emit_fn(
         // called through.
         valid_fps: if contract_ok {
             valid_fps.take()
+        } else {
+            HashSet::new()
+        },
+        valid_fp_fields: if contract_ok {
+            valid_fp_fields.take()
         } else {
             HashSet::new()
         },
@@ -5503,6 +5635,40 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 shape,
                 inv,
             });
+        }
+        // A packed struct -- or one with a packed struct inside -- is less
+        // aligned than its fields, and a field's points-to states that the
+        // field is aligned. Where every field still sits at an offset its own
+        // alignment divides, and the size keeps an array's elements just as
+        // aligned, the struct is given its fields' alignment instead: that
+        // asks more of whoever claims the storage than C does, never less.
+        // C's own value is still what `_Alignof` says. A field that is really
+        // misaligned would need unaligned accesses, which Palow has none of.
+        let mut align = align;
+        if ok {
+            let natural = fields
+                .iter()
+                .filter_map(|f| palow_alignof(tds, &f.ty))
+                .max()
+                .unwrap_or(1);
+            if natural > align {
+                match fields
+                    .iter()
+                    .find(|f| palow_alignof(tds, &f.ty).is_some_and(|a| f.offset % a != 0))
+                {
+                    Some(f) => {
+                        ok = false;
+                        bad = format!("field `{}` is not aligned, as the struct is packed", f.name);
+                    }
+                    None if size % natural != 0 => {
+                        ok = false;
+                        bad =
+                            "its size is not a multiple of its fields' alignment, as it is packed"
+                                .to_string();
+                    }
+                    None => align = natural,
+                }
+            }
         }
         if !ok {
             code.push(Chunk {
@@ -8026,6 +8192,11 @@ fn const_array(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<(String, u64, Stri
 }
 
 fn array_fill_shape(tds: &Typedefs, elem: &Type, len: u64) -> Option<(String, String, u64, u64)> {
+    // A fill is stated over the element's `_repr`, which a struct with an
+    // array field does not have; such an array is never filled this way.
+    if !has_repr(tds, elem) {
+        return None;
+    }
     Some((
         palow_name(tds, elem)?,
         fstar_type(tds, elem)?,
@@ -8374,8 +8545,27 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
             // abstract rather than refused. A reader learns that every read
             // yields *the same* value, which is the whole content of `const`
             // at an unknown initialiser.
+            // `_pulse_opaque_to_smt` means the same as for an array: the value
+            // is there for a proof to reveal, not for the solver to unfold
+            // unasked. It matters for a table of function pointers above all.
+            // Each entry's `pre_of`/`post_of` unfolds to the callee's
+            // contract, so a transparent table puts every one of those
+            // ownership predicates in front of the solver in every module
+            // that can see the table -- whether or not it ever reads it.
             match value {
-                Some((_, v)) => out += &format!("let var_{} : {} = {}\n", name, fty, v),
+                Some((_, v)) => {
+                    out += &format!(
+                        "{}let var_{} : {} = {}\n",
+                        if gv.opaque_to_smt {
+                            "[@@\"opaque_to_smt\"]\n"
+                        } else {
+                            ""
+                        },
+                        name,
+                        fty,
+                        v
+                    )
+                }
                 None => out += &format!("assume val var_{} : {}\n", name, fty),
             }
             // The permission is existentially quantified, so a client can read
@@ -8655,7 +8845,7 @@ fn ghost_stmt_names(body: &Stmts, out: &mut HashSet<String>) {
     fn go(body: &Stmts, out: &mut HashSet<String>) {
         for s in body.iter() {
             match &s.val {
-                StmtT::GhostStmt(c) if !ghost_replaced(c) => code(c, out),
+                StmtT::GhostStmt(c) if !ghost_interpreted(c) => code(c, out),
                 StmtT::If {
                     then_branch,
                     else_branch,
@@ -8989,12 +9179,23 @@ fn toposort(items: &[FnItem]) -> Result<Vec<usize>, Vec<(String, String)>> {
     }
 }
 
-pub fn emit_palow(
-    tu: &TranslationUnit,
-    splice_inline: bool,
-    model_specific: bool,
-) -> Vec<PalowModule> {
-    let mut tds = Typedefs::new(tu, splice_inline, model_specific);
+pub fn decl_name(decl: &Decl) -> String {
+    match &decl.val {
+        DeclT::FnDefn(fn_defn) => fn_defn.decl.name.val.to_string(),
+        DeclT::FnDecl(fn_decl) => fn_decl.name.val.to_string(),
+        DeclT::Typedef(type_defn) => type_defn.name.val.to_string(),
+        DeclT::StructDefn(struct_defn) => struct_defn.name.val.to_string(),
+        DeclT::StructDecl(name) => name.val.to_string(),
+        DeclT::UnionDefn(union_defn) => union_defn.name.val.to_string(),
+        DeclT::IncludeDecl(include_decl) => include_decl.module_name.to_string(),
+        DeclT::LetDecl(let_decl) => let_decl.name.val.to_string(),
+        DeclT::OpaqueTypeDecl(decl) => decl.name.val.to_string(),
+        DeclT::GlobalVar(gv) => gv.name.val.to_string(),
+    }
+}
+
+pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
+    let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
     for decl in &tu.decls {
         base.push_decl(decl);
@@ -9017,14 +9218,7 @@ pub fn emit_palow(
             continue;
         };
         let text = match include_pulse(&tds, &td.code) {
-            Ok(t) if splice_inline => {
-                format!("unfold\nlet ty_{} : Type = {}\n\n", td.name.val, t.trim())
-            }
-            Ok(_) => format!(
-                "(* `{}` is not an F* type: {} *)\n\n",
-                td.name.val,
-                tds.no_splice()
-            ),
+            Ok(t) => format!("unfold\nlet ty_{} : Type = {}\n\n", td.name.val, t.trim()),
             Err(why) => format!("(* `{}` is not an F* type: {} *)\n\n", td.name.val, why),
         };
         chunks.push(Chunk {
@@ -9032,9 +9226,6 @@ pub fn emit_palow(
             code: text,
             origin: origin_of(decl),
         });
-    }
-    if !splice_inline {
-        tds.opaque_types.clear();
     }
 
     // `_let` definitions first: they are the vocabulary the `_pure` functions
@@ -9093,9 +9284,6 @@ pub fn emit_palow(
         let DeclT::IncludeDecl(id) = &decl.val else {
             continue;
         };
-        if !splice_inline {
-            continue;
-        }
         let text = match include_pulse(&tds, &id.code) {
             Ok(t) => format!("{}\n\n", t.trim_end()),
             Err(why) => format!("(* `{}` is not translated: {} *)\n\n", id.module_name, why),
@@ -9116,7 +9304,7 @@ pub fn emit_palow(
         .decls
         .iter()
         .filter_map(|decl| match &decl.val {
-            DeclT::IncludeDecl(id) if splice_inline => include_pulse(&tds, &id.code).ok(),
+            DeclT::IncludeDecl(id) => include_pulse(&tds, &id.code).ok(),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -9553,8 +9741,8 @@ pub fn emit_palow(
 /// quantity, and the emitter writes `Nsz` from a couple of dozen places --
 /// sizes, alignments, offsets, element sizes, array lengths, pointer
 /// arithmetic. Rewriting the finished module text catches all of them at once
-/// and cannot miss a new one. `Pulse.Lib.C.Assumptions` assumes `fits_u64`
-/// with an SMTPat, so `SizeT.uint_to_t n` discharges its `fits` precondition
+/// and cannot miss a new one. `Pulse.Lib.C.Palow.CTypes.size_t_fits` assumes
+/// `fits` with an SMTPat, so `SizeT.uint_to_t n` discharges its `fits` precondition
 /// for any value C could have produced.
 fn widen_sizet_literals(code: &str) -> String {
     let b = code.as_bytes();
@@ -9731,6 +9919,12 @@ fn into_modules(chunks: Vec<Chunk>, ifaces: &HashMap<String, String>) -> Vec<Pal
     let mut deps: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut out: Vec<PalowModule> = Vec::new();
     for ch in chunks {
+        // A name the chunk defines itself is its own, even when an earlier
+        // module defines the same one: each function that shares a literal
+        // declares its own `acquire_literal_<n>`, and resolving those to the
+        // first module that happened to use the name would make every later
+        // one open it, and everything it opens.
+        let own: HashSet<String> = defined_names(&ch.code).into_iter().collect();
         let mut opens: BTreeSet<String> = BTreeSet::new();
         let mut word = String::new();
         for c in ch.code.chars().chain(std::iter::once(' ')) {
@@ -9739,7 +9933,7 @@ fn into_modules(chunks: Vec<Chunk>, ifaces: &HashMap<String, String>) -> Vec<Pal
                 continue;
             }
             if !word.is_empty() {
-                if let Some(m) = owner.get(&word) {
+                if let Some(m) = owner.get(&word).filter(|_| !own.contains(&word)) {
                     if *m != ch.module {
                         opens.insert(m.clone());
                     }
@@ -10039,6 +10233,8 @@ struct ArrayBlock {
 /// the enclosing scope in.
 struct BranchResult {
     lines: Vec<String>,
+    /// Whether the arm ends in a `return`, so that nothing may follow it.
+    returned: bool,
     /// Whether the arm ends in a call that does not return.
     diverged: bool,
     inits: Vec<bool>,
@@ -10176,6 +10372,10 @@ struct Body<'a> {
     /// Whether the expression being translated is a loop guard rather than a
     /// specification. A guard is real code, so a call may stay in it.
     in_guard: bool,
+    /// How deep inside `inline` the translation is. There every line is
+    /// folded back into one value, so `?:`, `&&` and `||` keep their arms as
+    /// values rather than giving each its own branch.
+    inlining: usize,
     /// Variables bound by a quantifier in an assertion. They have no storage,
     /// so they resolve to their own name rather than through a slot.
     spec_binders: HashMap<String, String>,
@@ -10210,6 +10410,8 @@ struct Body<'a> {
     /// The ownership the contract grants over the parameters' pointees, which
     /// a loop invariant has to restate.
     owned: &'a [OwnedParam],
+    /// See `FnSurface::outs`.
+    outs: &'a [OwnedParam],
     /// Parameters whose pointee the emitted contract owns; see `FnSurface`.
     granted: &'a HashSet<String>,
     /// See `FnSurface::spliced_own`.
@@ -10222,9 +10424,22 @@ struct Body<'a> {
     /// Parameters whose ownership sits behind a nullness guard, so a loop
     /// invariant claiming their storage is claiming the guard is discharged.
     guarded: &'a HashSet<String>,
+    /// See `FnSurface::null_payload`.
+    null_payload: &'a HashMap<String, String>,
+    /// Guarded parameters a null test has opened on the current path: their
+    /// pointee is owned as if the contract had granted it. The guard is put
+    /// back where an arm that falls through ends, so that both arms of the
+    /// `if` leave the same state; at a `return` Pulse puts it back itself,
+    /// since `intro_unless_null` is a `pulse_intro`. That matters: an explicit
+    /// step there would follow whatever `if` ends the function, and Pulse would
+    /// then have to join that `if` on its own rather than check each arm
+    /// against the postcondition.
+    unguarded: Vec<String>,
     /// Parameters the contract hands an `is_valid` for, and so the only
     /// pointers this body may call through without knowing the target.
     valid_fps: &'a HashSet<String>,
+    /// See `FnSurface::valid_fp_fields`.
+    valid_fp_fields: &'a HashSet<(String, String)>,
     /// Locals whose validity an `_ensures` on an `if` established. The
     /// signature's `valid_fps` says which *parameters* the contract spoke for;
     /// this says which locals the body's own annotations did.
@@ -11005,6 +11220,27 @@ impl<'a> Body<'a> {
                         && !self.slots.iter().any(|s| s.name == *v.val))
             }
             ExprT::ContainerOf(inner, _, _) | ExprT::Cast(inner, _) => self.stable_ptr(inner),
+            // `p + i` with both fixed for the call is one address for the
+            // whole call, as `p` is: an MMIO register at `base + OFFSET`.
+            ExprT::BinOp(BinOp::Add | BinOp::Sub, p, i)
+                if self.ty_of(p).is_ok_and(|t| self.elem_size(&t).is_some()) =>
+            {
+                self.stable_ptr(p) && self.stable_int(i)
+            }
+            _ => false,
+        }
+    }
+
+    /// An integer that has one value for the whole call: a constant, or a
+    /// parameter the body never gave storage to (and so never writes).
+    fn stable_int(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::IntLit(..) | ExprT::SizeOf(_) | ExprT::AlignOf(_) => true,
+            ExprT::Cast(inner, _) => self.stable_int(inner),
+            ExprT::Var(v) => {
+                self.params.contains(&*v.val.to_string())
+                    && !self.slots.iter().any(|s| s.name == *v.val)
+            }
             _ => false,
         }
     }
@@ -11132,7 +11368,11 @@ impl<'a> Body<'a> {
                 }
                 ExprT::Var(v)
                     if self.params.contains(&*v.val.to_string())
-                        && self.granted.contains(&*v.val.to_string()) =>
+                        && (self.granted.contains(&*v.val.to_string())
+                            || self.unguarded.contains(&v.val.to_string())
+                            // A written `_out` is owned from then on.
+                            || (self.outs.iter().any(|o| *o.base == *v.val)
+                                && !self.out_params.iter().any(|n| *n == *v.val))) =>
                 {
                     self.rvalue(inner)
                 }
@@ -12752,7 +12992,10 @@ impl<'a> Body<'a> {
             }
         }
         let before = self.lines.len();
-        let mut v = match self.rvalue(e) {
+        self.inlining += 1;
+        let r = self.rvalue(e);
+        self.inlining -= 1;
+        let mut v = match r {
             Ok(v) => v,
             // A ghost fragment wants the *value* of an object, and a load is
             // only one way to get one -- the expensive way, which needs the
@@ -12892,12 +13135,7 @@ impl<'a> Body<'a> {
                 self.prop(inner)
             }
             ExprT::Old(_) => Err("an assertion about the state on entry".to_string()),
-            ExprT::InlinePulse(code, _) => {
-                if !self.tds.splice_inline {
-                    return Err(self.tds.no_splice());
-                }
-                flatten_fragment(&self.inline_pulse(code)?)
-            }
+            ExprT::InlinePulse(code, _) => flatten_fragment(&self.inline_pulse(code)?),
             ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner)?)),
             // An assertion translates by *emitting* the loads its operands
             // need, which is exactly what a quantifier body cannot do: a load
@@ -13127,6 +13365,9 @@ impl<'a> Body<'a> {
                     out.push_str(ct.before);
                     out.push_str(&ct.text.val);
                 }
+                // The marker itself is not code: what follows it is the
+                // witness, and the caller takes the rendered remainder.
+                InlinePulseToken::WitnessAntiquot(ct) => out.push_str(ct.before),
                 InlinePulseToken::RValueAntiquot { before, expr } => {
                     // `inline` rather than `rvalue`: a fragment is a single
                     // term, so the loads it needs belong inside it, and a call
@@ -13353,22 +13594,8 @@ impl<'a> Body<'a> {
         )
     }
 
-    /// The size of what a pointer type points at, when arithmetic on it means
-    /// anything: C measures a pointer offset in elements, and the model in
-    /// bytes.
     fn elem_size(&self, ty: &Type) -> Option<u64> {
-        // `pointee` stops at `_plain`, because that annotation says the
-        // translation grants no ownership through the pointer. Arithmetic on
-        // it is still arithmetic on a C pointer, and how far one step moves is
-        // a question about the type and not about who owns what.
-        let pt = match pointee(self.tds, ty) {
-            Some(pt) => pt.clone(),
-            None => match &peel(self.tds, ty).val {
-                TypeT::Pointer(pt, _) => pt.clone(),
-                _ => return None,
-            },
-        };
-        palow_sizeof(self.tds, &pt).filter(|n| *n > 0)
+        ptr_elem_size(self.tds, ty)
     }
 
     /// An offset in bytes, as a `size_t`, for a subscript-like operand.
@@ -13534,6 +13761,55 @@ impl<'a> Body<'a> {
             out.push(z.clone());
         }
         Ok(())
+    }
+
+    /// `cond_arm`, for an arm on the side of a null test where the nullable
+    /// parameter `opened` is not null: the arm opens its guard and closes it
+    /// again, so that what it leaves behind is what the other arm does.
+    fn cond_arm_opened(
+        &mut self,
+        e: &Expr,
+        opened: Option<String>,
+    ) -> Result<(Vec<String>, String), String> {
+        let Some(p) = opened else {
+            return self.cond_arm(e);
+        };
+        self.unguarded.push(p.clone());
+        let r = self.cond_arm(e);
+        self.unguarded.pop();
+        let (mut lines, v) = r?;
+        let payload = &self.null_payload[&p];
+        lines.insert(0, format!("elim_unless_null var_{} ({});", p, payload));
+        lines.push(format!("intro_unless_null var_{} ({});", p, payload));
+        Ok((lines, v))
+    }
+
+    /// Translate one arm of a conditional expression into its own lines.
+    ///
+    /// The arm is one path, so whatever it borrows it gives back before the
+    /// join, and it may not change what the enclosing state knows -- which
+    /// slots are initialised, which blocks are live -- since the other arm
+    /// would then leave a different state behind.
+    fn cond_arm(&mut self, e: &Expr) -> Result<(Vec<String>, String), String> {
+        let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+        let nslots = self.slots.len();
+        let blocks: Vec<(bool, bool)> = self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
+        let outer = std::mem::take(&mut self.lines);
+        let v = self.rvalue(e);
+        let close = std::mem::take(&mut self.pending_close);
+        self.lines.extend(close);
+        self.close_own();
+        let lines = std::mem::replace(&mut self.lines, outer);
+        let v = v?;
+        let now: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+        let now_blocks: Vec<(bool, bool)> =
+            self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
+        if self.slots.len() != nslots || now != inits || now_blocks != blocks {
+            return Err(
+                "a conditional expression whose arm changes what is initialised".to_string(),
+            );
+        }
+        Ok((lines, v))
     }
 
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
@@ -13879,13 +14155,102 @@ impl<'a> Body<'a> {
                 // wrappers would otherwise hide that.
                 convert(peel(self.tds, &from), peel(self.tds, to), &v)
             }
+            // C evaluates exactly one arm of `c ? a : b`. When neither arm
+            // needs a statement of its own the two are just values and F*'s
+            // `if` is the whole translation. Otherwise each arm's statements
+            // go inside its own branch of a Pulse `if`, so that a read or a
+            // call in the arm not taken never happens -- `p ? *p : 0` is the
+            // case that matters.
+            ExprT::Cond(c, t, f) => {
+                let ty = self.ty_of(e)?;
+                let fty = fstar_type(self.tds, &ty)
+                    .ok_or_else(|| format!("a conditional expression of {}", describe(&ty)))?;
+                let pt = (self.inlining == 0)
+                    .then(|| self.param_null_test(c))
+                    .flatten();
+                let cv = match &pt {
+                    Some((p, when)) => Self::null_cond(&format!("var_{}", p), *when),
+                    None => self.rvalue(c)?,
+                };
+                if self.inlining > 0 {
+                    let tv = self.rvalue(t)?;
+                    let fv = self.rvalue(f)?;
+                    return Ok(format!("(if {} then {} else {})", cv, tv, fv));
+                }
+                let close = std::mem::take(&mut self.pending_close);
+                self.lines.extend(close);
+                self.close_own();
+                let live_then = matches!(pt, Some((_, false)));
+                let opened = |live: bool| pt.as_ref().filter(|_| live).map(|(p, _)| p.clone());
+                let (tl, tv) = self.cond_arm_opened(t, opened(live_then))?;
+                let (fl, fv) = self.cond_arm_opened(f, opened(!live_then))?;
+                if only_loads(&tl) && only_loads(&fl) {
+                    self.lines.extend(tl);
+                    self.lines.extend(fl);
+                    return Ok(format!("(if {} then {} else {})", cv, tv, fv));
+                }
+                let r = self.fresh("cond");
+                self.lines
+                    .push(format!("let {} : {} = if ({}) {{", r, fty, cv));
+                self.lines.extend(tl.iter().map(|l| indent(l)));
+                self.lines.push(format!("  {}", tv));
+                self.lines.push("} else {".to_string());
+                self.lines.extend(fl.iter().map(|l| indent(l)));
+                self.lines.push(format!("  {}", fv));
+                self.lines.push("};".to_string());
+                Ok(r)
+            }
             ExprT::BinOp(op, l, r) => {
                 if let Some(x) = self.ptr_binop(*op, l, r)? {
                     return Ok(x);
                 }
                 let ty = self.ty_of(l)?;
                 let opstr = binop(self.tds, *op, &ty, self.signed_ok)?;
-                let a = self.rvalue(l)?;
+                // `p && *p > 3`: the right side runs only where `p` is not
+                // null, so it may open the guard. `p == NULL || ...` likewise.
+                let pt = (matches!(op, BinOp::LogAnd | BinOp::LogOr) && self.inlining == 0)
+                    .then(|| self.param_null_test(l))
+                    .flatten()
+                    .filter(|(_, null_when_true)| *null_when_true == matches!(op, BinOp::LogOr));
+                let a = match &pt {
+                    Some((p, when)) => Self::null_cond(&format!("var_{}", p), *when),
+                    None => self.rvalue(l)?,
+                };
+                // `&&` and `||` evaluate their right side only when the left
+                // has not decided: `n > 0 && a[n - 1] == 0` must not read
+                // when `n` is zero. A right side that is just a value can sit
+                // in F*'s `&&`; one that needs statements goes in its own arm.
+                if matches!(op, BinOp::LogAnd | BinOp::LogOr) && self.inlining == 0 {
+                    let close = std::mem::take(&mut self.pending_close);
+                    self.lines.extend(close);
+                    self.close_own();
+                    let (rl, b) = self.cond_arm_opened(r, pt.map(|(p, _)| p))?;
+                    if only_loads(&rl) {
+                        self.lines.extend(rl);
+                        return Ok(format!("({} {} {})", a, opstr, b));
+                    }
+                    let (on_true, on_false) = match op {
+                        BinOp::LogAnd => (None, Some("false")),
+                        _ => (Some("true"), None),
+                    };
+                    let t = self.fresh("cond");
+                    self.lines.push(format!("let {} : bool = if ({}) {{", t, a));
+                    let rhs = |ls: &mut Vec<String>| {
+                        ls.extend(rl.iter().map(|l| indent(l)));
+                        ls.push(format!("  {}", b));
+                    };
+                    match on_true {
+                        Some(v) => self.lines.push(format!("  {}", v)),
+                        None => rhs(&mut self.lines),
+                    }
+                    self.lines.push("} else {".to_string());
+                    match on_false {
+                        Some(v) => self.lines.push(format!("  {}", v)),
+                        None => rhs(&mut self.lines),
+                    }
+                    self.lines.push("};".to_string());
+                    return Ok(t);
+                }
                 let b = self.rvalue(r)?;
                 Ok(format!("({} {} {})", a, opstr, b))
             }
@@ -13980,6 +14345,12 @@ impl<'a> Body<'a> {
                         signed: false,
                         width,
                     } => Ok(format!("(FStar.UInt{}.lognot {})", width, a)),
+                    // Unlike `-`, `~` cannot overflow: it is total on every
+                    // two's-complement width, which is what F*'s `lognot` is.
+                    TypeT::Int {
+                        signed: true,
+                        width,
+                    } => Ok(format!("(FStar.Int{}.lognot {})", width, a)),
                     _ => Err(format!("a bitwise complement of {}", describe(&ty))),
                 }
             }
@@ -13997,6 +14368,16 @@ impl<'a> Body<'a> {
                 }
                 _ => self.addr_only(inner),
             },
+            // A PAL primitive (`prims.rs`) is a definition in the Pulse
+            // library, pure and total, so a call to it is an application:
+            // there is nothing to sequence and nothing it could fail on.
+            ExprT::FnCall(name, args) if crate::prims::fstar_name(&name.val).is_some() => {
+                let mut out = crate::prims::fstar_name(&name.val).unwrap().to_string();
+                for a in args.iter() {
+                    out += &format!(" {}", self.rvalue(a)?);
+                }
+                Ok(format!("({})", out))
+            }
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
                 let mut out = format!("func_{}", name.val);
                 for a in args.iter() {
@@ -14079,9 +14460,21 @@ impl<'a> Body<'a> {
                 // pre/post are left to slprop matching: the fact in context is
                 // the author's, written in their own words, and naming them
                 // here would mean parsing those words.
+                // A field of a parameter's struct whose own `_refine` hands in
+                // the validity is the same thing one level down: the contract
+                // stated the `is_valid` at the field's value, which a load of
+                // the field produces.
+                let valid_field = match &strip_vattr(f).val {
+                    ExprT::Member(b, fname) => fp_base(b).is_some_and(|base| {
+                        self.valid_fp_fields
+                            .contains(&(base, fname.val.to_string()))
+                    }),
+                    _ => false,
+                };
                 if let Some(base) = fp_base(f)
                     && self.target_of(f).is_none()
-                    && (self.valid_fps.contains(&base)
+                    && (valid_field
+                        || self.valid_fps.contains(&base)
                         || self.local_valid_fps.contains(&base)
                         || self.fp_from_call.contains(&base))
                 {
@@ -14126,17 +14519,34 @@ impl<'a> Body<'a> {
                     // wrong reason.
                     let wide = !matches!(&strip_vattr(f).val, ExprT::Var(_));
                     let fty = self.ty_of(f)?;
+                    // The deep half of a struct with owned pointer fields is
+                    // a component of its own, at a pointer to one and at one
+                    // passed by value alike, as in the wrapper's witness.
+                    let has_own = |t: &Type| match &peel(self.tds, t).val {
+                        TypeT::TypeRef(TypeRefKind::Struct(n)) => self
+                            .tds
+                            .structs
+                            .get(&*n.val.to_string())
+                            .is_some_and(|si| !own_items(self.tds, si, &n.val).is_empty()),
+                        _ => false,
+                    };
                     let nwit = match &peel(self.tds, &fty).val {
                         TypeT::FnPtr { args, .. } => args
                             .iter()
-                            .filter(|a| {
-                                if wide {
+                            .map(|a| {
+                                let base = if wide {
                                     matches!(peel(self.tds, a).val, TypeT::Pointer(..))
                                 } else {
                                     pointee(self.tds, a).is_some()
-                                }
+                                };
+                                let deep = if base {
+                                    pointee(self.tds, a).is_some_and(|pt| has_own(&pt))
+                                } else {
+                                    has_own(a)
+                                };
+                                base as usize + (wide && deep) as usize
                             })
-                            .count(),
+                            .sum(),
                         _ => 0,
                     };
                     let w = self
@@ -14240,7 +14650,7 @@ impl<'a> Body<'a> {
                 Ok(format!("{}sz", n))
             }
             ExprT::AlignOf(t) => {
-                let n = palow_alignof(self.tds, t)
+                let n = c_alignof(self.tds, t)
                     .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
                 Ok(format!("{}sz", n))
             }
@@ -14286,7 +14696,17 @@ impl<'a> Body<'a> {
         let consumes = c.consumes.clone();
         let mut out = format!("func_{}", name.val);
         let mut implicit_args: Vec<String> = Vec::new();
+        let opened = self.field_args(args, &outs, |i| {
+            !(arr_args.get(i) == Some(&true)
+                || arrayptr_args.get(i) == Some(&true)
+                || plain_ptrs.get(i) == Some(&true)
+                || consumes.get(i) == Some(&true))
+        })?;
         for (i, a) in args.iter().enumerate() {
+            if let Some(at) = opened.get(&i) {
+                out += &format!(" {}", at);
+                continue;
+            }
             // A literal's address carries no writable ownership. A const
             // array parameter can receive a fractional read-only share of the
             // static storage; a mutable array parameter still gets the old
@@ -14414,6 +14834,130 @@ impl<'a> Body<'a> {
             out += " ()";
         }
         Ok(format!("({})", out))
+    }
+
+    /// Open the fields whose addresses a call's arguments are, for the length
+    /// of the statement.
+    ///
+    /// `f(&s->a)` hands the callee the field's storage, which this function
+    /// holds only as part of `*s`: a single field is focused and unfocused
+    /// afterwards, exactly as a store through it would be. Two fields of one
+    /// object cannot both be focused -- a focus leaves a hole where the rest
+    /// of the object was -- so the object is scattered into all its fields
+    /// instead and gathered again after the call. An `_out` field gives up
+    /// its value first, as `out_arg` does for one on its own.
+    ///
+    /// Returns the address passed for each argument handled here. Storage that
+    /// holds no value yet is left to `out_arg`, which already fills such an
+    /// object field by field.
+    fn field_args(
+        &mut self,
+        args: &Exprs,
+        outs: &[bool],
+        owns_one: impl Fn(usize) -> bool,
+    ) -> Result<HashMap<usize, String>, String> {
+        let mut groups: Vec<(String, Rc<Expr>, Vec<(usize, Rc<Ident>)>)> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let out = outs.get(i) == Some(&true);
+            if !out && !owns_one(i) {
+                continue;
+            }
+            let ExprT::Ref(inner) = &strip_vattr(a).val else {
+                continue;
+            };
+            let ExprT::Member(base, f) = &strip_vattr(inner).val else {
+                continue;
+            };
+            if self.union_of(base).is_some()
+                || self.in_pieces(base)
+                || self
+                    .ty_of(inner)
+                    .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
+            {
+                continue;
+            }
+            let mark = self.lines.len();
+            let key = self.addr_only(base);
+            if self.lines.len() != mark {
+                self.lines.truncate(mark);
+                continue;
+            }
+            let Ok(key) = key else {
+                continue;
+            };
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => g.2.push((i, f.clone())),
+                None => groups.push((key, base.clone(), vec![(i, f.clone())])),
+            }
+        }
+        let mut opened = HashMap::new();
+        for (key, base, fields) in groups {
+            // Storage still being filled is scattered already, or will be by
+            // the first `_out` that reaches it.
+            let filling = self
+                .slots
+                .iter()
+                .any(|s| s.addr == key && !s.init && s.array.is_none())
+                || self
+                    .blocks
+                    .iter()
+                    .any(|b| b.tmp == key && b.checked && !b.freed && !b.init);
+            if filling {
+                continue;
+            }
+            if fields.len() == 1 {
+                let (i, f) = &fields[0];
+                if outs.get(*i) == Some(&true) {
+                    continue;
+                }
+                let place = ExprT::Member(base.clone(), f.clone()).with_loc(base.loc.clone());
+                let fo = self.place(&place, true)?;
+                if fo.bits.is_some() {
+                    return Err(format!("the address of bit-field `{}`", f.val));
+                }
+                self.lines.extend(fo.open_write.iter().cloned());
+                self.pending_close.extend(fo.close_write);
+                opened.insert(*i, fo.at);
+                continue;
+            }
+            let (sn, bty) = self.struct_of(&base)?;
+            for (n, (_, f)) in fields.iter().enumerate() {
+                if fields[..n].iter().any(|(_, g)| g.val == f.val) {
+                    return Err(format!("field `{}` passed twice to one call", f.val));
+                }
+                if bitfield_at(self.tds, &bty, &f.val).is_some() {
+                    return Err(format!("the address of bit-field `{}`", f.val));
+                }
+            }
+            let sname = sn.strip_prefix("struct_").unwrap_or(&sn);
+            let splittable = self.tds.structs.get(sname).is_some_and(|si| {
+                si.fields.iter().all(|x| match &x.shape {
+                    FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+                    FieldShape::Array { .. } => true,
+                    FieldShape::Flex { .. } => false,
+                })
+            });
+            if !splittable {
+                return Err(format!(
+                    "two fields of one `{}` passed to a call, which cannot be split into its fields",
+                    sname
+                ));
+            }
+            let ff = self.open_field(&base, &fields[0].1, true)?;
+            self.no_value_yet(&ff.a)?;
+            self.lines.push(format!("{}_scatter {};", sn, ff.a));
+            for (i, f) in &fields {
+                let at = format!("({} +! {}_offsetof_{})", ff.a, sn, f.val);
+                if outs.get(*i) == Some(&true) {
+                    let pn = self.field_pn(&base, f)?;
+                    self.lines.push(format!("{}_forget {};", pn, at));
+                }
+                opened.insert(*i, at);
+            }
+            self.pending_close.push(format!("{}_gather {};", sn, ff.a));
+            self.pending_close.extend(ff.close_write);
+        }
+        Ok(opened)
     }
 
     /// Stop accounting for an object whose ownership a `_consumes` parameter
@@ -14726,6 +15270,11 @@ impl<'a> Body<'a> {
         }
         let xs = self.named_const("literal", &format!("[{}]", vs.join("; ")));
         let addr = format!("(Pulse.Lib.C.Palow.Ptr.literal_addr {})", xs);
+        // The contents are `const_seq`, as for an initialised stack array or
+        // an immutable global, so the same indexing lemmas apply to all three
+        // and a specification can name one sequence for whichever it is given.
+        // As for a stack array, the length rides along in the type from
+        // `const_seq_with_len`: the solver cannot count a list literal itself.
         // The ownership is assumed here rather than taken from a library
         // function, because a library function would have to take the
         // element's representation as a parameter and a trusted one that
@@ -14735,8 +15284,13 @@ impl<'a> Body<'a> {
         // assumption says one true thing about one piece of static data --
         // the same trust an immutable global's `acquire_var_*` asks for.
         let own = format!(
-            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Seq.seq_of_list {})",
-            pn, esize, pn, addr, xs
+            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Pulse.Lib.C.Palow.ConstSeq.const_seq_with_len {} {})",
+            pn,
+            esize,
+            pn,
+            addr,
+            xs,
+            vs.len()
         );
         let name = self.assumed_slprop("acquire_literal", &own);
         self.lines.push(format!("{} ();", name));
@@ -15350,6 +15904,45 @@ impl<'a> Body<'a> {
         Some((i, null_when_true))
     }
 
+    /// A test of a `_nullable` parameter against null, as the parameter and
+    /// whether it is the *then* arm that runs when the pointer is null.
+    ///
+    /// The arm where it is not null owns the pointee: it opens the guard, the
+    /// body reads and writes through the parameter as through any other, and
+    /// the guard is closed again (see `unguarded`). The null arm has `emp`
+    /// behind the guard and leaves it alone.
+    fn param_null_test(&self, cond: &Expr) -> Option<(String, bool)> {
+        fn peel(e: &Expr) -> &Expr {
+            match &strip_vattr(e).val {
+                ExprT::Cast(inner, _) => peel(inner),
+                _ => strip_vattr(e),
+            }
+        }
+        let (cond, negated) = match &peel(cond).val {
+            ExprT::UnOp(UnOp::Not, inner) => (peel(inner), true),
+            _ => (peel(cond), false),
+        };
+        let is_zero = |e: &Expr| matches!(&peel(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO);
+        let (var, null_when_true) = match &cond.val {
+            ExprT::Var(_) => (cond, negated),
+            ExprT::BinOp(BinOp::Eq, a, b) if is_zero(b) => (peel(a), !negated),
+            ExprT::BinOp(BinOp::Eq, a, b) if is_zero(a) => (peel(b), !negated),
+            _ => return None,
+        };
+        let ExprT::Var(v) = &var.val else {
+            return None;
+        };
+        let name = v.val.to_string();
+        if !self.params.contains(&*name)
+            || !self.null_payload.contains_key(&name)
+            || self.unguarded.contains(&name)
+            || self.slots.iter().any(|s| s.name == name)
+        {
+            return None;
+        }
+        Some((name, null_when_true))
+    }
+
     /// The emitted condition of a null test, in the polarity the C source
     /// wrote it, so that the arms stay where the source put them.
     fn null_cond(tmp: &str, null_when_true: bool) -> String {
@@ -15665,6 +16258,15 @@ impl<'a> Body<'a> {
                     self.out_params.remove(i);
                     self.lines
                         .push(format!("{}_write_uninit var_{} {};", pn, v.val, value));
+                    // A struct `_out` pointee is also tracked as the slot
+                    // `*p`, so that its fields can be written one at a time.
+                    // After a whole write -- `*p = v`, or the zeroing a
+                    // `memset` is lowered to -- the object is initialised,
+                    // and a later field write is an ordinary one.
+                    let star = format!("*{}", v.val);
+                    if let Some(s) = self.slots.iter_mut().rev().find(|s| s.name == star) {
+                        s.init = true;
+                    }
                     return Ok(());
                 }
             }
@@ -15931,6 +16533,22 @@ impl<'a> Body<'a> {
             // it gets the signature's ghost binder rather than the invariant's.
             pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
             olds.insert(o.base.clone(), o.entry.clone());
+        }
+        // An `_out` parameter the loop leaves alone is carried by Pulse's
+        // frame, written or not. One it touches has to be written already:
+        // the invariant would otherwise have to say the storage may or may
+        // not hold a value yet.
+        for o in self.outs {
+            if !kept.as_ref().is_none_or(|k| k.contains(&o.base)) || stated.contains(&o.base) {
+                continue;
+            }
+            if self.out_params.contains(&o.base) {
+                return Err(format!("{} with `*{}` not yet written", what, o.base));
+            }
+            let b = format!("inv_val_{}", o.base);
+            binders.push(format!("({}: {})", b, o.vty));
+            owns.push(format!("{}{}", o.pre, b));
+            pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
         }
 
         let spec = Spec {
@@ -16344,6 +16962,31 @@ impl<'a> Body<'a> {
                     }
                 }
                 let ty = self.ty_of(lhs)?;
+                // `x = c ? a : b` of a number is a value, and `rvalue` binds
+                // it before the store, so the store is one and Pulse never
+                // has to join two slots holding different things. Anything
+                // else -- a pointer above all, whose target this translation
+                // tracks -- is an `if` with one store per arm.
+                if let ExprT::Cond(c, a, b) = &strip_vattr(rhs).val {
+                    if !matches!(
+                        self.tds.resolve(&ty).val,
+                        TypeT::Bool | TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT
+                    ) {
+                        let arm = |e: &Rc<Expr>| {
+                            Rc::new(vec![
+                                StmtT::Assign(lhs.clone(), e.clone()).with_loc(s.loc.clone()),
+                            ])
+                        };
+                        let st = StmtT::If {
+                            cond: c.clone(),
+                            then_branch: arm(a),
+                            else_branch: arm(b),
+                            ensures: Rc::new(vec![]),
+                        }
+                        .with_loc(s.loc.clone());
+                        return self.stmt(&st);
+                    }
+                }
                 // An array is not assignable in C; this is the initialiser of
                 // a local array, which clang has already padded out to the
                 // declared length. It means one store per element, and saying
@@ -16549,9 +17192,6 @@ impl<'a> Body<'a> {
                 if matches!(&strip_vattr(e).val,
                     ExprT::InlinePulse(_, t) if matches!(self.tds.resolve(t).val, TypeT::SLProp)) =>
             {
-                if !self.tds.splice_inline {
-                    return Err(self.tds.no_splice());
-                }
                 let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
                     unreachable!()
                 };
@@ -16676,7 +17316,7 @@ impl<'a> Body<'a> {
                 self.lines.extend(close);
                 Ok(())
             }
-            StmtT::GhostStmt(code) if ghost_replaced(code) => {
+            StmtT::GhostStmt(code) if ghost_handled(code) => {
                 // `$unfold-uninit` is the one member of the pair that says
                 // something Palow cannot see for itself: that the object is
                 // storage the function owns but whose contents are not yet
@@ -16687,14 +17327,12 @@ impl<'a> Body<'a> {
                 if let Some(e) = uninit_open_arg(code) {
                     self.note_uninit(e);
                 }
-                if ghost_head(code).starts_with(ETA_HINT) {
+                if witness_hint(code) {
                     let t = self.inline_pulse(code)?;
-                    self.fp_witness =
-                        Some(t.trim().trim_start_matches(ETA_HINT).trim().to_string());
+                    self.fp_witness = Some(t.trim().to_string());
                 }
                 Ok(())
             }
-            StmtT::GhostStmt(_) if !self.tds.splice_inline => Err(self.tds.no_splice()),
             StmtT::GhostStmt(code) => {
                 let was = std::mem::replace(&mut self.keep_reads, true);
                 let t = self.inline_pulse(code);
@@ -16844,9 +17482,15 @@ impl<'a> Body<'a> {
                 let states_own = ensures.iter().any(|e| is_slprop_clause(self.tds, e));
                 let mut fps: Vec<(String, String)> = Vec::new();
                 let nt = self.null_test(cond);
-                let c = match nt {
-                    Some((i, when)) => Self::null_cond(&self.blocks[i].tmp, when),
-                    None => {
+                let pt = if nt.is_none() {
+                    self.param_null_test(cond)
+                } else {
+                    None
+                };
+                let c = match (nt, &pt) {
+                    (Some((i, when)), _) => Self::null_cond(&self.blocks[i].tmp, when),
+                    (None, Some((p, when))) => Self::null_cond(&format!("var_{}", p), *when),
+                    (None, None) => {
                         let cty = self.ty_of(cond)?;
                         if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
                             return Err("an `if` on a non-boolean condition".to_string());
@@ -16854,6 +17498,7 @@ impl<'a> Body<'a> {
                         self.rvalue(cond)?
                     }
                 };
+                let pt_live_then = matches!(pt, Some((_, false)));
                 // Pulse joins an `if` by matching on the condition, and it can
                 // only reduce that match inside an arm if the condition is a
                 // name. A call is not: two `if`s on the same call nest into a
@@ -16898,7 +17543,14 @@ impl<'a> Body<'a> {
                 if let Some((i, _)) = nt {
                     self.mark_checked(i, live_then);
                 }
-                let then = self.branch(then_branch)?;
+                if let Some((p, _)) = pt.as_ref().filter(|_| pt_live_then) {
+                    self.unguarded.push(p.clone());
+                }
+                let then = self.branch(then_branch);
+                if pt.is_some() && pt_live_then {
+                    self.unguarded.pop();
+                }
+                let mut then = then?;
                 let then_blocks = self.blocks.clone();
                 self.blocks = entry_blocks.clone();
                 self.out_params = entry_out;
@@ -16908,7 +17560,24 @@ impl<'a> Body<'a> {
                 if let Some((i, _)) = nt {
                     self.mark_checked(i, !live_then);
                 }
-                let els = self.branch(else_branch)?;
+                if let Some((p, _)) = pt.as_ref().filter(|_| !pt_live_then) {
+                    self.unguarded.push(p.clone());
+                }
+                let els = self.branch(else_branch);
+                if pt.is_some() && !pt_live_then {
+                    self.unguarded.pop();
+                }
+                let mut els = els?;
+                if let Some((p, _)) = &pt {
+                    let payload = &self.null_payload[p];
+                    let live = if pt_live_then { &mut then } else { &mut els };
+                    live.lines
+                        .insert(0, format!("elim_unless_null var_{} ({});", p, payload));
+                    if !live.returned && !live.diverged {
+                        live.lines
+                            .push(format!("intro_unless_null var_{} ({});", p, payload));
+                    }
+                }
                 let els_blocks = self.blocks.clone();
                 self.blocks = entry_blocks;
                 // An arm that does not come back has no state to join. What
@@ -17113,9 +17782,15 @@ impl<'a> Body<'a> {
                     // owns the block, so each arm opens by eliminating the
                     // guard in the direction the test settled.
                     let nt = self.null_test(cond);
-                    let c = match nt {
-                        Some((i, when)) => Self::null_cond(&self.blocks[i].tmp, when),
-                        None => {
+                    let pt = if nt.is_none() {
+                        self.param_null_test(cond)
+                    } else {
+                        None
+                    };
+                    let c = match (nt, &pt) {
+                        (Some((i, when)), _) => Self::null_cond(&self.blocks[i].tmp, when),
+                        (None, Some((p, when))) => Self::null_cond(&format!("var_{}", p), *when),
+                        (None, None) => {
                             let cty = self.ty_of(cond)?;
                             if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
                                 return Err("an `if` on a non-boolean condition".to_string());
@@ -17157,12 +17832,45 @@ impl<'a> Body<'a> {
                     if let Some((i, _)) = nt {
                         self.mark_checked(i, live_then);
                     }
-                    let (then_lines, then_val) = self.tail_arm(&then_stmts)?;
+                    let pt_live_then = matches!(pt, Some((_, false)));
+                    let open = |b: &mut Self, live: bool| {
+                        if let Some((p, _)) = pt.as_ref().filter(|_| live) {
+                            b.unguarded.push(p.clone());
+                        }
+                    };
+                    let close = |b: &mut Self, live: bool, lines: &mut Vec<String>| {
+                        if let Some((p, _)) = pt.as_ref().filter(|_| live) {
+                            b.unguarded.pop();
+                            lines.insert(
+                                0,
+                                format!("elim_unless_null var_{} ({});", p, b.null_payload[p]),
+                            );
+                        }
+                    };
+                    open(self, pt_live_then);
+                    let r = self.tail_arm(&then_stmts);
+                    let (mut then_lines, then_val) = match r {
+                        Ok(r) => r,
+                        Err(e) => {
+                            close(self, pt_live_then, &mut Vec::new());
+                            return Err(e);
+                        }
+                    };
+                    close(self, pt_live_then, &mut then_lines);
                     self.blocks = entry_blocks.clone();
                     if let Some((i, _)) = nt {
                         self.mark_checked(i, !live_then);
                     }
-                    let (else_lines, else_val) = self.tail_arm(&else_stmts)?;
+                    open(self, !pt_live_then);
+                    let r = self.tail_arm(&else_stmts);
+                    let (mut else_lines, else_val) = match r {
+                        Ok(r) => r,
+                        Err(e) => {
+                            close(self, !pt_live_then, &mut Vec::new());
+                            return Err(e);
+                        }
+                    };
+                    close(self, !pt_live_then, &mut else_lines);
                     self.blocks = entry_blocks;
                     let then_lines: Vec<String> = then_pre.into_iter().chain(then_lines).collect();
                     let else_lines: Vec<String> = else_pre.into_iter().chain(else_lines).collect();
@@ -17359,12 +18067,14 @@ impl<'a> Body<'a> {
             // A diverging arm has `pure False` in hand, which subsumes every
             // frame it is still holding; releasing them would be emitting
             // steps after the program has stopped.
-            if !result? && !diverged {
+            let returned = result?;
+            if !returned && !diverged {
                 self.release_from(mark);
             }
             self.seeded = outer_seeded;
             Ok(BranchResult {
                 lines: std::mem::take(&mut self.lines),
+                returned,
                 diverged,
                 inits: self.slots[..mark].iter().map(|s| s.init).collect(),
                 scattered: self.slots[..mark]
@@ -17976,6 +18686,29 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     }
 }
 
+/// The size of what a pointer type points at, when arithmetic on it means
+/// anything: C measures a pointer offset in elements, and the model in
+/// bytes.
+fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
+    // `pointee` stops at `_plain`, because that annotation says the
+    // translation grants no ownership through the pointer. Arithmetic on
+    // it is still arithmetic on a C pointer, and how far one step moves is
+    // a question about the type and not about who owns what.
+    let pt = match pointee(tds, ty) {
+        Some(pt) => pt.clone(),
+        None => match &peel(tds, ty).val {
+            TypeT::Pointer(pt, _) => pt.clone(),
+            _ => return None,
+        },
+    };
+    // GNU C takes `sizeof(void)` to be 1, so arithmetic on a `void *` --
+    // ubiquitous on kernel MMIO bases -- moves by bytes.
+    if matches!(peel(tds, &pt).val, TypeT::Void) {
+        return Some(1);
+    }
+    palow_sizeof(tds, &pt).filter(|n| *n > 0)
+}
+
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {
     let t = peel(tds, ty);
     let m = match &t.val {
@@ -18339,10 +19072,13 @@ fn ptr_base(tds: &Typedefs, env: &Env, e: &Expr) -> bool {
     let Ok(t) = env.infer_expr(e) else {
         return true;
     };
-    matches!(
-        peel(tds, &t.to_rc()).val,
-        TypeT::Pointer(..) | TypeT::FixedArray(..) | TypeT::FlexArray(..)
-    )
+    match &peel(tds, &t.to_rc()).val {
+        // GNU arithmetic on a `void *` is byte arithmetic, not an index: there
+        // is no `void` element for the result to name.
+        TypeT::Pointer(pt, _) => !matches!(peel(tds, pt).val, TypeT::Void),
+        TypeT::FixedArray(..) | TypeT::FlexArray(..) => true,
+        _ => false,
+    }
 }
 
 fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, Rc<Expr>> {
@@ -18713,6 +19449,7 @@ fn emit_body(
         },
         tail_branch: false,
         in_guard: false,
+        inlining: 0,
         spec_binders: HashMap::new(),
         ret_binding: None,
         fp_witness: None,
@@ -18720,17 +19457,29 @@ fn emit_body(
         olens: sig.olens.clone(),
         requires_ok: sig.req_props,
         owned: &sig.owned,
+        outs: &sig.outs,
         granted: &sig.granted,
         spliced_own: sig.spliced_own,
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
         guarded: &sig.guarded,
+        null_payload: &sig.null_payload,
+        unguarded: Vec::new(),
         valid_fps: &sig.valid_fps,
+        valid_fp_fields: &sig.valid_fp_fields,
         local_valid_fps: HashSet::new(),
         freeables: &sig.freeables,
         consumed_freed: HashSet::new(),
         consumed: &sig.consumed,
-        has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
+        // A scalar `_out` is restated by a loop's frame like any other
+        // pointee; a struct or array one is not yet.
+        has_out: defn.decl.args.iter().any(|a| {
+            a.mode == ParamMode::Out
+                && !a
+                    .name
+                    .as_ref()
+                    .is_some_and(|n| sig.outs.iter().any(|o| *o.base == *n.val))
+        }),
         divergent: false,
         seeded: Vec::new(),
         laundered: HashSet::new(),
@@ -18980,6 +19729,13 @@ fn include_pulse_scoped(
             InlinePulseToken::Declare { ident, ty } => {
                 declared.insert(ident.val.to_string(), ty.clone());
             }
+            InlinePulseToken::WitnessAntiquot(_) => {
+                return Err(
+                    "`$witness` names the ghost arguments of a call, so it belongs \
+                            to a ghost statement in a body, not to an `_include_pulse`"
+                        .to_string(),
+                );
+            }
             InlinePulseToken::RValueAntiquot { before, expr }
             | InlinePulseToken::LValueAntiquot { before, expr } => {
                 let v = declared_expr(tds, declared, expr)?;
@@ -19154,6 +19910,13 @@ fn declared_expr(
         // can name it just as a contract can. That is what lets the ghost
         // helpers of a model be stated in terms of the same predicate the
         // contracts use, instead of restating it.
+        ExprT::FnCall(name, args) if crate::prims::fstar_name(&name.val).is_some() => {
+            let mut out = crate::prims::fstar_name(&name.val).unwrap().to_string();
+            for a in args.iter() {
+                out += &format!(" ({})", declared_expr(tds, declared, a)?);
+            }
+            Ok(out)
+        }
         ExprT::FnCall(name, args) if tds.pure_fns.contains(&*name.val.to_string()) => {
             let mut out = format!("func_{}", name.val);
             for a in args.iter() {
@@ -19288,8 +20051,7 @@ fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
     if !matches!(
         aux_fn_kind(code),
         Some(AuxFnKind::UnfoldUninit | AuxFnKind::Scattered | AuxFnKind::Gathered)
-    ) && !ghost_head(code).contains("__aux_raw_unfold_uninit")
-    {
+    ) {
         return None;
     }
     code.tokens.iter().find_map(|t| match t {
@@ -19299,72 +20061,62 @@ fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
     })
 }
 
-/// Whether a ghost statement is about a part of the *old* memory model that
-/// Palow replaces with something the emitter writes itself.
+/// Whether this statement is a `$witness`: the ghost arguments that
+/// instantiate the contract of the indirect call that follows.
 ///
-/// Dropping a proof hint is sound in one direction only, and it is the safe
-/// one: a hint can make a proof succeed that would otherwise fail, so removing
-/// one can only cause a failure, never let a wrong proof through. What makes
-/// it right rather than merely safe is that for each of these the emitter
-/// already writes the replacement:
-///
-///   * the old function-pointer model -- Palow emits `of_fn_div_valid` before
-///     an indirect call and `drop_is_valid` after it;
-///   * the array-cell borrow discipline -- Palow has no `_arrayptr` and no
-///     borrowed cell, only `array_focus`/`array_unfocus` around each access;
-///   * the maybe-uninitialised discipline -- Palow writes `write_uninit` and
-///     `forget` where the initialisation state changes;
-///   * acquiring a global's storage, and the `drop_` that releases it again --
-///     in Palow a global's ownership arrives in the contract, so there is
-///     nothing to acquire and nothing to give back;
-///   * opening a struct into one reference per field, which the old model
-///     needs before it can touch a field at all -- Palow addresses a field as
-///     the object's address plus an offset, and the emitter writes the
-///     `focus`/`unfocus` pair around each access itself, so there is nothing
-///     to open.
-///
-/// Every other ghost statement says something Palow has no other way to learn,
-/// and is still refused rather than silently discarded.
-/// The hint that names the witness of an indirect call. It is not code Palow
-/// emits -- it is the one thing at such a call site that only the author
-/// knows -- but it arrives spelled as a call to the old model's eager-intro
-/// rule, so it is read there and turned into the witness argument.
-const ETA_HINT: &str = "Pulse.Lib.C.FuncPtr.eta_expanded_erased";
+/// It is the one thing at such a call site that the emitter cannot derive --
+/// only the author knows it -- so Palow reads it rather than emitting it. The
+/// marker renders as nothing, which leaves the rendered statement equal to the
+/// witness term.
+fn witness_hint(code: &InlinePulseCode) -> bool {
+    matches!(
+        code.tokens.first(),
+        Some(InlinePulseToken::WitnessAntiquot(_))
+    )
+}
 
-fn ghost_replaced(code: &InlinePulseCode) -> bool {
-    let head = ghost_head(code);
-    const REPLACED: &[&str] = &[
-        "Pulse.Lib.C.FuncPtr.",
-        "arrayptr_drop",
-        "array_borrow_cell",
-        "array_cell_read",
-        "array_return_cell",
-        "Pulse.Lib.C.MaybeUninit.",
-    ];
-    if REPLACED.iter().any(|p| head.starts_with(p)) {
-        return true;
-    }
-    // `$unfold`/`$fold` and their uninitialised variants, whether the source
-    // wrote the antiquotation or the generated name it stands for.
-    if head.contains("__aux_raw_unfold") || head.contains("__aux_raw_fold") {
-        return true;
-    }
-    if matches!(
-        aux_fn_kind(code),
-        Some(AuxFnKind::Unfold | AuxFnKind::UnfoldUninit | AuxFnKind::Fold | AuxFnKind::FoldUninit)
-    ) {
-        return true;
-    }
-    if head.starts_with("Global_") && head.contains(".acquire_var_") {
-        return true;
-    }
-    // The matching release. `drop_` on its own says nothing about which model
-    // it belongs to, so the global's address has to appear in it.
-    head.starts_with("drop_")
-        && code.tokens.iter().any(|t| match t {
-            InlinePulseToken::Verbatim(tok) => tok.text.val.contains("addr_var_"),
-            _ => false,
-        })
+/// Whether this ghost statement is one Palow *reads* instead of emitting.
+///
+/// There are two, and each says something Palow has no other way to learn:
+/// `$witness`, the ghost arguments of an indirect call, and `$unfold-uninit`,
+/// which says the object is storage the function owns but whose contents are
+/// not yet valid. Palow spells the latter as an uninitialised slot, so the
+/// statement becomes a note rather than code.
+///
+/// Both are recognised by their antiquotation token rather than by the name of
+/// a library function, so the test is structural and says what it means.
+///
+/// Everything else is emitted as the author wrote it. A ghost statement that
+/// belongs to the old model alone -- acquiring a global, dropping an
+/// `_arrayptr`, the maybe-uninitialised discipline, opening a struct into one
+/// reference per field -- has no meaning here and must be gated out of the
+/// source with `#ifndef PALOW`, the way `test/packet_space_connection` does.
+/// Palow does not recognise such statements by name and quietly drop them:
+/// that loses the author's intent without saying so, and it makes the
+/// emitter's behaviour depend on a list of library names that will outlive
+/// the model they belong to.
+fn ghost_handled(code: &InlinePulseCode) -> bool {
+    witness_hint(code) || matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
+}
+
+/// Whether the emitter reads this ghost statement structurally rather than
+/// taking it as opaque author Pulse.
+///
+/// The open/close brackets and the witness hint are the emitter's own
+/// vocabulary: it knows what each one does, so there is nothing to learn from
+/// the C objects they name. Every other ghost statement is the author's, and
+/// naming an object in one is what grants the body the right to touch it.
+fn ghost_interpreted(code: &InlinePulseCode) -> bool {
+    witness_hint(code)
+        || matches!(
+            aux_fn_kind(code),
+            Some(
+                AuxFnKind::Unfold
+                    | AuxFnKind::UnfoldUninit
+                    | AuxFnKind::Fold
+                    | AuxFnKind::FoldUninit
+            )
+        )
 }
 
 fn stmt_kind(s: &Stmt) -> &'static str {

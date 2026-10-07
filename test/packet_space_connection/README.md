@@ -140,22 +140,19 @@ the connection and all array slots.
 
 ## The Palow port
 
-The example is real MsQuic-derived code, so it has to work under both memory
-models. It does, from a single C file: `helpers/` holds
-`Helpers_PACKET_SPACE_CONNECTION` written against Palow and `helpers_old/`
-holds the copy written against the previous model, and the include path
-chooses which one the generated modules see. Nothing in the C names a model
-predicate, so nothing in the C had to change for the helpers.
+The example is real MsQuic-derived code. `helpers/` holds
+`Helpers_PACKET_SPACE_CONNECTION` written against Palow. Nothing in the C
+names a model predicate, so nothing in the C had to change for the helpers.
 
 Two encodings disappear in the port:
 
-* **`_core_ref` is not needed.** In the current model a struct field holding a
+* **`_core_ref` is not needed.** In the previous model a struct field holding a
   back-pointer cannot be a `ref`, because a `ref` is not a value; the field is a
   `core_ref` and `core_to_ref` converts it wherever ownership is stated. Under
   Palow a pointer field just holds a `ptr`, so `struct_connection_pts_to
   (conn_of ps_v)` is directly sayable and the conversions go away.
 
-* **`array_spec` is not needed.** The current model describes the fixed
+* **`array_spec` is not needed.** The previous model described the fixed
   `packets` array through a length/mask/`option` layer, so a slot is an
   `option` and installing one needs `array_spec_upd_set_eq`. Under Palow the
   field is a `Seq.seq ptr` refined to its length: a slot is `Seq.index`, an
@@ -163,10 +160,8 @@ Two encodings disappear in the port:
 
 The helper shrinks from 377 lines to about 300 as a result.
 
-One genuine divergence remains, and it is recorded as a block of macros at the
-top of `PalPacketSpaceInitialize`. `PacketSpace` arrives as raw storage.
-Palow has a parameter mode for that -- `_out` -- whose precondition *is* the
-uninitialised points-to and whose body scatters the four field writes into the
-storage and gathers it back. The current model has no such mode, because a
-`ref t` always holds a `t`, so the same fact is written by hand as an extra
-`pts_to_uninit` conjunct and opened and closed with two ghost statements.
+`PacketSpace` arrives as raw storage, so `PalPacketSpaceInitialize` takes it
+as an `_out` parameter, whose precondition *is* the uninitialised points-to and
+whose body scatters the four field writes into the storage and gathers it
+back. The previous model had no such mode, because a `ref t` always holds a
+`t`.

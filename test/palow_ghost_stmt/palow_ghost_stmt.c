@@ -4,11 +4,8 @@
 
 /* Ghost statements written against the Palow memory model.
  *
- * `_ghost_stmt` splices hand-written Pulse into the body, so the fragment
- * names whatever the surrounding model calls things. These fragments name
- * Palow's predicates, which the old translator has no definitions for, so this
- * test is `palow-only`. The C is still compiled, which is what keeps the
- * annotations honest as no-ops. */
+ * `_ghost_stmt` splices hand-written Pulse into the body, so the fragments
+ * name Palow's predicates directly. */
 
 /* A `ghost fn` is a statement, so `assume` here takes an slprop rather than a
  * prop. */

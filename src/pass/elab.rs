@@ -328,7 +328,9 @@ impl<'a> Elaborator<'a> {
                     self.elab_type(env, Rc::make_mut(ty));
                     env.push_var_decl(ident, ty.clone(), LocalDeclKind::RValue);
                 }
-                InlinePulseToken::Verbatim(_) | InlinePulseToken::FieldAntiquot { .. } => {}
+                InlinePulseToken::Verbatim(_)
+                | InlinePulseToken::FieldAntiquot { .. }
+                | InlinePulseToken::WitnessAntiquot(_) => {}
                 InlinePulseToken::AuxFnAntiquot { ty, .. } => self.elab_type(env, Rc::make_mut(ty)),
             }
         }
@@ -759,17 +761,11 @@ impl<'a> Elaborator<'a> {
                     | BinOp::BitAnd
                     | BinOp::BitOr
                     | BinOp::BitXor => {
-                        // Pointer arithmetic: array/arrayptr ± integer → cast integer to SizeT
+                        // Pointer arithmetic: pointer ± integer → cast integer to SizeT
                         let lhs_w = env.vtype_whnf(lhs_ty.clone());
                         let rhs_w = env.vtype_whnf(rhs_ty.clone());
-                        let lhs_is_ptr = matches!(
-                            &lhs_w.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        );
-                        let rhs_is_ptr = matches!(
-                            &rhs_w.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        );
+                        let lhs_is_ptr = env.is_arith_ptr(&lhs_w);
+                        let rhs_is_ptr = env.is_arith_ptr(&rhs_w);
                         if lhs_is_ptr && !rhs_is_ptr && matches!(bin_op, BinOp::Add | BinOp::Sub) {
                             let rhs_w = env.vtype_whnf(rhs_ty.clone());
                             if !matches!(rhs_w.val, TypeT::SizeT) {
@@ -1150,25 +1146,12 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Lower complex expressions at the top of statements.
-    /// - `Cond` in Assign/Return/Call → If statement
+    /// - `Cond` in Return/Call → If statement (an assignment's is left to
+    ///   the emitter, which knows whether the value is a number)
     fn lower_expr(stmt: &mut Rc<Stmt>) -> bool {
         let s = Rc::make_mut(stmt);
         let loc = s.loc.clone();
         match &s.val {
-            StmtT::Assign(lhs, rhs) => {
-                if let ExprT::Cond(c, a, b) = &rhs.val {
-                    let (c, a, b, lhs) = (c.clone(), a.clone(), b.clone(), lhs.clone());
-                    s.val = StmtT::If {
-                        cond: c,
-                        then_branch: Rc::new(vec![
-                            StmtT::Assign(lhs.clone(), a).with_loc(loc.clone()),
-                        ]),
-                        else_branch: Rc::new(vec![StmtT::Assign(lhs, b).with_loc(loc)]),
-                        ensures: Rc::new(vec![]),
-                    };
-                    return true;
-                }
-            }
             StmtT::Return(Some(rhs)) => {
                 if let ExprT::Cond(c, a, b) = &rhs.val {
                     let (c, a, b) = (c.clone(), a.clone(), b.clone());

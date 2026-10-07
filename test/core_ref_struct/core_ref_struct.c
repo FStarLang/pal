@@ -26,11 +26,7 @@ struct parent;
 
 struct child {
     int data;
-#ifdef PALOW
     struct parent *_plain up; // non-owning back-pointer
-#else
-    _core_ref struct parent *up; // non-owning back-pointer (breaks the cycle)
-#endif
 };
 
 struct parent {
@@ -44,7 +40,6 @@ struct parent {
  * `ref parent` with `core_to_ref` and asserted to point back to the parent.
  * This is exactly the reasoning that the auto-generated (acyclic) predicates
  * cannot express, and that `core_ref` enables the user to write by hand. */
-#ifdef PALOW
 // The same hand-written predicate in Palow. There is nothing to recover: the
 // back-pointer already *is* a `ptr`, the same type `p` has, so the last
 // conjunct is a plain equation rather than a round trip through `core_to_ref`.
@@ -54,14 +49,6 @@ _include_pulse(Core_ref_struct_include,
     Struct_child.struct_child_pts_to pv.$field(struct parent::down) 1.0R cv **
     pure (cv.$field(struct child::up) == p)
 )
-#else
-_include_pulse(Core_ref_struct_include,
-  let is_node (p: $type(struct parent *)) (pv: $type(struct parent)) (cv: $type(struct child)) : slprop =
-    pts_to p pv **
-    pts_to pv.$field(struct parent::down) cv **
-    pure (Pulse.Lib.C.CoreRef.core_to_ref $type(struct parent) cv.$field(struct child::up) == p)
-)
-#endif
 
 /* Field write on the struct that holds the core_ref. */
 void set_data(struct child *c, int v) {

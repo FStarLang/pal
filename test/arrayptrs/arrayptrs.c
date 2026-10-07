@@ -8,10 +8,8 @@ void write_via_ptr(_array int *a)
 {
   _arrayptr int *p = a + 3;
   *p = 42;
-  _ghost_stmt(arrayptr_drop $(p));
 }
 
-#ifdef PALOW
 // Palow spelling of the same two helper modules. A Palow pointer *is* an
 // address plus a provenance tag, so there is no separate `arrayptr_pts_to`
 // claim to carry around and no `arrayptr_parent` to recover: being derived
@@ -173,73 +171,6 @@ _include_pulse(Arrayptrs_include2,
          as (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p v);
   }
 )
-#else
-_include_pulse(Arrayptrs_include1,
-  let unless_null #a (x: array a) (p: slprop) : slprop =
-    if array_is_null x then emp else p
-
-  [@@pulse_intro]
-  ghost fn intro_unless_null_null (#a: Type0) p
-    ensures unless_null #a array_null p
-  {
-    rewrite emp as unless_null #a array_null p
-  }
-
-  [@@pulse_intro]
-  ghost fn intro_unless_null_nonnull (#a: Type0) (x: array a) p
-    requires p
-    ensures unless_null x p
-  {
-    if array_is_null x {
-      drop_ p;
-      assert rewrites_to x array_null;
-    } else {
-      rewrite p as unless_null x p;
-    }
-  }
-
-  ghost fn elim_unless_null_null (#a: Type0) (x: array a) p
-    requires unless_null x p
-    requires pure (array_is_null x)
-  {
-    rewrite unless_null x p as emp
-  }
-  ghost fn elim_unless_null_nonnull (#a: Type0) (x: array a) p
-    requires unless_null x p
-    requires pure (not (array_is_null x))
-    ensures p
-  {
-    rewrite unless_null x p as p
-  }
-)
-
-_include_pulse(Arrayptrs_include2,
-  unfold
-  let is_slice_prop #a (lo hi: array a) (x: array a) (v: full_array_spec a) =
-    base_of lo == base_of x /\ base_of hi == base_of x
-      /\ offset_of x <= offset_of lo
-      /\ offset_of lo <= offset_of hi
-      /\ offset_of hi <= offset_of x + array_spec_len v
-      /\ (forall (i: nat). offset_of lo <= i /\ i < offset_of hi ==>
-        (array_spec_mask v (i - offset_of x) /\ array_spec_initd v (i - offset_of x)))
-
-  [@@pulse_eager_unfold]
-  let is_slice #a (lo hi: array a) (x: array a) p (v: full_array_spec a) =
-    array_pts_to x p v **
-    arrayptr_pts_to lo x ** arrayptr_pts_to hi x **
-    pure (is_slice_prop lo hi x v)
-
-  // Spelled once so that the contracts below read the same in both models.
-  let off #a (q: array a) (x: array a) : GTot int = offset_of q
-  let span #a (lo hi: array a) : GTot int = offset_of hi - offset_of lo
-  unfold
-  let claim #a (q: array a) (x: array a) : slprop = arrayptr_pts_to q x
-  unfold
-  let found #a (r lo hi: array a) (x: array a) : slprop =
-    arrayptr_pts_to r x **
-    pure (offset_of lo <= offset_of r /\ offset_of r < offset_of hi)
-)
-#endif
 
 _arrayptr const int *binary_search(_arrayptr const int *lo, _arrayptr const int *hi, int target)
   _preserves(_inline_pulse(Arrayptrs_include2.is_slice $(lo) $(hi) $`arr $`p_arr $`v_arr))
@@ -253,32 +184,22 @@ _arrayptr const int *binary_search(_arrayptr const int *lo, _arrayptr const int 
     _invariant(_inline_pulse(Arrayptrs_include2.claim $(lo) $`arr))
     _invariant(_inline_pulse(Arrayptrs_include2.claim $(hi) $`arr))
     _invariant((bool) _inline_pulse(Arrayptrs_include2.is_slice_prop $(lo) $(hi) $`arr $`v_arr))
-#ifdef PALOW
     // Pulse's `old` is a marker the checker resolves against a dereference in
     // the precondition state; in Palow the invariant's pointers are pure
     // binders and there is nothing for it to resolve against, so the entry
     // values are named directly.
     _invariant((bool) _inline_pulse(Arrayptrs_include2.off $(_old(lo)) $`arr <= Arrayptrs_include2.off $(lo) $`arr && Arrayptrs_include2.off $(hi) $`arr <= Arrayptrs_include2.off $(_old(hi)) $`arr))
-#else
-    _invariant((bool) _inline_pulse(old (Arrayptrs_include2.off $(lo) $`arr) <= Arrayptrs_include2.off $(lo) $`arr && Arrayptrs_include2.off $(hi) $`arr <= old (Arrayptrs_include2.off $(hi) $`arr)))
-#endif
-#ifdef PALOW
     // The array itself. In the current model the loop reaches it through the
     // `arrayptr_pts_to` claims; in Palow the claims are empty and the
     // ownership has to be carried across the loop explicitly.
     _invariant(_inline_pulse(array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) $`arr $`p_arr $`v_arr))
-#endif
   {
       _arrayptr const int *mid = lo + (hi - lo) / 2;
       // Read once, so that the element is carved out of the array and put
       // back exactly once as well.
-#ifdef PALOW
       _ghost_stmt(Arrayptrs_include2.focus_at $`arr $(mid));
-#endif
       int probe = *mid;
-#ifdef PALOW
       _ghost_stmt(Arrayptrs_include2.unfocus_at $`arr $(mid));
-#endif
       if (probe == target)
         return mid;
       else if (probe < target)
@@ -302,12 +223,8 @@ void use_binary_search(_array const int *arr, int target, size_t length)
     _ghost_stmt(Arrayptrs_include1.elim_unless_null_null _ _);
   } else {
     _ghost_stmt(Arrayptrs_include1.elim_unless_null_nonnull _ _);
-#ifdef PALOW
     _ghost_stmt(Arrayptrs_include2.focus_at $(arr) $(result));
     int val = *result;
     _ghost_stmt(Arrayptrs_include2.unfocus_at $(arr) $(result));
-#else
-    int val = *result;
-#endif
   }
 }

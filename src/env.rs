@@ -491,10 +491,11 @@ impl Env {
                 let rhs_ty = self.vtype_whnf(self.infer_expr(rhs)?);
                 // pointer - pointer → PtrdiffT
                 match (&lhs_ty.val, &rhs_ty.val) {
-                    (
-                        TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
-                        TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
-                    ) => Ok(TypeT::PtrdiffT.with_loc_core(expr.loc.clone()).into()),
+                    (TypeT::Pointer(..), TypeT::Pointer(..))
+                        if self.is_arith_ptr(&lhs_ty) && self.is_arith_ptr(&rhs_ty) =>
+                    {
+                        Ok(TypeT::PtrdiffT.with_loc_core(expr.loc.clone()).into())
+                    }
                     _ => Ok(lhs_ty),
                 }
             }
@@ -637,6 +638,13 @@ impl Env {
                     | TypeT::Nullable(..)
             ) => None,
         }
+    }
+
+    /// Whether pointer arithmetic is allowed on a value of type `t` (already
+    /// in whnf). C allows it on any object pointer; GNU C also on `void *`,
+    /// taking `sizeof(void)` to be 1. A function pointer is not a `Pointer`.
+    pub fn is_arith_ptr(&self, t: &Type) -> bool {
+        matches!(t.val, TypeT::Pointer(..))
     }
 
     pub fn vtype_whnf(&self, a: MaybeRc<Type>) -> MaybeRc<Type> {
@@ -799,23 +807,6 @@ impl Env {
     pub fn mutable_global_lvalue(&self, ident: &Ident) -> Option<&GlobalVar> {
         let gv = self.addressable_global(ident)?;
         if gv.is_pure { None } else { Some(gv) }
-    }
-
-    /// The global named by `ident`, if it is a *mutable* C array object (`T g[N]`
-    /// or `T g[]`) and not shadowed locally.
-    ///
-    /// Like a mutable scalar global, its storage is assumed (here an `array T`
-    /// handle rather than a `ref`) and its ownership is not: contracts thread
-    /// `_live(g)`, which names the array's whole permission *and* its extent.
-    pub fn mutable_global_array(&self, ident: &Ident) -> Option<&GlobalVar> {
-        if self.lookup_var(ident).is_some() {
-            return None;
-        }
-        let gv = self.lookup_global_var(ident)?;
-        if gv.is_pure || global_array_object(gv).is_none() {
-            return None;
-        }
-        Some(gv)
     }
 
     pub fn is_lvalue(&self, expr: &Expr) -> bool {

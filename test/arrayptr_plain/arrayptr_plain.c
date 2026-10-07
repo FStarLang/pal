@@ -58,7 +58,6 @@ int look_named(_array const char *tab, size_t off, _plain const char *want)
 {
     _arrayptr const char *p = tab + off;
     int r = cmp(p, want);
-    _ghost_stmt(arrayptr_drop $(p));
     return r;
 }
 

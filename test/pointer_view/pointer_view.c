@@ -27,21 +27,12 @@ typedef struct node {
    "a points-to rules out null", the permission the refinement holds the list
    at, and the name of the ghost value it binds. Naming those once here keeps
    one copy of the predicate and its three ghost lemmas. */
-#ifdef PALOW
 #define _node_pts_to(h, nd) struct_node_pts_to h 1.0R nd
 #define _node_freeable(h) freeable h struct_node_sizeof
 #define _node_not_null(h) struct_node_pts_to_not_null h
 #define _node_uninit(h) ptr_pts_to_uninit h
 #define _node_perm 1.0R
 #define _node_elements_of_head reveal val_head_elements
-#else
-#define _node_pts_to(h, nd) pts_to h nd
-#define _node_freeable(h) freeable h
-#define _node_not_null(h) Pulse.Lib.Reference.pts_to_not_null h
-#define _node_uninit(h) pts_to_uninit h
-#define _node_perm p
-#define _node_elements_of_head reveal $`val_head_0
-#endif
 
 _include_pulse(Pointer_view_include1,
   module L = FStar.List.Tot

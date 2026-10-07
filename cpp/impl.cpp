@@ -1445,8 +1445,24 @@ public:
         }
 
         // BitCast (e.g., T* → void*): pass through after malloc/calloc
-        // detection. F* functions like memcpy are type-polymorphic.
+        // detection. F* functions like memcpy are type-polymorphic. A cast
+        // *to* a different object pointer type is kept, though: it changes
+        // what a dereference reads (`*(uint32_t *)base` is a 4-byte read,
+        // not a read of `void` or of a byte).
         if (ic->getCastKind() == CK_BitCast) {
+          auto from = ic->getSubExpr()->getType();
+          auto to = ic->getType();
+          if (from->isPointerType() && to->isPointerType()) {
+            auto fromPt =
+                from->getPointeeType().getCanonicalType().getUnqualifiedType();
+            auto toPt =
+                to->getPointeeType().getCanonicalType().getUnqualifiedType();
+            if (!toPt->isVoidType() && !toPt->isFunctionType() &&
+                !toPt->isIncompleteType() && fromPt != toPt) {
+              return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                                    trQualType(to, e->getSourceRange()));
+            }
+          }
           return trRValue(ic->getSubExpr());
         }
 
@@ -1882,12 +1898,14 @@ public:
         for (unsigned i = 0; i < c->getNumArgs(); ++i) {
           auto *arg = c->getArg(i);
           if (fd->isVariadic() && i >= fd->getNumParams()) {
-            if (!canOmitVariadicArgument(arg)) {
+            if (!canOmitVariadicArgument(arg) && !hoistedVarargs.count(arg)) {
               reportUnsupported(
                   arg->getSourceRange(), getRange(arg->getSourceRange()),
-                  "unsupported ignored variadic argument: expected a literal, "
-                  "a non-volatile local value or address, or wrapping "
-                  "integer arithmetic over those",
+                  "unsupported ignored variadic argument: one that is "
+                  "evaluated only conditionally (in a `?:` arm or on the "
+                  "right of `&&`/`||`) must be a literal, a non-volatile "
+                  "local value or address, or wrapping integer arithmetic "
+                  "over those",
                   "");
               return mk_rvalue_err(
                   std::move(loc),
@@ -2013,6 +2031,24 @@ public:
           return mk_alignof(std::move(loc), std::move(ty));
         }
       }
+    } else if (auto *ooe = dyn_cast<OffsetOfExpr>(e)) {
+      // `offsetof(T, designator)` is an integer constant that clang has
+      // already computed from the target ABI -- the same layout PAL records
+      // for `sizeof` and the `struct_T_offsetof_f` constants -- so it becomes
+      // a literal. This also covers nested and array designators
+      // (`offsetof(T, a.b[2])`) whenever they are constant. Clang types the
+      // expression as the canonical integer behind `size_t`, so the literal
+      // is given `size_t` explicitly.
+      Expr::EvalResult res;
+      if (ooe->EvaluateAsInt(res, *astCtx)) {
+        auto ty = mk_sizet(loc.clone());
+        return mk_int_lit(std::move(loc), toBigInt(res.Val.getInt()),
+                          std::move(ty));
+      }
+      reportUnsupported(e->getSourceRange(), loc,
+                        "offsetof with a non-constant designator", "");
+      return mk_rvalue_err(std::move(loc),
+                           trQualType(e->getType(), e->getSourceRange()));
     }
 
     // __builtin_choose_expr(c, a, b) is `a` or `b` -- decided by the compiler,
@@ -2143,6 +2179,9 @@ public:
   /// from them, keyed by the call expression.
   std::map<const Expr *, std::string> hoistedRValues;
   int rvalueHoistCounter = 0;
+  /// Variadic arguments evaluated ahead of their statement; see
+  /// `hoistRValueMembers`. The call itself then drops them.
+  std::set<const Expr *> hoistedVarargs;
 
   /// Bind a structure-valued call that a member projection reads from to a
   /// uniquely named local, ahead of the statement that contains it.
@@ -2168,7 +2207,10 @@ public:
       return;
     }
     if (auto *bo = dyn_cast<BinaryOperator>(e)) {
-      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr) {
+      // The right operand of a comma runs after the left, and `trStmt`
+      // translates it as a statement of its own, which hoists it there.
+      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr ||
+          bo->getOpcode() == BO_Comma) {
         hoistRValueMembers(stmts, bo->getLHS());
         return;
       }
@@ -2176,6 +2218,31 @@ public:
     for (auto *child : e->children()) {
       if (auto *ce = dyn_cast_or_null<Expr>(child)) {
         hoistRValueMembers(stmts, ce);
+      }
+    }
+    // A variadic argument has no parameter to be passed to, so its value is
+    // dropped. What evaluating it obliges -- ownership of a field it reads,
+    // no overflow in arithmetic -- is not dropped with it: an argument that is
+    // not trivially inert is bound to a local ahead of the statement, which
+    // is where those obligations are checked. C evaluates every argument
+    // before the call, in an unspecified order, so this is one of the orders
+    // it allows.
+    if (auto *call = dyn_cast<CallExpr>(e)) {
+      auto *fd = call->getDirectCallee();
+      if (fd && fd->isVariadic()) {
+        for (unsigned i = fd->getNumParams(); i < call->getNumArgs(); ++i) {
+          auto *arg = call->getArg(i);
+          if (canOmitVariadicArgument(arg) || hoistedVarargs.count(arg))
+            continue;
+          auto argLoc = getRange(arg->getSourceRange());
+          auto ty = trQualType(arg->getType(), arg->getSourceRange());
+          auto name = "__pal_vararg_" + std::to_string(rvalueHoistCounter++);
+          auto id = ctx.mk_ident(toStr(StringRef(name)), argLoc.clone());
+          auto rval = trRValue(arg);
+          stmts.push(mk_let_stmt(argLoc.clone(), std::move(id), std::move(ty),
+                                 std::move(rval)));
+          hoistedVarargs.insert(arg);
+        }
       }
     }
     auto *m = dyn_cast<MemberExpr>(e);

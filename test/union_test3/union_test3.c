@@ -47,7 +47,6 @@ union u2 {
  * outside the live member; it is the price of the byte-level view, and the
  * reason the two spellings cannot be shared.
  */
-#ifdef PALOW
 int write_subfield(union u2 *u _consumes, int v)
     _ensures(_inline_pulse(
         exists* a_val.
@@ -56,16 +55,6 @@ int write_subfield(union u2 *u _consumes, int v)
            Struct_inner.struct_inner_padding $(u) 1.0R **
            Union_u2.union_u2_rest_x $(u) 1.0R)))
     _ensures(return == v)
-#else
-int write_subfield(union u2 *u _consumes, int v)
-    _ensures(_inline_pulse(
-        exists* a_val.
-          (Union_u2.union_u2__aux_raw_unfolded_x $(u) 1.0R **
-           Struct_inner.struct_inner__aux_raw_unfolded (Union_u2.union_u2__x $(u)) 1.0R **
-           Pulse.Lib.Reference.pts_to (Struct_inner.struct_inner__a_1 (Union_u2.union_u2__x $(u))) #1.0R a_val **
-           Pulse.Lib.Reference.pts_to_uninit (Struct_inner.struct_inner__b_1 (Union_u2.union_u2__x $(u))))))
-    _ensures(return == v)
-#endif
 {
     _ghost_stmt($activate(union u2::x) $(u));
     _ghost_stmt($unfold-uninit(struct inner) $&(u->x));

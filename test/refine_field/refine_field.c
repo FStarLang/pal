@@ -64,9 +64,6 @@ uint8_t fourth(const struct buf *s) _requires(s->fixed._length == 4)
    model does not carry a field's refinement that far, so there it has to be
    asked for again. */
 uint8_t first(const struct buf *s)
-#ifndef PALOW
-    _requires(s->fixed._length == 4)
-#endif
 {
     return s->fixed[0];
 }

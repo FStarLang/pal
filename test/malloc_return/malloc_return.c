@@ -9,7 +9,6 @@
    emitter the caller cannot reach the block at all. The divergence is recorded
    here rather than worked around: the non-Palow arm keeps the older shape, in
    which the allocation is assumed to succeed. */
-#ifdef PALOW
 
 typedef int *int_ptr _allocated _nullable;
 
@@ -31,19 +30,3 @@ int alloc_and_free(int x) {
     return 42;
 }
 
-#else
-
-typedef int *int_ptr _allocated;
-
-int_ptr alloc_int() {
-    int *p = (int *) malloc(sizeof(int));
-    *p = 0;
-    return p;
-}
-
-int alloc_and_free(int x) {
-    free(alloc_int());
-    return 42;
-}
-
-#endif
