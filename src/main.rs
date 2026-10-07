@@ -17,6 +17,7 @@ mod hauntedc;
 mod ir;
 mod mayberc;
 mod pass;
+mod prims;
 mod source_range_info;
 mod vfs;
 
