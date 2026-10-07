@@ -5988,8 +5988,8 @@ new facts about memory.
     own. A loop that leaves it alone needs nothing, written or not, since
     Pulse's frame carries it. A loop that touches one not yet written is
     refused, since the invariant would have to say that the storage may or
-    may not hold a value. Struct and array `_out` parameters are still
-    refused at a loop. `test/out_loop` covers these.
+    may not hold a value. Entry 34 extends this to struct and array `_out`
+    parameters. `test/out_loop` covers these.
 
 31. **Field addresses as call arguments** (#348). `f(&s->a)` passed the
     field's address without opening `*s`, so the callee's points-to was
@@ -6043,3 +6043,26 @@ new facts about memory.
       lemma.
 
     `test/contract_ops` covers these.
+
+34. **Struct and array `_out` parameters in loops.** Loops are no longer
+    refused in a function with such a parameter.
+    - A struct `_out` is the slot `*p`. Once it is written, a loop that
+      touches it restates it in the invariant like any other slot, and the
+      author's clauses read it as `p->x`. A loop that writes it for the
+      first time is refused, as for a local.
+    - An `_out` array is restated in the invariant by its `option` view,
+      with its length tied to the caller's. A clause that reads a cell,
+      such as `a[j] == 0`, also claims that the cell holds a value: the
+      comparison becomes `Some? c /\ Some?.v c == 0`. So an invariant
+      over the prefix written so far, together with the exit condition,
+      proves that every cell holds a value when the function returns.
+    - Library changes:
+      - `array_somes` now also accepts that every cell holds a value stated
+        over `size_t` indices. That is what an invariant over `size_t j`
+        says, and Z3 cannot instantiate it at a `nat`. The bridge is that
+        an owned array's length fits in a `size_t` (`array_length_fits`).
+      - `array_somes` now also states each cell's value with a pattern on
+        `Seq.index vs i`. Before, a postcondition about an `_out` array's
+        values (`_ensures(a[0] == 7)`) failed even without a loop.
+
+    `test/out_aggr_loop` covers these.

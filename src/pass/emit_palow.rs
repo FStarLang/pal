@@ -1747,6 +1747,14 @@ struct Spec<'a> {
     /// exists)`. A `_letimpure` accessor over a refined parameter is a way of
     /// naming one of these.
     valued: RefCell<Vec<(String, String, String, bool)>>,
+    /// Arrays whose value here is a sequence of `option`s: an `_out` array
+    /// in a loop invariant, while it is still being filled.
+    maybes: HashSet<String>,
+    /// What the comparison being translated needs to be defined: that each
+    /// cell of a `maybes` array it reads holds a value. Unlike `guards`, this
+    /// is part of the claim, at the comparison itself -- reading a cell is a
+    /// statement that it was written.
+    defined: RefCell<Vec<String>>,
 }
 
 impl<'a> Spec<'a> {
@@ -1906,6 +1914,8 @@ impl<'a> Spec<'a> {
                         uses: RefCell::new(HashSet::new()),
                         signed_ok: false,
                         valued: RefCell::new(Vec::new()),
+                        maybes: self.maybes.clone(),
+                        defined: RefCell::new(Vec::new()),
                     };
                     let p = inner.prop(body, w)?;
                     self.uses
@@ -1950,6 +1960,31 @@ impl<'a> Spec<'a> {
                     }
                     return Ok(format!("({} {} {})", a, o, b));
                 }
+                let mark = self.defined.borrow().len();
+                let p = self.compare(*op, l, r, w)?;
+                let defs: Vec<String> = self.defined.borrow_mut().drain(mark..).collect();
+                Ok(if defs.is_empty() {
+                    p
+                } else {
+                    format!(r"({} /\ {})", defs.join(r" /\ "), p)
+                })
+            }
+            _ => {
+                // A bare `_Bool`-valued condition.
+                let ty = self.ty_of(e)?;
+                if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
+                    Ok(format!("({} == true)", self.value(e, w)?))
+                } else {
+                    Err(format!("{} in a contract", expr_kind(e)))
+                }
+            }
+        }
+    }
+
+    /// A comparison of two values, the atom of a contract.
+    fn compare(&self, op: BinOp, l: &Expr, r: &Expr, w: When) -> Result<String, String> {
+        {
+            {
                 let ty = self.ty_of(l)?;
                 if matches!(op, BinOp::Eq) {
                     // `_Bool` equality is equivalence of the two conditions,
@@ -1972,15 +2007,6 @@ impl<'a> Spec<'a> {
                 // mathematical ones, so an uncast comparison needs the `.v`
                 // that an explicit `(_specint)` would have supplied.
                 Ok(format!("({} {} {})", self.num(l, w)?, o, self.num(r, w)?))
-            }
-            _ => {
-                // A bare `_Bool`-valued condition.
-                let ty = self.ty_of(e)?;
-                if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
-                    Ok(format!("({} == true)", self.value(e, w)?))
-                } else {
-                    Err(format!("{} in a contract", expr_kind(e)))
-                }
             }
         }
     }
@@ -2156,7 +2182,12 @@ impl<'a> Spec<'a> {
             self.guards
                 .borrow_mut()
                 .push(format!("{} < Seq.length {}", i, term));
-            Ok(format!("(Seq.index {} {})", term, i))
+            let cell = format!("(Seq.index {} {})", term, i);
+            if self.maybes.contains(&*v.val) {
+                self.defined.borrow_mut().push(format!("Some? {}", cell));
+                return Ok(format!("(Some?.v {})", cell));
+            }
+            Ok(cell)
         } else if idx.is_some() {
             Err(format!("`{}[i]` on a non-array in a contract", v.val))
         } else {
@@ -3101,6 +3132,8 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
         valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
     };
     let clause = |es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -3198,6 +3231,8 @@ fn emit_pure_fn(
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
         valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
     };
     let clause = |sp: &Spec, es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -4221,6 +4256,8 @@ fn emit_fn(
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
         valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
     };
     let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
         es.iter()
@@ -4395,6 +4432,8 @@ fn emit_fn(
             uses: RefCell::new(HashSet::new()),
             signed_ok: false,
             valued: RefCell::new(Vec::new()),
+            maybes: HashSet::new(),
+            defined: RefCell::new(Vec::new()),
         };
         let r = how(&inner, w);
         spec.uses
@@ -5589,6 +5628,8 @@ fn refine_prop(
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
         valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
     };
     let mut out = Vec::new();
     for p in &ps {
@@ -10670,10 +10711,6 @@ struct Body<'a> {
     /// divergent too, which is why the whole set is reached by a fixpoint
     /// rather than in one pass.
     divergent_fns: &'a HashSet<String>,
-    /// Whether any parameter is `_out`. Such a parameter's storage is
-    /// uninitialised on entry and initialised by the body, so it is not a
-    /// fixed part of the frame a loop invariant can restate.
-    has_out: bool,
     /// Set by a loop: the function has to be declared `divergent`, since PAL
     /// translates no `decreases` measure.
     divergent: bool,
@@ -10718,6 +10755,8 @@ struct Body<'a> {
 #[derive(Clone)]
 struct ArrayParam {
     pn: String,
+    /// The F* type of an element.
+    fty: String,
     esize: String,
     /// The term for the array's base address.
     addr: String,
@@ -16559,14 +16598,18 @@ impl<'a> Body<'a> {
             touch_stmts(b, &mut t);
             t.written
         });
+        let mut deref_slots: Vec<(String, String)> = Vec::new();
         for s in self.slots.clone() {
             let s = &s;
+            // A struct `_out` parameter's slot is named `*p`; the body
+            // touches it through `p`.
+            let touch = s.name.strip_prefix('*').unwrap_or(&s.name);
             if let Some(k) = &kept
-                && !k.contains(&s.name)
+                && !k.contains(touch)
             {
                 continue;
             }
-            if stated.contains(&s.name) {
+            if stated.contains(&s.name) || stated.contains(touch) {
                 continue;
             }
             // A local that holds an allocated block and is not reassigned in
@@ -16593,10 +16636,13 @@ impl<'a> Body<'a> {
                 // inside a loop is real, but it is not this milestone.
                 return Err(format!("{} with `{}` not yet written", what, s.name));
             }
-            let b = format!("inv_{}", s.name);
+            let b = format!("inv_{}", touch);
             binders.push(format!("({}: {})", b, s.fstar_ty));
             owns.push(s.pts_to(&b));
             bound.push(s.name.clone());
+            if touch != s.name {
+                deref_slots.push((touch.to_string(), b.clone()));
+            }
             locals.insert(s.name.clone(), b);
         }
         // A local holding an allocated block is a name for the block's
@@ -16679,6 +16725,42 @@ impl<'a> Body<'a> {
             owns.push(format!("{}{}", o.pre, b));
             pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
         }
+        for (n, b) in deref_slots {
+            pointees.insert(n, (Some(b.clone()), Some(b)));
+        }
+        // An `_out` array is storage being filled, so what the invariant
+        // binds is the `option` view: a cell the loop has not written yet
+        // holds `None`, and a clause that reads a cell claims it is written.
+        // The length is the caller's, and does not change.
+        let mut maybes: HashSet<String> = HashSet::new();
+        let mut out_arrays: Vec<(String, ArrayParam)> = self
+            .arrays
+            .iter()
+            .filter(|(n, a)| a.maybe && self.out_params.contains(*n) && self.olens.contains_key(*n))
+            .map(|(n, a)| (n.clone(), a.clone()))
+            .collect();
+        out_arrays.sort_by(|a, b| a.0.cmp(&b.0));
+        for (n, a) in out_arrays {
+            if !kept.as_ref().is_none_or(|k| k.contains(&n)) || stated.contains(&n) {
+                continue;
+            }
+            let b = format!("inv_val_{}", n);
+            binders.push(format!("({}: Seq.seq (option ({})))", b, a.fty));
+            owns.push(format!(
+                "array_pts_to (maybe_repr {pn}_repr (SizeT.v {es})) (SizeT.v {es}) \
+                 (SizeT.v {pn}_alignof) {addr} 1.0R {b}",
+                pn = a.pn,
+                es = a.esize,
+                addr = a.addr,
+                b = b
+            ));
+            owns.push(format!(
+                "pure (Seq.length {} == Seq.length {})",
+                b, self.olens[&n]
+            ));
+            pointees.insert(n.clone(), (Some(b.clone()), Some(b)));
+            maybes.insert(n);
+        }
 
         let spec = Spec {
             tds: self.tds,
@@ -16708,6 +16790,8 @@ impl<'a> Body<'a> {
             uses: RefCell::new(HashSet::new()),
             signed_ok: false,
             valued: RefCell::new(Vec::new()),
+            maybes,
+            defined: RefCell::new(Vec::new()),
         };
         for e in own_clauses.iter() {
             let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
@@ -16776,9 +16860,6 @@ impl<'a> Body<'a> {
             return Err("a loop with its own `requires`".to_string());
         }
         let breaks = has_break(body);
-        if self.has_out {
-            return Err("a loop in a function with an `_out` parameter".to_string());
-        }
 
         let (binders, mut owns, props) = self.frame(inv, "a loop", Some(body))?;
         let bound = std::mem::take(&mut self.frame_slots);
@@ -19552,7 +19633,11 @@ fn emit_body(
         let (Some(name), Some(pt)) = (a.name.as_ref(), pointee(tds, &a.ty)) else {
             continue;
         };
-        let (Some(pn), Some(esize)) = (palow_name(tds, pt), palow_sizeof(tds, pt)) else {
+        let (Some(pn), Some(esize), Some(fty)) = (
+            palow_name(tds, pt),
+            palow_sizeof(tds, pt),
+            fstar_type(tds, pt),
+        ) else {
             continue;
         };
         if !has_repr(tds, pt) {
@@ -19562,6 +19647,7 @@ fn emit_body(
             name.val.to_string(),
             ArrayParam {
                 pn,
+                fty,
                 esize: format!("{}sz", esize),
                 addr: format!("var_{}", name.val),
                 // An `_out` array arrives as storage, so its elements are
@@ -19625,15 +19711,6 @@ fn emit_body(
         freeables: &sig.freeables,
         consumed_freed: HashSet::new(),
         consumed: &sig.consumed,
-        // A scalar `_out` is restated by a loop's frame like any other
-        // pointee; a struct or array one is not yet.
-        has_out: defn.decl.args.iter().any(|a| {
-            a.mode == ParamMode::Out
-                && !a
-                    .name
-                    .as_ref()
-                    .is_some_and(|n| sig.outs.iter().any(|o| *o.base == *n.val))
-        }),
         divergent: false,
         seeded: Vec::new(),
         laundered: HashSet::new(),
