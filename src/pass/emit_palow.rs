@@ -14280,6 +14280,12 @@ impl<'a> Body<'a> {
                         signed: false,
                         width,
                     } => Ok(format!("(FStar.UInt{}.lognot {})", width, a)),
+                    // Unlike `-`, `~` cannot overflow: it is total on every
+                    // two's-complement width, which is what F*'s `lognot` is.
+                    TypeT::Int {
+                        signed: true,
+                        width,
+                    } => Ok(format!("(FStar.Int{}.lognot {})", width, a)),
                     _ => Err(format!("a bitwise complement of {}", describe(&ty))),
                 }
             }
