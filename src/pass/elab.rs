@@ -761,17 +761,11 @@ impl<'a> Elaborator<'a> {
                     | BinOp::BitAnd
                     | BinOp::BitOr
                     | BinOp::BitXor => {
-                        // Pointer arithmetic: array/arrayptr ± integer → cast integer to SizeT
+                        // Pointer arithmetic: array/arrayptr/void* ± integer → cast integer to SizeT
                         let lhs_w = env.vtype_whnf(lhs_ty.clone());
                         let rhs_w = env.vtype_whnf(rhs_ty.clone());
-                        let lhs_is_ptr = matches!(
-                            &lhs_w.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        );
-                        let rhs_is_ptr = matches!(
-                            &rhs_w.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        );
+                        let lhs_is_ptr = env.is_arith_ptr(&lhs_w);
+                        let rhs_is_ptr = env.is_arith_ptr(&rhs_w);
                         if lhs_is_ptr && !rhs_is_ptr && matches!(bin_op, BinOp::Add | BinOp::Sub) {
                             let rhs_w = env.vtype_whnf(rhs_ty.clone());
                             if !matches!(rhs_w.val, TypeT::SizeT) {

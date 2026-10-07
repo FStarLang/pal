@@ -13406,6 +13406,11 @@ impl<'a> Body<'a> {
                 _ => return None,
             },
         };
+        // GNU C takes `sizeof(void)` to be 1, so arithmetic on a `void *` --
+        // ubiquitous on kernel MMIO bases -- moves by bytes.
+        if matches!(peel(self.tds, &pt).val, TypeT::Void) {
+            return Some(1);
+        }
         palow_sizeof(self.tds, &pt).filter(|n| *n > 0)
     }
 
@@ -18395,10 +18400,13 @@ fn ptr_base(tds: &Typedefs, env: &Env, e: &Expr) -> bool {
     let Ok(t) = env.infer_expr(e) else {
         return true;
     };
-    matches!(
-        peel(tds, &t.to_rc()).val,
-        TypeT::Pointer(..) | TypeT::FixedArray(..) | TypeT::FlexArray(..)
-    )
+    match &peel(tds, &t.to_rc()).val {
+        // GNU arithmetic on a `void *` is byte arithmetic, not an index: there
+        // is no `void` element for the result to name.
+        TypeT::Pointer(pt, _) => !matches!(peel(tds, pt).val, TypeT::Void),
+        TypeT::FixedArray(..) | TypeT::FlexArray(..) => true,
+        _ => false,
+    }
 }
 
 fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, Rc<Expr>> {

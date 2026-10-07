@@ -491,10 +491,11 @@ impl Env {
                 let rhs_ty = self.vtype_whnf(self.infer_expr(rhs)?);
                 // pointer - pointer → PtrdiffT
                 match (&lhs_ty.val, &rhs_ty.val) {
-                    (
-                        TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
-                        TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr),
-                    ) => Ok(TypeT::PtrdiffT.with_loc_core(expr.loc.clone()).into()),
+                    (TypeT::Pointer(..), TypeT::Pointer(..))
+                        if self.is_arith_ptr(&lhs_ty) && self.is_arith_ptr(&rhs_ty) =>
+                    {
+                        Ok(TypeT::PtrdiffT.with_loc_core(expr.loc.clone()).into())
+                    }
                     _ => Ok(lhs_ty),
                 }
             }
@@ -636,6 +637,19 @@ impl Env {
                     | TypeT::Plain(..)
                     | TypeT::Nullable(..)
             ) => None,
+        }
+    }
+
+    /// Whether pointer arithmetic is allowed on a value of type `t` (already
+    /// in whnf): array pointers, and -- as the GNU extension that takes
+    /// `sizeof(void)` to be 1 -- any `void *`.
+    pub fn is_arith_ptr(&self, t: &Type) -> bool {
+        match &t.val {
+            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr) => true,
+            TypeT::Pointer(pt, _) => {
+                matches!(self.vtype_whnf(pt.clone().into()).val, TypeT::Void)
+            }
+            _ => false,
         }
     }
 
