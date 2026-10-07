@@ -836,7 +836,10 @@ fn expr_parser<
                             .into())
                     }
                     _ => Ok(ExprT::FnCall(
-                        f,
+                        match crate::prims::of_builtin(&f.val) {
+                            Some(p) => Rc::<str>::from(p).with_loc(f.loc.clone()),
+                            None => f,
+                        },
                         args.into_iter().map(|e: Expr| e.to_rvalue()).collect(),
                     )
                     .with_loc(sift.resolve_source_info(&s))

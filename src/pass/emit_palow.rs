@@ -1545,6 +1545,10 @@ struct FnSurface {
     /// what it does -- so this is exactly the set of pointers the body may call
     /// through without knowing which function it is calling.
     valid_fps: HashSet<String>,
+    /// Function-pointer fields, as (parameter, field), whose `is_valid` the
+    /// contract hands in through a field-level `_refine` on the struct the
+    /// parameter is or points at.
+    valid_fp_fields: HashSet<(String, String)>,
     /// Parameters the caller hands over *with* the right to free them: an
     /// `_allocated` pointer taken `_consumes`. The block is the callee's to
     /// return, and a `free` of one is as ordinary as a `free` of a block this
@@ -2794,6 +2798,15 @@ impl<'a> Spec<'a> {
                         )),
                     },
                 }
+            }
+            // A PAL primitive is a total F* function of machine values, so in
+            // a contract it is applied exactly as in a body.
+            ExprT::FnCall(name, args) if crate::prims::fstar_name(&name.val).is_some() => {
+                let mut out = crate::prims::fstar_name(&name.val).unwrap().to_string();
+                for a in args.iter() {
+                    out += &format!(" {}", self.value(a, w)?);
+                }
+                Ok(format!("({})", out))
             }
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
                 let mut out = format!("func_{}", name.val);
@@ -5102,6 +5115,11 @@ fn emit_fn(
         // called through.
         valid_fps: if contract_ok {
             valid_fps.take()
+        } else {
+            HashSet::new()
+        },
+        valid_fp_fields: if contract_ok {
+            valid_fp_fields.take()
         } else {
             HashSet::new()
         },
@@ -10265,6 +10283,8 @@ struct Body<'a> {
     /// Parameters the contract hands an `is_valid` for, and so the only
     /// pointers this body may call through without knowing the target.
     valid_fps: &'a HashSet<String>,
+    /// See `FnSurface::valid_fp_fields`.
+    valid_fp_fields: &'a HashSet<(String, String)>,
     /// Locals whose validity an `_ensures` on an `if` established. The
     /// signature's `valid_fps` says which *parameters* the contract spoke for;
     /// this says which locals the body's own annotations did.
@@ -14042,6 +14062,16 @@ impl<'a> Body<'a> {
                 }
                 _ => self.addr_only(inner),
             },
+            // A PAL primitive (`prims.rs`) is a definition in the Pulse
+            // library, pure and total, so a call to it is an application:
+            // there is nothing to sequence and nothing it could fail on.
+            ExprT::FnCall(name, args) if crate::prims::fstar_name(&name.val).is_some() => {
+                let mut out = crate::prims::fstar_name(&name.val).unwrap().to_string();
+                for a in args.iter() {
+                    out += &format!(" {}", self.rvalue(a)?);
+                }
+                Ok(format!("({})", out))
+            }
             ExprT::FnCall(name, args) if self.tds.pure_fns.contains(&*name.val.to_string()) => {
                 let mut out = format!("func_{}", name.val);
                 for a in args.iter() {
@@ -14124,9 +14154,21 @@ impl<'a> Body<'a> {
                 // pre/post are left to slprop matching: the fact in context is
                 // the author's, written in their own words, and naming them
                 // here would mean parsing those words.
+                // A field of a parameter's struct whose own `_refine` hands in
+                // the validity is the same thing one level down: the contract
+                // stated the `is_valid` at the field's value, which a load of
+                // the field produces.
+                let valid_field = match &strip_vattr(f).val {
+                    ExprT::Member(b, fname) => fp_base(b).is_some_and(|base| {
+                        self.valid_fp_fields
+                            .contains(&(base, fname.val.to_string()))
+                    }),
+                    _ => false,
+                };
                 if let Some(base) = fp_base(f)
                     && self.target_of(f).is_none()
-                    && (self.valid_fps.contains(&base)
+                    && (valid_field
+                        || self.valid_fps.contains(&base)
                         || self.local_valid_fps.contains(&base)
                         || self.fp_from_call.contains(&base))
                 {
@@ -14171,17 +14213,34 @@ impl<'a> Body<'a> {
                     // wrong reason.
                     let wide = !matches!(&strip_vattr(f).val, ExprT::Var(_));
                     let fty = self.ty_of(f)?;
+                    // The deep half of a struct with owned pointer fields is
+                    // a component of its own, at a pointer to one and at one
+                    // passed by value alike, as in the wrapper's witness.
+                    let has_own = |t: &Type| match &peel(self.tds, t).val {
+                        TypeT::TypeRef(TypeRefKind::Struct(n)) => self
+                            .tds
+                            .structs
+                            .get(&*n.val.to_string())
+                            .is_some_and(|si| !own_items(self.tds, si, &n.val).is_empty()),
+                        _ => false,
+                    };
                     let nwit = match &peel(self.tds, &fty).val {
                         TypeT::FnPtr { args, .. } => args
                             .iter()
-                            .filter(|a| {
-                                if wide {
+                            .map(|a| {
+                                let base = if wide {
                                     matches!(peel(self.tds, a).val, TypeT::Pointer(..))
                                 } else {
                                     pointee(self.tds, a).is_some()
-                                }
+                                };
+                                let deep = if base {
+                                    pointee(self.tds, a).is_some_and(|pt| has_own(&pt))
+                                } else {
+                                    has_own(a)
+                                };
+                                base as usize + (wide && deep) as usize
                             })
-                            .count(),
+                            .sum(),
                         _ => 0,
                     };
                     let w = self
@@ -18811,6 +18870,7 @@ fn emit_body(
         piece_types: &sig.piece_types,
         guarded: &sig.guarded,
         valid_fps: &sig.valid_fps,
+        valid_fp_fields: &sig.valid_fp_fields,
         local_valid_fps: HashSet::new(),
         freeables: &sig.freeables,
         consumed_freed: HashSet::new(),
@@ -19246,6 +19306,13 @@ fn declared_expr(
         // can name it just as a contract can. That is what lets the ghost
         // helpers of a model be stated in terms of the same predicate the
         // contracts use, instead of restating it.
+        ExprT::FnCall(name, args) if crate::prims::fstar_name(&name.val).is_some() => {
+            let mut out = crate::prims::fstar_name(&name.val).unwrap().to_string();
+            for a in args.iter() {
+                out += &format!(" ({})", declared_expr(tds, declared, a)?);
+            }
+            Ok(out)
+        }
         ExprT::FnCall(name, args) if tds.pure_fns.contains(&*name.val.to_string()) => {
             let mut out = format!("func_{}", name.val);
             for a in args.iter() {

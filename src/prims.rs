@@ -18,6 +18,11 @@ use crate::ir::TypeT;
 struct Prim {
     /// The reserved name the front end emits.
     name: &'static str,
+    /// The compiler builtin this primitive stands for, as written in C source
+    /// and in specifications.
+    builtin: &'static str,
+    /// The Pulse library function that defines it.
+    fstar: &'static str,
     /// The result type, for inference. Arguments are not checked: the front end
     /// only ever emits a primitive at the arity and argument types its library
     /// function has.
@@ -29,6 +34,8 @@ const PRIMS: &[Prim] = &[Prim {
     // `Pulse.Lib.C.UInt64.bswap64` is defined in terms of shifts and masks, so
     // a caller that needs to reason about the result can unfold it.
     name: "__pal_bswap64",
+    builtin: "__builtin_bswap64",
+    fstar: "Pulse.Lib.C.UInt64.bswap64",
     ret: || TypeT::Int {
         signed: false,
         width: 64,
@@ -47,4 +54,17 @@ pub fn ret_type(name: &str) -> Option<TypeT> {
 /// Whether `name` is a PAL primitive.
 pub fn is_prim(name: &str) -> bool {
     lookup(name).is_some()
+}
+
+/// The F* function that defines the primitive `name`, if it is one. Every
+/// primitive is a pure total function, so a call is an F* application.
+pub fn fstar_name(name: &str) -> Option<&'static str> {
+    lookup(name).map(|p| p.fstar)
+}
+
+/// The primitive a compiler builtin named in a specification stands for. The
+/// front end does this itself for builtins in C code; specifications are parsed
+/// separately, so they need the same mapping.
+pub fn of_builtin(builtin: &str) -> Option<&'static str> {
+    PRIMS.iter().find(|p| p.builtin == builtin).map(|p| p.name)
 }

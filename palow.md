@@ -5870,3 +5870,26 @@ new facts about memory.
     `Pulse.Lib.C.Casts.Bool` and `Pulse.Lib.C.Inhabited`; `Ref`, `Array`,
     `CoreRef`, `FuncPtr`, `MaybeUninit` and the rest of the old vocabulary are
     deleted, as are `doc/structs.md` and `doc/arrays.md`, which described it.
+
+24. **`__builtin_bswap64`, and calls through a refined field.** The builtin
+    had a primitive (`prims.rs`) but no Palow translation, and a
+    specification could not name it at all. Each primitive now records the
+    builtin it stands for and the Pulse definition behind it; the spec parser
+    maps the builtin's name to the primitive, and the emitter writes a call as
+    an application of `Pulse.Lib.C.UInt64.bswap64` in bodies, contracts and
+    ghost code alike. Unfolding the definition does not help Z3, so the
+    library proves `bswap64_involutive` (an `SMTPat`) by restating it over
+    `FStar.UInt.uint_t 64` and handing that to the bit-vector tactic.
+    `test/bswap64` uses it in code, contracts and assertions.
+
+    A field-level `_refine((_slprop) ...)` on a function-pointer field was
+    already stated in the contract of every parameter that is, or points at,
+    the struct -- and recorded in a set that nothing read. So a body could not
+    call through `p->m` even though the contract handed it the `is_valid`.
+    That set now reaches the body, and such a call goes through `call_div` on
+    a load of the field, as for a table returned by a call. The witness guess
+    for a call through a field also counts the deep half of a struct with
+    owned pointer fields, which a known target's wrapper has as a component of
+    its own. `test/fnptr_spec`'s `ops_mixed` now names
+    `Pulse.Lib.C.Palow.FnPtr`, and gained `call_via`, `make_ops` and
+    `call_via_made` to exercise both ends.
