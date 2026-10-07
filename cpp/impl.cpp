@@ -341,6 +341,42 @@ public:
   // When inside a switch desugaring, break sets this flag instead of mk_break
   Rc<ir::Ident> *switchBreakId = nullptr;
 
+  // The arm a `?:` actually takes, when clang can decide the condition at
+  // compile time, or null when it cannot.
+  //
+  // C evaluates exactly one arm of a conditional, so when the condition is a
+  // constant the program IS that arm and nothing else. Translating the whole
+  // conditional is not merely wasteful, it is wrong in the way that matters
+  // here: the arm that is never taken is often not meant to be compiled at
+  // all. Generated RPC-stub headers can wrap every call argument in
+  // a test like
+  //
+  //   (__builtin_classify_type(x) == 12 || __builtin_classify_type(x) == 13)
+  //       ? ERROR__Struct_or_union_arguments_not_allowed_in_call()
+  //       : (uint64_t)(x)
+  //
+  // where the error function is declared and deliberately never defined, so
+  // that a struct argument fails to link. Once the classify_type calls fold,
+  // the condition is `1 == 12 || 1 == 13` and the dead arm is a call to a
+  // function PAL has no body for -- which, before this, both introduced an
+  // admitted module and made the conditional ill-typed, since the two arms'
+  // types agree in C but not after PAL maps a typedef and its underlying type
+  // to different F* names ("The branches of a conditional must return the same
+  // type: Typedef_uint64_t.ty_uint64_t and UInt64.t").
+  //
+  // Requiring the condition to be side-effect free is what makes dropping it
+  // sound: `f() ? a : b` must still call f. HasSideEffects is asked
+  // separately from the evaluation because EvaluateAsBooleanCondition has no
+  // equivalent of EvaluateAsInt's SE_NoSideEffects.
+  Expr *constantCondArm(const ConditionalOperator *co) {
+    bool val = false;
+    if (co->getCond()->HasSideEffects(*astCtx) ||
+        !co->getCond()->EvaluateAsBooleanCondition(val, *astCtx)) {
+      return nullptr;
+    }
+    return val ? co->getTrueExpr() : co->getFalseExpr();
+  }
+
   // TODO: should probably wait with translation until after parsing
 
   void Initialize(ASTContext &Context) override {
@@ -1887,6 +1923,39 @@ public:
                               std::move(result));
       }
 
+      case clang::BO_Comma: {
+        // The comma operator in rvalue position.
+        //
+        // `(a, b)` evaluates `a`, discards it, then yields `b`.  PAL's
+        // expression IR has nowhere to put `a`: there is no statement
+        // sequencing inside an rvalue, and hoisting it out would move it
+        // across the surrounding expression's other operands, which C's
+        // sequencing rules do not permit in general.
+        //
+        // So this is translated only when `a` cannot be observed at all --
+        // when Clang can tell us it has no side effects.  Then `(a, b)` and
+        // `b` are the same program and the arm is a pure simplification.
+        //
+        // This is not a corner case.  Generated RPC-stub macros can all be
+        // of the form
+        //
+        //   #define f(...) ((void)sizeof(f(__VA_ARGS__)),
+        //   (uint64_t)invoke_N(...))
+        //
+        // where the left operand is a compile-time prototype check whose
+        // operand is unevaluated.  Refusing it made every such call site an
+        // `admit()`, discarding the surrounding obligations along with
+        // it.
+        //
+        // A left operand that *does* have side effects still reaches the
+        // unsupported diagnostic below, deliberately: silently dropping it
+        // would change the program.
+        if (!bo->getLHS()->HasSideEffects(*astCtx)) {
+          return trRValue(bo->getRHS());
+        }
+        break;
+      }
+
       default:;
         // continue to error case
       }
@@ -1930,6 +1999,22 @@ public:
         if (bname == "__builtin_constant_p" && c->getNumArgs() == 1) {
           return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
                             trQualType(e->getType(), e->getSourceRange()));
+        }
+        // Any other builtin that answers a question about the *program text*
+        // rather than about a value: fold it to the answer clang computed.
+        // See the matching fold at the end of trRValue for the rationale; this
+        // arm is needed as well because a CallExpr never reaches that fallback
+        // -- it translates to a call node, and only a later pass discovers
+        // that the callee has no body to call.
+        if (fd->getBuiltinID() != 0 &&
+            e->getType()->isIntegralOrEnumerationType()) {
+          Expr::EvalResult builtinRes;
+          if (e->EvaluateAsInt(builtinRes, *astCtx, Expr::SE_NoSideEffects)) {
+            SmallString<32> digits;
+            builtinRes.Val.getInt().toString(digits, 10, /*Signed=*/true);
+            return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                              trQualType(e->getType(), e->getSourceRange()));
+          }
         }
         // Detect free(ptr)
         if (fd->getName() == "free" && c->getNumArgs() == 1) {
@@ -2207,6 +2292,9 @@ public:
     } else if (auto *init = dyn_cast<InitListExpr>(e)) {
       return trInitList(init, e->getSourceRange(), std::move(loc));
     } else if (auto *co = dyn_cast<ConditionalOperator>(e)) {
+      if (auto *arm = constantCondArm(co)) {
+        return trRValue(arm);
+      }
       // The condition is evaluated unconditionally and may hoist; the two arms
       // are not, so a statement expression in either must stay where it is.
       auto cond = trRValue(co->getCond());
@@ -2404,6 +2492,40 @@ public:
             return trRValue(lastValue);
           }
         }
+      }
+    }
+
+    // Last resort, before giving up: an expression that asks a question about
+    // the *program text* rather than about a value, and that clang has already
+    // answered.
+    //
+    // These are the type-level predicates -- __builtin_classify_type,
+    // __builtin_types_compatible_p, and their relatives -- which C code uses to
+    // select between branches at compile time. Translating such a test
+    // faithfully is not merely hard, it is wrong: the branch not taken is
+    // typically an error stub that has no definition, so only the folded value
+    // describes the program that is actually compiled.
+    //
+    // Three things make this safe to do here rather than as a general
+    // simplification:
+    //   * it is reached only where PAL was about to emit `(admit())` for the
+    //     whole enclosing expression, so it cannot displace any translation
+    //     PAL would otherwise perform, and cannot weaken any obligation --
+    //     an admit() discards them all;
+    //   * SE_NoSideEffects makes clang decline the fold if evaluating the
+    //     expression could do anything observable;
+    //   * an integral result type, since that is all mk_int_lit can carry.
+    //
+    // Generated RPC-stub headers reach this by wrapping every call argument
+    // in a CHECK_SCALAR test that rejects struct and union arguments at
+    // compile time. See test/classify_type.
+    if (e->getType()->isIntegralOrEnumerationType()) {
+      Expr::EvalResult constRes;
+      if (e->EvaluateAsInt(constRes, *astCtx, Expr::SE_NoSideEffects)) {
+        SmallString<32> digits;
+        constRes.Val.getInt().toString(digits, 10, /*Signed=*/true);
+        return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                          trQualType(e->getType(), e->getSourceRange()));
       }
     }
 
@@ -3543,6 +3665,9 @@ public:
         return trStmt(stmts, cse->getSubExpr());
       }
     } else if (auto *co = dyn_cast<ConditionalOperator>(stmt)) {
+      if (auto *arm = constantCondArm(co)) {
+        return trStmt(stmts, arm);
+      }
       // `c ? a : b;` as a statement: the value is discarded, but a and b may
       // still do something, so this is an if/else -- not a no-op, and not an
       // rvalue, which is why it cannot go through trRValue.
