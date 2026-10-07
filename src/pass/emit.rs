@@ -3626,6 +3626,15 @@ impl<'a> Emitter<'a> {
                         resolving_struct,
                     );
                 }
+                // When the inner type contributes nothing -- a `_nullable
+                // _plain` parameter, whose contract states the guarded
+                // resource itself -- the guard would be `unless_null p emp`,
+                // which is just `emp`. Emitted, it is only a second
+                // `unless_null` on the same pointer for call sites to
+                // introduce and eliminate.
+                if inner_props.is_empty() && local_bindings.is_empty() {
+                    return;
+                }
                 props.push(annotated(ty, || {
                     naryfn([
                         Doc::text("unless_null"),
