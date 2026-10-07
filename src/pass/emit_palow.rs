@@ -1551,6 +1551,9 @@ struct FnSurface {
     /// A function body never has to restate this -- Pulse carries it -- except
     /// at a loop, whose invariant Pulse cannot invent.
     owned: Vec<OwnedParam>,
+    /// The single, non-struct `_out` parameters. Once written, one is owned
+    /// like any other pointee, and a loop that touches it has to restate it.
+    outs: Vec<OwnedParam>,
     /// Parameters whose ownership sits behind a nullness guard.
     guarded: HashSet<String>,
     /// For each guarded parameter the body may open: the slprop the guard
@@ -3237,6 +3240,7 @@ fn emit_fn(
     let mut fresh: Vec<(String, String, String)> = Vec::new();
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut owned: Vec<OwnedParam> = Vec::new();
+    let mut outs: Vec<OwnedParam> = Vec::new();
     let mut arrays: HashSet<String> = HashSet::new();
     let mut olens: HashMap<String, String> = HashMap::new();
     let mut owns: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
@@ -3663,6 +3667,14 @@ fn emit_fn(
             // uninitialised points-to.
             ParamMode::Out if extent(tds, &arg.ty) == Some(Extent::One) => {
                 req.push(format!("{}_pts_to_uninit {}", pn, pname));
+                if !storable_struct(tds, pt) {
+                    outs.push(OwnedParam {
+                        base: base.clone(),
+                        vty: vty.clone(),
+                        pre: pts_to("1.0R", ""),
+                        entry: String::new(),
+                    });
+                }
                 // The mode is a statement about the *pre*condition: what
                 // arrives is storage. What leaves is the initialised object,
                 // unless the author wrote an `_ensures` that states ownership
@@ -5177,6 +5189,7 @@ fn emit_fn(
         pieces,
         piece_types,
         owned,
+        outs,
         guarded,
         null_payload,
         granted,
@@ -10350,6 +10363,8 @@ struct Body<'a> {
     /// The ownership the contract grants over the parameters' pointees, which
     /// a loop invariant has to restate.
     owned: &'a [OwnedParam],
+    /// See `FnSurface::outs`.
+    outs: &'a [OwnedParam],
     /// Parameters whose pointee the emitted contract owns; see `FnSurface`.
     granted: &'a HashSet<String>,
     /// See `FnSurface::spliced_own`.
@@ -11307,7 +11322,10 @@ impl<'a> Body<'a> {
                 ExprT::Var(v)
                     if self.params.contains(&*v.val.to_string())
                         && (self.granted.contains(&*v.val.to_string())
-                            || self.unguarded.contains(&v.val.to_string())) =>
+                            || self.unguarded.contains(&v.val.to_string())
+                            // A written `_out` is owned from then on.
+                            || (self.outs.iter().any(|o| *o.base == *v.val)
+                                && !self.out_params.iter().any(|n| *n == *v.val))) =>
                 {
                     self.rvalue(inner)
                 }
@@ -16335,6 +16353,22 @@ impl<'a> Body<'a> {
             pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
             olds.insert(o.base.clone(), o.entry.clone());
         }
+        // An `_out` parameter the loop leaves alone is carried by Pulse's
+        // frame, written or not. One it touches has to be written already:
+        // the invariant would otherwise have to say the storage may or may
+        // not hold a value yet.
+        for o in self.outs {
+            if !kept.as_ref().is_none_or(|k| k.contains(&o.base)) || stated.contains(&o.base) {
+                continue;
+            }
+            if self.out_params.contains(&o.base) {
+                return Err(format!("{} with `*{}` not yet written", what, o.base));
+            }
+            let b = format!("inv_val_{}", o.base);
+            binders.push(format!("({}: {})", b, o.vty));
+            owns.push(format!("{}{}", o.pre, b));
+            pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
+        }
 
         let spec = Spec {
             tds: self.tds,
@@ -19242,6 +19276,7 @@ fn emit_body(
         olens: sig.olens.clone(),
         requires_ok: sig.req_props,
         owned: &sig.owned,
+        outs: &sig.outs,
         granted: &sig.granted,
         spliced_own: sig.spliced_own,
         pieces: &sig.pieces,
@@ -19255,7 +19290,15 @@ fn emit_body(
         freeables: &sig.freeables,
         consumed_freed: HashSet::new(),
         consumed: &sig.consumed,
-        has_out: defn.decl.args.iter().any(|a| a.mode == ParamMode::Out),
+        // A scalar `_out` is restated by a loop's frame like any other
+        // pointee; a struct or array one is not yet.
+        has_out: defn.decl.args.iter().any(|a| {
+            a.mode == ParamMode::Out
+                && !a
+                    .name
+                    .as_ref()
+                    .is_some_and(|n| sig.outs.iter().any(|o| *o.base == *n.val))
+        }),
         divergent: false,
         seeded: Vec::new(),
         laundered: HashSet::new(),

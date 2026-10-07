@@ -5980,3 +5980,13 @@ new facts about memory.
     statement of its own. Arguments that are evaluated conditionally (in a
     `?:` arm or behind `&&`) are still refused. `test/variadic_args` covers
     these.
+
+30. **Loops in functions with `_out` parameters** (#347). `loop_` used to
+    refuse any loop in such a function. A single, non-struct `_out` is now
+    handled like an owned pointee: once written, `*p` may be read, and a
+    loop that touches it restates it in its invariant with a binder of its
+    own. A loop that leaves it alone needs nothing, written or not, since
+    Pulse's frame carries it. A loop that touches one not yet written is
+    refused, since the invariant would have to say that the storage may or
+    may not hold a value. Struct and array `_out` parameters are still
+    refused at a loop. `test/out_loop` covers these.
