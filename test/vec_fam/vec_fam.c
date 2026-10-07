@@ -36,11 +36,7 @@ void vec_set(struct vec *v, unsigned i, int x)
    the contract promises about the object holds only when there is one. PAL's
    FAM allocators are infallible, so the nullable spelling -- and the test that
    goes with it -- is Palow's alone. */
-#ifdef PALOW
 _allocated _nullable typedef struct vec *vec_ptr;
-#else
-_allocated typedef struct vec *vec_ptr;
-#endif
 
 // Allocate and zero-initialize a vec using the idiomatic flexible-array-member
 // calloc: `calloc(1, sizeof(struct vec) + n * sizeof(int))`. This is the
@@ -57,11 +53,9 @@ _allocated typedef struct vec *vec_ptr;
 vec_ptr vec_new(unsigned n)
 {
     struct vec *v = calloc(1, sizeof(struct vec) + n * sizeof(int));
-#ifdef PALOW
     if (v == NULL) {
         return NULL;
     }
-#endif
     v->len = n;
     return v;
 }
@@ -82,13 +76,10 @@ vec_ptr vec_new(unsigned n)
 vec_ptr vec_new_filled(unsigned n, int x)
 {
     struct vec *v = malloc(sizeof(struct vec) + n * sizeof(int));
-#ifdef PALOW
     if (v == NULL) {
         return NULL;
     }
-#endif
     v->len = n;
-#ifdef PALOW
     /* Palow holds the unfilled tail as a sequence of `option`s at the address
        the field starts at, so the frontier invariant is about that sequence:
        it is as long as the allocation asked for, and everything below `i`
@@ -107,20 +98,5 @@ vec_ptr vec_new_filled(unsigned n, int x)
     {
         v->data[i] = x;
     }
-#else
-    for (unsigned i = 0; i < n; i = i + 1)
-        _invariant(_live(i))
-        _invariant(_inline_pulse(
-            exists* s.
-              (Struct_vec.struct_vec__aux_raw_unfolded $(v) 1.0R) **
-              (array_pts_to (Struct_vec.struct_vec__data_1 $(v)) 1.0R s) **
-              (pure (array_spec_len s == UInt32.v $(n))) **
-              (pure (array_spec_full_mask s)) **
-              (pure (forall (k: nat). {:pattern (array_spec_initd s k)} k < UInt32.v $(i) ==> array_spec_initd s k))
-        ))
-    {
-        v->data[i] = x;
-    }
-#endif
     return v;
 }

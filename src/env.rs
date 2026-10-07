@@ -809,23 +809,6 @@ impl Env {
         if gv.is_pure { None } else { Some(gv) }
     }
 
-    /// The global named by `ident`, if it is a *mutable* C array object (`T g[N]`
-    /// or `T g[]`) and not shadowed locally.
-    ///
-    /// Like a mutable scalar global, its storage is assumed (here an `array T`
-    /// handle rather than a `ref`) and its ownership is not: contracts thread
-    /// `_live(g)`, which names the array's whole permission *and* its extent.
-    pub fn mutable_global_array(&self, ident: &Ident) -> Option<&GlobalVar> {
-        if self.lookup_var(ident).is_some() {
-            return None;
-        }
-        let gv = self.lookup_global_var(ident)?;
-        if gv.is_pure || global_array_object(gv).is_none() {
-            return None;
-        }
-        Some(gv)
-    }
-
     pub fn is_lvalue(&self, expr: &Expr) -> bool {
         match &expr.val {
             ExprT::Var(x) => match self.lookup_var(x) {

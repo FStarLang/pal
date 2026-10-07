@@ -29,42 +29,24 @@
 extern const uint32_t e_const;
 
 uint32_t read_e_const(void) _ensures(return == e_const) {
-#ifndef PALOW
-  _ghost_stmt(Global_e_const.acquire_var_e_const ());
-#endif
   const uint32_t *p = &e_const;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_e_const.addr_var_e_const #q _));
-#endif
 }
 
 /* 1.2 `_pure` forcing purity on a type that is not `const`. */
 _pure extern uint32_t e_pure;
 
 uint32_t read_e_pure(void) _ensures(return == e_pure) {
-#ifndef PALOW
-  _ghost_stmt(Global_e_pure.acquire_var_e_pure ());
-#endif
   const uint32_t *p = &e_pure;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_e_pure.addr_var_e_pure #q _));
-#endif
 }
 
 /* 1.3 Both together, which must change nothing. */
 _pure extern const uint32_t e_pure_const;
 
 uint32_t read_e_pure_const(void) _ensures(return == e_pure_const) {
-#ifndef PALOW
-  _ghost_stmt(Global_e_pure_const.acquire_var_e_pure_const ());
-#endif
   const uint32_t *p = &e_pure_const;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_e_pure_const.addr_var_e_pure_const #q _));
-#endif
 }
 
 /* 1.4 The address of an external global: assumed like any other, and non-null,
@@ -75,14 +57,8 @@ extern const uint32_t e_addressed;
 uint32_t *const p_to_e_addressed = (uint32_t *)&e_addressed;
 
 uint32_t read_p_to_e_addressed(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_p_to_e_addressed.acquire_var_p_to_e_addressed ());
-#endif
   uint32_t *const *pp = &p_to_e_addressed;
   uint32_t *v = *pp;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_p_to_e_addressed.addr_var_p_to_e_addressed #q _));
-#endif
   return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
 }
 
@@ -90,16 +66,10 @@ uint32_t read_p_to_e_addressed(void) _ensures(return == 0) {
 extern const uint32_t e_stable;
 
 uint32_t e_stable_diff(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_e_stable.acquire_var_e_stable ());
-#endif
   const uint32_t *p = &e_stable;
   uint32_t first = *p;
   uint32_t second = *p;
   return first - second;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_e_stable.addr_var_e_stable #q _));
-#endif
 }
 
 /* ===========================================================================
@@ -116,28 +86,16 @@ uint32_t e_stable_diff(void) _ensures(return == 0) {
 extern const uint32_t d_early_const;
 
 uint32_t read_d_early_const(void) _ensures(return == 5) {
-#ifndef PALOW
-  _ghost_stmt(Global_d_early_const.acquire_var_d_early_const ());
-#endif
   const uint32_t *p = &d_early_const;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_d_early_const.addr_var_d_early_const #q _));
-#endif
 }
 
 /* 2.2 Defined in a file that PAL sees *after* this one. */
 extern const uint32_t d_late_const;
 
 uint32_t read_d_late_const(void) _ensures(return == 6) {
-#ifndef PALOW
-  _ghost_stmt(Global_d_late_const.acquire_var_d_late_const ());
-#endif
   const uint32_t *p = &d_late_const;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_d_late_const.addr_var_d_late_const #q _));
-#endif
 }
 
 /* 2.3 `_pure` on the declaration and not on the definition, as a header
@@ -146,14 +104,8 @@ uint32_t read_d_late_const(void) _ensures(return == 6) {
 _pure extern uint32_t d_early_pure;
 
 uint32_t read_d_early_pure(void) _ensures(return == 7) {
-#ifndef PALOW
-  _ghost_stmt(Global_d_early_pure.acquire_var_d_early_pure ());
-#endif
   const uint32_t *p = &d_early_pure;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_d_early_pure.addr_var_d_early_pure #q _));
-#endif
 }
 
 /* 2.4 The address of a global defined in another file. */
@@ -162,14 +114,7 @@ extern const uint32_t d_early_addressed;
 uint32_t *const p_to_d_early_addressed = (uint32_t *)&d_early_addressed;
 
 uint32_t read_p_to_d_early_addressed(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_p_to_d_early_addressed.acquire_var_p_to_d_early_addressed ());
-#endif
   uint32_t *const *pp = &p_to_d_early_addressed;
   uint32_t *v = *pp;
-#ifndef PALOW
-  _ghost_stmt(
-      drop_ (exists* q. pts_to Global_p_to_d_early_addressed.addr_var_p_to_d_early_addressed #q _));
-#endif
   return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
 }

@@ -10,13 +10,7 @@ For the full annotation reference, see [`pal_surface_syntax.md`](pal_surface_syn
 
 ## How data is modelled
 
-Scalar types are the easy case: `int`, `unsigned`, `char`, … map directly to F* integer types (`Int32.t`, `UInt32.t`, …) and are passed by value with no ownership tracking. A pointer to a scalar (`T*`) becomes `ref T` paired with a `pts_to` slprop.
-
-Compound types need more machinery because they combine a runtime value with the resources it owns. Each has its own doc:
-
-- [`arrays.md`](arrays.md) — array representation, the three points-to flavors, and the `_array` / `_arrayptr` distinction.
-- [`structs.md`](structs.md) — what gets emitted per `struct`.
-- [`unions.md`](unions.md) — what gets emitted per `union`.
+PAL translates against the Palow memory model: memory is bytes, a pointer is an address plus a provenance, and every C type's points-to predicate is defined in terms of byte-level ownership. Scalars, structs, unions and arrays are all described in [`palow.md`](../palow.md), which is both the design document and the implementation log.
 
 ## Proving and internals
 

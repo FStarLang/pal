@@ -20,9 +20,5 @@ ptrdiff_t same_object_diff(_array int *a)
   _arrayptr int *p = a + 7;
   _arrayptr int *q = a + 2;
   ptrdiff_t d = p - q;   // well-defined: p, q point into the same object
-#ifndef PALOW
-  _ghost_stmt(arrayptr_drop $(p));
-  _ghost_stmt(arrayptr_drop $(q));
-#endif
   return d;
 }

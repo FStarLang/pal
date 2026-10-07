@@ -526,18 +526,6 @@ struct Typedefs<'a> {
     /// by-value struct -- which has no ownership at all, and for which the
     /// refinement is the only thing its contract could say.
     refined_structs: HashMap<String, Rc<Type>>,
-    /// Whether hand-written Pulse from `_ghost_stmt`, `_inline_pulse` and
-    /// `_include_pulse` is spliced into the output. A test whose fragments are
-    /// written against the old memory model marks itself beside its source,
-    /// and they are dropped instead -- the same weakening the emitter already
-    /// reports for anything it cannot translate.
-    splice_inline: bool,
-    /// Whether that marker was `palow-model-specific` rather than
-    /// `palow-old-annotations`: the fragment names something this model does
-    /// not have *by design*, so the resulting admit is a floor and not a
-    /// backlog item. The two say so differently in the generated file, because
-    /// otherwise the census counts them as one thing.
-    model_specific: bool,
     /// `_pure` functions that were successfully emitted as F* definitions, and
     /// so may appear in a specification and in a body without being sequenced.
     pure_fns: HashSet<String>,
@@ -573,17 +561,7 @@ impl<'a> Typedefs<'a> {
         self.aggregate_layouts.get(key).copied()
     }
 
-    /// Why a fragment was not spliced, phrased so the two markers stay
-    /// distinguishable in a census of the generated files.
-    fn no_splice(&self) -> String {
-        if self.model_specific {
-            "inline Pulse for a model this one deliberately does not have".to_string()
-        } else {
-            "inline Pulse written for the old memory model".to_string()
-        }
-    }
-
-    fn new(tu: &'a TranslationUnit, splice_inline: bool, model_specific: bool) -> Self {
+    fn new(tu: &'a TranslationUnit) -> Self {
         let mut m = HashMap::new();
         for decl in &tu.decls {
             if let DeclT::Typedef(td) = &decl.val {
@@ -592,8 +570,6 @@ impl<'a> Typedefs<'a> {
         }
         Typedefs {
             typedefs: m,
-            splice_inline,
-            model_specific,
             structs: HashMap::new(),
             unions: HashMap::new(),
             aggregate_layouts: HashMap::new(),
@@ -819,7 +795,7 @@ fn origin_of(decl: &Decl) -> Option<Origin> {
     Some(Origin {
         file: loc.file_name.clone(),
         range: loc.range,
-        name: crate::pass::emit::decl_name(decl),
+        name: decl_name(decl),
     })
 }
 
@@ -2251,9 +2227,6 @@ impl<'a> Spec<'a> {
     /// is the parameter's own address, which a contract can only name for
     /// something it was handed directly.
     fn inline_pulse(&self, code: &InlinePulseCode, w: When) -> Result<String, String> {
-        if !self.tds.splice_inline {
-            return Err(self.tds.no_splice());
-        }
         let mut out = String::new();
         for tok in &code.tokens {
             match tok {
@@ -2755,12 +2728,7 @@ impl<'a> Spec<'a> {
             // slprop is ownership, not a proposition, and it goes into the
             // `requires` and `ensures` clauses directly rather than under a
             // `pure`.
-            ExprT::InlinePulse(code, _) => {
-                if !self.tds.splice_inline {
-                    return Err(self.tds.no_splice());
-                }
-                self.inline_pulse(code, w)
-            }
+            ExprT::InlinePulse(code, _) => self.inline_pulse(code, w),
             // A `_letimpure` accessor is not a function that can be called in
             // a specification -- it is impure, which is the whole reason it
             // exists. What it denotes, though, is a ghost value the contract
@@ -9057,12 +9025,23 @@ fn toposort(items: &[FnItem]) -> Result<Vec<usize>, Vec<(String, String)>> {
     }
 }
 
-pub fn emit_palow(
-    tu: &TranslationUnit,
-    splice_inline: bool,
-    model_specific: bool,
-) -> Vec<PalowModule> {
-    let mut tds = Typedefs::new(tu, splice_inline, model_specific);
+pub fn decl_name(decl: &Decl) -> String {
+    match &decl.val {
+        DeclT::FnDefn(fn_defn) => fn_defn.decl.name.val.to_string(),
+        DeclT::FnDecl(fn_decl) => fn_decl.name.val.to_string(),
+        DeclT::Typedef(type_defn) => type_defn.name.val.to_string(),
+        DeclT::StructDefn(struct_defn) => struct_defn.name.val.to_string(),
+        DeclT::StructDecl(name) => name.val.to_string(),
+        DeclT::UnionDefn(union_defn) => union_defn.name.val.to_string(),
+        DeclT::IncludeDecl(include_decl) => include_decl.module_name.to_string(),
+        DeclT::LetDecl(let_decl) => let_decl.name.val.to_string(),
+        DeclT::OpaqueTypeDecl(decl) => decl.name.val.to_string(),
+        DeclT::GlobalVar(gv) => gv.name.val.to_string(),
+    }
+}
+
+pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
+    let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
     for decl in &tu.decls {
         base.push_decl(decl);
@@ -9085,14 +9064,7 @@ pub fn emit_palow(
             continue;
         };
         let text = match include_pulse(&tds, &td.code) {
-            Ok(t) if splice_inline => {
-                format!("unfold\nlet ty_{} : Type = {}\n\n", td.name.val, t.trim())
-            }
-            Ok(_) => format!(
-                "(* `{}` is not an F* type: {} *)\n\n",
-                td.name.val,
-                tds.no_splice()
-            ),
+            Ok(t) => format!("unfold\nlet ty_{} : Type = {}\n\n", td.name.val, t.trim()),
             Err(why) => format!("(* `{}` is not an F* type: {} *)\n\n", td.name.val, why),
         };
         chunks.push(Chunk {
@@ -9100,9 +9072,6 @@ pub fn emit_palow(
             code: text,
             origin: origin_of(decl),
         });
-    }
-    if !splice_inline {
-        tds.opaque_types.clear();
     }
 
     // `_let` definitions first: they are the vocabulary the `_pure` functions
@@ -9161,9 +9130,6 @@ pub fn emit_palow(
         let DeclT::IncludeDecl(id) = &decl.val else {
             continue;
         };
-        if !splice_inline {
-            continue;
-        }
         let text = match include_pulse(&tds, &id.code) {
             Ok(t) => format!("{}\n\n", t.trim_end()),
             Err(why) => format!("(* `{}` is not translated: {} *)\n\n", id.module_name, why),
@@ -9184,7 +9150,7 @@ pub fn emit_palow(
         .decls
         .iter()
         .filter_map(|decl| match &decl.val {
-            DeclT::IncludeDecl(id) if splice_inline => include_pulse(&tds, &id.code).ok(),
+            DeclT::IncludeDecl(id) => include_pulse(&tds, &id.code).ok(),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -9621,8 +9587,8 @@ pub fn emit_palow(
 /// quantity, and the emitter writes `Nsz` from a couple of dozen places --
 /// sizes, alignments, offsets, element sizes, array lengths, pointer
 /// arithmetic. Rewriting the finished module text catches all of them at once
-/// and cannot miss a new one. `Pulse.Lib.C.Assumptions` assumes `fits_u64`
-/// with an SMTPat, so `SizeT.uint_to_t n` discharges its `fits` precondition
+/// and cannot miss a new one. `Pulse.Lib.C.Palow.CTypes.size_t_fits` assumes
+/// `fits` with an SMTPat, so `SizeT.uint_to_t n` discharges its `fits` precondition
 /// for any value C could have produced.
 fn widen_sizet_literals(code: &str) -> String {
     let b = code.as_bytes();
@@ -12987,12 +12953,7 @@ impl<'a> Body<'a> {
                 self.prop(inner)
             }
             ExprT::Old(_) => Err("an assertion about the state on entry".to_string()),
-            ExprT::InlinePulse(code, _) => {
-                if !self.tds.splice_inline {
-                    return Err(self.tds.no_splice());
-                }
-                flatten_fragment(&self.inline_pulse(code)?)
-            }
+            ExprT::InlinePulse(code, _) => flatten_fragment(&self.inline_pulse(code)?),
             ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner)?)),
             // An assertion translates by *emitting* the loads its operands
             // need, which is exactly what a quantifier body cannot do: a load
@@ -16652,9 +16613,6 @@ impl<'a> Body<'a> {
                 if matches!(&strip_vattr(e).val,
                     ExprT::InlinePulse(_, t) if matches!(self.tds.resolve(t).val, TypeT::SLProp)) =>
             {
-                if !self.tds.splice_inline {
-                    return Err(self.tds.no_splice());
-                }
                 let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
                     unreachable!()
                 };
@@ -16796,7 +16754,6 @@ impl<'a> Body<'a> {
                 }
                 Ok(())
             }
-            StmtT::GhostStmt(_) if !self.tds.splice_inline => Err(self.tds.no_splice()),
             StmtT::GhostStmt(code) => {
                 let was = std::mem::replace(&mut self.keep_reads, true);
                 let t = self.inline_pulse(code);

@@ -93,13 +93,10 @@ calls it to find LLVM libraries.
 make                    # Rust binary + Pulse support library
 make test -j8           # translate every test case, verify with F*
 cd test/swap && make                       # one test
-cd test/swap && make MODEL=old             # the same test, previous memory model
 cargo run -- --print-ir test/swap/swap.c   # just the IR
 ```
 
-PAL emits the [Palow](palow.md) memory model by default, into `out/`.
-`--old-model` selects the previous emitter, whose output goes to `out_old/`
-so the two never overwrite each other.
+PAL emits code against the [Palow](palow.md) memory model.
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
@@ -157,7 +154,7 @@ Detailed references live in [`doc/`](doc/):
 | Document | Covers |
 |----------|--------|
 | [Surface syntax](doc/pal_surface_syntax.md) | Full annotation reference: contracts, ownership, refinements, ghost code, Pulse interop |
-| [Structs](doc/structs.md) | What PAL emits per `struct` and `union`: generated types, predicates, fold/unfold, field projections |
+| [Palow](palow.md) | The memory model: design, how C data is represented, implementation log |
 | [Internals](doc/internals.md) | Pipeline passes, IR design, Zngur FFI, diagnostics, output structure, Pulse support library |
 | [doc/README.md](doc/README.md) | Documentation index: how to write specs, how C data is modeled in Pulse |
 

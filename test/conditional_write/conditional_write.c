@@ -30,12 +30,5 @@ void caller(_out _array int *a, bool b)
   _requires(a._length == 1)
 {
     int *p = &a[0];
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(p));
-#endif
     maybe_write(p, b);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v 0sz)));
-    _ghost_stmt(array_return_cell $(a));
-#endif
 }

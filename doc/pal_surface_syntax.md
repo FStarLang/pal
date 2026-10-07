@@ -126,7 +126,7 @@ For `do { ... } while (cond)`, PAL desugars to `while (first || cond)` with a fr
 
 ### Refinements for data types
 
-As explained in `structs.md`, PAL auto-generates predicates for compound types. These can be further enriched with user-supplied predicates carried by the type itself:
+As explained in `palow.md`, PAL auto-generates predicates for compound types. These can be further enriched with user-supplied predicates carried by the type itself:
 
 | annotation                  | when the predicate must hold              |
 |-----------------------------|-------------------------------------------|
@@ -466,6 +466,5 @@ See `test/global_mutable_array/global_mutable_array.c`.
 
 ## See also
 
-- `structs.md` / `unions.md` — what gets generated per struct / union.
-- `arrays.md` — the array representation, points-to flavors, and the `_array` / `_arrayptr` distinction.
-- `src/pass/emit.rs` — the authoritative lowering when in doubt.
+- `palow.md` — the memory model: how structs, unions, arrays and pointers are represented.
+- `src/pass/emit_palow.rs` — the authoritative lowering when in doubt.

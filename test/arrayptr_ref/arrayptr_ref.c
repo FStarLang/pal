@@ -49,10 +49,6 @@ void pass_arrayptr_as_ref(_array int* a)
   _arrayptr int* p = a + 1;
   int* c = p;
   fill(c);
-#ifndef PALOW
-  _ghost_stmt(array_return_cell $(a));
-  _ghost_stmt(arrayptr_drop $(p));
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +83,6 @@ void pass_arrayptr_as_ref(_array int* a)
  * than an `array_spec` with a mask. Neither spelling can be made to stand for
  * the other, so both are written out.
  */
-#ifdef PALOW
 _arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
   _requires(_inline_pulse(array_pts_to
     Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr 16
@@ -95,14 +90,6 @@ _arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
   _ensures(_inline_pulse(
     array_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr 16 (SizeT.v Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof) $(a) 1.0R $`v **
     pure ($(return) == $(a))))
-#else
-_arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
-  _requires(_inline_pulse(array_pts_to_uninit $(a) $`v))
-  _ensures(_inline_pulse(
-    array_pts_to_uninit $(a) $`v **
-    arrayptr_pts_to $(return) $(a) **
-    pure (offset_of $(return) == offset_of $(a))))
-#endif
 {
     return &a[0];
 }
@@ -117,7 +104,6 @@ _arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
  * it is focused out of the array, written through field by field, and put
  * back, all under a name no contract ever granted.
  */
-#ifdef PALOW
 void consume_returned_arrayptr_as_ref(_array SUBRANGE* a)
   _requires(a._length == 1)
 {
@@ -131,20 +117,6 @@ void consume_returned_arrayptr_as_ref(_array SUBRANGE* a)
     _ghost_stmt(with x. rewrite (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr $(Sub) 1.0R x) as (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr ($(a) +! 0sz) 1.0R x));
     _ghost_stmt(array_unfocus Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr $(a) 16sz Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof 0sz 0sz);
 }
-#else
-void consume_returned_arrayptr_as_ref(_out _array SUBRANGE* a)
-  _requires(a._length == 1)
-{
-    SUBRANGE* Sub = get_uninit(a);
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(Sub));
-    _ghost_stmt($unfold-uninit(SUBRANGE) $(Sub));
-    Sub->Low = 10;
-    Sub->Count = 5;
-    _ghost_stmt($fold(SUBRANGE) $(Sub) _ _);
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some $(Sub));
-    _ghost_stmt(array_return_cell $(a));
-}
-#endif
 
 // ---------------------------------------------------------------------------
 // (3) An equality comparison between an arrayptr and a ref.
@@ -179,15 +151,8 @@ void assign_cell_address_to_ref(_out _array SUBRANGE* a)
   _requires(a._length == 1)
 {
     SUBRANGE* Sub = &a[0];
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(Sub));
-#endif
     _ghost_stmt($unfold-uninit(SUBRANGE) $(Sub));
     Sub->Low = 10;
     Sub->Count = 5;
     _ghost_stmt($fold(SUBRANGE) $(Sub) _ _);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some $(Sub));
-    _ghost_stmt(array_return_cell $(a));
-#endif
 }

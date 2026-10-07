@@ -63,19 +63,11 @@ check_one() {
   fi
 
   # One module per declaration means the dependency order between the
-  # generated files is no longer the order they were written in, so F* has to
-  # be asked for it. `verify.mk` already does exactly that for the old
-  # translator's output, and it is generic over the directory.
+  # generated files is not the order they were written in, so F* has to be
+  # asked for it; `verify.mk` does that, and it is generic over the directory.
   # A test may ship hand-written F* beside its C. `verify.mk` looks for that
   # directory relative to the working directory, and this runs from the repo
   # root rather than from the test, so the include is passed explicitly.
-  #
-  # A helper module is written against the memory model, so a test whose
-  # helpers mention the old model's predicates keeps that copy under
-  # `helpers_old/` -- but the *C* should not have to know which one it is
-  # getting, so the two copies use the same module name and the include path
-  # chooses. Annotation churn in the C is the thing being measured; moving it
-  # into the include path keeps the measurement honest.
   local helpers=""
   if [[ -d $tdir/helpers ]]; then
     helpers=" --include $tdir/helpers"

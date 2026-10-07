@@ -24,16 +24,8 @@ static const struct ops_ok o_ok = {.get = impl_ok};
 
 int32_t call_ok(struct plain *q)
 {
-#ifndef PALOW
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_ok.func_impl_ok__fp);
-  _ghost_stmt(Global_o_ok.acquire_var_o_ok ());
-#endif
   const struct ops_ok *p = &o_ok;
   return p->get(q);
-#ifndef PALOW
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-  _ghost_stmt(drop_ (exists* fr. pts_to Global_o_ok.addr_var_o_ok #fr _));
-#endif
 }
 
 /* The issue's reproducer. `y` gives `struct dep` a `__spec`, so the witness is
@@ -53,16 +45,8 @@ static const struct ops o = {.get = impl_dep};
 
 int32_t call_dep(struct dep *d)
 {
-#ifndef PALOW
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_dep.func_impl_dep__fp);
-  _ghost_stmt(Global_o.acquire_var_o ());
-#endif
   const struct ops *p = &o;
   return p->get(d);
-#ifndef PALOW
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-  _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
-#endif
 }
 
 /* Every kind of witness component at once: `d` gives two elim leaves (value and
@@ -99,16 +83,8 @@ _requires(*a > 0 && *a < 100)
 _preserves(_inline_pulse(FnptrSpecRefs.plain_pts_to $(q) 0l))
 int32_t call_mixed(struct dep *d, int32_t *a, _plain int32_t *q)
 {
-#ifndef PALOW
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
-  _ghost_stmt(Global_o_m.acquire_var_o_m ());
-#endif
   const struct ops_mixed *p = &o_m;
   return p->m(d, a, q);
-#ifndef PALOW
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-  _ghost_stmt(drop_ (exists* fr. pts_to Global_o_m.addr_var_o_m #fr _));
-#endif
 }
 
 /* A struct-level `_refine` that reads an `_array` field's `_length`, on a

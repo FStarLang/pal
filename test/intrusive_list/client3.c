@@ -182,19 +182,10 @@ void list_example3(void)
     bool assertion_empty = false;
     _plain struct item3 *removed = NULL;
 
-#ifndef PALOW
-    _ghost_stmt(Struct_item3.struct_item3__aux_raw_unfold $(&first) $(first));
-#endif
     _plain struct list_node *first_link = &first.link;
     _ghost_stmt(IntrusiveListExample3.fold_item $(&first));
-#ifndef PALOW
-    _ghost_stmt(Struct_item3.struct_item3__aux_raw_unfold $(&second) $(second));
-#endif
     _plain struct list_node *second_link = &second.link;
     _ghost_stmt(IntrusiveListExample3.fold_item $(&second));
-#ifndef PALOW
-    _ghost_stmt(Struct_item3.struct_item3__aux_raw_unfold $(&third) $(third));
-#endif
     _plain struct list_node *third_link = &third.link;
     _ghost_stmt(IntrusiveListExample3.fold_item $(&third));
 

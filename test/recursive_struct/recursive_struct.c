@@ -34,7 +34,6 @@ int get_data(node *n) {
    is the vocabulary for "the object at this address", "the right to free it",
    and "a points-to rules out null". Naming those three once here keeps one
    copy of the predicate and its three ghost lemmas. */
-#ifdef PALOW
 #define _node_pts_to(h, nd) struct_node_pts_to h 1.0R nd
 #define _node_freeable(h) freeable h struct_node_sizeof
 #define _node_not_null(h) struct_node_pts_to_not_null h
@@ -48,14 +47,6 @@ int get_data(node *n) {
    variable, Palow makes it an erased implicit named after the parameter and
    the refinement. */
 #define _node_elements_of_head reveal val_head_elements
-#else
-#define _node_pts_to(h, nd) pts_to h nd
-#define _node_freeable(h) freeable h
-#define _node_not_null(h) Pulse.Lib.Reference.pts_to_not_null h
-#define _node_uninit(h) pts_to_uninit h
-#define _node_perm p
-#define _node_elements_of_head reveal $`val_head_0
-#endif
 
 /* 3. _include_pulse: recursive ownership predicate + ghost helpers.
  *    Tests that pal generates correct struct types and that _include_pulse

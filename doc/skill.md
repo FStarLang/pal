@@ -107,7 +107,7 @@ When verifying a function, start with the simplest spec and gradually increase t
 Stating the correctness of C code involves stating the specification for functions as annotations in the C code. These annotations encode the pre and postconditions for the functions. Additionally, PAL annotations can also be used to state invariants on data types such as structs, unions, typedefs etc. Finally, all loops in the C code need to be annotated with appropriate loop invariants (covered in [§6](#6-loops-invariants-ensures-and-break)). For the full annotation reference — contracts, ownership, refinements, ghost code — see `doc/pal_surface_syntax.md` in the PAL repo.
 
 ### 4.1 Differentiating between raw pointers and arrays
-The first step in writing specifications is to distinguish array pointers from single-element references: PAL treats every `T*` as a reference by default, so tag array parameters with `_array` (a full array) or `_arrayptr` (a sub-array pointer). See `doc/arrays.md` in the PAL repo for the representation, the three points-to flavors, and the `_array` / `_arrayptr` distinction; the PAL tests `test/arrayptrs` and `test/array_test` are worked examples.
+The first step in writing specifications is to distinguish array pointers from single-element references: PAL treats every `T*` as a reference by default, so tag array parameters with `_array` (a full array) or `_arrayptr` (a sub-array pointer). See `palow.md` in the PAL repo for the representation; the PAL tests `test/arrayptrs` and `test/array_test` are worked examples.
 
 The second step can be either to add the type invariants or to write the function specifications. Suppose the module under consideration heavily involves passing around and modifying a complex data structure then first write the invariant for that data structure. Both of these involve writing accompanying Pulse code. First, we take a look at best practices for writing such code.
 
@@ -138,7 +138,7 @@ ghost fn loop_inv_fold (#v) (#e) (#spec) r ...
 ```
 
 ### 4.3 Writing struct invariants
-When writing struct invariants, first deeply understand the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components separately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For the `_refine` family (`_refine`, `_refine_always`, `_refine_uninit`, `_refine_value`) and exactly where the predicate fires, see the *Refinements for data types* section of `doc/pal_surface_syntax.md` and `doc/structs.md` in the PAL repo; the PAL tests `test/refine_typedef_pred` and `test/refine_always` are worked examples.
+When writing struct invariants, first deeply understand the logical invariant that should hold. Search for the strongest property that is maintained by all the functions. This property may have some pure components and some ownership information. Define these components separately and then define a final slprop combining these two parts. Finally associate the invariant with the data type by using the `_refine` annotation. For the `_refine` family (`_refine`, `_refine_always`, `_refine_uninit`, `_refine_value`) and exactly where the predicate fires, see the *Refinements for data types* section of `doc/pal_surface_syntax.md` in the PAL repo; the PAL tests `test/refine_typedef_pred` and `test/refine_always` are worked examples.
 
 ### 4.4 Annotations for functions
 The last step in adding specs is to add each function's pre- and post-conditions. By default PAL requires full ownership of every argument and returns it; override that per-argument when the default is too strong: `_consumes` (require ownership but do **not** return it), `_out` (require only *uninitialized* storage — a `pts_to_uninit` precondition — and return it initialized), or `_plain` (emit no ownership annotation at all). See the *Annotating function arguments* section of `doc/pal_surface_syntax.md` in the PAL repo for the exact pre/post each tag generates; in the PAL repo, `test/out_param` exercises `_out` and `test/refine_typedef_pred` uses `_plain`.
@@ -201,7 +201,7 @@ Pulse ghost-fn body syntax you will write inside `_ghost_stmt(...)`:
 Whenever a proof gets stuck carefully try to debug the root issue. Often the fastest way is to work at the level of the F* file. When a proof gets stuck, try to progress the proof by adding the right assert or lemma application to the F* file. Then just rewrite the right Pulse statement in the `_ghost_stmt()` blocks in the C code.
 
 After `make translate`, each C entity becomes one F* module. **Read them** — the C
-annotation is concise, but the generated F* is what Pulse actually checks. For the complete emitted-file layout see §5 (Output Structure) of `doc/internals.md`, and `doc/structs.md` for everything generated per `struct` and typedef (both in the PAL repo).
+annotation is concise, but the generated F* is what Pulse actually checks. For the complete emitted-file layout see §5 (Output Structure) of `doc/internals.md` in the PAL repo.
 
 | Generated file | Contains |
 |---|---|
@@ -240,7 +240,7 @@ names it needs.
 
 ### 5.4 `[@@pulse_intro]`: which fold/unfold lemmas Pulse applies for you
 
-PAL tags most generated struct fold/unfold lemmas (`__aux_raw_fold` / `__aux_raw_unfold`, `__pred_fold` / `__pred_unfold`) with `[@@pulse_intro]`, so Pulse applies them **automatically** whenever it needs the corresponding shape — you rarely invoke them by hand. See `doc/structs.md` in the PAL repo for what each generated lemma does.
+PAL tags most generated struct fold/unfold lemmas (`__aux_raw_fold` / `__aux_raw_unfold`, `__pred_fold` / `__pred_unfold`) with `[@@pulse_intro]`, so Pulse applies them **automatically** whenever it needs the corresponding shape — you rarely invoke them by hand.
 
 **The one exception**: `Struct_X__aux_raw_unfold_uninit` is emitted **without**
 `[@@pulse_intro]`. To open a *fresh, uninitialized* struct you must apply it by

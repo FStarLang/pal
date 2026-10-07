@@ -17,11 +17,7 @@
  * at the destination determine an address but not which allocation it belongs
  * to, so the recovered pointer has nothing to license a dereference and
  * `transport` is simply not provable. Putting provenance in `byte` closes that
- * gap, and it costs `memcpy`'s specification nothing.
- *
- * `palow-only`: the old model has no byte-level view to state any of this in.
- * The C is still compiled, which is what keeps the annotations honest as
- * no-ops. */
+ * gap, and it costs `memcpy`'s specification nothing. */
 
 _include_pulse(Copy_shim,
   include Pulse.Lib.C.Palow.Ptr

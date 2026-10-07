@@ -20,26 +20,14 @@
 /* One ghost argument. It occurs inside an slprop, so it is recoverable by
    matching against the caller's context. */
 _ghost_arg(int32_t v)
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R $(v)))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(v)))
-#endif
 int32_t impl_one(_plain int32_t *q) { return 0; }
 
 /* Two ghost arguments, each pinned by its own slprop. */
 _ghost_arg(int32_t v)
 _ghost_arg(int32_t w)
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R $(v)))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(v)))
-#endif
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(r) 1.0R $(w)))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R $(w)))
-#endif
 int32_t impl_two(_plain int32_t *q, _plain int32_t *r) { return 0; }
 
 /* Both kinds of witness component at once: `a` and `b` are bare (owned)
@@ -52,16 +40,8 @@ int32_t impl_two(_plain int32_t *q, _plain int32_t *r) { return 0; }
 _ghost_arg(int32_t v)
 _ghost_arg(int32_t w)
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R $(v)))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(v)))
-#endif
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(r) 1.0R $(w)))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R $(w)))
-#endif
 int32_t impl_mixed(int32_t *a, int32_t *b, _plain int32_t *q, _plain int32_t *r)
 {
     return *a + *b;
@@ -93,11 +73,7 @@ int32_t impl_plain_two(_plain int32_t *a, _plain int32_t *b)
    into one function-pointer variable. */
 _ghost_arg(int32_t v)
 _ensures(return == 0)
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R $(v)))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(v)))
-#endif
 int32_t impl_one_of_two(_plain int32_t *q, _plain int32_t *r) { return 0; }
 
 /* A *weaker* contract for `impl_mixed`, advertised by the `m` field of
@@ -123,7 +99,6 @@ int32_t impl_one_of_two(_plain int32_t *q, _plain int32_t *r) { return 0; }
    has to exist, since `weaken` demands one. It needs `prevent_lifting` because
    `post_of` has a top-level `exists*`, which Pulse would otherwise eliminate
    into hidden implicit binders, changing the coercion's type (Error 189). */
-#ifdef PALOW
 /* The same weakening in Palow. The domain is four addresses and the witness is
    the flat 4-tuple `(*a, *b, v, w)` -- Palow does not split the witness into an
    elim half and a ghost half, because a points-to at an address needs no
@@ -163,39 +138,6 @@ _include_pulse(Ops_spec,
     ensures post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r
   { () }
 )
-#else
-_include_pulse(Ops_spec,
-  let m_dom : Type0 =
-    ((ref Typedef_int32_t.ty_int32_t) & (ref Typedef_int32_t.ty_int32_t) &
-     (ref Typedef_int32_t.ty_int32_t) & (ref Typedef_int32_t.ty_int32_t))
-
-  let m_wit : Type0 =
-    ((Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t) &
-     (Typedef_int32_t.ty_int32_t & Typedef_int32_t.ty_int32_t))
-
-  [@@pulse_eager_unfold]
-  unfold let m_pre_w (x: m_dom) (y: erased m_wit) : slprop =
-    Pulse.Lib.C.FuncPtr.pre_of Funcptr_impl_mixed.func_impl_mixed__fp x y **
-    pure (fst (snd (reveal y)) == 0l) **
-    pure (snd (snd (reveal y)) == 1l)
-
-  ghost fn m_wpre (x: m_dom) (y: erased m_wit)
-    requires m_pre_w x y
-    ensures Pulse.Lib.C.FuncPtr.pre_of Funcptr_impl_mixed.func_impl_mixed__fp x y
-  {
-    drop_ (pure (fst (snd (reveal y)) == 0l));
-    drop_ (pure (snd (snd (reveal y)) == 1l));
-  }
-
-  ghost fn m_wpost (x: m_dom) (y: erased m_wit) (r: Typedef_int32_t.ty_int32_t)
-    requires Pulse.Lib.C.FuncPtr.prevent_lifting
-               (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r)
-    ensures Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp x y r
-  {
-    ()
-  }
-)
-#endif
 
 /* The `m` field carries the weakened contract as a field-level `_refine`, so
    any owner of a `struct ops` value may call through `m` without first
@@ -203,15 +145,9 @@ _include_pulse(Ops_spec,
 struct ops {
     int32_t (*f)(_plain int32_t *q);
     int32_t (*g)(_plain int32_t *q, _plain int32_t *r);
-#ifdef PALOW
     _refine((_slprop) _inline_pulse(
         Pulse.Lib.C.Palow.FnPtr.is_valid $(this) true Ops_spec.m_pre_w
           (Pulse.Lib.C.Palow.FnPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)))
-#else
-    _refine((_slprop) _inline_pulse(
-        Pulse.Lib.C.FuncPtr.is_valid $(this) true Ops_spec.m_pre_w
-          (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)))
-#endif
     int32_t (*m)(int32_t *a, int32_t *b, _plain int32_t *q, _plain int32_t *r);
     int32_t (*e)(int32_t *a, int32_t *b);
 };
@@ -223,16 +159,8 @@ static const struct ops o = {
 /* A direct call, for contrast: the ghost arguments are ordinary implicits and
    any number of them is already fine. (test/ghost_arg declares ghost-arg
    functions but never calls one, so this is the only direct-call coverage.) */
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R 0l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-#endif
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(r) 1.0R 1l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
-#endif
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
 int32_t call_direct_mixed(int32_t *a, int32_t *b,
                           _plain int32_t *q, _plain int32_t *r)
@@ -243,90 +171,38 @@ int32_t call_direct_mixed(int32_t *a, int32_t *b,
 /* The same calls through the function pointers in `o`. Same shape as
    `call_via_addr_of_global_struct` in test/addr_global; the only difference is
    the `_ghost_arg` on the callees. */
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R 0l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-#endif
 int32_t call_via_o_one(_plain int32_t *q)
 {
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_one.func_impl_one__fp);
-    _ghost_stmt(Global_o.acquire_var_o ());
-#endif
     const struct ops *p = &o;
     return p->f(q);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-    _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
-#endif
 }
 
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R 0l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-#endif
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(r) 1.0R 1l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
-#endif
 int32_t call_via_o_two(_plain int32_t *q, _plain int32_t *r)
 {
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_two.func_impl_two__fp);
-    _ghost_stmt(Global_o.acquire_var_o ());
-#endif
     const struct ops *p = &o;
     return p->g(q, r);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-    _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
-#endif
 }
 
 /* The mixed case through the pointer: `hide ((!a, !b), (_, _))`. */
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R 0l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-#endif
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(r) 1.0R 1l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
-#endif
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
 int32_t call_via_o_mixed(int32_t *a, int32_t *b,
                          _plain int32_t *q, _plain int32_t *r)
 {
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
-    _ghost_stmt(Global_o.acquire_var_o ());
-#endif
     const struct ops *p = &o;
     return p->m(a, b, q, r);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-    _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
-#endif
 }
 
 /* Control: the same two owned pointers with no ghost arguments. */
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
 int32_t call_via_o_elim_two(int32_t *a, int32_t *b)
 {
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_elim_two.func_impl_elim_two__fp);
-    _ghost_stmt(Global_o.acquire_var_o ());
-#endif
     const struct ops *p = &o;
     return p->e(a, b);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-    _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
-#endif
 }
 
 /* One variable, four different witness shapes written into it. Assignment is
@@ -363,45 +239,22 @@ int32_t call_across_shapes(int32_t *a, int32_t *b)
 {
     int32_t (*fp)(int32_t *, int32_t *);
 
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_elim_two.func_impl_elim_two__fp);
-#endif
     fp = impl_elim_two;
     int32_t r1 = fp(a, b);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_plain_two.func_impl_plain_two__fp);
-#endif
     fp = impl_plain_two;
     int32_t r2 = fp(a, b);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-#endif
 
     /* One ghost. Its value is recovered by matching `pts_to a` against the
        caller's context, so the call site never names it. */
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_one_of_two.func_impl_one_of_two__fp);
-#endif
     fp = impl_one_of_two;
     int32_t r3 = fp(a, b);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-#endif
 
     /* Two ghosts, so the ghost half of the witness is itself a pair. The
        result is discarded: `impl_two` states no `_ensures`, so folding it into
        the sum below would be an unprovable `int32` overflow check and nothing
        to do with witnesses. */
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_two.func_impl_two__fp);
-#endif
     fp = impl_two;
     fp(a, b);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-#endif
 
     return r1 + r2 + r3;
 }
@@ -412,27 +265,13 @@ int32_t call_across_shapes(int32_t *a, int32_t *b)
    ghost arity. No global is involved, so unlike the `o` cases there is nothing
    to acquire or drop besides the validity fact. */
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R 0l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-#endif
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(r) 1.0R 1l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
-#endif
 int32_t call_via_local_fp(int32_t *a, int32_t *b,
                           _plain int32_t *q, _plain int32_t *r)
 {
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
-#endif
     int32_t (*fp)(int32_t *, int32_t *, _plain int32_t *, _plain int32_t *) = impl_mixed;
     return fp(a, b, q, r);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -454,38 +293,22 @@ int32_t call_via_local_fp(int32_t *a, int32_t *b,
    carries -- the validity of every code pointer in the table -- inside the
    nullness guard, where they belong, and PAL's emitter leaves them outside.
    A caller under it could not spend the guard in any case. */
-#ifdef PALOW
 _allocated _nullable
-#else
-_allocated
-#endif
 struct ops *get_ops(void)
 {
     struct ops *p = (struct ops *) malloc(sizeof(struct ops));
-#ifdef PALOW
     if (p == NULL) {
         return NULL;
     }
-#endif
     *p = (struct ops){
         .f = impl_one, .g = impl_two, .m = impl_mixed, .e = impl_elim_two
     };
-#ifdef PALOW
     _ghost_stmt(Pulse.Lib.C.Palow.FnPtr.weaken _ true true
                     (Pulse.Lib.C.Palow.FnPtr.pre_of Funcptr_impl_mixed.func_impl_mixed__fp)
                     (Pulse.Lib.C.Palow.FnPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)
                     Ops_spec.m_pre_w
                     (Pulse.Lib.C.Palow.FnPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)
                     (fun _ y -> y) Ops_spec.m_wpre Ops_spec.m_wpost);
-#else
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.weaken _ true true
-                    (Pulse.Lib.C.FuncPtr.pre_of Funcptr_impl_mixed.func_impl_mixed__fp)
-                    (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)
-                    Ops_spec.m_pre_w
-                    (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)
-                    (fun _ y -> y) Ops_spec.m_wpre Ops_spec.m_wpost);
-#endif
     return p;
 }
 
@@ -494,21 +317,12 @@ struct ops *get_ops(void)
    refinement folded into `struct_ops__pred`. That absence is what this
    function asserts. */
 _requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(q) 1.0R 0l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-#endif
-#ifdef PALOW
 _preserves(_inline_pulse(int32_t_pts_to $(r) 1.0R 1l))
-#else
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(r) #1.0R 1l))
-#endif
 int32_t call_via_returned_ops(int32_t *a, int32_t *b,
                               _plain int32_t *q, _plain int32_t *r)
 {
     struct ops *p = get_ops();
-#ifdef PALOW
     /* `get_ops` is `_nullable` here, so the guard has to be spent before the
        table can be read at all. Nothing is owed on this path: the function
        promises nothing about its result. */
@@ -517,10 +331,6 @@ int32_t call_via_returned_ops(int32_t *a, int32_t *b,
     }
     int32_t res = p->m(a, b, q, r);
     _ghost_stmt(Pulse.Lib.C.Palow.FnPtr.drop_is_valid _ _ _);
-#else
-    int32_t res = p->m(a, b, q, r);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-#endif
     free(p);
     return res;
 }

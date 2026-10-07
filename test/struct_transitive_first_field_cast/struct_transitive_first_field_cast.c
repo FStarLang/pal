@@ -65,7 +65,6 @@ int32_t get_deep_via_cast(struct outer *o)
 // sibling. Ownership of the whole outer reachable through `q` is named with
 // the same nested `_container_of` the cast lowers to, so the frame matcher
 // unifies it syntactically.
-#ifdef PALOW
 // Two nested recoveries are two subtractions, and the address they name is
 // the one the contract owns the structure at.
 int32_t read_tag_via_cast(_plain int32_t *q)
@@ -80,21 +79,6 @@ int32_t read_tag_via_cast(_plain int32_t *q)
           $(_container_of(_container_of(q, struct inner, x),
                           struct outer, in)) 1.0R ov **
         pure ($(return) == ov.Struct_outer.fld_tag)))
-#else
-int32_t read_tag_via_cast(_plain int32_t *q)
-    _preserves(_inline_pulse(
-      exists* (ov: $type(struct outer)).
-        pts_to $(_container_of(_container_of(q, struct inner, x),
-                               struct outer, in)) #1.0R ov **
-        Struct_outer.struct_outer__pred
-          (!$(_container_of(_container_of(q, struct inner, x),
-                            struct outer, in))) 1.0R))
-    _ensures(_inline_pulse(
-      pure ($(return) ==
-        !(Struct_outer.struct_outer__get_tag
-            $(_container_of(_container_of(q, struct inner, x),
-                            struct outer, in))))))
-#endif
 {
     struct outer *o = (struct outer *)q;
     return o->tag;
@@ -127,7 +111,6 @@ void set_deepest_via_cast(struct l1 *p, int32_t v)
 
 // deep-field pointer -> struct (3 hops): recover `l1` from a pointer to its
 // innermost field &p->d.c.a and read the outermost sibling `n`.
-#ifdef PALOW
 int32_t read_n_via_cast(_plain int32_t *q)
     _requires(_inline_pulse(
       exists* (pv: $type(struct l1)).
@@ -140,21 +123,6 @@ int32_t read_n_via_cast(_plain int32_t *q)
           $(_container_of(_container_of(_container_of(q, struct l3, a),
                           struct l2, c), struct l1, d)) 1.0R pv **
         pure ($(return) == pv.Struct_l1.fld_n)))
-#else
-int32_t read_n_via_cast(_plain int32_t *q)
-    _preserves(_inline_pulse(
-      exists* (pv: $type(struct l1)).
-        pts_to $(_container_of(_container_of(_container_of(q, struct l3, a),
-                               struct l2, c), struct l1, d)) #1.0R pv **
-        Struct_l1.struct_l1__pred
-          (!$(_container_of(_container_of(_container_of(q, struct l3, a),
-                            struct l2, c), struct l1, d))) 1.0R))
-    _ensures(_inline_pulse(
-      pure ($(return) ==
-        !(Struct_l1.struct_l1__get_n
-            $(_container_of(_container_of(_container_of(q, struct l3, a),
-                            struct l2, c), struct l1, d))))))
-#endif
 {
     struct l1 *p = (struct l1 *)q;
     return p->n;
@@ -175,53 +143,10 @@ int32_t read_n_via_cast(_plain int32_t *q)
 // goal is closed by those lemmas. This is the same move as
 // test/container_field_read, expressed only in PAL annotations.
 
-#ifndef PALOW
-_include_pulse(Roundtrip_include,
-  module SO = Struct_outer
-  module L1 = Struct_l1
-
-  // Re-address the raw-unfolded witness and the `tag` cell of a `struct outer`
-  // from `a` to `b` when they denote the same object (`a == b`, discharged at
-  // the call site by the outer/inner `*_container_inv` SMTPats).
-  ghost fn readdr_outer (a: $type(struct outer *)) (b: $type(struct outer *))
-                        (#tv: $type(int32_t))
-    requires
-      (SO.struct_outer__aux_raw_unfolded a 1.0R **
-       pts_to (SO.struct_outer__tag_1 a) #1.0R tv **
-       pure (a == b))
-    ensures
-      (SO.struct_outer__aux_raw_unfolded b 1.0R **
-       pts_to (SO.struct_outer__tag_1 b) #1.0R tv)
-  {
-    rewrite (SO.struct_outer__aux_raw_unfolded a 1.0R)
-         as (SO.struct_outer__aux_raw_unfolded b 1.0R);
-    rewrite (pts_to (SO.struct_outer__tag_1 a) #1.0R tv)
-         as (pts_to (SO.struct_outer__tag_1 b) #1.0R tv);
-  }
-
-  // Same, for a `struct l1` and its `n` cell (three nesting levels).
-  ghost fn readdr_l1 (a: $type(struct l1 *)) (b: $type(struct l1 *))
-                     (#tv: $type(int32_t))
-    requires
-      (L1.struct_l1__aux_raw_unfolded a 1.0R **
-       pts_to (L1.struct_l1__n_1 a) #1.0R tv **
-       pure (a == b))
-    ensures
-      (L1.struct_l1__aux_raw_unfolded b 1.0R **
-       pts_to (L1.struct_l1__n_1 b) #1.0R tv)
-  {
-    rewrite (L1.struct_l1__aux_raw_unfolded a 1.0R)
-         as (L1.struct_l1__aux_raw_unfolded b 1.0R);
-    rewrite (pts_to (L1.struct_l1__n_1 a) #1.0R tv)
-         as (pts_to (L1.struct_l1__n_1 b) #1.0R tv);
-  }
-)
-#endif
 
 // Round trip through two hops: cast `outer *` to a pointer to the innermost
 // field, cast that back to `outer *`, write `tag` through the recovered
 // pointer, then read it back through the original one.
-#ifdef PALOW
 // In Palow the round trip needs no bridge: the casts out and back are an
 // addition and a subtraction of the same offsets, and the recovered pointer
 // is the original address rather than a different name for it.
@@ -233,21 +158,8 @@ int32_t roundtrip_via_2hop(struct outer *o, int32_t v)
     o2->tag = v;
     return o->tag;
 }
-#else
-int32_t roundtrip_via_2hop(struct outer *o, int32_t v)
-    _ensures(return == v)
-{
-    int32_t *q = (int32_t *)o;
-    struct outer *o2 = (struct outer *)q;
-    _ghost_stmt(Roundtrip_include.readdr_outer $(o) $(o2));
-    o2->tag = v;
-    _ghost_stmt(Roundtrip_include.readdr_outer $(o2) $(o));
-    return o->tag;
-}
-#endif
 
 // Round trip through three hops.
-#ifdef PALOW
 int32_t roundtrip_via_3hop(struct l1 *p, int32_t v)
     _ensures(return == v)
 {
@@ -256,15 +168,3 @@ int32_t roundtrip_via_3hop(struct l1 *p, int32_t v)
     p2->n = v;
     return p->n;
 }
-#else
-int32_t roundtrip_via_3hop(struct l1 *p, int32_t v)
-    _ensures(return == v)
-{
-    int32_t *q = (int32_t *)p;
-    struct l1 *p2 = (struct l1 *)q;
-    _ghost_stmt(Roundtrip_include.readdr_l1 $(p) $(p2));
-    p2->n = v;
-    _ghost_stmt(Roundtrip_include.readdr_l1 $(p2) $(p));
-    return p->n;
-}
-#endif

@@ -29,7 +29,6 @@ struct pair {
     int32_t second;  // nonzero offset: a genuine (non-identity) pointer adjustment
 };
 
-#ifdef PALOW
 /* In Palow a field's address is the structure's address plus the field's
    offset, and `_container_of` is the wrapping subtraction of that offset, so
    the two round trips are `add_sub_wrap` and `sub_wrap_add` rather than a pair
@@ -70,55 +69,13 @@ _include_pulse(Container_field_read_include,
     P.struct_pair_unfocus_read_second (var_second -? P.struct_pair_offsetof_second);
   }
 )
-#else
-_include_pulse(Container_field_read_include,
-  module P = Struct_pair
 
-  // Re-address the `second` cell from the container projection
-  // `second_1(container second)` to the original pointer `second`. The
-  // `rewrite`'s ref-equality goal is closed by the emitted right-inverse lemma.
-  ghost fn expose_second (var_second: $type(int32_t *))
-    requires
-      (exists* (sv: $type(int32_t)).
-         pts_to (P.struct_pair__second_1
-                   (P.struct_pair__second_container var_second)) #1.0R sv)
-    ensures (exists* (sv: $type(int32_t)). pts_to var_second #1.0R sv)
-  {
-    with sv. rewrite (pts_to (P.struct_pair__second_1
-                                (P.struct_pair__second_container var_second)) #1.0R sv)
-                  as (pts_to var_second #1.0R sv);
-  }
-
-  // Re-address it back, so the caller's container-named ownership is restored.
-  ghost fn hide_second (var_second: $type(int32_t *))
-    requires (exists* (sv: $type(int32_t)). pts_to var_second #1.0R sv)
-    ensures
-      (exists* (sv: $type(int32_t)).
-         pts_to (P.struct_pair__second_1
-                   (P.struct_pair__second_container var_second)) #1.0R sv)
-  {
-    with sv. rewrite (pts_to var_second #1.0R sv)
-                  as (pts_to (P.struct_pair__second_1
-                                (P.struct_pair__second_container var_second)) #1.0R sv);
-  }
-)
-#endif
-
-#ifdef PALOW
 int32_t read_second_via_field(_plain int32_t *second)
     _preserves(_inline_pulse(
       (exists* (pv: Struct_pair.struct_pair).
          Struct_pair.struct_pair_pts_to $(_container_of(second, struct pair, second)) 1.0R pv) **
       pure (SizeT.v Struct_pair.struct_pair_offsetof_second <=
               Pulse.Lib.C.Palow.Ptr.addr_of $(second))))
-#else
-int32_t read_second_via_field(_plain int32_t *second)
-    _preserves(_inline_pulse(
-      exists* (pv: $type(struct pair)).
-        pts_to $(_container_of(second, struct pair, second)) #1.0R pv **
-        Struct_pair.struct_pair__pred
-          (!$(_container_of(second, struct pair, second))) 1.0R))
-#endif
 {
     struct pair *parent = _container_of(second, struct pair, second);
     // Recovery (`parent`) is the container-addressed handle; the read below goes

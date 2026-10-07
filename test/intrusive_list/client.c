@@ -32,13 +32,7 @@ _plain struct item *items_find(_plain struct list_node *head, int value)
 {
     _ghost_stmt(IntrusiveListIndexed.head_open IntrusiveListExample.item_ipl
         $(head) (reveal $(entries)));
-#ifndef PALOW
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
-#endif
     _plain struct list_node *node = head->next;
-#ifndef PALOW
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
-#endif
     _ghost_stmt(IntrusiveListItems.find_start IntrusiveListExample.item_ipl
         (IntrusiveListExample.matches_value $(value)) $(head) $(node) (reveal $(entries)));
     while (node != head)
@@ -48,16 +42,10 @@ _plain struct item *items_find(_plain struct list_node *head, int value)
         _ghost_stmt(IntrusiveListItems.find_open IntrusiveListExample.item_ipl
             (IntrusiveListExample.matches_value $(value)) $(head) $(node) (reveal $(entries)));
         _ghost_stmt(with description. assert IntrusiveListExample.item_ipl $(node) description);
-#ifndef PALOW
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
-#endif
         /* The successor is read while the node is still a node: opening the
            payload joins the link back into the item it belongs to, and there
            is no reading `node->next` once it is a field of that. */
         _plain struct list_node *next = node->next;
-#ifndef PALOW
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
-#endif
         _plain struct item *item = containing_record(node, struct item, link);
         _ghost_stmt(IntrusiveListExample.value_open $(node) $(item));
         int current_value = item->value;
@@ -131,9 +119,6 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
                 (reveal $(description)) (reveal $(entries))))))
 {
     _ghost_stmt(IntrusiveListExample.value_order ());
-#ifndef PALOW
-    _ghost_stmt(Struct_item.struct_item__aux_raw_unfold $(item));
-#endif
     /* The item's own value does not change, so it is read once, while the
        item is still whole: from `prepare_item` on, its link belongs to the
        list machinery and the item is no longer an object one can read. */
@@ -142,13 +127,7 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
     _ghost_stmt(IntrusiveListExample.prepare_item $(item) $(entry));
     _ghost_stmt(IntrusiveListIndexed.head_open IntrusiveListExample.item_ipl
         $(head) (reveal $(entries)));
-#ifndef PALOW
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
-#endif
     _plain struct list_node *node = head->next;
-#ifndef PALOW
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
-#endif
     _ghost_stmt(IntrusiveListInsert.start IntrusiveListExample.item_ipl
         IntrusiveListExample.value_le $(head) $(node) $(entry)
         (reveal $(description)) (reveal $(entries)));
@@ -183,13 +162,7 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
             _ghost_stmt(Pulse.Lib.GhostReference.write stopped (hide (0 = 0)));
             break;
         } else {
-#ifndef PALOW
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
-#endif
             _plain struct list_node *next = node->next;
-#ifndef PALOW
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
-#endif
             _ghost_stmt(IntrusiveListInsert.mid_repack IntrusiveListExample.item_ipl
                 IntrusiveListExample.value_le $(head) $(node) $(entry)
                 (reveal $(description)) (reveal $(entries)));
@@ -218,13 +191,7 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
         _ghost_stmt(IntrusiveListInsert.head_open IntrusiveListExample.item_ipl
             IntrusiveListExample.value_le $(head) $(node) $(entry)
             (reveal $(description)) (reveal $(entries)));
-#ifndef PALOW
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
-#endif
         _plain struct list_node *first = head->next;
-#ifndef PALOW
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
-#endif
         _ghost_stmt(IntrusiveListInsert.head_close IntrusiveListExample.item_ipl
             IntrusiveListExample.value_le $(head) $(node) $(entry)
             (reveal $(description)) (reveal $(entries)));
@@ -240,13 +207,7 @@ void items_insert_sorted(_plain struct list_node *head, _plain struct item *item
             _ghost_stmt(IntrusiveListInsert.position_open IntrusiveListExample.item_ipl
                 IntrusiveListExample.value_le $(head) $(node) $(entry)
                 (reveal $(description)) (reveal $(entries)));
-#ifndef PALOW
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
-#endif
             _plain struct list_node *previous = node->prev;
-#ifndef PALOW
-            _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
-#endif
             _ghost_stmt(IntrusiveListInsert.position_close IntrusiveListExample.item_ipl
                 IntrusiveListExample.value_le $(head) $(node) $(previous) $(entry)
                 (reveal $(description)) (reveal $(entries)));
@@ -280,13 +241,7 @@ void items_remove_value(_plain struct list_node *head, int value)
 {
     _ghost_stmt(IntrusiveListIndexed.head_open IntrusiveListExample.item_ipl
         $(head) (reveal $(entries)));
-#ifndef PALOW
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(head));
-#endif
     _plain struct list_node *node = head->next;
-#ifndef PALOW
-    _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(head));
-#endif
     _ghost_stmt(IntrusiveListRemove.start IntrusiveListExample.item_ipl
         (IntrusiveListExample.matches_value $(value)) $(head) $(node) (reveal $(entries)));
     while (node != head)
@@ -295,13 +250,7 @@ void items_remove_value(_plain struct list_node *head, int value)
             (IntrusiveListExample.matches_value $(value)) $(head) $(node) (reveal $(entries)))) {
         _ghost_stmt(IntrusiveListRemove.expose IntrusiveListExample.item_ipl
             (IntrusiveListExample.matches_value $(value)) $(head) $(node) (reveal $(entries)));
-#ifndef PALOW
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_unfold $(node));
-#endif
         _plain struct list_node *next = node->next;
-#ifndef PALOW
-        _ghost_stmt(Struct_list_node.struct_list_node__aux_raw_fold $(node));
-#endif
         _plain struct item *item = containing_record(node, struct item, link);
         _ghost_stmt(IntrusiveListExample.value_open $(node) $(item));
         int current_value = item->value;
@@ -339,24 +288,12 @@ void list_example(void)
     bool assertion_empty = false;
     _plain struct item *assertion_item = NULL;
 
-#ifndef PALOW
-    _ghost_stmt(Struct_item.struct_item__aux_raw_unfold $(&first) $(first));
-#endif
     _plain struct list_node *first_link = &first.link;
     _ghost_stmt(IntrusiveListExample.fold_item $(&first));
-#ifndef PALOW
-    _ghost_stmt(Struct_item.struct_item__aux_raw_unfold $(&second) $(second));
-#endif
     _plain struct list_node *second_link = &second.link;
     _ghost_stmt(IntrusiveListExample.fold_item $(&second));
-#ifndef PALOW
-    _ghost_stmt(Struct_item.struct_item__aux_raw_unfold $(&third) $(third));
-#endif
     _plain struct list_node *third_link = &third.link;
     _ghost_stmt(IntrusiveListExample.fold_item $(&third));
-#ifndef PALOW
-    _ghost_stmt(Struct_item.struct_item__aux_raw_unfold $(&fourth) $(fourth));
-#endif
     _plain struct list_node *fourth_link = &fourth.link;
     _ghost_stmt(IntrusiveListExample.fold_item $(&fourth));
     _ghost_stmt(IntrusiveListContext.prepare_init

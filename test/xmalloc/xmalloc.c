@@ -28,11 +28,7 @@ typedef struct {
    contract for a constructor; see `test/malloc` for why the old model cannot
    state it. The non-nullable name is what the functions taking an existing
    block are written against. */
-#ifdef PALOW
 _allocated _nullable typedef slot *slot_optr;
-#else
-_allocated typedef slot *slot_optr;
-#endif
 _allocated typedef slot *slot_ptr;
 
 /* The allocator. Its postcondition is the one a caller wants: a block, the
@@ -41,14 +37,10 @@ slot_optr xmalloc_slot(uint32_t cap)
     _ensures((_specint) return->cap == cap)
     _ensures((_specint) return->used == 0)
 {
-#ifdef PALOW
     slot *p = malloc(sizeof(slot));
     if (p == NULL) {
         return NULL;
     }
-#else
-    slot *p = malloc(sizeof(slot));
-#endif
     *p = (slot) { .used = 0, .cap = cap };
     return p;
 }
@@ -67,11 +59,9 @@ uint32_t xmalloc_client(uint32_t cap)
     _ensures(return == 0)
 {
     slot_optr p = xmalloc_slot(cap);
-#ifdef PALOW
     if (p == NULL) {
         return 0;
     }
-#endif
     uint32_t used = p->used;
     xfree_slot(p);
     return used;

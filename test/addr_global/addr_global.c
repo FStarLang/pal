@@ -18,14 +18,8 @@ _pure uint32_t g_const = 42;
 uint32_t read_via_addr_of_global(void)
     _ensures(return == 42)
 {
-#ifndef PALOW
-    _ghost_stmt(Global_g_const.acquire_var_g_const ());
-#endif
     const uint32_t *p = &g_const;
     return *p;
-#ifndef PALOW
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_const.addr_var_g_const #q _));
-#endif
 }
 
 /* A global's address is never NULL, via the emitted `addr_var_g_not_null`
@@ -33,14 +27,8 @@ uint32_t read_via_addr_of_global(void)
 bool addr_of_global_is_not_null(void)
     _ensures(return == true)
 {
-#ifndef PALOW
-    _ghost_stmt(Global_g_const.acquire_var_g_const ());
-#endif
     const uint32_t *p = &g_const;
     return p != NULL;
-#ifndef PALOW
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_const.addr_var_g_const #q _));
-#endif
 }
 
 /* A `const` global with an initializer is implicitly `_pure`. */
@@ -48,14 +36,8 @@ const uint32_t g_implicit = 7;
 uint32_t read_via_addr_of_const_global(void)
     _ensures(return == 7)
 {
-#ifndef PALOW
-    _ghost_stmt(Global_g_implicit.acquire_var_g_implicit ());
-#endif
     const uint32_t *p = &g_implicit;
     return *p;
-#ifndef PALOW
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_implicit.addr_var_g_implicit #q _));
-#endif
 }
 
 int32_t add(int32_t a, int32_t b)
@@ -76,16 +58,8 @@ _pure ops g_ops = { .op = add };
 int32_t call_via_addr_of_global_struct(void)
     _ensures(return == 5)
 {
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-    _ghost_stmt(Global_g_ops.acquire_var_g_ops ());
-#endif
     const ops *p = &g_ops;
     return p->op(2, 3);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_ops.addr_var_g_ops #q _));
-#endif
 }
 
 /* Storing `&g` is no write to `g`. An immutable global is never owned, so a

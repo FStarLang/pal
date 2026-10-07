@@ -26,11 +26,5 @@ int32_t use_extern_fp(void)
     _ensures(return == 5)
 {
     int32_t (*fp)(int32_t, int32_t) = ext_add;
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_ext_add.func_ext_add__fp);
-#endif
     return fp(2, 3);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-#endif
 }

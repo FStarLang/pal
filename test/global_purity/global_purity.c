@@ -27,28 +27,16 @@
 const uint32_t i_const_init = 11;
 
 uint32_t read_i_const_init(void) _ensures(return == 11) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_const_init.acquire_var_i_const_init ());
-#endif
   const uint32_t *p = &i_const_init;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_const_init.addr_var_i_const_init #q _));
-#endif
 }
 
 /* 1.2 `_pure` with an initializer, on a type that is not `const`. */
 _pure uint32_t i_pure_init = 22;
 
 uint32_t read_i_pure_init(void) _ensures(return == 22) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_pure_init.acquire_var_i_pure_init ());
-#endif
   const uint32_t *p = &i_pure_init;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_pure_init.addr_var_i_pure_init #q _));
-#endif
 }
 
 /* 1.3 A tentative definition: no initializer and no storage-class specifier,
@@ -56,28 +44,16 @@ uint32_t read_i_pure_init(void) _ensures(return == 22) {
 _pure uint32_t i_pure_tentative;
 
 uint32_t read_i_pure_tentative(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_pure_tentative.acquire_var_i_pure_tentative ());
-#endif
   const uint32_t *p = &i_pure_tentative;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_pure_tentative.addr_var_i_pure_tentative #q _));
-#endif
 }
 
 /* 1.4 The same plus `const`, which must change nothing. */
 _pure const uint32_t i_pure_const_tentative;
 
 uint32_t read_i_pure_const_tentative(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_pure_const_tentative.acquire_var_i_pure_const_tentative ());
-#endif
   const uint32_t *p = &i_pure_const_tentative;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_pure_const_tentative.addr_var_i_pure_const_tentative #q _));
-#endif
 }
 
 /* 1.5 Declaration, then definition: one object, emitted once. */
@@ -85,14 +61,8 @@ const uint32_t i_decl_then_def;
 const uint32_t i_decl_then_def = 33;
 
 uint32_t read_i_decl_then_def(void) _ensures(return == 33) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_decl_then_def.acquire_var_i_decl_then_def ());
-#endif
   const uint32_t *p = &i_decl_then_def;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_decl_then_def.addr_var_i_decl_then_def #q _));
-#endif
 }
 
 /* 1.6 The same with `extern` on the declaration. */
@@ -100,14 +70,8 @@ extern const uint32_t i_extern_then_def;
 const uint32_t i_extern_then_def = 44;
 
 uint32_t read_i_extern_then_def(void) _ensures(return == 44) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_extern_then_def.acquire_var_i_extern_then_def ());
-#endif
   const uint32_t *p = &i_extern_then_def;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_extern_then_def.addr_var_i_extern_then_def #q _));
-#endif
 }
 
 /* --- The same object declared more than once. ----------------------------- */
@@ -117,14 +81,8 @@ const uint32_t i_def_then_decl = 55;
 const uint32_t i_def_then_decl;
 
 uint32_t read_i_def_then_decl(void) _ensures(return == 55) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_def_then_decl.acquire_var_i_def_then_decl ());
-#endif
   const uint32_t *p = &i_def_then_decl;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_def_then_decl.addr_var_i_def_then_decl #q _));
-#endif
 }
 
 /* 1.8 The same under `_pure`, which must not lose the initializer. */
@@ -132,14 +90,8 @@ _pure uint32_t i_pure_def_then_decl = 66;
 _pure uint32_t i_pure_def_then_decl;
 
 uint32_t read_i_pure_def_then_decl(void) _ensures(return == 66) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_pure_def_then_decl.acquire_var_i_pure_def_then_decl ());
-#endif
   const uint32_t *p = &i_pure_def_then_decl;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_pure_def_then_decl.addr_var_i_pure_def_then_decl #q _));
-#endif
 }
 
 /* 1.9 A bare `const` with no initializer anywhere: a tentative definition as
@@ -147,14 +99,8 @@ uint32_t read_i_pure_def_then_decl(void) _ensures(return == 66) {
 const uint32_t i_bare_const;
 
 uint32_t read_i_bare_const(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_i_bare_const.acquire_var_i_bare_const ());
-#endif
   const uint32_t *p = &i_bare_const;
   return *p;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_i_bare_const.addr_var_i_bare_const #q _));
-#endif
 }
 
 /* ===========================================================================
@@ -170,28 +116,16 @@ struct point {
 const struct point s_const_init = {.x = 3, .y = 4};
 
 int32_t read_s_const_init(void) _ensures(return == 4) {
-#ifndef PALOW
-  _ghost_stmt(Global_s_const_init.acquire_var_s_const_init ());
-#endif
   const struct point *p = &s_const_init;
   return p->y;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_s_const_init.addr_var_s_const_init #q _));
-#endif
 }
 
 /* 2.2 A tentative definition, so every field reads as 0. */
 _pure struct point s_pure_tentative;
 
 int32_t read_s_pure_tentative(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_s_pure_tentative.acquire_var_s_pure_tentative ());
-#endif
   const struct point *p = &s_pure_tentative;
   return p->x;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_s_pure_tentative.addr_var_s_pure_tentative #q _));
-#endif
 }
 
 /* 2.3 A declaration before the definition, as in 1.5. */
@@ -199,14 +133,8 @@ const struct point s_decl_then_def;
 const struct point s_decl_then_def = {.x = 5, .y = 6};
 
 int32_t read_s_decl_then_def(void) _ensures(return == 5) {
-#ifndef PALOW
-  _ghost_stmt(Global_s_decl_then_def.acquire_var_s_decl_then_def ());
-#endif
   const struct point *p = &s_decl_then_def;
   return p->x;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_s_decl_then_def.addr_var_s_decl_then_def #q _));
-#endif
 }
 
 /* --- Reads that do not fold. ---------------------------------------------
@@ -220,37 +148,19 @@ int32_t read_s_decl_then_def(void) _ensures(return == 5) {
 
 /* 2.4 The value of 2.1, read through a copy. */
 int32_t copy_s_const_init(void) _ensures(return == 4) {
-#ifndef PALOW
-  _ghost_stmt(Global_s_const_init.acquire_var_s_const_init ());
-#endif
   struct point q = s_const_init;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* r. pts_to Global_s_const_init.addr_var_s_const_init #r _));
-#endif
   return q.y;
 }
 
 /* 2.5 The value of 2.2, which is zero in every field. */
 int32_t copy_s_pure_tentative(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_s_pure_tentative.acquire_var_s_pure_tentative ());
-#endif
   struct point q = s_pure_tentative;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* r. pts_to Global_s_pure_tentative.addr_var_s_pure_tentative #r _));
-#endif
   return q.x;
 }
 
 /* 2.6 The value of 2.3, which comes from the second declaration. */
 int32_t copy_s_decl_then_def(void) _ensures(return == 5) {
-#ifndef PALOW
-  _ghost_stmt(Global_s_decl_then_def.acquire_var_s_decl_then_def ());
-#endif
   struct point q = s_decl_then_def;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* r. pts_to Global_s_decl_then_def.addr_var_s_decl_then_def #r _));
-#endif
   return q.x;
 }
 
@@ -314,14 +224,8 @@ uint32_t index_a_decl_then_def(size_t i) _requires(i == 1) _ensures(return == 8)
 uint32_t *const p_const_null = NULL;
 
 uint32_t read_p_const_null(void) _ensures(return == 1) {
-#ifndef PALOW
-  _ghost_stmt(Global_p_const_null.acquire_var_p_const_null ());
-#endif
   uint32_t *const *pp = &p_const_null;
   uint32_t *v = *pp;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_p_const_null.addr_var_p_const_null #q _));
-#endif
   return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
 }
 
@@ -329,14 +233,8 @@ uint32_t read_p_const_null(void) _ensures(return == 1) {
 const uint32_t *const p_const_both = NULL;
 
 uint32_t read_p_const_both(void) _ensures(return == 1) {
-#ifndef PALOW
-  _ghost_stmt(Global_p_const_both.acquire_var_p_const_both ());
-#endif
   const uint32_t *const *pp = &p_const_both;
   const uint32_t *v = *pp;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_p_const_both.addr_var_p_const_both #q _));
-#endif
   return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
 }
 
@@ -344,14 +242,8 @@ uint32_t read_p_const_both(void) _ensures(return == 1) {
 _pure uint32_t *p_pure_tentative;
 
 uint32_t read_p_pure_tentative(void) _ensures(return == 1) {
-#ifndef PALOW
-  _ghost_stmt(Global_p_pure_tentative.acquire_var_p_pure_tentative ());
-#endif
   uint32_t *const *pp = &p_pure_tentative;
   uint32_t *v = *pp;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_p_pure_tentative.addr_var_p_pure_tentative #q _));
-#endif
   return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
 }
 
@@ -359,14 +251,8 @@ uint32_t read_p_pure_tentative(void) _ensures(return == 1) {
 _pure const uint32_t *p_pure_const_pointee;
 
 uint32_t read_p_pure_const_pointee(void) _ensures(return == 1) {
-#ifndef PALOW
-  _ghost_stmt(Global_p_pure_const_pointee.acquire_var_p_pure_const_pointee ());
-#endif
   const uint32_t *const *pp = &p_pure_const_pointee;
   const uint32_t *v = *pp;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_p_pure_const_pointee.addr_var_p_pure_const_pointee #q _));
-#endif
   return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
 }
 
@@ -374,14 +260,8 @@ uint32_t read_p_pure_const_pointee(void) _ensures(return == 1) {
 uint32_t *const p_addr_of_global = (uint32_t *)&i_pure_init;
 
 uint32_t read_p_addr_of_global(void) _ensures(return == 0) {
-#ifndef PALOW
-  _ghost_stmt(Global_p_addr_of_global.acquire_var_p_addr_of_global ());
-#endif
   uint32_t *const *pp = &p_addr_of_global;
   uint32_t *v = *pp;
-#ifndef PALOW
-  _ghost_stmt(drop_ (exists* q. pts_to Global_p_addr_of_global.addr_var_p_addr_of_global #q _));
-#endif
   return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
 }
 

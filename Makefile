@@ -13,13 +13,6 @@ lib:
 -testsuite: rust lib
 	$(MAKE) -C test
 
-# The previous memory model is still emitted and still has to keep working, so
-# the suite runs a second time against it. Its output lives in `out_old/` and
-# `_cache_old/`, so the two passes do not fight over a directory.
-.PHONY: old-model-check
-old-model-check: rust lib
-	$(MAKE) -C test MODEL=old
-
 .PHONY: palow-check
 palow-check: rust lib
 	./test/palow-check.sh
@@ -36,7 +29,7 @@ format-check:
 	clang-format --dry-run --Werror cpp/impl.cpp
 
 .PHONY: test
-test: rust lib -testsuite old-model-check
+test: rust lib -testsuite
 # Only run formatting checks when tests succeed
 	$(MAKE) comment-check format-check
 

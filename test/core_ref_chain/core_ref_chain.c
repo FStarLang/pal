@@ -15,7 +15,6 @@
    parameter says everything the chain needs and the annotation has nothing
    left to add. `_core_ref` has no counterpart here and is not wanted; what it
    bought is what the generated ownership gives for free. */
-#ifdef PALOW
 
 struct b;
 struct a { struct b *pb; int x; };
@@ -23,19 +22,6 @@ struct b { struct a *pa; int y; };
 
 typedef struct a *a_owned;
 
-#else
-
-struct b;
-struct a { _core_ref struct b *pb; int x; };
-struct b {            struct a *pa; int y; };
-
-_refine((_slprop) _inline_pulse(
-  exists* (bv: $type(struct b)).
-    pts_to (Pulse.Lib.C.CoreRef.core_to_ref $type(struct b)
-              (($(*this)).$field(struct a::pb))) bv))
-typedef struct a *a_owned;
-
-#endif
 
 /* Straight through, in one expression. */
 int chained(a_owned o) // A

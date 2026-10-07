@@ -23,14 +23,7 @@ void caller(_array int *a, size_t i)
   _requires(i < a._length)
 {
     int *p = &a[i];
-#ifndef PALOW
-    _ghost_stmt(array_cell_read $(a) $(i));
-#endif
     write_to(p);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v $(i))));
-    _ghost_stmt(array_return_cell $(a));
-#endif
 }
 
 // `init_cell` takes an `_out int *` — an *uninitialized* `ref`
@@ -50,14 +43,7 @@ void caller_out(_array int *a, size_t i)
   _requires(i < a._length)
 {
     int *p = &a[i];
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(p));
-#endif
     init_cell(p);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v $(i))));
-    _ghost_stmt(array_return_cell $(a));
-#endif
 }
 
 // Borrow a *genuinely uninitialized* array cell and write through it.
@@ -71,14 +57,7 @@ void fill_first(_out _array int *a)
   _requires(a._length == 1)
 {
     int *p = &a[0];
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(p));
-#endif
     init_cell(p);
-#ifndef PALOW
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v 0sz)));
-    _ghost_stmt(array_return_cell $(a));
-#endif
 }
 
 
@@ -95,16 +74,13 @@ typedef struct {
 // unfolded to raw storage by hand before it can be handed out as a write-only
 // `ref`, so the same source needs explicit unfold/fold ghost steps there.
 // Palow's field focus is that step, so the call stands on its own.
-#ifdef PALOW
 void init_field(pair *p)
   _requires(_live(*p))
   _ensures(p->hi == 42)
 {
     init_cell(&p->hi);
 }
-#endif
 
-#ifdef PALOW
 // Palow: a local array handed to an `_out _array` parameter. PAL's model has
 // no uninitialised-array view, so the whole `_out _array` mode is Palow's.
 void fill_two(_out _array int *a)
@@ -119,7 +95,6 @@ void use_fill_two(void)
   int buf[2];
   fill_two(buf);
 }
-#endif
 
 // The array behind a struct's `_array` pointer field. Its ownership lives in
 // the struct's deep predicate, so handing it to a callee borrows that

@@ -436,7 +436,7 @@ accidentally correct today, will also then be correct for a reason.
 
 Pinning that down as a regression test rather than a story needs a way to
 write a test that *must not* verify, so one landed with this work.
-`test/misaligned` carries a `should-fail` file alongside `palow-only`; the
+`test/misaligned` carries a `should-fail` file; the
 template `Makefile` then requires the F\* run to fail *and* requires every line
 of `should-fail` to appear in its output, so a test cannot start failing for
 some unrelated reason and still look like it is doing its job. The file there
@@ -5856,3 +5856,17 @@ new facts about memory.
       In a body, `p ± i` with both fixed for the call is as stable as `p`
       itself, so dereferencing it is left to slprop matching like any other
       fixed function of the parameters.
+
+23. **The old model is gone.** Palow is the only memory model PAL emits.
+    `src/pass/emit.rs` and `--old-model` are deleted, and so is everything
+    that existed to keep the two side by side: the suite's second pass
+    (`MODEL=old`, `out_old/`), the `palow-only` markers, the `helpers_old/`
+    copies of test helpers, the inert `palow-old-annotations` and
+    `palow-model-specific` markers, and the `#ifndef PALOW` halves of the
+    tests, which were resolved with `unifdef -DPALOW`. `pal` still defines
+    `PALOW`, so sources outside this repository that test it keep working.
+    The Pulse library keeps only what generated code and the Palow modules
+    use: `Pulse.Lib.C.Palow.*`, the `Pulse.Lib.C.UInt*` arithmetic helpers,
+    `Pulse.Lib.C.Casts.Bool` and `Pulse.Lib.C.Inhabited`; `Ref`, `Array`,
+    `CoreRef`, `FuncPtr`, `MaybeUninit` and the rest of the old vocabulary are
+    deleted, as are `doc/structs.md` and `doc/arrays.md`, which described it.
