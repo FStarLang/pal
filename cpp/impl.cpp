@@ -2013,6 +2013,24 @@ public:
           return mk_alignof(std::move(loc), std::move(ty));
         }
       }
+    } else if (auto *ooe = dyn_cast<OffsetOfExpr>(e)) {
+      // `offsetof(T, designator)` is an integer constant that clang has
+      // already computed from the target ABI -- the same layout PAL records
+      // for `sizeof` and the `struct_T_offsetof_f` constants -- so it becomes
+      // a literal. This also covers nested and array designators
+      // (`offsetof(T, a.b[2])`) whenever they are constant. Clang types the
+      // expression as the canonical integer behind `size_t`, so the literal
+      // is given `size_t` explicitly.
+      Expr::EvalResult res;
+      if (ooe->EvaluateAsInt(res, *astCtx)) {
+        auto ty = mk_sizet(loc.clone());
+        return mk_int_lit(std::move(loc), toBigInt(res.Val.getInt()),
+                          std::move(ty));
+      }
+      reportUnsupported(e->getSourceRange(), loc,
+                        "offsetof with a non-constant designator", "");
+      return mk_rvalue_err(std::move(loc),
+                           trQualType(e->getType(), e->getSourceRange()));
     }
 
     // __builtin_choose_expr(c, a, b) is `a` or `b` -- decided by the compiler,
