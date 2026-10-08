@@ -25,6 +25,19 @@ rule it tests). See "Testing a rule that is not enforced yet" in `palow.md`
 for why the positive one is not optional, and for the two ways a test here can
 look like it passes while testing nothing.
 
+Those four reach `Etype` through a helper that takes `read_ok e u` as a
+hypothesis, which shows the predicate says the right thing but not that
+anything asks it. `test/etype_claim_ok` and `test/etype_claim_bad` close that
+gap by going through the *generated* API instead: the obligation is the
+`{t}_etype_ok` in `{t}_claim_uninit`'s precondition, the same one every typed
+claim in generated code carries, and it has to be earned from the index a
+store left behind rather than assumed. The positive file claims storage that
+a store typed `int32_t` as a `uint32_t` (6.5p7 bullet 3, the corresponding
+unsigned type) and a byte of it as an `int8_t` (the final bullet, a character
+type); the negative file claims that byte as a `bool_t`, which is on none of
+the bullets, and fails on exactly that -- same width, same alignment, same
+full ownership.
+
 Sections 20-23 -- `volatile`, `_Atomic`, `restrict`, object lifetime, and
 modifying a `const` object or a string literal -- are not 6.5p6/p7 and belong
 with the features they name rather than here.
