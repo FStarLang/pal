@@ -124,6 +124,24 @@ ghost fn mem_pts_to_at_perm_bound (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.ety
   requires  pure (len b > 0)
   ensures   pure (p <=. 1.0R)
 
+(* Every index the model can hand out is well formed: an entry's offset lies
+   inside the object it belongs to. `etypes_none`, `etypes_of`, `store_etypes`
+   and `memcpy_etypes` all produce such indices, and slicing and appending
+   preserve it, so this is a property of the heap rather than a side condition
+   anything has to carry.
+
+   It is an axiom here rather than a conjunct of `Etype.allocated` because
+   every condition in the generated code mentions `allocated`, and a second
+   quantifier in it costs the solver real time on large structs. Stated as a
+   fact about the *resource*, it is paid for only where it is used.
+
+   Where it is used is the character-access rule: `Etype.read_char_ok` says a
+   well-formed byte is readable as a character, which is what lets a store
+   through a character lvalue re-establish its own points-to. *)
+ghost fn mem_pts_to_at_wf (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  ensures   pure (Etype.etypes_wf e)
+
 (* Two ranges, at least one of them exclusively owned, cannot overlap. This is
    how Palow recovers non-aliasing: it comes from separation, not from
    provenance, so it holds between two distinct `malloc`s and equally between a

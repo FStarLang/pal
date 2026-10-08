@@ -446,6 +446,7 @@ fn live_ok_etype_ok_of(tds: &Typedefs, shape: &FieldShape, v: &str, e: &str) -> 
 fn store_chain(mct: &str, msz: u64, ind: &str) -> String {
     let lines: Vec<String> = if mct == "int8_t_ctype" || mct == "uint8_t_ctype" {
         vec![
+            format!("mem_pts_to_at_wf a;"),
             format!("mem_store_etypes a {};", mct),
             format!("ET.store_char_identity (Seq.slice e 0 {});", msz),
             format!("ET.read_char_ok (Seq.slice e 0 {});", msz),
@@ -6092,15 +6093,18 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             .iter()
             .map(|m| {
                 let sl = format!("(Seq.slice e 0 {})", m.size);
-                let pf = match ctype_of_shape(&m.shape) {
+                // A zero-size member covers no bytes, so there is no access to
+                // justify: `access_ok` is false at a type of size zero, and
+                // the member's condition is about the empty slice alone.
+                let pf = match ctype_of_shape(&m.shape).filter(|_| m.size > 0) {
                     Some(ct) => format!(
-                        "ET.read_ok_sub e {un}_ctype 0 {ct}; ET.allocated_slice e 0 {sz}; {br}",
+                        "assert_norm (ET.access_ok {un}_ctype 0 {ct}); ET.read_ok_sub e {un}_ctype 0 {ct}; ET.allocated_slice e 0 {sz}; {br}",
                         un = un,
                         ct = ct,
                         sz = m.size,
                         br = live_ok_read_ok_of(tds, &m.shape, "v", &sl)
                     ),
-                    None => String::new(),
+                    None => format!("ET.allocated_slice e 0 {}; ", m.size),
                 };
                 format!("    | {} v -> {}()\n", ctor(m), pf)
             })
@@ -6951,7 +6955,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             .filter_map(|f| {
                 let ct = ctype_of_shape(&f.shape)?;
                 Some(format!(
-                    "ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}",
+                    "assert_norm (ET.access_ok {sn}_ctype {off} {ct}); ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}",
                     sn = sn,
                     off = f.offset,
                     end = f.offset + f.size,
@@ -7024,7 +7028,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
                     let ct = ctype_of_shape(&f.shape)?;
                     let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
                     Some(format!(
-                        "ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}",
+                        "assert_norm (ET.access_ok {sn}_ctype {off} {ct}); ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}",
                         sn = sn,
                         off = f.offset,
                         end = f.offset + f.size,
@@ -16618,7 +16622,7 @@ impl<'a> Body<'a> {
                         // it. The value is an implicit there, so it is given
                         // as one.
                         Some((z, why)) if is_aggregate(&b.pn) => format!(
-                            "{} {}_conceal {} #1.0R #_ #({});",
+                            "{} {}_conceal {} #1.0R #_ #_ #({});",
                             why.join(" "),
                             b.pn,
                             b.tmp,
