@@ -65,6 +65,11 @@ let bool_t_etype_ok_untyped (e: ET.etypes)
           (ensures  bool_t_etype_ok e)
   = ET.untyped_read_ok e bool_t_ctype
 
+let bool_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e bool_t_ctype)
+          (ensures  bool_t_etype_ok e)
+  = ()
+
 let bool_t_repr (x: bool) (b: bytes) : prop =
   b == encode (SZ.v bool_t_sizeof) None (if x then 1 else 0)
 
@@ -178,6 +183,11 @@ let int8_t_etype_ok_untyped (e: ET.etypes)
           (ensures  int8_t_etype_ok e)
   = ET.untyped_read_ok e int8_t_ctype
 
+let int8_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e int8_t_ctype)
+          (ensures  int8_t_etype_ok e)
+  = ()
+
 let int8_t_repr (x: I8.t) (b: bytes) : prop =
   b == encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x))
 
@@ -289,6 +299,11 @@ let int16_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int16_t_sizeof)
           (ensures  int16_t_etype_ok e)
   = ET.untyped_read_ok e int16_t_ctype
+
+let int16_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e int16_t_ctype)
+          (ensures  int16_t_etype_ok e)
+  = ()
 
 let int16_t_repr (x: I16.t) (b: bytes) : prop =
   b == encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x))
@@ -402,6 +417,11 @@ let int32_t_etype_ok_untyped (e: ET.etypes)
           (ensures  int32_t_etype_ok e)
   = ET.untyped_read_ok e int32_t_ctype
 
+let int32_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e int32_t_ctype)
+          (ensures  int32_t_etype_ok e)
+  = ()
+
 let int32_t_repr (x: I32.t) (b: bytes) : prop =
   b == encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x))
 
@@ -513,6 +533,11 @@ let int64_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int64_t_sizeof)
           (ensures  int64_t_etype_ok e)
   = ET.untyped_read_ok e int64_t_ctype
+
+let int64_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e int64_t_ctype)
+          (ensures  int64_t_etype_ok e)
+  = ()
 
 let int64_t_repr (x: I64.t) (b: bytes) : prop =
   b == encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x))
@@ -626,6 +651,11 @@ let uint16_t_etype_ok_untyped (e: ET.etypes)
           (ensures  uint16_t_etype_ok e)
   = ET.untyped_read_ok e uint16_t_ctype
 
+let uint16_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e uint16_t_ctype)
+          (ensures  uint16_t_etype_ok e)
+  = ()
+
 let uint16_t_repr (x: U16.t) (b: bytes) : prop =
   b == encode (SZ.v uint16_t_sizeof) None (U16.v x)
 
@@ -737,6 +767,11 @@ let uint64_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v uint64_t_sizeof)
           (ensures  uint64_t_etype_ok e)
   = ET.untyped_read_ok e uint64_t_ctype
+
+let uint64_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e uint64_t_ctype)
+          (ensures  uint64_t_etype_ok e)
+  = ()
 
 let uint64_t_repr (x: U64.t) (b: bytes) : prop =
   b == encode (SZ.v uint64_t_sizeof) None (U64.v x)
@@ -880,6 +915,11 @@ let size_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v size_t_sizeof)
           (ensures  size_t_etype_ok e)
   = ET.untyped_read_ok e size_t_ctype
+
+let size_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e size_t_ctype)
+          (ensures  size_t_etype_ok e)
+  = ()
 
 let size_t_repr (x: SZ.t) (b: bytes) : prop =
   b == encode (SZ.v size_t_sizeof) None (SZ.v x)
@@ -1233,6 +1273,11 @@ let float32_t_etype_ok_untyped (e: ET.etypes)
           (ensures  float32_t_etype_ok e)
   = ET.untyped_read_ok e float32_t_ctype
 
+let float32_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e float32_t_ctype)
+          (ensures  float32_t_etype_ok e)
+  = ()
+
 let float32_t_repr (x: float32) (b: bytes) : prop =
   b == encode (SZ.v float32_t_sizeof) None (float32_bits x)
 
@@ -1344,6 +1389,11 @@ let float64_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v float64_t_sizeof)
           (ensures  float64_t_etype_ok e)
   = ET.untyped_read_ok e float64_t_ctype
+
+let float64_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e float64_t_ctype)
+          (ensures  float64_t_etype_ok e)
+  = ()
 
 let float64_t_repr (x: float64) (b: bytes) : prop =
   b == encode (SZ.v float64_t_sizeof) None (float64_bits x)

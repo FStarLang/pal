@@ -282,6 +282,27 @@ let read_ok (e: etypes) (u: ctype) : prop =
      | None -> True
      | Some en -> b2t (access_ok en.ty (en.off - k) u)))
 
+(* A subobject of a readable object is readable at its own type. This is the
+   bridge from the array layer, which states an element's condition as
+   `read_ok e ect`, to the struct layer, which states a containing type's
+   condition field by field: a struct that is readable as a whole is readable
+   at each of its fields, by `access_ok_trans`. *)
+let read_ok_sub (e: etypes) (s: ctype) (off: nat) (fld: ctype)
+  : Lemma (requires read_ok e s /\ access_ok s off fld /\ off + csize fld <= elen e)
+          (ensures  read_ok (Seq.slice e off (off + csize fld)) fld)
+  = let e' = Seq.slice e off (off + csize fld) in
+    let aux (k: nat)
+      : Lemma (k < elen e' ==>
+               (match eget e' k with
+                | None -> True
+                | Some en -> b2t (access_ok en.ty (en.off - k) fld)))
+      = if k < elen e' then
+          match eget e' k with
+          | None -> ()
+          | Some en -> access_ok_trans en.ty (en.off - (off + k)) s off fld
+    in
+    FStar.Classical.forall_intro aux
+
 (* Storage that has no effective type at all. `read_ok` is satisfied by it at
    every type, which is what makes it the right description of two things C
    treats alike: the result of `malloc`, and the storage of a *union*.

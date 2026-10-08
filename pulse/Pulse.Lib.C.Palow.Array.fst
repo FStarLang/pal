@@ -358,6 +358,29 @@ let elems_ok_none (ect: ET.ctype) (esize: nat) (n: nat)
     in
     Classical.forall_intro aux
 
+(* An array that is readable as a whole is readable element by element. The
+   array layer and the struct layer state their conditions differently --
+   `read_ok` at a `ctype` here, field by field there -- and this is how a
+   struct that is an array element gets from the one to the other. *)
+let elems_ok_read_ok (ect: ET.ctype) (esize: nat) (n: nat) (e: ET.etypes)
+  : Lemma (requires ET.csize ect == esize /\ ET.elen e == esize * n
+                    /\ ET.read_ok e (ET.TArr ect n))
+          (ensures  elems_ok ect esize n e)
+  = let aux (i: nat) : Lemma (i < n ==> ET.read_ok (elem_etypes esize e i) ect) =
+      if i < n then begin
+        elem_fits esize n i;
+        if esize = 0 then ()
+        else begin
+          M.multiple_modulo_lemma i esize;
+          assert (ET.emod (esize * i) esize == 0);
+          assert (ET.access_ok ect 0 ect);
+          assert (ET.access_ok (ET.TArr ect n) (esize * i) ect);
+          ET.read_ok_sub e (ET.TArr ect n) (esize * i) ect
+        end
+      end
+    in
+    Classical.forall_intro aux
+
 (* Storage that carries no effective type at all is claimable as an array of
    any element type that fits it: `read_ok` holds at every type on an entry
    with no effective type yet. This is the bridge from a union's storage --

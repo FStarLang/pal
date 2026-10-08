@@ -277,6 +277,19 @@ impl FieldShape {
         }
     }
 
+    /// The proof that storage readable at the containing type is readable at
+    /// this member's, which is how a type that is an array element gets from
+    /// the array layer's condition to its own.
+    fn etype_ok_read_ok(&self, e: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_etype_ok_read_ok {}; ", pn, e),
+            FieldShape::Array { pn, esize, len } => {
+                format!("elems_ok_read_ok {}_ctype {} {} {}; ", pn, esize, len, e)
+            }
+            FieldShape::Flex { .. } => String::new(),
+        }
+    }
+
     /// The proof that fresh, untyped storage meets `etype_ok`.
     fn etype_ok_none(&self) -> String {
         match self {
@@ -6760,6 +6773,30 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             .collect::<Vec<_>>()
             .join("")
     );
+    // And so does storage that is readable at this type as a whole, which is
+    // what the array layer hands an element.
+    c += &format!(
+        "let {sn}_etype_ok_read_ok (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype)\n          (ensures  {sn}_etype_ok e)\n  = {es}()\n\n",
+        sn = sn,
+        es = si
+            .fields
+            .iter()
+            .filter(|f| f.size > 0)
+            .map(|f| {
+                let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                format!(
+                    "ET.read_ok_sub e {sn}_ctype {off} {ct}; {}",
+                    f.shape.etype_ok_read_ok(&sl),
+                    sn = sn,
+                    off = f.offset,
+                    ct = ctype_of_shape(&f.shape)
+                        .map(|t| format!("({})", t))
+                        .unwrap_or_else(|| "()".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    );
     // Every field of an object of this type is aligned for its own type, and
     // by nothing deeper than arithmetic on numerals: the offset is a multiple
     // of the field's alignment, and the field's alignment divides the
@@ -7229,26 +7266,40 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     let mut hi = si.size;
     for reg in regions.iter().skip(1).rev() {
         let off = reg.offset();
-        w += &format!("  mem_split a {}sz;\n", off);
+        w += &format!("  mem_split_at a {}sz;\n", off);
         w += &format!("  slice_prefix b {hi} 0 {off};\n", hi = hi, off = off);
         w += &format!("  slice_prefix b {hi} {off} {hi};\n", hi = hi, off = off);
         hi = off;
     }
+    // A gap is padding: nobody can read it at a type, so its index is simply
+    // forgotten.
+    for reg in regions.iter() {
+        let Region::Gap(off, _) = reg else { continue };
+        w += &format!("  mem_hide_etypes {};\n", at(*off));
+    }
     for f in &si.fields {
         let pn = pn_of(f);
         if f.size == 0 {
+            // A zero-size member owns no bytes, so there is no index to
+            // carve out of the struct's: `mem_show_etypes` names the empty
+            // one the (empty) range already has.
             w += &format!(
-                "  mem_pts_to_nil {at} p (slice b {lo} {lo});\n",
+                "  mem_pts_to_nil {at} p (slice b {lo} {lo});\n  mem_show_etypes {at};\n",
                 at = at(f.offset),
                 lo = f.offset
             );
         }
         w += &format!(
-            "  {pn}_conceal {at} #p #(slice b {lo} {hi}) #(x.fld_{f});\n",
+            "  {pn}_conceal {at} #p #(slice b {lo} {hi}) #{e} #(x.fld_{f});\n",
             pn = pn,
             at = at(f.offset),
             lo = f.offset,
             hi = f.offset + f.size,
+            e = if f.size == 0 {
+                "_".to_string()
+            } else {
+                format!("(Seq.slice e {} {})", f.offset, f.offset + f.size)
+            },
             f = f.name
         );
         w += &format!(
@@ -7261,9 +7312,10 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         );
     }
     c += &format!(
-        "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: {sn})\n\
-         \x20 requires mem_pts_to a p b\n\
-         \x20 requires pure ({sn}_repr x b /\\ aligned a {sn}_alignof)\n{iv}\
+        "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: {sn})\n\
+         \x20 requires mem_pts_to_at a p b e\n\
+         \x20 requires pure ({sn}_repr x b /\\ aligned a {sn}_alignof)\n\
+         \x20 requires pure ({sn}_etype_ok e)\n{iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
          {{\n  {sn}_field_aligned a;\n{w}  fold {sn}_padding a p;\n  fold {sn}_pts_to a p x;\n}}\n\n",
         sn = sn,
@@ -7281,7 +7333,9 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
          \x20 requires pure (aligned a {sn}_alignof)\n\
          {iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
-         {{\n  elem_reveal {sn}_repr {sn}_ctype a;\n  {sn}_conceal a #p #_ #x;\n}}\n\n\
+         {{\n  elem_reveal {sn}_repr {sn}_ctype a;\n  \
+         with b e. assert (mem_pts_to_at a p b e);\n  \
+         {sn}_etype_ok_read_ok e;\n  {sn}_conceal a #p #b #e #x;\n}}\n\n\
          ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
          \x20 ensures  elem_pts_to {sn}_repr {sn}_ctype a p x\n\

@@ -73,6 +73,11 @@ let uint8_t_etype_ok_untyped (e: ET.etypes)
           (ensures  uint8_t_etype_ok e)
   = ET.untyped_read_ok e uint8_t_ctype
 
+let uint8_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e uint8_t_ctype)
+          (ensures  uint8_t_etype_ok e)
+  = ()
+
 let uint8_t_repr (x: U8.t) (b: bytes) : prop =
   b == encode (SZ.v uint8_t_sizeof) None (U8.v x)
 
@@ -120,6 +125,11 @@ let uint32_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v uint32_t_sizeof)
           (ensures  uint32_t_etype_ok e)
   = ET.untyped_read_ok e uint32_t_ctype
+
+let uint32_t_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e uint32_t_ctype)
+          (ensures  uint32_t_etype_ok e)
+  = ()
 
 let uint32_t_repr (x: U32.t) (b: bytes) : prop =
   b == encode (SZ.v uint32_t_sizeof) None (U32.v x)
@@ -272,6 +282,11 @@ let ptr_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v ptr_sizeof)
           (ensures  ptr_etype_ok e)
   = ET.untyped_read_ok e ptr_ctype
+
+let ptr_etype_ok_read_ok (e: ET.etypes)
+  : Lemma (requires ET.read_ok e ptr_ctype)
+          (ensures  ptr_etype_ok e)
+  = ()
 
 let ptr_repr (a: ptr) (b: bytes) : prop =
   b == encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a)
