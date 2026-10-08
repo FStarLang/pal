@@ -8143,6 +8143,84 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         ef = ensures_fixed,
         alloc = carve(true)
     );
+
+    // Giving a flexible object back runs the carve backwards, exactly as
+    // `{sn}_reveal_uninit` does for an ordinary struct: the joins go left to
+    // right, which is the reverse of the order the splits ran in. The tail
+    // arrives at the `option` view, which is where the loop that filled it
+    // left it, and at the length the allocation asked for -- the one thing
+    // the type does not say.
+    let reveal_fixed = |f: &StructField, free: &mut String| {
+        match &f.shape {
+            FieldShape::One { pn } => {
+                free.push_str(&format!(
+                    "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n  {pn}_reveal_uninit {off};\n",
+                    pn = pn,
+                    sn = sn,
+                    f = f.name,
+                    off = at(f.offset)
+                ));
+            }
+            FieldShape::Array { pn, esize, len } => {
+                free.push_str(&format!(
+                    "  rewrite (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} {off});\n  array_reveal_all_uninit {pn}_repr {pn}_etype_ok {off} {es}sz {pn}_alignof {n}sz;\n",
+                    pn = pn,
+                    es = esize,
+                    n = len,
+                    sn = sn,
+                    f = f.name,
+                    off = at(f.offset)
+                ));
+            }
+            FieldShape::Flex { .. } => unreachable!(),
+        }
+        // A zero-size member's storage was conjured rather than carved, so it
+        // is dropped rather than joined.
+        if f.size == 0 {
+            free.push_str(&format!("  drop_mem_pts_to_nil {};\n", at(f.offset)));
+        }
+    };
+    let reveal_flex = |free: &mut String| {
+        free.push_str(&format!(
+            "  rewrite (array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R xs)\n    as (array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {off} 1.0R xs);\n  array_forget {pn}_repr {pn}_etype_ok {off} {es}sz {pn}_alignof;\n",
+            pn = fpn,
+            es = fes,
+            sn = sn,
+            f = flex.name,
+            off = at(flex.offset)
+        ));
+    };
+    let mut give = String::new();
+    give += &format!("  unfold {}_padding a 1.0R;\n", sn);
+    if let Some(f) = field_at(0) {
+        if std::ptr::eq(f, flex) {
+            reveal_flex(&mut give);
+        } else {
+            reveal_fixed(f, &mut give);
+        }
+    }
+    for off in bounds.iter() {
+        match field_at(*off) {
+            Some(f) if std::ptr::eq(f, flex) => reveal_flex(&mut give),
+            Some(f) => reveal_fixed(f, &mut give),
+            None => {}
+        }
+        give += &format!("  mem_join a {}sz;\n", off);
+    }
+    let mut requires_fixed = String::new();
+    for u in &fixed_uninit {
+        requires_fixed += &format!("  requires {}\n", u);
+    }
+    c += &format!(
+        "ghost fn {sn}_reveal_uninit_flex (a: ptr) (n: SizeT.t) (#xs: Seq.seq (option {el}))\n{rf}  requires array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R xs\n  requires {sn}_padding a 1.0R\n  requires pure (Seq.length xs == SizeT.v n)\n  ensures  exists* b. mem_pts_to a 1.0R b\n                      ** pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es})\n{{\n{give}}}\n\n",
+        sn = sn,
+        el = elem,
+        es = fes,
+        pn = fpn,
+        f = flex.name,
+        rf = requires_fixed,
+        give = give
+    );
     c
 }
 
@@ -8597,10 +8675,11 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
                 body = body
             );
         }
-        // Every cut first, then every part. There are only as many cuts as
-        // there are parts, so the nested slices they leave behind cost
-        // nothing, and running them before anything is claimed keeps each
-        // cut's own side condition in an almost empty context.
+        // Every cut first, then every part. Each cut splits the piece that
+        // starts at `a`, so the side condition it leaves is about a range
+        // whose bounds are all literal -- the one shape the solver reads off
+        // rather than works out. Running the cuts before anything is claimed
+        // keeps each of those side conditions in an almost empty context.
         for lo in cuts.iter().copied().skip(1).rev() {
             alloc += &format!("  mem_split_at a {}sz;\n", lo);
         }
@@ -8616,7 +8695,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // struct be an array element or a union member, where the storage comes
     // from somewhere else entirely.
     c += &format!(
-        "#push-options \"--z3rlimit 60\"\nghost fn {sn}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
+        "#push-options \"--z3rlimit 150\"\nghost fn {sn}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
          \x20 requires mem_pts_to_at a 1.0R b e\n\
          \x20 requires pure (len b == SizeT.v {sn}_sizeof /\\ aligned a {sn}_alignof)\n\
          \x20 requires pure ({sn}_etype_ok e)\n\
@@ -17030,6 +17109,45 @@ impl<'a> Body<'a> {
             let b = &self.blocks[i];
             (b.tmp.clone(), b.pn.clone(), b.init)
         };
+        // A flexible struct has no whole-object storage view, so it goes back
+        // the way it was handed over: in pieces, at the length the allocation
+        // asked for. Each fixed field that was written is forgotten first --
+        // the tail is already at the `option` view the loop that filled it
+        // left it at.
+        if let Some(fx) = self.blocks[i].flex.clone() {
+            if init {
+                return Err(format!(
+                    "a `free` of `{}`, a flexible struct that was gathered into a value",
+                    pn
+                ));
+            }
+            let sname = pn.strip_prefix("struct_").unwrap_or(&pn).to_string();
+            let fields: Vec<(String, String)> = match self.tds.structs.get(&sname) {
+                Some(si) => si
+                    .fields
+                    .iter()
+                    .filter(|f| f.name != fx.field)
+                    .filter_map(|f| match &f.shape {
+                        FieldShape::One { pn } => Some((f.name.clone(), pn.clone())),
+                        _ => None,
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            for (f, fpn) in fields {
+                if self.blocks[i].scattered.contains(&f) {
+                    self.lines.push(format!(
+                        "{}_forget ({} +! {}_offsetof_{});",
+                        fpn, tmp, pn, f
+                    ));
+                }
+            }
+            self.lines
+                .push(format!("{}_reveal_uninit_flex {} {};", pn, tmp, fx.n));
+            self.lines.push(format!("free {};", tmp));
+            self.blocks[i].freed = true;
+            return Ok(());
+        }
         match &self.blocks[i].array.clone() {
             Some(a) if a.filled => self.lines.push(format!(
                 "array_forget_full {}_repr {}_etype_ok {} {} {}_alignof;",
