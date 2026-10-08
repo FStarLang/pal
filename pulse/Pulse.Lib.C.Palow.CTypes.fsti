@@ -51,6 +51,20 @@ let bool_t_sizeof : SZ.t = 1sz
 let bool_t_alignof : SZ.t = 1sz
 let bool_t_ctype : ET.ctype = ET.TScalar ET.SBool
 
+(* The effective-type side condition a `bool_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let bool_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e bool_t_ctype
+
+let bool_t_etype_ok_none ()
+  : Lemma (bool_t_etype_ok (ET.etypes_none (SZ.v bool_t_sizeof)))
+  = ()
+
+let bool_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v bool_t_sizeof)
+          (ensures  bool_t_etype_ok e)
+  = ET.untyped_read_ok e bool_t_ctype
+
 let bool_t_repr (x: bool) (b: bytes) : prop =
   b == encode (SZ.v bool_t_sizeof) None (if x then 1 else 0)
 
@@ -150,6 +164,20 @@ let int8_t_alignof : SZ.t = 1sz
   (* `int8_t` is `signed char`, a character type: it may alias anything. *)
 let int8_t_ctype : ET.ctype = ET.TScalar ET.SChar
 
+(* The effective-type side condition a `int8_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let int8_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int8_t_ctype
+
+let int8_t_etype_ok_none ()
+  : Lemma (int8_t_etype_ok (ET.etypes_none (SZ.v int8_t_sizeof)))
+  = ()
+
+let int8_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int8_t_sizeof)
+          (ensures  int8_t_etype_ok e)
+  = ET.untyped_read_ok e int8_t_ctype
+
 let int8_t_repr (x: I8.t) (b: bytes) : prop =
   b == encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x))
 
@@ -247,6 +275,20 @@ ghost fn int8_t_reveal_uninit (a: ptr)
 let int16_t_sizeof : SZ.t = 2sz
 let int16_t_alignof : SZ.t = 2sz
 let int16_t_ctype : ET.ctype = ET.TScalar ET.SInt16
+
+(* The effective-type side condition a `int16_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let int16_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int16_t_ctype
+
+let int16_t_etype_ok_none ()
+  : Lemma (int16_t_etype_ok (ET.etypes_none (SZ.v int16_t_sizeof)))
+  = ()
+
+let int16_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int16_t_sizeof)
+          (ensures  int16_t_etype_ok e)
+  = ET.untyped_read_ok e int16_t_ctype
 
 let int16_t_repr (x: I16.t) (b: bytes) : prop =
   b == encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x))
@@ -346,6 +388,20 @@ let int32_t_sizeof : SZ.t = 4sz
 let int32_t_alignof : SZ.t = 4sz
 let int32_t_ctype : ET.ctype = ET.TScalar ET.SInt32
 
+(* The effective-type side condition a `int32_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let int32_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int32_t_ctype
+
+let int32_t_etype_ok_none ()
+  : Lemma (int32_t_etype_ok (ET.etypes_none (SZ.v int32_t_sizeof)))
+  = ()
+
+let int32_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int32_t_sizeof)
+          (ensures  int32_t_etype_ok e)
+  = ET.untyped_read_ok e int32_t_ctype
+
 let int32_t_repr (x: I32.t) (b: bytes) : prop =
   b == encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x))
 
@@ -443,6 +499,20 @@ ghost fn int32_t_reveal_uninit (a: ptr)
 let int64_t_sizeof : SZ.t = 8sz
 let int64_t_alignof : SZ.t = 8sz
 let int64_t_ctype : ET.ctype = ET.TScalar ET.SInt64
+
+(* The effective-type side condition a `int64_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let int64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int64_t_ctype
+
+let int64_t_etype_ok_none ()
+  : Lemma (int64_t_etype_ok (ET.etypes_none (SZ.v int64_t_sizeof)))
+  = ()
+
+let int64_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int64_t_sizeof)
+          (ensures  int64_t_etype_ok e)
+  = ET.untyped_read_ok e int64_t_ctype
 
 let int64_t_repr (x: I64.t) (b: bytes) : prop =
   b == encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x))
@@ -542,6 +612,20 @@ let uint16_t_sizeof : SZ.t = 2sz
 let uint16_t_alignof : SZ.t = 2sz
 let uint16_t_ctype : ET.ctype = ET.TScalar ET.SUInt16
 
+(* The effective-type side condition a `uint16_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let uint16_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e uint16_t_ctype
+
+let uint16_t_etype_ok_none ()
+  : Lemma (uint16_t_etype_ok (ET.etypes_none (SZ.v uint16_t_sizeof)))
+  = ()
+
+let uint16_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v uint16_t_sizeof)
+          (ensures  uint16_t_etype_ok e)
+  = ET.untyped_read_ok e uint16_t_ctype
+
 let uint16_t_repr (x: U16.t) (b: bytes) : prop =
   b == encode (SZ.v uint16_t_sizeof) None (U16.v x)
 
@@ -639,6 +723,20 @@ ghost fn uint16_t_reveal_uninit (a: ptr)
 let uint64_t_sizeof : SZ.t = 8sz
 let uint64_t_alignof : SZ.t = 8sz
 let uint64_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
+
+(* The effective-type side condition a `uint64_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let uint64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e uint64_t_ctype
+
+let uint64_t_etype_ok_none ()
+  : Lemma (uint64_t_etype_ok (ET.etypes_none (SZ.v uint64_t_sizeof)))
+  = ()
+
+let uint64_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v uint64_t_sizeof)
+          (ensures  uint64_t_etype_ok e)
+  = ET.untyped_read_ok e uint64_t_ctype
 
 let uint64_t_repr (x: U64.t) (b: bytes) : prop =
   b == encode (SZ.v uint64_t_sizeof) None (U64.v x)
@@ -768,6 +866,20 @@ let size_t_alignof : SZ.t = 8sz
   (* `size_t` is a typedef for `unsigned long`, the same type as `uint64_t`
      on this target, so it shares a descriptor. *)
 let size_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
+
+(* The effective-type side condition a `size_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let size_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e size_t_ctype
+
+let size_t_etype_ok_none ()
+  : Lemma (size_t_etype_ok (ET.etypes_none (SZ.v size_t_sizeof)))
+  = ()
+
+let size_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v size_t_sizeof)
+          (ensures  size_t_etype_ok e)
+  = ET.untyped_read_ok e size_t_ctype
 
 let size_t_repr (x: SZ.t) (b: bytes) : prop =
   b == encode (SZ.v size_t_sizeof) None (SZ.v x)
@@ -1107,6 +1219,20 @@ let float32_t_sizeof : SZ.t = 4sz
 let float32_t_alignof : SZ.t = 4sz
 let float32_t_ctype : ET.ctype = ET.TScalar ET.SFloat32
 
+(* The effective-type side condition a `float32_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let float32_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e float32_t_ctype
+
+let float32_t_etype_ok_none ()
+  : Lemma (float32_t_etype_ok (ET.etypes_none (SZ.v float32_t_sizeof)))
+  = ()
+
+let float32_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v float32_t_sizeof)
+          (ensures  float32_t_etype_ok e)
+  = ET.untyped_read_ok e float32_t_ctype
+
 let float32_t_repr (x: float32) (b: bytes) : prop =
   b == encode (SZ.v float32_t_sizeof) None (float32_bits x)
 
@@ -1204,6 +1330,20 @@ ghost fn float32_t_reveal_uninit (a: ptr)
 let float64_t_sizeof : SZ.t = 8sz
 let float64_t_alignof : SZ.t = 8sz
 let float64_t_ctype : ET.ctype = ET.TScalar ET.SFloat64
+
+(* The effective-type side condition a `float64_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let float64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e float64_t_ctype
+
+let float64_t_etype_ok_none ()
+  : Lemma (float64_t_etype_ok (ET.etypes_none (SZ.v float64_t_sizeof)))
+  = ()
+
+let float64_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v float64_t_sizeof)
+          (ensures  float64_t_etype_ok e)
+  = ET.untyped_read_ok e float64_t_ctype
 
 let float64_t_repr (x: float64) (b: bytes) : prop =
   b == encode (SZ.v float64_t_sizeof) None (float64_bits x)

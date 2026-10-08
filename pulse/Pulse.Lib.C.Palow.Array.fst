@@ -358,6 +358,23 @@ let elems_ok_none (ect: ET.ctype) (esize: nat) (n: nat)
     in
     Classical.forall_intro aux
 
+(* Storage that carries no effective type at all is claimable as an array of
+   any element type that fits it: `read_ok` holds at every type on an entry
+   with no effective type yet. This is the bridge from a union's storage --
+   which a union's `_pts_to` keeps untyped, since 6.5.2.3p3 lets any member be
+   read -- to an array member of that union. *)
+let elems_ok_untyped (ect: ET.ctype) (esize: nat) (n: nat) (e: ET.etypes)
+  : Lemma (requires ET.csize ect == esize /\ ET.untyped e /\ ET.elen e == esize * n)
+          (ensures  elems_ok ect esize n e)
+  = let aux (i: nat) : Lemma (i < n ==> ET.read_ok (elem_etypes esize e i) ect) =
+      if i < n then begin
+        elem_fits esize n i;
+        ET.untyped_slice e (esize * i) (esize * i + esize);
+        ET.untyped_read_ok (elem_etypes esize e i) ect
+      end
+    in
+    Classical.forall_intro aux
+
 (* ---------------------------------------------------------------------------
    Ownership split and join
 
@@ -738,10 +755,10 @@ ghost fn elem_maybe_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (ect: ET.cty
                            (#x: option t)
   requires elem_pts_to (maybe_repr t_repr (SZ.v esize)) ect a 1.0R x
   requires pure (forall (v: t) (b: bytes). t_repr v b ==> len b == SZ.v esize)
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v esize)
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v esize /\ ET.elen e == len b /\ ET.read_ok e ect)
 {
   unfold elem_pts_to (maybe_repr t_repr (SZ.v esize)) ect a 1.0R x;
-  mem_hide_etypes a;
 }
 
 (* ---------------------------------------------------------------------------

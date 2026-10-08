@@ -249,6 +249,15 @@ let etypes_wf (e: etypes) : prop =
 (* Freshly allocated storage: no effective type anywhere. *)
 let etypes_none (n: nat) : e:etypes { elen e == n } = Seq.create n None
 
+(* Carving a range twice is carving it once. Stated with a pattern so that the
+   nested slices a struct's field-by-field carve produces collapse to the flat
+   slice its side condition is written with, without a hint per field. *)
+let etypes_slice_slice (e: etypes) (i j k l: nat)
+  : Lemma (requires i <= j /\ j <= elen e /\ k <= l /\ l <= j - i)
+          (ensures  Seq.slice (Seq.slice e i j) k l == Seq.slice e (i + k) (i + l))
+          [SMTPat (Seq.slice (Seq.slice e i j) k l)]
+  = Seq.slice_slice e i j k l
+
 (* Untyped storage stays untyped when it is cut up. Used wherever a block is
    handed out piecewise -- `mem_split_at` on `malloc`ed or pool storage. *)
 let etypes_none_slice (n: nat) (i: nat) (j: nat)
@@ -272,6 +281,38 @@ let read_ok (e: etypes) (u: ctype) : prop =
     (match eget e k with
      | None -> True
      | Some en -> b2t (access_ok en.ty (en.off - k) u)))
+
+(* Storage that has no effective type at all. `read_ok` is satisfied by it at
+   every type, which is what makes it the right description of two things C
+   treats alike: the result of `malloc`, and the storage of a *union*.
+
+   For the union that is not a shortcut. 6.5.2.3p3 and its footnote permit
+   reading any member of a union object, whichever one was last stored, so a
+   union's bytes have to admit a read at every member's type. Saying they carry
+   no effective type says exactly that, and -- unlike a conjunction of
+   `read_ok`s, one per member -- it splits and rejoins, which is what a member
+   focus and unfocus need. *)
+let untyped (e: etypes) : prop =
+  forall (k: nat). k < elen e ==> eget e k == None
+
+let untyped_read_ok (e: etypes) (u: ctype)
+  : Lemma (requires untyped e /\ elen e == csize u)
+          (ensures  read_ok e u)
+  = ()
+
+let untyped_slice (e: etypes) (i j: nat)
+  : Lemma (requires untyped e /\ i <= j /\ j <= elen e)
+          (ensures  untyped (Seq.slice e i j))
+  = ()
+
+let untyped_append (e1 e2: etypes)
+  : Lemma (requires untyped e1 /\ untyped e2)
+          (ensures  untyped (Seq.append e1 e2))
+  = ()
+
+let untyped_none (n: nat)
+  : Lemma (untyped (etypes_none n))
+  = ()
 
 (* A byte is relabelled only if its current type does not already license the
    store. That condition is what keeps the index from being *too* fine: writing

@@ -59,6 +59,20 @@ let uint8_t_alignof : SZ.t = 1sz
   (* `uint8_t` is `unsigned char`, a character type: it may alias anything. *)
 let uint8_t_ctype : ET.ctype = ET.TScalar ET.SChar
 
+(* The effective-type side condition a `uint8_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let uint8_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e uint8_t_ctype
+
+let uint8_t_etype_ok_none ()
+  : Lemma (uint8_t_etype_ok (ET.etypes_none (SZ.v uint8_t_sizeof)))
+  = ()
+
+let uint8_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v uint8_t_sizeof)
+          (ensures  uint8_t_etype_ok e)
+  = ET.untyped_read_ok e uint8_t_ctype
+
 let uint8_t_repr (x: U8.t) (b: bytes) : prop =
   b == encode (SZ.v uint8_t_sizeof) None (U8.v x)
 
@@ -92,6 +106,20 @@ ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U8
 let uint32_t_sizeof : SZ.t = 4sz
 let uint32_t_alignof : SZ.t = 4sz
 let uint32_t_ctype : ET.ctype = ET.TScalar ET.SUInt32
+
+(* The effective-type side condition a `uint32_t` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let uint32_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e uint32_t_ctype
+
+let uint32_t_etype_ok_none ()
+  : Lemma (uint32_t_etype_ok (ET.etypes_none (SZ.v uint32_t_sizeof)))
+  = ()
+
+let uint32_t_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v uint32_t_sizeof)
+          (ensures  uint32_t_etype_ok e)
+  = ET.untyped_read_ok e uint32_t_ctype
 
 let uint32_t_repr (x: U32.t) (b: bytes) : prop =
   b == encode (SZ.v uint32_t_sizeof) None (U32.v x)
@@ -230,6 +258,20 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
 let ptr_sizeof : SZ.t = 8sz
 let ptr_alignof : SZ.t = 8sz
 let ptr_ctype : ET.ctype = ET.TScalar ET.SPtr
+
+(* The effective-type side condition a `ptr` object's storage has to meet,
+   under the name every type publishes so that a struct or union containing
+   one can state its own condition without knowing what kind of type it is. *)
+let ptr_etype_ok (e: ET.etypes) : prop = ET.read_ok e ptr_ctype
+
+let ptr_etype_ok_none ()
+  : Lemma (ptr_etype_ok (ET.etypes_none (SZ.v ptr_sizeof)))
+  = ()
+
+let ptr_etype_ok_untyped (e: ET.etypes)
+  : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v ptr_sizeof)
+          (ensures  ptr_etype_ok e)
+  = ET.untyped_read_ok e ptr_ctype
 
 let ptr_repr (a: ptr) (b: bytes) : prop =
   b == encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a)
