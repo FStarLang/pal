@@ -8465,24 +8465,152 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         alloc += &format!("  mem_show_etypes {};\n", at(f.offset));
         claim_at(f, &mut alloc);
     }
-    for off in bounds.iter().rev() {
-        alloc += &format!("  mem_split_at a {}sz;\n", off);
-        if let Some(f) = field_at(*off) {
-            align_at(f, &mut alloc);
-            claim_at(f, &mut alloc);
-        } else {
-            // A gap: nothing claims it, and `{sn}_padding` is stated over
-            // bytes, so its index is dropped here rather than left in the
-            // context for the fold to trip over.
-            alloc += &format!("  mem_hide_etypes (a +! {}sz);\n", off);
+    // Carving the sub-object `[lo, hi)`, which lives at `a +! lo`. Every
+    // split is of the piece that starts there, so the pointer the split names
+    // never nests; the piece it cuts off does, and is immediately rewritten
+    // back to its offset from the object, which is how every other step
+    // spells it.
+    let carve = |lo: u64, hi: u64, alloc: &mut String| {
+        for off in bounds.iter().rev().filter(|o| **o > lo && **o < hi) {
+            if lo == 0 {
+                *alloc += &format!("  mem_split_at a {}sz;\n", off);
+            } else {
+                *alloc += &format!("  mem_split_at (a +! {}sz) {}sz;\n", lo, off - lo);
+                *alloc += &format!(
+                    "  rewrite each ((a +! {lo}sz) +! {d}sz) as (a +! {off}sz);\n",
+                    lo = lo,
+                    d = off - lo,
+                    off = off
+                );
+            }
+            if let Some(f) = field_at(*off) {
+                align_at(f, alloc);
+                claim_at(f, alloc);
+            } else {
+                // A gap: nothing claims it, and `{sn}_padding` is stated over
+                // bytes, so its index is dropped here rather than left in the
+                // context for the fold to trip over.
+                *alloc += &format!("  mem_hide_etypes (a +! {}sz);\n", off);
+            }
         }
-    }
-    if let Some(f) = field_at(0) {
-        align_at(f, &mut alloc);
-        claim_at(f, &mut alloc);
+        match field_at(lo) {
+            Some(f) => {
+                align_at(f, alloc);
+                claim_at(f, alloc);
+            }
+            None if lo == 0 => *alloc += "  mem_hide_etypes a;\n",
+            None => *alloc += &format!("  mem_hide_etypes (a +! {}sz);\n", lo),
+        }
+    };
+
+    // A wide struct is carved in parts. Every step of the carve is a separate
+    // SMT query, and each one sees everything the steps before it produced --
+    // so a single carve of `n` fields asks `n` questions in a context that
+    // grows to `n` claimed fields and `n` facts about their slices of the
+    // index. Past sixty-odd fields the solver gives up on goals that are
+    // arithmetic on literals. Cutting the object into parts first bounds what
+    // any one query sees: each part carves its own range from its own
+    // precondition, and the whole object's carve is as many steps as there
+    // are parts.
+    const CARVE_PART: usize = 12;
+    let cuts: Vec<u64> = if bounds.len() > 2 * CARVE_PART {
+        std::iter::once(0)
+            .chain(
+                bounds
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(i, _)| i % CARVE_PART == CARVE_PART - 1)
+                    .map(|(_, off)| off),
+            )
+            .filter(|off| *off < si.size)
+            .collect()
     } else {
-        alloc += "  mem_hide_etypes a;\n";
+        vec![0]
+    };
+    let mut parts = String::new();
+    if cuts.len() > 1 {
+        for (k, lo) in cuts.iter().copied().enumerate() {
+            let hi = cuts.get(k + 1).copied().unwrap_or(si.size);
+            let mut body = String::new();
+            carve(lo, hi, &mut body);
+            let outs: Vec<String> =
+                si.fields
+                    .iter()
+                    .filter(|f| f.size > 0 && f.offset >= lo && f.offset < hi)
+                    .map(|f| {
+                        f.shape
+                            .uninit_at(&format!("(a +! {}_offsetof_{})", sn, f.name))
+                    })
+                    .chain(gaps.iter().filter(|(off, _)| *off >= lo && *off < hi).map(
+                        |(off, n)| {
+                            format!(
+                                "(exists* g. mem_pts_to {} 1.0R g ** pure (len g == {}))",
+                                if *off == 0 {
+                                    "a".to_string()
+                                } else {
+                                    format!("(a +! {}sz)", off)
+                                },
+                                n
+                            )
+                        },
+                    ))
+                    .collect();
+            let conds: Vec<String> = si
+                .fields
+                .iter()
+                .filter(|f| f.size > 0 && f.offset >= lo && f.offset < hi)
+                .filter_map(|f| {
+                    f.shape.etype_ok(&format!(
+                        "(Seq.slice e {} {})",
+                        f.offset - lo,
+                        f.offset + f.size - lo
+                    ))
+                })
+                .collect();
+            parts += &format!(
+                "ghost fn {sn}_claim_uninit_part{k} (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
+                 \x20 requires mem_pts_to_at {at} 1.0R b e\n\
+                 \x20 requires pure (len b == {n} /\\ ET.elen e == len b\n\
+                 \x20                 /\\ aligned a {sn}_alignof /\\ ET.allocated e\n\
+                 \x20                 /\\ {conds})\n\
+                 \x20 ensures  {outs}\n\
+                 {{\n{body}}}\n\n",
+                sn = sn,
+                k = k,
+                at = if lo == 0 {
+                    "a".to_string()
+                } else {
+                    format!("(a +! {}sz)", lo)
+                },
+                n = hi - lo,
+                conds = if conds.is_empty() {
+                    "True".to_string()
+                } else {
+                    conds.join(" /\\ ")
+                },
+                outs = if outs.is_empty() {
+                    "emp".to_string()
+                } else {
+                    outs.join("\n\x20 ensures  ")
+                },
+                body = body
+            );
+        }
+        // Every cut first, then every part. There are only as many cuts as
+        // there are parts, so the nested slices they leave behind cost
+        // nothing, and running them before anything is claimed keeps each
+        // cut's own side condition in an almost empty context.
+        for lo in cuts.iter().copied().skip(1).rev() {
+            alloc += &format!("  mem_split_at a {}sz;\n", lo);
+        }
+        for k in 0..cuts.len() {
+            alloc += &format!("  {sn}_claim_uninit_part{k} a;\n", sn = sn, k = k);
+        }
+    } else {
+        carve(0, si.size, &mut alloc);
     }
+    c += &parts;
     // Claiming raw storage at this type is the carve on its own; a stack
     // allocation is that plus the allocation. Separating them is what lets a
     // struct be an array element or a union member, where the storage comes
