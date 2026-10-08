@@ -65,10 +65,11 @@ let bool_t_etype_ok_untyped (e: ET.etypes)
           (ensures  bool_t_etype_ok e)
   = ET.untyped_read_ok e bool_t_ctype
 
-let bool_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e bool_t_ctype)
-          (ensures  bool_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let bool_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v bool_t_sizeof ==> bool_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires bool_t_etype_ok_untyped)
+
 
 let bool_t_repr (x: bool) (b: bytes) : prop =
   b == encode (SZ.v bool_t_sizeof) None (if x then 1 else 0)
@@ -183,10 +184,11 @@ let int8_t_etype_ok_untyped (e: ET.etypes)
           (ensures  int8_t_etype_ok e)
   = ET.untyped_read_ok e int8_t_ctype
 
-let int8_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e int8_t_ctype)
-          (ensures  int8_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let int8_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v int8_t_sizeof ==> int8_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires int8_t_etype_ok_untyped)
+
 
 let int8_t_repr (x: I8.t) (b: bytes) : prop =
   b == encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x))
@@ -300,10 +302,11 @@ let int16_t_etype_ok_untyped (e: ET.etypes)
           (ensures  int16_t_etype_ok e)
   = ET.untyped_read_ok e int16_t_ctype
 
-let int16_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e int16_t_ctype)
-          (ensures  int16_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let int16_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v int16_t_sizeof ==> int16_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires int16_t_etype_ok_untyped)
+
 
 let int16_t_repr (x: I16.t) (b: bytes) : prop =
   b == encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x))
@@ -417,10 +420,11 @@ let int32_t_etype_ok_untyped (e: ET.etypes)
           (ensures  int32_t_etype_ok e)
   = ET.untyped_read_ok e int32_t_ctype
 
-let int32_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e int32_t_ctype)
-          (ensures  int32_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let int32_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v int32_t_sizeof ==> int32_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires int32_t_etype_ok_untyped)
+
 
 let int32_t_repr (x: I32.t) (b: bytes) : prop =
   b == encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x))
@@ -534,10 +538,11 @@ let int64_t_etype_ok_untyped (e: ET.etypes)
           (ensures  int64_t_etype_ok e)
   = ET.untyped_read_ok e int64_t_ctype
 
-let int64_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e int64_t_ctype)
-          (ensures  int64_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let int64_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v int64_t_sizeof ==> int64_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires int64_t_etype_ok_untyped)
+
 
 let int64_t_repr (x: I64.t) (b: bytes) : prop =
   b == encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x))
@@ -651,10 +656,11 @@ let uint16_t_etype_ok_untyped (e: ET.etypes)
           (ensures  uint16_t_etype_ok e)
   = ET.untyped_read_ok e uint16_t_ctype
 
-let uint16_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e uint16_t_ctype)
-          (ensures  uint16_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let uint16_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v uint16_t_sizeof ==> uint16_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires uint16_t_etype_ok_untyped)
+
 
 let uint16_t_repr (x: U16.t) (b: bytes) : prop =
   b == encode (SZ.v uint16_t_sizeof) None (U16.v x)
@@ -768,10 +774,11 @@ let uint64_t_etype_ok_untyped (e: ET.etypes)
           (ensures  uint64_t_etype_ok e)
   = ET.untyped_read_ok e uint64_t_ctype
 
-let uint64_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e uint64_t_ctype)
-          (ensures  uint64_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let uint64_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v uint64_t_sizeof ==> uint64_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires uint64_t_etype_ok_untyped)
+
 
 let uint64_t_repr (x: U64.t) (b: bytes) : prop =
   b == encode (SZ.v uint64_t_sizeof) None (U64.v x)
@@ -916,10 +923,11 @@ let size_t_etype_ok_untyped (e: ET.etypes)
           (ensures  size_t_etype_ok e)
   = ET.untyped_read_ok e size_t_ctype
 
-let size_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e size_t_ctype)
-          (ensures  size_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let size_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v size_t_sizeof ==> size_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires size_t_etype_ok_untyped)
+
 
 let size_t_repr (x: SZ.t) (b: bytes) : prop =
   b == encode (SZ.v size_t_sizeof) None (SZ.v x)
@@ -1101,98 +1109,98 @@ ghost fn uint8_t_reveal_uninit (a: ptr)
    --------------------------------------------------------------------------- *)
 
 ghost fn bool_t_of_elem (a: ptr) (#p: perm) (#x: bool)
-  requires elem_pts_to bool_t_repr bool_t_ctype a p x
+  requires elem_pts_to bool_t_repr bool_t_etype_ok a p x
   requires pure (aligned a bool_t_alignof)
   ensures  bool_t_pts_to a p x
 
 
 ghost fn bool_t_to_elem (a: ptr) (#p: perm) (#x: bool)
   requires bool_t_pts_to a p x
-  ensures  elem_pts_to bool_t_repr bool_t_ctype a p x
+  ensures  elem_pts_to bool_t_repr bool_t_etype_ok a p x
   ensures  pure (aligned a bool_t_alignof)
 
 
 ghost fn int8_t_of_elem (a: ptr) (#p: perm) (#x: I8.t)
-  requires elem_pts_to int8_t_repr int8_t_ctype a p x
+  requires elem_pts_to int8_t_repr int8_t_etype_ok a p x
   requires pure (aligned a int8_t_alignof)
   ensures  int8_t_pts_to a p x
 
 
 ghost fn int8_t_to_elem (a: ptr) (#p: perm) (#x: I8.t)
   requires int8_t_pts_to a p x
-  ensures  elem_pts_to int8_t_repr int8_t_ctype a p x
+  ensures  elem_pts_to int8_t_repr int8_t_etype_ok a p x
   ensures  pure (aligned a int8_t_alignof)
 
 
 ghost fn int16_t_of_elem (a: ptr) (#p: perm) (#x: I16.t)
-  requires elem_pts_to int16_t_repr int16_t_ctype a p x
+  requires elem_pts_to int16_t_repr int16_t_etype_ok a p x
   requires pure (aligned a int16_t_alignof)
   ensures  int16_t_pts_to a p x
 
 
 ghost fn int16_t_to_elem (a: ptr) (#p: perm) (#x: I16.t)
   requires int16_t_pts_to a p x
-  ensures  elem_pts_to int16_t_repr int16_t_ctype a p x
+  ensures  elem_pts_to int16_t_repr int16_t_etype_ok a p x
   ensures  pure (aligned a int16_t_alignof)
 
 
 ghost fn int32_t_of_elem (a: ptr) (#p: perm) (#x: I32.t)
-  requires elem_pts_to int32_t_repr int32_t_ctype a p x
+  requires elem_pts_to int32_t_repr int32_t_etype_ok a p x
   requires pure (aligned a int32_t_alignof)
   ensures  int32_t_pts_to a p x
 
 
 ghost fn int32_t_to_elem (a: ptr) (#p: perm) (#x: I32.t)
   requires int32_t_pts_to a p x
-  ensures  elem_pts_to int32_t_repr int32_t_ctype a p x
+  ensures  elem_pts_to int32_t_repr int32_t_etype_ok a p x
   ensures  pure (aligned a int32_t_alignof)
 
 
 ghost fn int64_t_of_elem (a: ptr) (#p: perm) (#x: I64.t)
-  requires elem_pts_to int64_t_repr int64_t_ctype a p x
+  requires elem_pts_to int64_t_repr int64_t_etype_ok a p x
   requires pure (aligned a int64_t_alignof)
   ensures  int64_t_pts_to a p x
 
 
 ghost fn int64_t_to_elem (a: ptr) (#p: perm) (#x: I64.t)
   requires int64_t_pts_to a p x
-  ensures  elem_pts_to int64_t_repr int64_t_ctype a p x
+  ensures  elem_pts_to int64_t_repr int64_t_etype_ok a p x
   ensures  pure (aligned a int64_t_alignof)
 
 
 ghost fn uint16_t_of_elem (a: ptr) (#p: perm) (#x: U16.t)
-  requires elem_pts_to uint16_t_repr uint16_t_ctype a p x
+  requires elem_pts_to uint16_t_repr uint16_t_etype_ok a p x
   requires pure (aligned a uint16_t_alignof)
   ensures  uint16_t_pts_to a p x
 
 
 ghost fn uint16_t_to_elem (a: ptr) (#p: perm) (#x: U16.t)
   requires uint16_t_pts_to a p x
-  ensures  elem_pts_to uint16_t_repr uint16_t_ctype a p x
+  ensures  elem_pts_to uint16_t_repr uint16_t_etype_ok a p x
   ensures  pure (aligned a uint16_t_alignof)
 
 
 ghost fn uint64_t_of_elem (a: ptr) (#p: perm) (#x: U64.t)
-  requires elem_pts_to uint64_t_repr uint64_t_ctype a p x
+  requires elem_pts_to uint64_t_repr uint64_t_etype_ok a p x
   requires pure (aligned a uint64_t_alignof)
   ensures  uint64_t_pts_to a p x
 
 
 ghost fn uint64_t_to_elem (a: ptr) (#p: perm) (#x: U64.t)
   requires uint64_t_pts_to a p x
-  ensures  elem_pts_to uint64_t_repr uint64_t_ctype a p x
+  ensures  elem_pts_to uint64_t_repr uint64_t_etype_ok a p x
   ensures  pure (aligned a uint64_t_alignof)
 
 
 ghost fn size_t_of_elem (a: ptr) (#p: perm) (#x: SZ.t)
-  requires elem_pts_to size_t_repr size_t_ctype a p x
+  requires elem_pts_to size_t_repr size_t_etype_ok a p x
   requires pure (aligned a size_t_alignof)
   ensures  size_t_pts_to a p x
 
 
 ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
   requires size_t_pts_to a p x
-  ensures  elem_pts_to size_t_repr size_t_ctype a p x
+  ensures  elem_pts_to size_t_repr size_t_etype_ok a p x
   ensures  pure (aligned a size_t_alignof)
 
 
@@ -1273,10 +1281,11 @@ let float32_t_etype_ok_untyped (e: ET.etypes)
           (ensures  float32_t_etype_ok e)
   = ET.untyped_read_ok e float32_t_ctype
 
-let float32_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e float32_t_ctype)
-          (ensures  float32_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let float32_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v float32_t_sizeof ==> float32_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires float32_t_etype_ok_untyped)
+
 
 let float32_t_repr (x: float32) (b: bytes) : prop =
   b == encode (SZ.v float32_t_sizeof) None (float32_bits x)
@@ -1390,10 +1399,11 @@ let float64_t_etype_ok_untyped (e: ET.etypes)
           (ensures  float64_t_etype_ok e)
   = ET.untyped_read_ok e float64_t_ctype
 
-let float64_t_etype_ok_read_ok (e: ET.etypes)
-  : Lemma (requires ET.read_ok e float64_t_ctype)
-          (ensures  float64_t_etype_ok e)
-  = ()
+(* The same, quantified: an array of this type needs it under a binder. *)
+let float64_t_etype_ok_untyped_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == SZ.v float64_t_sizeof ==> float64_t_etype_ok e)
+  = FStar.Classical.forall_intro (FStar.Classical.move_requires float64_t_etype_ok_untyped)
+
 
 let float64_t_repr (x: float64) (b: bytes) : prop =
   b == encode (SZ.v float64_t_sizeof) None (float64_bits x)
@@ -1487,14 +1497,14 @@ ghost fn float64_t_reveal_uninit (a: ptr)
 
 
 ghost fn float32_t_of_elem (a: ptr) (#p: perm) (#x: float32)
-  requires elem_pts_to float32_t_repr float32_t_ctype a p x
+  requires elem_pts_to float32_t_repr float32_t_etype_ok a p x
   requires pure (aligned a float32_t_alignof)
   ensures  float32_t_pts_to a p x
 
 
 ghost fn float32_t_to_elem (a: ptr) (#p: perm) (#x: float32)
   requires float32_t_pts_to a p x
-  ensures  elem_pts_to float32_t_repr float32_t_ctype a p x
+  ensures  elem_pts_to float32_t_repr float32_t_etype_ok a p x
   ensures  pure (aligned a float32_t_alignof)
 
 
@@ -1504,14 +1514,14 @@ let float32_t_repr_len (x: float32) (b: bytes)
 
 
 ghost fn float64_t_of_elem (a: ptr) (#p: perm) (#x: float64)
-  requires elem_pts_to float64_t_repr float64_t_ctype a p x
+  requires elem_pts_to float64_t_repr float64_t_etype_ok a p x
   requires pure (aligned a float64_t_alignof)
   ensures  float64_t_pts_to a p x
 
 
 ghost fn float64_t_to_elem (a: ptr) (#p: perm) (#x: float64)
   requires float64_t_pts_to a p x
-  ensures  elem_pts_to float64_t_repr float64_t_ctype a p x
+  ensures  elem_pts_to float64_t_repr float64_t_etype_ok a p x
   ensures  pure (aligned a float64_t_alignof)
 
 

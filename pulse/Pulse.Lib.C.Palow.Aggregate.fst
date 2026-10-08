@@ -329,7 +329,7 @@ let struct_V_offsetof_data : SZ.t = 4sz
 
 let struct_V_pts_to ([@@@mkey] a: ptr) (p: perm) (n: U32.t) (xs: Seq.seq U32.t) : slprop =
   uint32_t_pts_to a p n
-  ** array_pts_to uint32_t_repr uint32_t_ctype (SZ.v uint32_t_sizeof) (SZ.v uint32_t_alignof)
+  ** array_pts_to uint32_t_repr uint32_t_etype_ok (SZ.v uint32_t_sizeof) (SZ.v uint32_t_alignof)
                     (a +! struct_V_offsetof_data) p xs
   ** pure (U32.v n == Seq.length xs)
 
@@ -337,21 +337,21 @@ let struct_V_pts_to ([@@@mkey] a: ptr) (p: perm) (n: U32.t) (xs: Seq.seq U32.t) 
    is by definition `b == encode 4 None (U32.v x)`, so both directions are a
    fold/unfold pair; PAL emits one such pair per scalar type. *)
 ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
-  requires elem_pts_to uint32_t_repr uint32_t_ctype a p x
+  requires elem_pts_to uint32_t_repr uint32_t_etype_ok a p x
   requires pure (aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to a p x
 {
-  unfold elem_pts_to uint32_t_repr uint32_t_ctype a p x;
+  unfold elem_pts_to uint32_t_repr uint32_t_etype_ok a p x;
   uint32_t_conceal a #p #_ #_ #x;
 }
 
 ghost fn uint32_t_to_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
-  ensures  elem_pts_to uint32_t_repr uint32_t_ctype a p x
+  ensures  elem_pts_to uint32_t_repr uint32_t_etype_ok a p x
   ensures  pure (aligned a uint32_t_alignof)
 {
   uint32_t_reveal a #p #x;
-  fold elem_pts_to uint32_t_repr uint32_t_ctype a p x;
+  fold elem_pts_to uint32_t_repr uint32_t_etype_ok a p x;
 }
 
 (* `return v->data[i];` -- the whole point of the flexible-array encoding is
@@ -368,16 +368,16 @@ fn struct_V_get (a: ptr) (#p: perm) (#n: erased U32.t) (#xs: Seq.seq U32.t)
   ensures  pure (r == Seq.index xs (SZ.v i))
 {
   unfold struct_V_pts_to a p n xs;
-  array_focus uint32_t_repr uint32_t_ctype (a +! struct_V_offsetof_data) uint32_t_sizeof uint32_t_alignof i off;
+  array_focus uint32_t_repr uint32_t_etype_ok (a +! struct_V_offsetof_data) uint32_t_sizeof uint32_t_alignof i off;
   uint32_t_of_elem ((a +! struct_V_offsetof_data) +! off);
   let r = uint32_t_read ((a +! struct_V_offsetof_data) +! off);
   uint32_t_to_elem ((a +! struct_V_offsetof_data) +! off);
 
-  array_singleton_intro uint32_t_repr uint32_t_ctype ((a +! struct_V_offsetof_data) +! off)
+  array_singleton_intro uint32_t_repr uint32_t_etype_ok ((a +! struct_V_offsetof_data) +! off)
                         uint32_t_sizeof uint32_t_alignof;
-  array_join uint32_t_repr uint32_t_ctype ((a +! struct_V_offsetof_data) +! off) uint32_t_sizeof
+  array_join uint32_t_repr uint32_t_etype_ok ((a +! struct_V_offsetof_data) +! off) uint32_t_sizeof
              uint32_t_alignof uint32_t_sizeof;
-  array_join uint32_t_repr uint32_t_ctype (a +! struct_V_offsetof_data) uint32_t_sizeof
+  array_join uint32_t_repr uint32_t_etype_ok (a +! struct_V_offsetof_data) uint32_t_sizeof
              uint32_t_alignof off;
   Seq.lemma_eq_intro
     (Seq.append (Seq.slice xs 0 (SZ.v i))

@@ -391,56 +391,56 @@ ghost fn ptr_reveal_uninit (dest: ptr)
    --------------------------------------------------------------------------- *)
 
 ghost fn uint8_t_of_elem (a: ptr) (#p: perm) (#x: U8.t)
-  requires elem_pts_to uint8_t_repr uint8_t_ctype a p x
+  requires elem_pts_to uint8_t_repr uint8_t_etype_ok a p x
   requires pure (aligned a uint8_t_alignof)
   ensures  uint8_t_pts_to a p x
 {
-  elem_reveal uint8_t_repr uint8_t_ctype a;
+  elem_reveal uint8_t_repr uint8_t_etype_ok a;
   uint8_t_conceal a #p #_ #_ #x;
 }
 
 ghost fn uint8_t_to_elem (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
-  ensures  elem_pts_to uint8_t_repr uint8_t_ctype a p x
+  ensures  elem_pts_to uint8_t_repr uint8_t_etype_ok a p x
   ensures  pure (aligned a uint8_t_alignof)
 {
   uint8_t_reveal a;
-  elem_conceal uint8_t_repr uint8_t_ctype a #p #_ #_ #x;
+  elem_conceal uint8_t_repr uint8_t_etype_ok a #p #_ #_ #x;
 }
 
 ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
-  requires elem_pts_to uint32_t_repr uint32_t_ctype a p x
+  requires elem_pts_to uint32_t_repr uint32_t_etype_ok a p x
   requires pure (aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to a p x
 {
-  elem_reveal uint32_t_repr uint32_t_ctype a;
+  elem_reveal uint32_t_repr uint32_t_etype_ok a;
   uint32_t_conceal a #p #_ #_ #x;
 }
 
 ghost fn uint32_t_to_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
-  ensures  elem_pts_to uint32_t_repr uint32_t_ctype a p x
+  ensures  elem_pts_to uint32_t_repr uint32_t_etype_ok a p x
   ensures  pure (aligned a uint32_t_alignof)
 {
   uint32_t_reveal a;
-  elem_conceal uint32_t_repr uint32_t_ctype a #p #_ #_ #x;
+  elem_conceal uint32_t_repr uint32_t_etype_ok a #p #_ #_ #x;
 }
 
 ghost fn ptr_of_elem (a: ptr) (#p: perm) (#x: ptr)
-  requires elem_pts_to ptr_repr ptr_ctype a p x
+  requires elem_pts_to ptr_repr ptr_etype_ok a p x
   requires pure (aligned a ptr_alignof)
   ensures  ptr_pts_to a p x
 {
-  elem_reveal ptr_repr ptr_ctype a;
+  elem_reveal ptr_repr ptr_etype_ok a;
   ptr_conceal a #p #_ #_ #x;
 }
 
 ghost fn ptr_to_elem (a: ptr) (#p: perm) (#x: ptr)
   requires ptr_pts_to a p x
-  ensures  elem_pts_to ptr_repr ptr_ctype a p x
+  ensures  elem_pts_to ptr_repr ptr_etype_ok a p x
   ensures  pure (aligned a ptr_alignof)
 {
   ptr_reveal a;
-  elem_conceal ptr_repr ptr_ctype a #p #_ #_ #x;
+  elem_conceal ptr_repr ptr_etype_ok a #p #_ #_ #x;
 }
 

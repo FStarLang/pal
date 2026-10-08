@@ -25,26 +25,26 @@ module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module ET = Pulse.Lib.C.Palow.Etype
 
-fn array_stack_alloc (#t: Type0) (t_repr: t -> bytes -> prop) (ect: ET.ctype) (esize: SZ.t) (ealign: SZ.t { SZ.v ealign > 0 }) (n: SZ.t)
+fn array_stack_alloc (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop) (esize: SZ.t) (ealign: SZ.t { SZ.v ealign > 0 }) (n: SZ.t)
                      (nbytes: SZ.t { SZ.v nbytes == SZ.v esize * SZ.v n })
   requires pure (SZ.v esize % SZ.v ealign == 0 /\ SZ.v max_align % SZ.v ealign == 0
-                 /\ SZ.v esize > 0 /\ ET.csize ect == SZ.v esize)
+                 /\ SZ.v esize > 0 /\ eok (ET.etypes_none (SZ.v esize)))
   returns a : ptr
-  ensures array_pts_to (maybe_repr t_repr (SZ.v esize)) ect (SZ.v esize) (SZ.v ealign) a 1.0R
+  ensures array_pts_to (maybe_repr t_repr (SZ.v esize)) eok (SZ.v esize) (SZ.v ealign) a 1.0R
                        (Seq.create (SZ.v n) (None #t))
 {
   let a = mem_stack_alloc nbytes;
   aligned_divides a max_align ealign;
-  elems_ok_none ect (SZ.v esize) (SZ.v n);
-  array_claim_uninit t_repr ect a esize ealign n;
+  elems_ok_none eok (SZ.v esize) (SZ.v n);
+  array_claim_uninit t_repr eok a esize ealign n;
   a
 }
 
-fn array_stack_free (#t: Type0) (t_repr: t -> bytes -> prop) (ect: ET.ctype) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+fn array_stack_free (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
                     (#xs: erased (Seq.seq (option t)))
-  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) ect (SZ.v esize) (SZ.v ealign) a 1.0R xs
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) eok (SZ.v esize) (SZ.v ealign) a 1.0R xs
 {
-  array_forget t_repr ect a esize ealign;
+  array_forget t_repr eok a esize ealign;
   mem_stack_free a;
 }
 
@@ -62,7 +62,7 @@ fn array_stack_free (#t: Type0) (t_repr: t -> bytes -> prop) (ect: ET.ctype) (a:
 
    Only the fill value 0 is covered, which is the fill C code reliably means:
    `memset` with anything else is well defined only for byte-sized types. *)
-fn array_memset_zero (#t: Type0) (t_repr: t -> bytes -> prop) (ect: ET.ctype) (a: ptr)
+fn array_memset_zero (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop) (a: ptr)
                      (esize: SZ.t) (ealign: SZ.t) (n: SZ.t) (nbytes: SZ.t)
                      (z: t)
                      (* `xs` is `erased` because this is not a ghost function:
@@ -70,13 +70,13 @@ fn array_memset_zero (#t: Type0) (t_repr: t -> bytes -> prop) (ect: ET.ctype) (a
                         at every call, and failing to gives a misleading
                         "cannot have a ghost effect". *)
                      (#xs: erased (Seq.seq t))
-  requires array_pts_to t_repr ect (SZ.v esize) (SZ.v ealign) a 1.0R xs
+  requires array_pts_to t_repr eok (SZ.v esize) (SZ.v ealign) a 1.0R xs
   requires pure (Seq.length xs == SZ.v n /\ SZ.v nbytes == SZ.v esize * SZ.v n)
   requires pure (t_repr z (zeroed (SZ.v esize)))
-  ensures  array_pts_to t_repr ect (SZ.v esize) (SZ.v ealign) a 1.0R (Seq.create (SZ.v n) z)
+  ensures  array_pts_to t_repr eok (SZ.v esize) (SZ.v ealign) a 1.0R (Seq.create (SZ.v n) z)
 {
-  unfold array_pts_to t_repr ect (SZ.v esize) (SZ.v ealign) a 1.0R xs;
+  unfold array_pts_to t_repr eok (SZ.v esize) (SZ.v ealign) a 1.0R xs;
   memset_zero a nbytes;
   Classical.forall_intro (Classical.move_requires (elem_bytes_zeroed (SZ.v esize) (SZ.v n)));
-  fold array_pts_to t_repr ect (SZ.v esize) (SZ.v ealign) a 1.0R (Seq.create (SZ.v n) z);
+  fold array_pts_to t_repr eok (SZ.v esize) (SZ.v ealign) a 1.0R (Seq.create (SZ.v n) z);
 }
