@@ -324,10 +324,21 @@ let untyped (e: etypes) : prop =
    This is the half of 6.5p6 that `read_ok` does not record. `read_ok` says
    what may be read out of a byte; `allocated` says whether a store may change
    that, and a cross-member union write needs the second. Unlike `read_ok` it
-   is pointwise and offset-free, so it splits and rejoins by construction. *)
+   is pointwise and offset-free, so it splits and rejoins by construction.
+
+   It also carries `etypes_wf`, the structural invariant that every entry's
+   offset lies inside the object it belongs to. That is true of every index
+   the model can build -- `etypes_none`, `etypes_of` and `store_etypes` all
+   produce it, and slicing and appending preserve it -- but nothing else
+   records it, and the character-access rule needs it: `read_char_ok` is
+   exactly the statement that a well-formed byte is readable as a character,
+   which is how a store through a character lvalue re-establishes its own
+   points-to. Keeping it here rather than in a predicate of its own means
+   every condition that already propagates `allocated` propagates it too. *)
 let allocated (e: etypes) : prop =
-  forall (k: nat). k < elen e ==>
-    (match eget e k with None -> True | Some en -> b2t (not en.fixed))
+  etypes_wf e /\
+  (forall (k: nat). k < elen e ==>
+    (match eget e k with None -> True | Some en -> b2t (not en.fixed)))
 
 let allocated_slice (e: etypes) (i j: nat)
   : Lemma (requires allocated e /\ i <= j /\ j <= elen e)
@@ -359,6 +370,7 @@ let untyped_read_ok (e: etypes) (u: ctype)
 let untyped_slice (e: etypes) (i j: nat)
   : Lemma (requires untyped e /\ i <= j /\ j <= elen e)
           (ensures  untyped (Seq.slice e i j))
+          [SMTPat (untyped (Seq.slice e i j))]
   = ()
 
 let untyped_append (e1 e2: etypes)

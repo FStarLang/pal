@@ -410,6 +410,16 @@ let elems_ok_untyped (eok: ET.etypes -> prop) (esize: nat) (n: nat) (e: ET.etype
     in
     Classical.forall_intro aux
 
+(* The quantified form, for generated code that cannot name the index it is
+   about to claim at: after a chain of splits the slice is several `Seq.slice`
+   deep and only the solver knows which one it is. *)
+let elems_ok_untyped_all (eok: ET.etypes -> prop) (esize: nat) (n: nat)
+  : Lemma (requires (forall (e': ET.etypes). ET.untyped e' /\ ET.elen e' == esize ==> eok e'))
+          (ensures  (forall (e: ET.etypes). ET.untyped e /\ ET.elen e == esize * n
+                                       ==> elems_ok eok esize n e))
+  = Classical.forall_intro (Classical.move_requires (elems_ok_untyped eok esize n))
+
+
 (* ---------------------------------------------------------------------------
    Ownership split and join
 

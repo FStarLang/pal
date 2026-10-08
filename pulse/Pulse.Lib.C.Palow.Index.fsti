@@ -48,6 +48,21 @@ ghost fn mem_show_etypes (a: ptr) (#p: perm) (#b: bytes)
   ensures  exists* e. mem_pts_to_at a p b e
              ** pure (ET.elen e == len b /\ ET.allocated e)
 
+(* Giving allocated storage a new effective type. This is 6.5p6 for the case
+   the generated code cannot reach on its own: a store through an lvalue of
+   type `c` sets the stored-into object's effective type to `c`, and an
+   allocator that hands out raw storage has to be able to take that step for a
+   chunk it pre-filled. It is available precisely because the storage is
+   `allocated` -- no byte of it is at a declared type -- which is what
+   `allocated_store_ok` says, and it is unavailable for a declared object,
+   which is what C says too. *)
+ghost fn mem_retype (a: ptr) (c: ET.ctype) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (ET.elen e == len b /\ len b == ET.csize c /\ ET.allocated e
+                 /\ ~(c == ET.tchar))
+  ensures  exists* e'. mem_pts_to_at a 1.0R b e'
+             ** pure (ET.elen e' == len b /\ ET.read_ok e' c /\ ET.allocated e')
+
 (* ---------------------------------------------------------------------------
    Observing an indexed range
 

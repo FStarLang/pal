@@ -363,6 +363,108 @@ impl FieldShape {
     }
 }
 
+/// Whether a generated type's effective-type condition depends on the *value*
+/// stored in it. A union's does -- which member is live is a fact about the
+/// value, and only the live member's type is readable -- and so does that of
+/// any struct holding one, however deep. Everything else publishes a
+/// condition on the index alone, and for those `{t}_live_ok x e` is defined
+/// to be `{t}_etype_ok e`, so the two can be used interchangeably.
+fn live_dependent(tds: &Typedefs, pn: &str) -> bool {
+    if let Some(u) = pn.strip_prefix("union_") {
+        if tds.unions.contains_key(u) {
+            return true;
+        }
+    }
+    if let Some(s) = pn.strip_prefix("struct_") {
+        if let Some(si) = tds.structs.get(s) {
+            return si.fields.iter().any(|f| match &f.shape {
+                FieldShape::One { pn } => live_dependent(tds, pn),
+                // An array of such types would need a value-dependent array
+                // layer, which there is not: `elems_ok` takes a predicate on
+                // the index alone. Such a field keeps the storage condition.
+                _ => false,
+            });
+        }
+    }
+    false
+}
+
+/// Whether a generated type publishes a `_live_ok` at all. Only generated
+/// structs and unions do; the scalar layer has no value-dependent condition
+/// to publish.
+fn has_live_ok(tds: &Typedefs, pn: &str) -> bool {
+    pn.strip_prefix("union_")
+        .is_some_and(|u| tds.unions.contains_key(u))
+        || pn
+            .strip_prefix("struct_")
+            .is_some_and(|s| tds.structs.contains_key(s))
+}
+
+/// The condition a member's storage has to meet when the containing object is
+/// *holding a value*: a `_live_ok` where that is a different thing from the
+/// storage condition, and the storage condition everywhere else.
+fn live_ok_of(tds: &Typedefs, shape: &FieldShape, v: &str, e: &str) -> Option<String> {
+    match shape {
+        FieldShape::One { pn } if has_live_ok(tds, pn) => {
+            Some(format!("{}_live_ok {} {}", pn, v, e))
+        }
+        _ => shape.etype_ok(e),
+    }
+}
+
+/// The proof that storage a store at this member's type has just produced
+/// meets the member's *live* condition.
+fn live_ok_read_ok_of(tds: &Typedefs, shape: &FieldShape, v: &str, e: &str) -> String {
+    match shape {
+        FieldShape::One { pn } if has_live_ok(tds, pn) => {
+            format!("{}_live_ok_read_ok {} {}; ", pn, v, e)
+        }
+        _ => shape.etype_ok_read_ok(e),
+    }
+}
+
+/// The proof that a member's live condition implies its storage condition.
+fn live_ok_etype_ok_of(tds: &Typedefs, shape: &FieldShape, v: &str, e: &str) -> String {
+    match shape {
+        FieldShape::One { pn } if has_live_ok(tds, pn) => {
+            format!("{}_live_ok_etype_ok {} {}; ", pn, v, e)
+        }
+        _ => String::new(),
+    }
+}
+
+/// The ghost steps that retype a union member's slice of the index to the
+/// member's own type, between the split that isolates it and the claim that
+/// hands out the member's resource.
+///
+/// A character member takes a different route: 6.5p6 exempts stores through a
+/// character lvalue from installing an effective type at all, so the index
+/// does not move (`store_char_identity`) and the bytes are readable as
+/// characters because they are well formed (`read_char_ok`). The ordinary
+/// route is not merely unnecessary there, it is unavailable: `store_ok`'s
+/// re-typing disjunct is explicitly withheld from character stores.
+fn store_chain(mct: &str, msz: u64, ind: &str) -> String {
+    let lines: Vec<String> = if mct == "int8_t_ctype" || mct == "uint8_t_ctype" {
+        vec![
+            format!("mem_store_etypes a {};", mct),
+            format!("ET.store_char_identity (Seq.slice e 0 {});", msz),
+            format!("ET.read_char_ok (Seq.slice e 0 {});", msz),
+        ]
+    } else {
+        vec![
+            format!("ET.allocated_store_ok (Seq.slice e 0 {}) {};", msz, mct),
+            format!("mem_store_etypes a {};", mct),
+            format!("ET.store_ok_read_ok (Seq.slice e 0 {}) {};", msz, mct),
+            format!("ET.allocated_store_etypes (Seq.slice e 0 {}) {};", msz, mct),
+        ]
+    };
+    lines
+        .iter()
+        .map(|l| format!("{}\n{}", l, ind))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// The name a flexible array member's missing storage operations are
 /// spelled with. None of them is reachable -- a struct with one has no
 /// byte-level view and no uninitialised view, which is what gates them --
@@ -5016,7 +5118,9 @@ fn emit_fn(
         && ret_block.is_none()
         && is_void_ptr(tds, &decl.ret_type)
         && (out.contains(&format!("mem_pts_to ({})", ret_name))
-            || out.contains(&format!("mem_pts_to {}", ret_name)))
+            || out.contains(&format!("mem_pts_to {}", ret_name))
+            || out.contains(&format!("mem_pts_to_at ({})", ret_name))
+            || out.contains(&format!("mem_pts_to_at {}", ret_name)))
     {
         ret_block = Some(RetBlock {
             pn: String::new(),
@@ -5965,10 +6069,40 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             .map(|m| {
                 let sl = format!("(Seq.slice e 0 {})", m.size);
                 format!(
-                    "   | {} _ -> {}\n",
+                    "   | {} v -> {}\n",
                     ctor(m),
-                    m.shape.etype_ok(&sl).unwrap_or_else(|| "True".to_string())
+                    live_ok_of(tds, &m.shape, "v", &sl).unwrap_or_else(|| "True".to_string())
                 )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    );
+    // A live union still meets the storage condition -- that condition says
+    // only that the bytes are allocated and of the right length -- and
+    // storage that a store at the union's own type produced is live at every
+    // member, since `read_ok` at a union is `read_ok` at each of its members.
+    // The second is what lets a containing object be concealed as a whole.
+    c += &format!(
+        "let {un}_live_ok_etype_ok (u: {un}) (e: ET.etypes)\n  : Lemma (requires {un}_live_ok u e) (ensures {un}_etype_ok e)\n  = ()\n\n\
+         let {un}_live_ok_read_ok (u: {un}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof)\n          (ensures  {un}_live_ok u e)\n  = match u with\n{arms}\n\
+         let {un}_live_ok_read_ok_all ()\n  : Lemma (forall (u: {un}) (e: ET.etypes). ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_live_ok u e)\n  = FStar.Classical.forall_intro_2 (fun (u: {un}) (e: ET.etypes) -> FStar.Classical.move_requires ({un}_live_ok_read_ok u) e)\n\n",
+        un = un,
+        arms = ui
+            .members
+            .iter()
+            .map(|m| {
+                let sl = format!("(Seq.slice e 0 {})", m.size);
+                let pf = match ctype_of_shape(&m.shape) {
+                    Some(ct) => format!(
+                        "ET.read_ok_sub e {un}_ctype 0 {ct}; ET.allocated_slice e 0 {sz}; {br}",
+                        un = un,
+                        ct = ct,
+                        sz = m.size,
+                        br = live_ok_read_ok_of(tds, &m.shape, "v", &sl)
+                    ),
+                    None => String::new(),
+                };
+                format!("    | {} v -> {}()\n", ctor(m), pf)
             })
             .collect::<Vec<_>>()
             .join("")
@@ -6129,17 +6263,17 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              mem_split_at a {msz}sz;\n  \
              ET.allocated_slice e 0 {msz};\n  \
              ET.allocated_slice e {msz} (ET.elen e);\n  \
-             ET.allocated_store_ok (Seq.slice e 0 {msz}) {mct};\n  \
-             mem_store_etypes a {mct};\n  \
-             ET.store_ok_read_ok (Seq.slice e 0 {msz}) {mct};\n  \
-             ET.allocated_store_etypes (Seq.slice e 0 {msz}) {mct};\n  \
-             {bridge}\n  \
+             {store}             {bridge}\n  \
              {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
             f = f,
             uninit = mem_uninit,
-            mct = ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+            store = store_chain(
+                &ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+                m.size,
+                "  ",
+            ),
             bridge = m.shape.etype_ok_read_ok(&format!(
                 "(ET.store_etypes (Seq.slice e 0 {}) {})",
                 m.size,
@@ -6175,17 +6309,17 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              mem_split_at a {msz}sz;\n  \
              ET.allocated_slice e 0 {msz};\n  \
              ET.allocated_slice e {msz} (ET.elen e);\n  \
-             ET.allocated_store_ok (Seq.slice e 0 {msz}) {mct};\n  \
-             mem_store_etypes a {mct};\n  \
-             ET.store_ok_read_ok (Seq.slice e 0 {msz}) {mct};\n  \
-             ET.allocated_store_etypes (Seq.slice e 0 {msz}) {mct};\n  \
-             {bridge}\n  \
+             {store}             {bridge}\n  \
              {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
             f = f,
             uninit = mem_uninit,
-            mct = ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+            store = store_chain(
+                &ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+                m.size,
+                "  ",
+            ),
             bridge = m.shape.etype_ok_read_ok(&format!(
                 "(ET.store_etypes (Seq.slice e 0 {}) {})",
                 m.size,
@@ -6348,11 +6482,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              mem_split_at a {msz}sz;\n      \
              ET.allocated_slice e 0 {msz};\n      \
              ET.allocated_slice e {msz} (ET.elen e);\n      \
-             ET.allocated_store_ok (Seq.slice e 0 {msz}) {mct};\n      \
-             mem_store_etypes a {mct};\n      \
-             ET.store_ok_read_ok (Seq.slice e 0 {msz}) {mct};\n      \
-             ET.allocated_store_etypes (Seq.slice e 0 {msz}) {mct};\n      \
-             {bridge}\n      \
+             {store}             {bridge}\n      \
              {claim}
       \
              {write}\n      \
@@ -6361,7 +6491,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              rewrite ({un}_pts_to a 1.0R ({k} v)) as ({un}_pts_to a 1.0R x);\n    }}\n",
             k = ctor(m),
             f = m.name,
-            mct = ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+            store = store_chain(
+                &ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+                m.size,
+                "      ",
+            ),
             bridge = m.shape.etype_ok_read_ok(&format!(
                 "(ET.store_etypes (Seq.slice e 0 {}) {})",
                 m.size,
@@ -6847,6 +6981,69 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             .collect::<Vec<_>>()
             .join("")
     );
+    // The condition on an object of this type that is *holding a value*. For
+    // a struct with no union anywhere in it this is the storage condition
+    // itself -- nothing about the index depends on the value -- and is
+    // defined to be exactly that, so the two are interchangeable. For a
+    // struct that does hold a union, the union field contributes its live
+    // member's condition instead, which is all a member unfocus can give
+    // back, and the two conditions genuinely differ.
+    c += &if live_dependent(tds, &sn) {
+        format!(
+            "let {sn}_live_ok (x: {sn}) (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {sn}_sizeof /\\ ET.allocated e{cs}\n\n\
+             let {sn}_live_ok_etype_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires {sn}_live_ok x e) (ensures {sn}_etype_ok e)\n  = {el}()\n\n\
+             let {sn}_live_ok_read_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_live_ok x e)\n  = {er}()\n\n\
+             let {sn}_live_ok_read_ok_all ()\n  : Lemma (forall (x: {sn}) (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_live_ok x e)\n  = FStar.Classical.forall_intro_2 (fun (x: {sn}) (e: ET.etypes) -> FStar.Classical.move_requires ({sn}_live_ok_read_ok x) e)\n\n",
+            sn = sn,
+            cs = si
+                .fields
+                .iter()
+                .filter(|f| f.size > 0)
+                .filter_map(|f| {
+                    let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                    let v = format!("(x).fld_{}", f.name);
+                    Some(format!(" /\\\n  {}", live_ok_of(tds, &f.shape, &v, &sl)?))
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            el = si
+                .fields
+                .iter()
+                .filter(|f| f.size > 0)
+                .map(|f| {
+                    let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                    live_ok_etype_ok_of(tds, &f.shape, &format!("(x).fld_{}", f.name), &sl)
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            er = si
+                .fields
+                .iter()
+                .filter(|f| f.size > 0)
+                .filter_map(|f| {
+                    let ct = ctype_of_shape(&f.shape)?;
+                    let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                    Some(format!(
+                        "ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}",
+                        sn = sn,
+                        off = f.offset,
+                        end = f.offset + f.size,
+                        ct = ct,
+                        br = live_ok_read_ok_of(tds, &f.shape, &format!("(x).fld_{}", f.name), &sl)
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        )
+    } else {
+        format!(
+            "let {sn}_live_ok (x: {sn}) (e: ET.etypes) : prop = {sn}_etype_ok e\n\n\
+             let {sn}_live_ok_etype_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires {sn}_live_ok x e) (ensures {sn}_etype_ok e)\n  = ()\n\n\
+             let {sn}_live_ok_read_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_live_ok x e)\n  = {sn}_etype_ok_read_ok e\n\n\
+             let {sn}_live_ok_read_ok_all ()\n  : Lemma (forall (x: {sn}) (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_live_ok x e)\n  = {sn}_etype_ok_read_ok_all ()\n\n",
+            sn = sn
+        )
+    };
     // Every field of an object of this type is aligned for its own type, and
     // by nothing deeper than arithmetic on numerals: the offset is a multiple
     // of the field's alignment, and the field's alignment divides the
@@ -7326,7 +7523,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         "ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
          \x20 ensures  exists* b e. mem_pts_to_at a p b e\n\
-         \x20            ** pure ({sn}_repr x b /\\ {sn}_etype_ok e)\n\
+         \x20            ** pure ({sn}_repr x b /\\ {sn}_live_ok x e)\n\
          {{\n{r}}}\n\n",
         sn = sn,
         r = r
@@ -7386,7 +7583,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: {sn})\n\
          \x20 requires mem_pts_to_at a p b e\n\
          \x20 requires pure ({sn}_repr x b /\\ aligned a {sn}_alignof)\n\
-         \x20 requires pure ({sn}_etype_ok e)\n{iv}\
+         \x20 requires pure ({sn}_live_ok x e)\n{iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
          {{\n  {sn}_field_aligned a;\n{w}  fold {sn}_padding a p;\n  fold {sn}_pts_to a p x;\n}}\n\n",
         sn = sn,
@@ -7398,19 +7595,32 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     // the generic array layer's view of one slot, stated over the element's
     // representation, so these are the byte-level view read in the other
     // direction and nothing more.
+    // A struct holding a union has no `_of_elem`: the array layer's view of a
+    // slot states a condition on the index alone, and that condition cannot
+    // say which member of the union is live, so there is nothing to rebuild
+    // the object's live condition from. The other direction loses that
+    // information rather than needing it, so it stays.
+    if !live_dependent(tds, &sn) {
+        c += &format!(
+            "ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn})\n\
+             \x20 requires elem_pts_to {sn}_repr {sn}_etype_ok a p x\n\
+             \x20 requires pure (aligned a {sn}_alignof)\n\
+             {iv}\
+             \x20 ensures  {sn}_pts_to a p x\n\
+             {{\n  elem_reveal {sn}_repr {sn}_etype_ok a;\n  \
+             {sn}_conceal a #p #_ #_ #x;\n}}\n\n",
+            iv = struct_inv_req(si, &sn, "x"),
+            sn = sn
+        );
+    }
     c += &format!(
-        "ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn})\n\
-         \x20 requires elem_pts_to {sn}_repr {sn}_etype_ok a p x\n\
-         \x20 requires pure (aligned a {sn}_alignof)\n\
-         {iv}\
-         \x20 ensures  {sn}_pts_to a p x\n\
-         {{\n  elem_reveal {sn}_repr {sn}_etype_ok a;\n  \
-         {sn}_conceal a #p #_ #_ #x;\n}}\n\n\
-         ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n\
+        "ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
          \x20 ensures  elem_pts_to {sn}_repr {sn}_etype_ok a p x\n\
-         {{\n  {sn}_reveal a;\n  elem_conceal {sn}_repr {sn}_etype_ok a #p #_ #_ #x;\n}}\n\n",
-        iv = struct_inv_req(si, &sn, "x"),
+         {{\n  {sn}_reveal a;\n  \
+         with b e. assert (mem_pts_to_at a p b e);\n  \
+         {sn}_live_ok_etype_ok x e;\n  \
+         elem_conceal {sn}_repr {sn}_etype_ok a #p #_ #_ #x;\n}}\n\n",
         sn = sn
     );
     c
@@ -7728,10 +7938,42 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     // type's zero. Everything before the tail is claimed as storage either
     // way -- the source writes those fields, and a field it does not write is
     // a field the object cannot be gathered from.
+    // The index is untyped on the way in, and `untyped_slice` carries that
+    // through the splits; all the claims need on top of it is each type's own
+    // "untyped storage meets my condition", which cannot be applied by name
+    // because after a chain of splits the slice is several `Seq.slice` deep.
     let carve = |zeroed: bool| {
         let mut alloc = String::new();
+        let mut hinted: Vec<String> = Vec::new();
+        for f in si.fields.iter() {
+            let (pn, arr) = match &f.shape {
+                FieldShape::One { pn } => (pn.clone(), None),
+                FieldShape::Array { pn, esize, len } => (pn.clone(), Some((*esize, *len))),
+                FieldShape::Flex { pn, esize } => (pn.clone(), Some((*esize, 0))),
+            };
+            if !hinted.contains(&pn) {
+                hinted.push(pn.clone());
+                alloc += &format!("  {}_etype_ok_untyped_all ();\n", pn);
+            }
+            if let Some((es, len)) = arr {
+                if std::ptr::eq(f, flex) {
+                    alloc += &format!(
+                        "  elems_ok_untyped_all {pn}_etype_ok {es} (SizeT.v n);\n",
+                        pn = pn,
+                        es = es
+                    );
+                } else {
+                    alloc += &format!(
+                        "  elems_ok_untyped_all {pn}_etype_ok {es} {len};\n",
+                        pn = pn,
+                        es = es,
+                        len = len
+                    );
+                }
+            }
+        }
         for off in bounds.iter().rev() {
-            alloc += &format!("  mem_split a {}sz;\n", off);
+            alloc += &format!("  mem_split_at a {}sz;\n", off);
             match field_at(*off) {
                 Some(f) if std::ptr::eq(f, flex) => {
                     if zeroed {
@@ -7789,7 +8031,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         ensures_fixed += &format!("  ensures  {}\n", u);
     }
     c += &format!(
-        "ghost fn {sn}_claim_uninit_flex (a: ptr) (n: SizeT.t) (#b: bytes)\n  requires mem_pts_to a 1.0R b\n  requires pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es})\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  {fu}\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        "ghost fn {sn}_claim_uninit_flex (a: ptr) (n: SizeT.t) (#b: bytes) (#e: ET.etypes)\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es})\n  requires pure (ET.elen e == len b /\\ ET.untyped e)\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  {fu}\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
         sn = sn,
         es = fes,
         ef = ensures_fixed,
@@ -7798,7 +8040,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     );
     let elem = fstar_type(tds, flex_elem(tds, &flex.ty).unwrap()).unwrap();
     c += &format!(
-        "ghost fn {sn}_claim_zeroed_flex (a: ptr) (n: SizeT.t) (#z: {el}) (#b: bytes)\n  requires mem_pts_to a 1.0R b\n  requires pure (b == zeroed (SizeT.v {sn}_sizeof + SizeT.v n * {es}))\n  requires pure ({pn}_repr z (zeroed {es}))\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  array_pts_to {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z)\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        "ghost fn {sn}_claim_zeroed_flex (a: ptr) (n: SizeT.t) (#z: {el}) (#b: bytes) (#e: ET.etypes)\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (b == zeroed (SizeT.v {sn}_sizeof + SizeT.v n * {es}))\n  requires pure (ET.elen e == len b /\\ ET.untyped e)\n  requires pure ({pn}_repr z (zeroed {es}))\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  array_pts_to {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z)\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
         sn = sn,
         el = elem,
         es = fes,
@@ -15798,6 +16040,12 @@ impl<'a> Body<'a> {
             // fails at the call site where the mistake is.
             self.lines
                 .push(format!("aligned_divides {} max_align {}_alignof;", v, pn));
+            // 6.5p6: the object the source is about to write through this
+            // pointer takes this type as its effective type. The storage is
+            // `allocated`, so the step is available; for a declared object it
+            // would not be, which is what C says.
+            self.lines.push(format!("mem_retype {} {}_ctype;", v, pn));
+            self.lines.push(format!("{}_etype_ok_untyped_all ();", pn));
             self.lines.push(format!("{}_claim_uninit {};", pn, v));
             (pn, false)
         } else {

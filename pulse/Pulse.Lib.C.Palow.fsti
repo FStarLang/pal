@@ -114,6 +114,16 @@ ghost fn mem_pts_to_perm_bound (a: ptr) (#p: perm) (#b: bytes)
   requires  pure (len b > 0)
   ensures   pure (p <=. 1.0R)
 
+(* The same fact over the indexed view. It is stated here rather than derived
+   in `Pulse.Lib.C.Palow.Index` because the derivation there would have to
+   spend the resource that knows the index -- observing through half of a
+   share shows only `p /. 2.0R <=. 1.0R`, and hiding the index to use the
+   layer-0 fact cannot get it back. *)
+ghost fn mem_pts_to_at_perm_bound (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires  pure (len b > 0)
+  ensures   pure (p <=. 1.0R)
+
 (* Two ranges, at least one of them exclusively owned, cannot overlap. This is
    how Palow recovers non-aliasing: it comes from separation, not from
    provenance, so it holds between two distinct `malloc`s and equally between a
