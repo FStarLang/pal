@@ -21,7 +21,7 @@ uint16_t local_hdr(void)
   return h.len;
 }
 
-// C's alignment, not the one the proofs use.
+// C's alignment, which is also the one the proofs use.
 size_t hdr_align(void)
   _ensures(return == 1)
 {

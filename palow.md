@@ -470,11 +470,12 @@ its own), and a hand-written shim that steps a pointer has to call
   from clang. But `malloc` does *not* guarantee it, so claiming such a type on
   `malloc`ed storage should fail — correctly — and `aligned_alloc` needs a
   model. Worth doing, since it is the only way to write the program at all.
-- **Packed structs.** A packed struct whose fields still sit at naturally
-  aligned offsets, and whose size is a multiple of their alignment, is proved
-  with its fields' alignment rather than C's (entry 32). A really misaligned
-  field would need unaligned reads and writes, which the model does not have,
-  so such a struct is skipped.
+- **Packed structs.** A packed struct keeps C's alignment. A scalar or
+  pointer field that this alignment leaves misaligned is owned at the byte
+  level and accessed through an aligned temporary (entry 35). A misaligned
+  array or nested-struct field, or a bit-field in a packed struct, would need
+  unaligned versions of its whole ownership, so such a struct is still
+  skipped.
 - **`char` access is free.** `uint8_t_alignof` is `1sz` and `aligned a 1sz` is
   `addr_of a % 1 == 0`, which is trivially true, so no byte-level code pays
   anything. This is not an accident, and it is the reason the byte layer can
@@ -6013,7 +6014,8 @@ new facts about memory.
     what `_Alignof` evaluates to (`c_alignof`). The same rule covers a
     struct that only contains a packed one. Any other packed layout is
     skipped with the misaligned field named, since Palow has no unaligned
-    accesses. `test/packed_struct` covers these.
+    accesses. `test/packed_struct` covers these. *Superseded by entry 35:
+    the struct now keeps C's alignment.*
 
 33. **Operators in contracts.** `~`, `&`, `|`, `^`, `<<`, `>>`, `/`
     and `%` now translate in contracts as well as in bodies.
@@ -6066,3 +6068,30 @@ new facts about memory.
         values (`_ensures(a[0] == 7)`) failed even without a loop.
 
     `test/out_aggr_loop` covers these.
+
+35. **Unaligned fields of packed structs** (#353). Entry 32 raised a packed
+    struct's alignment to its fields', which asked more than C does. A
+    `uint8_t` buffer holding such a header at an odd offset could not be
+    used. Now the struct keeps C's alignment, and alignment is arithmetic:
+    a field is aligned when its type's alignment divides both the struct's
+    alignment and the field's offset.
+    - A misaligned scalar or pointer field is owned by
+      `elem_pts_to T_repr`, which is `T_pts_to` without the alignment
+      conjunct. Its storage view is `bytes_uninit a (SizeT.v T_sizeof)`.
+      `field_aligned` lists only the aligned fields.
+    - New library module `Pulse.Lib.C.Palow.Unaligned`: for each scalar
+      type and `ptr`, `T_read_u`, `T_write_u`, `T_write_uninit_u` and
+      `T_forget_u`. Each one copies through an aligned stack temporary
+      with `memcpy`, which is what a compiler emits for such an access.
+      They are proved from existing operations, so nothing new is trusted.
+    - Field reads and writes, field-by-field initialisation, `malloc`ed
+      objects, whole-struct copies, the byte-level view (array elements),
+      and nested packed structs all work through these.
+    - Handing a misaligned field's address to a callee (`f(&m->b)`, or as
+      an `_out` argument) is refused: the callee would get a typed
+      points-to, which states alignment, and C says using such a pointer is
+      undefined (C11 6.3.2.3p7).
+    - Still skipped: a misaligned array or nested-struct field, and
+      bit-fields in a packed struct.
+
+    `test/packed_unaligned` and `test/packed_struct` cover these.

@@ -118,7 +118,7 @@ fn record_fields(mut fs: Vec<String>, decl: bool) -> String {
 
 fn ctype_of_shape(shape: &FieldShape) -> Option<String> {
     match shape {
-        FieldShape::One { pn } => Some(format!("{}_ctype", pn)),
+        FieldShape::One { pn } | FieldShape::Unaligned { pn } => Some(format!("{}_ctype", pn)),
         FieldShape::Array { pn, len, .. } => Some(format!("(ET.TArr {}_ctype {})", pn, len)),
         FieldShape::Flex { .. } => None,
     }
@@ -126,6 +126,14 @@ fn ctype_of_shape(shape: &FieldShape) -> Option<String> {
 
 enum FieldShape {
     One {
+        pn: String,
+    },
+    /// A scalar or pointer member of a packed struct, at an offset its type's
+    /// alignment does not divide. Owned by its bytes and its value only --
+    /// `elem_pts_to` rather than `_pts_to`, which is the same thing less the
+    /// alignment -- and accessed by the `_u` operations, which go through an
+    /// aligned temporary as the compiler does.
+    Unaligned {
         pn: String,
     },
     Array {
@@ -144,12 +152,35 @@ enum FieldShape {
 }
 
 impl FieldShape {
+    /// The Palow name of the field's type, or of its element type.
+    fn pn(&self) -> &str {
+        match self {
+            FieldShape::One { pn }
+            | FieldShape::Unaligned { pn }
+            | FieldShape::Array { pn, .. }
+            | FieldShape::Flex { pn, .. } => pn,
+        }
+    }
+
+    /// The alignment fact `_field_aligned` states for the field at `at`, or
+    /// `None` for an unaligned one, of which there is nothing to state.
+    fn aligned_at(&self, at: &str) -> Option<String> {
+        match self {
+            FieldShape::One { pn } => Some(format!("aligned {} {}_alignof", at, pn)),
+            FieldShape::Unaligned { .. } => None,
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => Some(format!(
+                "array_aligned {} (SizeT.v {}_alignof) {}",
+                esize, pn, at
+            )),
+        }
+    }
+
     /// The F* type of the field's value. An array field's length is part of
     /// the type rather than a side condition, so that `Seq.upd` through it
     /// obviously preserves it.
     fn value_type(&self, elem: &str) -> String {
         match self {
-            FieldShape::One { .. } => elem.to_string(),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => elem.to_string(),
             FieldShape::Array { len, .. } => {
                 format!("(s: Seq.seq {} {{ Seq.length s == {} }})", elem, len)
             }
@@ -160,6 +191,7 @@ impl FieldShape {
     fn pts_to(&self, at: &str, value: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} p {}", pn, at, value),
+            FieldShape::Unaligned { pn } => format!("elem_pts_to {}_repr {} p {}", pn, at, value),
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
                     "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p {}",
@@ -172,7 +204,7 @@ impl FieldShape {
     /// How many bytes of the object the field occupies.
     fn size(&self, tds: &Typedefs, ty: &Type) -> Option<u64> {
         match self {
-            FieldShape::One { .. } => palow_sizeof(tds, ty),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => palow_sizeof(tds, ty),
             FieldShape::Array { esize, len, .. } => Some(esize * len),
             // A flexible array member contributes no bytes to the type: the
             // object it belongs to is larger than `sizeof` says, and by how
@@ -187,7 +219,9 @@ impl FieldShape {
     /// applied to its element's.
     fn repr_of(&self, v: &str, b: &str) -> String {
         match self {
-            FieldShape::One { pn } => format!("{}_repr {} {}", pn, v, b),
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                format!("{}_repr {} {}", pn, v, b)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!("array_repr {}_repr {} {} {}", pn, esize, v, b)
             }
@@ -198,6 +232,7 @@ impl FieldShape {
     fn pts_to_at(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} {} {}", pn, a, p, v),
+            FieldShape::Unaligned { pn } => format!("elem_pts_to {}_repr {} {} {}", pn, a, p, v),
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
                     "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} {} {}",
@@ -210,6 +245,7 @@ impl FieldShape {
     fn uninit_at(&self, a: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to_uninit {}", pn, a),
+            FieldShape::Unaligned { pn } => format!("bytes_uninit {} (SizeT.v {}_sizeof)", a, pn),
             FieldShape::Array { pn, esize, len } => {
                 format!(
                     "array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {}",
@@ -224,6 +260,9 @@ impl FieldShape {
     fn conceal(&self, a: &str, p: &str, b: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_conceal {} #{} #{} #{};", pn, a, p, b, v),
+            FieldShape::Unaligned { pn } => {
+                format!("elem_conceal {}_repr {} #{} #{} #{};", pn, a, p, b, v)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => format!(
                 "array_conceal {}_repr {} {}sz {}_alignof #{} #{} #{};",
                 pn, a, esize, pn, p, b, v
@@ -235,6 +274,7 @@ impl FieldShape {
     fn reveal(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_reveal {} #{} #{};", pn, a, p, v),
+            FieldShape::Unaligned { pn } => format!("elem_reveal {}_repr {} #{} #{};", pn, a, p, v),
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
                     "array_reveal {}_repr {} {}sz {}_alignof #{} #{};",
@@ -248,6 +288,9 @@ impl FieldShape {
     fn claim_uninit(&self, a: &str, b: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_claim_uninit {} #{};", pn, a, b),
+            FieldShape::Unaligned { pn } => {
+                format!("bytes_claim_uninit {} (SizeT.v {}_sizeof) #{};", a, pn, b)
+            }
             FieldShape::Array { pn, esize, len } => format!(
                 "array_claim_all_uninit {}_repr {} {}sz {}_alignof {}sz #{};",
                 pn, a, esize, pn, len, b
@@ -261,6 +304,7 @@ impl FieldShape {
     fn write_fn(&self) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_write_uninit", pn),
+            FieldShape::Unaligned { pn } => format!("{}_write_uninit_u", pn),
             FieldShape::Array { pn, esize, len } => {
                 format!("{}_fill", fill_name(pn, *esize, *len))
             }
@@ -279,6 +323,9 @@ impl FieldShape {
     fn uninit(&self, at: &str) -> Option<String> {
         match self {
             FieldShape::One { pn } => Some(format!("{}_pts_to_uninit {}", pn, at)),
+            FieldShape::Unaligned { pn } => {
+                Some(format!("bytes_uninit {} (SizeT.v {}_sizeof)", at, pn))
+            }
             FieldShape::Array { pn, esize, len } => Some(format!(
                 "array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {}",
                 pn, esize, pn, len, at
@@ -290,6 +337,24 @@ impl FieldShape {
         }
     }
 }
+
+/// The Palow types that have unaligned accesses, in
+/// `Pulse.Lib.C.Palow.Unaligned`.
+const UNALIGNED_TYPES: &[&str] = &[
+    "bool_t",
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "size_t",
+    "float32_t",
+    "float64_t",
+    "ptr",
+];
 
 /// The name a flexible array member's missing storage operations are
 /// spelled with. None of them is reachable -- a struct with one has no
@@ -1067,8 +1132,8 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     }
 }
 
-/// The alignment C reports, which for a packed struct is less than the one
-/// Palow proves with: see `collect_structs`.
+/// The alignment C reports. For a struct this is what `collect_structs`
+/// recorded, which is also what Palow proves with.
 fn c_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     match &tds.resolve(ty).val {
         TypeT::FixedArray(t, _) => c_alignof(tds, t),
@@ -5817,37 +5882,37 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 inv,
             });
         }
-        // A packed struct -- or one with a packed struct inside -- is less
-        // aligned than its fields, and a field's points-to states that the
-        // field is aligned. Where every field still sits at an offset its own
-        // alignment divides, and the size keeps an array's elements just as
-        // aligned, the struct is given its fields' alignment instead: that
-        // asks more of whoever claims the storage than C does, never less.
-        // C's own value is still what `_Alignof` says. A field that is really
-        // misaligned would need unaligned accesses, which Palow has none of.
-        let mut align = align;
+        // A packed struct -- or one with a packed struct inside -- can be
+        // less aligned than its fields. The struct keeps the alignment C gives
+        // it, which is what an allocator or an enclosing object guarantees,
+        // and each field is aligned or not by arithmetic on that: it is when
+        // its own alignment divides both the struct's and its offset. A
+        // scalar or a pointer that is not is owned by its bytes alone and
+        // accessed by the `_u` operations, which go through an aligned
+        // temporary; anything bigger would need unaligned versions of its
+        // whole ownership, which is not done.
         if ok {
-            let natural = fields
-                .iter()
-                .filter_map(|f| palow_alignof(tds, &f.ty))
-                .max()
-                .unwrap_or(1);
-            if natural > align {
-                match fields
-                    .iter()
-                    .find(|f| palow_alignof(tds, &f.ty).is_some_and(|a| f.offset % a != 0))
-                {
-                    Some(f) => {
-                        ok = false;
-                        bad = format!("field `{}` is not aligned, as the struct is packed", f.name);
+            for f in &mut fields {
+                let Some(fa) = palow_alignof(tds, &f.ty)
+                    .or_else(|| flex_elem(tds, &f.ty).and_then(|t| palow_alignof(tds, t)))
+                else {
+                    continue;
+                };
+                if align % fa == 0 && f.offset % fa == 0 {
+                    continue;
+                }
+                match &f.shape {
+                    FieldShape::One { pn } if UNALIGNED_TYPES.contains(&pn.as_str()) => {
+                        f.shape = FieldShape::Unaligned { pn: pn.clone() };
                     }
-                    None if size % natural != 0 => {
+                    _ => {
                         ok = false;
-                        bad =
-                            "its size is not a multiple of its fields' alignment, as it is packed"
-                                .to_string();
+                        bad = format!(
+                            "field `{}` is not aligned, as the struct is packed, and is not a scalar or a pointer",
+                            f.name
+                        );
+                        break;
                     }
-                    None => align = natural,
                 }
             }
         }
@@ -5874,9 +5939,12 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         // field-wise view, which is linear and which is all they are ever
         // used through.
         let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
-            && fields
-                .iter()
-                .all(|f| matches!(f.shape, FieldShape::One { .. }) && has_repr(tds, &f.ty));
+            && fields.iter().all(|f| {
+                matches!(
+                    f.shape,
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. }
+                ) && has_repr(tds, &f.ty)
+            });
         let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
         let inv = struct_invariant(tds, env, &fields);
         tds.structs.insert(
@@ -6049,16 +6117,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         let mut cs: Vec<String> = Vec::new();
         let mut ps: Vec<String> = Vec::new();
         for m in &ui.members {
-            let pn = match &m.shape {
-                FieldShape::One { pn } => pn,
-                FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
+            let pn = m.shape.pn();
+            let Some(al) = m.shape.aligned_at("a") else {
+                continue;
             };
-            cs.push(match &m.shape {
-                FieldShape::One { pn } => format!("aligned a {}_alignof", pn),
-                FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
-                    format!("array_aligned {} (SizeT.v {}_alignof) a", esize, pn)
-                }
-            });
+            cs.push(al);
             ps.push(format!("aligned_divides a {un}_alignof {pn}_alignof"));
         }
         if cs.is_empty() {
@@ -6786,16 +6849,11 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             } else {
                 format!("(a +! {}_offsetof_{})", sn, f.name)
             };
-            cs.push(match &f.shape {
-                FieldShape::One { pn } => format!("aligned {} {}_alignof", at, pn),
-                FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
-                    format!("array_aligned {} (SizeT.v {}_alignof) {}", esize, pn, at)
-                }
-            });
-            let pn = match &f.shape {
-                FieldShape::One { pn } => pn,
-                FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
+            let Some(al) = f.shape.aligned_at(&at) else {
+                continue;
             };
+            cs.push(al);
+            let pn = f.shape.pn();
             // `divides_addr` is opaque to the solver, so neither of these
             // steps happens by itself: weaken the object's alignment to the
             // field's, then step by the offset.
@@ -7044,10 +7102,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
             format!("(a +! {}sz)", off)
         }
     };
-    let pn_of = |f: &StructField| match &f.shape {
-        FieldShape::One { pn } => pn.clone(),
-        _ => unreachable!(),
-    };
+    let pn_of = |f: &StructField| f.shape.pn().to_string();
 
     // The representation pins the fields and says nothing about the padding,
     // which is exactly what C guarantees: the gaps hold unspecified values,
@@ -7154,15 +7209,12 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 let pn = pn_of(f);
                 let val = format!("x.fld_{}", f.name);
                 r += &format!(
-                    "  rewrite ({pn}_pts_to (a +! {sn}_offsetof_{f}) p {val})\n    \
-                     as ({pn}_pts_to {at} p {val});\n",
-                    pn = pn,
-                    sn = sn,
-                    f = f.name,
-                    val = val,
-                    at = at(f.offset)
+                    "  rewrite ({})\n    as ({});\n",
+                    f.shape
+                        .pts_to_at(&format!("(a +! {}_offsetof_{})", sn, f.name), "p", &val),
+                    f.shape.pts_to_at(&at(f.offset), "p", &val)
                 );
-                r += &format!("  {}_reveal {};\n", pn, at(f.offset));
+                r += &format!("  {}\n", f.shape.reveal(&at(f.offset), "p", &val));
                 r += &format!(
                     "  with {v}. assert (mem_pts_to {at} p {v} ** pure ({pn}_repr {val} {v}));\n",
                     v = v,
@@ -7243,20 +7295,20 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
             );
         }
         w += &format!(
-            "  {pn}_conceal {at} #p #(slice b {lo} {hi}) #(x.fld_{f});\n",
-            pn = pn,
-            at = at(f.offset),
-            lo = f.offset,
-            hi = f.offset + f.size,
-            f = f.name
+            "  {}\n",
+            f.shape.conceal(
+                &at(f.offset),
+                "p",
+                &format!("(slice b {} {})", f.offset, f.offset + f.size),
+                &format!("(x.fld_{})", f.name)
+            )
         );
+        let val = format!("x.fld_{}", f.name);
         w += &format!(
-            "  rewrite ({pn}_pts_to {at} p x.fld_{f})\n    \
-             as ({pn}_pts_to (a +! {sn}_offsetof_{f}) p x.fld_{f});\n",
-            pn = pn,
-            at = at(f.offset),
-            sn = sn,
-            f = f.name
+            "  rewrite ({})\n    as ({});\n",
+            f.shape.pts_to_at(&at(f.offset), "p", &val),
+            f.shape
+                .pts_to_at(&format!("(a +! {}_offsetof_{})", sn, f.name), "p", &val)
         );
     }
     c += &format!(
@@ -7423,6 +7475,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     for f in &si.fields {
         let ok = match &f.shape {
             FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::Unaligned { .. } => false,
             FieldShape::Array { .. } => true,
             FieldShape::Flex { .. } => std::ptr::eq(f, flex),
         };
@@ -7556,6 +7609,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     bounds.sort_unstable();
     bounds.dedup();
     let claim_fixed = |f: &StructField, alloc: &mut String| match &f.shape {
+        FieldShape::Unaligned { .. } => unreachable!(),
         FieldShape::One { pn } => {
             // A zero-size member's storage is conjured rather than carved, and
             // the enclosing object's range is still in the context at the same
@@ -7706,7 +7760,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         // representation when the shape was worked out; it is the field's own
         // type, which is not a scalar, that `has_repr` rejects.
         let ok = match &f.shape {
-            FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
             FieldShape::Array { .. } => true,
             FieldShape::Flex { .. } => false,
         };
@@ -7933,10 +7987,10 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // times. On the sixty-nine-field struct in `test/dpe` that is the
     // difference between twelve minutes and half a minute.
     let align_at = |f: &StructField, alloc: &mut String| {
-        let pn = match &f.shape {
-            FieldShape::One { pn } => pn,
-            FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
-        };
+        if matches!(f.shape, FieldShape::Unaligned { .. }) {
+            return;
+        }
+        let pn = f.shape.pn();
         if f.offset == 0 {
             *alloc += &format!("  aligned_divides a {sn}_alignof {pn}_alignof;\n");
         } else {
@@ -7947,6 +8001,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         }
     };
     let claim_at = |f: &StructField, alloc: &mut String| match &f.shape {
+        FieldShape::Unaligned { pn } => {
+            *alloc += &format!(
+                "  bytes_claim_uninit {off} (SizeT.v {pn}_sizeof);\n  \
+                 rewrite (bytes_uninit {off} (SizeT.v {pn}_sizeof))\n    \
+                 as (bytes_uninit (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof));\n",
+                pn = pn,
+                off = at(f.offset),
+                sn = sn,
+                f = f.name
+            );
+        }
         FieldShape::One { pn } => {
             // A zero-size member's storage is conjured rather than carved, and
             // the enclosing object's range is still in the context at the same
@@ -8043,6 +8108,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // its result as `append` of the two halves, so `n` reveals held at once is
     // the same quadratic context the splits had.
     let reveal_at = |f: &StructField, free: &mut String| match &f.shape {
+        FieldShape::Unaligned { pn } => {
+            *free += &format!(
+                "  rewrite (bytes_uninit (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof))\n    \
+                 as (bytes_uninit {off} (SizeT.v {pn}_sizeof));\n  \
+                 bytes_reveal_uninit {off} (SizeT.v {pn}_sizeof);\n",
+                pn = pn,
+                sn = sn,
+                f = f.name,
+                off = at(f.offset)
+            );
+        }
         FieldShape::One { pn } => {
             *free += &format!(
                 "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n",
@@ -8114,6 +8190,9 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             FieldShape::One { pn } => {
                 forget += &format!("  {}_forget (a +! {}_offsetof_{});\n", pn, sn, f.name);
             }
+            FieldShape::Unaligned { pn } => {
+                forget += &format!("  {}_forget_u (a +! {}_offsetof_{});\n", pn, sn, f.name);
+            }
             FieldShape::Flex { .. } => forget += NO_FLEX_STORAGE,
             FieldShape::Array { pn, esize, len } => {
                 forget += &format!(
@@ -8136,10 +8215,13 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     write += &format!("  unfold {}_pts_to_uninit a;\n", sn);
     for f in &si.fields {
         match &f.shape {
-            FieldShape::One { pn } => {
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
                 write += &format!(
-                    "  {}_write_uninit (a +! {}_offsetof_{}) x.fld_{};\n",
-                    pn, sn, f.name, f.name
+                    "  {} (a +! {}_offsetof_{}) x.fld_{};\n",
+                    f.shape.write_fn(),
+                    sn,
+                    f.name,
+                    f.name
                 );
             }
             FieldShape::Flex { .. } => write += NO_FLEX_STORAGE,
@@ -8176,6 +8258,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     for f in &si.fields {
         let reader = match &f.shape {
             FieldShape::One { pn } => format!("{}_read", pn),
+            FieldShape::Unaligned { pn } => format!("{}_read_u", pn),
             FieldShape::Array { pn, esize, len } => {
                 format!("{}_read", fill_name(pn, *esize, *len))
             }
@@ -8231,7 +8314,7 @@ fn storable_struct(tds: &Typedefs, ty: &Type) -> bool {
     };
     match tds.structs.get(&*n.val) {
         Some(si) => si.fields.iter().all(|f| match &f.shape {
-            FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
             FieldShape::Array { .. } => true,
             FieldShape::Flex { .. } => false,
         }),
@@ -9975,6 +10058,7 @@ open Pulse.Lib.C.Palow.Float\n\
 open Pulse.Lib.C.Palow.CTypes\n\
 open Pulse.Lib.C.Palow.Machine\n\
 open Pulse.Lib.C.Palow.Array\n\
+open Pulse.Lib.C.Palow.Unaligned\n\
 open Pulse.Lib.C.Palow.ConstSeq\n\
 open Pulse.Lib.C.Palow.Local\n\
 open Pulse.Lib.C.Palow.Nullable\n\
@@ -11878,7 +11962,14 @@ impl<'a> Body<'a> {
                     Some(pos) => format!("uint{}_t", pos.unit_bits),
                     None => self.field_pn(base, f)?,
                 };
+                let unaligned = self.unaligned_field(&ff.sn, &ff.field);
                 if self.in_pieces(base) {
+                    if unaligned {
+                        return Err(format!(
+                            "field `{}`, which is not aligned as its struct is packed, of a struct the contract holds in pieces",
+                            f.val
+                        ));
+                    }
                     if ff.bits.is_some() {
                         return Err(format!(
                             "a bit-field of `{}`, whose storage the contract holds in pieces",
@@ -11887,6 +11978,7 @@ impl<'a> Body<'a> {
                     }
                     return Ok(Focus {
                         write_fn: format!("{}_write", pn),
+                        unaligned: false,
                         pn,
                         bits: None,
                         at: ff.at,
@@ -11913,7 +12005,11 @@ impl<'a> Body<'a> {
                 let mut close_write = vec![format!("{}_unfocus_{} {};", ff.sn, ff.field, ff.a)];
                 close_write.extend(ff.close_write);
                 Ok(Focus {
-                    write_fn: format!("{}_write", pn),
+                    write_fn: match unaligned {
+                        true => format!("{}_write_u", pn),
+                        false => format!("{}_write", pn),
+                    },
+                    unaligned,
                     pn,
                     bits: ff.bits,
                     at: ff.at,
@@ -11984,11 +12080,7 @@ impl<'a> Body<'a> {
                 describe(self.tds.resolve(&fty))
             ));
         };
-        let pn = match &shape {
-            FieldShape::One { pn } | FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => {
-                pn.clone()
-            }
-        };
+        let pn = shape.pn().to_string();
         let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
             // The other way to know is the contract. There the union's value
@@ -12055,6 +12147,7 @@ impl<'a> Body<'a> {
             bits: None,
             pn: pn.clone(),
             write_fn: shape.write_fn(),
+            unaligned: false,
             at: a.clone(),
             open_read: focus,
             open_write: vec![format!("{}_switch{}_{} {};", un, uninit_suffix, f.val, a)],
@@ -12149,6 +12242,7 @@ impl<'a> Body<'a> {
             bits: None,
             pn: pn.clone(),
             write_fn: format!("{}_write", pn),
+            unaligned: false,
             at: format!("({} +! {}_offsetof_{})", a, sn, fname),
             open_read: vec![format!("{}_pun_{}_{}_{} {};", un, live, m, fname, a)],
             open_write: Vec::new(),
@@ -12162,6 +12256,14 @@ impl<'a> Body<'a> {
             val: ExprT::Member(Rc::new(base.clone()), Rc::new(f.clone())),
             loc: base.loc.clone(),
         })
+    }
+
+    /// Whether a field of a struct is one a packed layout left misaligned.
+    fn unaligned_field(&self, sn: &str, field: &str) -> bool {
+        sn.strip_prefix("struct_")
+            .and_then(|n| self.tds.structs.get(n))
+            .and_then(|si| si.fields.iter().find(|x| x.name == field))
+            .is_some_and(|x| matches!(x.shape, FieldShape::Unaligned { .. }))
     }
 
     fn field_pn(&self, base: &Expr, f: &Ident) -> Result<String, String> {
@@ -12204,7 +12306,7 @@ impl<'a> Body<'a> {
         // uninitialised view, which needs every field to have one.
         let mut flex = false;
         if !si.fields.iter().all(|x| match &x.shape {
-            FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(self.tds, &x.ty),
             FieldShape::Array { .. } => true,
             // A flexible struct has no whole-object uninitialised view --
             // there is no such thing as an object of the type -- but it does
@@ -12234,13 +12336,15 @@ impl<'a> Body<'a> {
                 b.tmp == ff.a && b.checked && !b.freed && !b.init && b.array.is_none()
             })?),
         };
+        let unaligned = self.unaligned_field(&ff.sn, &ff.field);
         if !writing {
             if !self.scattered_set(target).contains(&*f.val) {
                 return None;
             }
             return Some(Focus {
                 bits: None,
-                write_fn: format!("{}_write", pn),
+                write_fn: format!("{}_write{}", pn, if unaligned { "_u" } else { "" }),
+                unaligned,
                 pn: pn.to_string(),
                 at: ff.at.clone(),
                 open_read: Vec::new(),
@@ -12283,7 +12387,8 @@ impl<'a> Body<'a> {
         close_write.extend(ff.close_write.iter().cloned());
         Some(Focus {
             bits: None,
-            write_fn: format!("{}_write_uninit", pn),
+            write_fn: format!("{}_write_uninit{}", pn, if unaligned { "_u" } else { "" }),
+            unaligned,
             pn: pn.to_string(),
             at: ff.at.clone(),
             open_read: Vec::new(),
@@ -12328,7 +12433,7 @@ impl<'a> Body<'a> {
         si.fields
             .iter()
             .all(|x| match &x.shape {
-                FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+                FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(self.tds, &x.ty),
                 FieldShape::Array { .. } => true,
                 FieldShape::Flex { .. } => false,
             })
@@ -13060,6 +13165,7 @@ impl<'a> Body<'a> {
                 bits: None,
                 at,
                 write_fn: format!("{}_write", pn),
+                unaligned: false,
                 pn,
                 open_read: Vec::new(),
                 open_write: Vec::new(),
@@ -13123,6 +13229,7 @@ impl<'a> Body<'a> {
             bits: None,
             at,
             write_fn: format!("{}_write_uninit", pn),
+            unaligned: false,
             pn,
             open_read,
             open_write,
@@ -14088,7 +14195,7 @@ impl<'a> Body<'a> {
                         self.lines.extend(f.open_read.iter().cloned());
                         let t = self.fresh("elem");
                         self.lines
-                            .push(format!("let {} = {}_read {};", t, f.pn, f.at));
+                            .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
                         self.lines.extend(f.close_read);
                         return Ok(t);
                     }
@@ -14211,7 +14318,7 @@ impl<'a> Body<'a> {
                 self.lines.extend(f.open_read.iter().cloned());
                 let t = self.fresh(&hint);
                 self.lines
-                    .push(format!("let {} = {}_read {};", t, f.pn, f.at));
+                    .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
                 self.lines.extend(f.close_read);
                 // A bit-field has no storage of its own, so the read reads
                 // the unit and the bits come out of the value. This is also
@@ -15036,6 +15143,11 @@ impl<'a> Body<'a> {
             let ExprT::Member(base, f) = &strip_vattr(inner).val else {
                 continue;
             };
+            if let Ok((sn, _)) = self.struct_of(base)
+                && self.unaligned_field(&sn, &f.val)
+            {
+                return Err(misaligned_addr(&f.val));
+            }
             if self.union_of(base).is_some()
                 || self.in_pieces(base)
                 || self
@@ -15100,7 +15212,9 @@ impl<'a> Body<'a> {
             let sname = sn.strip_prefix("struct_").unwrap_or(&sn);
             let splittable = self.tds.structs.get(sname).is_some_and(|si| {
                 si.fields.iter().all(|x| match &x.shape {
-                    FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
+                        has_repr(self.tds, &x.ty)
+                    }
                     FieldShape::Array { .. } => true,
                     FieldShape::Flex { .. } => false,
                 })
@@ -15234,6 +15348,13 @@ impl<'a> Body<'a> {
         // written local takes on its way to an `_out` parameter.
         if let Some(p) = self.out_place(a) {
             let f = self.place(&p, true)?;
+            if f.unaligned {
+                let name = match &strip_vattr(&p).val {
+                    ExprT::Member(_, n) => n.val.to_string(),
+                    _ => String::new(),
+                };
+                return Err(misaligned_addr(&name));
+            }
             self.lines.extend(f.open_write.iter().cloned());
             if f.write_fn == format!("{}_write", f.pn) {
                 self.lines.push(format!("{}_forget {};", f.pn, f.at));
@@ -16502,9 +16623,9 @@ impl<'a> Body<'a> {
                 Some(pos) => {
                     let u = self.fresh("unit");
                     self.lines
-                        .push(format!("let {} = {}_read {};", u, f.pn, f.at));
+                        .push(format!("let {} = {} {};", u, f.read_fn(), f.at));
                     self.lines
-                        .push(format!("{}_write {} {};", f.pn, f.at, pos.put(&u, &value)));
+                        .push(format!("{} {} {};", f.write_fn, f.at, pos.put(&u, &value)));
                 }
                 None => self
                     .lines
@@ -18344,7 +18465,8 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// The written fields of a scattered slot, with the Palow name of each.
+    /// The written fields of a scattered slot, with the ghost step that turns
+    /// each back into storage.
     fn scattered_field_names(&self, i: usize) -> Vec<(String, String)> {
         let sn = self.slots[i].palow_ty.strip_prefix("struct_").unwrap_or("");
         let Some(si) = self.tds.structs.get(sn) else {
@@ -18354,7 +18476,8 @@ impl<'a> Body<'a> {
             .iter()
             .filter(|f| self.slots[i].scattered.contains(&f.name))
             .filter_map(|f| match &f.shape {
-                FieldShape::One { pn } => Some((f.name.clone(), pn.clone())),
+                FieldShape::One { pn } => Some((f.name.clone(), format!("{}_forget", pn))),
+                FieldShape::Unaligned { pn } => Some((f.name.clone(), format!("{}_forget_u", pn))),
                 FieldShape::Array { .. } | FieldShape::Flex { .. } => None,
             })
             .collect()
@@ -18382,7 +18505,7 @@ impl<'a> Body<'a> {
             let pn = self.slots[j].palow_ty.clone();
             for (name, p) in self.scattered_field_names(j) {
                 self.lines
-                    .push(format!("{}_forget ({} +! {}_offsetof_{});", p, k, pn, name));
+                    .push(format!("{} ({} +! {}_offsetof_{});", p, k, pn, name));
             }
             self.lines.push(format!("{}_gather_uninit {};", pn, k));
             self.slots[j].scattered.clear();
@@ -18494,10 +18617,8 @@ impl<'a> Body<'a> {
             if !scattered.is_empty() || nested {
                 let fpn = self.scattered_field_names(i);
                 for (name, p) in fpn {
-                    self.lines.push(format!(
-                        "{}_forget ({} +! {}_offsetof_{});",
-                        p, addr, pn, name
-                    ));
+                    self.lines
+                        .push(format!("{} ({} +! {}_offsetof_{});", p, addr, pn, name));
                 }
                 self.lines.push(format!("{}_gather_uninit {};", pn, addr));
             } else if init {
@@ -18885,7 +19006,7 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
             let mut vals = Vec::new();
             for f in &si.fields {
                 vals.push(match &f.shape {
-                    FieldShape::One { .. } => {
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
                         format!("fld_{} = {}", f.name, zero_value(tds, &f.ty)?)
                     }
                     // There is no zero of a flexible array member: how many
@@ -19114,10 +19235,32 @@ struct Focus {
     /// The store operation. An element of a local array may not hold a value
     /// yet, so it is written with the write-only operation.
     write_fn: String,
+    /// Set when the place is a misaligned field of a packed struct, owned by
+    /// `elem_pts_to` and accessed through an aligned temporary.
+    unaligned: bool,
     open_read: Vec<String>,
     open_write: Vec<String>,
     close_read: Vec<String>,
     close_write: Vec<String>,
+}
+
+/// Why the ownership of a misaligned field cannot be handed to a callee:
+/// what it would be handed as is a typed points-to, and that says the address
+/// is aligned. C agrees -- using the pointer is undefined (C11 6.3.2.3p7).
+fn misaligned_addr(field: &str) -> String {
+    format!(
+        "the address of field `{}`, which is not aligned as its struct is packed",
+        field
+    )
+}
+
+impl Focus {
+    fn read_fn(&self) -> String {
+        match self.unaligned {
+            true => format!("{}_read_u", self.pn),
+            false => format!("{}_read", self.pn),
+        }
+    }
 }
 
 /// Whether an expression is a literal object: a string or compound literal,
