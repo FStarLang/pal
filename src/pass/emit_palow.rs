@@ -300,22 +300,6 @@ impl FieldShape {
         }
     }
 
-    /// The proof that fresh, untyped storage meets `etype_ok`.
-    fn etype_ok_none(&self) -> String {
-        match self {
-            FieldShape::One { pn } => format!("{}_etype_ok_none (); ", pn),
-            FieldShape::Array { pn, esize, len } => {
-                format!(
-                    "{pn}_etype_ok_none (); elems_ok_none {pn}_etype_ok {esize} {len}; ",
-                    pn = pn,
-                    esize = esize,
-                    len = len
-                )
-            }
-            FieldShape::Flex { .. } => String::new(),
-        }
-    }
-
     /// Bytes of the right length in, storage out.
     fn claim_uninit(&self, a: &str, b: &str, e: &str) -> String {
         match self {
@@ -361,6 +345,62 @@ impl FieldShape {
             FieldShape::Flex { .. } => None,
         }
     }
+}
+
+/// The `sizeof` of each type the condition lemmas mention, normalised to a
+/// literal. Those lemmas are a chain of per-member bridges, every one of
+/// which carries an arithmetic side condition of the form
+/// `elen (Seq.slice e off end) == SizeT.v t_sizeof`. Each is trivial on its
+/// own, but a struct with dozens of members asks the solver to unfold the
+/// same handful of `sizeof` definitions dozens of times, and it gives up.
+/// Stating each one once, by normalisation rather than by SMT, keeps the
+/// query linear in the number of members.
+fn sizeof_norms(own: Option<(&str, u64)>, shapes: &[(&FieldShape, u64)]) -> String {
+    let mut seen: Vec<(String, u64)> = Vec::new();
+    let mut push = |n: String, v: u64| {
+        if !seen.iter().any(|(m, _)| *m == n) {
+            seen.push((n, v));
+        }
+    };
+    if let Some((n, v)) = own {
+        push(format!("{}_sizeof", n), v);
+    }
+    for (shape, size) in shapes {
+        match shape {
+            FieldShape::One { pn } => push(format!("{}_sizeof", pn), *size),
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
+                push(format!("{}_sizeof", pn), *esize)
+            }
+        }
+    }
+    seen.into_iter()
+        .map(|(n, v)| format!("assert_norm (SizeT.v {} == {}); ", n, v))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// `sizeof_norms` for a generated struct: its own size, and the element size
+/// of every member its condition mentions.
+fn struct_norms(si: &StructInfo, sn: &str) -> String {
+    let shapes: Vec<(&FieldShape, u64)> = si
+        .fields
+        .iter()
+        .filter(|f| f.size > 0)
+        .map(|f| (&f.shape, f.size))
+        .collect();
+    sizeof_norms(Some((sn, si.size)), &shapes)
+}
+
+/// `sizeof_norms` for a generated union: its own size, and the size of every
+/// member.
+fn union_norms(ui: &UnionInfo, un: &str) -> String {
+    let shapes: Vec<(&FieldShape, u64)> = ui
+        .members
+        .iter()
+        .filter(|m| m.size > 0)
+        .map(|m| (&m.shape, m.size))
+        .collect();
+    sizeof_norms(Some((un, ui.size)), &shapes)
 }
 
 /// Whether a generated type's effective-type condition depends on the *value*
@@ -6055,7 +6095,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     // member's type and nothing else, so that is all the matching unfocus can
     // put back.
     c += &format!(
-        "let {un}_etype_ok (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {un}_sizeof /\\ ET.allocated e\n\n\
+        "#push-options \"--z3rlimit 20\"\nlet {un}_etype_ok (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {un}_sizeof /\\ ET.allocated e\n\n\
          let {un}_etype_ok_none ()\n  : Lemma ({un}_etype_ok (ET.etypes_none (SizeT.v {un}_sizeof)))\n  = ()\n\n\
          let {un}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {un}_sizeof)\n          (ensures  {un}_etype_ok e)\n  = ()\n\n         let {un}_etype_ok_untyped_all ()\n  : Lemma (forall (e: ET.etypes). ET.untyped e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {un}_etype_ok_untyped)\n\n\
          let {un}_etype_ok_read_ok_all ()\n  : Lemma (forall (e: ET.etypes). ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_etype_ok e)\n  = ()\n\n",
@@ -6085,9 +6125,10 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     // The second is what lets a containing object be concealed as a whole.
     c += &format!(
         "let {un}_live_ok_etype_ok (u: {un}) (e: ET.etypes)\n  : Lemma (requires {un}_live_ok u e) (ensures {un}_etype_ok e)\n  = ()\n\n\
-         let {un}_live_ok_read_ok (u: {un}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof)\n          (ensures  {un}_live_ok u e)\n  = match u with\n{arms}\n\
-         let {un}_live_ok_read_ok_all ()\n  : Lemma (forall (u: {un}) (e: ET.etypes). ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_live_ok u e)\n  = FStar.Classical.forall_intro_2 (fun (u: {un}) (e: ET.etypes) -> FStar.Classical.move_requires ({un}_live_ok_read_ok u) e)\n\n",
+         let {un}_live_ok_read_ok (u: {un}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof)\n          (ensures  {un}_live_ok u e)\n  = {norms}\n    match u with\n{arms}\n\
+         let {un}_live_ok_read_ok_all ()\n  : Lemma (forall (u: {un}) (e: ET.etypes). ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_live_ok u e)\n  = FStar.Classical.forall_intro_2 (fun (u: {un}) (e: ET.etypes) -> FStar.Classical.move_requires ({un}_live_ok_read_ok u) e)\n\n#pop-options\n\n",
         un = un,
+        norms = union_norms(ui, &un),
         arms = ui
             .members
             .iter()
@@ -6928,45 +6969,51 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             .collect::<Vec<_>>()
             .join("")
     );
-    // Fresh storage meets it: `read_ok` holds at every type on an entry with
-    // no effective type yet, and slicing untyped storage leaves it untyped.
+    // The bridge from a whole-object `read_ok` to each field's condition, one
+    // top-level lemma per field. Inlining them all into one proof asks the
+    // solver a single query with a hypothesis per field -- a struct with
+    // dozens of members times out on it -- while each of these stays the same
+    // size no matter how large the struct is.
+    for (i, f) in si
+        .fields
+        .iter()
+        .filter(|f| f.size > 0)
+        .enumerate()
+        .filter(|(_, f)| ctype_of_shape(&f.shape).is_some())
+    {
+        let ct = ctype_of_shape(&f.shape).unwrap();
+        let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+        let Some(cond) = f.shape.etype_ok(&sl) else {
+            continue;
+        };
+        c += &format!(
+            "#push-options \"--z3rlimit 50\"\nlet {sn}_etype_ok_read_ok_fld{i} (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {cond})\n  = {norms}\n    assert_norm (ET.access_ok {sn}_ctype {off} {ct}); ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}()\n#pop-options\n\n",
+            sn = sn,
+            i = i,
+            cond = cond,
+            norms = sizeof_norms(Some((&sn, si.size)), &[(&f.shape, f.size)]),
+            off = f.offset,
+            end = f.offset + f.size,
+            ct = ct,
+            br = f.shape.etype_ok_read_ok(&sl)
+        );
+    }
+    // Storage that carries no effective type at all meets it, which is where
+    // a struct member of a union gets its condition from.
     c += &format!(
-        "let {sn}_etype_ok_none ()\n  : Lemma ({sn}_etype_ok (ET.etypes_none (SizeT.v {sn}_sizeof)))\n  = {es}()\n\n",
+        "#push-options \"--z3rlimit 20\"\nlet {sn}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {norms}{es}()\n\n         let {sn}_etype_ok_untyped_all ()\n  : Lemma (forall (e: ET.etypes). ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {sn}_etype_ok_untyped)\n\n\
+         let {sn}_etype_ok_read_ok (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {norms}\n    {er}()\n\n\
+         let {sn}_etype_ok_read_ok_all ()\n  : Lemma (forall (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {sn}_etype_ok_read_ok)\n\n\
+         let {sn}_etype_ok_none ()\n  : Lemma ({sn}_etype_ok (ET.etypes_none (SizeT.v {sn}_sizeof)))\n  = ET.untyped_none (SizeT.v {sn}_sizeof);\n    ET.allocated_none (SizeT.v {sn}_sizeof);\n    {sn}_etype_ok_untyped (ET.etypes_none (SizeT.v {sn}_sizeof))\n\n",
         sn = sn,
-        es = si
-            .fields
-            .iter()
-            .filter(|f| f.size > 0)
-            .map(|f| f.shape.etype_ok_none())
-            .collect::<Vec<_>>()
-            .join("")
-    );
-    // And so does storage that carries no effective type at all, which is
-    // where a struct member of a union gets its condition from.
-    c += &format!(
-        "let {sn}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {es}()\n\n         let {sn}_etype_ok_untyped_all ()\n  : Lemma (forall (e: ET.etypes). ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {sn}_etype_ok_untyped)\n\n\
-         let {sn}_etype_ok_read_ok (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {er}()\n\n\
-         let {sn}_etype_ok_read_ok_all ()\n  : Lemma (forall (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {sn}_etype_ok_read_ok)\n\n",
-        sn = sn,
+        norms = struct_norms(si, &sn),
         er = si
             .fields
             .iter()
             .filter(|f| f.size > 0)
-            .filter_map(|f| {
-                let ct = ctype_of_shape(&f.shape)?;
-                Some(format!(
-                    "assert_norm (ET.access_ok {sn}_ctype {off} {ct}); ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}",
-                    sn = sn,
-                    off = f.offset,
-                    end = f.offset + f.size,
-                    ct = ct,
-                    br = f.shape.etype_ok_read_ok(&format!(
-                        "(Seq.slice e {} {})",
-                        f.offset,
-                        f.offset + f.size
-                    ))
-                ))
-            })
+            .enumerate()
+            .filter(|(_, f)| ctype_of_shape(&f.shape).is_some())
+            .map(|(i, _)| format!("{sn}_etype_ok_read_ok_fld{i} e; ", sn = sn, i = i))
             .collect::<Vec<_>>()
             .join(""),
         es = si
@@ -6996,9 +7043,10 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         format!(
             "let {sn}_live_ok (x: {sn}) (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {sn}_sizeof /\\ ET.allocated e{cs}\n\n\
              let {sn}_live_ok_etype_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires {sn}_live_ok x e) (ensures {sn}_etype_ok e)\n  = {el}()\n\n\
-             let {sn}_live_ok_read_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_live_ok x e)\n  = {er}()\n\n\
-             let {sn}_live_ok_read_ok_all ()\n  : Lemma (forall (x: {sn}) (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_live_ok x e)\n  = FStar.Classical.forall_intro_2 (fun (x: {sn}) (e: ET.etypes) -> FStar.Classical.move_requires ({sn}_live_ok_read_ok x) e)\n\n",
+             let {sn}_live_ok_read_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_live_ok x e)\n  = {norms}\n    {er}()\n\n\
+             let {sn}_live_ok_read_ok_all ()\n  : Lemma (forall (x: {sn}) (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_live_ok x e)\n  = FStar.Classical.forall_intro_2 (fun (x: {sn}) (e: ET.etypes) -> FStar.Classical.move_requires ({sn}_live_ok_read_ok x) e)\n\n#pop-options\n\n",
             sn = sn,
+            norms = struct_norms(si, &sn),
             cs = si
                 .fields
                 .iter()
@@ -7044,7 +7092,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             "let {sn}_live_ok (x: {sn}) (e: ET.etypes) : prop = {sn}_etype_ok e\n\n\
              let {sn}_live_ok_etype_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires {sn}_live_ok x e) (ensures {sn}_etype_ok e)\n  = ()\n\n\
              let {sn}_live_ok_read_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_live_ok x e)\n  = {sn}_etype_ok_read_ok e\n\n\
-             let {sn}_live_ok_read_ok_all ()\n  : Lemma (forall (x: {sn}) (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_live_ok x e)\n  = {sn}_etype_ok_read_ok_all ()\n\n",
+             let {sn}_live_ok_read_ok_all ()\n  : Lemma (forall (x: {sn}) (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_live_ok x e)\n  = {sn}_etype_ok_read_ok_all ()\n\n#pop-options\n\n",
             sn = sn
         )
     };
@@ -7104,6 +7152,48 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             conj = cs.join("\n                    /\\ "),
             proof = ps.join(";\n    ")
         );
+        // And the same facts one at a time. `{sn}_field_aligned` is a single
+        // `n`-way conjunction, which is what every step that builds a whole
+        // object wants; a step that claims one field wants one conjunct, and
+        // getting it from the conjunction means splitting `n` ways. Worse,
+        // proving the conjunct inline makes the solver do modular arithmetic
+        // on two definitions inside whatever context it is called from -- and
+        // in the sixty-nine-field struct of `test/dpe` that context is large
+        // enough that the last field's goal times out. Proved here, each is
+        // one implication with nothing else in scope.
+        for f in &si.fields {
+            if palow_alignof(tds, &f.ty).is_none() && !matches!(f.shape, FieldShape::Flex { .. }) {
+                continue;
+            }
+            let pn = match &f.shape {
+                FieldShape::One { pn } => pn,
+                FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
+            };
+            let (at, proof) = if f.offset == 0 {
+                (
+                    "a".to_string(),
+                    format!("aligned_divides a {sn}_alignof {pn}_alignof"),
+                )
+            } else {
+                (
+                    format!("(a +! {sn}_offsetof_{})", f.name),
+                    format!(
+                        "aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof",
+                        f.name
+                    ),
+                )
+            };
+            c += &format!(
+                "\nlet {sn}_field_aligned_{fld} (a: ptr)\n  \
+                 : Lemma (requires aligned a {sn}_alignof)\n          \
+                 (ensures  aligned {at} {pn}_alignof)\n  = {proof}\n",
+                sn = sn,
+                fld = f.name,
+                at = at,
+                pn = pn,
+                proof = proof
+            );
+        }
     }
 
     // The field points-to at a given record expression, for every field but
@@ -8309,13 +8399,18 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             FieldShape::One { pn } => pn,
             FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
         };
-        if f.offset == 0 {
-            *alloc += &format!("  aligned_divides a {sn}_alignof {pn}_alignof;\n");
+        if palow_alignof(tds, &f.ty).is_none() && !matches!(f.shape, FieldShape::Flex { .. }) {
+            // No per-field lemma was emitted for this one; do it inline.
+            if f.offset == 0 {
+                *alloc += &format!("  aligned_divides a {sn}_alignof {pn}_alignof;\n");
+            } else {
+                *alloc += &format!(
+                    "  aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof;\n",
+                    f.name
+                );
+            }
         } else {
-            *alloc += &format!(
-                "  aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof;\n",
-                f.name
-            );
+            *alloc += &format!("  {sn}_field_aligned_{} a;\n", f.name);
         }
     };
     let claim_at = |f: &StructField, alloc: &mut String| match &f.shape {
@@ -8393,7 +8488,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // struct be an array element or a union member, where the storage comes
     // from somewhere else entirely.
     c += &format!(
-        "ghost fn {sn}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
+        "#push-options \"--z3rlimit 60\"\nghost fn {sn}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
          \x20 requires mem_pts_to_at a 1.0R b e\n\
          \x20 requires pure (len b == SizeT.v {sn}_sizeof /\\ aligned a {sn}_alignof)\n\
          \x20 requires pure ({sn}_etype_ok e)\n\
@@ -8401,7 +8496,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
          {{\n\
          {alloc}\
          \x20 fold {sn}_padding a 1.0R;\n\
-         \x20 fold {sn}_pts_to_uninit a;\n}}\n\n",
+         \x20 fold {sn}_pts_to_uninit a;\n}}\n#pop-options\n\n",
         sn = sn,
         alloc = alloc
     );

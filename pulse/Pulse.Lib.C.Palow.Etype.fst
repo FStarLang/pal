@@ -239,6 +239,17 @@ type etypes = Seq.seq (option etype_entry)
 let elen (e: etypes) : nat = Seq.length e
 let eget (e: etypes) (i: nat { i < elen e }) : option etype_entry = Seq.index e i
 
+(* The length of a slice, with a trigger on `elen` rather than on
+   `Seq.length`. Every condition here is written in terms of `elen`, so
+   without this the solver has to unfold the abbreviation before the sequence
+   library's own lemma can fire -- which it does happily in a small goal and
+   not at all in a proof that carves a sixty-nine-field struct apart. *)
+let elen_slice (e: etypes) (i: nat) (j: nat)
+  : Lemma (requires i <= j /\ j <= elen e)
+          (ensures  elen (Seq.slice e i j) == j - i)
+          [SMTPat (elen (Seq.slice e i j))]
+  = ()
+
 (* A byte's offset within its object is an offset *into* that object. Every
    index this module builds satisfies this, and `store_etypes` preserves it;
    it is stated separately because `etypes` is a plain sequence. *)
