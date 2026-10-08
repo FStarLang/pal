@@ -316,6 +316,41 @@ let read_ok_sub (e: etypes) (s: ctype) (off: nat) (fld: ctype)
 let untyped (e: etypes) : prop =
   forall (k: nat). k < elen e ==> eget e k == None
 
+(* Storage that may be re-typed: every byte either has no effective type yet
+   or belongs to an allocated object, which 6.5p6 lets a store relabel. The
+   complement is a *declared* object, whose declared type is its effective
+   type for good.
+
+   This is the half of 6.5p6 that `read_ok` does not record. `read_ok` says
+   what may be read out of a byte; `allocated` says whether a store may change
+   that, and a cross-member union write needs the second. Unlike `read_ok` it
+   is pointwise and offset-free, so it splits and rejoins by construction. *)
+let allocated (e: etypes) : prop =
+  forall (k: nat). k < elen e ==>
+    (match eget e k with None -> True | Some en -> b2t (not en.fixed))
+
+let allocated_slice (e: etypes) (i j: nat)
+  : Lemma (requires allocated e /\ i <= j /\ j <= elen e)
+          (ensures  allocated (Seq.slice e i j))
+          [SMTPat (allocated (Seq.slice e i j))]
+  = ()
+
+let allocated_append (e1 e2: etypes)
+  : Lemma (requires allocated e1 /\ allocated e2)
+          (ensures  allocated (Seq.append e1 e2))
+          [SMTPat (allocated (Seq.append e1 e2))]
+  = ()
+
+let allocated_untyped (e: etypes)
+  : Lemma (requires untyped e) (ensures allocated e)
+          [SMTPat (allocated e); SMTPat (untyped e)]
+  = ()
+
+let allocated_none (n: nat)
+  : Lemma (allocated (etypes_none n))
+          [SMTPat (allocated (etypes_none n))]
+  = ()
+
 let untyped_read_ok (e: etypes) (u: ctype)
   : Lemma (requires untyped e /\ elen e == csize u)
           (ensures  read_ok e u)
@@ -417,6 +452,26 @@ let store_ok_read_ok (e: etypes) (u: ctype)
         assert (eget e' k == store_entry (eget e k) u k)
     in
     FStar.Classical.forall_intro aux
+
+(* Allocated storage admits a store at any type of the right size: that is
+   `store_ok`'s second disjunct, and the whole reason the flag is tracked. *)
+let allocated_store_ok (e: etypes) (u: ctype)
+  : Lemma (requires allocated e /\ elen e == csize u /\ ~(u == tchar))
+          (ensures  store_ok e u)
+  = ()
+
+(* And a store leaves it allocated: `store_entry` either keeps an entry that
+   was already not `fixed`, or writes a fresh one that is not. *)
+let allocated_store_etypes (e: etypes) (u: ctype { elen e == csize u })
+  : Lemma (requires allocated e) (ensures allocated (store_etypes e u))
+  = let e' = store_etypes e u in
+    let aux (k: nat)
+      : Lemma (k < elen e' ==>
+               (match eget e' k with None -> True | Some en -> b2t (not en.fixed)))
+      = if k < elen e' then assert (eget e' k == store_entry (eget e k) u k)
+    in
+    FStar.Classical.forall_intro aux
+
 
 (* `memcpy` transports the entries along with the bytes, matching the C rule
    that a byte-copied object inherits the source object's effective type.

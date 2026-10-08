@@ -47,7 +47,7 @@ module M = FStar.Math.Lemmas
 
 let uint8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U8.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v uint8_t_sizeof) None (U8.v x)) e
-              ** pure (ET.elen e == SZ.v uint8_t_sizeof /\ ET.read_ok e uint8_t_ctype))
+              ** pure (ET.elen e == SZ.v uint8_t_sizeof /\ uint8_t_etype_ok e))
   ** pure (aligned a uint8_t_alignof)
 
 let uint8_t_repr_len (x: U8.t) (b: bytes)
@@ -59,7 +59,7 @@ ghost fn uint8_t_reveal (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (uint8_t_repr x b /\ aligned a uint8_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
+                      /\ ET.elen e == len b /\ uint8_t_etype_ok e)
 {
   unfold uint8_t_pts_to a p x;
 }
@@ -68,7 +68,7 @@ ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U8
   requires mem_pts_to_at a p b e
   requires pure (uint8_t_repr x b)
   requires pure (aligned a uint8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
+  requires pure (ET.elen e == len b /\ uint8_t_etype_ok e)
   ensures  uint8_t_pts_to a p x
 {
   fold uint8_t_pts_to a p x;
@@ -82,7 +82,7 @@ ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U8
 
 let uint32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U32.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v uint32_t_sizeof) None (U32.v x)) e
-              ** pure (ET.elen e == SZ.v uint32_t_sizeof /\ ET.read_ok e uint32_t_ctype))
+              ** pure (ET.elen e == SZ.v uint32_t_sizeof /\ uint32_t_etype_ok e))
   ** pure (aligned a uint32_t_alignof)
 
 let uint32_t_repr_len (x: U32.t) (b: bytes)
@@ -96,7 +96,7 @@ let uint32_t_repr_len (x: U32.t) (b: bytes)
 let uint32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
+                        /\ ET.elen e == len b /\ uint32_t_etype_ok e)
 
 (* An integer object carries no provenance: this is what distinguishes it from
    a stored pointer with the same bit pattern, and is why writing an integer
@@ -173,7 +173,7 @@ ghost fn uint32_t_reveal (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (uint32_t_repr x b /\ aligned a uint32_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
+                      /\ ET.elen e == len b /\ uint32_t_etype_ok e)
 {
   unfold uint32_t_pts_to a p x;
 }
@@ -182,7 +182,7 @@ ghost fn uint32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U
   requires mem_pts_to_at a p b e
   requires pure (uint32_t_repr x b)
   requires pure (aligned a uint32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
+  requires pure (ET.elen e == len b /\ uint32_t_etype_ok e)
   ensures  uint32_t_pts_to a p x
 {
   fold uint32_t_pts_to a p x;
@@ -202,7 +202,7 @@ ghost fn uint32_t_forget (a: ptr) (#x: U32.t)
 ghost fn uint32_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
+  requires pure (ET.elen e == len b /\ uint32_t_etype_ok e)
   ensures  uint32_t_pts_to_uninit a
 {
   fold uint32_t_pts_to_uninit a;
@@ -215,7 +215,7 @@ ghost fn uint32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U32.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (uint32_t_repr x b)
   requires pure (aligned a uint32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
+  requires pure (ET.elen e == len b /\ uint32_t_etype_ok e)
   ensures  uint32_t_pts_to a 1.0R x
 {
   fold uint32_t_pts_to a 1.0R x;
@@ -254,7 +254,7 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
 
 let ptr_pts_to ([@@@mkey] dest: ptr) (p: perm) (a: ptr) : slprop =
   (exists* e. mem_pts_to_at dest p (encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a)) e
-              ** pure (ET.elen e == SZ.v ptr_sizeof /\ ET.read_ok e ptr_ctype))
+              ** pure (ET.elen e == SZ.v ptr_sizeof /\ ptr_etype_ok e))
   ** pure (aligned dest ptr_alignof)
 
 let ptr_repr_len (a: ptr) (b: bytes)
@@ -332,7 +332,7 @@ ghost fn ptr_reveal (dest: ptr) (#p: perm) (#a: ptr)
   requires ptr_pts_to dest p a
   ensures  exists* b e. mem_pts_to_at dest p b e
              ** pure (ptr_repr a b /\ aligned dest ptr_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e ptr_ctype)
+                      /\ ET.elen e == len b /\ ptr_etype_ok e)
 {
   unfold ptr_pts_to dest p a;
 }
@@ -341,7 +341,7 @@ ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#a: ptr
   requires mem_pts_to_at dest p b e
   requires pure (ptr_repr a b)
   requires pure (aligned dest ptr_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e ptr_ctype)
+  requires pure (ET.elen e == len b /\ ptr_etype_ok e)
   ensures  ptr_pts_to dest p a
 {
   fold ptr_pts_to dest p a;
@@ -353,7 +353,7 @@ ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#a: ptr
 let ptr_pts_to_uninit ([@@@mkey] dest: ptr) : slprop =
   exists* b e. mem_pts_to_at dest 1.0R b e
                ** pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e ptr_ctype)
+                        /\ ET.elen e == len b /\ ptr_etype_ok e)
 
 ghost fn ptr_forget (dest: ptr) (#a: ptr)
   requires ptr_pts_to dest 1.0R a
@@ -366,7 +366,7 @@ ghost fn ptr_forget (dest: ptr) (#a: ptr)
 ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at dest 1.0R b e
   requires pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e ptr_ctype)
+  requires pure (ET.elen e == len b /\ ptr_etype_ok e)
   ensures  ptr_pts_to_uninit dest
 {
   fold ptr_pts_to_uninit dest;

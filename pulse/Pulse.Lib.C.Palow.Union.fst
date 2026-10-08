@@ -78,7 +78,7 @@ let union_U_ctype : ET.ctype =
    about. *)
 let union_U_members_ok (e: ET.etypes) : prop =
   ET.elen e == SZ.v union_U_sizeof /\
-  ET.read_ok (Seq.slice e 0 4) uint32_t_ctype /\
+  uint32_t_etype_ok (Seq.slice e 0 4) /\
   struct_T_fields_ok e
 
 let union_U_pts_to ([@@@mkey] a: ptr) (p: perm) (u: union_U) : slprop =
@@ -98,7 +98,7 @@ let union_U_member_aligned (a: ptr)
    client cannot silently forget that they exist. *)
 let union_U_x_rest ([@@@mkey] a: ptr) (p: perm) : slprop =
   exists* b e. mem_pts_to_at (a +! 4sz) p b e
-            ** pure (len b == 4 /\ ET.elen e == 4 /\ ET.read_ok e uint32_t_ctype)
+            ** pure (len b == 4 /\ ET.elen e == 4 /\ uint32_t_etype_ok e)
 
 (* ---------------------------------------------------------------------------
    Member views

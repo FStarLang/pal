@@ -54,7 +54,7 @@ let bool_t_ctype : ET.ctype = ET.TScalar ET.SBool
 (* The effective-type side condition a `bool_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let bool_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e bool_t_ctype
+let bool_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e bool_t_ctype /\ ET.allocated e
 
 let bool_t_etype_ok_none ()
   : Lemma (bool_t_etype_ok (ET.etypes_none (SZ.v bool_t_sizeof)))
@@ -63,7 +63,14 @@ let bool_t_etype_ok_none ()
 let bool_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v bool_t_sizeof)
           (ensures  bool_t_etype_ok e)
-  = ET.untyped_read_ok e bool_t_ctype
+  = ET.untyped_read_ok e bool_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let bool_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e bool_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v bool_t_sizeof ==> bool_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let bool_t_etype_ok_untyped_all (_: unit)
@@ -125,14 +132,14 @@ ghost fn bool_t_reveal (a: ptr) (#p: perm) (#x: bool)
   requires bool_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (bool_t_repr x b /\ aligned a bool_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+                      /\ ET.elen e == len b /\ bool_t_etype_ok e)
 
 
 ghost fn bool_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: bool)
   requires mem_pts_to_at a p b e
   requires pure (bool_t_repr x b)
   requires pure (aligned a bool_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+  requires pure (ET.elen e == len b /\ bool_t_etype_ok e)
   ensures  bool_t_pts_to a p x
 
 
@@ -145,7 +152,7 @@ ghost fn bool_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: bool)
   requires mem_pts_to_at a 1.0R b e
   requires pure (bool_t_repr x b)
   requires pure (aligned a bool_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+  requires pure (ET.elen e == len b /\ bool_t_etype_ok e)
   ensures  bool_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -153,7 +160,7 @@ ghost fn bool_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: bool)
 ghost fn bool_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v bool_t_sizeof /\ aligned a bool_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+  requires pure (ET.elen e == len b /\ bool_t_etype_ok e)
   ensures  bool_t_pts_to_uninit a
 
 
@@ -173,7 +180,7 @@ let int8_t_ctype : ET.ctype = ET.TScalar ET.SChar
 (* The effective-type side condition a `int8_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let int8_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int8_t_ctype
+let int8_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int8_t_ctype /\ ET.allocated e
 
 let int8_t_etype_ok_none ()
   : Lemma (int8_t_etype_ok (ET.etypes_none (SZ.v int8_t_sizeof)))
@@ -182,7 +189,14 @@ let int8_t_etype_ok_none ()
 let int8_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int8_t_sizeof)
           (ensures  int8_t_etype_ok e)
-  = ET.untyped_read_ok e int8_t_ctype
+  = ET.untyped_read_ok e int8_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let int8_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e int8_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v int8_t_sizeof ==> int8_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let int8_t_etype_ok_untyped_all (_: unit)
@@ -244,14 +258,14 @@ ghost fn int8_t_reveal (a: ptr) (#p: perm) (#x: I8.t)
   requires int8_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (int8_t_repr x b /\ aligned a int8_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+                      /\ ET.elen e == len b /\ int8_t_etype_ok e)
 
 
 ghost fn int8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: I8.t)
   requires mem_pts_to_at a p b e
   requires pure (int8_t_repr x b)
   requires pure (aligned a int8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+  requires pure (ET.elen e == len b /\ int8_t_etype_ok e)
   ensures  int8_t_pts_to a p x
 
 
@@ -264,7 +278,7 @@ ghost fn int8_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I8.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (int8_t_repr x b)
   requires pure (aligned a int8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+  requires pure (ET.elen e == len b /\ int8_t_etype_ok e)
   ensures  int8_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -272,7 +286,7 @@ ghost fn int8_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I8.t)
 ghost fn int8_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v int8_t_sizeof /\ aligned a int8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+  requires pure (ET.elen e == len b /\ int8_t_etype_ok e)
   ensures  int8_t_pts_to_uninit a
 
 
@@ -291,7 +305,7 @@ let int16_t_ctype : ET.ctype = ET.TScalar ET.SInt16
 (* The effective-type side condition a `int16_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let int16_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int16_t_ctype
+let int16_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int16_t_ctype /\ ET.allocated e
 
 let int16_t_etype_ok_none ()
   : Lemma (int16_t_etype_ok (ET.etypes_none (SZ.v int16_t_sizeof)))
@@ -300,7 +314,14 @@ let int16_t_etype_ok_none ()
 let int16_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int16_t_sizeof)
           (ensures  int16_t_etype_ok e)
-  = ET.untyped_read_ok e int16_t_ctype
+  = ET.untyped_read_ok e int16_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let int16_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e int16_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v int16_t_sizeof ==> int16_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let int16_t_etype_ok_untyped_all (_: unit)
@@ -362,14 +383,14 @@ ghost fn int16_t_reveal (a: ptr) (#p: perm) (#x: I16.t)
   requires int16_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (int16_t_repr x b /\ aligned a int16_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+                      /\ ET.elen e == len b /\ int16_t_etype_ok e)
 
 
 ghost fn int16_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: I16.t)
   requires mem_pts_to_at a p b e
   requires pure (int16_t_repr x b)
   requires pure (aligned a int16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+  requires pure (ET.elen e == len b /\ int16_t_etype_ok e)
   ensures  int16_t_pts_to a p x
 
 
@@ -382,7 +403,7 @@ ghost fn int16_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I16.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (int16_t_repr x b)
   requires pure (aligned a int16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+  requires pure (ET.elen e == len b /\ int16_t_etype_ok e)
   ensures  int16_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -390,7 +411,7 @@ ghost fn int16_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I16.t)
 ghost fn int16_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v int16_t_sizeof /\ aligned a int16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+  requires pure (ET.elen e == len b /\ int16_t_etype_ok e)
   ensures  int16_t_pts_to_uninit a
 
 
@@ -409,7 +430,7 @@ let int32_t_ctype : ET.ctype = ET.TScalar ET.SInt32
 (* The effective-type side condition a `int32_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let int32_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int32_t_ctype
+let int32_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int32_t_ctype /\ ET.allocated e
 
 let int32_t_etype_ok_none ()
   : Lemma (int32_t_etype_ok (ET.etypes_none (SZ.v int32_t_sizeof)))
@@ -418,7 +439,14 @@ let int32_t_etype_ok_none ()
 let int32_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int32_t_sizeof)
           (ensures  int32_t_etype_ok e)
-  = ET.untyped_read_ok e int32_t_ctype
+  = ET.untyped_read_ok e int32_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let int32_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e int32_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v int32_t_sizeof ==> int32_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let int32_t_etype_ok_untyped_all (_: unit)
@@ -480,14 +508,14 @@ ghost fn int32_t_reveal (a: ptr) (#p: perm) (#x: I32.t)
   requires int32_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (int32_t_repr x b /\ aligned a int32_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+                      /\ ET.elen e == len b /\ int32_t_etype_ok e)
 
 
 ghost fn int32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: I32.t)
   requires mem_pts_to_at a p b e
   requires pure (int32_t_repr x b)
   requires pure (aligned a int32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+  requires pure (ET.elen e == len b /\ int32_t_etype_ok e)
   ensures  int32_t_pts_to a p x
 
 
@@ -500,7 +528,7 @@ ghost fn int32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I32.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (int32_t_repr x b)
   requires pure (aligned a int32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+  requires pure (ET.elen e == len b /\ int32_t_etype_ok e)
   ensures  int32_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -508,7 +536,7 @@ ghost fn int32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I32.t)
 ghost fn int32_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v int32_t_sizeof /\ aligned a int32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+  requires pure (ET.elen e == len b /\ int32_t_etype_ok e)
   ensures  int32_t_pts_to_uninit a
 
 
@@ -527,7 +555,7 @@ let int64_t_ctype : ET.ctype = ET.TScalar ET.SInt64
 (* The effective-type side condition a `int64_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let int64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int64_t_ctype
+let int64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e int64_t_ctype /\ ET.allocated e
 
 let int64_t_etype_ok_none ()
   : Lemma (int64_t_etype_ok (ET.etypes_none (SZ.v int64_t_sizeof)))
@@ -536,7 +564,14 @@ let int64_t_etype_ok_none ()
 let int64_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v int64_t_sizeof)
           (ensures  int64_t_etype_ok e)
-  = ET.untyped_read_ok e int64_t_ctype
+  = ET.untyped_read_ok e int64_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let int64_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e int64_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v int64_t_sizeof ==> int64_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let int64_t_etype_ok_untyped_all (_: unit)
@@ -598,14 +633,14 @@ ghost fn int64_t_reveal (a: ptr) (#p: perm) (#x: I64.t)
   requires int64_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (int64_t_repr x b /\ aligned a int64_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+                      /\ ET.elen e == len b /\ int64_t_etype_ok e)
 
 
 ghost fn int64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: I64.t)
   requires mem_pts_to_at a p b e
   requires pure (int64_t_repr x b)
   requires pure (aligned a int64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+  requires pure (ET.elen e == len b /\ int64_t_etype_ok e)
   ensures  int64_t_pts_to a p x
 
 
@@ -618,7 +653,7 @@ ghost fn int64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I64.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (int64_t_repr x b)
   requires pure (aligned a int64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+  requires pure (ET.elen e == len b /\ int64_t_etype_ok e)
   ensures  int64_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -626,7 +661,7 @@ ghost fn int64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I64.t)
 ghost fn int64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v int64_t_sizeof /\ aligned a int64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+  requires pure (ET.elen e == len b /\ int64_t_etype_ok e)
   ensures  int64_t_pts_to_uninit a
 
 
@@ -645,7 +680,7 @@ let uint16_t_ctype : ET.ctype = ET.TScalar ET.SUInt16
 (* The effective-type side condition a `uint16_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let uint16_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e uint16_t_ctype
+let uint16_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e uint16_t_ctype /\ ET.allocated e
 
 let uint16_t_etype_ok_none ()
   : Lemma (uint16_t_etype_ok (ET.etypes_none (SZ.v uint16_t_sizeof)))
@@ -654,7 +689,14 @@ let uint16_t_etype_ok_none ()
 let uint16_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v uint16_t_sizeof)
           (ensures  uint16_t_etype_ok e)
-  = ET.untyped_read_ok e uint16_t_ctype
+  = ET.untyped_read_ok e uint16_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let uint16_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e uint16_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v uint16_t_sizeof ==> uint16_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let uint16_t_etype_ok_untyped_all (_: unit)
@@ -716,14 +758,14 @@ ghost fn uint16_t_reveal (a: ptr) (#p: perm) (#x: U16.t)
   requires uint16_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (uint16_t_repr x b /\ aligned a uint16_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+                      /\ ET.elen e == len b /\ uint16_t_etype_ok e)
 
 
 ghost fn uint16_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U16.t)
   requires mem_pts_to_at a p b e
   requires pure (uint16_t_repr x b)
   requires pure (aligned a uint16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+  requires pure (ET.elen e == len b /\ uint16_t_etype_ok e)
   ensures  uint16_t_pts_to a p x
 
 
@@ -736,7 +778,7 @@ ghost fn uint16_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U16.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (uint16_t_repr x b)
   requires pure (aligned a uint16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+  requires pure (ET.elen e == len b /\ uint16_t_etype_ok e)
   ensures  uint16_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -744,7 +786,7 @@ ghost fn uint16_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U16.t)
 ghost fn uint16_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint16_t_sizeof /\ aligned a uint16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+  requires pure (ET.elen e == len b /\ uint16_t_etype_ok e)
   ensures  uint16_t_pts_to_uninit a
 
 
@@ -763,7 +805,7 @@ let uint64_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
 (* The effective-type side condition a `uint64_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let uint64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e uint64_t_ctype
+let uint64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e uint64_t_ctype /\ ET.allocated e
 
 let uint64_t_etype_ok_none ()
   : Lemma (uint64_t_etype_ok (ET.etypes_none (SZ.v uint64_t_sizeof)))
@@ -772,7 +814,14 @@ let uint64_t_etype_ok_none ()
 let uint64_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v uint64_t_sizeof)
           (ensures  uint64_t_etype_ok e)
-  = ET.untyped_read_ok e uint64_t_ctype
+  = ET.untyped_read_ok e uint64_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let uint64_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e uint64_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v uint64_t_sizeof ==> uint64_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let uint64_t_etype_ok_untyped_all (_: unit)
@@ -834,14 +883,14 @@ ghost fn uint64_t_reveal (a: ptr) (#p: perm) (#x: U64.t)
   requires uint64_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (uint64_t_repr x b /\ aligned a uint64_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+                      /\ ET.elen e == len b /\ uint64_t_etype_ok e)
 
 
 ghost fn uint64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U64.t)
   requires mem_pts_to_at a p b e
   requires pure (uint64_t_repr x b)
   requires pure (aligned a uint64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+  requires pure (ET.elen e == len b /\ uint64_t_etype_ok e)
   ensures  uint64_t_pts_to a p x
 
 
@@ -854,7 +903,7 @@ ghost fn uint64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U64.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (uint64_t_repr x b)
   requires pure (aligned a uint64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+  requires pure (ET.elen e == len b /\ uint64_t_etype_ok e)
   ensures  uint64_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -862,7 +911,7 @@ ghost fn uint64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U64.t)
 ghost fn uint64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint64_t_sizeof /\ aligned a uint64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+  requires pure (ET.elen e == len b /\ uint64_t_etype_ok e)
   ensures  uint64_t_pts_to_uninit a
 
 
@@ -912,7 +961,7 @@ let size_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
 (* The effective-type side condition a `size_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let size_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e size_t_ctype
+let size_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e size_t_ctype /\ ET.allocated e
 
 let size_t_etype_ok_none ()
   : Lemma (size_t_etype_ok (ET.etypes_none (SZ.v size_t_sizeof)))
@@ -921,7 +970,14 @@ let size_t_etype_ok_none ()
 let size_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v size_t_sizeof)
           (ensures  size_t_etype_ok e)
-  = ET.untyped_read_ok e size_t_ctype
+  = ET.untyped_read_ok e size_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let size_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e size_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v size_t_sizeof ==> size_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let size_t_etype_ok_untyped_all (_: unit)
@@ -983,14 +1039,14 @@ ghost fn size_t_reveal (a: ptr) (#p: perm) (#x: SZ.t)
   requires size_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (size_t_repr x b /\ aligned a size_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+                      /\ ET.elen e == len b /\ size_t_etype_ok e)
 
 
 ghost fn size_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: SZ.t)
   requires mem_pts_to_at a p b e
   requires pure (size_t_repr x b)
   requires pure (aligned a size_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+  requires pure (ET.elen e == len b /\ size_t_etype_ok e)
   ensures  size_t_pts_to a p x
 
 
@@ -1003,7 +1059,7 @@ ghost fn size_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: SZ.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (size_t_repr x b)
   requires pure (aligned a size_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+  requires pure (ET.elen e == len b /\ size_t_etype_ok e)
   ensures  size_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -1011,7 +1067,7 @@ ghost fn size_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: SZ.t)
 ghost fn size_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v size_t_sizeof /\ aligned a size_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+  requires pure (ET.elen e == len b /\ size_t_etype_ok e)
   ensures  size_t_pts_to_uninit a
 
 
@@ -1081,7 +1137,7 @@ ghost fn uint8_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U8.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (uint8_t_repr x b)
   requires pure (aligned a uint8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
+  requires pure (ET.elen e == len b /\ uint8_t_etype_ok e)
   ensures  uint8_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -1089,7 +1145,7 @@ ghost fn uint8_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U8.t)
 ghost fn uint8_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint8_t_sizeof /\ aligned a uint8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
+  requires pure (ET.elen e == len b /\ uint8_t_etype_ok e)
   ensures  uint8_t_pts_to_uninit a
 
 
@@ -1270,7 +1326,7 @@ let float32_t_ctype : ET.ctype = ET.TScalar ET.SFloat32
 (* The effective-type side condition a `float32_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let float32_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e float32_t_ctype
+let float32_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e float32_t_ctype /\ ET.allocated e
 
 let float32_t_etype_ok_none ()
   : Lemma (float32_t_etype_ok (ET.etypes_none (SZ.v float32_t_sizeof)))
@@ -1279,7 +1335,14 @@ let float32_t_etype_ok_none ()
 let float32_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v float32_t_sizeof)
           (ensures  float32_t_etype_ok e)
-  = ET.untyped_read_ok e float32_t_ctype
+  = ET.untyped_read_ok e float32_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let float32_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e float32_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v float32_t_sizeof ==> float32_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let float32_t_etype_ok_untyped_all (_: unit)
@@ -1341,14 +1404,14 @@ ghost fn float32_t_reveal (a: ptr) (#p: perm) (#x: float32)
   requires float32_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (float32_t_repr x b /\ aligned a float32_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+                      /\ ET.elen e == len b /\ float32_t_etype_ok e)
 
 
 ghost fn float32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: float32)
   requires mem_pts_to_at a p b e
   requires pure (float32_t_repr x b)
   requires pure (aligned a float32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+  requires pure (ET.elen e == len b /\ float32_t_etype_ok e)
   ensures  float32_t_pts_to a p x
 
 
@@ -1361,7 +1424,7 @@ ghost fn float32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: float32)
   requires mem_pts_to_at a 1.0R b e
   requires pure (float32_t_repr x b)
   requires pure (aligned a float32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+  requires pure (ET.elen e == len b /\ float32_t_etype_ok e)
   ensures  float32_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -1369,7 +1432,7 @@ ghost fn float32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: float32)
 ghost fn float32_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v float32_t_sizeof /\ aligned a float32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+  requires pure (ET.elen e == len b /\ float32_t_etype_ok e)
   ensures  float32_t_pts_to_uninit a
 
 
@@ -1388,7 +1451,7 @@ let float64_t_ctype : ET.ctype = ET.TScalar ET.SFloat64
 (* The effective-type side condition a `float64_t` object's storage has to meet,
    under the name every type publishes so that a struct or union containing
    one can state its own condition without knowing what kind of type it is. *)
-let float64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e float64_t_ctype
+let float64_t_etype_ok (e: ET.etypes) : prop = ET.read_ok e float64_t_ctype /\ ET.allocated e
 
 let float64_t_etype_ok_none ()
   : Lemma (float64_t_etype_ok (ET.etypes_none (SZ.v float64_t_sizeof)))
@@ -1397,7 +1460,14 @@ let float64_t_etype_ok_none ()
 let float64_t_etype_ok_untyped (e: ET.etypes)
   : Lemma (requires ET.untyped e /\ ET.elen e == SZ.v float64_t_sizeof)
           (ensures  float64_t_etype_ok e)
-  = ET.untyped_read_ok e float64_t_ctype
+  = ET.untyped_read_ok e float64_t_ctype; ET.allocated_untyped e
+
+(* Storage that a store at this type has just produced meets its condition.
+   This is where a union member switch lands. *)
+let float64_t_etype_ok_read_ok_all (_: unit)
+  : Lemma (forall (e: ET.etypes). ET.read_ok e float64_t_ctype /\ ET.allocated e
+                             /\ ET.elen e == SZ.v float64_t_sizeof ==> float64_t_etype_ok e)
+  = ()
 
 (* The same, quantified: an array of this type needs it under a binder. *)
 let float64_t_etype_ok_untyped_all (_: unit)
@@ -1459,14 +1529,14 @@ ghost fn float64_t_reveal (a: ptr) (#p: perm) (#x: float64)
   requires float64_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (float64_t_repr x b /\ aligned a float64_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+                      /\ ET.elen e == len b /\ float64_t_etype_ok e)
 
 
 ghost fn float64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: float64)
   requires mem_pts_to_at a p b e
   requires pure (float64_t_repr x b)
   requires pure (aligned a float64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+  requires pure (ET.elen e == len b /\ float64_t_etype_ok e)
   ensures  float64_t_pts_to a p x
 
 
@@ -1479,7 +1549,7 @@ ghost fn float64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: float64)
   requires mem_pts_to_at a 1.0R b e
   requires pure (float64_t_repr x b)
   requires pure (aligned a float64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+  requires pure (ET.elen e == len b /\ float64_t_etype_ok e)
   ensures  float64_t_pts_to a 1.0R x
 
 (* Raw storage of the right size is write-only ownership at this type, and back
@@ -1487,7 +1557,7 @@ ghost fn float64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: float64)
 ghost fn float64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v float64_t_sizeof /\ aligned a float64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+  requires pure (ET.elen e == len b /\ float64_t_etype_ok e)
   ensures  float64_t_pts_to_uninit a
 
 

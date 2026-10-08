@@ -85,10 +85,10 @@ void pass_arrayptr_as_ref(_array int* a)
  */
 _arrayptr SUBRANGE* get_uninit(_plain _array SUBRANGE* a)
   _requires(_inline_pulse(array_pts_to
-    Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_ctype 16
+    Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_etype_ok 16
     (SizeT.v Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof) $(a) 1.0R $`v))
   _ensures(_inline_pulse(
-    array_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_ctype 16 (SizeT.v Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof) $(a) 1.0R $`v **
+    array_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_etype_ok 16 (SizeT.v Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof) $(a) 1.0R $`v **
     pure ($(return) == $(a))))
 {
     return &a[0];
@@ -108,14 +108,14 @@ void consume_returned_arrayptr_as_ref(_array SUBRANGE* a)
   _requires(a._length == 1)
 {
     SUBRANGE* Sub = get_uninit(a);
-    _ghost_stmt(array_focus Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_ctype $(a) 16sz Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof 0sz 0sz);
-    _ghost_stmt(with x. rewrite (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_ctype ($(a) +! 0sz) 1.0R x) as (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_ctype $(Sub) 1.0R x));
+    _ghost_stmt(array_focus Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_etype_ok $(a) 16sz Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof 0sz 0sz);
+    _ghost_stmt(with x. rewrite (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_etype_ok ($(a) +! 0sz) 1.0R x) as (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_etype_ok $(Sub) 1.0R x));
     _ghost_stmt(Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_of_elem $(Sub));
     Sub->Low = 10;
     Sub->Count = 5;
     _ghost_stmt(Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_to_elem $(Sub));
-    _ghost_stmt(with x. rewrite (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_ctype $(Sub) 1.0R x) as (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_ctype ($(a) +! 0sz) 1.0R x));
-    _ghost_stmt(array_unfocus Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_ctype $(a) 16sz Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof 0sz 0sz);
+    _ghost_stmt(with x. rewrite (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_etype_ok $(Sub) 1.0R x) as (elem_pts_to Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_etype_ok ($(a) +! 0sz) 1.0R x));
+    _ghost_stmt(array_unfocus Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_repr Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_etype_ok $(a) 16sz Struct_SUBRANGE_anon_1.struct_SUBRANGE_anon_1_alignof 0sz 0sz);
 }
 
 // ---------------------------------------------------------------------------

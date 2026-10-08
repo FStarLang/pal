@@ -283,6 +283,23 @@ impl FieldShape {
         }
     }
 
+    /// The proof that storage a store at this member's type has just produced
+    /// meets `etype_ok`. This is where a union member switch lands.
+    fn etype_ok_read_ok(&self, e: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_etype_ok_read_ok_all (); ", pn),
+            FieldShape::Array { pn, esize, len } => format!(
+                "{pn}_etype_ok_read_ok_all (); \
+                 elems_ok_read_ok {pn}_etype_ok {pn}_ctype {esize} {len} {e}; ",
+                pn = pn,
+                esize = esize,
+                len = len,
+                e = e
+            ),
+            FieldShape::Flex { .. } => String::new(),
+        }
+    }
+
     /// The proof that fresh, untyped storage meets `etype_ok`.
     fn etype_ok_none(&self) -> String {
         match self {
@@ -5933,13 +5950,14 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     // member's type and nothing else, so that is all the matching unfocus can
     // put back.
     c += &format!(
-        "let {un}_etype_ok (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {un}_sizeof /\\ ET.untyped e\n\n\
+        "let {un}_etype_ok (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {un}_sizeof /\\ ET.allocated e\n\n\
          let {un}_etype_ok_none ()\n  : Lemma ({un}_etype_ok (ET.etypes_none (SizeT.v {un}_sizeof)))\n  = ()\n\n\
-         let {un}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {un}_sizeof)\n          (ensures  {un}_etype_ok e)\n  = ()\n\n",
+         let {un}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {un}_sizeof)\n          (ensures  {un}_etype_ok e)\n  = ()\n\n         let {un}_etype_ok_untyped_all ()\n  : Lemma (forall (e: ET.etypes). ET.untyped e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {un}_etype_ok_untyped)\n\n\
+         let {un}_etype_ok_read_ok_all ()\n  : Lemma (forall (e: ET.etypes). ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_etype_ok e)\n  = ()\n\n",
         un = un
     );
     c += &format!(
-        "let {un}_live_ok (u: {un}) (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {un}_sizeof /\\\n  (match u with\n{arms}  )\n\n",
+        "let {un}_live_ok (u: {un}) (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {un}_sizeof /\\ ET.allocated e /\\\n  (match u with\n{arms}  )\n\n",
         un = un,
         arms = ui
             .members
@@ -6039,7 +6057,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         c += &format!(
             "let {un}_rest_{f} (a: ptr) (p: perm) : slprop =\n  \
              exists* r er. mem_pts_to_at (a +! {msz}sz) p r er\n             \
-             ** pure (len r == {rest} /\\ aligned a {un}_alignof /\\ ET.elen er == len r)\n\n",
+             ** pure (len r == {rest} /\\ aligned a {un}_alignof\n                      /\\ ET.elen er == len r /\\ ET.allocated er)\n\n",
             un = un,
             f = f,
             msz = m.size,
@@ -6109,14 +6127,24 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              ** pure ({un}_repr u b /\\ {un}_live_ok u e));\n  \
              {un}_member_aligned a;\n  \
              mem_split_at a {msz}sz;\n  \
+             ET.allocated_slice e 0 {msz};\n  \
+             ET.allocated_slice e {msz} (ET.elen e);\n  \
+             ET.allocated_store_ok (Seq.slice e 0 {msz}) {mct};\n  \
              mem_store_etypes a {mct};\n  \
              ET.store_ok_read_ok (Seq.slice e 0 {msz}) {mct};\n  \
+             ET.allocated_store_etypes (Seq.slice e 0 {msz}) {mct};\n  \
+             {bridge}\n  \
              {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
             f = f,
             uninit = mem_uninit,
             mct = ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+            bridge = m.shape.etype_ok_read_ok(&format!(
+                "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                m.size,
+                ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+            )),
             claim = m.shape.claim_uninit(
                 "a",
                 &format!("(slice b 0 {})", m.size),
@@ -6142,23 +6170,35 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              {{\n  \
              unfold {un}_pts_to_uninit a;\n  \
              with b e. assert (mem_pts_to_at a 1.0R b e\n    \
-             ** pure (len b == SizeT.v {un}_sizeof /\\ ET.untyped e));\n  \
+             ** pure (len b == SizeT.v {un}_sizeof /\\ {un}_etype_ok e));\n  \
              {un}_member_aligned a;\n  \
              mem_split_at a {msz}sz;\n  \
-             ET.untyped_slice e 0 {msz};\n  \
+             ET.allocated_slice e 0 {msz};\n  \
+             ET.allocated_slice e {msz} (ET.elen e);\n  \
+             ET.allocated_store_ok (Seq.slice e 0 {msz}) {mct};\n  \
+             mem_store_etypes a {mct};\n  \
+             ET.store_ok_read_ok (Seq.slice e 0 {msz}) {mct};\n  \
+             ET.allocated_store_etypes (Seq.slice e 0 {msz}) {mct};\n  \
              {bridge}\n  \
              {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
             f = f,
             uninit = mem_uninit,
-            bridge = m
-                .shape
-                .etype_ok_untyped(&format!("(Seq.slice e 0 {})", m.size)),
+            mct = ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+            bridge = m.shape.etype_ok_read_ok(&format!(
+                "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                m.size,
+                ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+            )),
             claim = m.shape.claim_uninit(
                 "a",
                 &format!("(slice b 0 {})", m.size),
-                &format!("(Seq.slice e 0 {})", m.size),
+                &format!(
+                    "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                    m.size,
+                    ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+                ),
             ),
             msz = m.size
         );
@@ -6254,9 +6294,9 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          {{\n  fold {un}_pts_to_uninit a;\n}}\n\n\
          ghost fn {un}_reveal_uninit (a: ptr)\n\
          \x20 requires {un}_pts_to_uninit a\n\
-         \x20 ensures  exists* b e. mem_pts_to_at a 1.0R b e\n             \
-         ** pure (len b == SizeT.v {un}_sizeof /\\ {un}_etype_ok e)\n\
-         {{\n  unfold {un}_pts_to_uninit a;\n}}\n\n\
+         \x20 ensures  exists* b. mem_pts_to a 1.0R b\n             \
+         ** pure (len b == SizeT.v {un}_sizeof)\n\
+         {{\n  unfold {un}_pts_to_uninit a;\n  mem_hide_etypes a;\n}}\n\n\
          ghost fn {un}_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#u: {un})\n\
          \x20 requires mem_pts_to_at a p b e\n\
          \x20 requires pure ({un}_repr u b /\\ aligned a {un}_alignof)\n\
@@ -6285,7 +6325,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          fn {un}_stack_free (a: ptr)\n\
          \x20 requires {un}_pts_to_uninit a\n\
          \x20 ensures  emp\n\
-         {{\n  unfold {un}_pts_to_uninit a;\n  mem_stack_free a;\n}}\n\n",
+         {{\n  {un}_reveal_uninit a;\n  mem_stack_free a;\n}}\n\n",
         un = un
     );
     // Storing a whole union value is the one operation that has to know which
@@ -6302,10 +6342,16 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     for m in &ui.members {
         c += &format!(
             "    {k} v -> {{\n      \
-             with b e. assert (mem_pts_to_at a 1.0R b e ** pure (ET.untyped e));\n      \
+             with b e. assert (mem_pts_to_at a 1.0R b e\n        \
+             ** pure (len b == SizeT.v {un}_sizeof /\\ {un}_etype_ok e));\n      \
              {un}_member_aligned a;\n      \
              mem_split_at a {msz}sz;\n      \
-             ET.untyped_slice e 0 {msz};\n      \
+             ET.allocated_slice e 0 {msz};\n      \
+             ET.allocated_slice e {msz} (ET.elen e);\n      \
+             ET.allocated_store_ok (Seq.slice e 0 {msz}) {mct};\n      \
+             mem_store_etypes a {mct};\n      \
+             ET.store_ok_read_ok (Seq.slice e 0 {msz}) {mct};\n      \
+             ET.allocated_store_etypes (Seq.slice e 0 {msz}) {mct};\n      \
              {bridge}\n      \
              {claim}
       \
@@ -6315,13 +6361,20 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              rewrite ({un}_pts_to a 1.0R ({k} v)) as ({un}_pts_to a 1.0R x);\n    }}\n",
             k = ctor(m),
             f = m.name,
-            bridge = m
-                .shape
-                .etype_ok_untyped(&format!("(Seq.slice e 0 {})", m.size)),
+            mct = ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+            bridge = m.shape.etype_ok_read_ok(&format!(
+                "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                m.size,
+                ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+            )),
             claim = m.shape.claim_uninit(
                 "a",
                 &format!("(slice b 0 {})", m.size),
-                &format!("(Seq.slice e 0 {})", m.size),
+                &format!(
+                    "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                    m.size,
+                    ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+                ),
             ),
             write = m.shape.write_uninit("a", "v"),
             un = un,
@@ -6724,7 +6777,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     // object-level condition could not be re-established by any join. Padding
     // is deliberately left out; nothing reads it.
     c += &format!(
-        "let {sn}_etype_ok (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {sn}_sizeof{cs}\n\n",
+        "let {sn}_etype_ok (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {sn}_sizeof /\\ ET.allocated e{cs}\n\n",
         sn = sn,
         cs = si
             .fields
@@ -6753,8 +6806,31 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     // And so does storage that carries no effective type at all, which is
     // where a struct member of a union gets its condition from.
     c += &format!(
-        "let {sn}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {es}()\n\n",
+        "let {sn}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {es}()\n\n         let {sn}_etype_ok_untyped_all ()\n  : Lemma (forall (e: ET.etypes). ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {sn}_etype_ok_untyped)\n\n\
+         let {sn}_etype_ok_read_ok (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {er}()\n\n\
+         let {sn}_etype_ok_read_ok_all ()\n  : Lemma (forall (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {sn}_etype_ok_read_ok)\n\n",
         sn = sn,
+        er = si
+            .fields
+            .iter()
+            .filter(|f| f.size > 0)
+            .filter_map(|f| {
+                let ct = ctype_of_shape(&f.shape)?;
+                Some(format!(
+                    "ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}",
+                    sn = sn,
+                    off = f.offset,
+                    end = f.offset + f.size,
+                    ct = ct,
+                    br = f.shape.etype_ok_read_ok(&format!(
+                        "(Seq.slice e {} {})",
+                        f.offset,
+                        f.offset + f.size
+                    ))
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(""),
         es = si
             .fields
             .iter()

@@ -88,7 +88,7 @@ let elem_etypes (esize: nat) (e: ET.etypes) (i: nat) : ET.etypes =
   if hi <= ET.elen e then Seq.slice e lo hi else Seq.empty
 
 let elems_ok (eok: ET.etypes -> prop) (esize: nat) (n: nat) (e: ET.etypes) : prop =
-  ET.elen e == esize * n /\
+  ET.elen e == esize * n /\ ET.allocated e /\
   (forall (i: nat). i < n ==> eok (elem_etypes esize e i))
 
 let array_pts_to (#t: Type) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop) (esize: nat) (ealign: nat)
@@ -346,7 +346,7 @@ let elems_ok_join (eok: ET.etypes -> prop) (esize: nat) (e1 e2: ET.etypes) (n m:
    at 0 is the whole range. This is the index half of `singleton_repr`. *)
 let elems_ok_one (eok: ET.etypes -> prop) (esize: nat) (e: ET.etypes)
   : Lemma (requires ET.elen e == esize)
-          (ensures  (elems_ok eok esize 1 e <==> eok e))
+          (ensures  (elems_ok eok esize 1 e <==> (eok e /\ ET.allocated e)))
   = assert (elem_etypes esize e 0 == Seq.slice e 0 esize);
     Seq.lemma_eq_intro (Seq.slice e 0 esize) e
 
@@ -365,6 +365,30 @@ let elems_ok_none (eok: ET.etypes -> prop) (esize: nat) (n: nat)
       if i < n then begin
         elem_fits esize n i;
         Seq.lemma_eq_elim (elem_etypes esize e i) (ET.etypes_none esize)
+      end
+    in
+    Classical.forall_intro aux
+
+(* An array that is readable as a whole is readable element by element. This
+   is how a store at the array type -- which is what a union member switch
+   does -- lands back in the pointwise form the array layer carries. *)
+let elems_ok_read_ok (eok: ET.etypes -> prop) (ect: ET.ctype) (esize: nat) (n: nat) (e: ET.etypes)
+  : Lemma (requires (forall (e': ET.etypes). ET.read_ok e' ect /\ ET.allocated e'
+                                             /\ ET.elen e' == esize ==> eok e')
+                    /\ ET.csize ect == esize /\ ET.elen e == esize * n
+                    /\ ET.allocated e /\ ET.read_ok e (ET.TArr ect n))
+          (ensures  elems_ok eok esize n e)
+  = let aux (i: nat) : Lemma (i < n ==> eok (elem_etypes esize e i)) =
+      if i < n then begin
+        elem_fits esize n i;
+        if esize = 0 then ()
+        else begin
+          M.multiple_modulo_lemma i esize;
+          assert (ET.emod (esize * i) esize == 0);
+          assert (ET.access_ok ect 0 ect);
+          assert (ET.access_ok (ET.TArr ect n) (esize * i) ect);
+          ET.read_ok_sub e (ET.TArr ect n) (esize * i) ect
+        end
       end
     in
     Classical.forall_intro aux
@@ -446,7 +470,7 @@ ghost fn array_join (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> 
 let elem_pts_to (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop)
                 ([@@@mkey] a: ptr) (p: perm) (x: t) : slprop =
   exists* b e. mem_pts_to_at a p b e
-               ** pure (t_repr x b /\ ET.elen e == len b /\ eok e)
+               ** pure (t_repr x b /\ ET.elen e == len b /\ ET.allocated e /\ eok e)
 
 let singleton_repr (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat) (x: t) (b: bytes)
   : Lemma (requires len b == esize /\ t_repr x b)
@@ -578,7 +602,7 @@ ghost fn array_unfocus (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes 
 ghost fn elem_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop) (a: ptr) (#p: perm) (#x: t)
   requires elem_pts_to t_repr eok a p x
   ensures  exists* b e. mem_pts_to_at a p b e
-             ** pure (t_repr x b /\ ET.elen e == len b /\ eok e)
+             ** pure (t_repr x b /\ ET.elen e == len b /\ ET.allocated e /\ eok e)
 {
   unfold elem_pts_to t_repr eok a p x;
 }
@@ -586,7 +610,7 @@ ghost fn elem_reveal (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes ->
 ghost fn elem_conceal (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop) (a: ptr)
                       (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: t)
   requires mem_pts_to_at a p b e
-  requires pure (t_repr x b /\ ET.elen e == len b /\ eok e)
+  requires pure (t_repr x b /\ ET.elen e == len b /\ ET.allocated e /\ eok e)
   ensures  elem_pts_to t_repr eok a p x
 {
   fold elem_pts_to t_repr eok a p x;

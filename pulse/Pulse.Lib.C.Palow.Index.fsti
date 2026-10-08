@@ -37,7 +37,7 @@ module SZ = FStar.SizeT
    is why those are unaffected by effective types. *)
 ghost fn mem_hide_etypes (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a p b e
-  requires pure (ET.elen e == len b)
+  requires pure (ET.elen e == len b /\ ET.allocated e)
   ensures  mem_pts_to a p b
 
 (* Recover the index. The result is existential, so this does not let a caller
@@ -45,7 +45,8 @@ ghost fn mem_hide_etypes (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
    bytes already had, and nothing more. *)
 ghost fn mem_show_etypes (a: ptr) (#p: perm) (#b: bytes)
   requires mem_pts_to a p b
-  ensures  exists* e. mem_pts_to_at a p b e ** pure (ET.elen e == len b)
+  ensures  exists* e. mem_pts_to_at a p b e
+             ** pure (ET.elen e == len b /\ ET.allocated e)
 
 (* ---------------------------------------------------------------------------
    Observing an indexed range
@@ -73,10 +74,10 @@ ghost fn mem_show_etypes (a: ptr) (#p: perm) (#b: bytes)
 
 ghost fn mem_pts_to_at_not_null (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
   preserves mem_pts_to_at a p b e
-  requires  pure (ET.elen e == len b /\ len b > 0)
+  requires  pure (ET.elen e == len b /\ ET.allocated e /\ len b > 0)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 ghost fn mem_pts_to_at_fits (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
   preserves mem_pts_to_at a p b e
-  requires  pure (ET.elen e == len b)
+  requires  pure (ET.elen e == len b /\ ET.allocated e)
   ensures   pure (SZ.fits (addr_of a + len b))

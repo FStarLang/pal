@@ -65,15 +65,16 @@ let struct_S_ctype : ET.ctype =
    which is what lets `struct_S_split` and `struct_S_join` stay provable. The
    padding bytes are deliberately unconstrained: nothing reads them. *)
 let struct_S_fields_ok (e: ET.etypes) : prop =
-  ET.elen e == SZ.v struct_S_sizeof /\
-  ET.read_ok (Seq.slice e 0 4) uint32_t_ctype /\
-  ET.read_ok (Seq.slice e 4 5) uint8_t_ctype
+  ET.elen e == SZ.v struct_S_sizeof /\ ET.allocated e /\
+  uint32_t_etype_ok (Seq.slice e 0 4) /\
+  uint8_t_etype_ok (Seq.slice e 4 5)
 
 (* The join side: a field slice of the concatenated index is the field's own
    index back. Pure, and the only reason `struct_S_join` goes through. *)
 let struct_S_fields_ok_intro (ef eg epad: ET.etypes)
   : Lemma (requires ET.elen ef == 4 /\ ET.elen eg == 1 /\ ET.elen epad == 3
-                    /\ ET.read_ok ef uint32_t_ctype /\ ET.read_ok eg uint8_t_ctype)
+                    /\ ET.allocated epad
+                    /\ uint32_t_etype_ok ef /\ uint8_t_etype_ok eg)
           (ensures  struct_S_fields_ok (Seq.append ef (Seq.append eg epad)))
   = let e = Seq.append ef (Seq.append eg epad) in
     Seq.lemma_eq_intro (Seq.slice e 0 4) ef;
@@ -242,12 +243,12 @@ let struct_T_ctype : ET.ctype =
 
 let struct_T_fields_ok (e: ET.etypes) : prop =
   ET.elen e == SZ.v struct_T_sizeof /\
-  ET.read_ok (Seq.slice e 0 4) uint32_t_ctype /\
-  ET.read_ok (Seq.slice e 4 8) uint32_t_ctype
+  uint32_t_etype_ok (Seq.slice e 0 4) /\
+  uint32_t_etype_ok (Seq.slice e 4 8)
 
 let struct_T_fields_ok_intro (ey ez: ET.etypes)
   : Lemma (requires ET.elen ey == 4 /\ ET.elen ez == 4
-                    /\ ET.read_ok ey uint32_t_ctype /\ ET.read_ok ez uint32_t_ctype)
+                    /\ uint32_t_etype_ok ey /\ uint32_t_etype_ok ez)
           (ensures  struct_T_fields_ok (Seq.append ey ez))
   = let e = Seq.append ey ez in
     Seq.lemma_eq_intro (Seq.slice e 0 4) ey;

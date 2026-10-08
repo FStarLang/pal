@@ -140,7 +140,7 @@ void *blob_addr(struct blobholder *h)
        the field has to be focused for its bytes to be in hand, and owning a
        byte is what rules out the empty provenance. */
     _ghost_stmt(Struct_blobholder.struct_blobholder_focus_blob $(h));
-    _ghost_stmt(Pulse.Lib.C.Palow.Array.array_pts_to_not_null uint8_t_repr uint8_t_ctype 1
+    _ghost_stmt(Pulse.Lib.C.Palow.Array.array_pts_to_not_null uint8_t_repr uint8_t_etype_ok 1
         (FStar.SizeT.v uint8_t_alignof)
         ($(h) +! Struct_blobholder.struct_blobholder_offsetof_blob));
     _ghost_stmt(Struct_blobholder.struct_blobholder_unfocus_read_blob $(h));

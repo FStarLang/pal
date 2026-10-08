@@ -82,7 +82,7 @@ fn transport (src dst: ptr) (#target: ptr) (#bd: bytes) (#ed: ET.etypes)
   requires pure (len bd == SZ.v ptr_sizeof /\ aligned dst ptr_alignof)
   (* `memcpy` keeps the destination's index, so reading the copy back as a
      pointer needs the destination to have admitted pointers already. *)
-  requires pure (ET.elen ed == SZ.v ptr_sizeof /\ ET.read_ok ed ptr_ctype)
+  requires pure (ET.elen ed == SZ.v ptr_sizeof /\ ptr_etype_ok ed)
   preserves uint32_t_pts_to target 1.0R x
   returns   y : U32.t
   ensures   ptr_pts_to src 1.0R target ** ptr_pts_to dst 1.0R target

@@ -53,10 +53,20 @@ val mem_pts_to ([@@@mkey] a: ptr) (p: perm) (b: bytes) : slprop
    would let an index be discarded and a fresh unconstrained one conjured --
    `fixed` and all. It is an equality rather than a definition only because
    Pulse's frame matcher keys on the head symbol of a `val`, and making this
-   one a `let` costs more in matching than the index is worth. *)
+   one a `let` costs more in matching than the index is worth.
+
+   The index is also required to be `allocated` -- no byte of it is at a
+   declared type. That is what makes the unindexed view the view of *storage*:
+   allocated storage is the only thing whose index may be forgotten and later
+   recovered without losing information a later store would need, since a
+   `fixed` entry constrains every future store and an existential over indices
+   cannot preserve it. The consequence is that an object with a declared type
+   does not pass through this view at all; it needs an indexed path of its
+   own. *)
 val mem_pts_to_at_eq (a: ptr) (p: perm) (b: bytes)
   : Lemma (mem_pts_to a p b ==
-           (exists* e. mem_pts_to_at a p b e ** pure (Etype.elen e == len b)))
+           (exists* e. mem_pts_to_at a p b e
+                    ** pure (Etype.elen e == len b /\ Etype.allocated e)))
 
 val mem_pts_to_timeless (a: ptr) (p: perm) (b: bytes)
   : Lemma (timeless (mem_pts_to a p b))

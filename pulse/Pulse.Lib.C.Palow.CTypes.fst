@@ -51,13 +51,13 @@ module I64 = FStar.Int64
 
 let bool_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: bool) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v bool_t_sizeof) None (if x then 1 else 0)) e
-              ** pure (ET.elen e == SZ.v bool_t_sizeof /\ ET.read_ok e bool_t_ctype))
+              ** pure (ET.elen e == SZ.v bool_t_sizeof /\ bool_t_etype_ok e))
   ** pure (aligned a bool_t_alignof)
 
 let bool_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v bool_t_sizeof /\ aligned a bool_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+                        /\ ET.elen e == len b /\ bool_t_etype_ok e)
 
 let bool_t_repr_no_prov (x: bool) (b: bytes)
   : Lemma (requires bool_t_repr x b)
@@ -129,7 +129,7 @@ ghost fn bool_t_reveal (a: ptr) (#p: perm) (#x: bool)
   requires bool_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (bool_t_repr x b /\ aligned a bool_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+                      /\ ET.elen e == len b /\ bool_t_etype_ok e)
 {
   unfold bool_t_pts_to a p x;
 }
@@ -138,7 +138,7 @@ ghost fn bool_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: boo
   requires mem_pts_to_at a p b e
   requires pure (bool_t_repr x b)
   requires pure (aligned a bool_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+  requires pure (ET.elen e == len b /\ bool_t_etype_ok e)
   ensures  bool_t_pts_to a p x
 {
   fold bool_t_pts_to a p x;
@@ -156,7 +156,7 @@ ghost fn bool_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: bool)
   requires mem_pts_to_at a 1.0R b e
   requires pure (bool_t_repr x b)
   requires pure (aligned a bool_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+  requires pure (ET.elen e == len b /\ bool_t_etype_ok e)
   ensures  bool_t_pts_to a 1.0R x
 {
   fold bool_t_pts_to a 1.0R x;
@@ -165,7 +165,7 @@ ghost fn bool_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: bool)
 ghost fn bool_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v bool_t_sizeof /\ aligned a bool_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e bool_t_ctype)
+  requires pure (ET.elen e == len b /\ bool_t_etype_ok e)
   ensures  bool_t_pts_to_uninit a
 {
   fold bool_t_pts_to_uninit a;
@@ -185,13 +185,13 @@ ghost fn bool_t_reveal_uninit (a: ptr)
 
 let int8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I8.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v x))) e
-              ** pure (ET.elen e == SZ.v int8_t_sizeof /\ ET.read_ok e int8_t_ctype))
+              ** pure (ET.elen e == SZ.v int8_t_sizeof /\ int8_t_etype_ok e))
   ** pure (aligned a int8_t_alignof)
 
 let int8_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v int8_t_sizeof /\ aligned a int8_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+                        /\ ET.elen e == len b /\ int8_t_etype_ok e)
 
 let int8_t_repr_no_prov (x: I8.t) (b: bytes)
   : Lemma (requires int8_t_repr x b)
@@ -264,7 +264,7 @@ ghost fn int8_t_reveal (a: ptr) (#p: perm) (#x: I8.t)
   requires int8_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (int8_t_repr x b /\ aligned a int8_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+                      /\ ET.elen e == len b /\ int8_t_etype_ok e)
 {
   unfold int8_t_pts_to a p x;
 }
@@ -273,7 +273,7 @@ ghost fn int8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: I8.
   requires mem_pts_to_at a p b e
   requires pure (int8_t_repr x b)
   requires pure (aligned a int8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+  requires pure (ET.elen e == len b /\ int8_t_etype_ok e)
   ensures  int8_t_pts_to a p x
 {
   fold int8_t_pts_to a p x;
@@ -291,7 +291,7 @@ ghost fn int8_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I8.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (int8_t_repr x b)
   requires pure (aligned a int8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+  requires pure (ET.elen e == len b /\ int8_t_etype_ok e)
   ensures  int8_t_pts_to a 1.0R x
 {
   fold int8_t_pts_to a 1.0R x;
@@ -300,7 +300,7 @@ ghost fn int8_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I8.t)
 ghost fn int8_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v int8_t_sizeof /\ aligned a int8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
+  requires pure (ET.elen e == len b /\ int8_t_etype_ok e)
   ensures  int8_t_pts_to_uninit a
 {
   fold int8_t_pts_to_uninit a;
@@ -320,13 +320,13 @@ ghost fn int8_t_reveal_uninit (a: ptr)
 
 let int16_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I16.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v x))) e
-              ** pure (ET.elen e == SZ.v int16_t_sizeof /\ ET.read_ok e int16_t_ctype))
+              ** pure (ET.elen e == SZ.v int16_t_sizeof /\ int16_t_etype_ok e))
   ** pure (aligned a int16_t_alignof)
 
 let int16_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v int16_t_sizeof /\ aligned a int16_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+                        /\ ET.elen e == len b /\ int16_t_etype_ok e)
 
 let int16_t_repr_no_prov (x: I16.t) (b: bytes)
   : Lemma (requires int16_t_repr x b)
@@ -399,7 +399,7 @@ ghost fn int16_t_reveal (a: ptr) (#p: perm) (#x: I16.t)
   requires int16_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (int16_t_repr x b /\ aligned a int16_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+                      /\ ET.elen e == len b /\ int16_t_etype_ok e)
 {
   unfold int16_t_pts_to a p x;
 }
@@ -408,7 +408,7 @@ ghost fn int16_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: I1
   requires mem_pts_to_at a p b e
   requires pure (int16_t_repr x b)
   requires pure (aligned a int16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+  requires pure (ET.elen e == len b /\ int16_t_etype_ok e)
   ensures  int16_t_pts_to a p x
 {
   fold int16_t_pts_to a p x;
@@ -426,7 +426,7 @@ ghost fn int16_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I16.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (int16_t_repr x b)
   requires pure (aligned a int16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+  requires pure (ET.elen e == len b /\ int16_t_etype_ok e)
   ensures  int16_t_pts_to a 1.0R x
 {
   fold int16_t_pts_to a 1.0R x;
@@ -435,7 +435,7 @@ ghost fn int16_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I16.t)
 ghost fn int16_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v int16_t_sizeof /\ aligned a int16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
+  requires pure (ET.elen e == len b /\ int16_t_etype_ok e)
   ensures  int16_t_pts_to_uninit a
 {
   fold int16_t_pts_to_uninit a;
@@ -455,13 +455,13 @@ ghost fn int16_t_reveal_uninit (a: ptr)
 
 let int32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I32.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v x))) e
-              ** pure (ET.elen e == SZ.v int32_t_sizeof /\ ET.read_ok e int32_t_ctype))
+              ** pure (ET.elen e == SZ.v int32_t_sizeof /\ int32_t_etype_ok e))
   ** pure (aligned a int32_t_alignof)
 
 let int32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v int32_t_sizeof /\ aligned a int32_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+                        /\ ET.elen e == len b /\ int32_t_etype_ok e)
 
 let int32_t_repr_no_prov (x: I32.t) (b: bytes)
   : Lemma (requires int32_t_repr x b)
@@ -534,7 +534,7 @@ ghost fn int32_t_reveal (a: ptr) (#p: perm) (#x: I32.t)
   requires int32_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (int32_t_repr x b /\ aligned a int32_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+                      /\ ET.elen e == len b /\ int32_t_etype_ok e)
 {
   unfold int32_t_pts_to a p x;
 }
@@ -543,7 +543,7 @@ ghost fn int32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: I3
   requires mem_pts_to_at a p b e
   requires pure (int32_t_repr x b)
   requires pure (aligned a int32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+  requires pure (ET.elen e == len b /\ int32_t_etype_ok e)
   ensures  int32_t_pts_to a p x
 {
   fold int32_t_pts_to a p x;
@@ -561,7 +561,7 @@ ghost fn int32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I32.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (int32_t_repr x b)
   requires pure (aligned a int32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+  requires pure (ET.elen e == len b /\ int32_t_etype_ok e)
   ensures  int32_t_pts_to a 1.0R x
 {
   fold int32_t_pts_to a 1.0R x;
@@ -570,7 +570,7 @@ ghost fn int32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I32.t)
 ghost fn int32_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v int32_t_sizeof /\ aligned a int32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
+  requires pure (ET.elen e == len b /\ int32_t_etype_ok e)
   ensures  int32_t_pts_to_uninit a
 {
   fold int32_t_pts_to_uninit a;
@@ -590,13 +590,13 @@ ghost fn int32_t_reveal_uninit (a: ptr)
 
 let int64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I64.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v x))) e
-              ** pure (ET.elen e == SZ.v int64_t_sizeof /\ ET.read_ok e int64_t_ctype))
+              ** pure (ET.elen e == SZ.v int64_t_sizeof /\ int64_t_etype_ok e))
   ** pure (aligned a int64_t_alignof)
 
 let int64_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v int64_t_sizeof /\ aligned a int64_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+                        /\ ET.elen e == len b /\ int64_t_etype_ok e)
 
 let int64_t_repr_no_prov (x: I64.t) (b: bytes)
   : Lemma (requires int64_t_repr x b)
@@ -669,7 +669,7 @@ ghost fn int64_t_reveal (a: ptr) (#p: perm) (#x: I64.t)
   requires int64_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (int64_t_repr x b /\ aligned a int64_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+                      /\ ET.elen e == len b /\ int64_t_etype_ok e)
 {
   unfold int64_t_pts_to a p x;
 }
@@ -678,7 +678,7 @@ ghost fn int64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: I6
   requires mem_pts_to_at a p b e
   requires pure (int64_t_repr x b)
   requires pure (aligned a int64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+  requires pure (ET.elen e == len b /\ int64_t_etype_ok e)
   ensures  int64_t_pts_to a p x
 {
   fold int64_t_pts_to a p x;
@@ -696,7 +696,7 @@ ghost fn int64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I64.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (int64_t_repr x b)
   requires pure (aligned a int64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+  requires pure (ET.elen e == len b /\ int64_t_etype_ok e)
   ensures  int64_t_pts_to a 1.0R x
 {
   fold int64_t_pts_to a 1.0R x;
@@ -705,7 +705,7 @@ ghost fn int64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: I64.t)
 ghost fn int64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v int64_t_sizeof /\ aligned a int64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
+  requires pure (ET.elen e == len b /\ int64_t_etype_ok e)
   ensures  int64_t_pts_to_uninit a
 {
   fold int64_t_pts_to_uninit a;
@@ -725,13 +725,13 @@ ghost fn int64_t_reveal_uninit (a: ptr)
 
 let uint16_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U16.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v uint16_t_sizeof) None (U16.v x)) e
-              ** pure (ET.elen e == SZ.v uint16_t_sizeof /\ ET.read_ok e uint16_t_ctype))
+              ** pure (ET.elen e == SZ.v uint16_t_sizeof /\ uint16_t_etype_ok e))
   ** pure (aligned a uint16_t_alignof)
 
 let uint16_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v uint16_t_sizeof /\ aligned a uint16_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+                        /\ ET.elen e == len b /\ uint16_t_etype_ok e)
 
 let uint16_t_repr_no_prov (x: U16.t) (b: bytes)
   : Lemma (requires uint16_t_repr x b)
@@ -803,7 +803,7 @@ ghost fn uint16_t_reveal (a: ptr) (#p: perm) (#x: U16.t)
   requires uint16_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (uint16_t_repr x b /\ aligned a uint16_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+                      /\ ET.elen e == len b /\ uint16_t_etype_ok e)
 {
   unfold uint16_t_pts_to a p x;
 }
@@ -812,7 +812,7 @@ ghost fn uint16_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U
   requires mem_pts_to_at a p b e
   requires pure (uint16_t_repr x b)
   requires pure (aligned a uint16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+  requires pure (ET.elen e == len b /\ uint16_t_etype_ok e)
   ensures  uint16_t_pts_to a p x
 {
   fold uint16_t_pts_to a p x;
@@ -830,7 +830,7 @@ ghost fn uint16_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U16.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (uint16_t_repr x b)
   requires pure (aligned a uint16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+  requires pure (ET.elen e == len b /\ uint16_t_etype_ok e)
   ensures  uint16_t_pts_to a 1.0R x
 {
   fold uint16_t_pts_to a 1.0R x;
@@ -839,7 +839,7 @@ ghost fn uint16_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U16.t)
 ghost fn uint16_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint16_t_sizeof /\ aligned a uint16_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
+  requires pure (ET.elen e == len b /\ uint16_t_etype_ok e)
   ensures  uint16_t_pts_to_uninit a
 {
   fold uint16_t_pts_to_uninit a;
@@ -859,13 +859,13 @@ ghost fn uint16_t_reveal_uninit (a: ptr)
 
 let uint64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U64.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v uint64_t_sizeof) None (U64.v x)) e
-              ** pure (ET.elen e == SZ.v uint64_t_sizeof /\ ET.read_ok e uint64_t_ctype))
+              ** pure (ET.elen e == SZ.v uint64_t_sizeof /\ uint64_t_etype_ok e))
   ** pure (aligned a uint64_t_alignof)
 
 let uint64_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v uint64_t_sizeof /\ aligned a uint64_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+                        /\ ET.elen e == len b /\ uint64_t_etype_ok e)
 
 let uint64_t_repr_no_prov (x: U64.t) (b: bytes)
   : Lemma (requires uint64_t_repr x b)
@@ -937,7 +937,7 @@ ghost fn uint64_t_reveal (a: ptr) (#p: perm) (#x: U64.t)
   requires uint64_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (uint64_t_repr x b /\ aligned a uint64_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+                      /\ ET.elen e == len b /\ uint64_t_etype_ok e)
 {
   unfold uint64_t_pts_to a p x;
 }
@@ -946,7 +946,7 @@ ghost fn uint64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: U
   requires mem_pts_to_at a p b e
   requires pure (uint64_t_repr x b)
   requires pure (aligned a uint64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+  requires pure (ET.elen e == len b /\ uint64_t_etype_ok e)
   ensures  uint64_t_pts_to a p x
 {
   fold uint64_t_pts_to a p x;
@@ -964,7 +964,7 @@ ghost fn uint64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U64.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (uint64_t_repr x b)
   requires pure (aligned a uint64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+  requires pure (ET.elen e == len b /\ uint64_t_etype_ok e)
   ensures  uint64_t_pts_to a 1.0R x
 {
   fold uint64_t_pts_to a 1.0R x;
@@ -973,7 +973,7 @@ ghost fn uint64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U64.t)
 ghost fn uint64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint64_t_sizeof /\ aligned a uint64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
+  requires pure (ET.elen e == len b /\ uint64_t_etype_ok e)
   ensures  uint64_t_pts_to_uninit a
 {
   fold uint64_t_pts_to_uninit a;
@@ -1025,13 +1025,13 @@ let size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < pow2 64) (ensures SZ.fi
 
 let size_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: SZ.t) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v size_t_sizeof) None (SZ.v x)) e
-              ** pure (ET.elen e == SZ.v size_t_sizeof /\ ET.read_ok e size_t_ctype))
+              ** pure (ET.elen e == SZ.v size_t_sizeof /\ size_t_etype_ok e))
   ** pure (aligned a size_t_alignof)
 
 let size_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v size_t_sizeof /\ aligned a size_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+                        /\ ET.elen e == len b /\ size_t_etype_ok e)
 
 let size_t_repr_no_prov (x: SZ.t) (b: bytes)
   : Lemma (requires size_t_repr x b)
@@ -1103,7 +1103,7 @@ ghost fn size_t_reveal (a: ptr) (#p: perm) (#x: SZ.t)
   requires size_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (size_t_repr x b /\ aligned a size_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+                      /\ ET.elen e == len b /\ size_t_etype_ok e)
 {
   unfold size_t_pts_to a p x;
 }
@@ -1112,7 +1112,7 @@ ghost fn size_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: SZ.
   requires mem_pts_to_at a p b e
   requires pure (size_t_repr x b)
   requires pure (aligned a size_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+  requires pure (ET.elen e == len b /\ size_t_etype_ok e)
   ensures  size_t_pts_to a p x
 {
   fold size_t_pts_to a p x;
@@ -1130,7 +1130,7 @@ ghost fn size_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: SZ.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (size_t_repr x b)
   requires pure (aligned a size_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+  requires pure (ET.elen e == len b /\ size_t_etype_ok e)
   ensures  size_t_pts_to a 1.0R x
 {
   fold size_t_pts_to a 1.0R x;
@@ -1139,7 +1139,7 @@ ghost fn size_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: SZ.t)
 ghost fn size_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v size_t_sizeof /\ aligned a size_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e size_t_ctype)
+  requires pure (ET.elen e == len b /\ size_t_etype_ok e)
   ensures  size_t_pts_to_uninit a
 {
   fold size_t_pts_to_uninit a;
@@ -1163,7 +1163,7 @@ ghost fn size_t_reveal_uninit (a: ptr)
 let uint8_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v uint8_t_sizeof /\ aligned a uint8_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
+                        /\ ET.elen e == len b /\ uint8_t_etype_ok e)
 
 let uint8_t_repr_no_prov (x: U8.t) (b: bytes)
   : Lemma (requires uint8_t_repr x b)
@@ -1243,7 +1243,7 @@ ghost fn uint8_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U8.t)
   requires mem_pts_to_at a 1.0R b e
   requires pure (uint8_t_repr x b)
   requires pure (aligned a uint8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
+  requires pure (ET.elen e == len b /\ uint8_t_etype_ok e)
   ensures  uint8_t_pts_to a 1.0R x
 {
   uint8_t_conceal a #1.0R #b #e #x;
@@ -1252,7 +1252,7 @@ ghost fn uint8_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: U8.t)
 ghost fn uint8_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint8_t_sizeof /\ aligned a uint8_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
+  requires pure (ET.elen e == len b /\ uint8_t_etype_ok e)
   ensures  uint8_t_pts_to_uninit a
 {
   fold uint8_t_pts_to_uninit a;
@@ -1437,13 +1437,13 @@ ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
 
 let float32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float32) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v float32_t_sizeof) None (float32_bits x)) e
-              ** pure (ET.elen e == SZ.v float32_t_sizeof /\ ET.read_ok e float32_t_ctype))
+              ** pure (ET.elen e == SZ.v float32_t_sizeof /\ float32_t_etype_ok e))
   ** pure (aligned a float32_t_alignof)
 
 let float32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v float32_t_sizeof /\ aligned a float32_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+                        /\ ET.elen e == len b /\ float32_t_etype_ok e)
 
 let float32_t_repr_no_prov (x: float32) (b: bytes)
   : Lemma (requires float32_t_repr x b)
@@ -1516,7 +1516,7 @@ ghost fn float32_t_reveal (a: ptr) (#p: perm) (#x: float32)
   requires float32_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (float32_t_repr x b /\ aligned a float32_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+                      /\ ET.elen e == len b /\ float32_t_etype_ok e)
 {
   unfold float32_t_pts_to a p x;
 }
@@ -1525,7 +1525,7 @@ ghost fn float32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: 
   requires mem_pts_to_at a p b e
   requires pure (float32_t_repr x b)
   requires pure (aligned a float32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+  requires pure (ET.elen e == len b /\ float32_t_etype_ok e)
   ensures  float32_t_pts_to a p x
 {
   fold float32_t_pts_to a p x;
@@ -1543,7 +1543,7 @@ ghost fn float32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: float32)
   requires mem_pts_to_at a 1.0R b e
   requires pure (float32_t_repr x b)
   requires pure (aligned a float32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+  requires pure (ET.elen e == len b /\ float32_t_etype_ok e)
   ensures  float32_t_pts_to a 1.0R x
 {
   fold float32_t_pts_to a 1.0R x;
@@ -1552,7 +1552,7 @@ ghost fn float32_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: float32)
 ghost fn float32_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v float32_t_sizeof /\ aligned a float32_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float32_t_ctype)
+  requires pure (ET.elen e == len b /\ float32_t_etype_ok e)
   ensures  float32_t_pts_to_uninit a
 {
   fold float32_t_pts_to_uninit a;
@@ -1572,13 +1572,13 @@ ghost fn float32_t_reveal_uninit (a: ptr)
 
 let float64_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: float64) : slprop =
   (exists* e. mem_pts_to_at a p (encode (SZ.v float64_t_sizeof) None (float64_bits x)) e
-              ** pure (ET.elen e == SZ.v float64_t_sizeof /\ ET.read_ok e float64_t_ctype))
+              ** pure (ET.elen e == SZ.v float64_t_sizeof /\ float64_t_etype_ok e))
   ** pure (aligned a float64_t_alignof)
 
 let float64_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
   exists* b e. mem_pts_to_at a 1.0R b e
                ** pure (len b == SZ.v float64_t_sizeof /\ aligned a float64_t_alignof
-                        /\ ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+                        /\ ET.elen e == len b /\ float64_t_etype_ok e)
 
 let float64_t_repr_no_prov (x: float64) (b: bytes)
   : Lemma (requires float64_t_repr x b)
@@ -1651,7 +1651,7 @@ ghost fn float64_t_reveal (a: ptr) (#p: perm) (#x: float64)
   requires float64_t_pts_to a p x
   ensures  exists* b e. mem_pts_to_at a p b e
              ** pure (float64_t_repr x b /\ aligned a float64_t_alignof
-                      /\ ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+                      /\ ET.elen e == len b /\ float64_t_etype_ok e)
 {
   unfold float64_t_pts_to a p x;
 }
@@ -1660,7 +1660,7 @@ ghost fn float64_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: 
   requires mem_pts_to_at a p b e
   requires pure (float64_t_repr x b)
   requires pure (aligned a float64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+  requires pure (ET.elen e == len b /\ float64_t_etype_ok e)
   ensures  float64_t_pts_to a p x
 {
   fold float64_t_pts_to a p x;
@@ -1678,7 +1678,7 @@ ghost fn float64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: float64)
   requires mem_pts_to_at a 1.0R b e
   requires pure (float64_t_repr x b)
   requires pure (aligned a float64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+  requires pure (ET.elen e == len b /\ float64_t_etype_ok e)
   ensures  float64_t_pts_to a 1.0R x
 {
   fold float64_t_pts_to a 1.0R x;
@@ -1687,7 +1687,7 @@ ghost fn float64_t_claim (a: ptr) (#b: bytes) (#e: ET.etypes) (x: float64)
 ghost fn float64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v float64_t_sizeof /\ aligned a float64_t_alignof)
-  requires pure (ET.elen e == len b /\ ET.read_ok e float64_t_ctype)
+  requires pure (ET.elen e == len b /\ float64_t_etype_ok e)
   ensures  float64_t_pts_to_uninit a
 {
   fold float64_t_pts_to_uninit a;
