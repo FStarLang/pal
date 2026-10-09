@@ -103,6 +103,7 @@
  * ---------------------------------------------------------------------------
  */
 
+#include "pal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,6 +111,17 @@
 #include <stddef.h>
 #include <limits.h>
 #include <inttypes.h>
+
+/* `<stdio.h>` declares the format string as a plain `const char *`, which PAL
+   reads as a pointer to a single `char` -- so passing a string literal, which
+   is an array, does not typecheck.  Redeclaring it with `_array` says what C
+   means.  `_array` expands to an attribute, so this agrees with the header's
+   declaration and a real compiler accepts both; outside a PAL run it expands
+   to nothing and this file still compiles and runs as ordinary C.  Nothing
+   about the variadic part needs saying: PAL already evaluates each variadic
+   argument in order, keeping its side effects, and only the call itself is
+   unmodelled. */
+int printf(const _array char *fmt, ...);
 
 /* ------------------------------------------------------------------ */
 /* Plumbing: opaque sinks so the optimizer cannot delete the accesses. */
