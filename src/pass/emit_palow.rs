@@ -191,11 +191,13 @@ impl FieldShape {
     fn pts_to(&self, at: &str, value: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} p {}", pn, at, value),
-            FieldShape::Unaligned { pn } => format!("elem_pts_to {}_repr {} p {}", pn, at, value),
+            FieldShape::Unaligned { pn } => {
+                format!("elem_pts_to {}_repr {}_etype_ok {} p {}", pn, pn, at, value)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
-                    "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p {}",
-                    pn, esize, pn, at, value
+                    "array_pts_to {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} p {}",
+                    pn, pn, esize, pn, at, value
                 )
             }
         }
@@ -232,11 +234,13 @@ impl FieldShape {
     fn pts_to_at(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} {} {}", pn, a, p, v),
-            FieldShape::Unaligned { pn } => format!("elem_pts_to {}_repr {} {} {}", pn, a, p, v),
+            FieldShape::Unaligned { pn } => {
+                format!("elem_pts_to {}_repr {}_etype_ok {} {} {}", pn, pn, a, p, v)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
-                    "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} {} {}",
-                    pn, esize, pn, a, p, v
+                    "array_pts_to {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {} {}",
+                    pn, pn, esize, pn, a, p, v
                 )
             }
         }
@@ -245,11 +249,13 @@ impl FieldShape {
     fn uninit_at(&self, a: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to_uninit {}", pn, a),
-            FieldShape::Unaligned { pn } => format!("bytes_uninit {} (SizeT.v {}_sizeof)", a, pn),
+            FieldShape::Unaligned { pn } => {
+                format!("bytes_uninit {}_etype_ok {} (SizeT.v {}_sizeof)", pn, a, pn)
+            }
             FieldShape::Array { pn, esize, len } => {
                 format!(
-                    "array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {}",
-                    pn, esize, pn, len, a
+                    "array_pts_to_uninit {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {}",
+                    pn, pn, esize, pn, len, a
                 )
             }
             FieldShape::Flex { .. } => NO_FLEX_STORAGE.to_string(),
@@ -257,15 +263,20 @@ impl FieldShape {
     }
 
     /// Bytes in, ownership out.
-    fn conceal(&self, a: &str, p: &str, b: &str, v: &str) -> String {
+    fn conceal(&self, a: &str, p: &str, b: &str, e: &str, v: &str) -> String {
         match self {
-            FieldShape::One { pn } => format!("{}_conceal {} #{} #{} #{};", pn, a, p, b, v),
+            FieldShape::One { pn } => {
+                format!("{}_conceal {} #{} #{} #{} #{};", pn, a, p, b, e, v)
+            }
             FieldShape::Unaligned { pn } => {
-                format!("elem_conceal {}_repr {} #{} #{} #{};", pn, a, p, b, v)
+                format!(
+                    "elem_conceal {}_repr {}_etype_ok {} #{} #{} #{} #{};",
+                    pn, pn, a, p, b, e, v
+                )
             }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => format!(
-                "array_conceal {}_repr {} {}sz {}_alignof #{} #{} #{};",
-                pn, a, esize, pn, p, b, v
+                "array_conceal {}_repr {}_etype_ok {} {}sz {}_alignof #{} #{} #{} #{};",
+                pn, pn, a, esize, pn, p, b, e, v
             ),
         }
     }
@@ -274,28 +285,94 @@ impl FieldShape {
     fn reveal(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_reveal {} #{} #{};", pn, a, p, v),
-            FieldShape::Unaligned { pn } => format!("elem_reveal {}_repr {} #{} #{};", pn, a, p, v),
+            FieldShape::Unaligned { pn } => {
+                format!(
+                    "elem_reveal {}_repr {}_etype_ok {} #{} #{};",
+                    pn, pn, a, p, v
+                )
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
-                    "array_reveal {}_repr {} {}sz {}_alignof #{} #{};",
-                    pn, a, esize, pn, p, v
+                    "array_reveal {}_repr {}_etype_ok {} {}sz {}_alignof #{} #{};",
+                    pn, pn, a, esize, pn, p, v
                 )
             }
         }
     }
 
-    /// Bytes of the right length in, storage out.
-    fn claim_uninit(&self, a: &str, b: &str) -> String {
+    /// The effective-type side condition this field's storage has to meet,
+    /// over an index term. Every type publishes `{name}_etype_ok` -- the
+    /// scalar layer, generated structs and generated unions alike -- so a
+    /// containing type can state its own condition without knowing what kind
+    /// of type each member is. An array states its condition elementwise
+    /// instead, with the same `elems_ok` the array combinators use.
+    fn etype_ok(&self, e: &str) -> Option<String> {
         match self {
-            FieldShape::One { pn } => format!("{}_claim_uninit {} #{};", pn, a, b),
-            FieldShape::Unaligned { pn } => {
-                format!("bytes_claim_uninit {} (SizeT.v {}_sizeof) #{};", a, pn, b)
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                Some(format!("{}_etype_ok {}", pn, e))
+            }
+            FieldShape::Array { pn, esize, len } => {
+                Some(format!("elems_ok {}_etype_ok {} {} {}", pn, esize, len, e))
+            }
+            // A flexible array member is not part of its struct's type, so it
+            // contributes no condition: whatever is stored past the last real
+            // member is separately typed.
+            FieldShape::Flex { .. } => None,
+        }
+    }
+
+    /// The proof that storage carrying no effective type at all -- a union's
+    /// storage, or a fresh allocation -- meets `etype_ok`.
+    fn etype_ok_untyped(&self, e: &str) -> String {
+        match self {
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                format!("{}_etype_ok_untyped {}; ", pn, e)
+            }
+            FieldShape::Array { pn, esize, len } => {
+                format!(
+                    "{pn}_etype_ok_untyped_all (); elems_ok_untyped {pn}_etype_ok {esize} {len} {e}; ",
+                    pn = pn,
+                    esize = esize,
+                    len = len,
+                    e = e
+                )
+            }
+            FieldShape::Flex { .. } => String::new(),
+        }
+    }
+
+    /// The proof that storage a store at this member's type has just produced
+    /// meets `etype_ok`. This is where a union member switch lands.
+    fn etype_ok_read_ok(&self, e: &str) -> String {
+        match self {
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                format!("{}_etype_ok_read_ok_all (); ", pn)
             }
             FieldShape::Array { pn, esize, len } => format!(
-                "array_claim_all_uninit {}_repr {} {}sz {}_alignof {}sz #{};",
-                pn, a, esize, pn, len, b
+                "{pn}_etype_ok_read_ok_all (); \
+                 elems_ok_read_ok {pn}_etype_ok {pn}_ctype {esize} {len} {e}; ",
+                pn = pn,
+                esize = esize,
+                len = len,
+                e = e
             ),
-            FieldShape::Flex { .. } => format!("{} {} {};", NO_FLEX_STORAGE, a, b),
+            FieldShape::Flex { .. } => String::new(),
+        }
+    }
+
+    /// Bytes of the right length in, storage out.
+    fn claim_uninit(&self, a: &str, b: &str, e: &str) -> String {
+        match self {
+            FieldShape::One { pn } => format!("{}_claim_uninit {} #{} #{};", pn, a, b, e),
+            FieldShape::Unaligned { pn } => format!(
+                "bytes_claim_uninit {}_etype_ok {} (SizeT.v {}_sizeof) #{} #{};",
+                pn, a, pn, b, e
+            ),
+            FieldShape::Array { pn, esize, len } => format!(
+                "array_claim_all_uninit {}_repr {}_etype_ok {} {}sz {}_alignof {}sz #{} #{};",
+                pn, pn, a, esize, pn, len, b, e
+            ),
+            FieldShape::Flex { .. } => format!("{} {} {} {};", NO_FLEX_STORAGE, a, b, e),
         }
     }
 
@@ -323,12 +400,13 @@ impl FieldShape {
     fn uninit(&self, at: &str) -> Option<String> {
         match self {
             FieldShape::One { pn } => Some(format!("{}_pts_to_uninit {}", pn, at)),
-            FieldShape::Unaligned { pn } => {
-                Some(format!("bytes_uninit {} (SizeT.v {}_sizeof)", at, pn))
-            }
+            FieldShape::Unaligned { pn } => Some(format!(
+                "bytes_uninit {}_etype_ok {} (SizeT.v {}_sizeof)",
+                pn, at, pn
+            )),
             FieldShape::Array { pn, esize, len } => Some(format!(
-                "array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {}",
-                pn, esize, pn, len, at
+                "array_pts_to_uninit {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {}",
+                pn, pn, esize, pn, len, at
             )),
             // No storage view, so the struct as a whole gets none either:
             // there is no such thing as an uninitialised `struct vec`,
@@ -336,6 +414,167 @@ impl FieldShape {
             FieldShape::Flex { .. } => None,
         }
     }
+}
+
+/// The `sizeof` of each type the condition lemmas mention, normalised to a
+/// literal. Those lemmas are a chain of per-member bridges, every one of
+/// which carries an arithmetic side condition of the form
+/// `elen (Seq.slice e off end) == SizeT.v t_sizeof`. Each is trivial on its
+/// own, but a struct with dozens of members asks the solver to unfold the
+/// same handful of `sizeof` definitions dozens of times, and it gives up.
+/// Stating each one once, by normalisation rather than by SMT, keeps the
+/// query linear in the number of members.
+fn sizeof_norms(own: Option<(&str, u64)>, shapes: &[(&FieldShape, u64)]) -> String {
+    let mut seen: Vec<(String, u64)> = Vec::new();
+    let mut push = |n: String, v: u64| {
+        if !seen.iter().any(|(m, _)| *m == n) {
+            seen.push((n, v));
+        }
+    };
+    if let Some((n, v)) = own {
+        push(format!("{}_sizeof", n), v);
+    }
+    for (shape, size) in shapes {
+        match shape {
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                push(format!("{}_sizeof", pn), *size)
+            }
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
+                push(format!("{}_sizeof", pn), *esize)
+            }
+        }
+    }
+    seen.into_iter()
+        .map(|(n, v)| format!("assert_norm (SizeT.v {} == {}); ", n, v))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// `sizeof_norms` for a generated struct: its own size, and the element size
+/// of every member its condition mentions.
+fn struct_norms(si: &StructInfo, sn: &str) -> String {
+    let shapes: Vec<(&FieldShape, u64)> = si
+        .fields
+        .iter()
+        .filter(|f| f.size > 0)
+        .map(|f| (&f.shape, f.size))
+        .collect();
+    sizeof_norms(Some((sn, si.size)), &shapes)
+}
+
+/// `sizeof_norms` for a generated union: its own size, and the size of every
+/// member.
+fn union_norms(ui: &UnionInfo, un: &str) -> String {
+    let shapes: Vec<(&FieldShape, u64)> = ui
+        .members
+        .iter()
+        .filter(|m| m.size > 0)
+        .map(|m| (&m.shape, m.size))
+        .collect();
+    sizeof_norms(Some((un, ui.size)), &shapes)
+}
+
+/// Whether a generated type's effective-type condition depends on the *value*
+/// stored in it. A union's does -- which member is live is a fact about the
+/// value, and only the live member's type is readable -- and so does that of
+/// any struct holding one, however deep. Everything else publishes a
+/// condition on the index alone, and for those `{t}_live_ok x e` is defined
+/// to be `{t}_etype_ok e`, so the two can be used interchangeably.
+fn live_dependent(tds: &Typedefs, pn: &str) -> bool {
+    if let Some(u) = pn.strip_prefix("union_") {
+        if tds.unions.contains_key(u) {
+            return true;
+        }
+    }
+    if let Some(s) = pn.strip_prefix("struct_") {
+        if let Some(si) = tds.structs.get(s) {
+            return si.fields.iter().any(|f| match &f.shape {
+                FieldShape::One { pn } => live_dependent(tds, pn),
+                // An array of such types would need a value-dependent array
+                // layer, which there is not: `elems_ok` takes a predicate on
+                // the index alone. Such a field keeps the storage condition.
+                _ => false,
+            });
+        }
+    }
+    false
+}
+
+/// Whether a generated type publishes a `_live_ok` at all. Only generated
+/// structs and unions do; the scalar layer has no value-dependent condition
+/// to publish.
+fn has_live_ok(tds: &Typedefs, pn: &str) -> bool {
+    pn.strip_prefix("union_")
+        .is_some_and(|u| tds.unions.contains_key(u))
+        || pn
+            .strip_prefix("struct_")
+            .is_some_and(|s| tds.structs.contains_key(s))
+}
+
+/// The condition a member's storage has to meet when the containing object is
+/// *holding a value*: a `_live_ok` where that is a different thing from the
+/// storage condition, and the storage condition everywhere else.
+fn live_ok_of(tds: &Typedefs, shape: &FieldShape, v: &str, e: &str) -> Option<String> {
+    match shape {
+        FieldShape::One { pn } if has_live_ok(tds, pn) => {
+            Some(format!("{}_live_ok {} {}", pn, v, e))
+        }
+        _ => shape.etype_ok(e),
+    }
+}
+
+/// The proof that storage a store at this member's type has just produced
+/// meets the member's *live* condition.
+fn live_ok_read_ok_of(tds: &Typedefs, shape: &FieldShape, v: &str, e: &str) -> String {
+    match shape {
+        FieldShape::One { pn } if has_live_ok(tds, pn) => {
+            format!("{}_live_ok_read_ok {} {}; ", pn, v, e)
+        }
+        _ => shape.etype_ok_read_ok(e),
+    }
+}
+
+/// The proof that a member's live condition implies its storage condition.
+fn live_ok_etype_ok_of(tds: &Typedefs, shape: &FieldShape, v: &str, e: &str) -> String {
+    match shape {
+        FieldShape::One { pn } if has_live_ok(tds, pn) => {
+            format!("{}_live_ok_etype_ok {} {}; ", pn, v, e)
+        }
+        _ => String::new(),
+    }
+}
+
+/// The ghost steps that retype a union member's slice of the index to the
+/// member's own type, between the split that isolates it and the claim that
+/// hands out the member's resource.
+///
+/// A character member takes a different route: 6.5p6 exempts stores through a
+/// character lvalue from installing an effective type at all, so the index
+/// does not move (`store_char_identity`) and the bytes are readable as
+/// characters because they are well formed (`read_char_ok`). The ordinary
+/// route is not merely unnecessary there, it is unavailable: `store_ok`'s
+/// re-typing disjunct is explicitly withheld from character stores.
+fn store_chain(mct: &str, msz: u64, ind: &str) -> String {
+    let lines: Vec<String> = if mct == "int8_t_ctype" || mct == "uint8_t_ctype" {
+        vec![
+            format!("mem_pts_to_at_wf a;"),
+            format!("mem_store_etypes a {};", mct),
+            format!("ET.store_char_identity (Seq.slice e 0 {});", msz),
+            format!("ET.read_char_ok (Seq.slice e 0 {});", msz),
+        ]
+    } else {
+        vec![
+            format!("ET.allocated_store_ok (Seq.slice e 0 {}) {};", msz, mct),
+            format!("mem_store_etypes a {};", mct),
+            format!("ET.store_ok_read_ok (Seq.slice e 0 {}) {};", msz, mct),
+            format!("ET.allocated_store_etypes (Seq.slice e 0 {}) {};", msz, mct),
+        ]
+    };
+    lines
+        .iter()
+        .map(|l| format!("{}\n{}", l, ind))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// The Palow types that have unaligned accesses, in
@@ -3770,62 +4009,63 @@ fn emit_fn(
 
         // `T *p` owns one `T`; `T p[]` owns a sequence of them. Same F* type,
         // different contract.
-        let (vty, pts_to): (String, Box<dyn Fn(&str, &str) -> String>) =
-            match extent(tds, &arg.ty).unwrap() {
-                Extent::One => {
-                    let pn = pn.clone();
-                    let p = pname.clone();
+        let (vty, pts_to): (String, Box<dyn Fn(&str, &str) -> String>) = match extent(tds, &arg.ty)
+            .unwrap()
+        {
+            Extent::One => {
+                let pn = pn.clone();
+                let p = pname.clone();
+                (
+                    vty,
+                    Box::new(move |perm: &str, v: &str| {
+                        format!("{}_pts_to {} {} {}", pn, p, perm, v)
+                    }),
+                )
+            }
+            Extent::Array => {
+                if !has_repr(tds, pt) {
+                    return Err(format!(
+                        "parameter {} is an array of {}, which has no byte-level `_repr`",
+                        pname,
+                        describe(tds.resolve(pt))
+                    ));
+                }
+                arrays.insert(base.clone());
+                let esize = palow_sizeof(tds, pt).ok_or_else(|| {
+                    format!("parameter {} is an array of {}", pname, describe(pt))
+                })?;
+                let pn = pn.clone();
+                let p = pname.clone();
+                // `_out` says the callee is handed storage rather than a
+                // value, and storage is the `option` view: the length is
+                // fixed -- it is what the caller allocated -- but no
+                // element is promised to hold anything. Keeping the
+                // sequence as a binder rather than hiding it behind
+                // `array_pts_to_uninit` is what lets `a._length` go on
+                // meaning `Seq.length` of it.
+                if arg.mode == ParamMode::Out {
                     (
-                        vty,
+                        format!("Seq.seq (option ({}))", vty),
                         Box::new(move |perm: &str, v: &str| {
-                            format!("{}_pts_to {} {} {}", pn, p, perm, v)
+                            format!(
+                                "array_pts_to (maybe_repr {pn}_repr {esize}) {pn}_etype_ok {esize} \
+                                     (SizeT.v {pn}_alignof) {p} {perm} {v}"
+                            )
+                        }),
+                    )
+                } else {
+                    (
+                        format!("Seq.seq {}", vty),
+                        Box::new(move |perm: &str, v: &str| {
+                            format!(
+                                "array_pts_to {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {} {}",
+                                pn, pn, esize, pn, p, perm, v
+                            )
                         }),
                     )
                 }
-                Extent::Array => {
-                    if !has_repr(tds, pt) {
-                        return Err(format!(
-                            "parameter {} is an array of {}, which has no byte-level `_repr`",
-                            pname,
-                            describe(tds.resolve(pt))
-                        ));
-                    }
-                    arrays.insert(base.clone());
-                    let esize = palow_sizeof(tds, pt).ok_or_else(|| {
-                        format!("parameter {} is an array of {}", pname, describe(pt))
-                    })?;
-                    let pn = pn.clone();
-                    let p = pname.clone();
-                    // `_out` says the callee is handed storage rather than a
-                    // value, and storage is the `option` view: the length is
-                    // fixed -- it is what the caller allocated -- but no
-                    // element is promised to hold anything. Keeping the
-                    // sequence as a binder rather than hiding it behind
-                    // `array_pts_to_uninit` is what lets `a._length` go on
-                    // meaning `Seq.length` of it.
-                    if arg.mode == ParamMode::Out {
-                        (
-                            format!("Seq.seq (option ({}))", vty),
-                            Box::new(move |perm: &str, v: &str| {
-                                format!(
-                                    "array_pts_to (maybe_repr {pn}_repr {esize}) {esize} \
-                                     (SizeT.v {pn}_alignof) {p} {perm} {v}"
-                                )
-                            }),
-                        )
-                    } else {
-                        (
-                            format!("Seq.seq {}", vty),
-                            Box::new(move |perm: &str, v: &str| {
-                                format!(
-                                    "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} {} {}",
-                                    pn, esize, pn, p, perm, v
-                                )
-                            }),
-                        )
-                    }
-                }
-            };
+            }
+        };
         // The deep half of the parameter's ownership. A struct pointer in C
         // almost always means the struct *and* what its pointers reach; the
         // two are separate predicates here, so the contract states both. A
@@ -3961,7 +4201,7 @@ fn emit_fn(
                     format!("{}'", vname),
                     format!("Seq.seq {}", plain),
                     format!(
-                        "array_pts_to {pn}_repr {esize} (SizeT.v {pn}_alignof) \
+                        "array_pts_to {pn}_repr {pn}_etype_ok {esize} (SizeT.v {pn}_alignof) \
                          {pname} 1.0R {vname}' ** \
                          pure (Seq.length {vname}' == Seq.length (reveal {vname}))"
                     ),
@@ -5192,7 +5432,9 @@ fn emit_fn(
         && ret_block.is_none()
         && is_void_ptr(tds, &decl.ret_type)
         && (out.contains(&format!("mem_pts_to ({})", ret_name))
-            || out.contains(&format!("mem_pts_to {}", ret_name)))
+            || out.contains(&format!("mem_pts_to {}", ret_name))
+            || out.contains(&format!("mem_pts_to_at ({})", ret_name))
+            || out.contains(&format!("mem_pts_to_at {}", ret_name)))
     {
         ret_block = Some(RetBlock {
             pn: String::new(),
@@ -6128,6 +6370,79 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     );
+    // The effective-type conditions a union's storage has to meet.
+    //
+    // `_etype_ok` is the *storage* condition, the one a union publishes to a
+    // struct or array that contains it, and it says the bytes carry no
+    // effective type at all. That is not a shortcut: 6.5.2.3p3 and its
+    // footnote permit reading any member of a union object, so the bytes have
+    // to admit a read at every member's type at once, and "carries no
+    // effective type" says exactly that. It also splits and rejoins, which a
+    // conjunction of per-member `read_ok`s does not.
+    //
+    // `_live_ok` is the condition on a union that is *holding a value*, and
+    // names only the live member. It has to: a member focus hands the client
+    // the member's own typed resource, which records `read_ok` at the
+    // member's type and nothing else, so that is all the matching unfocus can
+    // put back.
+    c += &format!(
+        "#push-options \"--z3rlimit 20\"\nlet {un}_etype_ok (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {un}_sizeof /\\ ET.allocated e\n\n\
+         let {un}_etype_ok_none ()\n  : Lemma ({un}_etype_ok (ET.etypes_none (SizeT.v {un}_sizeof)))\n  = ()\n\n\
+         let {un}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {un}_sizeof)\n          (ensures  {un}_etype_ok e)\n  = ()\n\n         let {un}_etype_ok_untyped_all ()\n  : Lemma (forall (e: ET.etypes). ET.untyped e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {un}_etype_ok_untyped)\n\n\
+         let {un}_etype_ok_read_ok_all ()\n  : Lemma (forall (e: ET.etypes). ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_etype_ok e)\n  = ()\n\n",
+        un = un
+    );
+    c += &format!(
+        "let {un}_live_ok (u: {un}) (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {un}_sizeof /\\ ET.allocated e /\\\n  (match u with\n{arms}  )\n\n",
+        un = un,
+        arms = ui
+            .members
+            .iter()
+            .map(|m| {
+                let sl = format!("(Seq.slice e 0 {})", m.size);
+                format!(
+                    "   | {} v -> {}\n",
+                    ctor(m),
+                    live_ok_of(tds, &m.shape, "v", &sl).unwrap_or_else(|| "True".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    );
+    // A live union still meets the storage condition -- that condition says
+    // only that the bytes are allocated and of the right length -- and
+    // storage that a store at the union's own type produced is live at every
+    // member, since `read_ok` at a union is `read_ok` at each of its members.
+    // The second is what lets a containing object be concealed as a whole.
+    c += &format!(
+        "let {un}_live_ok_etype_ok (u: {un}) (e: ET.etypes)\n  : Lemma (requires {un}_live_ok u e) (ensures {un}_etype_ok e)\n  = ()\n\n\
+         let {un}_live_ok_read_ok (u: {un}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof)\n          (ensures  {un}_live_ok u e)\n  = {norms}\n    match u with\n{arms}\n\
+         let {un}_live_ok_read_ok_all ()\n  : Lemma (forall (u: {un}) (e: ET.etypes). ET.read_ok e {un}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {un}_sizeof ==> {un}_live_ok u e)\n  = FStar.Classical.forall_intro_2 (fun (u: {un}) (e: ET.etypes) -> FStar.Classical.move_requires ({un}_live_ok_read_ok u) e)\n\n#pop-options\n\n",
+        un = un,
+        norms = union_norms(ui, &un),
+        arms = ui
+            .members
+            .iter()
+            .map(|m| {
+                let sl = format!("(Seq.slice e 0 {})", m.size);
+                // A zero-size member covers no bytes, so there is no access to
+                // justify: `access_ok` is false at a type of size zero, and
+                // the member's condition is about the empty slice alone.
+                let pf = match ctype_of_shape(&m.shape).filter(|_| m.size > 0) {
+                    Some(ct) => format!(
+                        "assert_norm (ET.access_ok {un}_ctype 0 {ct}); ET.read_ok_sub e {un}_ctype 0 {ct}; ET.allocated_slice e 0 {sz}; {br}",
+                        un = un,
+                        ct = ct,
+                        sz = m.size,
+                        br = live_ok_read_ok_of(tds, &m.shape, "v", &sl)
+                    ),
+                    None => format!("ET.allocated_slice e 0 {}; ", m.size),
+                };
+                format!("    | {} v -> {}()\n", ctor(m), pf)
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    );
     // Every member of a union starts where the object does, so an object
     // aligned for the union is aligned for each member: the members are what
     // the union alignment is the maximum of. Pure arithmetic on numerals.
@@ -6184,10 +6499,12 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
 
     c += &format!(
         "let {un}_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop =\n  \
-         exists* b. mem_pts_to a p b ** pure ({un}_repr u b /\\ aligned a {un}_alignof)\n\n\
+         exists* b e. mem_pts_to_at a p b e\n             \
+         ** pure ({un}_repr u b /\\ aligned a {un}_alignof /\\ {un}_live_ok u e)\n\n\
          let {un}_pts_to_uninit ([@@@mkey] a: ptr) : slprop =\n  \
-         exists* b. mem_pts_to a 1.0R b\n             \
-         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\n",
+         exists* b e. mem_pts_to_at a 1.0R b e\n             \
+         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof\n                      \
+         /\\ {un}_etype_ok e)\n\n",
         un = un
     );
 
@@ -6204,8 +6521,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         // is shorter than telling them apart.
         c += &format!(
             "let {un}_rest_{f} (a: ptr) (p: perm) : slprop =\n  \
-             exists* r. mem_pts_to (a +! {msz}sz) p r\n             \
-             ** pure (len r == {rest} /\\ aligned a {un}_alignof)\n\n",
+             exists* r er. mem_pts_to_at (a +! {msz}sz) p r er\n             \
+             ** pure (len r == {rest} /\\ aligned a {un}_alignof\n                      /\\ ET.elen er == len r /\\ ET.allocated er)\n\n",
             un = un,
             f = f,
             msz = m.size,
@@ -6218,18 +6535,23 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              \x20 ensures  {un}_rest_{f} a p\n\
              {{\n  \
              unfold {un}_pts_to a p ({k} v);\n  \
-             with b. assert (mem_pts_to a p b ** pure ({un}_repr ({k} v) b));\n  \
+             with b e. assert (mem_pts_to_at a p b e\n    \
+             ** pure ({un}_repr ({k} v) b /\\ {un}_live_ok ({k} v) e));\n  \
              {un}_member_aligned a;\n  \
-             mem_split a {msz}sz;\n  \
+             mem_split_at a {msz}sz;\n  \
              {conceal}\n  \
              fold {un}_rest_{f} a p;\n}}\n\n",
             un = un,
             f = f,
             k = k,
             pts = mem_pts_to("p", "v"),
-            conceal = m
-                .shape
-                .conceal("a", "p", &format!("(slice b 0 {})", m.size), "v"),
+            conceal = m.shape.conceal(
+                "a",
+                "p",
+                &format!("(slice b 0 {})", m.size),
+                &format!("(Seq.slice e 0 {})", m.size),
+                "v",
+            ),
             mty = mty,
             msz = m.size
         );
@@ -6240,11 +6562,12 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              \x20 ensures  {un}_pts_to a p ({k} v)\n\
              {{\n  \
              {reveal}\n  \
-             with bx. assert (mem_pts_to a p bx ** pure ({repr}));\n  \
+             with bx ex. assert (mem_pts_to_at a p bx ex ** pure ({repr}));\n  \
              unfold {un}_rest_{f} a p;\n  \
-             with r. assert (mem_pts_to (a +! {msz}sz) p r);\n  \
-             mem_join a #p #bx #r {msz}sz;\n  \
+             with r er. assert (mem_pts_to_at (a +! {msz}sz) p r er);\n  \
+             mem_join_at a #p #bx #r #ex #er {msz}sz;\n  \
              append_slice_left bx r;\n  \
+             Seq.lemma_eq_intro (Seq.slice (Seq.append ex er) 0 {msz}) ex;\n  \
              fold {un}_pts_to a p ({k} v);\n}}\n\n",
             un = un,
             f = f,
@@ -6265,17 +6588,37 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              \x20 ensures  {un}_rest_{f} a 1.0R\n\
              {{\n  \
              unfold {un}_pts_to a 1.0R u;\n  \
-             with b. assert (mem_pts_to a 1.0R b ** pure ({un}_repr u b));\n  \
+             with b e. assert (mem_pts_to_at a 1.0R b e\n    \
+             ** pure ({un}_repr u b /\\ {un}_live_ok u e));\n  \
              {un}_member_aligned a;\n  \
-             mem_split a {msz}sz;\n  \
+             mem_split_at a {msz}sz;\n  \
+             ET.allocated_slice e 0 {msz};\n  \
+             ET.allocated_slice e {msz} (ET.elen e);\n  \
+             {store}             {bridge}\n  \
              {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
             f = f,
             uninit = mem_uninit,
-            claim = m
-                .shape
-                .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
+            store = store_chain(
+                &ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+                m.size,
+                "  ",
+            ),
+            bridge = m.shape.etype_ok_read_ok(&format!(
+                "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                m.size,
+                ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+            )),
+            claim = m.shape.claim_uninit(
+                "a",
+                &format!("(slice b 0 {})", m.size),
+                &format!(
+                    "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                    m.size,
+                    ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+                ),
+            ),
             msz = m.size
         );
         // The same step from storage that has never held anything. A local
@@ -6291,17 +6634,37 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              \x20 ensures  {un}_rest_{f} a 1.0R\n\
              {{\n  \
              unfold {un}_pts_to_uninit a;\n  \
-             with b. assert (mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof));\n  \
+             with b e. assert (mem_pts_to_at a 1.0R b e\n    \
+             ** pure (len b == SizeT.v {un}_sizeof /\\ {un}_etype_ok e));\n  \
              {un}_member_aligned a;\n  \
-             mem_split a {msz}sz;\n  \
+             mem_split_at a {msz}sz;\n  \
+             ET.allocated_slice e 0 {msz};\n  \
+             ET.allocated_slice e {msz} (ET.elen e);\n  \
+             {store}             {bridge}\n  \
              {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
             f = f,
             uninit = mem_uninit,
-            claim = m
-                .shape
-                .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
+            store = store_chain(
+                &ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+                m.size,
+                "  ",
+            ),
+            bridge = m.shape.etype_ok_read_ok(&format!(
+                "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                m.size,
+                ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+            )),
+            claim = m.shape.claim_uninit(
+                "a",
+                &format!("(slice b 0 {})", m.size),
+                &format!(
+                    "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                    m.size,
+                    ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+                ),
+            ),
             msz = m.size
         );
     }
@@ -6388,23 +6751,27 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     // know it is a union: storage in, storage out, and the loss of knowledge
     // in between.
     c += &format!(
-        "ghost fn {un}_claim_uninit (a: ptr) (#b: bytes)\n\
-         \x20 requires mem_pts_to a 1.0R b\n\
+        "ghost fn {un}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
+         \x20 requires mem_pts_to_at a 1.0R b e\n\
          \x20 requires pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\
+         \x20 requires pure ({un}_etype_ok e)\n\
          \x20 ensures  {un}_pts_to_uninit a\n\
          {{\n  fold {un}_pts_to_uninit a;\n}}\n\n\
          ghost fn {un}_reveal_uninit (a: ptr)\n\
          \x20 requires {un}_pts_to_uninit a\n\
-         \x20 ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof)\n\
-         {{\n  unfold {un}_pts_to_uninit a;\n}}\n\n\
-         ghost fn {un}_conceal (a: ptr) (#p: perm) (#b: bytes) (#u: {un})\n\
-         \x20 requires mem_pts_to a p b\n\
+         \x20 ensures  exists* b. mem_pts_to a 1.0R b\n             \
+         ** pure (len b == SizeT.v {un}_sizeof)\n\
+         {{\n  unfold {un}_pts_to_uninit a;\n  mem_hide_etypes a;\n}}\n\n\
+         ghost fn {un}_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#u: {un})\n\
+         \x20 requires mem_pts_to_at a p b e\n\
          \x20 requires pure ({un}_repr u b /\\ aligned a {un}_alignof)\n\
+         \x20 requires pure ({un}_live_ok u e)\n\
          \x20 ensures  {un}_pts_to a p u\n\
          {{\n  fold {un}_pts_to a p u;\n}}\n\n\
          ghost fn {un}_reveal (a: ptr) (#p: perm) (#u: {un})\n\
          \x20 requires {un}_pts_to a p u\n\
-         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({un}_repr u b)\n\
+         \x20 ensures  exists* b e. mem_pts_to_at a p b e\n             \
+         ** pure ({un}_repr u b /\\ {un}_live_ok u e)\n\
          {{\n  unfold {un}_pts_to a p u;\n}}\n\n",
         un = un
     );
@@ -6423,7 +6790,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          fn {un}_stack_free (a: ptr)\n\
          \x20 requires {un}_pts_to_uninit a\n\
          \x20 ensures  emp\n\
-         {{\n  unfold {un}_pts_to_uninit a;\n  mem_stack_free a;\n}}\n\n",
+         {{\n  {un}_reveal_uninit a;\n  mem_stack_free a;\n}}\n\n",
         un = un
     );
     // Storing a whole union value is the one operation that has to know which
@@ -6440,19 +6807,40 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     for m in &ui.members {
         c += &format!(
             "    {k} v -> {{\n      \
-             with b. assert (mem_pts_to a 1.0R b);\n      \
+             with b e. assert (mem_pts_to_at a 1.0R b e\n        \
+             ** pure (len b == SizeT.v {un}_sizeof /\\ {un}_etype_ok e));\n      \
              {un}_member_aligned a;\n      \
-             mem_split a {msz}sz;\n      \
-             {claim}\n      \
+             mem_split_at a {msz}sz;\n      \
+             ET.allocated_slice e 0 {msz};\n      \
+             ET.allocated_slice e {msz} (ET.elen e);\n      \
+             {store}             {bridge}\n      \
+             {claim}
+      \
              {write}\n      \
              fold {un}_rest_{f} a 1.0R;\n      \
              {un}_unfocus_{f} a;\n      \
              rewrite ({un}_pts_to a 1.0R ({k} v)) as ({un}_pts_to a 1.0R x);\n    }}\n",
             k = ctor(m),
             f = m.name,
-            claim = m
-                .shape
-                .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
+            store = store_chain(
+                &ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string()),
+                m.size,
+                "      ",
+            ),
+            bridge = m.shape.etype_ok_read_ok(&format!(
+                "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                m.size,
+                ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+            )),
+            claim = m.shape.claim_uninit(
+                "a",
+                &format!("(slice b 0 {})", m.size),
+                &format!(
+                    "(ET.store_etypes (Seq.slice e 0 {}) {})",
+                    m.size,
+                    ctype_of_shape(&m.shape).unwrap_or_else(|| "()".to_string())
+                ),
+            ),
             write = m.shape.write_uninit("a", "v"),
             un = un,
             msz = m.size
@@ -6522,8 +6910,8 @@ impl OwnItem {
         match self.esize {
             None => format!("{}_pts_to {} {} {}", self.pn, self.at, p, v),
             Some(es) => format!(
-                "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} {} {}",
-                self.pn, es, self.pn, self.at, p, v
+                "array_pts_to {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {} {}",
+                self.pn, self.pn, es, self.pn, self.at, p, v
             ),
         }
     }
@@ -6846,6 +7234,154 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     );
+    // The effective-type side condition this type's storage has to meet before
+    // it can be claimed: each field's slice of the index admits a read at that
+    // field's type. Stated *pointwise*, per field, rather than as `read_ok e
+    // {sn}_ctype` for the whole object, for the reason given in
+    // `Pulse.Lib.C.Palow.Array`: `read_ok` splits but does not rejoin, so an
+    // object-level condition could not be re-established by any join. Padding
+    // is deliberately left out; nothing reads it.
+    c += &format!(
+        "let {sn}_etype_ok (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {sn}_sizeof /\\ ET.allocated e{cs}\n\n",
+        sn = sn,
+        cs = si
+            .fields
+            .iter()
+            .filter(|f| f.size > 0)
+            .filter_map(|f| {
+                let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                Some(format!(" /\\\n  {}", f.shape.etype_ok(&sl)?))
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    );
+    // The bridge from a whole-object `read_ok` to each field's condition, one
+    // top-level lemma per field. Inlining them all into one proof asks the
+    // solver a single query with a hypothesis per field -- a struct with
+    // dozens of members times out on it -- while each of these stays the same
+    // size no matter how large the struct is.
+    for (i, f) in si
+        .fields
+        .iter()
+        .filter(|f| f.size > 0)
+        .enumerate()
+        .filter(|(_, f)| ctype_of_shape(&f.shape).is_some())
+    {
+        let ct = ctype_of_shape(&f.shape).unwrap();
+        let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+        let Some(cond) = f.shape.etype_ok(&sl) else {
+            continue;
+        };
+        c += &format!(
+            "#push-options \"--z3rlimit 50\"\nlet {sn}_etype_ok_read_ok_fld{i} (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {cond})\n  = {norms}\n    assert_norm (ET.access_ok {sn}_ctype {off} {ct}); ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}()\n#pop-options\n\n",
+            sn = sn,
+            i = i,
+            cond = cond,
+            norms = sizeof_norms(Some((&sn, si.size)), &[(&f.shape, f.size)]),
+            off = f.offset,
+            end = f.offset + f.size,
+            ct = ct,
+            br = f.shape.etype_ok_read_ok(&sl)
+        );
+    }
+    // Storage that carries no effective type at all meets it, which is where
+    // a struct member of a union gets its condition from.
+    c += &format!(
+        "#push-options \"--z3rlimit 20\"\nlet {sn}_etype_ok_untyped (e: ET.etypes)\n  : Lemma (requires ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {norms}{es}()\n\n         let {sn}_etype_ok_untyped_all ()\n  : Lemma (forall (e: ET.etypes). ET.untyped e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {sn}_etype_ok_untyped)\n\n\
+         let {sn}_etype_ok_read_ok (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_etype_ok e)\n  = {norms}\n    {er}()\n\n\
+         let {sn}_etype_ok_read_ok_all ()\n  : Lemma (forall (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_etype_ok e)\n  = FStar.Classical.forall_intro (FStar.Classical.move_requires {sn}_etype_ok_read_ok)\n\n\
+         let {sn}_etype_ok_none ()\n  : Lemma ({sn}_etype_ok (ET.etypes_none (SizeT.v {sn}_sizeof)))\n  = ET.untyped_none (SizeT.v {sn}_sizeof);\n    ET.allocated_none (SizeT.v {sn}_sizeof);\n    {sn}_etype_ok_untyped (ET.etypes_none (SizeT.v {sn}_sizeof))\n\n",
+        sn = sn,
+        norms = struct_norms(si, &sn),
+        er = si
+            .fields
+            .iter()
+            .filter(|f| f.size > 0)
+            .enumerate()
+            .filter(|(_, f)| ctype_of_shape(&f.shape).is_some())
+            .map(|(i, _)| format!("{sn}_etype_ok_read_ok_fld{i} e; ", sn = sn, i = i))
+            .collect::<Vec<_>>()
+            .join(""),
+        es = si
+            .fields
+            .iter()
+            .filter(|f| f.size > 0)
+            .map(|f| {
+                let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                format!(
+                    "ET.untyped_slice e {} {}; {}",
+                    f.offset,
+                    f.offset + f.size,
+                    f.shape.etype_ok_untyped(&sl)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    );
+    // The condition on an object of this type that is *holding a value*. For
+    // a struct with no union anywhere in it this is the storage condition
+    // itself -- nothing about the index depends on the value -- and is
+    // defined to be exactly that, so the two are interchangeable. For a
+    // struct that does hold a union, the union field contributes its live
+    // member's condition instead, which is all a member unfocus can give
+    // back, and the two conditions genuinely differ.
+    c += &if live_dependent(tds, &sn) {
+        format!(
+            "let {sn}_live_ok (x: {sn}) (e: ET.etypes) : prop =\n  ET.elen e == SizeT.v {sn}_sizeof /\\ ET.allocated e{cs}\n\n\
+             let {sn}_live_ok_etype_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires {sn}_live_ok x e) (ensures {sn}_etype_ok e)\n  = {el}()\n\n\
+             let {sn}_live_ok_read_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_live_ok x e)\n  = {norms}\n    {er}()\n\n\
+             let {sn}_live_ok_read_ok_all ()\n  : Lemma (forall (x: {sn}) (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_live_ok x e)\n  = FStar.Classical.forall_intro_2 (fun (x: {sn}) (e: ET.etypes) -> FStar.Classical.move_requires ({sn}_live_ok_read_ok x) e)\n\n#pop-options\n\n",
+            sn = sn,
+            norms = struct_norms(si, &sn),
+            cs = si
+                .fields
+                .iter()
+                .filter(|f| f.size > 0)
+                .filter_map(|f| {
+                    let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                    let v = format!("(x).fld_{}", f.name);
+                    Some(format!(" /\\\n  {}", live_ok_of(tds, &f.shape, &v, &sl)?))
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            el = si
+                .fields
+                .iter()
+                .filter(|f| f.size > 0)
+                .map(|f| {
+                    let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                    live_ok_etype_ok_of(tds, &f.shape, &format!("(x).fld_{}", f.name), &sl)
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            er = si
+                .fields
+                .iter()
+                .filter(|f| f.size > 0)
+                .filter_map(|f| {
+                    let ct = ctype_of_shape(&f.shape)?;
+                    let sl = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+                    Some(format!(
+                        "assert_norm (ET.access_ok {sn}_ctype {off} {ct}); ET.read_ok_sub e {sn}_ctype {off} {ct}; ET.allocated_slice e {off} {end}; {br}",
+                        sn = sn,
+                        off = f.offset,
+                        end = f.offset + f.size,
+                        ct = ct,
+                        br = live_ok_read_ok_of(tds, &f.shape, &format!("(x).fld_{}", f.name), &sl)
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        )
+    } else {
+        format!(
+            "let {sn}_live_ok (x: {sn}) (e: ET.etypes) : prop = {sn}_etype_ok e\n\n\
+             let {sn}_live_ok_etype_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires {sn}_live_ok x e) (ensures {sn}_etype_ok e)\n  = ()\n\n\
+             let {sn}_live_ok_read_ok (x: {sn}) (e: ET.etypes)\n  : Lemma (requires ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof)\n          (ensures  {sn}_live_ok x e)\n  = {sn}_etype_ok_read_ok e\n\n\
+             let {sn}_live_ok_read_ok_all ()\n  : Lemma (forall (x: {sn}) (e: ET.etypes). ET.read_ok e {sn}_ctype /\\ ET.allocated e /\\ ET.elen e == SizeT.v {sn}_sizeof ==> {sn}_live_ok x e)\n  = {sn}_etype_ok_read_ok_all ()\n\n#pop-options\n\n",
+            sn = sn
+        )
+    };
     // Every field of an object of this type is aligned for its own type, and
     // by nothing deeper than arithmetic on numerals: the offset is a multiple
     // of the field's alignment, and the field's alignment divides the
@@ -6897,6 +7433,50 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             conj = cs.join("\n                    /\\ "),
             proof = ps.join(";\n    ")
         );
+        // And the same facts one at a time. `{sn}_field_aligned` is a single
+        // `n`-way conjunction, which is what every step that builds a whole
+        // object wants; a step that claims one field wants one conjunct, and
+        // getting it from the conjunction means splitting `n` ways. Worse,
+        // proving the conjunct inline makes the solver do modular arithmetic
+        // on two definitions inside whatever context it is called from -- and
+        // in the sixty-nine-field struct of `test/dpe` that context is large
+        // enough that the last field's goal times out. Proved here, each is
+        // one implication with nothing else in scope.
+        for f in &si.fields {
+            if palow_alignof(tds, &f.ty).is_none() && !matches!(f.shape, FieldShape::Flex { .. }) {
+                continue;
+            }
+            // An unaligned field has no alignment to state, so it gets no
+            // lemma -- `aligned_at` returns `None` for the same reason.
+            if matches!(f.shape, FieldShape::Unaligned { .. }) {
+                continue;
+            }
+            let pn = f.shape.pn();
+            let (at, proof) = if f.offset == 0 {
+                (
+                    "a".to_string(),
+                    format!("aligned_divides a {sn}_alignof {pn}_alignof"),
+                )
+            } else {
+                (
+                    format!("(a +! {sn}_offsetof_{})", f.name),
+                    format!(
+                        "aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof",
+                        f.name
+                    ),
+                )
+            };
+            c += &format!(
+                "\nlet {sn}_field_aligned_{fld} (a: ptr)\n  \
+                 : Lemma (requires aligned a {sn}_alignof)\n          \
+                 (ensures  aligned {at} {pn}_alignof)\n  = {proof}\n",
+                sn = sn,
+                fld = f.name,
+                at = at,
+                pn = pn,
+                proof = proof
+            );
+        }
     }
 
     // The field points-to at a given record expression, for every field but
@@ -7210,6 +7790,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         let pn = pn_of(f);
         r += &format!(
             "  {pn}_reveal (a +! {sn}_offsetof_{f});
+               mem_hide_etypes (a +! {sn}_offsetof_{f});
                with v. assert (mem_pts_to (a +! {sn}_offsetof_{f}) p v **              pure ({pn}_repr x.fld_{f} v));
                {pn}_repr_len x.fld_{f} v;
                drop_mem_pts_to_nil (a +! {sn}_offsetof_{f});
@@ -7220,8 +7801,10 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         );
     }
     let mut accs: Vec<String> = Vec::new();
+    let mut eaccs: Vec<String> = Vec::new();
     for (k, reg) in regions.iter().enumerate() {
         let v = format!("r{}", k);
+        let ev = format!("q{}", k);
         match reg {
             Region::Field(f) => {
                 let pn = pn_of(f);
@@ -7233,9 +7816,13 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                     f.shape.pts_to_at(&at(f.offset), "p", &val)
                 );
                 r += &format!("  {}\n", f.shape.reveal(&at(f.offset), "p", &val));
+                // The field keeps its index: a struct's condition is the
+                // conjunction of its fields' own, so the byte-level view it
+                // hands back has to carry them.
                 r += &format!(
-                    "  with {v}. assert (mem_pts_to {at} p {v} ** pure ({pn}_repr {val} {v}));\n",
+                    "  with {v} {e}. assert (mem_pts_to_at {at} p {v} {e} ** pure ({pn}_repr {val} {v}));\n",
                     v = v,
+                    e = ev,
                     at = at(f.offset),
                     pn = pn,
                     val = val
@@ -7243,9 +7830,13 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 r += &format!("  {}_repr_len {} {};\n", pn, val, v);
             }
             Region::Gap(off, n) => {
+                // Padding has no condition, but it still needs *an* index to
+                // join with: `mem_show_etypes` names the one it already has.
+                r += &format!("  mem_show_etypes {};\n", at(*off));
                 r += &format!(
-                    "  with {v}. assert (mem_pts_to {at} p {v} ** pure (len {v} == {n}));\n",
+                    "  with {v} {e}. assert (mem_pts_to_at {at} p {v} {e} ** pure (len {v} == {n}));\n",
                     v = v,
+                    e = ev,
                     at = at(*off),
                     n = n
                 );
@@ -7256,9 +7847,14 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         } else {
             format!("(append {} {})", accs[k - 1], v)
         });
+        eaccs.push(if k == 0 {
+            ev
+        } else {
+            format!("(Seq.append {} {})", eaccs[k - 1], ev)
+        });
     }
     for reg in regions.iter().skip(1) {
-        r += &format!("  mem_join a {}sz;\n", reg.offset());
+        r += &format!("  mem_join_at a {}sz;\n", reg.offset());
     }
     // Every field's slice of the finished object has to be recognised as the
     // bytes that field was revealed to. Peeling the appends off from the
@@ -7268,15 +7864,25 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         let (lo, hi) = (f.offset, f.offset + f.size);
         for k in (j + 1..regions.len()).rev() {
             r += &format!(
-                "  slice_append_left_at {} r{} {} {};\n",
+                "  slice_append_left_at {} r{} {} {};\n  etypes_slice_append_left {} q{} {} {};\n",
                 accs[k - 1],
+                k,
+                lo,
+                hi,
+                eaccs[k - 1],
                 k,
                 lo,
                 hi
             );
         }
         if j > 0 {
-            r += &format!("  append_slice_right {} r{};\n", accs[j - 1], j);
+            r += &format!(
+                "  append_slice_right {} r{};\n  etypes_append_right {} q{};\n",
+                accs[j - 1],
+                j,
+                eaccs[j - 1],
+                j
+            );
         }
     }
     r += &format!(
@@ -7287,7 +7893,8 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     c += &format!(
         "ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
-         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({sn}_repr x b)\n\
+         \x20 ensures  exists* b e. mem_pts_to_at a p b e\n\
+         \x20            ** pure ({sn}_repr x b /\\ {sn}_live_ok x e)\n\
          {{\n{r}}}\n\n",
         sn = sn,
         r = r
@@ -7298,16 +7905,24 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     let mut hi = si.size;
     for reg in regions.iter().skip(1).rev() {
         let off = reg.offset();
-        w += &format!("  mem_split a {}sz;\n", off);
+        w += &format!("  mem_split_at a {}sz;\n", off);
         w += &format!("  slice_prefix b {hi} 0 {off};\n", hi = hi, off = off);
         w += &format!("  slice_prefix b {hi} {off} {hi};\n", hi = hi, off = off);
         hi = off;
     }
+    // A gap is padding: nobody can read it at a type, so its index is simply
+    // forgotten.
+    for reg in regions.iter() {
+        let Region::Gap(off, _) = reg else { continue };
+        w += &format!("  mem_hide_etypes {};\n", at(*off));
+    }
     for f in &si.fields {
-        let pn = pn_of(f);
         if f.size == 0 {
+            // A zero-size member owns no bytes, so there is no index to
+            // carve out of the struct's: `mem_show_etypes` names the empty
+            // one the (empty) range already has.
             w += &format!(
-                "  mem_pts_to_nil {at} p (slice b {lo} {lo});\n",
+                "  mem_pts_to_nil {at} p (slice b {lo} {lo});\n  mem_show_etypes {at};\n",
                 at = at(f.offset),
                 lo = f.offset
             );
@@ -7318,6 +7933,13 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 &at(f.offset),
                 "p",
                 &format!("(slice b {} {})", f.offset, f.offset + f.size),
+                // A zero-size member gets no slice to name: there is no byte
+                // for the index to be about.
+                &if f.size == 0 {
+                    "_".to_string()
+                } else {
+                    format!("(Seq.slice e {} {})", f.offset, f.offset + f.size)
+                },
                 &format!("(x.fld_{})", f.name)
             )
         );
@@ -7330,9 +7952,10 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         );
     }
     c += &format!(
-        "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: {sn})\n\
-         \x20 requires mem_pts_to a p b\n\
-         \x20 requires pure ({sn}_repr x b /\\ aligned a {sn}_alignof)\n{iv}\
+        "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (#x: {sn})\n\
+         \x20 requires mem_pts_to_at a p b e\n\
+         \x20 requires pure ({sn}_repr x b /\\ aligned a {sn}_alignof)\n\
+         \x20 requires pure ({sn}_live_ok x e)\n{iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
          {{\n  {sn}_field_aligned a;\n{w}  fold {sn}_padding a p;\n  fold {sn}_pts_to a p x;\n}}\n\n",
         sn = sn,
@@ -7344,18 +7967,32 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     // the generic array layer's view of one slot, stated over the element's
     // representation, so these are the byte-level view read in the other
     // direction and nothing more.
+    // A struct holding a union has no `_of_elem`: the array layer's view of a
+    // slot states a condition on the index alone, and that condition cannot
+    // say which member of the union is live, so there is nothing to rebuild
+    // the object's live condition from. The other direction loses that
+    // information rather than needing it, so it stays.
+    if !live_dependent(tds, &sn) {
+        c += &format!(
+            "ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn})\n\
+             \x20 requires elem_pts_to {sn}_repr {sn}_etype_ok a p x\n\
+             \x20 requires pure (aligned a {sn}_alignof)\n\
+             {iv}\
+             \x20 ensures  {sn}_pts_to a p x\n\
+             {{\n  elem_reveal {sn}_repr {sn}_etype_ok a;\n  \
+             {sn}_conceal a #p #_ #_ #x;\n}}\n\n",
+            iv = struct_inv_req(si, &sn, "x"),
+            sn = sn
+        );
+    }
     c += &format!(
-        "ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn})\n\
-         \x20 requires elem_pts_to {sn}_repr a p x\n\
-         \x20 requires pure (aligned a {sn}_alignof)\n\
-         {iv}\
-         \x20 ensures  {sn}_pts_to a p x\n\
-         {{\n  elem_reveal {sn}_repr a;\n  {sn}_conceal a #p #_ #x;\n}}\n\n\
-         ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n\
+        "ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
-         \x20 ensures  elem_pts_to {sn}_repr a p x\n\
-         {{\n  {sn}_reveal a;\n  elem_conceal {sn}_repr a #p #_ #x;\n}}\n\n",
-        iv = struct_inv_req(si, &sn, "x"),
+         \x20 ensures  elem_pts_to {sn}_repr {sn}_etype_ok a p x\n\
+         {{\n  {sn}_reveal a;\n  \
+         with b e. assert (mem_pts_to_at a p b e);\n  \
+         {sn}_live_ok_etype_ok x e;\n  \
+         elem_conceal {sn}_repr {sn}_etype_ok a #p #_ #_ #x;\n}}\n\n",
         sn = sn
     );
     c
@@ -7392,37 +8029,37 @@ fn emit_fill(pn: &str, elem: &str, esize: u64, len: u64) -> String {
     let tmpl = "\
 fn rec {f}_from (a: ptr) (vs: (s: Seq.seq {t} {{ Seq.length s == {n} }})) (k: SizeT.t)
                 (#xs: erased (xs: Seq.seq (option {t}) {{ Seq.length xs == {n} }}))
-  requires array_pts_to (maybe_repr {pn}_repr {es}) {es} {aln} a 1.0R xs
+  requires array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} {aln} a 1.0R xs
   requires pure (SizeT.v k <= {n} /\\
                  (forall (j: nat). j < SizeT.v k ==> Seq.index xs j == Some (Seq.index vs j)))
-  ensures  array_pts_to {pn}_repr {es} {aln} a 1.0R vs
+  ensures  array_pts_to {pn}_repr {pn}_etype_ok {es} {aln} a 1.0R vs
   decreases ({n} - SizeT.v k)
 {{
   if (SizeT.lt k {n}sz) {{
-    array_focus (maybe_repr {pn}_repr {es}) a {es}sz {al} k ({es}sz `SizeT.mul` k);
-    elem_maybe_reveal {pn}_repr {es}sz {at};
+    array_focus (maybe_repr {pn}_repr {es}) {pn}_etype_ok a {es}sz {al} k ({es}sz `SizeT.mul` k);
+    elem_maybe_reveal {pn}_repr {pn}_etype_ok {es}sz {at};
     {pn}_claim_uninit {at};
     {pn}_write_uninit {at} (Seq.index vs (SizeT.v k));
     {pn}_to_elem {at};
-    elem_maybe_put {pn}_repr {es}sz {at};
-    array_unfocus (maybe_repr {pn}_repr {es}) a {es}sz {al} k ({es}sz `SizeT.mul` k);
+    elem_maybe_put {pn}_repr {pn}_etype_ok {es}sz {at};
+    array_unfocus (maybe_repr {pn}_repr {es}) {pn}_etype_ok a {es}sz {al} k ({es}sz `SizeT.mul` k);
     {f}_from a vs (k `SizeT.add` 1sz);
   }} else {{
-    array_claim_all {pn}_repr a {es}sz {al} vs;
+    array_claim_all {pn}_repr {pn}_etype_ok a {es}sz {al} vs;
   }}
 }}
 
 fn {f}_fill (a: ptr) (vs: (s: Seq.seq {t} {{ Seq.length s == {n} }}))
-  requires array_pts_to_uninit {pn}_repr {es} {aln} {n} a
-  ensures  array_pts_to {pn}_repr {es} {aln} a 1.0R vs
+  requires array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} {aln} {n} a
+  ensures  array_pts_to {pn}_repr {pn}_etype_ok {es} {aln} a 1.0R vs
 {{
-  unfold array_pts_to_uninit {pn}_repr {es} {aln} {n} a;
+  unfold array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} {aln} {n} a;
   {f}_from a vs 0sz;
 }}
 
 fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == SizeT.v k }}))
                 (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs == {n} }}))
-  preserves array_pts_to {pn}_repr {es} {aln} a p xs
+  preserves array_pts_to {pn}_repr {pn}_etype_ok {es} {aln} a p xs
   requires pure (SizeT.v k <= {n} /\\
                  (forall (j: nat). j < SizeT.v k ==> Seq.index acc j == Seq.index xs j))
   returns  r : (s: Seq.seq {t} {{ Seq.length s == {n} }})
@@ -7430,11 +8067,11 @@ fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == S
   decreases ({n} - SizeT.v k)
 {{
   if (SizeT.lt k {n}sz) {{
-    array_focus {pn}_repr a {es}sz {al} k ({es}sz `SizeT.mul` k);
+    array_focus {pn}_repr {pn}_etype_ok a {es}sz {al} k ({es}sz `SizeT.mul` k);
     {pn}_of_elem {at};
     let v = {pn}_read {at};
     {pn}_to_elem {at};
-    array_unfocus_read {pn}_repr a {es}sz {al} k ({es}sz `SizeT.mul` k);
+    array_unfocus_read {pn}_repr {pn}_etype_ok a {es}sz {al} k ({es}sz `SizeT.mul` k);
     {f}_upto a (k `SizeT.add` 1sz) (Seq.snoc acc v)
   }} else {{
     Seq.lemma_eq_intro acc (reveal xs);
@@ -7443,7 +8080,7 @@ fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == S
 }}
 
 fn {f}_read (a: ptr) (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs == {n} }}))
-  preserves array_pts_to {pn}_repr {es} {aln} a p xs
+  preserves array_pts_to {pn}_repr {pn}_etype_ok {es} {aln} a p xs
   returns  r : (s: Seq.seq {t} {{ Seq.length s == {n} }})
   ensures  pure (r == reveal xs)
 {{
@@ -7521,7 +8158,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     // the `option` view: `array_pts_to_uninit` hides the sequence, and a
     // loop's invariant has to name it.
     let flex_uninit = format!(
-        "array_pts_to (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) {at} 1.0R \
+        "array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {at} 1.0R \
          (Seq.create (SizeT.v n) (None #{el}))",
         pn = fpn,
         es = fes,
@@ -7648,7 +8285,8 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         }
         FieldShape::Array { pn, esize, len } => {
             *alloc += &format!(
-                "  array_claim_all_uninit {}_repr {} {}sz {}_alignof {}sz{};\n",
+                "  array_claim_all_uninit {}_repr {}_etype_ok {} {}sz {}_alignof {}sz{};\n",
+                pn,
                 pn,
                 at(f.offset),
                 esize,
@@ -7657,7 +8295,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
                 if f.size == 0 { " #(uninit 0)" } else { "" }
             );
             *alloc += &format!(
-                "  rewrite (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off})\n    as (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}));\n",
+                "  rewrite (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} {off})\n    as (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}));\n",
                 pn = pn,
                 es = esize,
                 n = len,
@@ -7674,21 +8312,53 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     // type's zero. Everything before the tail is claimed as storage either
     // way -- the source writes those fields, and a field it does not write is
     // a field the object cannot be gathered from.
+    // The index is untyped on the way in, and `untyped_slice` carries that
+    // through the splits; all the claims need on top of it is each type's own
+    // "untyped storage meets my condition", which cannot be applied by name
+    // because after a chain of splits the slice is several `Seq.slice` deep.
     let carve = |zeroed: bool| {
         let mut alloc = String::new();
+        let mut hinted: Vec<String> = Vec::new();
+        for f in si.fields.iter() {
+            let (pn, arr) = match &f.shape {
+                FieldShape::One { pn } | FieldShape::Unaligned { pn } => (pn.clone(), None),
+                FieldShape::Array { pn, esize, len } => (pn.clone(), Some((*esize, *len))),
+                FieldShape::Flex { pn, esize } => (pn.clone(), Some((*esize, 0))),
+            };
+            if !hinted.contains(&pn) {
+                hinted.push(pn.clone());
+                alloc += &format!("  {}_etype_ok_untyped_all ();\n", pn);
+            }
+            if let Some((es, len)) = arr {
+                if std::ptr::eq(f, flex) {
+                    alloc += &format!(
+                        "  elems_ok_untyped_all {pn}_etype_ok {es} (SizeT.v n);\n",
+                        pn = pn,
+                        es = es
+                    );
+                } else {
+                    alloc += &format!(
+                        "  elems_ok_untyped_all {pn}_etype_ok {es} {len};\n",
+                        pn = pn,
+                        es = es,
+                        len = len
+                    );
+                }
+            }
+        }
         for off in bounds.iter().rev() {
-            alloc += &format!("  mem_split a {}sz;\n", off);
+            alloc += &format!("  mem_split_at a {}sz;\n", off);
             match field_at(*off) {
                 Some(f) if std::ptr::eq(f, flex) => {
                     if zeroed {
                         alloc += &format!(
-                            "  array_claim_zeroed {pn}_repr {off} {es}sz {pn}_alignof n #z;\n  array_claim_all {pn}_repr {off} {es}sz {pn}_alignof (Seq.create (SizeT.v n) z);\n",
+                            "  array_claim_zeroed {pn}_repr {pn}_etype_ok {off} {es}sz {pn}_alignof n #z;\n  array_claim_all {pn}_repr {pn}_etype_ok {off} {es}sz {pn}_alignof (Seq.create (SizeT.v n) z);\n",
                             pn = fpn,
                             off = at(f.offset),
                             es = fes
                         );
                         alloc += &format!(
-                            "  rewrite (array_pts_to {pn}_repr {es} (SizeT.v {pn}_alignof) {off} 1.0R (Seq.create (SizeT.v n) z))\n    as (array_pts_to {pn}_repr {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z));\n",
+                            "  rewrite (array_pts_to {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {off} 1.0R (Seq.create (SizeT.v n) z))\n    as (array_pts_to {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z));\n",
                             pn = fpn,
                             es = fes,
                             off = at(f.offset),
@@ -7697,13 +8367,13 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
                         );
                     } else {
                         alloc += &format!(
-                            "  array_claim_uninit {pn}_repr {off} {es}sz {pn}_alignof n;\n",
+                            "  array_claim_uninit {pn}_repr {pn}_etype_ok {off} {es}sz {pn}_alignof n;\n",
                             pn = fpn,
                             off = at(f.offset),
                             es = fes
                         );
                         alloc += &format!(
-                            "  rewrite (array_pts_to (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) {off} 1.0R (Seq.create (SizeT.v n) (None #{el})))\n    as (array_pts_to (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) (None #{el})));\n",
+                            "  rewrite (array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {off} 1.0R (Seq.create (SizeT.v n) (None #{el})))\n    as (array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) (None #{el})));\n",
                             pn = fpn,
                             es = fes,
                             off = at(f.offset),
@@ -7735,7 +8405,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         ensures_fixed += &format!("  ensures  {}\n", u);
     }
     c += &format!(
-        "ghost fn {sn}_claim_uninit_flex (a: ptr) (n: SizeT.t) (#b: bytes)\n  requires mem_pts_to a 1.0R b\n  requires pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es})\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  {fu}\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        "ghost fn {sn}_claim_uninit_flex (a: ptr) (n: SizeT.t) (#b: bytes) (#e: ET.etypes)\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es})\n  requires pure (ET.elen e == len b /\\ ET.untyped e)\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  {fu}\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
         sn = sn,
         es = fes,
         ef = ensures_fixed,
@@ -7744,7 +8414,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     );
     let elem = fstar_type(tds, flex_elem(tds, &flex.ty).unwrap()).unwrap();
     c += &format!(
-        "ghost fn {sn}_claim_zeroed_flex (a: ptr) (n: SizeT.t) (#z: {el}) (#b: bytes)\n  requires mem_pts_to a 1.0R b\n  requires pure (b == zeroed (SizeT.v {sn}_sizeof + SizeT.v n * {es}))\n  requires pure ({pn}_repr z (zeroed {es}))\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  array_pts_to {pn}_repr {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z)\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        "ghost fn {sn}_claim_zeroed_flex (a: ptr) (n: SizeT.t) (#z: {el}) (#b: bytes) (#e: ET.etypes)\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (b == zeroed (SizeT.v {sn}_sizeof + SizeT.v n * {es}))\n  requires pure (ET.elen e == len b /\\ ET.untyped e)\n  requires pure ({pn}_repr z (zeroed {es}))\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  array_pts_to {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z)\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
         sn = sn,
         el = elem,
         es = fes,
@@ -7752,6 +8422,93 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         f = flex.name,
         ef = ensures_fixed,
         alloc = carve(true)
+    );
+
+    // Giving a flexible object back runs the carve backwards, exactly as
+    // `{sn}_reveal_uninit` does for an ordinary struct: the joins go left to
+    // right, which is the reverse of the order the splits ran in. The tail
+    // arrives at the `option` view, which is where the loop that filled it
+    // left it, and at the length the allocation asked for -- the one thing
+    // the type does not say.
+    let reveal_fixed = |f: &StructField, free: &mut String| {
+        match &f.shape {
+            FieldShape::One { pn } => {
+                free.push_str(&format!(
+                    "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n  {pn}_reveal_uninit {off};\n",
+                    pn = pn,
+                    sn = sn,
+                    f = f.name,
+                    off = at(f.offset)
+                ));
+            }
+            FieldShape::Array { pn, esize, len } => {
+                free.push_str(&format!(
+                    "  rewrite (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} {off});\n  array_reveal_all_uninit {pn}_repr {pn}_etype_ok {off} {es}sz {pn}_alignof {n}sz;\n",
+                    pn = pn,
+                    es = esize,
+                    n = len,
+                    sn = sn,
+                    f = f.name,
+                    off = at(f.offset)
+                ));
+            }
+            FieldShape::Unaligned { pn } => {
+                free.push_str(&format!(
+                    "  rewrite (bytes_uninit {pn}_etype_ok (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof))\n    as (bytes_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof));\n  bytes_reveal_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof);\n  mem_hide_etypes {off};\n",
+                    pn = pn,
+                    sn = sn,
+                    f = f.name,
+                    off = at(f.offset)
+                ));
+            }
+            FieldShape::Flex { .. } => unreachable!(),
+        }
+        // A zero-size member's storage was conjured rather than carved, so it
+        // is dropped rather than joined.
+        if f.size == 0 {
+            free.push_str(&format!("  drop_mem_pts_to_nil {};\n", at(f.offset)));
+        }
+    };
+    let reveal_flex = |free: &mut String| {
+        free.push_str(&format!(
+            "  rewrite (array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R xs)\n    as (array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {off} 1.0R xs);\n  array_forget {pn}_repr {pn}_etype_ok {off} {es}sz {pn}_alignof;\n",
+            pn = fpn,
+            es = fes,
+            sn = sn,
+            f = flex.name,
+            off = at(flex.offset)
+        ));
+    };
+    let mut give = String::new();
+    give += &format!("  unfold {}_padding a 1.0R;\n", sn);
+    if let Some(f) = field_at(0) {
+        if std::ptr::eq(f, flex) {
+            reveal_flex(&mut give);
+        } else {
+            reveal_fixed(f, &mut give);
+        }
+    }
+    for off in bounds.iter() {
+        match field_at(*off) {
+            Some(f) if std::ptr::eq(f, flex) => reveal_flex(&mut give),
+            Some(f) => reveal_fixed(f, &mut give),
+            None => {}
+        }
+        give += &format!("  mem_join a {}sz;\n", off);
+    }
+    let mut requires_fixed = String::new();
+    for u in &fixed_uninit {
+        requires_fixed += &format!("  requires {}\n", u);
+    }
+    c += &format!(
+        "ghost fn {sn}_reveal_uninit_flex (a: ptr) (n: SizeT.t) (#xs: Seq.seq (option {el}))\n{rf}  requires array_pts_to (maybe_repr {pn}_repr {es}) {pn}_etype_ok {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R xs\n  requires {sn}_padding a 1.0R\n  requires pure (Seq.length xs == SizeT.v n)\n  ensures  exists* b. mem_pts_to a 1.0R b\n                      ** pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es})\n{{\n{give}}}\n\n",
+        sn = sn,
+        el = elem,
+        es = fes,
+        pn = fpn,
+        f = flex.name,
+        rf = requires_fixed,
+        give = give
     );
     c
 }
@@ -8005,25 +8762,32 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // times. On the sixty-nine-field struct in `test/dpe` that is the
     // difference between twelve minutes and half a minute.
     let align_at = |f: &StructField, alloc: &mut String| {
+        // An unaligned field states no alignment, so there is nothing to
+        // carry over to it.
         if matches!(f.shape, FieldShape::Unaligned { .. }) {
             return;
         }
         let pn = f.shape.pn();
-        if f.offset == 0 {
-            *alloc += &format!("  aligned_divides a {sn}_alignof {pn}_alignof;\n");
+        if palow_alignof(tds, &f.ty).is_none() && !matches!(f.shape, FieldShape::Flex { .. }) {
+            // No per-field lemma was emitted for this one; do it inline.
+            if f.offset == 0 {
+                *alloc += &format!("  aligned_divides a {sn}_alignof {pn}_alignof;\n");
+            } else {
+                *alloc += &format!(
+                    "  aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof;\n",
+                    f.name
+                );
+            }
         } else {
-            *alloc += &format!(
-                "  aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof;\n",
-                f.name
-            );
+            *alloc += &format!("  {sn}_field_aligned_{} a;\n", f.name);
         }
     };
     let claim_at = |f: &StructField, alloc: &mut String| match &f.shape {
         FieldShape::Unaligned { pn } => {
             *alloc += &format!(
-                "  bytes_claim_uninit {off} (SizeT.v {pn}_sizeof);\n  \
-                 rewrite (bytes_uninit {off} (SizeT.v {pn}_sizeof))\n    \
-                 as (bytes_uninit (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof));\n",
+                "  bytes_claim_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof);\n  \
+                 rewrite (bytes_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof))\n    \
+                 as (bytes_uninit {pn}_etype_ok (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof));\n",
                 pn = pn,
                 off = at(f.offset),
                 sn = sn,
@@ -8051,7 +8815,8 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         FieldShape::Flex { .. } => *alloc += NO_FLEX_STORAGE,
         FieldShape::Array { pn, esize, len } => {
             *alloc += &format!(
-                "  array_claim_all_uninit {}_repr {} {}sz {}_alignof {}sz{};\n",
+                "  array_claim_all_uninit {}_repr {}_etype_ok {} {}sz {}_alignof {}sz{};\n",
+                pn,
                 pn,
                 at(f.offset),
                 esize,
@@ -8060,7 +8825,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
                 if f.size == 0 { " #(uninit 0)" } else { "" }
             );
             *alloc += &format!(
-                "  rewrite (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off})\n    as (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}));\n",
+                "  rewrite (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} {off})\n    as (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}));\n",
                 pn = pn,
                 es = esize,
                 n = len,
@@ -8077,32 +8842,170 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     for f in si.fields.iter().filter(|f| f.size == 0) {
         align_at(f, &mut alloc);
         alloc += &format!("  mem_pts_to_nil {} 1.0R (uninit 0);\n", at(f.offset));
+        alloc += &format!("  mem_show_etypes {};\n", at(f.offset));
         claim_at(f, &mut alloc);
     }
-    for off in bounds.iter().rev() {
-        alloc += &format!("  mem_split a {}sz;\n", off);
-        if let Some(f) = field_at(*off) {
-            align_at(f, &mut alloc);
-            claim_at(f, &mut alloc);
+    // Carving the sub-object `[lo, hi)`, which lives at `a +! lo`. Every
+    // split is of the piece that starts there, so the pointer the split names
+    // never nests; the piece it cuts off does, and is immediately rewritten
+    // back to its offset from the object, which is how every other step
+    // spells it.
+    let carve = |lo: u64, hi: u64, alloc: &mut String| {
+        for off in bounds.iter().rev().filter(|o| **o > lo && **o < hi) {
+            if lo == 0 {
+                *alloc += &format!("  mem_split_at a {}sz;\n", off);
+            } else {
+                *alloc += &format!("  mem_split_at (a +! {}sz) {}sz;\n", lo, off - lo);
+                *alloc += &format!(
+                    "  rewrite each ((a +! {lo}sz) +! {d}sz) as (a +! {off}sz);\n",
+                    lo = lo,
+                    d = off - lo,
+                    off = off
+                );
+            }
+            if let Some(f) = field_at(*off) {
+                align_at(f, alloc);
+                claim_at(f, alloc);
+            } else {
+                // A gap: nothing claims it, and `{sn}_padding` is stated over
+                // bytes, so its index is dropped here rather than left in the
+                // context for the fold to trip over.
+                *alloc += &format!("  mem_hide_etypes (a +! {}sz);\n", off);
+            }
         }
+        match field_at(lo) {
+            Some(f) => {
+                align_at(f, alloc);
+                claim_at(f, alloc);
+            }
+            None if lo == 0 => *alloc += "  mem_hide_etypes a;\n",
+            None => *alloc += &format!("  mem_hide_etypes (a +! {}sz);\n", lo),
+        }
+    };
+
+    // A wide struct is carved in parts. Every step of the carve is a separate
+    // SMT query, and each one sees everything the steps before it produced --
+    // so a single carve of `n` fields asks `n` questions in a context that
+    // grows to `n` claimed fields and `n` facts about their slices of the
+    // index. Past sixty-odd fields the solver gives up on goals that are
+    // arithmetic on literals. Cutting the object into parts first bounds what
+    // any one query sees: each part carves its own range from its own
+    // precondition, and the whole object's carve is as many steps as there
+    // are parts.
+    const CARVE_PART: usize = 12;
+    let cuts: Vec<u64> = if bounds.len() > 2 * CARVE_PART {
+        std::iter::once(0)
+            .chain(
+                bounds
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(i, _)| i % CARVE_PART == CARVE_PART - 1)
+                    .map(|(_, off)| off),
+            )
+            .filter(|off| *off < si.size)
+            .collect()
+    } else {
+        vec![0]
+    };
+    let mut parts = String::new();
+    if cuts.len() > 1 {
+        for (k, lo) in cuts.iter().copied().enumerate() {
+            let hi = cuts.get(k + 1).copied().unwrap_or(si.size);
+            let mut body = String::new();
+            carve(lo, hi, &mut body);
+            let outs: Vec<String> =
+                si.fields
+                    .iter()
+                    .filter(|f| f.size > 0 && f.offset >= lo && f.offset < hi)
+                    .map(|f| {
+                        f.shape
+                            .uninit_at(&format!("(a +! {}_offsetof_{})", sn, f.name))
+                    })
+                    .chain(gaps.iter().filter(|(off, _)| *off >= lo && *off < hi).map(
+                        |(off, n)| {
+                            format!(
+                                "(exists* g. mem_pts_to {} 1.0R g ** pure (len g == {}))",
+                                if *off == 0 {
+                                    "a".to_string()
+                                } else {
+                                    format!("(a +! {}sz)", off)
+                                },
+                                n
+                            )
+                        },
+                    ))
+                    .collect();
+            let conds: Vec<String> = si
+                .fields
+                .iter()
+                .filter(|f| f.size > 0 && f.offset >= lo && f.offset < hi)
+                .filter_map(|f| {
+                    f.shape.etype_ok(&format!(
+                        "(Seq.slice e {} {})",
+                        f.offset - lo,
+                        f.offset + f.size - lo
+                    ))
+                })
+                .collect();
+            parts += &format!(
+                "ghost fn {sn}_claim_uninit_part{k} (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
+                 \x20 requires mem_pts_to_at {at} 1.0R b e\n\
+                 \x20 requires pure (len b == {n} /\\ ET.elen e == len b\n\
+                 \x20                 /\\ aligned a {sn}_alignof /\\ ET.allocated e\n\
+                 \x20                 /\\ {conds})\n\
+                 \x20 ensures  {outs}\n\
+                 {{\n{body}}}\n\n",
+                sn = sn,
+                k = k,
+                at = if lo == 0 {
+                    "a".to_string()
+                } else {
+                    format!("(a +! {}sz)", lo)
+                },
+                n = hi - lo,
+                conds = if conds.is_empty() {
+                    "True".to_string()
+                } else {
+                    conds.join(" /\\ ")
+                },
+                outs = if outs.is_empty() {
+                    "emp".to_string()
+                } else {
+                    outs.join("\n\x20 ensures  ")
+                },
+                body = body
+            );
+        }
+        // Every cut first, then every part. Each cut splits the piece that
+        // starts at `a`, so the side condition it leaves is about a range
+        // whose bounds are all literal -- the one shape the solver reads off
+        // rather than works out. Running the cuts before anything is claimed
+        // keeps each of those side conditions in an almost empty context.
+        for lo in cuts.iter().copied().skip(1).rev() {
+            alloc += &format!("  mem_split_at a {}sz;\n", lo);
+        }
+        for k in 0..cuts.len() {
+            alloc += &format!("  {sn}_claim_uninit_part{k} a;\n", sn = sn, k = k);
+        }
+    } else {
+        carve(0, si.size, &mut alloc);
     }
-    if let Some(f) = field_at(0) {
-        align_at(f, &mut alloc);
-        claim_at(f, &mut alloc);
-    }
+    c += &parts;
     // Claiming raw storage at this type is the carve on its own; a stack
     // allocation is that plus the allocation. Separating them is what lets a
     // struct be an array element or a union member, where the storage comes
     // from somewhere else entirely.
     c += &format!(
-        "ghost fn {sn}_claim_uninit (a: ptr) (#b: bytes)\n\
-         \x20 requires mem_pts_to a 1.0R b\n\
+        "#push-options \"--z3rlimit 150\"\nghost fn {sn}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
+         \x20 requires mem_pts_to_at a 1.0R b e\n\
          \x20 requires pure (len b == SizeT.v {sn}_sizeof /\\ aligned a {sn}_alignof)\n\
+         \x20 requires pure ({sn}_etype_ok e)\n\
          \x20 ensures  {sn}_pts_to_uninit a\n\
          {{\n\
          {alloc}\
          \x20 fold {sn}_padding a 1.0R;\n\
-         \x20 fold {sn}_pts_to_uninit a;\n}}\n\n",
+         \x20 fold {sn}_pts_to_uninit a;\n}}\n#pop-options\n\n",
         sn = sn,
         alloc = alloc
     );
@@ -8113,6 +9016,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
          {{\n\
          \x20 let a = mem_stack_alloc {sn}_sizeof;\n\
          \x20 aligned_divides a max_align {sn}_alignof;\n\
+         \x20 {sn}_etype_ok_none ();\n\
          \x20 {sn}_claim_uninit a;\n\
          \x20 a\n}}\n\n",
         sn = sn
@@ -8128,9 +9032,10 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     let reveal_at = |f: &StructField, free: &mut String| match &f.shape {
         FieldShape::Unaligned { pn } => {
             *free += &format!(
-                "  rewrite (bytes_uninit (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof))\n    \
-                 as (bytes_uninit {off} (SizeT.v {pn}_sizeof));\n  \
-                 bytes_reveal_uninit {off} (SizeT.v {pn}_sizeof);\n",
+                "  rewrite (bytes_uninit {pn}_etype_ok (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof))\n    \
+                 as (bytes_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof));\n  \
+                 bytes_reveal_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof);\n  \
+                 mem_hide_etypes {off};\n",
                 pn = pn,
                 sn = sn,
                 f = f.name,
@@ -8150,7 +9055,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         FieldShape::Flex { .. } => *free += NO_FLEX_STORAGE,
         FieldShape::Array { pn, esize, len } => {
             *free += &format!(
-                "  rewrite (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off});\n",
+                "  rewrite (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {pn}_etype_ok {es} (SizeT.v {pn}_alignof) {n} {off});\n",
                 pn = pn,
                 es = esize,
                 n = len,
@@ -8159,7 +9064,8 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
                 off = at(f.offset)
             );
             *free += &format!(
-                "  array_reveal_all_uninit {}_repr {} {}sz {}_alignof {}sz;\n",
+                "  array_reveal_all_uninit {}_repr {}_etype_ok {} {}sz {}_alignof {}sz;\n",
+                pn,
                 pn,
                 at(f.offset),
                 esize,
@@ -8214,8 +9120,8 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             FieldShape::Flex { .. } => forget += NO_FLEX_STORAGE,
             FieldShape::Array { pn, esize, len } => {
                 forget += &format!(
-                    "  array_forget_all {}_repr (a +! {}_offsetof_{}) {}sz {}_alignof {}sz;\n",
-                    pn, sn, f.name, esize, pn, len
+                    "  array_forget_all {}_repr {}_etype_ok (a +! {}_offsetof_{}) {}sz {}_alignof {}sz;\n",
+                    pn, pn, sn, f.name, esize, pn, len
                 );
             }
         }
@@ -10077,6 +10983,7 @@ open Pulse.Lib.C.Palow.Scalar\n\
 open Pulse.Lib.C.Palow.Float\n\
 open Pulse.Lib.C.Palow.CTypes\n\
 open Pulse.Lib.C.Palow.Machine\n\
+open Pulse.Lib.C.Palow.Index\n\
 open Pulse.Lib.C.Palow.Array\n\
 open Pulse.Lib.C.Palow.Unaligned\n\
 open Pulse.Lib.C.Palow.ConstSeq\n\
@@ -10367,7 +11274,7 @@ impl Slot {
         match &self.array {
             None => format!("{}_pts_to {} 1.0R {}", self.palow_ty, self.addr, value),
             Some((esize, maybe)) => format!(
-                "array_pts_to {r} (SizeT.v {e}) (SizeT.v {a}_alignof) {n} 1.0R {v}",
+                "array_pts_to {r} {a}_etype_ok (SizeT.v {e}) (SizeT.v {a}_alignof) {n} 1.0R {v}",
                 r = self.elem_repr(esize, *maybe),
                 a = self.palow_ty,
                 e = esize,
@@ -11005,8 +11912,8 @@ impl<'a> Body<'a> {
                 ));
             };
             self.lines.push(format!(
-                "unfold array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {};",
-                pn, esize, pn, len, a
+                "unfold array_pts_to_uninit {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {};",
+                pn, pn, esize, pn, len, a
             ));
             self.slots.retain(|s| s.addr != a);
             self.slots.push(Slot {
@@ -11944,12 +12851,12 @@ impl<'a> Body<'a> {
         let off = format!("({} `SizeT.mul` {})", esize, i);
         let at = format!("({} +! {})", arr, off);
         self.lines.push(format!(
-            "array_offset_fits {}_repr {} {} {}_alignof {};",
-            pn, arr, esize, pn, i
+            "array_offset_fits {}_repr {}_etype_ok {} {} {}_alignof {};",
+            pn, pn, arr, esize, pn, i
         ));
         self.lines.push(format!(
-            "array_focus {}_repr {} {} {}_alignof {} {};",
-            pn, arr, esize, pn, i, off
+            "array_focus {}_repr {}_etype_ok {} {} {}_alignof {} {};",
+            pn, pn, arr, esize, pn, i, off
         ));
         self.lines.push(format!("{}_of_elem {};", pn, at));
         let close = format!("{} {} {}_alignof {} {}", arr, esize, pn, i, off);
@@ -13161,27 +14068,28 @@ impl<'a> Body<'a> {
         } else {
             format!("{}_repr", pn)
         };
+        let ectype = format!("{}_etype_ok", pn);
         if writing && let Some(s) = self.slots.iter_mut().find(|s| s.addr == arr) {
             s.array_value = None;
         }
         self.lines.push(format!(
-            "array_offset_fits {} {} {} {}_alignof {};",
-            repr, arr, esize, pn, i
+            "array_offset_fits {} {} {} {} {}_alignof {};",
+            repr, ectype, arr, esize, pn, i
         ));
         self.lines.push(format!(
-            "array_focus {} {} {} {}_alignof {} {};",
-            repr, arr, esize, pn, i, off
+            "array_focus {} {} {} {} {}_alignof {} {};",
+            repr, ectype, arr, esize, pn, i, off
         ));
         let common = format!("{} {} {}_alignof {} {}", arr, esize, pn, i, off);
         if !maybe {
             self.lines.push(format!("{}_of_elem {};", pn, at));
             let mut close_read = vec![
                 format!("{}_to_elem {};", pn, at),
-                format!("array_unfocus_read {} {};", repr, common),
+                format!("array_unfocus_read {} {} {};", repr, ectype, common),
             ];
             let mut close_write = vec![
                 format!("{}_to_elem {};", pn, at),
-                format!("array_unfocus {} {};", repr, common),
+                format!("array_unfocus {} {} {};", repr, ectype, common),
             ];
             close_read.extend(cl_read);
             close_write.extend(cl_write);
@@ -13202,11 +14110,17 @@ impl<'a> Body<'a> {
         // not: it goes down to the raw bytes and comes back up through the
         // type's own write-only view, exactly as a scalar local does.
         let open_read = vec![
-            format!("elem_maybe_get {}_repr {} {};", pn, esize, at),
+            format!(
+                "elem_maybe_get {}_repr {}_etype_ok {} {};",
+                pn, pn, esize, at
+            ),
             format!("{}_of_elem {};", pn, at),
         ];
         let open_write = vec![
-            format!("elem_maybe_reveal {}_repr {} {};", pn, esize, at),
+            format!(
+                "elem_maybe_reveal {}_repr {}_etype_ok {} {};",
+                pn, pn, esize, at
+            ),
             format!("{}_claim_uninit {};", pn, at),
         ];
         // Both directions close through `array_unfocus`, even the read: what
@@ -13214,8 +14128,11 @@ impl<'a> Body<'a> {
         // only up to a proof, and `array_unfocus_read` matches syntactically.
         let mut both = vec![
             format!("{}_to_elem {};", pn, at),
-            format!("elem_maybe_put {}_repr {} {};", pn, esize, at),
-            format!("array_unfocus {} {};", repr, common),
+            format!(
+                "elem_maybe_put {}_repr {}_etype_ok {} {};",
+                pn, pn, esize, at
+            ),
+            format!("array_unfocus {} {} {};", repr, ectype, common),
         ];
         let mut close_write = both.clone();
         let mut close_read = both;
@@ -13240,8 +14157,8 @@ impl<'a> Body<'a> {
             if full {
                 let (un, arm) = self.slots[si].union_arm.clone().unwrap();
                 close_write.push(format!(
-                    "array_claim_all_somes {}_repr {} {} {}_alignof;",
-                    pn, arr, esize, pn
+                    "array_claim_all_somes {}_repr {}_etype_ok {} {} {}_alignof;",
+                    pn, pn, arr, esize, pn
                 ));
                 close_write.push(format!("{}_unfocus_{} {};", un, arm, arr));
                 self.slots.remove(si);
@@ -14413,12 +15330,12 @@ impl<'a> Body<'a> {
                                 let (addr, pn) = (sl.addr.clone(), sl.palow_ty.clone());
                                 if maybe {
                                     self.lines.push(format!(
-                                        "array_somes {}_repr {} {} {}_alignof;",
-                                        pn, addr, esize, pn
+                                        "array_somes {}_repr {}_etype_ok {} {} {}_alignof;",
+                                        pn, pn, addr, esize, pn
                                     ));
                                     self.pending_close.push(format!(
-                                        "array_unsomes {}_repr {} {} {}_alignof;",
-                                        pn, addr, esize, pn
+                                        "array_unsomes {}_repr {}_etype_ok {} {} {}_alignof;",
+                                        pn, pn, addr, esize, pn
                                     ));
                                 }
                                 return Ok(addr);
@@ -15071,9 +15988,8 @@ impl<'a> Body<'a> {
                 let (pn, tmp) = (self.blocks[bi].pn.clone(), self.blocks[bi].tmp.clone());
                 let ab = self.blocks[bi].array.clone().unwrap();
                 let (z, _) = ab.zero.clone().unwrap();
-                self.lines.push(format!(
-                    "array_claim_all {}_repr {} {} {}_alignof (Seq.create (SizeT.v {}) {});",
-                    pn, tmp, ab.esize, pn, ab.n, z
+                self.lines.push(format!("array_claim_all {}_repr {}_etype_ok {} {} {}_alignof (Seq.create (SizeT.v {}) {});",
+                    pn, pn, tmp, ab.esize, pn, ab.n, z
                 ));
                 if let Some(x) = self.blocks[bi].array.as_mut() {
                     x.filled = true;
@@ -15376,8 +16292,8 @@ impl<'a> Body<'a> {
         {
             let (pn, at) = (self.slots[i].palow_ty.clone(), self.slots[i].addr.clone());
             self.pending_close.push(format!(
-                "array_unsomes {}_repr {} {} {}_alignof;",
-                pn, at, esize, pn
+                "array_unsomes {}_repr {}_etype_ok {} {} {}_alignof;",
+                pn, pn, at, esize, pn
             ));
             return Ok(at);
         }
@@ -15392,8 +16308,8 @@ impl<'a> Body<'a> {
         {
             let (pn, at, esize) = (ap.pn.clone(), ap.addr.clone(), ap.esize.clone());
             self.lines.push(format!(
-                "array_unsomes {}_repr {} {} {}_alignof;",
-                pn, at, esize, pn
+                "array_unsomes {}_repr {}_etype_ok {} {} {}_alignof;",
+                pn, pn, at, esize, pn
             ));
             return Ok(at);
         }
@@ -15544,12 +16460,12 @@ impl<'a> Body<'a> {
         };
         if maybe {
             self.lines.push(format!(
-                "array_somes {}_repr {} {} {}_alignof;",
-                pn, addr, esize, pn
+                "array_somes {}_repr {}_etype_ok {} {} {}_alignof;",
+                pn, pn, addr, esize, pn
             ));
             self.pending_close.push(format!(
-                "array_unsomes {}_repr {} {} {}_alignof;",
-                pn, addr, esize, pn
+                "array_unsomes {}_repr {}_etype_ok {} {} {}_alignof;",
+                pn, pn, addr, esize, pn
             ));
         }
         Ok(addr)
@@ -15639,7 +16555,8 @@ impl<'a> Body<'a> {
         // assumption says one true thing about one piece of static data --
         // the same trust an immutable global's `acquire_var_*` asks for.
         let own = format!(
-            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Pulse.Lib.C.Palow.ConstSeq.const_seq_with_len {} {})",
+            "exists* (p: perm). array_pts_to {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} p (Pulse.Lib.C.Palow.ConstSeq.const_seq_with_len {} {})",
+            pn,
             pn,
             esize,
             pn,
@@ -15650,8 +16567,8 @@ impl<'a> Body<'a> {
         let name = self.assumed_slprop("acquire_literal", &own);
         self.lines.push(format!("{} ();", name));
         self.pending_close.push(format!(
-            "literal_share_drop {}_repr {}sz {}_alignof {};",
-            pn, esize, pn, xs
+            "literal_share_drop {}_repr {}_etype_ok {}sz {}_alignof {};",
+            pn, pn, esize, pn, xs
         ));
         Ok(addr)
     }
@@ -15682,8 +16599,9 @@ impl<'a> Body<'a> {
                 ));
             }
             self.lines.push(format!(
-                "let loc_{} = array_stack_alloc {}_repr {}sz {}_alignof {}sz {}sz;",
+                "let loc_{} = array_stack_alloc {}_repr {}_etype_ok {}sz {}_alignof {}sz {}sz;",
                 name.val,
+                pn,
                 pn,
                 esize,
                 pn,
@@ -15755,8 +16673,8 @@ impl<'a> Body<'a> {
         }
         if let Some(n) = &b.bytes {
             return format!(
-                "(mem_pts_to {t} 1.0R ({f} (SizeT.v {n})) ** freeable {t} {n} \
-             ** pure (aligned {t} max_align))",
+                "(mem_pts_to_at {t} 1.0R ({f} (SizeT.v {n})) (ET.etypes_none (SizeT.v {n})) \
+             ** freeable {t} {n} ** pure (aligned {t} max_align))",
                 t = b.tmp,
                 f = b.fill,
                 n = n
@@ -15769,8 +16687,8 @@ impl<'a> Body<'a> {
             _ => format!("{}_sizeof", b.pn),
         };
         format!(
-            "(mem_pts_to {t} 1.0R ({f} (SizeT.v {n})) ** freeable {t} {n} \
-             ** pure (aligned {t} max_align))",
+            "(mem_pts_to_at {t} 1.0R ({f} (SizeT.v {n})) (ET.etypes_none (SizeT.v {n})) \
+             ** freeable {t} {n} ** pure (aligned {t} max_align))",
             t = b.tmp,
             f = b.fill,
             n = n
@@ -15822,6 +16740,12 @@ impl<'a> Body<'a> {
             // fails at the call site where the mistake is.
             self.lines
                 .push(format!("aligned_divides {} max_align {}_alignof;", v, pn));
+            // 6.5p6: the object the source is about to write through this
+            // pointer takes this type as its effective type. The storage is
+            // `allocated`, so the step is available; for a declared object it
+            // would not be, which is what C says.
+            self.lines.push(format!("mem_retype {} {}_ctype;", v, pn));
+            self.lines.push(format!("{}_etype_ok_untyped_all ();", pn));
             self.lines.push(format!("{}_claim_uninit {};", pn, v));
             (pn, false)
         } else {
@@ -16370,8 +17294,9 @@ impl<'a> Body<'a> {
                     // the author writes see it as bytes.
                     if self.piece_types.contains(&b.pn) {
                         ls.push(format!(
-                            "array_forget{} {}_repr ({} +! {}_offsetof_{}) {} {}_alignof;",
+                            "array_forget{} {}_repr {}_etype_ok ({} +! {}_offsetof_{}) {} {}_alignof;",
                             if fx.zero.is_some() { "_full" } else { "" },
+                            fx.pn,
                             fx.pn,
                             b.tmp,
                             b.pn,
@@ -16393,7 +17318,7 @@ impl<'a> Body<'a> {
                         // it. The value is an implicit there, so it is given
                         // as one.
                         Some((z, why)) if is_aggregate(&b.pn) => format!(
-                            "{} {}_conceal {} #1.0R #_ #({});",
+                            "{} {}_conceal {} #1.0R #_ #_ #({});",
                             why.join(" "),
                             b.pn,
                             b.tmp,
@@ -16414,8 +17339,9 @@ impl<'a> Body<'a> {
                         // zero. Nothing else in the generated code needs that,
                         // so it is named here rather than left to a pattern.
                         Some((z, why)) => format!(
-                            "{} array_claim_zeroed {}_repr {} {} {}_alignof {} #{};",
+                            "{} array_claim_zeroed {}_repr {}_etype_ok {} {} {}_alignof {} #{};",
                             why.join(" "),
+                            b.pn,
                             b.pn,
                             b.tmp,
                             a.esize,
@@ -16424,8 +17350,8 @@ impl<'a> Body<'a> {
                             z
                         ),
                         None => format!(
-                            "array_claim_uninit {}_repr {} {} {}_alignof {};",
-                            b.pn, b.tmp, a.esize, b.pn, a.n
+                            "array_claim_uninit {}_repr {}_etype_ok {} {} {}_alignof {};",
+                            b.pn, b.pn, b.tmp, a.esize, b.pn, a.n
                         ),
                     },
                 ],
@@ -16486,8 +17412,8 @@ impl<'a> Body<'a> {
             return;
         }
         self.lines.push(format!(
-            "array_claim_all_somes {}_repr ({} +! {}_offsetof_{}) {} {}_alignof;",
-            fx.pn, tmp, pn, fx.field, fx.esize, fx.pn
+            "array_claim_all_somes {}_repr {}_etype_ok ({} +! {}_offsetof_{}) {} {}_alignof;",
+            fx.pn, fx.pn, tmp, pn, fx.field, fx.esize, fx.pn
         ));
         self.lines.push(format!("{}_gather {};", pn, tmp));
         self.blocks[i].scattered.clear();
@@ -16562,8 +17488,8 @@ impl<'a> Body<'a> {
             {
                 let v = self.rvalue(arg)?;
                 self.lines.push(format!(
-                    "array_forget_full {}_repr {} {}sz {}_alignof;",
-                    pn, v, es, pn
+                    "array_forget_full {}_repr {}_etype_ok {} {}sz {}_alignof;",
+                    pn, pn, v, es, pn
                 ));
                 self.lines.push(format!("free {};", v));
                 return Ok(());
@@ -16577,14 +17503,53 @@ impl<'a> Body<'a> {
             let b = &self.blocks[i];
             (b.tmp.clone(), b.pn.clone(), b.init)
         };
+        // A flexible struct has no whole-object storage view, so it goes back
+        // the way it was handed over: in pieces, at the length the allocation
+        // asked for. Each fixed field that was written is forgotten first --
+        // the tail is already at the `option` view the loop that filled it
+        // left it at.
+        if let Some(fx) = self.blocks[i].flex.clone() {
+            if init {
+                return Err(format!(
+                    "a `free` of `{}`, a flexible struct that was gathered into a value",
+                    pn
+                ));
+            }
+            let sname = pn.strip_prefix("struct_").unwrap_or(&pn).to_string();
+            let fields: Vec<(String, String)> = match self.tds.structs.get(&sname) {
+                Some(si) => si
+                    .fields
+                    .iter()
+                    .filter(|f| f.name != fx.field)
+                    .filter_map(|f| match &f.shape {
+                        FieldShape::One { pn } => Some((f.name.clone(), pn.clone())),
+                        _ => None,
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            for (f, fpn) in fields {
+                if self.blocks[i].scattered.contains(&f) {
+                    self.lines.push(format!(
+                        "{}_forget ({} +! {}_offsetof_{});",
+                        fpn, tmp, pn, f
+                    ));
+                }
+            }
+            self.lines
+                .push(format!("{}_reveal_uninit_flex {} {};", pn, tmp, fx.n));
+            self.lines.push(format!("free {};", tmp));
+            self.blocks[i].freed = true;
+            return Ok(());
+        }
         match &self.blocks[i].array.clone() {
             Some(a) if a.filled => self.lines.push(format!(
-                "array_forget_full {}_repr {} {} {}_alignof;",
-                pn, tmp, a.esize, pn
+                "array_forget_full {}_repr {}_etype_ok {} {} {}_alignof;",
+                pn, pn, tmp, a.esize, pn
             )),
             Some(a) => self.lines.push(format!(
-                "array_forget {}_repr {} {} {}_alignof;",
-                pn, tmp, a.esize, pn
+                "array_forget {}_repr {}_etype_ok {} {} {}_alignof;",
+                pn, pn, tmp, a.esize, pn
             )),
             None => {
                 if init {
@@ -16934,7 +17899,7 @@ impl<'a> Body<'a> {
             let b = format!("inv_val_{}", n);
             binders.push(format!("({}: Seq.seq (option ({})))", b, a.fty));
             owns.push(format!(
-                "array_pts_to (maybe_repr {pn}_repr (SizeT.v {es})) (SizeT.v {es}) \
+                "array_pts_to (maybe_repr {pn}_repr (SizeT.v {es})) {pn}_etype_ok (SizeT.v {es}) \
                  (SizeT.v {pn}_alignof) {addr} 1.0R {b}",
                 pn = a.pn,
                 es = a.esize,
@@ -17294,9 +18259,9 @@ impl<'a> Body<'a> {
                 }
                 let n = self.index(size)?;
                 self.lines.push(format!(
-                    "let loc_{} = array_stack_alloc {}_repr {}sz {}_alignof {} \
+                    "let loc_{} = array_stack_alloc {}_repr {}_etype_ok {}sz {}_alignof {} \
                      ({}sz `SizeT.mul` {});",
-                    name.val, pn, esize, pn, n, esize, n
+                    name.val, pn, pn, esize, pn, n, esize, n
                 ));
                 self.slots.push(Slot {
                     name: name.val.to_string(),
@@ -17827,11 +18792,12 @@ impl<'a> Body<'a> {
                     } else {
                         format!("{}_repr", pn)
                     };
+                    let ectype = format!("{}_etype_ok", pn);
                     let z = if maybe { format!("(Some {})", z) } else { z };
                     self.lines.push(format!("encode_zero {};", esize));
                     self.lines.push(format!(
-                        "array_memset_zero {} {} {}sz {}_alignof {} {} {};",
-                        repr, arr, esize, pn, n, nbytes, z
+                        "array_memset_zero {} {} {} {}sz {}_alignof {} {} {};",
+                        repr, ectype, arr, esize, pn, n, nbytes, z
                     ));
                     self.lines.extend(close);
                     Ok(())
@@ -18634,8 +19600,8 @@ impl<'a> Body<'a> {
                     continue;
                 };
                 self.lines.push(format!(
-                    "array_somes {}_repr {} {} {}_alignof;",
-                    a.pn, a.addr, a.esize, a.pn
+                    "array_somes {}_repr {}_etype_ok {} {} {}_alignof;",
+                    a.pn, a.pn, a.addr, a.esize, a.pn
                 ));
             }
         }
@@ -18661,13 +19627,13 @@ impl<'a> Body<'a> {
             if let Some((esize, maybe)) = array {
                 if maybe {
                     self.lines.push(format!(
-                        "array_stack_free {}_repr {} {} {}_alignof;",
-                        pn, addr, esize, pn
+                        "array_stack_free {}_repr {}_etype_ok {} {} {}_alignof;",
+                        pn, pn, addr, esize, pn
                     ));
                 } else {
                     self.lines.push(format!(
-                        "array_forget_full {}_repr {} {} {}_alignof;",
-                        pn, addr, esize, pn
+                        "array_forget_full {}_repr {}_etype_ok {} {} {}_alignof;",
+                        pn, pn, addr, esize, pn
                     ));
                     self.lines.push(format!("mem_stack_free {};", addr));
                 }

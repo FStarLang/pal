@@ -27,6 +27,8 @@ _include_pulse(Pool_shim,
   include Pulse.Lib.C.Palow
   include Pulse.Lib.C.Palow.Scalar
   include Pulse.Lib.C.Palow.Encoding
+  include Pulse.Lib.C.Palow.Index
+  module ET = Pulse.Lib.C.Palow.Etype
 
   (* The bytes the pool still has to hand out. They are zeroed rather than
      uninitialised so that a chunk can be claimed at a value the moment it is
@@ -36,7 +38,27 @@ _include_pulse(Pool_shim,
      because a contract term is typed with none of the `requires` in scope, so
      a refined subtraction would not typecheck there. *)
   unfold let pool_block (a: ptr) (n: nat) : slprop =
-    mem_pts_to a 1.0R (zeroed n) ** pure (aligned a uint32_t_alignof)
+    exists* e. mem_pts_to_at a 1.0R (zeroed n) e
+            ** pure (ET.elen e == n /\ ET.allocated e)
+            ** pure (aligned a uint32_t_alignof)
+
+  (* Setting a chunk's effective type. 6.5p6 attaches that to the store that
+     writes an object; the pool pre-zeroes its storage, so the step has to be
+     taken on its own -- and it is available only because a pool block is
+     `allocated`: no byte of it is at a declared type, so a store is free to
+     retype it. A pool over an object with a declared type could not do this,
+     which is exactly what C says. *)
+  ghost fn pool_retype (a: ptr) (#b: bytes) (#e: ET.etypes)
+    requires mem_pts_to_at a 1.0R b e
+    requires pure (ET.elen e == len b /\ len b == 4 /\ ET.allocated e)
+    ensures  exists* e'. mem_pts_to_at a 1.0R b e'
+               ** pure (ET.elen e' == len b /\ uint32_t_etype_ok e')
+  {
+    ET.allocated_store_ok e uint32_t_ctype;
+    mem_store_etypes a uint32_t_ctype;
+    ET.store_ok_read_ok e uint32_t_ctype;
+    ET.allocated_store_etypes e uint32_t_ctype;
+  }
 
   (* Two zeroed ranges laid end to end are one zeroed range. This is what a
      chunk going back into the pool needs, and it is the only thing in this
@@ -57,10 +79,15 @@ _ensures(_inline_pulse(uint32_t_pts_to $(return) 1.0R 0ul))
 _ensures(_inline_pulse(Pool_shim.pool_block ($(a) +! 4sz) (FStar.SizeT.v $(rest))))
 uint32_t *pool_take(_plain uint8_t *a, size_t rest)
 {
-  _ghost_stmt(mem_split $(a) 4sz);
+  _ghost_stmt(mem_split_at $(a) 4sz);
   _ghost_stmt(aligned_add $(a) uint32_t_alignof 4sz);
   _ghost_stmt(aligned_add $(a) uint32_t_alignof 8sz);
   _ghost_stmt(encode_zero 4);
+  /* The chunk's effective type becomes `uint32_t` here. 6.5p6 attaches that
+   * to the store that writes it; the pool pre-zeroes, so the step has to be
+   * taken explicitly -- and it is only available because a pool block is
+   * `allocated`, i.e. no byte of it is at a declared type. */
+  _ghost_stmt(Pool_shim.pool_retype $(a));
   _ghost_stmt(uint32_t_claim $(a) 0ul);
   return (uint32_t *) a;
 }
@@ -76,7 +103,7 @@ void pool_return(_plain uint32_t *p, size_t rest)
 {
   _ghost_stmt(uint32_t_reveal $(p));
   _ghost_stmt(encode_zero 4);
-  _ghost_stmt(mem_join $(p) 4sz);
+  _ghost_stmt(mem_join_at $(p) 4sz);
 }
 
 /* Two chunks out of one block, so that the objects really are independent:
@@ -88,13 +115,15 @@ _ensures(_inline_pulse(Pool_shim.pool_block ($(a) +! 8sz) (FStar.SizeT.v $(rest)
 void pool_take2(_plain uint8_t *a, size_t rest)
 {
   _ghost_stmt(encode_zero 4);
-  _ghost_stmt(mem_split $(a) 4sz);
+  _ghost_stmt(mem_split_at $(a) 4sz);
+  _ghost_stmt(Pool_shim.pool_retype $(a));
   _ghost_stmt(uint32_t_claim $(a) 0ul);
-  _ghost_stmt(mem_split ($(a) +! 4sz) 4sz);
+  _ghost_stmt(mem_split_at ($(a) +! 4sz) 4sz);
   /* `divides_addr` is opaque, so stepping four bytes on from an aligned
      address is a lemma call rather than something the solver does itself. */
   _ghost_stmt(aligned_add $(a) uint32_t_alignof 4sz);
   _ghost_stmt(aligned_add $(a) uint32_t_alignof 8sz);
+  _ghost_stmt(Pool_shim.pool_retype ($(a) +! 4sz));
   _ghost_stmt(uint32_t_claim ($(a) +! 4sz) 0ul);
   /* The tail is at `(a + 4) + 4`, and the contract says `a + 8`. `add_add`
      makes the two equal; `rewrite each` is what says so to the matcher, which

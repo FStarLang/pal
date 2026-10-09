@@ -1,0 +1,2 @@
+E.read_ok (E.copy_etypes (E.etypes_of ct_i32 true)
+Pulse.Lib.C.Palow.Etype.copy_etypes

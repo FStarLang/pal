@@ -1,0 +1,2 @@
+E.store_ok (E.etypes_of ct_i32 true) ct_f32
+Pulse.Lib.C.Palow.Etype.store_ok

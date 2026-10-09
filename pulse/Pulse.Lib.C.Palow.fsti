@@ -53,10 +53,20 @@ val mem_pts_to ([@@@mkey] a: ptr) (p: perm) (b: bytes) : slprop
    would let an index be discarded and a fresh unconstrained one conjured --
    `fixed` and all. It is an equality rather than a definition only because
    Pulse's frame matcher keys on the head symbol of a `val`, and making this
-   one a `let` costs more in matching than the index is worth. *)
+   one a `let` costs more in matching than the index is worth.
+
+   The index is also required to be `allocated` -- no byte of it is at a
+   declared type. That is what makes the unindexed view the view of *storage*:
+   allocated storage is the only thing whose index may be forgotten and later
+   recovered without losing information a later store would need, since a
+   `fixed` entry constrains every future store and an existential over indices
+   cannot preserve it. The consequence is that an object with a declared type
+   does not pass through this view at all; it needs an indexed path of its
+   own. *)
 val mem_pts_to_at_eq (a: ptr) (p: perm) (b: bytes)
   : Lemma (mem_pts_to a p b ==
-           (exists* e. mem_pts_to_at a p b e ** pure (Etype.elen e == len b)))
+           (exists* e. mem_pts_to_at a p b e
+                    ** pure (Etype.elen e == len b /\ Etype.allocated e)))
 
 val mem_pts_to_timeless (a: ptr) (p: perm) (b: bytes)
   : Lemma (timeless (mem_pts_to a p b))
@@ -103,6 +113,34 @@ ghost fn mem_pts_to_perm_bound (a: ptr) (#p: perm) (#b: bytes)
   preserves mem_pts_to a p b
   requires  pure (len b > 0)
   ensures   pure (p <=. 1.0R)
+
+(* The same fact over the indexed view. It is stated here rather than derived
+   in `Pulse.Lib.C.Palow.Index` because the derivation there would have to
+   spend the resource that knows the index -- observing through half of a
+   share shows only `p /. 2.0R <=. 1.0R`, and hiding the index to use the
+   layer-0 fact cannot get it back. *)
+ghost fn mem_pts_to_at_perm_bound (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires  pure (len b > 0)
+  ensures   pure (p <=. 1.0R)
+
+(* Every index the model can hand out is well formed: an entry's offset lies
+   inside the object it belongs to. `etypes_none`, `etypes_of`, `store_etypes`
+   and `memcpy_etypes` all produce such indices, and slicing and appending
+   preserve it, so this is a property of the heap rather than a side condition
+   anything has to carry.
+
+   It is an axiom here rather than a conjunct of `Etype.allocated` because
+   every condition in the generated code mentions `allocated`, and a second
+   quantifier in it costs the solver real time on large structs. Stated as a
+   fact about the *resource*, it is paid for only where it is used.
+
+   Where it is used is the character-access rule: `Etype.read_char_ok` says a
+   well-formed byte is readable as a character, which is what lets a store
+   through a character lvalue re-establish its own points-to. *)
+ghost fn mem_pts_to_at_wf (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  ensures   pure (Etype.etypes_wf e)
 
 (* Two ranges, at least one of them exclusively owned, cannot overlap. This is
    how Palow recovers non-aliasing: it comes from separation, not from
@@ -206,12 +244,19 @@ ghost fn mem_split_at (a: ptr) (#p: perm) (#b: bytes)
 (* The bytes at an address determine their index, just as they determine each
    other (`mem_pts_to_injective`). This is what makes the equality above safe
    to use in both directions: eliminating the existential gives you *the*
-   index, not merely *an* index. *)
+   index, not merely *an* index.
+
+   It concludes the byte half as well, under the same length hypothesis
+   `mem_pts_to_injective` uses. That is not a second axiom so much as the
+   indexed reading of the first: a caller holding two indexed views cannot
+   reach the unindexed fact without spending one of them on a rewrite, and
+   then has no way to recover the index it gave up. *)
+[@@allow_ambiguous]
 ghost fn mem_pts_to_at_injective (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
                                  (#e1 #e2: Etype.etypes)
   preserves mem_pts_to_at a p1 b1 e1
   preserves mem_pts_to_at a p2 b2 e2
-  ensures   pure (e1 == e2)
+  ensures   pure (e1 == e2 /\ (len b1 == len b2 ==> b1 == b2))
 
 ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
                      (#e1: Etype.etypes { Etype.elen e1 == len b1 })
@@ -219,6 +264,37 @@ ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
                      (n: SZ.t { SZ.v n == len b1 })
   requires mem_pts_to_at a p b1 e1 ** mem_pts_to_at (a +! n) p b2 e2
   ensures  mem_pts_to_at a p (append b1 b2) (Seq.append e1 e2)
+
+(* Sharing and gathering carry the index along unchanged. These two cannot be
+   derived from `mem_pts_to_at_eq` the way the splitting lemmas can, and the
+   reason is worth recording, because it is the same reason the equality is
+   safe in the first place.
+
+   Going `mem_pts_to_at a p b e` -> `mem_pts_to a p b` -> share -> and back
+   produces two halves whose indices are existentially quantified. They can be
+   shown equal to each other, by `mem_pts_to_at_injective`, but not to `e`:
+   the resource that knew about `e` was spent by the rewrite, and an
+   existential cannot be forced to a particular witness after the fact. That
+   inability is precisely what stops `hide` followed by `show` from being a
+   laundering step -- so it is not a defect to be worked around here, and the
+   honest response is to state the indexed forms as primitive.
+
+   Everything else that merely *observes* a range -- nullness, bounds,
+   disjointness, injectivity -- is derived from these in
+   `Pulse.Lib.C.Palow.Index`, by sharing, observing through one half, and
+   gathering back. *)
+ghost fn mem_share_at (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  requires mem_pts_to_at a p b e
+  ensures  mem_pts_to_at a (p /. 2.0R) b e ** mem_pts_to_at a (p /. 2.0R) b e
+
+[@@allow_ambiguous]
+ghost fn mem_gather_at (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
+                       (#e1 #e2: Etype.etypes)
+  requires mem_pts_to_at a p1 b1 e1
+  requires mem_pts_to_at a p2 b2 e2
+  requires pure (len b1 == len b2)
+  ensures  mem_pts_to_at a (p1 +. p2) b1 e1
+  ensures  pure (b1 == b2 /\ e1 == e2)
 
 (* A store at type `u` relabels allocated storage and leaves declared objects
    alone; a read at `u` requires the covered entries to be compatible with it.

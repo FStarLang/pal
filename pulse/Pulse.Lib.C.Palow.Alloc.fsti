@@ -22,6 +22,7 @@ open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Nullable
 
+module ET = Pulse.Lib.C.Palow.Etype
 module SZ = FStar.SizeT
 
 (* The right to return `n` bytes at `a` to the allocator they came from.
@@ -49,13 +50,13 @@ val freeable_timeless (a: ptr) (n: SZ.t)
    come from `aligned_alloc`. *)
 fn malloc (n: SZ.t)
   returns  a : ptr
-  ensures  unless_null a (mem_pts_to a 1.0R (uninit (SZ.v n)) ** freeable a n
-                          ** pure (aligned a max_align))
+  ensures  unless_null a (mem_pts_to_at a 1.0R (uninit (SZ.v n)) (ET.etypes_none (SZ.v n))
+                          ** freeable a n ** pure (aligned a max_align))
 
 fn calloc (n: SZ.t)
   returns  a : ptr
-  ensures  unless_null a (mem_pts_to a 1.0R (zeroed (SZ.v n)) ** freeable a n
-                          ** pure (aligned a max_align))
+  ensures  unless_null a (mem_pts_to_at a 1.0R (zeroed (SZ.v n)) (ET.etypes_none (SZ.v n))
+                          ** freeable a n ** pure (aligned a max_align))
 
 (* `free` needs the whole block back, at full permission, and needs to be told
    nothing about its contents. Requiring `len b == SZ.v n` is what makes

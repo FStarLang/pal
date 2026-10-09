@@ -1,0 +1,1 @@
+bool_t_etype_ok (Seq.slice (ET.store_etypes e0 int32_t_ctype) 0 1)

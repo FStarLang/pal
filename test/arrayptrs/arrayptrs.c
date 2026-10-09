@@ -81,7 +81,7 @@ _include_pulse(Arrayptrs_include2,
 
   [@@pulse_eager_unfold]
   let is_slice (lo hi x: ptr) (p: perm) (v: Seq.seq Int32.t) =
-    array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p v **
+    array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p v **
     pure (is_slice_prop lo hi x v)
 
   unfold
@@ -112,8 +112,8 @@ _include_pulse(Arrayptrs_include2,
     if i < Seq.length v then Seq.index v i else 0l
 
   let rest (x r: ptr) (p: perm) (v: Seq.seq Int32.t) : slprop =
-    array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p (Seq.slice v 0 (clamp (idx r x) (Seq.length v))) **
-    array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) (r +! 4sz) p
+    array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p (Seq.slice v 0 (clamp (idx r x) (Seq.length v))) **
+    array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) (r +! 4sz) p
                  (Seq.slice v (clamp (idx r x + 1) (Seq.length v)) (Seq.length v))
 
   let in_array (x r: ptr) (v: Seq.seq Int32.t) : prop =
@@ -122,24 +122,24 @@ _include_pulse(Arrayptrs_include2,
 /\ (addr_of r - addr_of x) % 4 == 0
 
   ghost fn focus_at (x r: ptr) (#p: perm) (#v: Seq.seq Int32.t)
-    requires array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p v
+    requires array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p v
     requires pure (in_array x r v)
     ensures int32_t_pts_to r p (nth v (idx r x))
     ensures rest x r p v
   {
     let off = SizeT.uint_to_t (addr_of r - addr_of x);
     let i = SizeT.uint_to_t (idx r x);
-    array_focus int32_t_repr x 4sz int32_t_alignof i off;
+    array_focus int32_t_repr int32_t_etype_ok x 4sz int32_t_alignof i off;
     ptr_ext (x +! off) r;
-    rewrite (elem_pts_to int32_t_repr (x +! off) p (Seq.index v (SizeT.v i)))
-         as (elem_pts_to int32_t_repr r p (nth v (idx r x)));
+    rewrite (elem_pts_to int32_t_repr int32_t_etype_ok (x +! off) p (Seq.index v (SizeT.v i)))
+         as (elem_pts_to int32_t_repr int32_t_etype_ok r p (nth v (idx r x)));
     int32_t_of_elem r;
-    rewrite (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p (Seq.slice v 0 (SizeT.v i)))
-         as (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p
+    rewrite (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p (Seq.slice v 0 (SizeT.v i)))
+         as (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p
                           (Seq.slice v 0 (clamp (idx r x) (Seq.length v))));
-    rewrite (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) ((x +! off) +! 4sz) p
+    rewrite (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) ((x +! off) +! 4sz) p
                           (Seq.slice v (SizeT.v i + 1) (Seq.length v)))
-         as (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) (r +! 4sz) p
+         as (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) (r +! 4sz) p
                           (Seq.slice v (clamp (idx r x + 1) (Seq.length v)) (Seq.length v)));
     fold rest x r p v;
   }
@@ -148,27 +148,27 @@ _include_pulse(Arrayptrs_include2,
     requires int32_t_pts_to r p (nth v (idx r x))
     requires rest x r p v
     requires pure (in_array x r v)
-    ensures array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p v
+    ensures array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p v
   {
     let off = SizeT.uint_to_t (addr_of r - addr_of x);
     let i = SizeT.uint_to_t (idx r x);
     unfold rest x r p v;
     ptr_ext (x +! off) r;
     int32_t_to_elem r;
-    rewrite (elem_pts_to int32_t_repr r p (nth v (idx r x)))
-         as (elem_pts_to int32_t_repr (x +! off) p (Seq.index v (SizeT.v i)));
-    rewrite (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p
+    rewrite (elem_pts_to int32_t_repr int32_t_etype_ok r p (nth v (idx r x)))
+         as (elem_pts_to int32_t_repr int32_t_etype_ok (x +! off) p (Seq.index v (SizeT.v i)));
+    rewrite (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p
                           (Seq.slice v 0 (clamp (idx r x) (Seq.length v))))
-         as (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p (Seq.slice v 0 (SizeT.v i)));
-    rewrite (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) (r +! 4sz) p
+         as (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p (Seq.slice v 0 (SizeT.v i)));
+    rewrite (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) (r +! 4sz) p
                           (Seq.slice v (clamp (idx r x + 1) (Seq.length v)) (Seq.length v)))
-         as (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) ((x +! off) +! 4sz) p
+         as (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) ((x +! off) +! 4sz) p
                           (Seq.slice v (SizeT.v i + 1) (Seq.length v)));
-    array_unfocus int32_t_repr x 4sz int32_t_alignof i off;
+    array_unfocus int32_t_repr int32_t_etype_ok x 4sz int32_t_alignof i off;
     Seq.lemma_eq_intro (Seq.upd v (SizeT.v i) (Seq.index v (SizeT.v i))) v;
-    rewrite (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p
+    rewrite (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p
                           (Seq.upd v (SizeT.v i) (Seq.index v (SizeT.v i))))
-         as (array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) x p v);
+         as (array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) x p v);
   }
 )
 
@@ -192,7 +192,7 @@ _arrayptr const int *binary_search(_arrayptr const int *lo, _arrayptr const int 
     // The array itself. In the current model the loop reaches it through the
     // `arrayptr_pts_to` claims; in Palow the claims are empty and the
     // ownership has to be carried across the loop explicitly.
-    _invariant(_inline_pulse(array_pts_to int32_t_repr 4 (SizeT.v int32_t_alignof) $`arr $`p_arr $`v_arr))
+    _invariant(_inline_pulse(array_pts_to int32_t_repr int32_t_etype_ok 4 (SizeT.v int32_t_alignof) $`arr $`p_arr $`v_arr))
   {
       _arrayptr const int *mid = lo + (hi - lo) / 2;
       // Read once, so that the element is carved out of the array and put
