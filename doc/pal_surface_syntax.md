@@ -199,8 +199,9 @@ PAL exposes two ghost constructs for proof assistance that have no runtime effec
 
 Ghost arguments do not change C function-pointer signatures. Generated
 wrappers forward them through erased witnesses. If inference cannot determine
-a call's ghost arguments, supply a witness with a ghost statement; the callee's
-precondition must still hold. Taking a function's address requires no witness.
+a call's ghost arguments, supply a witness with a ghost statement,
+`_ghost_stmt($witness (hide (a, b)));`, immediately before the call, direct
+or indirect; the callee's precondition must still hold. Taking a function's address requires no witness.
 See `test/func_pointer/func_pointer.c` for examples.
 
 ## Pulse interop
@@ -227,7 +228,7 @@ Inside an `_inline_pulse(...)` body — and the spec macros built on it — text
 | `$unfold(U::f)` / `$fold(U::f)`           | the unfold / fold step for union field `f` |
 | `$scattered(struct T) $(p)`               | nothing — says `*p` is already in pieces, as after `T_scatter_uninit`, possibly with fields the body does not write holding values; the body's field writes then fill the rest by address (`write_uninit`), and `*p` is gathered only if every field gets written |
 | `$gathered(struct T) $(p)`                | nothing — the closing form of `$scattered`: says a ghost step has made `*p` whole again, so later accesses focus its fields instead of filling them |
-| `$witness <term>`                         | nothing — in a `_ghost_stmt` immediately before an indirect call, `<term>` is the tuple of ghost arguments that instantiates the callee's contract; only the author knows it, so the call site has to say it |
+| `$witness <term>`                         | nothing — in a `_ghost_stmt` immediately before a call, `<term>` is the tuple of ghost arguments that instantiates the callee's contract; only the author knows it, so the call site has to say it. Before a direct call it is the erased tuple of the callee's `_ghost_arg`s, in order (`hide 5ul`, `hide (1ul, 2ul)`); everything else is inferred |
 
 Notes:
 

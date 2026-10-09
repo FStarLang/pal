@@ -470,11 +470,12 @@ its own), and a hand-written shim that steps a pointer has to call
   from clang. But `malloc` does *not* guarantee it, so claiming such a type on
   `malloc`ed storage should fail — correctly — and `aligned_alloc` needs a
   model. Worth doing, since it is the only way to write the program at all.
-- **Packed structs.** A packed struct whose fields still sit at naturally
-  aligned offsets, and whose size is a multiple of their alignment, is proved
-  with its fields' alignment rather than C's (entry 32). A really misaligned
-  field would need unaligned reads and writes, which the model does not have,
-  so such a struct is skipped.
+- **Packed structs.** A packed struct keeps C's alignment. A scalar or
+  pointer field that this alignment leaves misaligned is owned at the byte
+  level and accessed through an aligned temporary (entry 35). A misaligned
+  array or nested-struct field, or a bit-field in a packed struct, would need
+  unaligned versions of its whole ownership, so such a struct is still
+  skipped.
 - **`char` access is free.** `uint8_t_alignof` is `1sz` and `aligned a 1sz` is
   `addr_of a % 1 == 0`, which is trivially true, so no byte-level code pays
   anything. This is not an accident, and it is the reason the byte layer can
@@ -6201,10 +6202,9 @@ new facts about memory.
 
 28. **`~` on a signed operand** (#349). The body translation of `~` only
     knew unsigned widths; a signed operand (including the `int` that
-    `~FLAG_X` promotes to) now uses `FStar.Int{w}.lognot`. As with the
-    unsigned form, SMT knows nothing about the resulting value, so a
-    contract about it would need a lemma. `test/bitnot_signed` covers
-    `x &= ~FLAG` and `x = ~x`.
+    `~FLAG_X` promotes to) is now translated too. Entry 33 changed both
+    forms to arithmetic, so SMT can reason about the result.
+    `test/bitnot_signed` covers `x &= ~FLAG` and `x = ~x`.
 
 29. **Arbitrary variadic arguments** (#354). A variadic argument was
     only accepted if it was inert (a local, a constant). Since Palow drops
@@ -6224,8 +6224,8 @@ new facts about memory.
     own. A loop that leaves it alone needs nothing, written or not, since
     Pulse's frame carries it. A loop that touches one not yet written is
     refused, since the invariant would have to say that the storage may or
-    may not hold a value. Struct and array `_out` parameters are still
-    refused at a loop. `test/out_loop` covers these.
+    may not hold a value. Entry 34 extends this to struct and array `_out`
+    parameters. `test/out_loop` covers these.
 
 31. **Field addresses as call arguments** (#348). `f(&s->a)` passed the
     field's address without opening `*s`, so the callee's points-to was
@@ -6249,4 +6249,97 @@ new facts about memory.
     what `_Alignof` evaluates to (`c_alignof`). The same rule covers a
     struct that only contains a packed one. Any other packed layout is
     skipped with the misaligned field named, since Palow has no unaligned
-    accesses. `test/packed_struct` covers these.
+    accesses. `test/packed_struct` covers these. *Superseded by entry 35:
+    the struct now keeps C's alignment.*
+
+33. **Operators in contracts.** `~`, `&`, `|`, `^`, `<<`, `>>`, `/`
+    and `%` now translate in contracts as well as in bodies.
+    - `~x` is written arithmetically in both places: `-1 - x` for signed
+      types and `MAX - x` for unsigned ones. SMT knows nothing about
+      `lognot`, but it can do arithmetic.
+    - A contract literal is a spec int, so `x & ~4` reaches the emitter as
+      a bitwise expression lifted to `_specint`. Such an expression is
+      lowered back to the machine type of its operands, promoted to at
+      least `int` as C does. Its literals become machine literals: wrapped
+      for unsigned types, range-checked for signed ones. A machine cast
+      around it stays a real conversion, so
+      `return == (uint8_t)(x & ~4)` means what C means.
+    - Each partial operator states its definedness as a conjunct next to
+      the claim:
+      - `/` and `%` need a non-zero divisor, and on signed types a
+        quotient in range (`INT_MIN / -1`).
+      - A signed `<<` needs a non-negative operand whose product with
+        `2^s` fits.
+      - In a body these are checked at the operation. `/` and `%` are
+        therefore refused in a body whose contract did not translate.
+    - The `*` overflow guards for signed and `size_t` multiplication were
+      spelled `` `op_Multiply` ``, which does not resolve. They now use
+      `*`.
+    - Limit: SMT still knows nothing about `logand`, `logor` and
+      `logxor`. `x & 0xff <= 255` and commutativity therefore need a
+      lemma.
+
+    `test/contract_ops` covers these.
+
+34. **Struct and array `_out` parameters in loops.** Loops are no longer
+    refused in a function with such a parameter.
+    - A struct `_out` is the slot `*p`. Once it is written, a loop that
+      touches it restates it in the invariant like any other slot, and the
+      author's clauses read it as `p->x`. A loop that writes it for the
+      first time is refused, as for a local.
+    - An `_out` array is restated in the invariant by its `option` view,
+      with its length tied to the caller's. A clause that reads a cell,
+      such as `a[j] == 0`, also claims that the cell holds a value: the
+      comparison becomes `Some? c /\ Some?.v c == 0`. So an invariant
+      over the prefix written so far, together with the exit condition,
+      proves that every cell holds a value when the function returns.
+    - Library changes:
+      - `array_somes` now also accepts that every cell holds a value stated
+        over `size_t` indices. That is what an invariant over `size_t j`
+        says, and Z3 cannot instantiate it at a `nat`. The bridge is that
+        an owned array's length fits in a `size_t` (`array_length_fits`).
+      - `array_somes` now also states each cell's value with a pattern on
+        `Seq.index vs i`. Before, a postcondition about an `_out` array's
+        values (`_ensures(a[0] == 7)`) failed even without a loop.
+
+    `test/out_aggr_loop` covers these.
+
+35. **Unaligned fields of packed structs** (#353). Entry 32 raised a packed
+    struct's alignment to its fields', which asked more than C does. A
+    `uint8_t` buffer holding such a header at an odd offset could not be
+    used. Now the struct keeps C's alignment, and alignment is arithmetic:
+    a field is aligned when its type's alignment divides both the struct's
+    alignment and the field's offset.
+    - A misaligned scalar or pointer field is owned by
+      `elem_pts_to T_repr`, which is `T_pts_to` without the alignment
+      conjunct. Its storage view is `bytes_uninit a (SizeT.v T_sizeof)`.
+      `field_aligned` lists only the aligned fields.
+    - New library module `Pulse.Lib.C.Palow.Unaligned`: for each scalar
+      type and `ptr`, `T_read_u`, `T_write_u`, `T_write_uninit_u` and
+      `T_forget_u`. Each one copies through an aligned stack temporary
+      with `memcpy`, which is what a compiler emits for such an access.
+      They are proved from existing operations, so nothing new is trusted.
+    - Field reads and writes, field-by-field initialisation, `malloc`ed
+      objects, whole-struct copies, the byte-level view (array elements),
+      and nested packed structs all work through these.
+    - Handing a misaligned field's address to a callee (`f(&m->b)`, or as
+      an `_out` argument) is refused: the callee would get a typed
+      points-to, which states alignment, and C says using such a pointer is
+      undefined (C11 6.3.2.3p7).
+    - Still skipped: a misaligned array or nested-struct field, and
+      bit-fields in a packed struct.
+
+    `test/packed_unaligned` and `test/packed_struct` cover these.
+
+36. **`$witness` at a direct call** (#356). A `_ghost_arg` appears only in
+    `pure`s, so Pulse cannot infer it from the ownership handed over, and
+    there was no way to supply one at a direct call: a `$witness` was
+    honoured only before an indirect call, and before a direct one it was
+    silently left pending. Now a direct call takes it. The witness is the
+    erased tuple of the callee's `_ghost_arg`s, in declaration order (a
+    single value for one, a pair for two, an `n`-tuple for more). The
+    call writes `#_` for every other implicit, which are
+    still inferred, and the projected witness at each ghost argument's
+    position. A `$witness` before a call to a function with no ghost
+    arguments is an error rather than being ignored. `test/ghost_arg_direct`
+    covers this.

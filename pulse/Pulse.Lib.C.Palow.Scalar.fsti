@@ -259,6 +259,17 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
   requires uint32_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
 
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `uint32_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `uint32_t_reveal_uninit` drops exactly that fact. *)
+ghost fn uint32_t_reveal_uninit_at (a: ptr)
+  requires uint32_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof
+                      /\ ET.elen e == len b /\ uint32_t_etype_ok e)
+
 
 (* ---------------------------------------------------------------------------
    Pointers as stored values
@@ -397,6 +408,17 @@ ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes) (#e: ET.etypes)
 ghost fn ptr_reveal_uninit (dest: ptr)
   requires ptr_pts_to_uninit dest
   ensures  exists* b. mem_pts_to dest 1.0R b ** pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
+
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `ptr_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `ptr_reveal_uninit` drops exactly that fact. *)
+ghost fn ptr_reveal_uninit_at (a: ptr)
+  requires ptr_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v ptr_sizeof /\ aligned a ptr_alignof
+                      /\ ET.elen e == len b /\ ptr_etype_ok e)
 
 (* ---------------------------------------------------------------------------
    Elements of an array

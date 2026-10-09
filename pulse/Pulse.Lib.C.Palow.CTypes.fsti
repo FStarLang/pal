@@ -168,6 +168,17 @@ ghost fn bool_t_reveal_uninit (a: ptr)
   requires bool_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v bool_t_sizeof /\ aligned a bool_t_alignof)
 
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `bool_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `bool_t_reveal_uninit` drops exactly that fact. *)
+ghost fn bool_t_reveal_uninit_at (a: ptr)
+  requires bool_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v bool_t_sizeof /\ aligned a bool_t_alignof
+                      /\ ET.elen e == len b /\ bool_t_etype_ok e)
+
 
 
 (* ------------------------------- int8_t ------------------------------- *)
@@ -294,6 +305,17 @@ ghost fn int8_t_reveal_uninit (a: ptr)
   requires int8_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int8_t_sizeof /\ aligned a int8_t_alignof)
 
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `int8_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `int8_t_reveal_uninit` drops exactly that fact. *)
+ghost fn int8_t_reveal_uninit_at (a: ptr)
+  requires int8_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v int8_t_sizeof /\ aligned a int8_t_alignof
+                      /\ ET.elen e == len b /\ int8_t_etype_ok e)
+
 
 
 (* ------------------------------- int16_t ------------------------------- *)
@@ -418,6 +440,17 @@ ghost fn int16_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
 ghost fn int16_t_reveal_uninit (a: ptr)
   requires int16_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int16_t_sizeof /\ aligned a int16_t_alignof)
+
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `int16_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `int16_t_reveal_uninit` drops exactly that fact. *)
+ghost fn int16_t_reveal_uninit_at (a: ptr)
+  requires int16_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v int16_t_sizeof /\ aligned a int16_t_alignof
+                      /\ ET.elen e == len b /\ int16_t_etype_ok e)
 
 
 
@@ -544,6 +577,17 @@ ghost fn int32_t_reveal_uninit (a: ptr)
   requires int32_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int32_t_sizeof /\ aligned a int32_t_alignof)
 
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `int32_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `int32_t_reveal_uninit` drops exactly that fact. *)
+ghost fn int32_t_reveal_uninit_at (a: ptr)
+  requires int32_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v int32_t_sizeof /\ aligned a int32_t_alignof
+                      /\ ET.elen e == len b /\ int32_t_etype_ok e)
+
 
 
 (* ------------------------------- int64_t ------------------------------- *)
@@ -668,6 +712,17 @@ ghost fn int64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
 ghost fn int64_t_reveal_uninit (a: ptr)
   requires int64_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v int64_t_sizeof /\ aligned a int64_t_alignof)
+
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `int64_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `int64_t_reveal_uninit` drops exactly that fact. *)
+ghost fn int64_t_reveal_uninit_at (a: ptr)
+  requires int64_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v int64_t_sizeof /\ aligned a int64_t_alignof
+                      /\ ET.elen e == len b /\ int64_t_etype_ok e)
 
 
 
@@ -794,6 +849,17 @@ ghost fn uint16_t_reveal_uninit (a: ptr)
   requires uint16_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint16_t_sizeof /\ aligned a uint16_t_alignof)
 
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `uint16_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `uint16_t_reveal_uninit` drops exactly that fact. *)
+ghost fn uint16_t_reveal_uninit_at (a: ptr)
+  requires uint16_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v uint16_t_sizeof /\ aligned a uint16_t_alignof
+                      /\ ET.elen e == len b /\ uint16_t_etype_ok e)
+
 
 
 (* ------------------------------- uint64_t ------------------------------- *)
@@ -918,6 +984,17 @@ ghost fn uint64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
 ghost fn uint64_t_reveal_uninit (a: ptr)
   requires uint64_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint64_t_sizeof /\ aligned a uint64_t_alignof)
+
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `uint64_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `uint64_t_reveal_uninit` drops exactly that fact. *)
+ghost fn uint64_t_reveal_uninit_at (a: ptr)
+  requires uint64_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v uint64_t_sizeof /\ aligned a uint64_t_alignof
+                      /\ ET.elen e == len b /\ uint64_t_etype_ok e)
 
 
 
@@ -1075,6 +1152,17 @@ ghost fn size_t_reveal_uninit (a: ptr)
   requires size_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v size_t_sizeof /\ aligned a size_t_alignof)
 
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `size_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `size_t_reveal_uninit` drops exactly that fact. *)
+ghost fn size_t_reveal_uninit_at (a: ptr)
+  requires size_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v size_t_sizeof /\ aligned a size_t_alignof
+                      /\ ET.elen e == len b /\ size_t_etype_ok e)
+
 
 
 
@@ -1152,6 +1240,17 @@ ghost fn uint8_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
 ghost fn uint8_t_reveal_uninit (a: ptr)
   requires uint8_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint8_t_sizeof /\ aligned a uint8_t_alignof)
+
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `uint8_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `uint8_t_reveal_uninit` drops exactly that fact. *)
+ghost fn uint8_t_reveal_uninit_at (a: ptr)
+  requires uint8_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v uint8_t_sizeof /\ aligned a uint8_t_alignof
+                      /\ ET.elen e == len b /\ uint8_t_etype_ok e)
 
 
 (* ---------------------------------------------------------------------------
@@ -1440,6 +1539,17 @@ ghost fn float32_t_reveal_uninit (a: ptr)
   requires float32_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float32_t_sizeof /\ aligned a float32_t_alignof)
 
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `float32_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `float32_t_reveal_uninit` drops exactly that fact. *)
+ghost fn float32_t_reveal_uninit_at (a: ptr)
+  requires float32_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v float32_t_sizeof /\ aligned a float32_t_alignof
+                      /\ ET.elen e == len b /\ float32_t_etype_ok e)
+
 
 
 (* ------------------------------ float64_t ------------------------------ *)
@@ -1564,6 +1674,17 @@ ghost fn float64_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
 ghost fn float64_t_reveal_uninit (a: ptr)
   requires float64_t_pts_to_uninit a
   ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v float64_t_sizeof /\ aligned a float64_t_alignof)
+
+(* The same, keeping the effective-type index. The bytes a stack allocation
+   hands out already meet the type's condition -- that is what
+   `float64_t_pts_to_uninit` says -- and a byte-level copy into them preserves the
+   index, so a caller that copies into the slot can still conceal it at the
+   type afterwards. `float64_t_reveal_uninit` drops exactly that fact. *)
+ghost fn float64_t_reveal_uninit_at (a: ptr)
+  requires float64_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e
+             ** pure (len b == SZ.v float64_t_sizeof /\ aligned a float64_t_alignof
+                      /\ ET.elen e == len b /\ float64_t_etype_ok e)
 
 
 ghost fn float32_t_of_elem (a: ptr) (#p: perm) (#x: float32)

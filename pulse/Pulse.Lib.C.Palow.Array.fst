@@ -943,14 +943,59 @@ let somes_index (#t: Type0) (xs: Seq.seq t) (i: nat)
    The `xs == somes vs` it leaves behind is what lets the caller put its own
    view back together afterwards: `array_unsomes` returns `somes vs`, and the
    equation says that is the sequence it started with. *)
+(* Every cell holding a value, stated over the indices a C loop counts with.
+   An invariant over `size_t j` gives Z3 nothing to instantiate for a `nat`;
+   the length fitting in a `size_t` is what bridges the two. *)
+let all_some_sz (#t: Type0) (xs: Seq.seq (option t)) : prop =
+  forall (i: SZ.t). SZ.v i < Seq.length xs ==> Some? (Seq.index xs (SZ.v i))
+
+let all_some_of_sz (#t: Type0) (xs: Seq.seq (option t))
+  : Lemma (requires SZ.fits (Seq.length xs) /\ all_some_sz xs)
+          (ensures  forall (i: nat). i < Seq.length xs ==> Some? (Seq.index xs i))
+  = let aux (i: nat) : Lemma (i < Seq.length xs ==> Some? (Seq.index xs i)) =
+      if i < Seq.length xs then begin
+        SZ.fits_lte i (Seq.length xs);
+        assert (SZ.v (SZ.uint_to_t i) == i)
+      end
+    in
+    Classical.forall_intro aux
+
+let length_fits (esize n m: nat)
+  : Lemma (requires esize * n <= m /\ SZ.fits m)
+          (ensures  esize > 0 ==> SZ.fits n)
+  = if esize > 0 then begin
+      M.lemma_mult_le_right n 1 esize;
+      SZ.fits_lte n m
+    end
+
+(* An array's length fits in a `size_t` when its elements take up room: the
+   bytes are owned, and a live range ends at an address that fits. *)
+ghost fn array_length_fits (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop) (a: ptr)
+                           (esize: SZ.t) (ealign: SZ.t) (#p: perm) (#xs: Seq.seq t)
+  preserves array_pts_to t_repr eok (SZ.v esize) (SZ.v ealign) a p xs
+  ensures   pure (SZ.v esize > 0 ==> SZ.fits (Seq.length xs))
+{
+  unfold array_pts_to t_repr eok (SZ.v esize) (SZ.v ealign) a p xs;
+  with b e. assert (mem_pts_to_at a p b e
+                    ** pure (array_repr t_repr (SZ.v esize) xs b));
+  mem_pts_to_at_fits a;
+  length_fits (SZ.v esize) (Seq.length xs) (addr_of a + len b);
+  fold array_pts_to t_repr eok (SZ.v esize) (SZ.v ealign) a p xs;
+}
+
 ghost fn array_somes (#t: Type0) (t_repr: t -> bytes -> prop) (eok: ET.etypes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
                      (#p: perm) (#xs: Seq.seq (option t))
   requires array_pts_to (maybe_repr t_repr (SZ.v esize)) eok (SZ.v esize) (SZ.v ealign) a p xs
-  requires pure (forall (i: nat). i < Seq.length xs ==> Some? (Seq.index xs i))
+  requires pure ((forall (i: nat). i < Seq.length xs ==> Some? (Seq.index xs i)) \/
+                 (SZ.v esize > 0 /\ all_some_sz xs))
   ensures  exists* (vs: Seq.seq t).
              array_pts_to t_repr eok (SZ.v esize) (SZ.v ealign) a p vs **
-             pure (xs == somes vs /\ Seq.length vs == Seq.length xs)
+             pure (xs == somes vs /\ Seq.length vs == Seq.length xs /\
+                   (forall (i: nat). {:pattern Seq.index vs i}
+                     i < Seq.length vs ==> Seq.index xs i == Some (Seq.index vs i)))
 {
+  array_length_fits (maybe_repr t_repr (SZ.v esize)) eok a esize ealign;
+  Classical.move_requires all_some_of_sz xs;
   unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) eok (SZ.v esize) (SZ.v ealign) a p xs;
   let vs : Seq.seq t = Seq.init (Seq.length xs) (fun i -> Some?.v (Seq.index xs i));
   Seq.lemma_eq_intro xs (somes vs);

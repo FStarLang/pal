@@ -118,7 +118,7 @@ fn record_fields(mut fs: Vec<String>, decl: bool) -> String {
 
 fn ctype_of_shape(shape: &FieldShape) -> Option<String> {
     match shape {
-        FieldShape::One { pn } => Some(format!("{}_ctype", pn)),
+        FieldShape::One { pn } | FieldShape::Unaligned { pn } => Some(format!("{}_ctype", pn)),
         FieldShape::Array { pn, len, .. } => Some(format!("(ET.TArr {}_ctype {})", pn, len)),
         FieldShape::Flex { .. } => None,
     }
@@ -126,6 +126,14 @@ fn ctype_of_shape(shape: &FieldShape) -> Option<String> {
 
 enum FieldShape {
     One {
+        pn: String,
+    },
+    /// A scalar or pointer member of a packed struct, at an offset its type's
+    /// alignment does not divide. Owned by its bytes and its value only --
+    /// `elem_pts_to` rather than `_pts_to`, which is the same thing less the
+    /// alignment -- and accessed by the `_u` operations, which go through an
+    /// aligned temporary as the compiler does.
+    Unaligned {
         pn: String,
     },
     Array {
@@ -144,12 +152,35 @@ enum FieldShape {
 }
 
 impl FieldShape {
+    /// The Palow name of the field's type, or of its element type.
+    fn pn(&self) -> &str {
+        match self {
+            FieldShape::One { pn }
+            | FieldShape::Unaligned { pn }
+            | FieldShape::Array { pn, .. }
+            | FieldShape::Flex { pn, .. } => pn,
+        }
+    }
+
+    /// The alignment fact `_field_aligned` states for the field at `at`, or
+    /// `None` for an unaligned one, of which there is nothing to state.
+    fn aligned_at(&self, at: &str) -> Option<String> {
+        match self {
+            FieldShape::One { pn } => Some(format!("aligned {} {}_alignof", at, pn)),
+            FieldShape::Unaligned { .. } => None,
+            FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => Some(format!(
+                "array_aligned {} (SizeT.v {}_alignof) {}",
+                esize, pn, at
+            )),
+        }
+    }
+
     /// The F* type of the field's value. An array field's length is part of
     /// the type rather than a side condition, so that `Seq.upd` through it
     /// obviously preserves it.
     fn value_type(&self, elem: &str) -> String {
         match self {
-            FieldShape::One { .. } => elem.to_string(),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => elem.to_string(),
             FieldShape::Array { len, .. } => {
                 format!("(s: Seq.seq {} {{ Seq.length s == {} }})", elem, len)
             }
@@ -160,6 +191,9 @@ impl FieldShape {
     fn pts_to(&self, at: &str, value: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} p {}", pn, at, value),
+            FieldShape::Unaligned { pn } => {
+                format!("elem_pts_to {}_repr {}_etype_ok {} p {}", pn, pn, at, value)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
                     "array_pts_to {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} p {}",
@@ -172,7 +206,7 @@ impl FieldShape {
     /// How many bytes of the object the field occupies.
     fn size(&self, tds: &Typedefs, ty: &Type) -> Option<u64> {
         match self {
-            FieldShape::One { .. } => palow_sizeof(tds, ty),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => palow_sizeof(tds, ty),
             FieldShape::Array { esize, len, .. } => Some(esize * len),
             // A flexible array member contributes no bytes to the type: the
             // object it belongs to is larger than `sizeof` says, and by how
@@ -187,7 +221,9 @@ impl FieldShape {
     /// applied to its element's.
     fn repr_of(&self, v: &str, b: &str) -> String {
         match self {
-            FieldShape::One { pn } => format!("{}_repr {} {}", pn, v, b),
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                format!("{}_repr {} {}", pn, v, b)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!("array_repr {}_repr {} {} {}", pn, esize, v, b)
             }
@@ -198,6 +234,9 @@ impl FieldShape {
     fn pts_to_at(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} {} {}", pn, a, p, v),
+            FieldShape::Unaligned { pn } => {
+                format!("elem_pts_to {}_repr {}_etype_ok {} {} {}", pn, pn, a, p, v)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
                     "array_pts_to {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {} {}",
@@ -210,6 +249,9 @@ impl FieldShape {
     fn uninit_at(&self, a: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to_uninit {}", pn, a),
+            FieldShape::Unaligned { pn } => {
+                format!("bytes_uninit {}_etype_ok {} (SizeT.v {}_sizeof)", pn, a, pn)
+            }
             FieldShape::Array { pn, esize, len } => {
                 format!(
                     "array_pts_to_uninit {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {}",
@@ -226,6 +268,12 @@ impl FieldShape {
             FieldShape::One { pn } => {
                 format!("{}_conceal {} #{} #{} #{} #{};", pn, a, p, b, e, v)
             }
+            FieldShape::Unaligned { pn } => {
+                format!(
+                    "elem_conceal {}_repr {}_etype_ok {} #{} #{} #{} #{};",
+                    pn, pn, a, p, b, e, v
+                )
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => format!(
                 "array_conceal {}_repr {}_etype_ok {} {}sz {}_alignof #{} #{} #{} #{};",
                 pn, pn, a, esize, pn, p, b, e, v
@@ -237,6 +285,12 @@ impl FieldShape {
     fn reveal(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_reveal {} #{} #{};", pn, a, p, v),
+            FieldShape::Unaligned { pn } => {
+                format!(
+                    "elem_reveal {}_repr {}_etype_ok {} #{} #{};",
+                    pn, pn, a, p, v
+                )
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
                     "array_reveal {}_repr {}_etype_ok {} {}sz {}_alignof #{} #{};",
@@ -254,7 +308,9 @@ impl FieldShape {
     /// instead, with the same `elems_ok` the array combinators use.
     fn etype_ok(&self, e: &str) -> Option<String> {
         match self {
-            FieldShape::One { pn } => Some(format!("{}_etype_ok {}", pn, e)),
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                Some(format!("{}_etype_ok {}", pn, e))
+            }
             FieldShape::Array { pn, esize, len } => {
                 Some(format!("elems_ok {}_etype_ok {} {} {}", pn, esize, len, e))
             }
@@ -269,7 +325,9 @@ impl FieldShape {
     /// storage, or a fresh allocation -- meets `etype_ok`.
     fn etype_ok_untyped(&self, e: &str) -> String {
         match self {
-            FieldShape::One { pn } => format!("{}_etype_ok_untyped {}; ", pn, e),
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                format!("{}_etype_ok_untyped {}; ", pn, e)
+            }
             FieldShape::Array { pn, esize, len } => {
                 format!(
                     "{pn}_etype_ok_untyped_all (); elems_ok_untyped {pn}_etype_ok {esize} {len} {e}; ",
@@ -287,7 +345,9 @@ impl FieldShape {
     /// meets `etype_ok`. This is where a union member switch lands.
     fn etype_ok_read_ok(&self, e: &str) -> String {
         match self {
-            FieldShape::One { pn } => format!("{}_etype_ok_read_ok_all (); ", pn),
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                format!("{}_etype_ok_read_ok_all (); ", pn)
+            }
             FieldShape::Array { pn, esize, len } => format!(
                 "{pn}_etype_ok_read_ok_all (); \
                  elems_ok_read_ok {pn}_etype_ok {pn}_ctype {esize} {len} {e}; ",
@@ -304,6 +364,10 @@ impl FieldShape {
     fn claim_uninit(&self, a: &str, b: &str, e: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_claim_uninit {} #{} #{};", pn, a, b, e),
+            FieldShape::Unaligned { pn } => format!(
+                "bytes_claim_uninit {}_etype_ok {} (SizeT.v {}_sizeof) #{} #{};",
+                pn, a, pn, b, e
+            ),
             FieldShape::Array { pn, esize, len } => format!(
                 "array_claim_all_uninit {}_repr {}_etype_ok {} {}sz {}_alignof {}sz #{} #{};",
                 pn, pn, a, esize, pn, len, b, e
@@ -317,6 +381,7 @@ impl FieldShape {
     fn write_fn(&self) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_write_uninit", pn),
+            FieldShape::Unaligned { pn } => format!("{}_write_uninit_u", pn),
             FieldShape::Array { pn, esize, len } => {
                 format!("{}_fill", fill_name(pn, *esize, *len))
             }
@@ -335,6 +400,10 @@ impl FieldShape {
     fn uninit(&self, at: &str) -> Option<String> {
         match self {
             FieldShape::One { pn } => Some(format!("{}_pts_to_uninit {}", pn, at)),
+            FieldShape::Unaligned { pn } => Some(format!(
+                "bytes_uninit {}_etype_ok {} (SizeT.v {}_sizeof)",
+                pn, at, pn
+            )),
             FieldShape::Array { pn, esize, len } => Some(format!(
                 "array_pts_to_uninit {}_repr {}_etype_ok {} (SizeT.v {}_alignof) {} {}",
                 pn, pn, esize, pn, len, at
@@ -367,7 +436,9 @@ fn sizeof_norms(own: Option<(&str, u64)>, shapes: &[(&FieldShape, u64)]) -> Stri
     }
     for (shape, size) in shapes {
         match shape {
-            FieldShape::One { pn } => push(format!("{}_sizeof", pn), *size),
+            FieldShape::One { pn } | FieldShape::Unaligned { pn } => {
+                push(format!("{}_sizeof", pn), *size)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 push(format!("{}_sizeof", pn), *esize)
             }
@@ -505,6 +576,24 @@ fn store_chain(mct: &str, msz: u64, ind: &str) -> String {
         .collect::<Vec<_>>()
         .join("")
 }
+
+/// The Palow types that have unaligned accesses, in
+/// `Pulse.Lib.C.Palow.Unaligned`.
+const UNALIGNED_TYPES: &[&str] = &[
+    "bool_t",
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "size_t",
+    "float32_t",
+    "float64_t",
+    "ptr",
+];
 
 /// The name a flexible array member's missing storage operations are
 /// spelled with. None of them is reachable -- a struct with one has no
@@ -1282,8 +1371,8 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     }
 }
 
-/// The alignment C reports, which for a packed struct is less than the one
-/// Palow proves with: see `collect_structs`.
+/// The alignment C reports. For a struct this is what `collect_structs`
+/// recorded, which is also what Palow proves with.
 fn c_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     match &tds.resolve(ty).val {
         TypeT::FixedArray(t, _) => c_alignof(tds, t),
@@ -1814,6 +1903,11 @@ struct FnSurface {
     /// How many components that wrapper's witness tuple has, which is the
     /// shape an indirect call has to write out for its holes to be solvable.
     fp_wits: usize,
+    /// The implicit binders of the emitted `fn`, by name, in order, and the
+    /// names of those that are `_ghost_arg`s. A direct call's `$witness`
+    /// supplies the latter, and implicits apply positionally.
+    implicits: Vec<String>,
+    ghost_args: Vec<String>,
     /// The mutable globals the contract hands in and back out. The body treats
     /// each as a slot it did not allocate.
     globals: Vec<Slot>,
@@ -1962,6 +2056,14 @@ struct Spec<'a> {
     /// exists)`. A `_letimpure` accessor over a refined parameter is a way of
     /// naming one of these.
     valued: RefCell<Vec<(String, String, String, bool)>>,
+    /// Arrays whose value here is a sequence of `option`s: an `_out` array
+    /// in a loop invariant, while it is still being filled.
+    maybes: HashSet<String>,
+    /// What the comparison being translated needs to be defined: that each
+    /// cell of a `maybes` array it reads holds a value. Unlike `guards`, this
+    /// is part of the claim, at the comparison itself -- reading a cell is a
+    /// statement that it was written.
+    defined: RefCell<Vec<String>>,
 }
 
 impl<'a> Spec<'a> {
@@ -2121,6 +2223,8 @@ impl<'a> Spec<'a> {
                         uses: RefCell::new(HashSet::new()),
                         signed_ok: false,
                         valued: RefCell::new(Vec::new()),
+                        maybes: self.maybes.clone(),
+                        defined: RefCell::new(Vec::new()),
                     };
                     let p = inner.prop(body, w)?;
                     self.uses
@@ -2165,6 +2269,31 @@ impl<'a> Spec<'a> {
                     }
                     return Ok(format!("({} {} {})", a, o, b));
                 }
+                let mark = self.defined.borrow().len();
+                let p = self.compare(*op, l, r, w)?;
+                let defs: Vec<String> = self.defined.borrow_mut().drain(mark..).collect();
+                Ok(if defs.is_empty() {
+                    p
+                } else {
+                    format!(r"({} /\ {})", defs.join(r" /\ "), p)
+                })
+            }
+            _ => {
+                // A bare `_Bool`-valued condition.
+                let ty = self.ty_of(e)?;
+                if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
+                    Ok(format!("({} == true)", self.value(e, w)?))
+                } else {
+                    Err(format!("{} in a contract", expr_kind(e)))
+                }
+            }
+        }
+    }
+
+    /// A comparison of two values, the atom of a contract.
+    fn compare(&self, op: BinOp, l: &Expr, r: &Expr, w: When) -> Result<String, String> {
+        {
+            {
                 let ty = self.ty_of(l)?;
                 if matches!(op, BinOp::Eq) {
                     // `_Bool` equality is equivalence of the two conditions,
@@ -2187,15 +2316,6 @@ impl<'a> Spec<'a> {
                 // mathematical ones, so an uncast comparison needs the `.v`
                 // that an explicit `(_specint)` would have supplied.
                 Ok(format!("({} {} {})", self.num(l, w)?, o, self.num(r, w)?))
-            }
-            _ => {
-                // A bare `_Bool`-valued condition.
-                let ty = self.ty_of(e)?;
-                if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
-                    Ok(format!("({} == true)", self.value(e, w)?))
-                } else {
-                    Err(format!("{} in a contract", expr_kind(e)))
-                }
             }
         }
     }
@@ -2371,11 +2491,128 @@ impl<'a> Spec<'a> {
             self.guards
                 .borrow_mut()
                 .push(format!("{} < Seq.length {}", i, term));
-            Ok(format!("(Seq.index {} {})", term, i))
+            let cell = format!("(Seq.index {} {})", term, i);
+            if self.maybes.contains(&*v.val) {
+                self.defined.borrow_mut().push(format!("Some? {}", cell));
+                return Ok(format!("(Some?.v {})", cell));
+            }
+            Ok(cell)
         } else if idx.is_some() {
             Err(format!("`{}[i]` on a non-array in a contract", v.val))
         } else {
             Ok(term.clone())
+        }
+    }
+
+    /// A bitwise expression that elaboration lifted to `_specint` because a
+    /// literal in it is one -- `x & 4`, `flags & ~FLAG` -- translated at the
+    /// machine type C computes it at instead. Bitwise operators mean nothing
+    /// on unbounded integers, but the machine operands say which width C
+    /// meant, and a literal at that width is the same bits.
+    fn spec_bits(&self, e: &Expr, w: When) -> Option<Result<String, String>> {
+        let lowered = self.lowered_bits(e)?;
+        Some(self.num(&lowered, w))
+    }
+
+    /// A cast of such an expression to a machine type: the cast is a real
+    /// conversion of the lowered value, not the number-it-already-is reading
+    /// a cast of a specification integer otherwise gets.
+    fn cast_bits(&self, e: &Expr) -> Option<Rc<Expr>> {
+        let ExprT::Cast(inner, to) = &strip_vattr(e).val else {
+            return None;
+        };
+        if !matches!(self.tds.resolve(to).val, TypeT::Int { .. }) {
+            return None;
+        }
+        let lowered = self.lowered_bits(inner)?;
+        Some(ExprT::Cast(lowered, to.clone()).with_loc(e.loc.clone()))
+    }
+
+    fn lowered_bits(&self, e: &Expr) -> Option<Rc<Expr>> {
+        if !matches!(
+            strip_vattr(e).val,
+            ExprT::UnOp(UnOp::BitNot, _)
+                | ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ..)
+        ) {
+            return None;
+        }
+        let ety = self.ty_of(e).ok()?;
+        if !matches!(self.tds.resolve(&ety).val, TypeT::SpecInt | TypeT::SpecNat) {
+            return None;
+        }
+        let (signed, width) = self.bits_ty(e)?;
+        // C's integer promotion: nothing narrower than `int` is operated on.
+        let (signed, width) = if width < 32 {
+            (true, 32)
+        } else {
+            (signed, width)
+        };
+        let ty = TypeT::Int { signed, width }.with_loc(e.loc.clone());
+        self.lower_bits(e, &ty)
+    }
+
+    fn bits_ty(&self, e: &Expr) -> Option<(bool, u32)> {
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, to)
+                if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) =>
+            {
+                let t = self.ty_of(inner).ok()?;
+                match peel(self.tds, &t).val {
+                    TypeT::Int { signed, width } => Some((signed, width)),
+                    _ => None,
+                }
+            }
+            ExprT::UnOp(UnOp::BitNot, x) => self.bits_ty(x),
+            ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, l, r) => {
+                match (self.bits_ty(l), self.bits_ty(r)) {
+                    (Some((s1, w1)), Some((s2, w2))) => Some(if w1 != w2 {
+                        if w1 > w2 { (s1, w1) } else { (s2, w2) }
+                    } else {
+                        (s1 && s2, w1)
+                    }),
+                    (a, b) => a.or(b),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn lower_bits(&self, e: &Expr, ty: &Rc<Type>) -> Option<Rc<Expr>> {
+        let loc = e.loc.clone();
+        let lit = |n: BigInt| -> Option<Rc<Expr>> {
+            let TypeT::Int { signed, width } = ty.val else {
+                return None;
+            };
+            let m = BigInt::from(1) << width;
+            let n = if signed {
+                let half = BigInt::from(1) << (width - 1);
+                if n < -half.clone() || n >= half {
+                    return None;
+                }
+                n
+            } else {
+                ((n % &m) + &m) % &m
+            };
+            Some(ExprT::IntLit(Rc::new(n), ty.clone()).with_loc(loc.clone()))
+        };
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, to)
+                if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) =>
+            {
+                Some(ExprT::Cast(inner.clone(), ty.clone()).with_loc(loc))
+            }
+            ExprT::IntLit(n, _) => lit((**n).clone()),
+            ExprT::UnOp(UnOp::Neg, x) => match &strip_vattr(x).val {
+                ExprT::IntLit(n, _) => lit(-(**n).clone()),
+                _ => None,
+            },
+            ExprT::UnOp(UnOp::BitNot, x) => {
+                Some(ExprT::UnOp(UnOp::BitNot, self.lower_bits(x, ty)?).with_loc(loc))
+            }
+            ExprT::BinOp(op @ (BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor), l, r) => Some(
+                ExprT::BinOp(*op, self.lower_bits(l, ty)?, self.lower_bits(r, ty)?).with_loc(loc),
+            ),
+            _ => None,
         }
     }
 
@@ -2391,10 +2628,7 @@ impl<'a> Spec<'a> {
             return match op {
                 BinOp::Add => Some(format!("SizeT.fits (SizeT.v {} + SizeT.v {})", a, b)),
                 BinOp::Sub => Some(format!("SizeT.v {} >= SizeT.v {}", a, b)),
-                BinOp::Mul => Some(format!(
-                    "SizeT.fits (SizeT.v {} `op_Multiply` SizeT.v {})",
-                    a, b
-                )),
+                BinOp::Mul => Some(format!("SizeT.fits (SizeT.v {} * SizeT.v {})", a, b)),
                 _ => None,
             };
         }
@@ -2422,11 +2656,39 @@ impl<'a> Spec<'a> {
                     width
                 );
                 // A shift of a negative signed value is undefined in C, and
-                // F* refuses it too.
+                // F* refuses it too; so is a left shift whose result does not
+                // fit.
                 if signed {
-                    g = format!(r"{} /\ {}.v {} >= 0", g, m, self.value(l, w).ok()?);
+                    let a = self.value(l, w).ok()?;
+                    g = format!(r"{} /\ {}.v {} >= 0", g, m, a);
+                    if op == BinOp::Shl {
+                        g = format!(
+                            r"{} /\ ({}.v {} * pow2 ({}Int{}.v {})) <= FStar.Int.max_int {}",
+                            g,
+                            m,
+                            a,
+                            if rs { "" } else { "U" },
+                            rw,
+                            self.value(r, w).ok()?,
+                            width
+                        );
+                    }
                 }
                 Some(g)
+            }
+            // Division by zero is undefined, and so is the one signed
+            // quotient that overflows, `INT_MIN / -1` -- for `%` as well.
+            BinOp::Div | BinOp::Mod => {
+                let (a, b) = (self.value(l, w).ok()?, self.value(r, w).ok()?);
+                let nz = format!("{}.v {} <> 0", m, b);
+                Some(if signed {
+                    format!(
+                        r"{} /\ FStar.Int.size (FStar.Int.({}.v {} /- {}.v {})) {}",
+                        nz, m, a, m, b, width
+                    )
+                } else {
+                    nz
+                })
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul if signed => Some(format!(
                 "FStar.Int.size ({}.v {} {} {}.v {}) {}",
@@ -2435,7 +2697,7 @@ impl<'a> Spec<'a> {
                 match op {
                     BinOp::Add => "+",
                     BinOp::Sub => "-",
-                    _ => "`op_Multiply`",
+                    _ => "*",
                 },
                 m,
                 self.value(r, w).ok()?,
@@ -2478,6 +2740,9 @@ impl<'a> Spec<'a> {
         // the clause has no way to discharge: a guard conjoined at the top of
         // the clause cannot mention a variable the clause binds itself, which
         // is exactly where these casts appear.
+        if let Some(c) = self.cast_bits(e) {
+            return self.num(&c, w);
+        }
         if let ExprT::Cast(inner, _) = &strip_vattr(e).val
             && matches!(
                 self.tds.resolve(&ty).val,
@@ -2651,6 +2916,7 @@ impl<'a> Spec<'a> {
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
+            ExprT::Cast(..) if let Some(c) = self.cast_bits(e) => self.value(&c, w),
             ExprT::Cast(inner, to) => {
                 let to = self.tds.resolve(to);
                 match &to.val {
@@ -2663,7 +2929,9 @@ impl<'a> Spec<'a> {
                         }
                         let ity = self.ty_of(inner)?;
                         match self.int_module(&ity) {
-                            Some(m) => Ok(format!("({}.v {})", m, self.value(inner, w)?)),
+                            // `num` reads signed arithmetic mathematically,
+                            // which is what `(_specint) (-x - 1)` means.
+                            Some(_) => self.num(inner, w),
                             None if matches!(
                                 self.tds.resolve(&ity).val,
                                 TypeT::SpecInt | TypeT::SpecNat
@@ -2854,6 +3122,12 @@ impl<'a> Spec<'a> {
                     &f.val.to_string(),
                 ))
             }
+            ExprT::UnOp(UnOp::BitNot, _)
+            | ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ..)
+                if let Some(r) = self.spec_bits(e, w) =>
+            {
+                r
+            }
             ExprT::UnOp(op, inner) => {
                 let ety = self.ty_of(e)?;
                 let ty = self.tds.resolve(&ety);
@@ -2886,20 +3160,11 @@ impl<'a> Spec<'a> {
                         width,
                         self.value(inner, w)?
                     )),
-                    // The bitwise complement is total on the whole unsigned
-                    // range, so it needs nothing said about it and is the same
-                    // function the body emits.
-                    (
-                        UnOp::BitNot,
-                        TypeT::Int {
-                            signed: false,
-                            width,
-                        },
-                    ) => Ok(format!(
-                        "(FStar.UInt{}.lognot {})",
-                        width,
-                        self.value(inner, w)?
-                    )),
+                    // The bitwise complement is total, so it needs nothing said
+                    // about it and is the same term the body emits.
+                    (UnOp::BitNot, TypeT::Int { .. }) => {
+                        Ok(bitnot(self.tds, ty, &self.value(inner, w)?).unwrap())
+                    }
                     _ => Err(format!(
                         "`{}` on {} in a contract",
                         op.to_str(),
@@ -3176,6 +3441,8 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
         valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
     };
     let clause = |es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -3273,6 +3540,8 @@ fn emit_pure_fn(
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
         valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
     };
     let clause = |sp: &Spec, es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -4297,6 +4566,8 @@ fn emit_fn(
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
         valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
     };
     let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
         es.iter()
@@ -4471,6 +4742,8 @@ fn emit_fn(
             uses: RefCell::new(HashSet::new()),
             signed_ok: false,
             valued: RefCell::new(Vec::new()),
+            maybes: HashSet::new(),
+            defined: RefCell::new(Vec::new()),
         };
         let r = how(&inner, w);
         spec.uses
@@ -5429,6 +5702,19 @@ fn emit_fn(
         contract: contract_ok,
         fp,
         fp_wits: wits.len(),
+        implicits: perms
+            .iter()
+            .chain(ghosts.iter())
+            .map(|b| {
+                let nm = b.trim_start_matches("(#");
+                nm[..nm.find(':').unwrap_or(nm.len())].trim().to_string()
+            })
+            .collect(),
+        ghost_args: decl
+            .ghost_args
+            .iter()
+            .map(|g| format!("var_{}", g.name.val))
+            .collect(),
         globals: globals.to_vec(),
         uses: spec.uses.take(),
         // A contract that was dropped granted nothing, so nothing may be
@@ -5667,6 +5953,8 @@ fn refine_prop(
         uses: RefCell::new(HashSet::new()),
         signed_ok: false,
         valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
     };
     let mut out = Vec::new();
     for p in &ps {
@@ -5854,37 +6142,37 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 inv,
             });
         }
-        // A packed struct -- or one with a packed struct inside -- is less
-        // aligned than its fields, and a field's points-to states that the
-        // field is aligned. Where every field still sits at an offset its own
-        // alignment divides, and the size keeps an array's elements just as
-        // aligned, the struct is given its fields' alignment instead: that
-        // asks more of whoever claims the storage than C does, never less.
-        // C's own value is still what `_Alignof` says. A field that is really
-        // misaligned would need unaligned accesses, which Palow has none of.
-        let mut align = align;
+        // A packed struct -- or one with a packed struct inside -- can be
+        // less aligned than its fields. The struct keeps the alignment C gives
+        // it, which is what an allocator or an enclosing object guarantees,
+        // and each field is aligned or not by arithmetic on that: it is when
+        // its own alignment divides both the struct's and its offset. A
+        // scalar or a pointer that is not is owned by its bytes alone and
+        // accessed by the `_u` operations, which go through an aligned
+        // temporary; anything bigger would need unaligned versions of its
+        // whole ownership, which is not done.
         if ok {
-            let natural = fields
-                .iter()
-                .filter_map(|f| palow_alignof(tds, &f.ty))
-                .max()
-                .unwrap_or(1);
-            if natural > align {
-                match fields
-                    .iter()
-                    .find(|f| palow_alignof(tds, &f.ty).is_some_and(|a| f.offset % a != 0))
-                {
-                    Some(f) => {
-                        ok = false;
-                        bad = format!("field `{}` is not aligned, as the struct is packed", f.name);
+            for f in &mut fields {
+                let Some(fa) = palow_alignof(tds, &f.ty)
+                    .or_else(|| flex_elem(tds, &f.ty).and_then(|t| palow_alignof(tds, t)))
+                else {
+                    continue;
+                };
+                if align % fa == 0 && f.offset % fa == 0 {
+                    continue;
+                }
+                match &f.shape {
+                    FieldShape::One { pn } if UNALIGNED_TYPES.contains(&pn.as_str()) => {
+                        f.shape = FieldShape::Unaligned { pn: pn.clone() };
                     }
-                    None if size % natural != 0 => {
+                    _ => {
                         ok = false;
-                        bad =
-                            "its size is not a multiple of its fields' alignment, as it is packed"
-                                .to_string();
+                        bad = format!(
+                            "field `{}` is not aligned, as the struct is packed, and is not a scalar or a pointer",
+                            f.name
+                        );
+                        break;
                     }
-                    None => align = natural,
                 }
             }
         }
@@ -5911,9 +6199,12 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         // field-wise view, which is linear and which is all they are ever
         // used through.
         let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
-            && fields
-                .iter()
-                .all(|f| matches!(f.shape, FieldShape::One { .. }) && has_repr(tds, &f.ty));
+            && fields.iter().all(|f| {
+                matches!(
+                    f.shape,
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. }
+                ) && has_repr(tds, &f.ty)
+            });
         let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
         let inv = struct_invariant(tds, env, &fields);
         tds.structs.insert(
@@ -6159,16 +6450,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         let mut cs: Vec<String> = Vec::new();
         let mut ps: Vec<String> = Vec::new();
         for m in &ui.members {
-            let pn = match &m.shape {
-                FieldShape::One { pn } => pn,
-                FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
+            let pn = m.shape.pn();
+            let Some(al) = m.shape.aligned_at("a") else {
+                continue;
             };
-            cs.push(match &m.shape {
-                FieldShape::One { pn } => format!("aligned a {}_alignof", pn),
-                FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
-                    format!("array_aligned {} (SizeT.v {}_alignof) a", esize, pn)
-                }
-            });
+            cs.push(al);
             ps.push(format!("aligned_divides a {un}_alignof {pn}_alignof"));
         }
         if cs.is_empty() {
@@ -7117,16 +7403,11 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             } else {
                 format!("(a +! {}_offsetof_{})", sn, f.name)
             };
-            cs.push(match &f.shape {
-                FieldShape::One { pn } => format!("aligned {} {}_alignof", at, pn),
-                FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
-                    format!("array_aligned {} (SizeT.v {}_alignof) {}", esize, pn, at)
-                }
-            });
-            let pn = match &f.shape {
-                FieldShape::One { pn } => pn,
-                FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
+            let Some(al) = f.shape.aligned_at(&at) else {
+                continue;
             };
+            cs.push(al);
+            let pn = f.shape.pn();
             // `divides_addr` is opaque to the solver, so neither of these
             // steps happens by itself: weaken the object's alignment to the
             // field's, then step by the offset.
@@ -7165,10 +7446,12 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             if palow_alignof(tds, &f.ty).is_none() && !matches!(f.shape, FieldShape::Flex { .. }) {
                 continue;
             }
-            let pn = match &f.shape {
-                FieldShape::One { pn } => pn,
-                FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
-            };
+            // An unaligned field has no alignment to state, so it gets no
+            // lemma -- `aligned_at` returns `None` for the same reason.
+            if matches!(f.shape, FieldShape::Unaligned { .. }) {
+                continue;
+            }
+            let pn = f.shape.pn();
             let (at, proof) = if f.offset == 0 {
                 (
                     "a".to_string(),
@@ -7417,10 +7700,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
             format!("(a +! {}sz)", off)
         }
     };
-    let pn_of = |f: &StructField| match &f.shape {
-        FieldShape::One { pn } => pn.clone(),
-        _ => unreachable!(),
-    };
+    let pn_of = |f: &StructField| f.shape.pn().to_string();
 
     // The representation pins the fields and says nothing about the padding,
     // which is exactly what C guarantees: the gaps hold unspecified values,
@@ -7530,15 +7810,12 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 let pn = pn_of(f);
                 let val = format!("x.fld_{}", f.name);
                 r += &format!(
-                    "  rewrite ({pn}_pts_to (a +! {sn}_offsetof_{f}) p {val})\n    \
-                     as ({pn}_pts_to {at} p {val});\n",
-                    pn = pn,
-                    sn = sn,
-                    f = f.name,
-                    val = val,
-                    at = at(f.offset)
+                    "  rewrite ({})\n    as ({});\n",
+                    f.shape
+                        .pts_to_at(&format!("(a +! {}_offsetof_{})", sn, f.name), "p", &val),
+                    f.shape.pts_to_at(&at(f.offset), "p", &val)
                 );
-                r += &format!("  {}_reveal {};\n", pn, at(f.offset));
+                r += &format!("  {}\n", f.shape.reveal(&at(f.offset), "p", &val));
                 // The field keeps its index: a struct's condition is the
                 // conjunction of its fields' own, so the byte-level view it
                 // hands back has to carry them.
@@ -7640,7 +7917,6 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         w += &format!("  mem_hide_etypes {};\n", at(*off));
     }
     for f in &si.fields {
-        let pn = pn_of(f);
         if f.size == 0 {
             // A zero-size member owns no bytes, so there is no index to
             // carve out of the struct's: `mem_show_etypes` names the empty
@@ -7652,25 +7928,27 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
             );
         }
         w += &format!(
-            "  {pn}_conceal {at} #p #(slice b {lo} {hi}) #{e} #(x.fld_{f});\n",
-            pn = pn,
-            at = at(f.offset),
-            lo = f.offset,
-            hi = f.offset + f.size,
-            e = if f.size == 0 {
-                "_".to_string()
-            } else {
-                format!("(Seq.slice e {} {})", f.offset, f.offset + f.size)
-            },
-            f = f.name
+            "  {}\n",
+            f.shape.conceal(
+                &at(f.offset),
+                "p",
+                &format!("(slice b {} {})", f.offset, f.offset + f.size),
+                // A zero-size member gets no slice to name: there is no byte
+                // for the index to be about.
+                &if f.size == 0 {
+                    "_".to_string()
+                } else {
+                    format!("(Seq.slice e {} {})", f.offset, f.offset + f.size)
+                },
+                &format!("(x.fld_{})", f.name)
+            )
         );
+        let val = format!("x.fld_{}", f.name);
         w += &format!(
-            "  rewrite ({pn}_pts_to {at} p x.fld_{f})\n    \
-             as ({pn}_pts_to (a +! {sn}_offsetof_{f}) p x.fld_{f});\n",
-            pn = pn,
-            at = at(f.offset),
-            sn = sn,
-            f = f.name
+            "  rewrite ({})\n    as ({});\n",
+            f.shape.pts_to_at(&at(f.offset), "p", &val),
+            f.shape
+                .pts_to_at(&format!("(a +! {}_offsetof_{})", sn, f.name), "p", &val)
         );
     }
     c += &format!(
@@ -7852,6 +8130,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     for f in &si.fields {
         let ok = match &f.shape {
             FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::Unaligned { .. } => false,
             FieldShape::Array { .. } => true,
             FieldShape::Flex { .. } => std::ptr::eq(f, flex),
         };
@@ -7985,6 +8264,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     bounds.sort_unstable();
     bounds.dedup();
     let claim_fixed = |f: &StructField, alloc: &mut String| match &f.shape {
+        FieldShape::Unaligned { .. } => unreachable!(),
         FieldShape::One { pn } => {
             // A zero-size member's storage is conjured rather than carved, and
             // the enclosing object's range is still in the context at the same
@@ -8041,7 +8321,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         let mut hinted: Vec<String> = Vec::new();
         for f in si.fields.iter() {
             let (pn, arr) = match &f.shape {
-                FieldShape::One { pn } => (pn.clone(), None),
+                FieldShape::One { pn } | FieldShape::Unaligned { pn } => (pn.clone(), None),
                 FieldShape::Array { pn, esize, len } => (pn.clone(), Some((*esize, *len))),
                 FieldShape::Flex { pn, esize } => (pn.clone(), Some((*esize, 0))),
             };
@@ -8172,6 +8452,15 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
                     off = at(f.offset)
                 ));
             }
+            FieldShape::Unaligned { pn } => {
+                free.push_str(&format!(
+                    "  rewrite (bytes_uninit {pn}_etype_ok (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof))\n    as (bytes_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof));\n  bytes_reveal_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof);\n  mem_hide_etypes {off};\n",
+                    pn = pn,
+                    sn = sn,
+                    f = f.name,
+                    off = at(f.offset)
+                ));
+            }
             FieldShape::Flex { .. } => unreachable!(),
         }
         // A zero-size member's storage was conjured rather than carved, so it
@@ -8246,7 +8535,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         // representation when the shape was worked out; it is the field's own
         // type, which is not a scalar, that `has_repr` rejects.
         let ok = match &f.shape {
-            FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
             FieldShape::Array { .. } => true,
             FieldShape::Flex { .. } => false,
         };
@@ -8473,10 +8762,12 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // times. On the sixty-nine-field struct in `test/dpe` that is the
     // difference between twelve minutes and half a minute.
     let align_at = |f: &StructField, alloc: &mut String| {
-        let pn = match &f.shape {
-            FieldShape::One { pn } => pn,
-            FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => pn,
-        };
+        // An unaligned field states no alignment, so there is nothing to
+        // carry over to it.
+        if matches!(f.shape, FieldShape::Unaligned { .. }) {
+            return;
+        }
+        let pn = f.shape.pn();
         if palow_alignof(tds, &f.ty).is_none() && !matches!(f.shape, FieldShape::Flex { .. }) {
             // No per-field lemma was emitted for this one; do it inline.
             if f.offset == 0 {
@@ -8492,6 +8783,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         }
     };
     let claim_at = |f: &StructField, alloc: &mut String| match &f.shape {
+        FieldShape::Unaligned { pn } => {
+            *alloc += &format!(
+                "  bytes_claim_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof);\n  \
+                 rewrite (bytes_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof))\n    \
+                 as (bytes_uninit {pn}_etype_ok (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof));\n",
+                pn = pn,
+                off = at(f.offset),
+                sn = sn,
+                f = f.name
+            );
+        }
         FieldShape::One { pn } => {
             // A zero-size member's storage is conjured rather than carved, and
             // the enclosing object's range is still in the context at the same
@@ -8728,6 +9030,18 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // its result as `append` of the two halves, so `n` reveals held at once is
     // the same quadratic context the splits had.
     let reveal_at = |f: &StructField, free: &mut String| match &f.shape {
+        FieldShape::Unaligned { pn } => {
+            *free += &format!(
+                "  rewrite (bytes_uninit {pn}_etype_ok (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof))\n    \
+                 as (bytes_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof));\n  \
+                 bytes_reveal_uninit {pn}_etype_ok {off} (SizeT.v {pn}_sizeof);\n  \
+                 mem_hide_etypes {off};\n",
+                pn = pn,
+                sn = sn,
+                f = f.name,
+                off = at(f.offset)
+            );
+        }
         FieldShape::One { pn } => {
             *free += &format!(
                 "  rewrite ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}))\n    as ({pn}_pts_to_uninit {off});\n",
@@ -8800,6 +9114,9 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             FieldShape::One { pn } => {
                 forget += &format!("  {}_forget (a +! {}_offsetof_{});\n", pn, sn, f.name);
             }
+            FieldShape::Unaligned { pn } => {
+                forget += &format!("  {}_forget_u (a +! {}_offsetof_{});\n", pn, sn, f.name);
+            }
             FieldShape::Flex { .. } => forget += NO_FLEX_STORAGE,
             FieldShape::Array { pn, esize, len } => {
                 forget += &format!(
@@ -8822,10 +9139,13 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     write += &format!("  unfold {}_pts_to_uninit a;\n", sn);
     for f in &si.fields {
         match &f.shape {
-            FieldShape::One { pn } => {
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
                 write += &format!(
-                    "  {}_write_uninit (a +! {}_offsetof_{}) x.fld_{};\n",
-                    pn, sn, f.name, f.name
+                    "  {} (a +! {}_offsetof_{}) x.fld_{};\n",
+                    f.shape.write_fn(),
+                    sn,
+                    f.name,
+                    f.name
                 );
             }
             FieldShape::Flex { .. } => write += NO_FLEX_STORAGE,
@@ -8862,6 +9182,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     for f in &si.fields {
         let reader = match &f.shape {
             FieldShape::One { pn } => format!("{}_read", pn),
+            FieldShape::Unaligned { pn } => format!("{}_read_u", pn),
             FieldShape::Array { pn, esize, len } => {
                 format!("{}_read", fill_name(pn, *esize, *len))
             }
@@ -8917,7 +9238,7 @@ fn storable_struct(tds: &Typedefs, ty: &Type) -> bool {
     };
     match tds.structs.get(&*n.val) {
         Some(si) => si.fields.iter().all(|f| match &f.shape {
-            FieldShape::One { .. } => has_repr(tds, &f.ty),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
             FieldShape::Array { .. } => true,
             FieldShape::Flex { .. } => false,
         }),
@@ -10421,6 +10742,8 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                 contract: sig.contract,
                 fp: sig.fp.is_some(),
                 fp_wits: sig.fp_wits,
+                implicits: sig.implicits.clone(),
+                ghost_args: sig.ghost_args.clone(),
                 outs: fndecl
                     .args
                     .iter()
@@ -10662,6 +10985,7 @@ open Pulse.Lib.C.Palow.CTypes\n\
 open Pulse.Lib.C.Palow.Machine\n\
 open Pulse.Lib.C.Palow.Index\n\
 open Pulse.Lib.C.Palow.Array\n\
+open Pulse.Lib.C.Palow.Unaligned\n\
 open Pulse.Lib.C.Palow.ConstSeq\n\
 open Pulse.Lib.C.Palow.Local\n\
 open Pulse.Lib.C.Palow.Nullable\n\
@@ -11154,6 +11478,10 @@ struct Callee {
     fp: bool,
     /// How many components that wrapper's witness tuple has.
     fp_wits: usize,
+    /// The callee's implicit binders, in order, and which of them are
+    /// `_ghost_arg`s; see `Sig::implicits`.
+    implicits: Vec<String>,
+    ghost_args: Vec<String>,
     /// Which parameters are `_out`, by position. Those arguments are not
     /// evaluated: what is passed is storage, not a value.
     outs: Vec<bool>,
@@ -11398,10 +11726,6 @@ struct Body<'a> {
     /// divergent too, which is why the whole set is reached by a fixpoint
     /// rather than in one pass.
     divergent_fns: &'a HashSet<String>,
-    /// Whether any parameter is `_out`. Such a parameter's storage is
-    /// uninitialised on entry and initialised by the body, so it is not a
-    /// fixed part of the frame a loop invariant can restate.
-    has_out: bool,
     /// Set by a loop: the function has to be declared `divergent`, since PAL
     /// translates no `decreases` measure.
     divergent: bool,
@@ -11446,6 +11770,8 @@ struct Body<'a> {
 #[derive(Clone)]
 struct ArrayParam {
     pn: String,
+    /// The F* type of an element.
+    fty: String,
     esize: String,
     /// The term for the array's base address.
     addr: String,
@@ -12567,7 +12893,14 @@ impl<'a> Body<'a> {
                     Some(pos) => format!("uint{}_t", pos.unit_bits),
                     None => self.field_pn(base, f)?,
                 };
+                let unaligned = self.unaligned_field(&ff.sn, &ff.field);
                 if self.in_pieces(base) {
+                    if unaligned {
+                        return Err(format!(
+                            "field `{}`, which is not aligned as its struct is packed, of a struct the contract holds in pieces",
+                            f.val
+                        ));
+                    }
                     if ff.bits.is_some() {
                         return Err(format!(
                             "a bit-field of `{}`, whose storage the contract holds in pieces",
@@ -12576,6 +12909,7 @@ impl<'a> Body<'a> {
                     }
                     return Ok(Focus {
                         write_fn: format!("{}_write", pn),
+                        unaligned: false,
                         pn,
                         bits: None,
                         at: ff.at,
@@ -12602,7 +12936,11 @@ impl<'a> Body<'a> {
                 let mut close_write = vec![format!("{}_unfocus_{} {};", ff.sn, ff.field, ff.a)];
                 close_write.extend(ff.close_write);
                 Ok(Focus {
-                    write_fn: format!("{}_write", pn),
+                    write_fn: match unaligned {
+                        true => format!("{}_write_u", pn),
+                        false => format!("{}_write", pn),
+                    },
+                    unaligned,
                     pn,
                     bits: ff.bits,
                     at: ff.at,
@@ -12673,11 +13011,7 @@ impl<'a> Body<'a> {
                 describe(self.tds.resolve(&fty))
             ));
         };
-        let pn = match &shape {
-            FieldShape::One { pn } | FieldShape::Array { pn, .. } | FieldShape::Flex { pn, .. } => {
-                pn.clone()
-            }
-        };
+        let pn = shape.pn().to_string();
         let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
             // The other way to know is the contract. There the union's value
@@ -12744,6 +13078,7 @@ impl<'a> Body<'a> {
             bits: None,
             pn: pn.clone(),
             write_fn: shape.write_fn(),
+            unaligned: false,
             at: a.clone(),
             open_read: focus,
             open_write: vec![format!("{}_switch{}_{} {};", un, uninit_suffix, f.val, a)],
@@ -12838,6 +13173,7 @@ impl<'a> Body<'a> {
             bits: None,
             pn: pn.clone(),
             write_fn: format!("{}_write", pn),
+            unaligned: false,
             at: format!("({} +! {}_offsetof_{})", a, sn, fname),
             open_read: vec![format!("{}_pun_{}_{}_{} {};", un, live, m, fname, a)],
             open_write: Vec::new(),
@@ -12851,6 +13187,14 @@ impl<'a> Body<'a> {
             val: ExprT::Member(Rc::new(base.clone()), Rc::new(f.clone())),
             loc: base.loc.clone(),
         })
+    }
+
+    /// Whether a field of a struct is one a packed layout left misaligned.
+    fn unaligned_field(&self, sn: &str, field: &str) -> bool {
+        sn.strip_prefix("struct_")
+            .and_then(|n| self.tds.structs.get(n))
+            .and_then(|si| si.fields.iter().find(|x| x.name == field))
+            .is_some_and(|x| matches!(x.shape, FieldShape::Unaligned { .. }))
     }
 
     fn field_pn(&self, base: &Expr, f: &Ident) -> Result<String, String> {
@@ -12893,7 +13237,7 @@ impl<'a> Body<'a> {
         // uninitialised view, which needs every field to have one.
         let mut flex = false;
         if !si.fields.iter().all(|x| match &x.shape {
-            FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+            FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(self.tds, &x.ty),
             FieldShape::Array { .. } => true,
             // A flexible struct has no whole-object uninitialised view --
             // there is no such thing as an object of the type -- but it does
@@ -12923,13 +13267,15 @@ impl<'a> Body<'a> {
                 b.tmp == ff.a && b.checked && !b.freed && !b.init && b.array.is_none()
             })?),
         };
+        let unaligned = self.unaligned_field(&ff.sn, &ff.field);
         if !writing {
             if !self.scattered_set(target).contains(&*f.val) {
                 return None;
             }
             return Some(Focus {
                 bits: None,
-                write_fn: format!("{}_write", pn),
+                write_fn: format!("{}_write{}", pn, if unaligned { "_u" } else { "" }),
+                unaligned,
                 pn: pn.to_string(),
                 at: ff.at.clone(),
                 open_read: Vec::new(),
@@ -12972,7 +13318,8 @@ impl<'a> Body<'a> {
         close_write.extend(ff.close_write.iter().cloned());
         Some(Focus {
             bits: None,
-            write_fn: format!("{}_write_uninit", pn),
+            write_fn: format!("{}_write_uninit{}", pn, if unaligned { "_u" } else { "" }),
+            unaligned,
             pn: pn.to_string(),
             at: ff.at.clone(),
             open_read: Vec::new(),
@@ -13017,7 +13364,7 @@ impl<'a> Body<'a> {
         si.fields
             .iter()
             .all(|x| match &x.shape {
-                FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+                FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(self.tds, &x.ty),
                 FieldShape::Array { .. } => true,
                 FieldShape::Flex { .. } => false,
             })
@@ -13750,6 +14097,7 @@ impl<'a> Body<'a> {
                 bits: None,
                 at,
                 write_fn: format!("{}_write", pn),
+                unaligned: false,
                 pn,
                 open_read: Vec::new(),
                 open_write: Vec::new(),
@@ -13822,6 +14170,7 @@ impl<'a> Body<'a> {
             bits: None,
             at,
             write_fn: format!("{}_write_uninit", pn),
+            unaligned: false,
             pn,
             open_read,
             open_write,
@@ -14787,7 +15136,7 @@ impl<'a> Body<'a> {
                         self.lines.extend(f.open_read.iter().cloned());
                         let t = self.fresh("elem");
                         self.lines
-                            .push(format!("let {} = {}_read {};", t, f.pn, f.at));
+                            .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
                         self.lines.extend(f.close_read);
                         return Ok(t);
                     }
@@ -14910,7 +15259,7 @@ impl<'a> Body<'a> {
                 self.lines.extend(f.open_read.iter().cloned());
                 let t = self.fresh(&hint);
                 self.lines
-                    .push(format!("let {} = {}_read {};", t, f.pn, f.at));
+                    .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
                 self.lines.extend(f.close_read);
                 // A bit-field has no storage of its own, so the read reads
                 // the unit and the bits come out of the value. This is also
@@ -15218,19 +15567,8 @@ impl<'a> Body<'a> {
             ExprT::UnOp(UnOp::BitNot, inner) => {
                 let ty = self.ty_of(e)?;
                 let a = self.rvalue(inner)?;
-                match &self.tds.resolve(&ty).val {
-                    TypeT::Int {
-                        signed: false,
-                        width,
-                    } => Ok(format!("(FStar.UInt{}.lognot {})", width, a)),
-                    // Unlike `-`, `~` cannot overflow: it is total on every
-                    // two's-complement width, which is what F*'s `lognot` is.
-                    TypeT::Int {
-                        signed: true,
-                        width,
-                    } => Ok(format!("(FStar.Int{}.lognot {})", width, a)),
-                    _ => Err(format!("a bitwise complement of {}", describe(&ty))),
-                }
+                bitnot(self.tds, &ty, &a)
+                    .ok_or_else(|| format!("a bitwise complement of {}", describe(&ty)))
             }
             ExprT::Ref(inner) => match &strip_vattr(inner).val {
                 // A global's address is a constant of type `ptr`, so it needs
@@ -15572,6 +15910,17 @@ impl<'a> Body<'a> {
         let arr_args = c.arr_args.clone();
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
+        let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
+        // A `$witness` before a direct call names the callee's `_ghost_arg`s,
+        // which appear only inside `pure`s and so cannot be read off the
+        // ownership being handed over. Everything else is still inferred.
+        let witness = self.fp_witness.take();
+        if witness.is_some() && ghost_args.is_empty() {
+            return Err(format!(
+                "a `$witness` before a call to `{}`, which has no ghost arguments",
+                name.val
+            ));
+        }
         let mut out = format!("func_{}", name.val);
         let mut implicit_args: Vec<String> = Vec::new();
         let opened = self.field_args(args, &outs, |i| {
@@ -15704,11 +16053,42 @@ impl<'a> Body<'a> {
             }
             out += &format!(" {}", v);
         }
-        for a in implicit_args {
-            out += &format!(" {}", a);
-        }
         if args.is_empty() {
             out += " ()";
+        }
+        if let Some(w) = witness {
+            let n = ghost_args.len();
+            let mut imps: Vec<String> = vec!["#_".to_string(); implicits.len()];
+            for (k, a) in implicit_args.into_iter().enumerate() {
+                if k >= imps.len() || ghost_args.contains(&implicits[k]) {
+                    return Err(format!(
+                        "a `$witness` before a call to `{}` with an array argument",
+                        name.val
+                    ));
+                }
+                imps[k] = a;
+            }
+            for (i, g) in ghost_args.iter().enumerate() {
+                let Some(k) = implicits.iter().position(|x| x == g) else {
+                    continue;
+                };
+                imps[k] = match n {
+                    1 => format!("#({})", w),
+                    2 => format!(
+                        "#(hide ({} (reveal ({}))))",
+                        if i == 0 { "fst" } else { "snd" },
+                        w
+                    ),
+                    _ => format!("#(hide (Mktuple{}?._{} (reveal ({}))))", n, i + 1, w),
+                };
+            }
+            while imps.last().is_some_and(|i| i == "#_") {
+                imps.pop();
+            }
+            implicit_args = imps;
+        }
+        for a in implicit_args {
+            out += &format!(" {}", a);
         }
         Ok(format!("({})", out))
     }
@@ -15745,6 +16125,11 @@ impl<'a> Body<'a> {
             let ExprT::Member(base, f) = &strip_vattr(inner).val else {
                 continue;
             };
+            if let Ok((sn, _)) = self.struct_of(base)
+                && self.unaligned_field(&sn, &f.val)
+            {
+                return Err(misaligned_addr(&f.val));
+            }
             if self.union_of(base).is_some()
                 || self.in_pieces(base)
                 || self
@@ -15809,7 +16194,9 @@ impl<'a> Body<'a> {
             let sname = sn.strip_prefix("struct_").unwrap_or(&sn);
             let splittable = self.tds.structs.get(sname).is_some_and(|si| {
                 si.fields.iter().all(|x| match &x.shape {
-                    FieldShape::One { .. } => has_repr(self.tds, &x.ty),
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
+                        has_repr(self.tds, &x.ty)
+                    }
                     FieldShape::Array { .. } => true,
                     FieldShape::Flex { .. } => false,
                 })
@@ -15943,6 +16330,13 @@ impl<'a> Body<'a> {
         // written local takes on its way to an `_out` parameter.
         if let Some(p) = self.out_place(a) {
             let f = self.place(&p, true)?;
+            if f.unaligned {
+                let name = match &strip_vattr(&p).val {
+                    ExprT::Member(_, n) => n.val.to_string(),
+                    _ => String::new(),
+                };
+                return Err(misaligned_addr(&name));
+            }
             self.lines.extend(f.open_write.iter().cloned());
             if f.write_fn == format!("{}_write", f.pn) {
                 self.lines.push(format!("{}_forget {};", f.pn, f.at));
@@ -17260,9 +17654,9 @@ impl<'a> Body<'a> {
                 Some(pos) => {
                     let u = self.fresh("unit");
                     self.lines
-                        .push(format!("let {} = {}_read {};", u, f.pn, f.at));
+                        .push(format!("let {} = {} {};", u, f.read_fn(), f.at));
                     self.lines
-                        .push(format!("{}_write {} {};", f.pn, f.at, pos.put(&u, &value)));
+                        .push(format!("{} {} {};", f.write_fn, f.at, pos.put(&u, &value)));
                 }
                 None => self
                     .lines
@@ -17356,14 +17750,18 @@ impl<'a> Body<'a> {
             touch_stmts(b, &mut t);
             t.written
         });
+        let mut deref_slots: Vec<(String, String)> = Vec::new();
         for s in self.slots.clone() {
             let s = &s;
+            // A struct `_out` parameter's slot is named `*p`; the body
+            // touches it through `p`.
+            let touch = s.name.strip_prefix('*').unwrap_or(&s.name);
             if let Some(k) = &kept
-                && !k.contains(&s.name)
+                && !k.contains(touch)
             {
                 continue;
             }
-            if stated.contains(&s.name) {
+            if stated.contains(&s.name) || stated.contains(touch) {
                 continue;
             }
             // A local that holds an allocated block and is not reassigned in
@@ -17390,10 +17788,13 @@ impl<'a> Body<'a> {
                 // inside a loop is real, but it is not this milestone.
                 return Err(format!("{} with `{}` not yet written", what, s.name));
             }
-            let b = format!("inv_{}", s.name);
+            let b = format!("inv_{}", touch);
             binders.push(format!("({}: {})", b, s.fstar_ty));
             owns.push(s.pts_to(&b));
             bound.push(s.name.clone());
+            if touch != s.name {
+                deref_slots.push((touch.to_string(), b.clone()));
+            }
             locals.insert(s.name.clone(), b);
         }
         // A local holding an allocated block is a name for the block's
@@ -17476,6 +17877,42 @@ impl<'a> Body<'a> {
             owns.push(format!("{}{}", o.pre, b));
             pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
         }
+        for (n, b) in deref_slots {
+            pointees.insert(n, (Some(b.clone()), Some(b)));
+        }
+        // An `_out` array is storage being filled, so what the invariant
+        // binds is the `option` view: a cell the loop has not written yet
+        // holds `None`, and a clause that reads a cell claims it is written.
+        // The length is the caller's, and does not change.
+        let mut maybes: HashSet<String> = HashSet::new();
+        let mut out_arrays: Vec<(String, ArrayParam)> = self
+            .arrays
+            .iter()
+            .filter(|(n, a)| a.maybe && self.out_params.contains(*n) && self.olens.contains_key(*n))
+            .map(|(n, a)| (n.clone(), a.clone()))
+            .collect();
+        out_arrays.sort_by(|a, b| a.0.cmp(&b.0));
+        for (n, a) in out_arrays {
+            if !kept.as_ref().is_none_or(|k| k.contains(&n)) || stated.contains(&n) {
+                continue;
+            }
+            let b = format!("inv_val_{}", n);
+            binders.push(format!("({}: Seq.seq (option ({})))", b, a.fty));
+            owns.push(format!(
+                "array_pts_to (maybe_repr {pn}_repr (SizeT.v {es})) {pn}_etype_ok (SizeT.v {es}) \
+                 (SizeT.v {pn}_alignof) {addr} 1.0R {b}",
+                pn = a.pn,
+                es = a.esize,
+                addr = a.addr,
+                b = b
+            ));
+            owns.push(format!(
+                "pure (Seq.length {} == Seq.length {})",
+                b, self.olens[&n]
+            ));
+            pointees.insert(n.clone(), (Some(b.clone()), Some(b)));
+            maybes.insert(n);
+        }
 
         let spec = Spec {
             tds: self.tds,
@@ -17505,6 +17942,8 @@ impl<'a> Body<'a> {
             uses: RefCell::new(HashSet::new()),
             signed_ok: false,
             valued: RefCell::new(Vec::new()),
+            maybes,
+            defined: RefCell::new(Vec::new()),
         };
         for e in own_clauses.iter() {
             let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
@@ -17573,9 +18012,6 @@ impl<'a> Body<'a> {
             return Err("a loop with its own `requires`".to_string());
         }
         let breaks = has_break(body);
-        if self.has_out {
-            return Err("a loop in a function with an `_out` parameter".to_string());
-        }
 
         let (binders, mut owns, props) = self.frame(inv, "a loop", Some(body))?;
         let bound = std::mem::take(&mut self.frame_slots);
@@ -19061,7 +19497,8 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// The written fields of a scattered slot, with the Palow name of each.
+    /// The written fields of a scattered slot, with the ghost step that turns
+    /// each back into storage.
     fn scattered_field_names(&self, i: usize) -> Vec<(String, String)> {
         let sn = self.slots[i].palow_ty.strip_prefix("struct_").unwrap_or("");
         let Some(si) = self.tds.structs.get(sn) else {
@@ -19071,7 +19508,8 @@ impl<'a> Body<'a> {
             .iter()
             .filter(|f| self.slots[i].scattered.contains(&f.name))
             .filter_map(|f| match &f.shape {
-                FieldShape::One { pn } => Some((f.name.clone(), pn.clone())),
+                FieldShape::One { pn } => Some((f.name.clone(), format!("{}_forget", pn))),
+                FieldShape::Unaligned { pn } => Some((f.name.clone(), format!("{}_forget_u", pn))),
                 FieldShape::Array { .. } | FieldShape::Flex { .. } => None,
             })
             .collect()
@@ -19099,7 +19537,7 @@ impl<'a> Body<'a> {
             let pn = self.slots[j].palow_ty.clone();
             for (name, p) in self.scattered_field_names(j) {
                 self.lines
-                    .push(format!("{}_forget ({} +! {}_offsetof_{});", p, k, pn, name));
+                    .push(format!("{} ({} +! {}_offsetof_{});", p, k, pn, name));
             }
             self.lines.push(format!("{}_gather_uninit {};", pn, k));
             self.slots[j].scattered.clear();
@@ -19211,10 +19649,8 @@ impl<'a> Body<'a> {
             if !scattered.is_empty() || nested {
                 let fpn = self.scattered_field_names(i);
                 for (name, p) in fpn {
-                    self.lines.push(format!(
-                        "{}_forget ({} +! {}_offsetof_{});",
-                        p, addr, pn, name
-                    ));
+                    self.lines
+                        .push(format!("{} ({} +! {}_offsetof_{});", p, addr, pn, name));
                 }
                 self.lines.push(format!("{}_gather_uninit {};", pn, addr));
             } else if init {
@@ -19471,6 +19907,24 @@ fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String
     Ok(format!("({}.of_literal \"{}\")", m, digits))
 }
 
+/// `~a`, written as the subtraction it equals in two's complement: `-1 - a`
+/// for a signed type, `MAX - a` for an unsigned one. Neither can overflow,
+/// and unlike F*'s `lognot` the solver can reason about either -- including
+/// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
+fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
+    let TypeT::Int { signed, width } = peel(tds, ty).val else {
+        return None;
+    };
+    let all = if signed {
+        BigInt::from(-1)
+    } else {
+        (BigInt::from(1) << width) - 1
+    };
+    let lit = int_literal(tds, &all, ty).ok()?;
+    let m = format!("FStar.{}Int{}", if signed { "" } else { "U" }, width);
+    Some(format!("({}.sub {} {})", m, lit, a))
+}
+
 fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
     Ok(match (signed, width) {
         (true, 8) => "y",
@@ -19584,7 +20038,7 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
             let mut vals = Vec::new();
             for f in &si.fields {
                 vals.push(match &f.shape {
-                    FieldShape::One { .. } => {
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
                         format!("fld_{} = {}", f.name, zero_value(tds, &f.ty)?)
                     }
                     // There is no zero of a flexible array member: how many
@@ -19755,6 +20209,13 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     } = &t.val
     {
         let wrap = format!("Pulse.Lib.C.UInt{}", width);
+        // Division is partial at either signedness: by zero it is undefined.
+        if matches!(op, BinOp::Div | BinOp::Mod) && !signed_ok {
+            return Err(
+                "a division, whose definedness obligation needs the untranslated `_requires`"
+                    .to_string(),
+            );
+        }
         return Ok(match op {
             BinOp::Add => format!("`{}.add_wrap`", wrap),
             BinOp::Sub => format!("`{}.sub_wrap`", wrap),
@@ -19765,7 +20226,7 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         });
     }
     match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul if !signed_ok => Err(
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod if !signed_ok => Err(
             "signed arithmetic, whose overflow obligation needs the untranslated `_requires`"
                 .to_string(),
         ),
@@ -19806,10 +20267,32 @@ struct Focus {
     /// The store operation. An element of a local array may not hold a value
     /// yet, so it is written with the write-only operation.
     write_fn: String,
+    /// Set when the place is a misaligned field of a packed struct, owned by
+    /// `elem_pts_to` and accessed through an aligned temporary.
+    unaligned: bool,
     open_read: Vec<String>,
     open_write: Vec<String>,
     close_read: Vec<String>,
     close_write: Vec<String>,
+}
+
+/// Why the ownership of a misaligned field cannot be handed to a callee:
+/// what it would be handed as is a typed points-to, and that says the address
+/// is aligned. C agrees -- using the pointer is undefined (C11 6.3.2.3p7).
+fn misaligned_addr(field: &str) -> String {
+    format!(
+        "the address of field `{}`, which is not aligned as its struct is packed",
+        field
+    )
+}
+
+impl Focus {
+    fn read_fn(&self) -> String {
+        match self.unaligned {
+            true => format!("{}_read_u", self.pn),
+            false => format!("{}_read", self.pn),
+        }
+    }
 }
 
 /// Whether an expression is a literal object: a string or compound literal,
@@ -20325,7 +20808,11 @@ fn emit_body(
         let (Some(name), Some(pt)) = (a.name.as_ref(), pointee(tds, &a.ty)) else {
             continue;
         };
-        let (Some(pn), Some(esize)) = (palow_name(tds, pt), palow_sizeof(tds, pt)) else {
+        let (Some(pn), Some(esize), Some(fty)) = (
+            palow_name(tds, pt),
+            palow_sizeof(tds, pt),
+            fstar_type(tds, pt),
+        ) else {
             continue;
         };
         if !has_repr(tds, pt) {
@@ -20335,6 +20822,7 @@ fn emit_body(
             name.val.to_string(),
             ArrayParam {
                 pn,
+                fty,
                 esize: format!("{}sz", esize),
                 addr: format!("var_{}", name.val),
                 // An `_out` array arrives as storage, so its elements are
@@ -20398,15 +20886,6 @@ fn emit_body(
         freeables: &sig.freeables,
         consumed_freed: HashSet::new(),
         consumed: &sig.consumed,
-        // A scalar `_out` is restated by a loop's frame like any other
-        // pointee; a struct or array one is not yet.
-        has_out: defn.decl.args.iter().any(|a| {
-            a.mode == ParamMode::Out
-                && !a
-                    .name
-                    .as_ref()
-                    .is_some_and(|n| sig.outs.iter().any(|o| *o.base == *n.val))
-        }),
         divergent: false,
         seeded: Vec::new(),
         laundered: HashSet::new(),
