@@ -6108,3 +6108,15 @@ new facts about memory.
     position. A `$witness` before a call to a function with no ghost
     arguments is an error rather than being ignored. `test/ghost_arg_direct`
     covers this.
+37. **Subscripts of a global array of structs** (#358). A `_pure` array
+    global with a literal initialiser is published as a sequence constant,
+    and a subscript of one with a symbolic index already read as `Seq.index`
+    of it -- but only as the whole expression. `table[j].offset` stopped at
+    the member access and fell through to the array-parameter path. The
+    body's by-value projections (`value_read`) now treat such a global as a
+    value root, so `table[j].offset`, `entries[i].range.hi` and
+    `entries[i].tag[k]` become `Seq.index` followed by field projections.
+    Contracts had the same gap even for scalar tables (`scalars[i]` was
+    "`*scalars` in a contract"); there the subscript is now `Seq.index` of
+    the constant, guarded by its length. `test/global_struct_table` covers
+    this.

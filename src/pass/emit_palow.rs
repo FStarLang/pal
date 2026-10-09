@@ -2225,6 +2225,19 @@ impl<'a> Spec<'a> {
         let ExprT::Var(v) = &base.val else {
             return Err("a contract that dereferences a computed pointer".to_string());
         };
+        // A subscript of a `_pure` array global published as a sequence
+        // constant is `Seq.index` of that constant: there is nothing to own,
+        // which is also how a body reads it.
+        if let Some(i) = idx
+            && !self.pointees.contains_key(&*v.val)
+            && let Some(t) = self.global_array_const(v)
+        {
+            let i = self.num(i, w)?;
+            self.guards
+                .borrow_mut()
+                .push(format!("{} < Seq.length {}", i, t));
+            return Ok(format!("(Seq.index {} {})", t, i));
+        }
         let Some((pre, post)) = self.pointees.get(&*v.val) else {
             return Err(format!("`*{}` in a contract", v.val));
         };
@@ -11318,6 +11331,13 @@ impl<'a> Body<'a> {
             // value lives, and reading through that is the access this is
             // not.
             ExprT::Var(v) => {
+                // An array global published as a sequence constant is a value
+                // too, so `table[j].offset` is `Seq.index` and then a field
+                // projection, the same as for a parameter. Its length is in
+                // the constant's type, so `Seq.index` carries the bound.
+                if self.slots.iter().all(|s| s.name != *v.val) && self.global_array_value(v) {
+                    return Some(format!("var_{}", v.val));
+                }
                 let v = v.val.to_string();
                 if !self.params.contains(&v) {
                     return None;
