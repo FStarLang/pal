@@ -10843,6 +10843,9 @@ struct Body<'a> {
     /// Local pointers loaded once out of memory, with what they were loaded
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
+    /// Locals bound once to a converted parameter, `void *b = (void *)q;`:
+    /// the structure a byte offset from `b` lands in. See `byte_base_map`.
+    byte_bases: HashMap<String, Rc<Expr>>,
     /// Locals bound once from a call. A code pointer carries no
     /// ownership, so the only thing that can make a call through one
     /// possible is an `is_valid` fact, and a callee that returns a
@@ -14519,6 +14522,16 @@ impl<'a> Body<'a> {
                     self.lines.extend(fl);
                     return Ok(format!("(if {} then {} else {})", cv, tv, fv));
                 }
+                // Pulse joins the arms by matching on the condition, and when
+                // an arm is itself an `if` -- `a ? x : b ? y : z` -- the outer
+                // join can only be reduced if the condition is a name.
+                let cv = if is_fstar_name(&cv) {
+                    cv
+                } else {
+                    let b = self.fresh("test");
+                    self.lines.push(format!("let {} = {};", b, cv));
+                    b
+                };
                 let r = self.fresh("cond");
                 self.lines
                     .push(format!("let {} : {} = if ({}) {{", r, fty, cv));
@@ -17254,7 +17267,223 @@ impl<'a> Body<'a> {
     /// back. A local array handed to a callee is converted to the view the
     /// callee asks for, and the way back can only be emitted once the call
     /// has been -- so it is owed here rather than emitted in place.
+    /// The structure a byte pointer is the address of: `(void *)q`, or a
+    /// local that is another name for it, where `q` points at a struct.
+    fn byte_root(&self, b: &Rc<Expr>) -> Option<(Rc<Expr>, String)> {
+        let mut s = b.clone();
+        while let ExprT::Cast(x, _) | ExprT::VAttr(_, x) = &s.val {
+            s = x.clone();
+        }
+        if let Ok(t) = self.ty_of(&s)
+            && let TypeT::Pointer(st, _) = &peel(self.tds, &t).val
+            && let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, st).val
+            && self.tds.structs.contains_key(&*n.val)
+        {
+            return Some((s, n.val.to_string()));
+        }
+        if let ExprT::Var(v) = &s.val {
+            if let Some(x) = self.byte_bases.get(&*v.val) {
+                return self.byte_root(&x.clone());
+            }
+            if let Some(place) = self.aliases.get(&*v.val)
+                && let ExprT::Deref(x) = &place.val
+            {
+                return self.byte_root(x);
+            }
+        }
+        None
+    }
+
+    /// Every field of structure `sn` -- nested structures included -- whose
+    /// type is the one Palow names `pn`, as its byte offset and the C
+    /// expression for its address.
+    fn fields_of_type(
+        &self,
+        sn: &str,
+        lv: &Rc<Expr>,
+        at: u64,
+        pn: &str,
+        out: &mut Vec<(u64, Rc<Expr>)>,
+    ) {
+        let Some(si) = self.tds.structs.get(sn) else {
+            return;
+        };
+        for f in &si.fields {
+            let m = ExprT::Member(
+                lv.clone(),
+                Rc::<str>::from(f.name.as_str()).with_loc(lv.loc.clone()),
+            )
+            .with_loc(lv.loc.clone());
+            // A bit-field storage unit is in `fields` under a name C does not
+            // have, so it is no field a pointer can be taken to.
+            if self.ty_of(&m).is_err() {
+                continue;
+            }
+            if palow_name(self.tds, &f.ty).as_deref() == Some(pn) {
+                out.push((
+                    at + f.offset,
+                    ExprT::Ref(m.clone()).with_loc(lv.loc.clone()),
+                ));
+            }
+            if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &f.ty).val {
+                self.fields_of_type(&n.val, &m, at + f.offset, pn, out);
+            }
+        }
+    }
+
+    /// The first `(T *)(base + off)` in `e` where `base` is a byte pointer to
+    /// a structure: the expression itself, `off`, and the fields of type `T`
+    /// the result can be, by offset.
+    #[allow(clippy::type_complexity)]
+    fn byte_field_site(
+        &self,
+        e: &Rc<Expr>,
+    ) -> Result<Option<(Rc<Expr>, Rc<Expr>, Vec<(u64, Rc<Expr>)>)>, String> {
+        if let ExprT::Cast(inner, pty) = &e.val
+            && let TypeT::Pointer(t, _) = &peel(self.tds, pty).val
+            && let ExprT::BinOp(BinOp::Add, b, off) = &strip_vattr(inner).val
+            && let Ok(bty) = self.ty_of(b)
+            && let TypeT::Pointer(bt, _) = &peel(self.tds, &bty).val
+            && matches!(
+                peel(self.tds, bt).val,
+                TypeT::Void | TypeT::Int { width: 8, .. }
+            )
+            && let Some((q, sn)) = self.byte_root(b)
+        {
+            let pn = palow_name(self.tds, t)
+                .ok_or_else(|| format!("a byte-offset pointer to {}", describe(t)))?;
+            let lv = ExprT::Deref(q.clone()).with_loc(q.loc.clone());
+            let mut cands = Vec::new();
+            self.fields_of_type(&sn, &lv, 0, &pn, &mut cands);
+            if cands.is_empty() {
+                return Err(format!(
+                    "a byte-offset pointer to {} into `struct {}`, which has no field of that type",
+                    describe(t),
+                    sn
+                ));
+            }
+            return Ok(Some((e.clone(), off.clone(), cands)));
+        }
+        for x in expr_operands(e) {
+            if let Some(r) = self.byte_field_site(x)? {
+                return Ok(Some(r));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A statement that reaches a field through a byte offset from the start
+    /// of its structure -- `*(T *)((char *)q + off)`, or the same pointer
+    /// handed to a callee -- written as the field access it is.
+    ///
+    /// C allows this because the result points at an object of type `T`
+    /// inside `*q`; which object depends on `off`. A constant offset names one
+    /// field, and the pointer is simply `&q->f`. A computed one -- read out of
+    /// a descriptor table, typically -- is one of the fields of type `T`, so
+    /// the statement becomes a case split over their offsets, with each arm
+    /// the ordinary field access. That the offset *is* one of them is the
+    /// assertion in front of the split: it is what C's rule demands of the
+    /// program, and if the solver cannot see it the pointer may land between
+    /// fields, which is exactly what has to be refused.
+    fn split_byte_field(&mut self, s: &Stmt) -> Result<Option<Rc<Stmt>>, String> {
+        let roots: Vec<&Rc<Expr>> = match &s.val {
+            StmtT::Call(e) | StmtT::Return(Some(e)) => vec![e],
+            StmtT::Assign(l, r) => vec![l, r],
+            _ => return Ok(None),
+        };
+        let mut site = None;
+        for r in &roots {
+            if let Some(x) = self.byte_field_site(r)? {
+                site = Some(x);
+                break;
+            }
+        }
+        let Some((site, off, cands)) = site else {
+            return Ok(None);
+        };
+        let rebuild = |with: &Rc<Expr>| -> Rc<Stmt> {
+            let v = match &s.val {
+                StmtT::Call(e) => StmtT::Call(replace_subexpr(e, &site, with)),
+                StmtT::Return(Some(e)) => StmtT::Return(Some(replace_subexpr(e, &site, with))),
+                StmtT::Assign(l, r) => StmtT::Assign(
+                    replace_subexpr(l, &site, with),
+                    replace_subexpr(r, &site, with),
+                ),
+                _ => unreachable!(),
+            };
+            v.with_loc(s.loc.clone())
+        };
+        if let Some(k) = const_index(&strip_vattr(&off).val) {
+            let Some((_, a)) = cands.iter().find(|(o, _)| *o == k) else {
+                return Err(format!(
+                    "a byte-offset pointer at offset {}, where no field of its type is",
+                    k
+                ));
+            };
+            return Ok(Some(rebuild(a)));
+        }
+        if has_effects(&off) {
+            return Err("a byte-offset field pointer whose offset has side effects".to_string());
+        }
+        let o = self.index(&off)?;
+        let alts: Vec<String> = cands
+            .iter()
+            .map(|(k, _)| format!("SizeT.v {} == {}", o, k))
+            .collect();
+        self.lines
+            .push(format!("assert (pure ({}));", alts.join(" \\/ ")));
+        let oty = self.ty_of(&off)?;
+        let test = |k: u64| {
+            let lit =
+                ExprT::IntLit(Rc::new(BigInt::from(k)), oty.clone()).with_loc(off.loc.clone());
+            ExprT::BinOp(BinOp::Eq, off.clone(), lit).with_loc(off.loc.clone())
+        };
+        let mut cands = cands;
+        let (_, last) = cands.pop().unwrap();
+        // Where the pointer is only used to compute a value, only that value
+        // is split: `off == K1 ? v1 : v2`. Splitting the whole statement would
+        // put whatever it then does with the value -- a store into an array,
+        // say -- into every arm, and Pulse would have to join arms that each
+        // changed more than the field they read.
+        let value_root = match &s.val {
+            StmtT::Return(Some(e)) => Some(e),
+            StmtT::Assign(l, r) if !Rc::ptr_eq(l, &site) && self.byte_field_site(l)?.is_none() => {
+                Some(r)
+            }
+            _ => None,
+        };
+        if let Some(root) = value_root {
+            let mut acc = replace_subexpr(root, &site, &last);
+            for (k, a) in cands.into_iter().rev() {
+                acc = ExprT::Cond(test(k), replace_subexpr(root, &site, &a), acc)
+                    .with_loc(root.loc.clone());
+            }
+            let v = match &s.val {
+                StmtT::Return(_) => StmtT::Return(Some(acc)),
+                StmtT::Assign(l, _) => StmtT::Assign(l.clone(), acc),
+                _ => unreachable!(),
+            };
+            return Ok(Some(v.with_loc(s.loc.clone())));
+        }
+        let mut acc: Rc<Stmts> = Rc::new(vec![rebuild(&last)]);
+        for (k, a) in cands.into_iter().rev() {
+            acc = Rc::new(vec![
+                StmtT::If {
+                    cond: test(k),
+                    then_branch: Rc::new(vec![rebuild(&a)]),
+                    else_branch: acc,
+                    ensures: Rc::new(Vec::new()),
+                }
+                .with_loc(s.loc.clone()),
+            ]);
+        }
+        Ok(Some(acc[0].clone()))
+    }
+
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
+        if let Some(s2) = self.split_byte_field(s)? {
+            return self.stmt(&s2);
+        }
         let r = self.stmt_inner(s);
         let close = std::mem::take(&mut self.pending_close);
         let open = std::mem::take(&mut self.own_open);
@@ -17923,7 +18152,16 @@ impl<'a> Body<'a> {
                 // unprovable. Binding the call first costs nothing -- C
                 // evaluates the condition once anyway -- and makes the
                 // branch hypothesis usable.
-                let c = if nt.is_none() && matches!(strip_vattr(cond).val, ExprT::FnCall(..)) {
+                // The same goes for an `if` whose arm is another `if`: the
+                // inner join is stated in terms of the outer condition.
+                let nested = then_branch
+                    .iter()
+                    .chain(else_branch.iter())
+                    .any(|x| matches!(x.val, StmtT::If { .. }));
+                let c = if nt.is_none()
+                    && (matches!(strip_vattr(cond).val, ExprT::FnCall(..))
+                        || (nested && !is_fstar_name(&c)))
+                {
                     let t = self.fresh("cond");
                     self.lines.push(format!("let {} = {};", t, c));
                     t
@@ -18134,6 +18372,13 @@ impl<'a> Body<'a> {
     /// which is what a chain of early returns needs.
     fn rest(&mut self, stmts: &[Rc<Stmt>]) -> Result<bool, String> {
         for (i, s) in stmts.iter().enumerate() {
+            if matches!(s.val, StmtT::Return(Some(_)))
+                && let Some(s2) = self.split_byte_field(s)?
+            {
+                let mut tail = vec![s2];
+                tail.extend(stmts[i + 1..].iter().cloned());
+                return self.rest(&tail);
+            }
             match &s.val {
                 StmtT::Return(e) => {
                     if let Some(e) = e {
@@ -19444,6 +19689,84 @@ fn subst_var(e: &Rc<Expr>, from: &str, to: &Rc<Expr>) -> Option<Rc<Expr>> {
     }
 }
 
+/// Whether an F\* term is a bare name, which Pulse can reduce a join on.
+fn is_fstar_name(t: &str) -> bool {
+    !t.is_empty()
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
+}
+
+/// The operands of the expression forms a byte-offset field pointer can sit
+/// inside. Anything else is opaque to `byte_field_site`, which then simply
+/// does not look into it.
+fn expr_operands(e: &Rc<Expr>) -> Vec<&Rc<Expr>> {
+    match &e.val {
+        ExprT::Deref(x)
+        | ExprT::Ref(x)
+        | ExprT::Member(x, _)
+        | ExprT::VAttr(_, x)
+        | ExprT::UnOp(_, x)
+        | ExprT::Cast(x, _) => vec![x],
+        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => vec![a, b],
+        ExprT::Cond(a, b, c) => vec![a, b, c],
+        ExprT::FnCall(_, xs) => xs.iter().collect(),
+        ExprT::FnPtrCall(f, xs) => std::iter::once(f).chain(xs.iter()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `e` with the one subexpression that *is* `target` (by identity) replaced.
+/// Only the forms `expr_operands` looks into are rebuilt, which is exactly
+/// where a target can have been found.
+fn replace_subexpr(e: &Rc<Expr>, target: &Rc<Expr>, with: &Rc<Expr>) -> Rc<Expr> {
+    if Rc::ptr_eq(e, target) {
+        return with.clone();
+    }
+    let go = |x: &Rc<Expr>| replace_subexpr(x, target, with);
+    let v = match &e.val {
+        // `*&q->f` is `q->f`, which is what sends a read or write down the
+        // field path rather than through a bare address.
+        ExprT::Deref(x) => {
+            let x = go(x);
+            if let ExprT::Ref(m) = &x.val {
+                return m.clone();
+            }
+            ExprT::Deref(x)
+        }
+        ExprT::Ref(x) => ExprT::Ref(go(x)),
+        ExprT::Member(x, f) => ExprT::Member(go(x), f.clone()),
+        ExprT::VAttr(a, x) => ExprT::VAttr(a.clone(), go(x)),
+        ExprT::UnOp(o, x) => ExprT::UnOp(*o, go(x)),
+        ExprT::Cast(x, t) => ExprT::Cast(go(x), t.clone()),
+        ExprT::Index(a, b) => ExprT::Index(go(a), go(b)),
+        ExprT::BinOp(o, a, b) => ExprT::BinOp(*o, go(a), go(b)),
+        ExprT::AssignExpr(a, b) => ExprT::AssignExpr(go(a), go(b)),
+        ExprT::Cond(a, b, c) => ExprT::Cond(go(a), go(b), go(c)),
+        ExprT::FnCall(n, xs) => ExprT::FnCall(n.clone(), xs.iter().map(go).collect()),
+        ExprT::FnPtrCall(f, xs) => ExprT::FnPtrCall(go(f), xs.iter().map(go).collect()),
+        _ => return e.clone(),
+    };
+    v.with_loc(e.loc.clone())
+}
+
+/// Whether evaluating an expression can change anything, so that evaluating it
+/// once more -- as the test of a case split -- is not the same program.
+fn has_effects(e: &Rc<Expr>) -> bool {
+    match &e.val {
+        ExprT::FnCall(..)
+        | ExprT::FnPtrCall(..)
+        | ExprT::AssignExpr(..)
+        | ExprT::PreIncr(_)
+        | ExprT::PostIncr(_)
+        | ExprT::PreDecr(_)
+        | ExprT::PostDecr(_)
+        | ExprT::Malloc(..)
+        | ExprT::Free(_)
+        | ExprT::InlinePulse(..) => true,
+        _ => expr_operands(e).into_iter().any(has_effects),
+    }
+}
+
 fn strip_vattr(e: &Expr) -> &Expr {
     match &e.val {
         ExprT::VAttr(_, inner) => strip_vattr(inner),
@@ -19764,6 +20087,45 @@ fn balanced(s: &str) -> bool {
 /// exactly the question it is good at: the load carries a `rewrites_to` to the
 /// field's value, and a body that had overwritten the field would be matching
 /// against the new value and fail.
+/// The locals bound exactly once to a conversion of a name the body never
+/// rebinds -- `void *stats_base = (void *)q;` -- with that conversion. Such a
+/// local is the structure's address under another type for the whole call,
+/// which is what lets `stats_base + off` be read as an offset into `*q`.
+fn byte_base_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
+    let mut t = Touched::default();
+    touch_stmts(body, &mut t);
+    let locals: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut out = HashMap::new();
+    for st in body.iter() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
+            continue;
+        }
+        let ExprT::Cast(..) = &strip_vattr(rhs).val else {
+            continue;
+        };
+        let ExprT::Var(v) = &strip_casts(rhs).val else {
+            continue;
+        };
+        if locals.contains(&*v.val) || t.rebound.get(&*v.val).copied().unwrap_or(0) != 0 {
+            continue;
+        }
+        out.insert(q, rhs.clone());
+    }
+    out
+}
+
 fn ptr_source_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
@@ -19961,6 +20323,7 @@ fn emit_body(
         blocks: Vec::new(),
         aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
+        byte_bases: byte_base_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
         active: HashMap::new(),

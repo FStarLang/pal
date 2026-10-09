@@ -6120,3 +6120,22 @@ new facts about memory.
     "`*scalars` in a contract"); there the subscript is now `Seq.index` of
     the constant, guarded by its length. `test/global_struct_table` covers
     this.
+38. **A field reached by byte offset** (#358). `(T *)((char *)q + off)`
+    where `q` points at a struct -- directly, or through a local bound once
+    to `(void *)q` -- points at whichever field of type `T` sits at byte
+    offset `off`, nested structs included. The IFB driver reads its counters
+    this way, with the offsets taken from a constant descriptor table, and
+    hands the pointer to `u64_stats_read`. A constant offset names one field,
+    and the pointer is `&q->f`. A computed one becomes a case split over the
+    offsets of the fields of type `T`, after
+    `assert (pure (off == K1 \/ ... \/ off == Kn))`. That assertion is C's own
+    requirement that the pointer lands on an object of type `T`, so an offset
+    the solver cannot place on a field is refused. Where the pointer only
+    feeds a value (a `return`, or an assignment's right side), only that
+    value is split, as `off == K1 ? v1 : ...`, so the arms change nothing
+    but the field they read. A write or a bare call splits the whole
+    statement. Pulse joins nested arms only if each condition is a name, so
+    a conditional expression whose arms need statements, and an `if` whose
+    arm is another `if`, now bind a compound condition first.
+    `test/offset_table_read` covers reads, a call, a write, a constant offset
+    and nested fields.
