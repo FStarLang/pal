@@ -38,6 +38,27 @@ type); the negative file claims that byte as a `bool_t`, which is on none of
 the bullets, and fails on exactly that -- same width, same alignment, same
 full ownership.
 
+Where the corpus stands under `make palow-check`, which translates it with
+`--palow-permissive` and typechecks the result: four modules do not verify,
+and none of the four is about 6.5p7.
+
+  - `case_10_1_flexible_array_member` -- the fill loop needs the
+    `_inline_pulse` frontier invariant that `test/vec_fam` documents.
+  - `case_3_2_effective_type_survives_nonmodifying_accesses` -- a global's
+    value is existentially quantified across a call, and the postcondition
+    asks for the one it came in with.
+  - `case_21_1_restrict_violation_with_matching_types` and
+    `case_22_1_use_a_freed_pointer_VALUE` -- the ownership analysis does not
+    grant the pointer. For 22.1 that is the right answer by accident: it is a
+    UB case, and it is rejected, just not by the rule it was written for.
+
+`TranslationErrors` fails by construction while any `admit()` remains, so it
+is not a fifth. Note that the corpus declares `printf`, `puts` and `strcmp`
+itself, with `_array` on their string parameters: `<stdio.h>` says `const char
+*`, which PAL reads as a pointer to a single `char`, and a string literal is
+an array. Without those three lines eight modules fail on their first call and
+hide everything above.
+
 Sections 20-23 -- `volatile`, `_Atomic`, `restrict`, object lifetime, and
 modifying a `const` object or a string literal -- are not 6.5p6/p7 and belong
 with the features they name rather than here.

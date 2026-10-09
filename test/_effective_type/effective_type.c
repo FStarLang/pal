@@ -120,8 +120,11 @@
    to nothing and this file still compiles and runs as ordinary C.  Nothing
    about the variadic part needs saying: PAL already evaluates each variadic
    argument in order, keeping its side effects, and only the call itself is
-   unmodelled. */
+   unmodelled.  `puts` and `strcmp` take the same string arguments and need
+   the same word. */
 int printf(const _array char *fmt, ...);
+int puts(const _array char *s);
+int strcmp(const _array char *a, const _array char *b);
 
 /* ------------------------------------------------------------------ */
 /* Plumbing: opaque sinks so the optimizer cannot delete the accesses. */
