@@ -6139,3 +6139,13 @@ new facts about memory.
     arm is another `if`, now bind a compound condition first.
     `test/offset_table_read` covers reads, a call, a write, a constant offset
     and nested fields.
+39. **A loop condition that reads through a focus** (#359). `i < d->n`
+    needs `d->n` focused, read and unfocused -- statements, which a guard
+    built as a pure term could not hold, so the loop was refused. Pulse's
+    `while` guard is itself a block, so those statements now go inside it
+    and run again on every iteration, as C's condition does: a body that
+    changes `d->n` is seen by the next test. Such a guard is emitted as an
+    ordinary value, so `&&` and `||` keep their short circuit --
+    `i < r->count && r->data[i] != 0` reads the element only when `i` is in
+    bounds. `test/loop_cond_field` covers both, and a body that shrinks the
+    bound.

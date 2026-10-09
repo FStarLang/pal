@@ -17089,10 +17089,28 @@ impl<'a> Body<'a> {
         let head = self.inline(cond);
         self.in_guard = false;
         let head = head?;
-        if self.lines.len() != before {
+        // A condition that reads through a focus -- `i < d->n` -- is a
+        // statement sequence, not a term. Pulse's guard is a block, so the
+        // sequence goes there and is run again on every iteration, which is
+        // what C does: the field is read anew each time round. It is emitted
+        // again as an ordinary value so `&&` and `||` keep their short
+        // circuit: `i < r->count && r->data[i]` must not read past the end.
+        let head = if self.lines.len() != before {
             self.lines.truncate(before);
-            return Err("a loop whose condition needs a focused access".to_string());
-        }
+            self.in_guard = true;
+            let head = self.rvalue(cond);
+            self.in_guard = false;
+            let head = head?;
+            let pre = self.lines.split_off(before);
+            let mut g = String::from("{\n");
+            for l in &pre {
+                g.push_str(&format!("    {}\n", l));
+            }
+            g.push_str(&format!("    {}\n  }}", head));
+            g
+        } else {
+            head
+        };
 
         // What the author claims about the exit of a `break`ing loop needs a
         // name for each local it mentions that survives the loop. A ghost
