@@ -1664,6 +1664,11 @@ struct FnSurface {
     /// How many components that wrapper's witness tuple has, which is the
     /// shape an indirect call has to write out for its holes to be solvable.
     fp_wits: usize,
+    /// The implicit binders of the emitted `fn`, by name, in order, and the
+    /// names of those that are `_ghost_arg`s. A direct call's `$witness`
+    /// supplies the latter, and implicits apply positionally.
+    implicits: Vec<String>,
+    ghost_args: Vec<String>,
     /// The mutable globals the contract hands in and back out. The body treats
     /// each as a slot it did not allocate.
     globals: Vec<Slot>,
@@ -5455,6 +5460,19 @@ fn emit_fn(
         contract: contract_ok,
         fp,
         fp_wits: wits.len(),
+        implicits: perms
+            .iter()
+            .chain(ghosts.iter())
+            .map(|b| {
+                let nm = b.trim_start_matches("(#");
+                nm[..nm.find(':').unwrap_or(nm.len())].trim().to_string()
+            })
+            .collect(),
+        ghost_args: decl
+            .ghost_args
+            .iter()
+            .map(|g| format!("var_{}", g.name.val))
+            .collect(),
         globals: globals.to_vec(),
         uses: spec.uses.take(),
         // A contract that was dropped granted nothing, so nothing may be
@@ -9818,6 +9836,8 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                 contract: sig.contract,
                 fp: sig.fp.is_some(),
                 fp_wits: sig.fp_wits,
+                implicits: sig.implicits.clone(),
+                ghost_args: sig.ghost_args.clone(),
                 outs: fndecl
                     .args
                     .iter()
@@ -10551,6 +10571,10 @@ struct Callee {
     fp: bool,
     /// How many components that wrapper's witness tuple has.
     fp_wits: usize,
+    /// The callee's implicit binders, in order, and which of them are
+    /// `_ghost_arg`s; see `Sig::implicits`.
+    implicits: Vec<String>,
+    ghost_args: Vec<String>,
     /// Which parameters are `_out`, by position. Those arguments are not
     /// evaluated: what is passed is storage, not a value.
     outs: Vec<bool>,
@@ -14969,6 +14993,17 @@ impl<'a> Body<'a> {
         let arr_args = c.arr_args.clone();
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
+        let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
+        // A `$witness` before a direct call names the callee's `_ghost_arg`s,
+        // which appear only inside `pure`s and so cannot be read off the
+        // ownership being handed over. Everything else is still inferred.
+        let witness = self.fp_witness.take();
+        if witness.is_some() && ghost_args.is_empty() {
+            return Err(format!(
+                "a `$witness` before a call to `{}`, which has no ghost arguments",
+                name.val
+            ));
+        }
         let mut out = format!("func_{}", name.val);
         let mut implicit_args: Vec<String> = Vec::new();
         let opened = self.field_args(args, &outs, |i| {
@@ -15102,11 +15137,42 @@ impl<'a> Body<'a> {
             }
             out += &format!(" {}", v);
         }
-        for a in implicit_args {
-            out += &format!(" {}", a);
-        }
         if args.is_empty() {
             out += " ()";
+        }
+        if let Some(w) = witness {
+            let n = ghost_args.len();
+            let mut imps: Vec<String> = vec!["#_".to_string(); implicits.len()];
+            for (k, a) in implicit_args.into_iter().enumerate() {
+                if k >= imps.len() || ghost_args.contains(&implicits[k]) {
+                    return Err(format!(
+                        "a `$witness` before a call to `{}` with an array argument",
+                        name.val
+                    ));
+                }
+                imps[k] = a;
+            }
+            for (i, g) in ghost_args.iter().enumerate() {
+                let Some(k) = implicits.iter().position(|x| x == g) else {
+                    continue;
+                };
+                imps[k] = match n {
+                    1 => format!("#({})", w),
+                    2 => format!(
+                        "#(hide ({} (reveal ({}))))",
+                        if i == 0 { "fst" } else { "snd" },
+                        w
+                    ),
+                    _ => format!("#(hide (Mktuple{}?._{} (reveal ({}))))", n, i + 1, w),
+                };
+            }
+            while imps.last().is_some_and(|i| i == "#_") {
+                imps.pop();
+            }
+            implicit_args = imps;
+        }
+        for a in implicit_args {
+            out += &format!(" {}", a);
         }
         Ok(format!("({})", out))
     }

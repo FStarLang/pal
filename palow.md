@@ -6095,3 +6095,16 @@ new facts about memory.
       bit-fields in a packed struct.
 
     `test/packed_unaligned` and `test/packed_struct` cover these.
+
+36. **`$witness` at a direct call** (#356). A `_ghost_arg` appears only in
+    `pure`s, so Pulse cannot infer it from the ownership handed over, and
+    there was no way to supply one at a direct call: a `$witness` was
+    honoured only before an indirect call, and before a direct one it was
+    silently left pending. Now a direct call takes it. The witness is the
+    erased tuple of the callee's `_ghost_arg`s, in declaration order (a
+    single value for one, a pair for two, an `n`-tuple for more). The
+    call writes `#_` for every other implicit, which are
+    still inferred, and the projected witness at each ghost argument's
+    position. A `$witness` before a call to a function with no ghost
+    arguments is an error rather than being ignored. `test/ghost_arg_direct`
+    covers this.
