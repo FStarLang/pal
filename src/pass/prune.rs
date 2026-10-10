@@ -61,7 +61,7 @@ enum DeclName {
     Union(Rc<str>),
     Typedef(Rc<str>),
     GlobalVar(Rc<str>),
-    Include(Rc<SourceInfo>),
+    Include(Rc<str>),
     /// Not a declaration: the F* module an `_include_pulse(M, ...)` block
     /// contributes to, reached by a verbatim `M.x` in inline Pulse and
     /// leading to every block of that module. Without it, a block in a header
@@ -139,6 +139,33 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
     }
 }
 
+// A generated module referenced from verbatim inline-Pulse text is a real dependency, but the
+// text is opaque to the scanner. Recover the referenced declaration from the module name, which
+// `emit::module_name_for_decl` builds by prefixing the C name.
+fn scan_verbatim_module_ref(deps: &mut HashSet<DeclName>, text: &str) {
+    for segment in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        for (prefix, wrap) in [
+            ("Func_", (|n| DeclName::Fn(n)) as fn(Rc<str>) -> DeclName),
+            ("Global_", |n| DeclName::GlobalVar(n)),
+            ("Typedef_", |n| DeclName::Typedef(n)),
+            ("Struct_", |n| DeclName::Struct(n)),
+            ("Union_", |n| DeclName::Union(n)),
+        ] {
+            if let Some(name) = segment.strip_prefix(prefix) {
+                if !name.is_empty() {
+                    deps.insert(wrap(Rc::from(name)));
+                }
+            }
+        }
+        // An INCLUDES module is referred to by its bare name, with no prefix to
+        // recognize it by, so every segment has to be offered as a candidate. A
+        // segment that names no module simply matches no declaration.
+        if !segment.is_empty() {
+            deps.insert(DeclName::Include(Rc::from(segment)));
+        }
+    }
+}
+
 fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) {
     for tok in &code.tokens {
         match tok {
@@ -148,6 +175,7 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
                 scan_type(deps, ty)
             }
             InlinePulseToken::Verbatim(tok) => {
+                scan_verbatim_module_ref(deps, &tok.text.val);
                 // Any capitalized identifier may be a module qualifier; the
                 // node is inert unless an `_include_pulse` defines it.
                 if tok.text.val.starts_with(|c: char| c.is_ascii_uppercase()) {
@@ -377,7 +405,7 @@ fn decl_name(decl: &Decl) -> DeclName {
         DeclT::StructDefn(struct_defn) => DeclName::Struct(struct_defn.name.val.clone()),
         DeclT::StructDecl(name) => DeclName::Struct(name.val.clone()),
         DeclT::UnionDefn(union_defn) => DeclName::Union(union_defn.name.val.clone()),
-        DeclT::IncludeDecl(_) => DeclName::Include(decl.loc.clone()),
+        DeclT::IncludeDecl(include_decl) => DeclName::Include(include_decl.module_name.clone()),
         DeclT::LetDecl(let_decl) => DeclName::Fn(let_decl.name.val.clone()),
         DeclT::OpaqueTypeDecl(decl) => DeclName::Typedef(decl.name.val.clone()),
         DeclT::GlobalVar(gv) => DeclName::GlobalVar(gv.name.val.clone()),
