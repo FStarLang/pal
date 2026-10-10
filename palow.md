@@ -6149,3 +6149,20 @@ new facts about memory.
     `i < r->count && r->data[i] != 0` reads the element only when `i` is in
     bounds. `test/loop_cond_field` covers both, and a body that shrinks the
     bound.
+40. **A pointer into a constant table** (#360). Since #358 a path into a
+    published array global reads as `Seq.index` and projections, and that
+    was also what `table[j].name` became where the field decays to a
+    pointer -- the array's value where the callee wanted an address. Such a
+    path now has the address it denotes, `addr_var_table +!
+    elem_off_var_table j +! offsetof`, with `elem_off_var_table` assumed
+    alongside the table, as its address is. Where the pointer has to carry
+    ownership -- `&table[j]`, `&table[j].offset`, a decayed field handed to a
+    callee -- the entry's read share is acquired for the statement with an
+    assumed `acquire_elem_var_table j` and dropped after with
+    `release_elem_var_table j`. That is the trust `acquire_var_*` and
+    `acquire_literal_*` already ask for: one fact about static, immutable
+    storage. A variadic argument takes only the address. Separately, an
+    array field decayed into a pointer parameter that is not `_array` --
+    `use_name(d->name)` for any owned `d` -- now focuses its first element,
+    which is all a one-object pointer owns. `test/global_table_array_field`
+    covers these cases.

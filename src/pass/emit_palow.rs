@@ -8805,6 +8805,28 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
                         n,
                         term
                     );
+                    // A pointer into the table -- `&table[j]`, or a field of
+                    // an entry decayed to a pointer -- needs a read share of
+                    // the entry it lands in. The storage is static and
+                    // immutable, so a share is acquired per entry exactly as
+                    // `acquire_var_*` acquires one of a scalar global, and
+                    // given back by dropping it. The offset is assumed in the
+                    // same breath: the object exists, so its size fits.
+                    if let TypeT::FixedArray(elem, _) = &tds.resolve(&gv.ty).val
+                        && let (Some(pn), Some(esize)) =
+                            (palow_name(tds, elem), palow_sizeof(tds, elem))
+                    {
+                        let at = format!("(addr_var_{} +! elem_off_var_{} i)", name, name);
+                        let own = format!(
+                            "exists* (p: perm). {}_pts_to {} p (Seq.index var_{} (SizeT.v i))",
+                            pn, at, name
+                        );
+                        out += &format!(
+                            "assume val elem_off_var_{name} : (i: SizeT.t {{ SizeT.v i < {n} }}) -> (o: SizeT.t {{ SizeT.v o == {esize} * SizeT.v i }})\n\n\
+                             assume val acquire_elem_var_{name} : (i: SizeT.t {{ SizeT.v i < {n} }}) -> stt_ghost unit emp_inames emp\n  (fun _ -> {own})\n\n\
+                             ghost fn release_elem_var_{name} (i: SizeT.t {{ SizeT.v i < {n} }})\n  requires {own}\n  ensures  emp\n{{\n  drop_ ({own})\n}}\n\n"
+                        );
+                    }
                 }
             }
             chunks.push(Chunk {
@@ -11200,6 +11222,67 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// `table[i]` where `table` is an array global published as a sequence
+    /// constant: the table's name and the index as a `size_t`. Such an entry
+    /// has an address inside the global's storage, and a read share of it is
+    /// what `acquire_elem_var_<table>` hands out.
+    fn global_elem(&mut self, e: &Expr) -> Result<Option<(String, String)>, String> {
+        let ExprT::Index(arr, idx) = &strip_vattr(e).val else {
+            return Ok(None);
+        };
+        let ExprT::Var(v) = &strip_vattr(arr).val else {
+            return Ok(None);
+        };
+        if self.env.lookup_var(v).is_some()
+            || self.slots.iter().any(|s| s.name == *v.val)
+            || !self.global_array_value(v)
+        {
+            return Ok(None);
+        }
+        let Ok(ety) = self.ty_of(e) else {
+            return Ok(None);
+        };
+        if palow_name(self.tds, &ety).is_none() || palow_sizeof(self.tds, &ety).is_none() {
+            return Ok(None);
+        }
+        let n = self.global_array_len(v).unwrap_or(0);
+        let literal = const_index(&strip_vattr(idx).val).is_some_and(|k| k < n);
+        if !literal && !self.signed_ok {
+            return Err(format!(
+                "a subscript of `{}`, whose bounds obligation needs the untranslated `_requires`",
+                v.val
+            ));
+        }
+        let i = self.index(idx)?;
+        Ok(Some((v.val.to_string(), i)))
+    }
+
+    /// Whether this path starts at an entry of a constant table.
+    fn global_root(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Member(b, _) => self.global_root(b),
+            ExprT::Index(arr, _) => match &strip_vattr(arr).val {
+                ExprT::Var(v) => {
+                    self.env.lookup_var(v).is_none()
+                        && self.slots.iter().all(|s| s.name != *v.val)
+                        && self.global_array_value(v)
+                }
+                _ => self.global_root(arr),
+            },
+            _ => false,
+        }
+    }
+
+    /// The address of a global table's entry, and the lines that acquire and
+    /// give back a read share of it.
+    fn acquire_global_elem(&mut self, g: &str, i: &str) -> (String, String) {
+        self.lines.push(format!("acquire_elem_var_{} {};", g, i));
+        (
+            format!("(addr_var_{} +! elem_off_var_{} {})", g, g, i),
+            format!("release_elem_var_{} {};", g, i),
+        )
+    }
+
     /// The constant an lvalue reads, when it is rooted at a global nothing in
     /// the program can write. Returns the type at that path together with the
     /// initialiser that reached it; `None` means the path is covered by
@@ -11782,6 +11865,11 @@ impl<'a> Body<'a> {
             // afterwards, exactly as a subscript does; the difference is that
             // the access happens in the callee rather than here.
             ExprT::Index(base, idx) => {
+                if let Some((g, i)) = self.global_elem(e)? {
+                    let (at, close) = self.acquire_global_elem(&g, &i);
+                    self.pending_close.push(close);
+                    return Ok(at);
+                }
                 // An array field of a struct the contract holds in pieces is
                 // not the emitter's to hand out: whatever owns those bytes is
                 // whatever the contract said owns them, and all the body needs
@@ -11899,6 +11987,9 @@ impl<'a> Body<'a> {
                 }
                 _ => self.rvalue(inner),
             },
+            ExprT::Index(..) if let Some((g, i)) = self.global_elem(e)? => {
+                Ok(format!("(addr_var_{} +! elem_off_var_{} {})", g, g, i))
+            }
             _ => self.addr(e),
         }
     }
@@ -12789,6 +12880,12 @@ impl<'a> Body<'a> {
                 f.open_read.clone()
             });
             return Ok((f.at, f.close_read, f.close_write));
+        }
+        // An entry of a constant table is static storage nobody owns, so
+        // a read share of it is acquired for the access and dropped after.
+        if let Some((g, i)) = self.global_elem(base)? {
+            let (at, close) = self.acquire_global_elem(&g, &i);
+            return Ok((at, vec![close.clone()], vec![close]));
         }
         // The same for `a[i].f`, and for every kind of array there is: a
         // parameter, a local, a global, an allocated block. Which of them the
@@ -14303,6 +14400,16 @@ impl<'a> Body<'a> {
                 if let Some(x) = self.const_read(e) {
                     return Ok(x);
                 }
+                // An array field of a constant table's entry, decayed to a
+                // pointer, is an address inside the table's storage -- not
+                // the field's value, which is what `value_read` would give.
+                if let ExprT::Member(base, f) = &e.val
+                    && self.global_root(base)
+                    && let Ok(fty) = self.field_ty(base, f)
+                    && matches!(peel(self.tds, &fty).val, TypeT::FixedArray(..))
+                {
+                    return self.addr_only(e);
+                }
                 // A path into a parameter passed by value is a projection out
                 // of a record this function already holds, not a read of
                 // memory.
@@ -14698,6 +14805,9 @@ impl<'a> Body<'a> {
                 {
                     Ok(format!("addr_var_{}", v.val))
                 }
+                // `&table[j]` hands out the entry, so a read share of it
+                // goes along for the statement, as a focus would.
+                ExprT::Index(..) if self.global_root(inner) => self.addr(inner),
                 _ => self.addr_only(inner),
             },
             // A PAL primitive (`prims.rs`) is a definition in the Pulse
@@ -15126,10 +15236,50 @@ impl<'a> Body<'a> {
                 && matches!(peel(self.tds, &aty).val, TypeT::FixedArray(..))
             {
                 let (sn, _) = self.struct_of(base)?;
-                let at = self.addr_only(base)?;
+                // The struct itself may have to be opened first -- an entry
+                // of a constant table is acquired -- and that is given back
+                // after the field is.
+                let (at, _, close) = if self.global_root(base) {
+                    self.base_addr(base, true)?
+                } else {
+                    (self.addr_only(base)?, Vec::new(), Vec::new())
+                };
                 self.lines.push(format!("{}_focus_{} {};", sn, f.val, at));
                 self.pending_close
                     .push(format!("{}_unfocus_{} {};", sn, f.val, at));
+                self.pending_close.extend(close);
+            }
+            // An array field decayed into a parameter that is not `_array`
+            // is the address of its first element, and a one-object pointer
+            // owns just that element. So the element is focused out of the
+            // field for the statement -- the same focus `s->name[0]` takes --
+            // and the argument is its address.
+            if i < outs.len()
+                && !outs[i]
+                && arr_args.get(i) != Some(&true)
+                && arrayptr_args.get(i) != Some(&true)
+                && plain_ptrs.get(i) != Some(&true)
+                && consumes.get(i) != Some(&true)
+                && let ExprT::Member(base, _) = &strip_casts(a).val
+                && self.union_of(base).is_none()
+                && !self.in_pieces(base)
+                && let Ok(aty) = self.ty_of(strip_casts(a))
+                && matches!(peel(self.tds, &aty).val, TypeT::FixedArray(..))
+            {
+                let writing = consts.get(i) != Some(&true);
+                let fo = self.focus_elem(strip_casts(a), None, writing)?;
+                self.lines.extend(if writing {
+                    fo.open_write.iter().cloned()
+                } else {
+                    fo.open_read.iter().cloned()
+                });
+                self.pending_close.extend(if writing {
+                    fo.close_write
+                } else {
+                    fo.close_read
+                });
+                out += &format!(" {}", fo.at);
+                continue;
             }
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
