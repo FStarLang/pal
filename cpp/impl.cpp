@@ -790,10 +790,9 @@ public:
                            false);
     }
     // A braced initializer for a scalar object: C permits `int x = {0}` and
-    // `T x = {}`, and BOSS reaches it through typedefs whose definition on one
-    // platform is a struct and on another a plain integer -- `SNAP_LE_UINT32`
-    // and `SNAP_CRC64` are both. The list holds at most one element, and it
-    // initializes the object directly.
+    // `T x = {}`. Code can reach it through typedefs whose definition is a
+    // struct on one platform and a plain integer on another. The list holds at
+    // most one element, and it initializes the object directly.
     if (qt->isScalarType()) {
       if (init->getNumInits() == 0) {
         return trZeroInit(init->getType(), range, std::move(loc));
@@ -1932,6 +1931,23 @@ public:
           return mk_alignof(std::move(loc), std::move(ty));
         }
       }
+    } else if (auto *off = dyn_cast<OffsetOfExpr>(e)) {
+      // `offsetof(S, m)` is a ground fact about the ABI, in the same way the
+      // size of a complete record is, and clang has already computed it. Fold
+      // it to its value rather than leaving the whole enclosing function
+      // untranslatable. This shares the layout assumption `c_sizeof` makes:
+      // the layout being proved against is the one this compiler chooses.
+      Expr::EvalResult evalResult;
+      if (off->EvaluateAsInt(evalResult, *astCtx)) {
+        SmallString<32> digits;
+        evalResult.Val.getInt().toString(digits, 10, /*Signed=*/false);
+        return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                          trQualType(e->getType(), e->getSourceRange()));
+      }
+      reportUnsupported(e->getSourceRange(), loc,
+                        "offsetof whose value is not a constant", "");
+      return mk_rvalue_err(std::move(loc),
+                           trQualType(e->getType(), e->getSourceRange()));
     }
 
     // __builtin_choose_expr(c, a, b) is `a` or `b` -- decided by the compiler,
@@ -3377,6 +3393,10 @@ public:
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
       return {};
+    } else if (dyn_cast<FileScopeAsmDecl>(D)) {
+      reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
+                        "file-scope assembly is not translated", "");
+      return {};
     }
 
     reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
@@ -3615,6 +3635,9 @@ static void parse_file(RefMut<Ctx> ctx) {
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-DC2PULSE", "-fno-builtin", "-D_FORTIFY_SOURCE=0"},
       ArgumentInsertPosition::BEGIN));
+  Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+      {"-Wno-unused-but-set-variable", "-Wno-unused-variable"},
+      ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
