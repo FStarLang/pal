@@ -3213,10 +3213,16 @@ public:
                         ? ir::ParamMode::Out()
                         : [&]() {
                             auto qt = param->getType().IgnoreParens();
-                            if (qt.isConstQualified())
+                            if (qt.getCanonicalType().isConstQualified())
                               return ir::ParamMode::Const();
-                            if (auto ptr = dyn_cast<PointerType>(qt)) {
-                              if (ptr->getPointeeType().isConstQualified())
+                            // `getAs` desugars through typedefs, so a
+                            // parameter declared with a pointer-to-const
+                            // typedef (`PCFOO`) is recognized just
+                            // like one that writes `const T *` through.
+                            if (auto ptr = qt->getAs<PointerType>()) {
+                              if (ptr->getPointeeType()
+                                      .getCanonicalType()
+                                      .isConstQualified())
                                 return ir::ParamMode::Const();
                             }
                             return ir::ParamMode::Regular();
