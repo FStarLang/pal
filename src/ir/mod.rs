@@ -556,35 +556,12 @@ impl FieldT {
             FieldT::BitField { name, .. } => name,
         }
     }
-    pub fn is_array(&self) -> bool {
-        match self {
-            FieldT::Plain { ty, .. } => {
-                matches!(
-                    peel_type(ty).val,
-                    TypeT::FixedArray(_, _) | TypeT::FlexArray(_)
-                )
-            }
-            FieldT::BitField { .. } => false,
-        }
-    }
-
     /// For a bit-field, the number of bits in its declared width; `None` for a
     /// plain field. Doubles as a "this is a bit-field" predicate.
     pub fn bit_width(&self) -> Option<u32> {
         match self {
             FieldT::BitField { width, .. } => Some(*width),
             FieldT::Plain { .. } => None,
-        }
-    }
-
-    /// For array fields, return the element type and length.
-    pub fn fixed_array_info(&self) -> Option<(&Rc<Type>, u64)> {
-        match self {
-            FieldT::Plain { ty, .. } => match &peel_type(ty).val {
-                TypeT::FixedArray(elem_ty, length) => Some((elem_ty, *length)),
-                _ => None,
-            },
-            FieldT::BitField { .. } => None,
         }
     }
 
@@ -684,6 +661,16 @@ pub enum AuxFnKind {
     /// uninitialized. Union-only; has no struct form. Emits the per-arm
     /// activation fn `union_<U>__activate_<arm>`.
     Activate,
+    /// `$scattered(struct S) $(p)` — says that `*p` is already in pieces:
+    /// its fields are owned one by one, those the body writes as storage.
+    /// Palow-only; it emits nothing, and only tells the emitter to fill the
+    /// remaining fields by address instead of opening the object.
+    Scattered,
+    /// `$gathered(struct S) $(p)` — the closing form of `$scattered`: says
+    /// that `*p` is a whole object again, because a ghost step of the
+    /// author's put it back together. Palow-only, and emits nothing; it only
+    /// tells the emitter to stop treating the object as a heap of fields.
+    Gathered,
 }
 
 impl AuxFnKind {
@@ -694,26 +681,8 @@ impl AuxFnKind {
             AuxFnKind::Fold => "fold",
             AuxFnKind::FoldUninit => "fold-uninit",
             AuxFnKind::Activate => "activate",
-        }
-    }
-
-    /// The struct-level aux fn infix, if this kind has a struct form.
-    /// `Activate` is union-only and has none.
-    pub fn struct_aux_name(self) -> Option<&'static str> {
-        match self {
-            AuxFnKind::Unfold => Some("raw_unfold"),
-            AuxFnKind::UnfoldUninit => Some("raw_unfold_uninit"),
-            AuxFnKind::Fold => Some("raw_fold"),
-            AuxFnKind::FoldUninit => Some("raw_fold_uninit"),
-            AuxFnKind::Activate => None,
-        }
-    }
-
-    pub fn union_aux_name(self) -> Option<&'static str> {
-        match self {
-            AuxFnKind::Unfold => Some("raw_unfold"),
-            AuxFnKind::Fold => Some("raw_fold"),
-            AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit | AuxFnKind::Activate => None,
+            AuxFnKind::Scattered => "scattered",
+            AuxFnKind::Gathered => "gathered",
         }
     }
 }
@@ -748,6 +717,13 @@ pub enum InlinePulseToken {
         ident: Rc<Ident>,
         ty: Rc<Type>,
     },
+    /// `$witness` — the ghost arguments that instantiate the contract of the
+    /// indirect call that follows. It stands at the head of the statement and
+    /// emits nothing; the rest of the statement is the witness term. Only the
+    /// author knows it, so there is nothing for the emitter to derive.
+    /// Palow-only: the old model spells the same thing as a call to
+    /// `Pulse.Lib.C.FuncPtr.eta_expanded_erased`, and wants a different tuple.
+    WitnessAntiquot(CodeToken),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -838,8 +814,55 @@ pub enum DeclT {
     GlobalVar(GlobalVar),
 }
 
+/// Identifies a named C type whose layout is recorded in [`LayoutTable`].
+///
+/// Only named types need an entry: the size and alignment of every other type
+/// (scalars, pointers, arrays) follows from its structure.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
+pub enum LayoutKey {
+    Typedef(Rc<str>),
+    Struct(Rc<str>),
+    Union(Rc<str>),
+}
+
+impl LayoutKey {
+    pub fn of_type_ref(kind: &TypeRefKind) -> LayoutKey {
+        match kind {
+            TypeRefKind::Typedef(i) => LayoutKey::Typedef(i.val.clone()),
+            TypeRefKind::Struct(i) => LayoutKey::Struct(i.val.clone()),
+            TypeRefKind::Union(i) => LayoutKey::Union(i.val.clone()),
+        }
+    }
+}
+
+/// Layout of a named C type, as computed by clang for the target ABI.
+///
+/// Sizes and offsets are in bytes. `field_offsets` is empty for typedefs and
+/// unions (all union members start at offset 0).
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Default)]
+pub struct TypeLayout {
+    pub size: u64,
+    pub align: u64,
+    pub field_offsets: Vec<(Rc<str>, u64)>,
+    /// Bit offsets of the bit-fields, which have no byte offset of their own.
+    /// A bit-field is addressed by the byte range its storage unit occupies
+    /// plus its position inside it, and this is the second half of that.
+    pub field_bit_offsets: Vec<(Rc<str>, u64)>,
+}
+
+/// Target-specific layout of every named C type in the translation unit.
+///
+/// Populated by the clang frontend (see `cpp/impl.cpp`) and consumed by the
+/// emitter, which turns `sizeof`/`_Alignof` into concrete `SizeT` literals
+/// instead of opaque, F*-type-indexed `c_sizeof`/`c_alignof` applications.
+pub type LayoutTable = std::collections::BTreeMap<LayoutKey, TypeLayout>;
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct TranslationUnit {
     pub main_file_names: Vec<Rc<str>>,
     pub decls: Vec<Decl>,
+    /// Layout of named C types, keyed by [`LayoutKey`]. See [`LayoutTable`].
+    pub layouts: LayoutTable,
+    /// Size of a data pointer in bytes, as reported by clang.
+    pub pointer_size: u64,
 }

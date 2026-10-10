@@ -7,6 +7,9 @@ typedef int *nullable_ptr;
 
 void take_nullable(_out nullable_ptr p)
 {
-    _ghost_stmt(Pulse.Lib.Reference.pts_to_uninit_not_null $(p));
+    /* The refinement says the pointer is NULL and the `_out` mode says it
+       addresses storage; unwritten storage still occupies bytes at a real
+       address, so the two cannot both hold and the body is vacuous. */
+    _ghost_stmt(Pulse.Lib.C.Palow.CTypes.int32_t_pts_to_uninit_not_null $(p));
     _ghost_stmt(unreachable());
 }

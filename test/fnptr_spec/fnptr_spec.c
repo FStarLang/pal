@@ -1,5 +1,6 @@
 #include "pal.h"
 #include <stdint.h>
+#include <stdlib.h>
 
 /* Indirect calls where an argument's struct has a `__spec` companion --
    https://github.com/FStarLang/pal/issues/277.
@@ -24,12 +25,8 @@ static const struct ops_ok o_ok = {.get = impl_ok};
 
 int32_t call_ok(struct plain *q)
 {
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_ok.func_impl_ok__fp);
-  _ghost_stmt(Global_o_ok.acquire_var_o_ok ());
   const struct ops_ok *p = &o_ok;
   return p->get(q);
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-  _ghost_stmt(drop_ (exists* fr. pts_to Global_o_ok.addr_var_o_ok #fr _));
 }
 
 /* The issue's reproducer. `y` gives `struct dep` a `__spec`, so the witness is
@@ -49,12 +46,8 @@ static const struct ops o = {.get = impl_dep};
 
 int32_t call_dep(struct dep *d)
 {
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_dep.func_impl_dep__fp);
-  _ghost_stmt(Global_o.acquire_var_o ());
   const struct ops *p = &o;
   return p->get(d);
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-  _ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
 }
 
 /* Every kind of witness component at once: `d` gives two elim leaves (value and
@@ -66,7 +59,7 @@ int32_t call_dep(struct dep *d)
    contributes more than one leaf. */
 _ghost_arg(int32_t v)
 _requires(*a > 0 && *a < 100)
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R $(v)))
+_preserves(_inline_pulse(FnptrSpecRefs.plain_pts_to $(q) $(v)))
 int32_t impl_mixed(struct dep *d, int32_t *a, _plain int32_t *q)
 {
   return *a;
@@ -75,28 +68,62 @@ int32_t impl_mixed(struct dep *d, int32_t *a, _plain int32_t *q)
 /* The `m` field carries `is_valid` as a field-level `_refine`. */
 struct ops_mixed {
   _refine((_slprop) _inline_pulse(
-      Pulse.Lib.C.FuncPtr.is_valid $(this) true
-        (Pulse.Lib.C.FuncPtr.pre_of Funcptr_impl_mixed.func_impl_mixed__fp)
-        (Pulse.Lib.C.FuncPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)))
+      Pulse.Lib.C.Palow.FnPtr.is_valid $(this) true
+        (Pulse.Lib.C.Palow.FnPtr.pre_of Funcptr_impl_mixed.func_impl_mixed__fp)
+        (Pulse.Lib.C.Palow.FnPtr.post_of Funcptr_impl_mixed.func_impl_mixed__fp)))
   int32_t (*m)(struct dep *d, int32_t *a, _plain int32_t *q);
 };
 
 static const struct ops_mixed o_m = {.m = impl_mixed};
 
-/* A global's `acquire` yields a bare `pts_to` at the global's value, not the
-   struct's `__pred`, so the field refinement is not in scope here. It costs
+/* A global's `acquire` yields a bare points-to at the global's value, without
+   the field refinements, so the `is_valid` is not in scope here. It costs
    nothing to reintroduce: `o_m.m` is definitionally `of_fn_div .. impl_mixed`,
    so `of_fn_div_valid` supplies the `is_valid` from `emp`. */
 _requires(*a > 0 && *a < 100)
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
+_preserves(_inline_pulse(FnptrSpecRefs.plain_pts_to $(q) 0l))
 int32_t call_mixed(struct dep *d, int32_t *a, _plain int32_t *q)
 {
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
-  _ghost_stmt(Global_o_m.acquire_var_o_m ());
   const struct ops_mixed *p = &o_m;
   return p->m(d, a, q);
-  _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-  _ghost_stmt(drop_ (exists* fr. pts_to Global_o_m.addr_var_o_m #fr _));
+}
+
+/* Through a table the caller owns: the field refinement is part of the
+   parameter's contract, which is the only place the `is_valid` comes from. */
+_requires(*a > 0 && *a < 100)
+_preserves(_inline_pulse(FnptrSpecRefs.plain_pts_to $(q) 0l))
+int32_t call_via(struct ops_mixed *p, struct dep *d, int32_t *a,
+                 _plain int32_t *q)
+{
+  return p->m(d, a, q);
+}
+
+/* Building such a table: the refinement is owed on return, and the store of
+   `impl_mixed` is what discharges it. */
+_allocated _nullable
+struct ops_mixed *make_ops(void)
+{
+  struct ops_mixed *p = (struct ops_mixed *) malloc(sizeof(struct ops_mixed));
+  if (p == NULL) {
+    return NULL;
+  }
+  p->m = impl_mixed;
+  return p;
+}
+
+/* And handing one built here to `call_via`. */
+_requires(*a > 0 && *a < 100)
+_preserves(_inline_pulse(FnptrSpecRefs.plain_pts_to $(q) 0l))
+int32_t call_via_made(struct dep *d, int32_t *a, _plain int32_t *q)
+{
+  struct ops_mixed *p = make_ops();
+  if (p == NULL) {
+    return 0;
+  }
+  int32_t res = call_via(p, d, a, q);
+  _ghost_stmt(Pulse.Lib.C.Palow.FnPtr.drop_is_valid _ _ _);
+  free(p);
+  return res;
 }
 
 /* A struct-level `_refine` that reads an `_array` field's `_length`, on a
@@ -133,3 +160,16 @@ struct ops_byval {
 };
 
 static const struct ops_byval o_byval = {.fn = use_byval};
+
+/* `_plain` on a struct passed by value drops the field refinement from the
+   contract: no `is_valid` is asked of the caller, and the callee cannot call
+   through `o.m`. */
+int32_t ignore_ops(_plain struct ops_mixed o)
+{
+  return 0;
+}
+
+int32_t pass_ops(struct ops_mixed o)
+{
+  return ignore_ops(o);
+}

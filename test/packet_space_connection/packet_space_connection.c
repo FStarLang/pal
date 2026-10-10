@@ -92,6 +92,8 @@ PalPacketSpaceConnectionOwnerUpdate(
     PalPacketSpaceConnectionUpdate(PacketSpace, PacketNumber);
 }
 
+#define _not_null(p) _ghost_stmt(struct_packet_space_pts_to_not_null $(p))
+
 /*
  * Models QuicPacketSpaceInitialize's create + install lifecycle in one step,
  * producing the full owner.
@@ -111,29 +113,27 @@ void
 PalPacketSpaceInitialize(
     _plain connection* Connection,
     uint32_t EncryptLevel,
-    _plain packet_space* PacketSpace
+    _out packet_space* PacketSpace
     )
     _requires(_inline_pulse(
         Helpers_PACKET_SPACE_CONNECTION.connection_slot_empty
-            $(Connection) $(EncryptLevel)
-        ** Pulse.Lib.Reference.pts_to_uninit $(PacketSpace)))
+            $(Connection) $(EncryptLevel)))
     _ensures(_inline_pulse(
         Helpers_PACKET_SPACE_CONNECTION.connection_owner_exists $(PacketSpace)))
 {
-    /* Turn raw memory into a valid packet space: open the per-field uninit reps,
-     * populate every field, then fold to ESTABLISH the representation. */
-    _ghost_stmt($unfold-uninit(packet_space) $(PacketSpace));
+    /* Turn raw memory into a valid packet space. The parameter is an `_out`,
+     * so the emitter knows the storage is uninitialised and scatters the four
+     * writes into it itself. */
     PacketSpace->connection = Connection;
     PacketSpace->encrypt_level = EncryptLevel;
     PacketSpace->largest_acknowledged = 0;
     PacketSpace->ack_needed = PACKET_SPACE_ACK_NOT_NEEDED;
-    _ghost_stmt($fold(packet_space) $(PacketSpace) _ _ _ _);
 
     /* Install into the connection's slot and deposit into the full owner. */
     Connection->packets[EncryptLevel] = PacketSpace;
-    /* A live `pts_to PacketSpace _` proves the pointer is non-NULL, which the
-     * deposit needs to record `slot_at ... == Some PacketSpace` with a live slot. */
-    _ghost_stmt(Pulse.Lib.Reference.pts_to_not_null $(PacketSpace));
+    /* A live points-to proves the pointer is non-NULL, which the deposit needs
+     * to record that the slot it fills is a live one. */
+    _not_null(PacketSpace);
     _ghost_stmt(
         Helpers_PACKET_SPACE_CONNECTION.deposit
             $(PacketSpace) $(Connection) $(EncryptLevel));

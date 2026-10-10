@@ -12,8 +12,9 @@
  * `FStar.UIntN.t` by its bit WIDTH and then gives it full N-bit modular
  * arithmetic over all N bits, which is to say a representation with no padding.
  * With no padding and CHAR_BIT == 8 -- which PAL also already assumes, by
- * mapping `char` to `FStar.UInt8.t` -- `sizeof(T)` is exactly N/8.  The
- * derivation is written out in full in Pulse.Lib.C.Sizeof.fsti.
+ * mapping `char` to `FStar.UInt8.t` -- `sizeof(T)` is exactly N/8.  Both
+ * emitters now write that number down as a literal and the opaque constant is
+ * gone; the derivation it used to carry is in palow.md.
  *
  * The practical consequence is this file.  `sizeof` almost never appears alone
  * in C; it appears multiplied or divided, and with only `sizeof > 0` known the

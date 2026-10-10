@@ -316,7 +316,7 @@ fn punct2<
         .padded_by(ws())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TargetIntWidths {
     pub char_width: u32,
     pub short_width: u32,
@@ -836,7 +836,10 @@ fn expr_parser<
                             .into())
                     }
                     _ => Ok(ExprT::FnCall(
-                        f,
+                        match crate::prims::of_builtin(&f.val) {
+                            Some(p) => Rc::<str>::from(p).with_loc(f.loc.clone()),
+                            None => f,
+                        },
                         args.into_iter().map(|e: Expr| e.to_rvalue()).collect(),
                     )
                     .with_loc(sift.resolve_source_info(&s))
@@ -1657,6 +1660,9 @@ pub fn process_inline_pulse(
             first_span: SimpleSpan,
             result_text: String,
         },
+        WitnessAntiquot {
+            dollar_span: SimpleSpan,
+        },
     }
 
     // Balanced parentheses: matches everything between ( and ), handling nesting.
@@ -1768,6 +1774,27 @@ pub fn process_inline_pulse(
             kind: AuxFnKind::FoldUninit,
         });
 
+    // `$witness` takes no parenthesised argument: unlike the others it names a
+    // term rather than a type, and the term is the rest of the statement.
+    let witness_antiquot = just(Token::Punct(Punct::Dollar))
+        .map_with(|_, extra| extra.span())
+        .then_ignore(just(Token::Ident("witness")))
+        .map(|dollar_span| RawToken::WitnessAntiquot { dollar_span });
+
+    let scattered_antiquot =
+        dollar_keyword("scattered").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
+            dollar_span,
+            body_span,
+            kind: AuxFnKind::Scattered,
+        });
+
+    let gathered_antiquot =
+        dollar_keyword("gathered").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
+            dollar_span,
+            body_span,
+            kind: AuxFnKind::Gathered,
+        });
+
     // $`ident → emits 'ident (F* implicit/ticked argument)
     let tick_antiquot = just(Token::Punct(Punct::Dollar))
         .map_with(|_, extra| extra.span())
@@ -1805,6 +1832,9 @@ pub fn process_inline_pulse(
         unfold_antiquot,
         fold_antiquot,
         activate_antiquot,
+        scattered_antiquot,
+        gathered_antiquot,
+        witness_antiquot,
         ident_tick_antiquot,
         tick_antiquot,
         antiquot,
@@ -1861,6 +1891,9 @@ pub fn process_inline_pulse(
                 } else {
                     InlinePulseToken::RValueAntiquot { before, expr }
                 }
+            }
+            RawToken::WitnessAntiquot { dollar_span } => {
+                InlinePulseToken::WitnessAntiquot(code.tokens[dollar_span.start].clone())
             }
             RawToken::TypeAntiquot {
                 dollar_span,

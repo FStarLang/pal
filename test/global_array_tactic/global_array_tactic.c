@@ -94,6 +94,9 @@ _Bool use_sorted_property(int i, int j)
   _requires(0 < j && j < my_array._length)
   _ensures(i <= j ==> return)
 {
-  _ghost_stmt(Helper.my_array_sorted ());
+  /* The fact is the same; where it lives is not. A `_pure` array global is an
+     `array_spec` in PAL's model and a `const_seq` in Palow's, so the proof of
+     it is a different module in each. */
+  _ghost_stmt(HelperPalow.my_array_sorted ());
   return my_array[i] <= my_array[j];
 }
