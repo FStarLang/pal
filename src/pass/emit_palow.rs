@@ -1559,6 +1559,9 @@ fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
         // all there is, and all a contract can say about it is what the
         // author says by hand.
         TypeT::Pointer(to, _) if is_incomplete(tds, to) => None,
+        // `_core_ref` says the pointer carries no predicate: an address and
+        // nothing else, whatever type it is written at.
+        TypeT::Pointer(_, PointerKind::Core) => None,
         TypeT::Pointer(to, _) => Some(to),
         TypeT::Nullable(t)
         | TypeT::Refine(t, _)

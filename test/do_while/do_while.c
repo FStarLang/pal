@@ -1,6 +1,7 @@
 #include "pal.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /* do-while with user-named flag variable for first-iteration invariant */
 uint32_t simple_do(uint32_t n)
@@ -140,4 +141,85 @@ int g_loop(void)
     {
     } while (f(&s));
     return s.x;
+}
+
+/* ---------------------------------------------------------------------------
+ * `do { ... } while (0)` as a macro wrapper, not a loop.
+ *
+ * This is the shape of every BUG_ON/assert-style macro in C. Desugaring it
+ * into a real loop is semantically correct but loses everything the body
+ * establishes, because only the invariant survives a loop. PAL emits the body
+ * straight-line when the guard is a constant zero, so the guard's fact reaches
+ * the code after it.
+ * ------------------------------------------------------------------------ */
+
+void abort_if(void) __attribute__((__noreturn__)) _ensures(1 == 0);
+
+#define CHECK(cond)                                                            \
+	do {                                                                   \
+		if (!(cond)) {                                                 \
+			abort_if();                                            \
+		}                                                              \
+	} while (0)
+
+/* The obligation is the subscript, and the only thing licensing it is CHECK.
+ * If the do-while(0) were desugared into a loop this would not verify. */
+uint32_t checked_index(_array uint32_t *a, size_t n, size_t i)
+    _requires(a._length == n)
+{
+	CHECK(i < n);
+	return a[i];
+}
+
+/* Two checks in sequence, both needed, and a read between them: confirms the
+ * facts accumulate rather than the last one merely happening to survive. */
+uint32_t checked_index2(_array uint32_t *a, size_t n, size_t i, size_t j)
+    _requires(a._length == n)
+{
+	CHECK(i < n);
+	uint32_t x = a[i];
+	CHECK(j < n);
+	return x + a[j];
+}
+
+/* Nested do-while(0), as macro-expands-to-macro produces. */
+uint32_t checked_nested(_array uint32_t *a, size_t n, size_t i)
+    _requires(a._length == n)
+{
+	do {
+		CHECK(i < n);
+	} while (0);
+	return a[i];
+}
+
+/* A `continue` inside do-while(0) targets the do-while, not any enclosing
+ * loop: it jumps to the (false) guard and so leaves the do-while, and control
+ * resumes on the statement after it. Inlining the body would re-bind it to the
+ * `while` below, turning "skip the rest of the macro" into "skip the rest of
+ * the iteration".
+ *
+ * The postcondition discriminates: `iters` is incremented *after* the
+ * do-while, so a re-bound continue would skip it on every iteration and the
+ * function would return 0, failing `return >= 1`. `break` is preserved for the same
+ * reason and by the same guard; it is not tested by verification here only
+ * because breaking out of the desugared do-while is a separate, pre-existing
+ * gap. */
+uint32_t dowhile0_with_continue(uint32_t n)
+    _requires(n >= 1 && n <= 100)
+    _ensures(return >= 1)
+{
+	uint32_t iters = 0;
+	uint32_t i = 0;
+	while (i < n)
+	    _invariant(_live(i) && _live(n) && _live(iters))
+	    _invariant((_specint) n >= 1)
+	    _invariant((_specint) i <= n && (_specint) iters == (_specint) i)
+	{
+		do {
+			continue;
+		} while (0);
+		iters = iters + 1;
+		i = i + 1;
+	}
+	return iters;
 }

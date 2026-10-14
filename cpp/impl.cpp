@@ -56,6 +56,23 @@ static bool hasTopLevelContinue(const Stmt *s) {
   return false;
 }
 
+// A `break` that would bind to the enclosing do-while. Unlike `continue`, a
+// `break` also binds to a `switch`, so a switch is a boundary here and is not
+// one above.
+static bool hasTopLevelBreak(const Stmt *s) {
+  if (!s)
+    return false;
+  if (isa<BreakStmt>(s))
+    return true;
+  if (isa<ForStmt>(s) || isa<WhileStmt>(s) || isa<DoStmt>(s) ||
+      isa<SwitchStmt>(s))
+    return false;
+  for (const Stmt *child : s->children())
+    if (hasTopLevelBreak(child))
+      return true;
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -220,6 +237,42 @@ public:
   };
   // When inside a switch desugaring, break sets this flag instead of mk_break
   Rc<ir::Ident> *switchBreakId = nullptr;
+
+  // The arm a `?:` actually takes, when clang can decide the condition at
+  // compile time, or null when it cannot.
+  //
+  // C evaluates exactly one arm of a conditional, so when the condition is a
+  // constant the program IS that arm and nothing else. Translating the whole
+  // conditional is not merely wasteful, it is wrong in the way that matters
+  // here: the arm that is never taken is often not meant to be compiled at
+  // all. Generated RPC-stub headers can wrap every call argument in
+  // a test like
+  //
+  //   (__builtin_classify_type(x) == 12 || __builtin_classify_type(x) == 13)
+  //       ? ERROR__Struct_or_union_arguments_not_allowed_in_call()
+  //       : (uint64_t)(x)
+  //
+  // where the error function is declared and deliberately never defined, so
+  // that a struct argument fails to link. Once the classify_type calls fold,
+  // the condition is `1 == 12 || 1 == 13` and the dead arm is a call to a
+  // function PAL has no body for -- which, before this, both introduced an
+  // admitted module and made the conditional ill-typed, since the two arms'
+  // types agree in C but not after PAL maps a typedef and its underlying type
+  // to different F* names ("The branches of a conditional must return the same
+  // type: Typedef_uint64_t.ty_uint64_t and UInt64.t").
+  //
+  // Requiring the condition to be side-effect free is what makes dropping it
+  // sound: `f() ? a : b` must still call f. HasSideEffects is asked
+  // separately from the evaluation because EvaluateAsBooleanCondition has no
+  // equivalent of EvaluateAsInt's SE_NoSideEffects.
+  Expr *constantCondArm(const ConditionalOperator *co) {
+    bool val = false;
+    if (co->getCond()->HasSideEffects(*astCtx) ||
+        !co->getCond()->EvaluateAsBooleanCondition(val, *astCtx)) {
+      return nullptr;
+    }
+    return val ? co->getTrueExpr() : co->getFalseExpr();
+  }
 
   // TODO: should probably wait with translation until after parsing
 
@@ -684,6 +737,43 @@ public:
     return ty;
   }
 
+  // A `_core_ref` parameter carries no ownership: `core_ref` is an
+  // axiomatized address with no `pts_to`, and the predicate generated for it
+  // is `emp`. Reading its const qualifier as a borrow would still give it a
+  // permission implicit, and an implicit that appears only in `emp` is one no
+  // call site can ever solve, so the call does not elaborate. The attribute
+  // is nearly always written on a typedef -- it has to be, to land on the
+  // pointee of a `void const**` -- so the typedef chain is walked.
+  static bool isCoreRefQualType(QualType qt) {
+    while (!qt.isNull()) {
+      qt = qt.IgnoreParens();
+      auto *td = qt->getAs<TypedefType>();
+      if (!td)
+        return false;
+      for (auto *attr : td->getDecl()->getAttrs()) {
+        if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
+          if (ann->getAnnotation() == "pal-core-ref" && ann->args_size() == 0)
+            return true;
+        }
+      }
+      QualType next = td->getDecl()->getUnderlyingType();
+      if (next.getAsOpaquePtr() == qt.getAsOpaquePtr())
+        return false;
+      qt = next;
+    }
+    return false;
+  }
+
+  bool hasCoreRefAttr(AttrVec const &attrs) {
+    for (auto attr : attrs) {
+      if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
+        if (ann->getAnnotation() == "pal-core-ref" && ann->args_size() == 0)
+          return true;
+      }
+    }
+    return false;
+  }
+
   bool hasConsumesAttr(AttrVec const &attrs) {
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
       if (auto ann = dyn_cast<AnnotateAttr>(*it)) {
@@ -747,6 +837,11 @@ public:
         return trLValue(ic->getSubExpr());
       }
     } else if (isa<CompoundLiteralExpr>(e)) {
+      auto hoisted = hoistedCompoundLiterals.find(e->IgnoreParenImpCasts());
+      if (hoisted != hoistedCompoundLiterals.end()) {
+        auto tmp = ctx.mk_ident(toStr(StringRef(hoisted->second)), loc.clone());
+        return mk_lvalue_var(std::move(loc), std::move(tmp));
+      }
       // C11 6.5.2.5p4 makes a compound literal an lvalue, so `(T){...}.f` and
       // `&(T){...}` are both legal. The object it names is unnamed and fresh,
       // though, so nothing stored through it can be observed by any later
@@ -834,10 +929,9 @@ public:
                            false);
     }
     // A braced initializer for a scalar object: C permits `int x = {0}` and
-    // `T x = {}`, and BOSS reaches it through typedefs whose definition on one
-    // platform is a struct and on another a plain integer -- `SNAP_LE_UINT32`
-    // and `SNAP_CRC64` are both. The list holds at most one element, and it
-    // initializes the object directly.
+    // `T x = {}`. Code can reach it through typedefs whose definition is a
+    // struct on one platform and a plain integer on another. The list holds at
+    // most one element, and it initializes the object directly.
     if (qt->isScalarType()) {
       if (init->getNumInits() == 0) {
         return trZeroInit(init->getType(), range, std::move(loc));
@@ -1667,6 +1761,39 @@ public:
                               std::move(result));
       }
 
+      case clang::BO_Comma: {
+        // The comma operator in rvalue position.
+        //
+        // `(a, b)` evaluates `a`, discards it, then yields `b`.  PAL's
+        // expression IR has nowhere to put `a`: there is no statement
+        // sequencing inside an rvalue, and hoisting it out would move it
+        // across the surrounding expression's other operands, which C's
+        // sequencing rules do not permit in general.
+        //
+        // So this is translated only when `a` cannot be observed at all --
+        // when Clang can tell us it has no side effects.  Then `(a, b)` and
+        // `b` are the same program and the arm is a pure simplification.
+        //
+        // This is not a corner case.  Generated RPC-stub macros can all be
+        // of the form
+        //
+        //   #define f(...) ((void)sizeof(f(__VA_ARGS__)),
+        //   (uint64_t)invoke_N(...))
+        //
+        // where the left operand is a compile-time prototype check whose
+        // operand is unevaluated.  Refusing it made every such call site an
+        // `admit()`, discarding the surrounding obligations along with
+        // it.
+        //
+        // A left operand that *does* have side effects still reaches the
+        // unsupported diagnostic below, deliberately: silently dropping it
+        // would change the program.
+        if (!bo->getLHS()->HasSideEffects(*astCtx)) {
+          return trRValue(bo->getRHS());
+        }
+        break;
+      }
+
       default:;
         // continue to error case
       }
@@ -1710,6 +1837,22 @@ public:
         if (bname == "__builtin_constant_p" && c->getNumArgs() == 1) {
           return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
                             trQualType(e->getType(), e->getSourceRange()));
+        }
+        // Any other builtin that answers a question about the *program text*
+        // rather than about a value: fold it to the answer clang computed.
+        // See the matching fold at the end of trRValue for the rationale; this
+        // arm is needed as well because a CallExpr never reaches that fallback
+        // -- it translates to a call node, and only a later pass discovers
+        // that the callee has no body to call.
+        if (fd->getBuiltinID() != 0 &&
+            e->getType()->isIntegralOrEnumerationType()) {
+          Expr::EvalResult builtinRes;
+          if (e->EvaluateAsInt(builtinRes, *astCtx, Expr::SE_NoSideEffects)) {
+            SmallString<32> digits;
+            builtinRes.Val.getInt().toString(digits, 10, /*Signed=*/true);
+            return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                              trQualType(e->getType(), e->getSourceRange()));
+          }
         }
         // Detect free(ptr)
         if (fd->getName() == "free" && c->getNumArgs() == 1) {
@@ -1949,6 +2092,9 @@ public:
     } else if (auto *init = dyn_cast<InitListExpr>(e)) {
       return trInitList(init, e->getSourceRange(), std::move(loc));
     } else if (auto *co = dyn_cast<ConditionalOperator>(e)) {
+      if (auto *arm = constantCondArm(co)) {
+        return trRValue(arm);
+      }
       // The condition is evaluated unconditionally and may hoist; the two arms
       // are not, so a statement expression in either must stay where it is.
       auto cond = trRValue(co->getCond());
@@ -2150,6 +2296,40 @@ public:
       }
     }
 
+    // Last resort, before giving up: an expression that asks a question about
+    // the *program text* rather than about a value, and that clang has already
+    // answered.
+    //
+    // These are the type-level predicates -- __builtin_classify_type,
+    // __builtin_types_compatible_p, and their relatives -- which C code uses to
+    // select between branches at compile time. Translating such a test
+    // faithfully is not merely hard, it is wrong: the branch not taken is
+    // typically an error stub that has no definition, so only the folded value
+    // describes the program that is actually compiled.
+    //
+    // Three things make this safe to do here rather than as a general
+    // simplification:
+    //   * it is reached only where PAL was about to emit `(admit())` for the
+    //     whole enclosing expression, so it cannot displace any translation
+    //     PAL would otherwise perform, and cannot weaken any obligation --
+    //     an admit() discards them all;
+    //   * SE_NoSideEffects makes clang decline the fold if evaluating the
+    //     expression could do anything observable;
+    //   * an integral result type, since that is all mk_int_lit can carry.
+    //
+    // Generated RPC-stub headers reach this by wrapping every call argument
+    // in a CHECK_SCALAR test that rejects struct and union arguments at
+    // compile time. See test/classify_type.
+    if (e->getType()->isIntegralOrEnumerationType()) {
+      Expr::EvalResult constRes;
+      if (e->EvaluateAsInt(constRes, *astCtx, Expr::SE_NoSideEffects)) {
+        SmallString<32> digits;
+        constRes.Val.getInt().toString(digits, 10, /*Signed=*/true);
+        return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                          trQualType(e->getType(), e->getSourceRange()));
+      }
+    }
+
     reportUnsupported(e->getSourceRange(), loc,
                       "unsupported rvalue expression ", e->getStmtClassName());
     return mk_rvalue_err(std::move(loc),
@@ -2178,6 +2358,7 @@ public:
   /// Structure-valued call results bound ahead of the statement that projects
   /// from them, keyed by the call expression.
   std::map<const Expr *, std::string> hoistedRValues;
+  std::map<const Expr *, std::string> hoistedCompoundLiterals;
   int rvalueHoistCounter = 0;
   /// Variadic arguments evaluated ahead of their statement; see
   /// `hoistRValueMembers`. The call itself then drops them.
@@ -2266,18 +2447,61 @@ public:
     hoistedRValues[base] = name;
   }
 
+  void hoistAddressedCompoundLiterals(Vec<Rc<ir::Stmt>> &stmts, Expr *e) {
+    if (!e)
+      return;
+    e = e->IgnoreParens();
+    if (auto *co = dyn_cast<ConditionalOperator>(e)) {
+      hoistAddressedCompoundLiterals(stmts, co->getCond());
+      return;
+    }
+    if (auto *bo = dyn_cast<BinaryOperator>(e)) {
+      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr) {
+        hoistAddressedCompoundLiterals(stmts, bo->getLHS());
+        return;
+      }
+    }
+    if (auto *uo = dyn_cast<UnaryOperator>(e);
+        uo && uo->getOpcode() == UO_AddrOf) {
+      auto *base = uo->getSubExpr()->IgnoreParenImpCasts();
+      if (auto *cl = dyn_cast<CompoundLiteralExpr>(base)) {
+        if (!hoistedCompoundLiterals.count(base)) {
+          auto baseLoc = getRange(base->getSourceRange());
+          auto ty = trQualType(base->getType(), base->getSourceRange());
+          auto name = "__pal_compound_" + std::to_string(rvalueHoistCounter++);
+          auto id = ctx.mk_ident(toStr(StringRef(name)), baseLoc.clone());
+          stmts.push(mk_var_decl(baseLoc.clone(), id.clone(), ty.clone()));
+          stmts.push(mk_assign(baseLoc.clone(),
+                               mk_lvalue_var(baseLoc.clone(), id.clone()),
+                               trRValue(cl)));
+          hoistedCompoundLiterals[base] = name;
+        }
+        return;
+      }
+    }
+    for (auto *child : e->children()) {
+      if (auto *ce = dyn_cast_or_null<Expr>(child)) {
+        hoistAddressedCompoundLiterals(stmts, ce);
+      }
+    }
+  }
+
   rust::Unit trStmt(Vec<Rc<ir::Stmt>> &stmts, Stmt *stmt) {
     auto loc = getRange(stmt->getSourceRange());
 
     if (auto *e = dyn_cast<Expr>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, e);
       hoistRValueMembers(stmts, e);
     } else if (auto *ret = dyn_cast<ReturnStmt>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, ret->getRetValue());
       hoistRValueMembers(stmts, ret->getRetValue());
     } else if (auto *ifs = dyn_cast<IfStmt>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, ifs->getCond());
       hoistRValueMembers(stmts, ifs->getCond());
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto *d : ds->decls()) {
         if (auto *vd = dyn_cast<VarDecl>(d)) {
+          hoistAddressedCompoundLiterals(stmts, vd->getInit());
           hoistRValueMembers(stmts, vd->getInit());
         }
       }
@@ -2448,14 +2672,21 @@ public:
       auto enss = Vec<Rc<ir::Expr>>::new_();
       std::string flagName;
       std::string condName;
+      // Whether the user wrote any loop annotation on this do-while. The Vec
+      // bridge exposes only new_/push, so emptiness is tracked here rather
+      // than queried afterwards.
+      bool sawLoopAnnot = false;
       if (auto attrBody = dyn_cast<AttributedStmt>(body)) {
         for (auto attr : attrBody->getAttrs()) {
           if (auto inv = isUnaryAttrOf(attr, "pal-invariant")) {
             invs.push(std::move(inv.value()));
+            sawLoopAnnot = true;
           } else if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
             reqs.push(std::move(req.value()));
+            sawLoopAnnot = true;
           } else if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
             enss.push(std::move(ens.value()));
+            sawLoopAnnot = true;
           } else if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
             if (ann->getAnnotation() == "pal-do-while-first" &&
                 ann->args_size() == 1) {
@@ -2473,6 +2704,43 @@ public:
           }
         }
         body = attrBody->getSubStmt();
+      }
+
+      // `do { ... } while (0)` is not a loop. It is C's standard idiom for
+      // giving a multi-statement macro a single-statement body (C FAQ 10.4),
+      // and BUG_ON and assert-style macros are built from it.
+      //
+      // Desugaring it like any other do-while is semantically correct but
+      // destroys the facts it establishes: the body becomes a Pulse `while`,
+      // and the *only* thing that survives a loop is its invariant. The
+      // auto-generated invariant relates the two loop-control flags and says
+      // nothing about program state, so
+      //
+      //     BUG_ON(i >= n);   // do { if (i >= n) abort(); } while (0)
+      //
+      // taught the solver nothing about `i` afterwards -- even though
+      // _pal_abort ensures `pure False`, so the `if` really does establish
+      // `i < n` on the path that continues. Every bounds check written this
+      // way was invisible, which for a codebase whose validation idiom *is*
+      // BUG_ON means essentially all of its input validation was invisible.
+      //
+      // When the guard is a constant zero the body runs exactly once, so
+      // emitting it straight-line is not an optimisation but the faithful
+      // translation. Guarded conservatively:
+      //   * a top-level `break` or `continue` in the body targets this
+      //     do-while (both exit it, since the guard is false); inlining would
+      //     silently re-bind them to an enclosing loop, or to nothing;
+      //   * any user annotation means the user is treating this as a loop, so
+      //     honour that and take the general path.
+      {
+        auto condVal = d->getCond()->getIntegerConstantExpr(*astCtx);
+        bool isZeroGuard = !d->getCond()->HasSideEffects(*astCtx) &&
+                           condVal.has_value() && *condVal == 0;
+        if (isZeroGuard && !sawLoopAnnot && flagName.empty() &&
+            condName.empty() && !hasTopLevelBreak(body) &&
+            !hasTopLevelContinue(body)) {
+          return trStmt(stmts, body);
+        }
       }
 
       // First-iteration flag: named by _do_while_first, else auto-generated.
@@ -3141,6 +3409,9 @@ public:
         return trStmt(stmts, cse->getSubExpr());
       }
     } else if (auto *co = dyn_cast<ConditionalOperator>(stmt)) {
+      if (auto *arm = constantCondArm(co)) {
+        return trStmt(stmts, arm);
+      }
       // `c ? a : b;` as a statement: the value is discarded, but a and b may
       // still do something, so this is an if/else -- not a no-op, and not an
       // rvalue, which is why it cannot go through trRValue.
@@ -3361,10 +3632,29 @@ public:
                         ? ir::ParamMode::Out()
                         : [&]() {
                             auto qt = param->getType().IgnoreParens();
-                            if (qt.isConstQualified())
+                            if (hasCoreRefAttr(param->getAttrs()) ||
+                                isCoreRefQualType(param->getType()))
+                              return ir::ParamMode::Regular();
+                            // A top-level `const` on a parameter passed by
+                            // value says nothing about ownership: the callee
+                            // gets its own copy, and the qualifier only
+                            // forbids reassigning the local. Reading it as a
+                            // borrow gives the parameter a permission
+                            // implicit, and for a scalar -- whose ownership
+                            // predicate is `emp` -- nothing at the call site
+                            // can ever solve it, so the call does not
+                            // elaborate. Only an indirection can be borrowed.
+                            if (qt.getCanonicalType()->isPointerType() &&
+                                qt.getCanonicalType().isConstQualified())
                               return ir::ParamMode::Const();
-                            if (auto ptr = dyn_cast<PointerType>(qt)) {
-                              if (ptr->getPointeeType().isConstQualified())
+                            // `getAs` desugars through typedefs, so a
+                            // parameter declared with a pointer-to-const
+                            // typedef (`PCFOO`) is recognized just
+                            // like one that writes `const T *` through.
+                            if (auto ptr = qt->getAs<PointerType>()) {
+                              if (ptr->getPointeeType()
+                                      .getCanonicalType()
+                                      .isConstQualified())
                                 return ir::ParamMode::Const();
                             }
                             return ir::ParamMode::Regular();
@@ -3526,6 +3816,10 @@ public:
     } else if (dyn_cast<StaticAssertDecl>(D)) {
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
+      return {};
+    } else if (dyn_cast<FileScopeAsmDecl>(D)) {
+      reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
+                        "file-scope assembly is not translated", "");
       return {};
     }
 
@@ -3765,6 +4059,9 @@ static void parse_file(RefMut<Ctx> ctx) {
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-DC2PULSE", "-fno-builtin", "-D_FORTIFY_SOURCE=0"},
       ArgumentInsertPosition::BEGIN));
+  Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+      {"-Wno-unused-but-set-variable", "-Wno-unused-variable"},
+      ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
