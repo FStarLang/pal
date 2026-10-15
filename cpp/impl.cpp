@@ -72,6 +72,109 @@ static bool hasTopLevelBreak(const Stmt *s) {
   return false;
 }
 
+// Returns true if the constant expression `e` folds to zero with no side
+// effects -- the condition of a `do { } while (0)` macro wrapper.
+static bool isSideEffectFreeZero(ASTContext &ctx, const Expr *e) {
+  if (!e || e->HasSideEffects(ctx))
+    return false;
+  Expr::EvalResult result;
+  return e->EvaluateAsInt(result, ctx) && result.Val.isInt() &&
+         result.Val.getInt() == 0;
+}
+
+// Returns true when `e` reads memory through a pointer. Such expressions are
+// side-effect-free in C, but they are not stable pure facts for PAL's do-while
+// auto-linking invariant: the user's loop invariant may rebind the pointee to
+// its current value, while a spec translation of the guard can refer back to a
+// function-entry value.
+static bool readsThroughPointer(const Expr *e) {
+  if (!e)
+    return false;
+  e = e->IgnoreParenImpCasts();
+  if (const auto *u = dyn_cast<UnaryOperator>(e)) {
+    if (u->getOpcode() == UO_Deref)
+      return true;
+    return readsThroughPointer(u->getSubExpr());
+  }
+  if (const auto *m = dyn_cast<MemberExpr>(e)) {
+    return m->isArrow() || readsThroughPointer(m->getBase());
+  }
+  if (const auto *s = dyn_cast<ArraySubscriptExpr>(e)) {
+    return readsThroughPointer(s->getBase()) ||
+           readsThroughPointer(s->getIdx());
+  }
+  if (const auto *c = dyn_cast<CallExpr>(e)) {
+    if (readsThroughPointer(c->getCallee()))
+      return true;
+    for (const Expr *arg : c->arguments())
+      if (readsThroughPointer(arg))
+        return true;
+    return false;
+  }
+  if (const auto *co = dyn_cast<ConditionalOperator>(e)) {
+    return readsThroughPointer(co->getCond()) ||
+           readsThroughPointer(co->getTrueExpr()) ||
+           readsThroughPointer(co->getFalseExpr());
+  }
+  if (const auto *bco = dyn_cast<BinaryConditionalOperator>(e)) {
+    return readsThroughPointer(bco->getCommon()) ||
+           readsThroughPointer(bco->getFalseExpr());
+  }
+  for (const Stmt *child : e->children()) {
+    if (const auto *childExpr = dyn_cast_or_null<Expr>(child)) {
+      if (readsThroughPointer(childExpr))
+        return true;
+    }
+  }
+  return false;
+}
+
+// Returns true if control cannot leave `s` by falling off its end, because `s`
+// claims it is never reached past that point. `__builtin_unreachable()` is how
+// C spells that claim, and it is what a `noreturn` abort macro expands to.
+//
+// The claim propagates the way control flow does: a block aborts if any of its
+// statements does (whatever follows an abort is dead), a `do { } while (0)`
+// wrapper aborts if its body does, and an `if` aborts if both arms do, or if
+// its condition folds to a constant selecting an arm that does -- which is the
+// shape `if (!(cond)) __builtin_unreachable();` takes once `cond` is literally
+// false.
+//
+// PAL discharges the claim rather than assuming it (see src/pass/builtins.rs),
+// so recognizing an abort here weakens nothing: it only lets a switch arm that
+// ends in one be treated as an arm that cannot fall through, which it is.
+static bool abortsControlFlow(ASTContext &ctx, const Stmt *s) {
+  if (!s)
+    return false;
+  if (const auto *call = dyn_cast<CallExpr>(s))
+    return call->getBuiltinCallee() == Builtin::BI__builtin_unreachable;
+  if (const auto *attributed = dyn_cast<AttributedStmt>(s))
+    return abortsControlFlow(ctx, attributed->getSubStmt());
+  if (const auto *label = dyn_cast<LabelStmt>(s))
+    return abortsControlFlow(ctx, label->getSubStmt());
+  if (const auto *compound = dyn_cast<CompoundStmt>(s)) {
+    for (const Stmt *child : compound->body())
+      if (abortsControlFlow(ctx, child))
+        return true;
+    return false;
+  }
+  if (const auto *d = dyn_cast<DoStmt>(s))
+    return isSideEffectFreeZero(ctx, d->getCond()) &&
+           abortsControlFlow(ctx, d->getBody());
+  if (const auto *i = dyn_cast<IfStmt>(s)) {
+    bool thenAborts = abortsControlFlow(ctx, i->getThen());
+    bool elseAborts = abortsControlFlow(ctx, i->getElse());
+    if (thenAborts && elseAborts)
+      return true;
+    Expr::EvalResult result;
+    if (i->getCond() && !i->getCond()->HasSideEffects(ctx) &&
+        i->getCond()->EvaluateAsInt(result, ctx) && result.Val.isInt())
+      return result.Val.getInt() != 0 ? thenAborts : elseAborts;
+    return false;
+  }
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -2676,12 +2779,16 @@ public:
         // the `first || cond` fact the original do-while guard would have
         // provided.
         //
-        // This is only sound when `cond` is a *pure* expression: the invariant
-        // is a `with_pure` proposition, so an impure guard (e.g. `while (f())`)
-        // cannot appear in it. When the guard has side effects we omit the
-        // linking invariant entirely (such loops must instead carry a
-        // user-written invariant relating program state to the guard's result).
-        if (!d->getCond()->HasSideEffects(*astCtx)) {
+        // This is only sound when `cond` is a stable pure expression: the
+        // invariant is a `with_pure` proposition, so an impure guard (e.g.
+        // `while (f())`) cannot appear in it. Likewise, a guard that reads
+        // through a pointer can be pure in C but unstable for PAL proofs: a
+        // user invariant may rebind the pointee to its current value, while the
+        // spec translation of the guard can refer to an entry-value binder.
+        // Such loops must instead carry a user-written invariant relating
+        // program state to the guard's result.
+        if (!d->getCond()->HasSideEffects(*astCtx) &&
+            !readsThroughPointer(d->getCond())) {
           auto firstRead = mk_rvalue_lvalue(
               loc.clone(), mk_lvalue_var(loc.clone(), firstId.clone()));
           auto contReadInv = mk_rvalue_lvalue(
@@ -2771,8 +2878,20 @@ public:
 
       // Evaluate scrutinee
       auto scrutRval = trRValue(sw->getCond());
-      auto scrutTy =
-          trQualType(sw->getCond()->getType(), sw->getCond()->getSourceRange());
+      // Clang applies the integral promotions to the switch condition. An
+      // enumeration is modeled by its underlying integer type, so that
+      // promotion translates to the identity and is elided from the rvalue.
+      // Annotating the binding with the promoted type would then leave the
+      // declared type and the translated value syntactically distinct, which
+      // the Pulse dereference tactic rejects. Use the enumeration's own type
+      // so the two agree; other promotions are genuine casts that trRValue
+      // preserves, so their promoted type remains correct.
+      auto *scrutExpr = sw->getCond();
+      auto scrutQualTy = scrutExpr->getType();
+      if (scrutExpr->IgnoreImpCasts()->getType()->isEnumeralType()) {
+        scrutQualTy = scrutExpr->IgnoreImpCasts()->getType();
+      }
+      auto scrutTy = trQualType(scrutQualTy, scrutExpr->getSourceRange());
 
       // Bind the scrutinee once as an immutable value.
       static int switchCounter = 0;
@@ -2831,34 +2950,40 @@ public:
       bool seenDefault = false;
       SwitchGroup *currentGroup = nullptr;
       for (auto *child : comp->body()) {
-        if (auto *cs = dyn_cast<CaseStmt>(child)) {
+        if (isa<CaseStmt>(child) || isa<DefaultStmt>(child)) {
           auto childLoc = getRange(child->getSourceRange());
           if (seenDefault) {
-            reportUnsupported(cs->getSourceRange(), childLoc,
+            reportUnsupported(child->getSourceRange(), childLoc,
                               "default must be the last case in switch", "");
             break;
           }
 
           groups.push_back({child, false, {}, {}});
           currentGroup = &groups.back();
-          Stmt *caseBody = child;
-          while (auto *innerCs = dyn_cast<CaseStmt>(caseBody)) {
-            currentGroup->caseValues.push_back(innerCs->getLHS());
-            caseBody = innerCs->getSubStmt();
+          // Consecutive labels nest: clang makes the second the sub-statement
+          // of the first, so `case A: case B: default:` arrives as a chain
+          // rather than as three siblings. Peel the whole chain, in either
+          // order, so a default sharing an arm with explicit cases is that
+          // arm's default rather than a statement in its body.
+          Stmt *labelBody = child;
+          for (;;) {
+            if (auto *innerCs = dyn_cast<CaseStmt>(labelBody)) {
+              currentGroup->caseValues.push_back(innerCs->getLHS());
+              labelBody = innerCs->getSubStmt();
+            } else if (auto *innerDs = dyn_cast<DefaultStmt>(labelBody)) {
+              currentGroup->isDefault = true;
+              seenDefault = true;
+              labelBody = innerDs->getSubStmt();
+            } else {
+              break;
+            }
           }
-          if (auto *ds = dyn_cast_or_null<DefaultStmt>(caseBody)) {
-            seenDefault = true;
-            currentGroup->isDefault = true;
-            caseBody = ds->getSubStmt();
-          }
-          if (caseBody)
-            currentGroup->body.push_back(caseBody);
-        } else if (auto *ds = dyn_cast<DefaultStmt>(child)) {
-          seenDefault = true;
-          groups.push_back({child, true, {}, {}});
-          currentGroup = &groups.back();
-          if (ds->getSubStmt())
-            currentGroup->body.push_back(ds->getSubStmt());
+          // The arm is reached by anything, so its explicit case values add
+          // nothing and would otherwise be emitted as a redundant test.
+          if (currentGroup->isDefault)
+            currentGroup->caseValues.clear();
+          if (labelBody)
+            currentGroup->body.push_back(labelBody);
         } else if (currentGroup) {
           currentGroup->body.push_back(child);
         } else {
@@ -2868,20 +2993,40 @@ public:
         }
       }
 
-      // A switch whose cases all end in a direct break has no fall-through.
-      // Emit it as one match and omit the terminal breaks.
+      // A switch whose cases cannot fall through is an if/else chain or a
+      // match, and saying so is what lets the prover reason about it. A case
+      // ends in a direct `break`, which the encoding drops; or it leaves the
+      // function or the switch some other way -- `return`, or a `goto` out of
+      // the switch -- in which case there is equally nothing to fall through
+      // to, and the statement stays. A dispatcher whose default arm aborts and
+      // jumps to a shared exit is the common shape of the second kind.
+      //
+      // An arm can also end in a `noreturn` abort with no jump after it, which
+      // is what the C compiler's own reachability analysis relies on. That arm
+      // does not fall through either, so recognize it the same way.
+      auto dropsTerminalBreak = [](SwitchGroup &group) {
+        return !group.body.empty() && isa<BreakStmt>(group.body.back());
+      };
+      auto groupBodySize = [&](SwitchGroup &group) {
+        return dropsTerminalBreak(group) ? group.body.size() - 1
+                                         : group.body.size();
+      };
       bool hasOnlyTerminalBreaks = !groups.empty();
       std::vector<SwitchGroup *> cases;
       SwitchGroup *defaultGroup = nullptr;
       for (auto &group : groups) {
-        bool hasTerminalBreak =
-            !group.body.empty() && isa<BreakStmt>(group.body.back());
-        if (!hasTerminalBreak) {
+        bool cannotFallThrough =
+            !group.body.empty() &&
+            (isa<BreakStmt>(group.body.back()) ||
+             isa<ReturnStmt>(group.body.back()) ||
+             isa<GotoStmt>(group.body.back()) ||
+             abortsControlFlow(*astCtx, group.body.back()));
+        if (!cannotFallThrough) {
           hasOnlyTerminalBreaks = false;
           break;
         }
 
-        size_t bodySize = group.body.size() - 1;
+        size_t bodySize = groupBodySize(group);
         if (group.isDefault) {
           defaultGroup = &group;
         } else {
@@ -2900,7 +3045,7 @@ public:
       if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
         auto makeBody = [&](SwitchGroup &group) {
           auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
+          size_t bodySize = groupBodySize(group);
           for (size_t i = 0; i < bodySize; i++)
             trStmt(bodyStmts, group.body[i]);
           return bodyStmts;
@@ -2952,6 +3097,53 @@ public:
                               std::move(matchEnss)));
           return {};
         }
+      }
+
+      // A switch with no fall-through is an if/else chain, and saying so is
+      // better than encoding it: the hit and break flags turn every case test
+      // into a compound condition over mutable state, which leaves the prover
+      // unable to reduce a state-dependent join at the *next* test. Nested
+      // if/else tests the scrutinee directly, so each branch condition is the
+      // one the join is phrased in. Reserved for the unannotated case; an
+      // explicit switch postcondition still takes the match form above.
+      if (hasOnlyTerminalBreaks && !cases.empty() && switchEnss.empty() &&
+          defaultGroup) {
+        auto makeChainBody = [&](SwitchGroup &group) {
+          auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+          size_t bodySize = groupBodySize(group);
+          for (size_t i = 0; i < bodySize; i++)
+            trStmt(bodyStmts, group.body[i]);
+          return bodyStmts;
+        };
+
+        auto chain = makeChainBody(*defaultGroup);
+        size_t remaining = cases.size();
+        for (auto it = cases.rbegin(); it != cases.rend(); ++it) {
+          auto *group = *it;
+          auto childLoc = getRange(group->label->getSourceRange());
+          Rc<ir::Expr> cond = mk_rvalue_binop(
+              childLoc.clone(), ir::BinOp::Eq(),
+              mk_lvalue_var(childLoc.clone(), scrutId.clone()),
+              trRValue(group->caseValues.front()->IgnoreParenImpCasts()));
+          for (size_t i = 1; i < group->caseValues.size(); i++) {
+            auto eq = mk_rvalue_binop(
+                childLoc.clone(), ir::BinOp::Eq(),
+                mk_lvalue_var(childLoc.clone(), scrutId.clone()),
+                trRValue(group->caseValues[i]->IgnoreParenImpCasts()));
+            cond = mk_rvalue_binop(childLoc.clone(), ir::BinOp::LogOr(),
+                                   std::move(cond), std::move(eq));
+          }
+          auto ifStmt =
+              mk_if(childLoc.clone(), std::move(cond), makeChainBody(*group),
+                    std::move(chain), Vec<Rc<ir::Expr>>::new_());
+          if (--remaining == 0) {
+            stmts.push(std::move(ifStmt));
+          } else {
+            chain = Vec<Rc<ir::Stmt>>::new_();
+            chain.push(std::move(ifStmt));
+          }
+        }
+        return {};
       }
 
       // General switches retain explicit hit and break state to model

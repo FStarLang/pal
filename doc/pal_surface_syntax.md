@@ -122,7 +122,18 @@ while (...)
 
 A loop with two `break` sites would carry two `_ensures` clauses, one for each.
 
-For `do { ... } while (cond)`, PAL desugars to `while (first || cond)` with a fresh boolean flag. Use `_do_while_first(name)` to name that flag explicitly when the invariant needs to refer to it (see `test/do_while/do_while.c`).
+For `do { ... } while (cond)`, PAL desugars through fresh boolean flags. Use
+`_do_while_first(name)` to name the first-iteration flag explicitly when the
+invariant needs to refer to it, and `_do_while_cond(name)` to name the
+continuation flag used by the clean desugaring (see
+`test/do_while/do_while.c`).
+
+When the guard is a stable pure expression over local scalars, PAL adds an
+internal linking invariant relating the continuation flag to `first || cond`.
+PAL omits that automatic invariant for guards with side effects and for guards
+that read through pointers, such as `p->x < p->y`. In those cases, name the
+continuation flag with `_do_while_cond(name)` and state the needed relationship
+yourself, for example `_invariant(cont == (p->x < p->y))`.
 
 ### Refinements for data types
 

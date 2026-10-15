@@ -223,3 +223,23 @@ uint32_t dowhile0_with_continue(uint32_t n)
 	}
 	return iters;
 }
+
+struct bounds {
+    uint32_t x;
+    uint32_t y;
+};
+
+void pointer_guard_loop(struct bounds *p)
+    _requires(p->x < p->y && p->y <= 10u)
+    _ensures(p->x == p->y)
+{
+    do
+        _do_while_first(first)
+        _do_while_cond(cont)
+        _invariant(_live(*p) && _live(first) && _live(cont))
+        _invariant(p->x <= p->y && p->y == _old(p->y))
+        _invariant(cont == (p->x < p->y))
+    {
+        p->x = p->x + 1u;
+    } while (p->x < p->y);
+}
