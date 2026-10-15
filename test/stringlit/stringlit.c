@@ -22,8 +22,8 @@ _plain const char *get_name() {
     return "hello";
 }
 
-/* A local array with an initializer writes its contents into the array just
-   allocated, via array_multiple_writes. */
+/* A local array with a constant initializer is emitted as one Palow array-fill
+   call whose post-state is the constant sequence. */
 void init_from_string(void) {
     char buf[] = "lo";
     write(buf, 3);

@@ -12,8 +12,3 @@ int32_t checked_add(int32_t a, int32_t b)
     assert(result >= 0);
     return result;
 }
-
-void check_nonnull(const int *x) {
-    _ghost_stmt(pts_to_not_null $(x));
-    assert(x);
-}

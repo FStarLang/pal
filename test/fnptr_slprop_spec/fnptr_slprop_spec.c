@@ -12,13 +12,23 @@ struct ops {
 	int32_t (*h)(_plain int32_t *q, int32_t n);
 };
 
+/* "A `_plain int32_t *` that holds zero", named once. An F* module whose
+   body is an `include` re-exports every name in it, so the shim also brings
+   the function-pointer library into scope. */
+_include_pulse(Sl_shim,
+  include Pulse.Lib.C.Palow.FnPtr
+
+  unfold let q_zero (q: Pulse.Lib.C.Palow.Ptr.ptr) : slprop =
+    Pulse.Lib.C.Palow.CTypes.int32_t_pts_to q 1.0R 0l
+)
+
 /* An slprop in `_requires` and in `_ensures`. */
-_requires(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
-_ensures(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
+_requires(_inline_pulse(Sl_shim.q_zero $(q)))
+_ensures(_inline_pulse(Sl_shim.q_zero $(q)))
 int32_t impl_pre(_plain int32_t *q) { return 0; }
 
 /* The same, written as one `_preserves`. */
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
+_preserves(_inline_pulse(Sl_shim.q_zero $(q)))
 int32_t impl_both(_plain int32_t *q) { return 0; }
 
 /* Boolean and slprop annotations on the same function, on both sides of the
@@ -28,32 +38,28 @@ int32_t impl_both(_plain int32_t *q) { return 0; }
    boolean halves can take part in. */
 _requires(n > 0 && n < 100)
 _ensures(return == n)
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
+_preserves(_inline_pulse(Sl_shim.q_zero $(q)))
 int32_t impl_mixed(_plain int32_t *q, int32_t n) { return n; }
 
 static const struct ops o = { .f = impl_pre, .g = impl_both, .h = impl_mixed };
 
 /* Calls through the pointers, so the wrappers are instantiated. */
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
+_preserves(_inline_pulse(Sl_shim.q_zero $(q)))
 int32_t call_via_o(_plain int32_t *q)
 {
-	_ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_both.func_impl_both__fp);
-	_ghost_stmt(Global_o.acquire_var_o ());
+	_ghost_stmt(Sl_shim.of_fn_div_valid _ _ Funcptr_impl_both.func_impl_both__fp);
 	const struct ops *p = &o;
 	return p->g(q);
-	_ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-	_ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+	_ghost_stmt(Sl_shim.drop_is_valid _ _ _);
 }
 
 _requires(n > 0 && n < 100)
 _ensures(return == n)
-_preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(q) #1.0R 0l))
+_preserves(_inline_pulse(Sl_shim.q_zero $(q)))
 int32_t call_via_o_mixed(_plain int32_t *q, int32_t n)
 {
-	_ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
-	_ghost_stmt(Global_o.acquire_var_o ());
+	_ghost_stmt(Sl_shim.of_fn_div_valid _ _ Funcptr_impl_mixed.func_impl_mixed__fp);
 	const struct ops *p = &o;
 	return p->h(q, n);
-	_ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-	_ghost_stmt(drop_ (exists* fr. pts_to Global_o.addr_var_o #fr _));
+	_ghost_stmt(Sl_shim.drop_is_valid _ _ _);
 }

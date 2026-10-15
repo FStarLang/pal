@@ -5,7 +5,8 @@ use std::{
 };
 
 use crate::{
-    diag::{Diagnostic, Diagnostics},
+    diag::{Diagnostic, DiagnosticLevel, Diagnostics},
+    ir::Location,
     vfs::{OverlayFS, RealFS, VFS},
 };
 use clap::Parser;
@@ -15,6 +16,7 @@ mod diag;
 mod env;
 mod hauntedc;
 mod ir;
+mod layout;
 mod mayberc;
 mod pass;
 mod prims;
@@ -45,6 +47,12 @@ struct Cli {
         help = "Show timing information for each compiler pass"
     )]
     time_passes: bool,
+
+    #[arg(
+        long = "palow-permissive",
+        help = "Report Palow's untranslated constructs as comments only, not as errors"
+    )]
+    palow_permissive: bool,
 
     #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
     quiet: bool,
@@ -166,8 +174,16 @@ fn main() {
     let mut combined_tu = ir::TranslationUnit {
         main_file_names: Vec::new(),
         decls: Vec::new(),
+        layouts: ir::LayoutTable::new(),
+        pointer_size: 8,
     };
     let mut diags = Diagnostics::empty();
+
+    // The source's own `-D` flags, plus `PALOW`. There used to be a second
+    // memory model, and sources written for both still test `PALOW` to pick
+    // the hand-written Pulse that belongs to this one.
+    let mut defines: Vec<String> = cli.defines.clone();
+    defines.push("PALOW".to_string());
 
     let parse_start = Instant::now();
     for file in &cli.files {
@@ -182,11 +198,13 @@ fn main() {
         }
 
         let (tu, file_diags) =
-            clang::parse_file(&file_name, &cli.include_paths, &cli.defines, &mut *vfs);
+            clang::parse_file(&file_name, &cli.include_paths, &defines, &mut *vfs);
         combined_tu
             .main_file_names
             .push(tu.main_file_names[0].clone());
         combined_tu.decls.extend(tu.decls);
+        combined_tu.layouts.extend(tu.layouts);
+        combined_tu.pointer_size = tu.pointer_size;
         diags.merge(file_diags);
     }
     if cli.time_passes {
@@ -281,9 +299,8 @@ fn main() {
         return;
     }
 
-    // Emit per-declaration modules
     let t = Instant::now();
-    let modules = pass::emit::emit_multifile(&mut diags, &combined_tu);
+    let modules = pass::emit_palow::emit_palow(&combined_tu);
     if cli.time_passes {
         eprintln!(
             "  emit ({} modules): {:.3}s",
@@ -291,27 +308,60 @@ fn main() {
             t.elapsed().as_secs_f64()
         );
     }
-
+    // A gap the generated file owns up to is still a gap. While the
+    // translation was being built, saying so in a comment was the point:
+    // the comment is what made the coverage measurable, and turning a
+    // missing feature into a hard failure would have stopped the whole
+    // suite on the first one. There is nothing left to measure, so the
+    // comment becomes an error -- a specification that is quietly weaker
+    // than the one the user wrote is the failure mode this model exists to
+    // rule out, and it should not be possible to get one by accident.
+    // `--palow-permissive` is for a measurement run, which wants the
+    // comments and the count back.
+    if !cli.palow_permissive {
+        for module in &modules {
+            for why in pass::emit_palow::weakenings(module) {
+                let loc = match &module.origin {
+                    Some(o) => Location {
+                        file_name: o.file.clone(),
+                        range: o.range,
+                    },
+                    None => {
+                        let z = crate::ir::Position {
+                            line: 1,
+                            character: 1,
+                        };
+                        Location {
+                            file_name: cli.files.first().cloned().unwrap_or_default().into(),
+                            range: crate::ir::Range { start: z, end: z },
+                        }
+                    }
+                };
+                diags.report(Diagnostic {
+                    loc,
+                    level: DiagnosticLevel::Error,
+                    msg: format!("`{}`: {}", module.module_name, why),
+                });
+            }
+        }
+    }
     if let Some(outdir) = &cli.outdir {
         let outdir = Path::new(&outdir).to_path_buf();
         std::fs::create_dir_all(&outdir).unwrap();
-
-        // Track which .fst/.fsti files we generate this run
         let mut generated_files: HashSet<PathBuf> = HashSet::new();
-
         for module in &modules {
-            let fst_path = outdir.join(format!("{}.fst", module.module_name));
-            write_if_changed(&fst_path, module.code.as_bytes());
-            generated_files.insert(fst_path);
-            if let Some(fsti_code) = &module.fsti_code {
-                let fsti_path = outdir.join(format!("{}.fsti", module.module_name));
-                write_if_changed(&fsti_path, fsti_code.as_bytes());
-                generated_files.insert(fsti_path);
+            let path = outdir.join(format!("{}.fst", module.module_name));
+            write_if_changed(&path, module.code.as_bytes());
+            generated_files.insert(path);
+            if let Some(iface) = &module.iface {
+                let path = outdir.join(format!("{}.fsti", module.module_name));
+                write_if_changed(&path, iface.as_bytes());
+                generated_files.insert(path);
             }
         }
-
-        // Write TranslationErrors.fst — asserts False when there are errors so
-        // that F* reports a failure, but individual modules remain verifiable.
+        // An IDE pointed at the output directory expects to find these
+        // files, and `TranslationErrors` is what makes a translation
+        // failure a *verification* failure rather than a silent gap.
         let errors_path = outdir.join("TranslationErrors.fst");
         write_if_changed(
             &errors_path,
@@ -325,18 +375,15 @@ fn main() {
             .as_bytes(),
         );
         generated_files.insert(errors_path);
-
-        // Write single unified source_range_info.json
         std::fs::write(
             outdir.join("source_range_info.json"),
             source_range_info::serialize(&modules),
         )
         .unwrap();
-
-        // Write diagnostics
         std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
-
-        // Remove stale .fst/.fsti files from previous runs
+        // A module that is no longer generated has to go, or the next
+        // verification run picks up a stale one and succeeds on code that
+        // no longer exists.
         if let Ok(entries) = std::fs::read_dir(&outdir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -348,13 +395,11 @@ fn main() {
             }
         }
     } else {
-        eprintln!("Not saving generated Pulse output, specify --outdir to create files");
+        for module in &modules {
+            println!("{}", module.code);
+        }
     }
-
     if !cli.quiet {
         diags.print_to_stderr(&mut *vfs);
-    }
-    if diags.has_errors() {
-        std::process::exit(0)
     }
 }

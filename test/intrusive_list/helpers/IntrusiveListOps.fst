@@ -8,7 +8,7 @@ open Pulse.Lib.C
 open FStar.List.Tot
 #lang-pulse
 
-module R = Pulse.Lib.Reference
+module R = IntrusiveListNodeRef
 module N = Struct_list_node
 module X = IntrusiveListIndexed
 module T = Pulse.Lib.Trade
@@ -741,6 +741,7 @@ fn move_close (#a: Type0) (p: X.ipayload a) (source destination first last tail:
   chain_join p destination (X.lnext dv) first destination dst src;
   last_suffix destination dst src;
   ring_close p destination (dst @ src);
+  R.forget source;
 }
 
 ghost
@@ -763,11 +764,15 @@ fn indexed_normalize (#a: Type0) (p: X.ipayload a) (head: X.lref)
 }
 
 ghost
+(* Palow's scope exit frees a local as *storage*, so the last thing a list's
+   head does is give up its value: the current model's local can be freed
+   holding one. *)
 fn indexed_release_empty (#a: Type0) (p: X.ipayload a) (head: X.lref)
   requires X.is_list_ring_ix p head 1.0R []
-  ensures exists* (v: N.struct_list_node). R.pts_to head v
+  ensures R.pts_to_uninit head
 {
   X.ring_elim_empty p head;
+  R.forget head;
 }
 
 ghost

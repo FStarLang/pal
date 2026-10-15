@@ -13,8 +13,6 @@ int32_t post_incr(_array int32_t *a)
   _arrayptr int32_t *p = a;
   _arrayptr int32_t *q = p++;
   int32_t result = (q < p) ? 1 : 0;
-  _ghost_stmt(arrayptr_drop $(p));
-  _ghost_stmt(arrayptr_drop $(q));
   return result;
 }
 
@@ -26,8 +24,6 @@ int32_t pre_incr(_array int32_t *a)
   _arrayptr int32_t *p = a;
   _arrayptr int32_t *q = ++p;
   int32_t result = (q == p) ? 1 : 0;
-  _ghost_stmt(arrayptr_drop $(p));
-  _ghost_stmt(arrayptr_drop $(q));
   return result;
 }
 
@@ -39,8 +35,6 @@ int32_t post_decr(_array int32_t *a)
   _arrayptr int32_t *p = a + 1;
   _arrayptr int32_t *q = p--;
   int32_t result = (p < q) ? 1 : 0;
-  _ghost_stmt(arrayptr_drop $(p));
-  _ghost_stmt(arrayptr_drop $(q));
   return result;
 }
 
@@ -52,7 +46,5 @@ int32_t pre_decr(_array int32_t *a)
   _arrayptr int32_t *p = a + 1;
   _arrayptr int32_t *q = --p;
   int32_t result = (q == p) ? 1 : 0;
-  _ghost_stmt(arrayptr_drop $(p));
-  _ghost_stmt(arrayptr_drop $(q));
   return result;
 }

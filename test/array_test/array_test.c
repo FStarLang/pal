@@ -55,10 +55,18 @@ typedef struct {
   _array int *x, *y;
 } two_arrays;
 void test_two_arrays() {
-  two_arrays p = {
-    .x = (int *)calloc(3, sizeof(int)),
-    .y = (int *)malloc(4 * sizeof(int))
-  };
+  // Allocated one at a time, and checked. An allocation that fails returns
+  // null, so a struct built out of two of them in one initialiser has no
+  // place to put the check -- and the second failure has to undo the first.
+  _array int *x = (int *)calloc(3, sizeof(int));
+  if (x == NULL)
+    return;
+  _array int *y = (int *)malloc(4 * sizeof(int));
+  if (y == NULL) {
+    free(x);
+    return;
+  }
+  two_arrays p = { .x = x, .y = y };
   p.x[2] = 3;
   free(p.x);
   free(p.y);

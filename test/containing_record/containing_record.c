@@ -37,18 +37,21 @@ struct outer {
 };
 
 // offsetof write: recover `outer` from `&outer->node` and set `outer->value`.
+// Palow's `_container_of` is a subtraction on an address, so the enclosing
+// structure is owned at the recovered pointer with the structure's own
+// points-to and there is nothing else to say: no separate predicate for the
+// fields, and no round-trip lemma, because the projection back down is the
+// matching addition.
 void set_value_via_node(_plain struct inner *node, int32_t v)
     _requires(_inline_pulse(
       exists* (ov: $type(struct outer)).
-        pts_to $(_container_of(node, struct outer, node)) #1.0R ov **
-        Struct_outer.struct_outer__pred
-          (!$(_container_of(node, struct outer, node))) 1.0R))
+        Struct_outer.struct_outer_pts_to
+          $(_container_of(node, struct outer, node)) 1.0R ov))
     _ensures(_inline_pulse(
       exists* (ov: $type(struct outer)).
-        pts_to $(_container_of(node, struct outer, node)) #1.0R ov **
-        Struct_outer.struct_outer__pred
-          (!$(_container_of(node, struct outer, node))) 1.0R **
-        pure (ov.Struct_outer.struct_outer__value == $(v))))
+        Struct_outer.struct_outer_pts_to
+          $(_container_of(node, struct outer, node)) 1.0R ov **
+        pure (ov.Struct_outer.fld_value == $(v))))
 {
     struct outer *parent = _container_of(node, struct outer, node);
     parent->value = v;
@@ -57,16 +60,19 @@ void set_value_via_node(_plain struct inner *node, int32_t v)
 // offsetof read: recover `outer` from `&outer->node` and read `outer->value`.
 // Ownership is unchanged across the call, so the shared predicate is stated once
 // with `_preserves`; only the functional result is `_ensures`-only.
+// The result is related to the value that comes back rather than to a getter
+// applied to the pointer, which is what a model with no getters has to do --
+// and is a stronger statement, since it also says the field was not changed.
 int32_t read_value_via_node(_plain struct inner *node)
-    _preserves(_inline_pulse(
+    _requires(_inline_pulse(
       exists* (ov: $type(struct outer)).
-        pts_to $(_container_of(node, struct outer, node)) #1.0R ov **
-        Struct_outer.struct_outer__pred
-          (!$(_container_of(node, struct outer, node))) 1.0R))
+        Struct_outer.struct_outer_pts_to
+          $(_container_of(node, struct outer, node)) 1.0R ov))
     _ensures(_inline_pulse(
-      pure ($(return) ==
-        !(Struct_outer.struct_outer__get_value
-            $(_container_of(node, struct outer, node))))))
+      exists* (ov: $type(struct outer)).
+        Struct_outer.struct_outer_pts_to
+          $(_container_of(node, struct outer, node)) 1.0R ov **
+        pure ($(return) == ov.Struct_outer.fld_value)))
 {
     struct outer *parent = _container_of(node, struct outer, node);
     return parent->value;

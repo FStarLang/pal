@@ -16,6 +16,12 @@ cargo build
 # Run all tests (builds first, then verifies generated .fst files with F*)
 make test -j8
 
+# One test
+make -C test/swap
+
+# Palow coverage census (counts untranslated constructs instead of failing)
+make palow-check
+
 # Run a single test by translating a C file directly
 cargo run -- test/swap.c          # produces Swap.fst, Swap_diagnostics.json, Swap_source_range_info.json
 cargo run -- --print-ir test/swap.c  # print the IR without emitting files
@@ -26,6 +32,8 @@ clang-format -i cpp/impl.cpp
 ```
 
 The test suite (`test/Makefile`) runs `pal` on each `.c` file in `test/`, then verifies the generated `.fst` files using F*/Pulse.
+
+`pal` emits code against the **Palow** memory model (`src/pass/emit_palow.rs`, see `palow.md`). Anything Palow cannot translate is a hard error -- `--palow-permissive` downgrades those to comments for a coverage run.
 
 ALWAYS RUN `make test -j8` TO MAKE SURE THE TESTS SUCCEED!!!
 
@@ -43,7 +51,7 @@ The main pipeline (`src/main.rs`) processes each C file through sequential passe
 2. **Check** (`src/pass/check.rs`) — IR well-formedness validation, run after each transformation pass.
 3. **Prune** (`src/pass/prune.rs`) — Removes declarations not from the main file.
 4. **Elab** (`src/pass/elab.rs`) — Type elaboration and checking.
-5. **Emit** (`src/pass/emit.rs`) — Generates Pulse `.fst` code from the IR.
+5. **Emit** (`src/pass/emit_palow.rs`) — Generates Pulse `.fst` code against the Palow memory model.
 
 ### IR (`src/ir/`)
 

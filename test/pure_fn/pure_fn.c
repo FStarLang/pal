@@ -49,10 +49,3 @@ void test() {
     bool pure_not_result = pure_not(true);
     _assert(pure_not_result == false);
 }
-
-_pure int pure_ghost_stmt()
-  _ensures(1 == 0)
-{
-  _ghost_stmt(assume False);
-  return 1;
-}

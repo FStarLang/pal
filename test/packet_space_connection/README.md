@@ -137,3 +137,31 @@ The precise postcondition states the two packet-space scalar values and the two
 connection scalar values, while `connection_owner` re-establishes ownership of
 the connection and all array slots.
 
+
+## The Palow port
+
+The example is real MsQuic-derived code. `helpers/` holds
+`Helpers_PACKET_SPACE_CONNECTION` written against Palow. Nothing in the C
+names a model predicate, so nothing in the C had to change for the helpers.
+
+Two encodings disappear in the port:
+
+* **`_core_ref` is not needed.** In the previous model a struct field holding a
+  back-pointer cannot be a `ref`, because a `ref` is not a value; the field is a
+  `core_ref` and `core_to_ref` converts it wherever ownership is stated. Under
+  Palow a pointer field just holds a `ptr`, so `struct_connection_pts_to
+  (conn_of ps_v)` is directly sayable and the conversions go away.
+
+* **`array_spec` is not needed.** The previous model described the fixed
+  `packets` array through a length/mask/`option` layer, so a slot is an
+  `option` and installing one needs `array_spec_upd_set_eq`. Under Palow the
+  field is a `Seq.seq ptr` refined to its length: a slot is `Seq.index`, an
+  install is `Seq.upd`, and the only lemma left is `Seq.lemma_index_upd2`.
+
+The helper shrinks from 377 lines to about 300 as a result.
+
+`PacketSpace` arrives as raw storage, so `PalPacketSpaceInitialize` takes it
+as an `_out` parameter, whose precondition *is* the uninitialised points-to and
+whose body scatters the four field writes into the storage and gathers it
+back. The previous model had no such mode, because a `ref t` always holds a
+`t`.

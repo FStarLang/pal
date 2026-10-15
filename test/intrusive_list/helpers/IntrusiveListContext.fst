@@ -10,7 +10,7 @@ open FStar.List.Tot
 #lang-pulse
 
 module X = IntrusiveListIndexed
-module R = Pulse.Lib.Reference
+module R = IntrusiveListNodeRef
 
 (* Dependent proof parameters travel together across the C annotation boundary. *)
 noeq type context = {

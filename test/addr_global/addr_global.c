@@ -18,10 +18,8 @@ _pure uint32_t g_const = 42;
 uint32_t read_via_addr_of_global(void)
     _ensures(return == 42)
 {
-    _ghost_stmt(Global_g_const.acquire_var_g_const ());
     const uint32_t *p = &g_const;
     return *p;
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_const.addr_var_g_const #q _));
 }
 
 /* A global's address is never NULL, via the emitted `addr_var_g_not_null`
@@ -29,10 +27,8 @@ uint32_t read_via_addr_of_global(void)
 bool addr_of_global_is_not_null(void)
     _ensures(return == true)
 {
-    _ghost_stmt(Global_g_const.acquire_var_g_const ());
     const uint32_t *p = &g_const;
     return p != NULL;
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_const.addr_var_g_const #q _));
 }
 
 /* A `const` global with an initializer is implicitly `_pure`. */
@@ -40,10 +36,8 @@ const uint32_t g_implicit = 7;
 uint32_t read_via_addr_of_const_global(void)
     _ensures(return == 7)
 {
-    _ghost_stmt(Global_g_implicit.acquire_var_g_implicit ());
     const uint32_t *p = &g_implicit;
     return *p;
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_implicit.addr_var_g_implicit #q _));
 }
 
 int32_t add(int32_t a, int32_t b)
@@ -64,11 +58,20 @@ _pure ops g_ops = { .op = add };
 int32_t call_via_addr_of_global_struct(void)
     _ensures(return == 5)
 {
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.of_fn_div_valid _ _ Funcptr_add.func_add__fp);
-    _ghost_stmt(Global_g_ops.acquire_var_g_ops ());
     const ops *p = &g_ops;
     return p->op(2, 3);
-    _ghost_stmt(Pulse.Lib.C.FuncPtr.drop_is_valid _ _ _);
-    _ghost_stmt(drop_ (exists* q. pts_to Global_g_ops.addr_var_g_ops #q _));
 }
 
+/* Storing `&g` is no write to `g`. An immutable global is never owned, so a
+ * function that installs its address in a dispatch slot -- what every kernel
+ * driver does with a `const struct net_device_ops` -- needs no permission on
+ * it, and the functions above that `acquire` it are not made to own it either. */
+typedef struct {
+    const ops *_plain o; /* a dispatch slot owns nothing */
+} holder;
+
+void install_ops(holder *h)
+    _ensures(h->o == &g_ops)
+{
+    h->o = &g_ops;
+}
