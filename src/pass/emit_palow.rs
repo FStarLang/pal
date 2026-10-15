@@ -8314,7 +8314,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
          \x20 returns  y : {sn}\n\
          \x20 ensures  pure (y == reveal x)\n\
          \x20 ensures  rewrites_to y (reveal x)\n\
-         {{\n{read}  {{ {fields} }}\n}}\n\n",
+         {{\n{read}  ({{ {fields} }} <: {sn})\n}}\n\n",
             sn = sn,
             read = read,
             fields = record_fields(
