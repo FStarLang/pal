@@ -85,9 +85,9 @@ ghost fn pts_to_perm_bound (#p: perm) (r: ptr) (#v: N.struct_list_node)
 {
   N.struct_list_node_focus_next r;
   ptr_reveal (r +! N.struct_list_node_offsetof_next);
-  with b. assert (mem_pts_to (r +! N.struct_list_node_offsetof_next) p b);
-  mem_pts_to_perm_bound (r +! N.struct_list_node_offsetof_next);
-  ptr_conceal (r +! N.struct_list_node_offsetof_next) #p #b #(v.N.fld_next);
+  with b e. assert (mem_pts_to_at (r +! N.struct_list_node_offsetof_next) p b e);
+  mem_pts_to_at_perm_bound (r +! N.struct_list_node_offsetof_next);
+  ptr_conceal (r +! N.struct_list_node_offsetof_next) #p #b #e #(v.N.fld_next);
   N.struct_list_node_unfocus_read_next r;
 }
 

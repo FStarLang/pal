@@ -638,7 +638,8 @@ Access rules:
   the effective type.
 - **`memcpy` and character-wise copies** transport the entries along with the
   bytes, matching the C rule that a byte-copied object inherits the source's
-  effective type.
+  effective type — except into a `fixed` byte, which keeps its own, since
+  6.5p6's third rule applies only to an object with no declared type.
 - Declared objects (`fixed = true`) get their entries at allocation and keep
   them for their lifetime.
 
@@ -649,7 +650,9 @@ the access rules, and proves the facts that decide whether they are usable:
 reading a `uint32_t` out of a `union U` object is allowed at *both* member
 offsets (so acceptance test 2 survives), a struct member is readable at its
 own offset, a struct is *not* compatible with a union of the same shape, an
-array is readable element by element, and reading a pointer out of storage
+array is readable element by element, an `int` object is readable through
+`unsigned int *` (6.5p7's signed/unsigned counterpart rule), and reading a
+pointer out of storage
 whose last store was an integer is not allowed.
 
 *Stage 2 -- the descriptors.* A descriptor has to be something the emitter can
@@ -678,7 +681,105 @@ part of the type, and the storage past the last real member is typed by
 whatever is stored into it. Emitting the descriptors changed no proof and cost
 nothing measurable: the census is unchanged at 1104/1082/0/22/0.
 
+*Stage 2b -- the rules, completed against a corpus.* `test/effective_type`
+collects 61 cases of 6.5p6/p7, each tagged `[DEFINED]`, `[UB]` or `[UNSPEC]`
+and cited to the standard. Transcribing the nineteen of them that bear on
+6.5p6/p7 into theorems found three gaps in stage 1, all now closed:
+
+- **The signed/unsigned counterpart rule (6.5p7 bullet 3) was missing.**
+  `access_ok` allowed a type to access only *itself* at offset zero, so
+  reading an `int` through `unsigned int *` — which the standard explicitly
+  permits, and which case 1.2 exercises — was rejected. `counterpart` and the
+  extra disjunct fix it; `access_ok_trans` needed one more early case and was
+  otherwise unchanged.
+
+- **There was a relabelling function but no store rule.** `store_etypes` says
+  how a store *moves* the index; it does not say whether the store is
+  *allowed*, and storing at an incompatible type into a declared object is
+  undefined behaviour rather than a no-op (cases 13.2, 14.2). `store_ok` is
+  that side condition, and `store_ok_read_ok` — a permitted store leaves the
+  bytes readable at the type stored — is the load-bearing theorem for
+  enforcement: without it a generated `T_write` cannot re-establish its own
+  points-to. The old `store_none_read_ok` is its all-`None` special case.
+
+- **`memcpy` as plain index transport is unsound.** R3 applies only to an
+  object with no declared type, so copying a `double` over a declared `int`
+  must not relabel it (case 14.1). `copy_etypes` keeps a `fixed` destination
+  entry and takes the source's otherwise — and strips `fixed` from what it
+  copies, since R3 gives the destination the source's effective *type* and not
+  a declared one. Without the strip, `memcpy`ing a declared object into
+  `malloc`ed storage would make that storage permanently un-re-typeable and
+  case 5.3 followed by case 4.2 would stop being legal.
+
+One case is accepted that C calls undefined, and is recorded as a positive
+theorem (`case_17_2_partial_memcpy_leaves_a_hybrid_is_accepted`) so that it
+cannot be mistaken for enforcement. Copying half of one `double` over half of
+another leaves a chimera; an entry records a type and an offset within an
+object but no object *identity*, so the two halves are indistinguishable from
+one whole. Detecting it would mean a ghost identity threaded through every
+split and join, for a case no alias analysis exploits — the bytes do agree with
+their claimed type. Cases 18.1 and 19 are likewise not this module's business:
+what makes them undefined is an indeterminate value, which `uninit` already
+blocks because no `_repr` relates a value to a range containing an
+uninitialized byte.
+
+Sections 19-22 of the corpus — `volatile`, `_Atomic`, `restrict`, object
+lifetime, and modifying a `const` object or a string literal — are not
+6.5p6/p7 and are deliberately out of this module's scope. Separation already
+gives what `restrict` promises, and the literal machinery already gives
+22.1/22.2.
+
 *Stage 3 -- enforcement* is not done. See below.
+
+#### Testing a rule that is not enforced yet
+
+`test/_effective_type` cannot be run as a test suite: almost none of its
+defined-behaviour cases translate, and almost all of its undefined ones are
+already rejected -- but by the ownership and alias analysis, not by 6.5p7.
+`*(float *)&i` fails because the contract does not grant the dereferenced
+target, and would fail for that reason if effective types did not exist. A
+`should-fail` pinned on that message would pass without testing anything, and
+would keep passing if the rule were deleted.
+
+Four tests state the obligation where enforcement will actually sit -- on
+layer 0's `mem_pts_to_at` -- using `_include_pulse` to write the ghost step
+that a typed read or write will become. They go under the translator's
+analysis rather than through it, so the only thing that can reject them is the
+rule:
+
+| test | obligation | outcome |
+| --- | --- | --- |
+| `test/etype_access_ok` | `read_ok`, four defined cases | verifies |
+| `test/etype_pun_bad` | `read_ok (etypes_of ct_i32 true) ct_f32` | `should-fail` |
+| `test/etype_store_bad` | `store_ok (etypes_of ct_i32 true) ct_f32` | `should-fail` |
+| `test/etype_memcpy_bad` | `read_ok (copy_etypes …) ct_f32` | `should-fail` |
+| `test/etype_char_store` | `store_etypes … tchar` is the identity | verifies |
+
+The positive one is not optional. A negative test alone would pass just as
+well if `read_ok` were unprovable for *every* type, which is what a
+too-strong rule looks like, so `etype_access_ok` discharges the *same*
+obligation through the *same* ghost function on the *same* index: reading a
+declared `int32_t` at `uint32_t` succeeds where reading it at `float`
+fails. That is the discrimination being tested, and neither half shows it
+alone.
+
+Two traps are worth recording, because both produced a test that passed while
+testing nothing.
+
+- **Widths have to match.** `read_ok` and `store_ok` both require the index to
+  cover exactly `csize u` bytes, so punning a 4-byte `int32_t` as an 8-byte
+  `double` fails on the width and proves nothing about effective types. The
+  negative tests all pun between `int32_t` and `float`, which are the same
+  width, leaving the type rule as the only thing that can reject them.
+- **One failing obligation per directory.** F* stops at the first error, so a
+  second failing ghost function in the same module is shadowed and is never
+  tested -- which is why the read, store and memcpy rules have a directory
+  each rather than sharing one.
+
+The tests also pay for themselves beyond what the theorems in `Etype` cover:
+`store_etypes`'s refinement has to be carried in the binder of any ghost step
+that wraps it, which no pure lemma exposes and which the store test found
+immediately.
 
 Layer 0 carries the index on the *primitive* points-to, `mem_pts_to_at`, and
 ties the index-free one to it by an slprop equality:
@@ -722,17 +823,38 @@ keeps the matcher exactly as it was: the whole suite is unchanged.
 only because layer 0 has no implementation module to derive them in.
 
 In this first cut the index is still not *enforced*: no layer-1 predicate
-constrains it, so no existing proof changes.
+constrains it, so no existing proof changes. It is worth being precise about
+what that leaves open, because it sets the shape of the work. Every typed
+predicate is *defined* as an existential over bytes, and `mem_pts_to` is
+itself an existential over the index, so the index a typed object hides is
+completely unconstrained. Nothing stops this:
+
+```fstar
+ghost fn launder (a: ptr) (#x: Int32.t) (y: float32)
+  requires int32_t_pts_to a 1.0R x
+  requires pure (forall (b: bytes). int32_t_repr x b ==> float32_t_repr y b)
+  ensures  float32_t_pts_to a 1.0R y
+{ int32_t_reveal a; with b. assert (mem_pts_to a 1.0R b);
+  float32_t_conceal a #1.0R #b #y; }
+```
+
+which typechecks today. The hypothesis is about *bits* -- it says the two
+values share an object representation, which is what a pun means -- and
+`float32_t_conceal` asks for nothing about the index, so the effective type is
+dropped unconditionally. Two things follow. There is no distinguished "pun"
+operation to guard: `reveal` followed by `conceal` is the pun, and `claim` is
+not involved. And enforcement cannot be a side condition carried next to a
+typed points-to, because `reveal` would spend the points-to and leave the side
+condition describing nothing.
 
 #### What enforcement will cost
 
-Switching it on is the disruptive part, and the shape is now clear. The index
-is state, so the fact that these bytes are accessible at type `T` cannot be a
-duplicable side condition -- it has to live inside `T_pts_to`. But it need not
-live there *precisely*: the typed layer never needs to know the index, only
-that `read_ok e T_ctype` holds of it. That predicate is established once, by
-`T_claim`, and preserved by every `T`-write, so each typed points-to grows one
-existential and one `pure` conjunct:
+Switching it on is the disruptive part. The index is state, so the fact that
+these bytes are accessible at type `T` cannot be a duplicable side condition --
+it has to live inside `T_pts_to`. For *reads* it need not live there
+precisely: `read_ok` never looks at `fixed`, so knowing `read_ok e T_ctype`
+of the hidden index is enough, and each typed points-to grows one existential
+and one `pure` conjunct:
 
 ```fstar
 let uint32_t_pts_to a p x =
@@ -746,6 +868,21 @@ out `mem_pts_to_at` rather than `mem_pts_to`. That is the churn -- every
 byte-facing step in the aggregate, array and union machinery has to use the
 index-carrying split and join.
 
+*Stores* are the part that is not settled, and the open question is where
+`fixed` lives. `store_ok` is the side condition on a store, and it is the only
+rule that consults `fixed`, so a typed write has to be able to see it. The
+obvious cheap answer -- a `declared a u` token issued at the start of a
+lifetime, in the manner of `freeable` -- does not work, because blocking a
+retype means requiring the token's *absence*, which separation logic cannot
+express. Nor is the `read_ok e T_ctype` above enough: it leaves `e`
+unconstrained in the other direction too, so an allocated object cannot prove
+`fixed = false` about itself and legal retyping would be blocked along with
+the illegal kind. What a typed points-to has to pin is therefore
+`e == etypes_of T_ctype fx` for a *known* `fx`, which means `fx` appears
+somewhere in the signature -- as a boolean parameter, as a full index
+parameter, or by splitting each predicate into declared and allocated forms.
+All three churn every hand-written contract, and the choice is open.
+
 Where the rule bites is *re-typing*. Fresh `malloc` storage has an all-`None`
 index, which satisfies `read_ok` at every type, so claiming it costs nothing.
 Once it has been written at `uint32_t`, claiming the same bytes at another
@@ -754,6 +891,103 @@ available, but only as an explicit ghost step on full permission
 (`mem_store_etypes`), which is exactly right: you cannot retype storage you
 share, and it has no effect on a declared object, whose store is undefined
 behaviour rather than a retype.
+
+Three layer-0 hooks are still missing, and all three are about where `fixed`
+comes from. Nothing today ever sets it: `etypes_of t true` appears only in
+theorems. A declared object has to acquire it when its lifetime begins, and
+`mem_stack_alloc` hands out an *unconstrained* hidden index, so it cannot be
+conjured afterwards — that would be the same laundering the `forget`/`recall`
+pair was rejected for. So:
+
+- `malloc`, `calloc` and `mem_stack_alloc` have to *promise* `etypes_none n`
+  rather than an existential index;
+- a ghost `mem_declare a u`, taking an all-`None` range to
+  `etypes_of u true`, is what a local, a global, a compound literal or a
+  string literal emits when it comes into existence — and is what makes case
+  13.4 (`static char buf[]` reused as an `int`) fail;
+- `memcpy` needs an index-carrying spec producing `copy_etypes`.
+
+None of the three can land before the typed layer carries the index, because
+each of them would otherwise be either dead or unsound on its own.
+
+#### What has been built so far, and what the next domino is
+
+Three pieces of the machinery above are in the tree and verified, chosen
+because each is sound and useful on its own:
+
+- **The character exception** (6.5p6, last sentence). `store_entry` now
+  short-circuits at `tchar`, so a store through a character lvalue installs
+  no effective type. This is not a nicety: without it `malloc` + `memset` +
+  use-as-`int32_t` would be undefined, because clearing the buffer would
+  retype every byte as `char` and no wider read could cross one. Every
+  character type in the model is `TScalar SChar` — `uint8_t`, `int8_t` and
+  `char` all are — so one test catches all three and the emitter needs no
+  special case. `store_ok` had to move with it: the `not fixed` disjunct is
+  now guarded by `u =!= tchar`, because at `tchar` nothing moves, so the only
+  way bytes can be readable at `tchar` afterwards is to have been readable
+  before. Without that guard `store_ok_read_ok` breaks at `tchar`.
+  `store_char_identity` is the canary: replace the guard with `false` and it
+  stops verifying. `test/etype_char_store` pins the same rule one layer up,
+  through `mem_store_etypes` on a *slice* of a larger object.
+
+- **`Pulse.Lib.C.Palow.Index`**, the hide/show pair, derived from
+  `mem_pts_to_at_eq` with no new axioms. `mem_hide_etypes` forgets the index,
+  `mem_show_etypes` recovers an existential one. Two observations
+  (`not_null`, `fits`) are lifted to the indexed form by share / observe /
+  gather. Two are deliberately absent: `perm_bound` survives sharing only in
+  its halved form, and `disjoint` needs the whole `1.0R` range, leaving
+  nothing behind to retain the index with.
+
+- **`mem_share_at` / `mem_gather_at`** at layer 0, and a strengthened
+  `mem_pts_to_at_injective` that also concludes `b1 == b2` under a length
+  hypothesis. The sharing pair genuinely cannot be derived: going out to
+  `mem_pts_to`, sharing, and coming back gives two halves with *existential*
+  indices, provably equal to each other but not to the `e` you started with,
+  because the resource that knew `e` was spent on the rewrite. That inability
+  is exactly what makes `hide` → `show` safe, so it is not a defect to work
+  around. Folding bytes-injectivity into the existing axiom avoided a third.
+
+What is *not* done is the threading itself, and the reason is worth recording
+so the next attempt does not rediscover it. The design works — converting
+`uint32_t_pts_to` to carry the index does block the pun, by an asymmetry:
+`reveal` drops the index, `conceal` demands one *and* demands `read_ok` of it
+at the new type, so `int32_t_reveal` → `float32_t_conceal` stops typechecking,
+and code needing a round trip uses a new `_reveal_at`. `_pts_to_uninit` must
+carry it too, or `forget` → `reveal_uninit` is a laundering path around
+`reveal`.
+
+The obstacle is that it cannot stop at the scalars. `uint8_t_of_elem` goes
+through `elem_pts_to`, which is generic over an element representation and
+carries no `ctype`:
+
+```fstar
+let elem_pts_to (#t) (t_repr: t -> bytes -> prop) a p x =
+  exists* b. mem_pts_to a p b ** pure (t_repr x b)
+```
+
+So a `conceal` that demands an index cannot be reached from a focused array
+element, and `array_pts_to` is the same shape. Threading the index means a
+`ctype` parameter on both and propagating it through `Array` and every array
+consumer — about 330 mention sites — then `Aggregate`, `Union`, `Pool`,
+`Provenance` and `Examples`, then the ten scalar groups in `CTypes` that
+generated code actually uses, then 47 `conceal`/`claim` sites in
+`emit_palow.rs`, then the contracts in the test corpus. The library cannot be
+green part-way through, so this is one large change rather than a sequence of
+small ones.
+
+Aggregate join is the hard problem waiting at the end of it. `struct_S_join`
+rebuilds a struct from separated field predicates with no trade and no memory
+of the enclosing index, and from the fields' `read_ok … field_ctype` you
+cannot recover `read_ok e struct_ctype` — `read_ok (etypes_of ct_i32 false ++
+etypes_of ct_i32 false) ct_T` is simply false. The way out is for the struct
+predicate to carry a generated **`fields_ok e`** — each field slice readable
+at its own field type — rather than `read_ok e ct_S`. That is derivable from
+`read_ok e ct_S` (via `read_ok_slice` and `access_ok_trans`) *and*
+re-establishable from the fields, so split and join both work. Its
+incompleteness is narrow and worth paying: two tags with identical scalar
+layouts stay interchangeable, but any pun differing at a scalar leaf —
+int↔float, int↔pointer — is still caught. Retyping at join was rejected
+because `mem_store_etypes` needs `p == 1.0R` and join is at arbitrary `p`.
 
 #### How fine is the index?
 
@@ -770,6 +1004,7 @@ does not already license the store.**
 
 ```fstar
 let store_entry (en: option etype_entry) (u: ctype) (k: nat) : option etype_entry =
+  if u = tchar then en else
   match en with
   | Some e0 -> if e0.fixed || access_ok e0.ty (e0.off - k) u then Some e0
                else Some ({ ty = u; off = k; fixed = false })
@@ -1211,7 +1446,7 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Provenance` | proved | the `uintptr_t` round trip, and `memcpy` transporting a stored pointer |
 | `Pulse.Lib.C.Palow.CTypes` | proved | the remaining C scalar types (`_Bool`, `int8_t`..`int64_t`, `uint16_t`, `uint64_t`, `size_t`, `uint8_t`'s derived set) |
 | `Pulse.Lib.C.Palow.Examples` | proved | hand-written Palow renditions of programs PAL already translates |
-| `Pulse.Lib.C.Palow.Etype` | proved | `ctype`, per-byte effective-type entries, `access_ok`, the store rule, and the union/array/punning theorems |
+| `Pulse.Lib.C.Palow.Etype` | proved | `ctype`, per-byte effective-type entries, `access_ok` with the counterpart rule, `store_ok`/`store_etypes`, `copy_etypes`, the union/array/punning theorems, and sections 1-18 of `test/effective_type` transcribed as theorems |
 | `Pulse.Lib.C.Palow.Aggregate` | proved | two structs (with and without padding), field split/join, flexible array members |
 | `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus |
 | `Pulse.Lib.C.Palow.Union` | proved | `union U { uint32_t x; struct T t; }`, member views, the type-punning acceptance test |

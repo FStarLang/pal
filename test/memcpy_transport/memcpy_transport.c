@@ -24,19 +24,25 @@ _include_pulse(Copy_shim,
   include Pulse.Lib.C.Palow.Bytes
   include Pulse.Lib.C.Palow
   include Pulse.Lib.C.Palow.Scalar
+  module ET = Pulse.Lib.C.Palow.Etype
 
   (* Storage of a given size and no particular type: what the destination of a
-     copy is before the copy, and the only thing said about it. *)
+     copy is before the copy, and the only thing said about it. "No particular
+     type" is now said twice over -- nothing is known about the bytes, and the
+     effective-type index is `untyped`, so nothing has been stored there at a
+     type yet. *)
   (* The alignment is an argument because copied bytes carry none: `mem_copy`
      promises the destination the source's bytes and nothing else, so whoever
      is going to claim the destination at a type has to have said, in advance,
      that it is aligned for that type. *)
   unfold let raw (a: ptr) (n al: FStar.SizeT.t) : slprop =
-    exists* b. mem_pts_to a 1.0R b
-               ** pure (len b == FStar.SizeT.v n /\ aligned a al)
+    exists* b e. mem_pts_to_at a 1.0R b e
+               ** pure (len b == FStar.SizeT.v n /\ aligned a al
+                        /\ ET.elen e == len b /\ ET.untyped e)
 )
 
 _type(bytes_t, Pulse.Lib.C.Palow.Bytes.bytes)
+_type(etypes_t, Pulse.Lib.C.Palow.Etype.etypes)
 
 /* C's `memcpy`, declared with the contract the model gives it. It is assumed
  * here for the same reason it is axiomatized in
@@ -46,9 +52,11 @@ _type(bytes_t, Pulse.Lib.C.Palow.Bytes.bytes)
  * it. */
 _ghost_arg(bytes_t bs)
 _ghost_arg(bytes_t bd)
-_requires(_inline_pulse(mem_pts_to $(src) 1.0R $(bs) ** mem_pts_to $(dst) 1.0R $(bd)))
+_ghost_arg(etypes_t es)
+_ghost_arg(etypes_t ed)
+_requires(_inline_pulse(mem_pts_to_at $(src) 1.0R $(bs) $(es) ** mem_pts_to_at $(dst) 1.0R $(bd) $(ed)))
 _requires(_inline_pulse(pure (len $(bs) == FStar.SizeT.v $(n) /\ len $(bd) == FStar.SizeT.v $(n))))
-_ensures(_inline_pulse(mem_pts_to $(src) 1.0R $(bs) ** mem_pts_to $(dst) 1.0R $(bs)))
+_ensures(_inline_pulse(mem_pts_to_at $(src) 1.0R $(bs) $(es) ** mem_pts_to_at $(dst) 1.0R $(bs) $(es)))
 void mem_copy(_plain uint8_t *dst, _plain const uint8_t *src, size_t n);
 
 /* A `uint32_t` copied into storage of no type at all, and read back out of the
@@ -67,8 +75,8 @@ uint32_t copy_scalar(_plain uint32_t *dst, _plain const uint32_t *src)
 {
   _ghost_stmt(uint32_t_reveal $(src));
   mem_copy((uint8_t *) dst, (const uint8_t *) src, sizeof(uint32_t));
-  _ghost_stmt(uint32_t_conceal $(src) #1.0R #_ #$(x));
-  _ghost_stmt(uint32_t_conceal $(dst) #1.0R #_ #$(x));
+  _ghost_stmt(uint32_t_conceal $(src) #1.0R #_ #_ #$(x));
+  _ghost_stmt(uint32_t_conceal $(dst) #1.0R #_ #_ #$(x));
   return *dst;
 }
 
@@ -91,8 +99,8 @@ uint32_t transport(_plain uint32_t **src, _plain uint32_t **dst, _plain uint32_t
 {
   _ghost_stmt(ptr_reveal $(src));
   mem_copy((uint8_t *) dst, (const uint8_t *) src, sizeof(uint32_t *));
-  _ghost_stmt(ptr_conceal $(src) #1.0R #_ #$(target));
-  _ghost_stmt(ptr_conceal $(dst) #1.0R #_ #$(target));
+  _ghost_stmt(ptr_conceal $(src) #1.0R #_ #_ #$(target));
+  _ghost_stmt(ptr_conceal $(dst) #1.0R #_ #_ #$(target));
   uint32_t *p = *dst;
   return *p;
 }

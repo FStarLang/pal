@@ -35,7 +35,9 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Aggregate
 open Pulse.Lib.C.Palow.Machine
+open Pulse.Lib.C.Palow.Index
 
+module ET = Pulse.Lib.C.Palow.Etype
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module U32 = FStar.UInt32
@@ -57,8 +59,32 @@ let union_U_repr (u: union_U) (b: bytes) : prop =
       | U_x v -> uint32_t_repr v (slice b 0 4)
       | U_t t -> struct_T_repr t b))
 
+let union_U_ctype : ET.ctype =
+  ET.TUnion "U" 8 [(0, uint32_t_ctype); (0, struct_T_ctype)]
+
+(* The effective-type side condition of a union, and the place 6.5p7 does its
+   work. It is *not* indexed by the member the value is in: a union's storage
+   admits a read at any member's type, so the condition is the conjunction over
+   all members, which is what makes `union_U_split_t` and `union_U_join_t`
+   stay a bare unfold/fold.
+
+   Like `struct_S_fields_ok` it bottoms out at *scalar leaves* rather than
+   asking for `read_ok e union_U_ctype`. `read_ok` splits but does not rejoin,
+   so an aggregate-level condition could not be re-established by a join; the
+   pointwise one is the conjunction of its parts and so splits and joins by
+   construction. The price is that a union is interchangeable with a struct of
+   the same leaf layout, and the gain is that a pun at a scalar leaf -- int
+   read as float, or as a pointer -- is still rejected, which is what 6.5p7 is
+   about. *)
+let union_U_members_ok (e: ET.etypes) : prop =
+  ET.elen e == SZ.v union_U_sizeof /\
+  uint32_t_etype_ok (Seq.slice e 0 4) /\
+  struct_T_fields_ok e
+
 let union_U_pts_to ([@@@mkey] a: ptr) (p: perm) (u: union_U) : slprop =
-  exists* b. mem_pts_to a p b ** pure (union_U_repr u b /\ aligned a union_U_alignof)
+  exists* b e. mem_pts_to_at a p b e
+            ** pure (union_U_repr u b /\ aligned a union_U_alignof
+                     /\ union_U_members_ok e)
 
 (* A union's members all start at offset zero, so each one's alignment is the
    union's -- which is by construction the strictest of theirs. *)
@@ -71,7 +97,8 @@ let union_U_member_aligned (a: ptr)
    these back separately so that the union can be reassembled, and so that a
    client cannot silently forget that they exist. *)
 let union_U_x_rest ([@@@mkey] a: ptr) (p: perm) : slprop =
-  exists* b. mem_pts_to (a +! 4sz) p b ** pure (len b == 4)
+  exists* b e. mem_pts_to_at (a +! 4sz) p b e
+            ** pure (len b == 4 /\ ET.elen e == 4 /\ uint32_t_etype_ok e)
 
 (* ---------------------------------------------------------------------------
    Member views
@@ -89,10 +116,12 @@ ghost fn union_U_split_x (a: ptr) (#p: perm) (#v: U32.t)
 {
   unfold union_U_pts_to a p (U_x v);
   union_U_member_aligned a;
-  with b. assert (mem_pts_to a p b ** pure (union_U_repr (U_x v) b));
-  mem_split a 4sz;
+  with b e. assert (mem_pts_to_at a p b e
+                    ** pure (union_U_repr (U_x v) b /\ union_U_members_ok e));
+  mem_split_at a 4sz;
   Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v v));
-  uint32_t_conceal a #p #_ #v;
+  Seq.lemma_eq_intro (Seq.slice e 4 (ET.elen e)) (Seq.slice e 4 8);
+  uint32_t_conceal a #p #_ #_ #v;
   fold union_U_x_rest a p;
 }
 
@@ -102,10 +131,12 @@ ghost fn union_U_join_x (a: ptr) (#p: perm) (#v: U32.t)
   ensures  union_U_pts_to a p (U_x v)
 {
   uint32_t_reveal a #p #v;
+  with ex. assert (mem_pts_to_at a p (encode 4 None (U32.v v)) ex);
   unfold union_U_x_rest a p;
-  with rest. assert (mem_pts_to (a +! 4sz) p rest);
-  mem_join a #p #(encode 4 None (U32.v v)) #rest 4sz;
+  with rest erest. assert (mem_pts_to_at (a +! 4sz) p rest erest);
+  mem_join_at a #p #(encode 4 None (U32.v v)) #rest #ex #erest 4sz;
   append_slice_left (encode 4 None (U32.v v)) rest;
+  struct_T_fields_ok_intro ex erest;
   fold union_U_pts_to a p (U_x v);
 }
 
@@ -122,6 +153,7 @@ ghost fn union_U_join_t (a: ptr) (#p: perm) (#t: struct_T)
   ensures  union_U_pts_to a p (U_t t)
 {
   unfold struct_T_pts_to a p t;
+  union_U_member_aligned a;
   fold union_U_pts_to a p (U_t t);
 }
 
@@ -184,8 +216,10 @@ fn union_pun_test (a: ptr) (#u0: erased union_U)
   (* a.x = 10; -- the store only needs the first four bytes, whatever they
      previously held and whichever member the union was in. *)
   unfold union_U_pts_to a 1.0R u0;
-  with b0. assert (mem_pts_to a 1.0R b0 ** pure (union_U_repr u0 b0));
-  mem_split a 4sz;
+  with b0 e0. assert (mem_pts_to_at a 1.0R b0 e0
+                      ** pure (union_U_repr u0 b0 /\ union_U_members_ok e0));
+  mem_split_at a 4sz;
+  Seq.lemma_eq_intro (Seq.slice e0 4 (ET.elen e0)) (Seq.slice e0 4 8);
   uint32_t_claim_uninit a;
   uint32_t_write_uninit a 10ul;
   fold union_U_x_rest a 1.0R;

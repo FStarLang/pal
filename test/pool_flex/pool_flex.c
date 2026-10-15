@@ -22,6 +22,8 @@ _include_pulse(P,
   include Pulse.Lib.C.Palow.Alloc
   include Pulse.Lib.C.Palow.Array
   include Pulse.Lib.C.Palow.Nullable
+  include Pulse.Lib.C.Palow.Index
+  module ET = Pulse.Lib.C.Palow.Etype
   include Struct_pool_anon_1
 
   (* How much of the pool one allocation of `n` bytes actually consumes.
@@ -65,7 +67,8 @@ _include_pulse(P,
       size_t_pts_to (a +! struct_pool_anon_1_offsetof_end) 1.0R e **
       struct_pool_anon_1_padding a 1.0R **
       returned (a +! struct_pool_anon_1_offsetof_data) r **
-      mem_pts_to ((a +! struct_pool_anon_1_offsetof_data) +! b) 1.0R bs **
+      (exists* ebs. mem_pts_to_at ((a +! struct_pool_anon_1_offsetof_data) +! b) 1.0R bs ebs
+                 ** pure (ET.elen ebs == len bs /\ ET.allocated ebs)) **
       freeable a sz **
       pure (FStar.SizeT.v b <= FStar.SizeT.v e
 /\ len bs == FStar.SizeT.v e - FStar.SizeT.v b
@@ -105,6 +108,7 @@ pool *pool_new(size_t max_alloc)
     /* Nothing has been handed out, so the returned prefix is empty and the
        unclaimed range is all of it. Splitting at zero says both at once. */
     _ghost_stmt(mem_split ($(p) +! struct_pool_anon_1_offsetof_data) 0sz);
+    _ghost_stmt(mem_show_etypes (($(p) +! struct_pool_anon_1_offsetof_data) +! 0sz));
     _ghost_stmt(fold P.returned ($(p) +! struct_pool_anon_1_offsetof_data) 0sz);
     /* Both `unless_null` introductions are `[@@pulse_intro]`, so which one
        applies has to be said. */
@@ -121,7 +125,9 @@ _requires(_inline_pulse(P.pool_inv $(p) $(b) $(r) $(e)))
 _ensures(_inline_pulse(
   pure ($(return) == ($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) **
   pure (aligned $(return) max_align) **
-  (exists* bs. mem_pts_to $(return) 1.0R bs ** pure (len bs == FStar.SizeT.v $(n))) **
+  (exists* bs e2. mem_pts_to_at $(return) 1.0R bs e2
+                  ** pure (len bs == FStar.SizeT.v $(n)
+                           /\ ET.elen e2 == len bs /\ ET.allocated e2)) **
   P.pad $(return) $(n) **
   (exists* b2. pure (FStar.SizeT.v b2 == FStar.SizeT.v $(b) + P.roundup $(n))
                ** P.pool_inv $(p) b2 $(r) $(e))))
@@ -142,8 +148,9 @@ void *pool_alloc(_plain pool *p, size_t n)
     _ghost_stmt(aligned_add $(p) max_align struct_pool_anon_1_offsetof_data);
     _ghost_stmt(aligned_add ($(p) +! struct_pool_anon_1_offsetof_data) max_align $(b));
     /* The slot is `m` bytes: `n` for the caller and the rest for the pad. */
-    _ghost_stmt(mem_split (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(m));
-    _ghost_stmt(mem_split (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
+    _ghost_stmt(mem_split_at (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(m));
+    _ghost_stmt(mem_split_at (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
+    _ghost_stmt(mem_hide_etypes ((($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) +! $(n)));
     _ghost_stmt(fold P.pad (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
     p->begin += m;
     /* The chunk handed out sits at `(data + b) + n`, and the contract says
@@ -166,10 +173,13 @@ void pool_free(_plain pool *p)
        the bytes they stand for, and the three ranges join into the one block
        `free` was given. */
     _ghost_stmt(unfold P.returned ($(p) +! struct_pool_anon_1_offsetof_data) $(b));
+    _ghost_stmt(mem_hide_etypes (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)));
     _ghost_stmt(mem_join ($(p) +! struct_pool_anon_1_offsetof_data) $(b));
     _ghost_stmt(unfold struct_pool_anon_1_padding $(p) 1.0R);
     _ghost_stmt(size_t_reveal ($(p) +! struct_pool_anon_1_offsetof_begin));
+    _ghost_stmt(mem_hide_etypes ($(p) +! struct_pool_anon_1_offsetof_begin));
     _ghost_stmt(size_t_reveal ($(p) +! struct_pool_anon_1_offsetof_end));
+    _ghost_stmt(mem_hide_etypes ($(p) +! struct_pool_anon_1_offsetof_end));
     _ghost_stmt(rewrite each ($(p) +! struct_pool_anon_1_offsetof_begin) as $(p));
     _ghost_stmt(mem_join $(p) 8sz);
     _ghost_stmt(mem_join $(p) 16sz);
@@ -193,12 +203,14 @@ void example()
     /* Hand both chunks back before the pool goes. The pointers are the ones
        `pool_alloc` promised, which is what the two rewrites say. */
     _ghost_stmt(int32_t_reveal $(x));
+    _ghost_stmt(mem_hide_etypes $(x));
     _ghost_stmt(unfold P.pad $(x) 4sz);
     _ghost_stmt(mem_join $(x) 4sz);
     _ghost_stmt(rewrite each $(x)
                 as (($(p) +! struct_pool_anon_1_offsetof_data) +! 0sz));
     _ghost_stmt(P.pool_return $(p) 0sz 16sz);
     _ghost_stmt(int64_t_reveal $(y));
+    _ghost_stmt(mem_hide_etypes $(y));
     /* The second chunk is at `data + 16`, and the pool says so as a `size_t`
        whose value is 16. Naming the address before the rewrite is what keeps
        the equality query small enough to go through. */

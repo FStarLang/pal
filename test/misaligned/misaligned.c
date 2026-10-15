@@ -14,13 +14,17 @@ _include_pulse(M,
   include Pulse.Lib.C.Palow.Bytes
   include Pulse.Lib.C.Palow
   include Pulse.Lib.C.Palow.Scalar
+  include Pulse.Lib.C.Palow.Index
+  module ET = Pulse.Lib.C.Palow.Etype
 
-  ghost fn claim_misaligned (a: ptr) (#b: bytes)
-    requires mem_pts_to (a +! 1sz) 1.0R b
+  ghost fn claim_misaligned (a: ptr) (#b: bytes) (#e: ET.etypes)
+    requires mem_pts_to_at (a +! 1sz) 1.0R b e
     requires pure (aligned a max_align)
     requires pure (len b == FStar.SizeT.v uint32_t_sizeof)
+    requires pure (ET.elen e == len b /\ ET.untyped e)
     ensures  uint32_t_pts_to_uninit (a +! 1sz)
   {
+    uint32_t_etype_ok_untyped e;
     uint32_t_claim_uninit (a +! 1sz);
   }
 )
