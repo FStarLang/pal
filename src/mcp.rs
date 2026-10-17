@@ -287,6 +287,20 @@ struct QueryInput {
     query: Query,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct IncludePathsInput {
+    session_id: SessionId,
+    include_paths: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PreprocessorDefinitionInput {
+    session_id: SessionId,
+    defines: Vec<String>,
+}
+
 impl PalMcpServer {
     pub(super) fn new(root: PathBuf, fstar: PathBuf, pulse: PathBuf) -> workspace::Result<Self> {
         let root = root.canonicalize().map_err(|error| {
@@ -312,6 +326,35 @@ impl PalMcpServer {
             }),
             tool_router: Self::tool_router(),
         })
+    }
+
+    fn add_compile_options(
+        &self,
+        session_id: SessionId,
+        include_paths: Vec<String>,
+        defines: Vec<String>,
+    ) -> Result<CallToolResult, ErrorData> {
+        validate_compile_options(&include_paths, &defines)?;
+        let mut sessions = self.shared.sessions();
+        let session = sessions
+            .get_mut(&session_id)
+            .filter(|session| !session.closing)
+            .ok_or_else(|| params("unknown_session", "session does not exist"))?;
+        if session.job.as_ref().is_some_and(|job| job.active) {
+            return Err(params("session_busy", "session already has an active job"));
+        }
+        session.includes.extend(
+            include_paths
+                .into_iter()
+                .map(|path| self.shared.root.join(path)),
+        );
+        session.defines.extend(defines);
+        Ok(CallToolResult::structured(json!({
+            "session_id": session_id,
+            "accepted_revision": session.revision,
+            "include_paths": session.includes,
+            "defines": session.defines,
+        })))
     }
 
     pub(super) async fn shutdown(&self) {
@@ -348,16 +391,7 @@ impl PalMcpServer {
                 include_paths,
                 defines,
             } => {
-                if include_paths
-                    .iter()
-                    .chain(&defines)
-                    .any(|value| value.contains('\0'))
-                {
-                    return Err(params(
-                        "invalid_path",
-                        "include paths and definitions cannot contain NUL",
-                    ));
-                }
+                validate_compile_options(&include_paths, &defines)?;
                 let id = SessionId::next()?;
                 let status = Status {
                     session_id: id.clone(),
@@ -451,6 +485,26 @@ impl PalMcpServer {
                 ))
             }
         }
+    }
+
+    #[tool(
+        description = "Append include directories in order, like -I<path>, for the session's next verification. Relative paths use the server root; active jobs reject updates."
+    )]
+    async fn add_include_paths(
+        &self,
+        Parameters(input): Parameters<IncludePathsInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.add_compile_options(input.session_id, input.include_paths, Vec::new())
+    }
+
+    #[tool(
+        description = "Append preprocessor definitions in order, like -DFOO or -DFOO=bar, for the session's next verification. Active jobs reject updates."
+    )]
+    async fn add_preprocessor_definition(
+        &self,
+        Parameters(input): Parameters<PreprocessorDefinitionInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.add_compile_options(input.session_id, Vec::new(), input.defines)
     }
 
     #[tool(
@@ -613,6 +667,20 @@ impl PalMcpServer {
             json!({"session_id":input.session_id,"accepted_revision":revision,"job_id":job_id,"complete":complete && indexed.index.complete,"data":data}),
         ))
     }
+}
+
+fn validate_compile_options(include_paths: &[String], defines: &[String]) -> Result<(), ErrorData> {
+    if include_paths
+        .iter()
+        .chain(defines)
+        .any(|value| value.contains('\0'))
+    {
+        return Err(params(
+            "invalid_path",
+            "include paths and definitions cannot contain NUL",
+        ));
+    }
+    Ok(())
 }
 
 struct JobSuccess {

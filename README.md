@@ -140,8 +140,18 @@ the same major version; a mismatch reports how to set `LIBCLANG_PATH`.
 | Tool | Arguments and behavior |
 |------|------------------------|
 | `pal_session` | `{"action":"open","include_paths":[],"defines":[]}` returns a session ID, revision `0`, and status URI. `cancel` takes `session_id`/`job_id`; `close` takes `session_id` and releases its snapshots. |
+| `add_include_paths` | `{"session_id":"s1","include_paths":["include","vendor/include"]}` appends directories, like `-Iinclude -Ivendor/include`. Relative paths resolve against the server root. |
+| `add_preprocessor_definition` | `{"session_id":"s1","defines":["FOO","BAR=value"]}` appends definitions, like `-DFOO -DBAR=value`. |
 | `pal_verify` | `{"session_id":"s1","base_revision":0,"changes":[{"op":"reference","path":"examples/example.c"}]}` immediately reserves a background job. Stale revisions and busy sessions start no job. |
 | `pal_query` | Takes `session_id`, optional `job_id`, and a tagged `query`: `symbols` with `path`; or `definition`, `references`, `callers`, `callees`, `hover` with `path` and zero-based UTF-16 `position`. References optionally include `include_declaration`. |
+
+Both add tools preserve order and duplicates, including existing session options;
+later definitions take precedence. Pass paths/definitions without `-I`/`-D` prefixes.
+They return the session ID, unchanged accepted revision, and the full `include_paths`
+(resolved paths) and `defines` lists. Updates apply to the next `pal_verify`, including
+an empty-change refresh; accepted proofs/navigation remain unchanged until it succeeds.
+Updates while a job is active fail with `session_busy`; closed/unknown sessions fail
+with `unknown_session`. NUL-containing inputs reject the entire addition.
 
 Open a session, listen for its `pal://sessions/<id>/status` resource, wait for
 the subscription acknowledgment, then submit verification. Use modern

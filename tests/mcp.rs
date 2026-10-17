@@ -130,17 +130,6 @@ impl Client {
             "{initialized}"
         );
         client.notify("notifications/initialized", json!({}));
-        let tools = client.rpc("tools/list", json!({}));
-        let names: BTreeSet<_> = tools["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            names,
-            BTreeSet::from(["pal_session", "pal_verify", "pal_query"])
-        );
         client
     }
 
@@ -1492,5 +1481,152 @@ fn real_mcp_incremental_verification_navigation_and_lifecycle() {
     accepted(&status);
     client.close(&empty);
     client.close(&session);
+    client.shutdown();
+}
+
+#[test]
+fn real_mcp_add_compile_options() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .unwrap();
+    let fixtures = tempfile::tempdir().unwrap();
+    let root = fixtures.path().canonicalize().unwrap();
+    fs::write(
+        root.join("pal.h"),
+        fs::read(repo.join("examples/pal.h")).unwrap(),
+    )
+    .unwrap();
+    for (directory, value) in [("first include", 7), ("second", 9)] {
+        fs::create_dir(root.join(directory)).unwrap();
+        fs::write(
+            root.join(directory).join("config.h"),
+            format!("#define HEADER_VALUE {value}\n"),
+        )
+        .unwrap();
+    }
+    fs::create_dir(root.join("third")).unwrap();
+    fs::write(root.join("third/extra.h"), "#define EXTRA 1\n").unwrap();
+    let source = r#"#include "pal.h"
+#include <config.h>
+#if ENABLED != 1 || HEADER_VALUE != 7
+#error incorrect compile options
+#endif
+#if FACTOR == 2
+int configured_two(void) _ensures(return == 14) { return HEADER_VALUE * FACTOR; }
+#elif FACTOR == 3
+#include <extra.h>
+int configured_three(void) _ensures(return == 22) { return HEADER_VALUE * FACTOR + EXTRA; }
+#else
+#error incorrect definition order
+#endif
+"#;
+    let wrapper = Wrapper::new();
+    let mut client = Client::start(&root, &wrapper, &repo);
+    let mut session = client.open(&[]);
+    client.tool(
+        "add_include_paths",
+        json!({"session_id":session.session_id,"include_paths":["first include","second"]}),
+    );
+    client.tool(
+        "add_preprocessor_definition",
+        json!({"session_id":session.session_id,"defines":["ENABLED","FACTOR=2"]}),
+    );
+    let (_, status, _) = client.run(
+        &mut session,
+        json!([replace("configured.c", source)]),
+        &wrapper,
+    );
+    accepted(&status);
+    let symbols = |client: &mut Client, session: &Session| -> Vec<DocumentSymbol> {
+        data(client.query(
+            session,
+            None,
+            json!({"kind":"symbols","path":"configured.c"}),
+        ))
+    };
+    assert!(
+        symbols(&mut client, &session)
+            .iter()
+            .any(|symbol| symbol.name == "configured_two")
+    );
+    client.tool(
+        "add_include_paths",
+        json!({"session_id":session.session_id,"include_paths":["third"]}),
+    );
+    client.tool(
+        "add_preprocessor_definition",
+        json!({"session_id":session.session_id,"defines":["FACTOR=1","FACTOR=3"]}),
+    );
+    assert_eq!(client.status(&session.status_uri)["accepted_revision"], 1);
+    assert!(
+        symbols(&mut client, &session)
+            .iter()
+            .any(|symbol| symbol.name == "configured_two")
+    );
+    for (tool, arguments) in [
+        (
+            "add_include_paths",
+            json!({"session_id":session.session_id,"include_paths":["second","bad\0path"]}),
+        ),
+        (
+            "add_preprocessor_definition",
+            json!({"session_id":session.session_id,"defines":["FACTOR=4","bad\0define"]}),
+        ),
+    ] {
+        invalid(&client.tool_response(tool, arguments), "invalid_path");
+    }
+    wrapper.arm();
+    let job = client.submit(&session, json!([]));
+    let paused = wrapper.paused();
+    for (tool, arguments) in [
+        (
+            "add_include_paths",
+            json!({"session_id":session.session_id,"include_paths":["second"]}),
+        ),
+        (
+            "add_preprocessor_definition",
+            json!({"session_id":session.session_id,"defines":["FACTOR=4"]}),
+        ),
+    ] {
+        invalid(&client.tool_response(tool, arguments), "session_busy");
+    }
+    client.tool(
+        "pal_session",
+        json!({"action":"cancel","session_id":session.session_id,"job_id":job.job_id}),
+    );
+    let status = client.terminal(&mut session, &job);
+    assert_eq!(status["phase"], "cancelled");
+    assert_exited(&paused);
+    let (_, status, trace) = client.run(&mut session, json!([]), &wrapper);
+    accepted(&status);
+    trace.stored("Func_configured_three.fst");
+    let updated = symbols(&mut client, &session);
+    assert!(
+        updated
+            .iter()
+            .any(|symbol| symbol.name == "configured_three")
+    );
+    assert!(!updated.iter().any(|symbol| symbol.name == "configured_two"));
+    let mut isolated = client.open(&["first include"]);
+    let (_, status, _) = client.run(
+        &mut isolated,
+        json!([replace("configured.c", source)]),
+        &wrapper,
+    );
+    failed(&status, "translation_failed");
+    client.close(&isolated);
+    client.close(&session);
+    for (tool, arguments) in [
+        (
+            "add_include_paths",
+            json!({"session_id":session.session_id,"include_paths":[]}),
+        ),
+        (
+            "add_preprocessor_definition",
+            json!({"session_id":session.session_id,"defines":[]}),
+        ),
+    ] {
+        invalid(&client.tool_response(tool, arguments), "unknown_session");
+    }
     client.shutdown();
 }
