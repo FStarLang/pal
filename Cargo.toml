@@ -3,6 +3,10 @@ name = "pal"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+mcp = ["dep:rmcp", "dep:moka", "dep:tokio", "dep:clang-rs", "dep:tempfile", "dep:sha2", "dep:process-wrap"]
+
 [dependencies]
 chumsky = "0.13.0"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -12,6 +16,13 @@ num-bigint = "0.4"
 pretty = "0.12.5"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+rmcp = { version = "3.5.1", optional = true, default-features = false, features = ["server", "macros", "transport-io"] }
+moka = { version = "0.12.16", optional = true, features = ["future"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "process", "sync", "time", "io-util", "macros"] }
+clang-rs = { package = "clang", version = "2.0.0", optional = true, features = ["clang_10_0", "runtime"] }
+tempfile = { version = "3.27.0", optional = true }
+sha2 = { version = "0.10.9", optional = true }
+process-wrap = { version = "10.0.0", optional = true, features = ["tokio1"] }
 
 [build-dependencies]
 build-rs = "0.3.4"

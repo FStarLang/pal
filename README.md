@@ -120,6 +120,71 @@ pal [OPTIONS] <FILES>...
       --tmpdir <DIR>     directory for intermediates
 ```
 
+### Optional MCP server
+
+Requires Rust 1.88+, matching Clang/libclang 20+, and the verified Pulse support
+library. The default build and ordinary translation CLI do not enable MCP.
+
+```bash
+env -u ADMIT -u OTHERFLAGS make -C pulse
+cargo build --features mcp
+LIBCLANG_PATH=/usr/lib/llvm20/lib target/debug/pal mcp --root .
+```
+
+`pal mcp` uses stdio exclusively for MCP JSON-RPC; compiler/verifier logs go to
+stderr. Options: `--root` (default `.`), `--fstar-exe` (default `fstar.exe`), and
+`--pulse-dir` (default the build-time repository's `pulse/`, override after
+relocating the executable). LLVM's selected Clang and loaded libclang must have
+the same major version; a mismatch reports how to set `LIBCLANG_PATH`.
+
+| Tool | Arguments and behavior |
+|------|------------------------|
+| `pal_session` | `{"action":"open","include_paths":[],"defines":[]}` returns a session ID, revision `0`, and status URI. `cancel` takes `session_id`/`job_id`; `close` takes `session_id` and releases its snapshots. |
+| `pal_verify` | `{"session_id":"s1","base_revision":0,"changes":[{"op":"reference","path":"examples/example.c"}]}` immediately reserves a background job. Stale revisions and busy sessions start no job. |
+| `pal_query` | Takes `session_id`, optional `job_id`, and a tagged `query`: `symbols` with `path`; or `definition`, `references`, `callers`, `callees`, `hover` with `path` and zero-based UTF-16 `position`. References optionally include `include_declaration`. |
+
+Open a session, listen for its `pal://sessions/<id>/status` resource, wait for
+the subscription acknowledgment, then submit verification. Use modern
+`subscriptions/listen` with `notifications.resourceSubscriptions: [status_uri]`;
+each `notifications/resources/updated` carries its subscription request ID.
+Read the resource for the latest phase, elapsed time, diagnostics and error.
+Polling `resources/read` also works; updates may coalesce. RMCP's 2026-07-28
+protocol uses per-request `_meta` with `io.modelcontextprotocol/protocolVersion`
+set to `2026-07-28` and `io.modelcontextprotocol/clientCapabilities` set to `{}`.
+An older `initialize` handshake alone does not select modern subscriptions.
+
+Changes are tagged `reference` (attach/refresh a local file), `replace` (complete
+inline `code`), or `append` (append `code` bytes exactly to a managed source,
+without inserting a newline). Paths must be root-relative `.c`/`.h` paths;
+absolute paths, traversal and escaping symlinks are rejected. Headers are include
+overlays, not standalone translation units. References and implicit project
+headers refresh on each submission; `changes: []` refreshes existing roots.
+Inputs changing during a job fail rather than silently publishing mixed bytes.
+Submitted sources and generated files are never written into the user's tree.
+
+Only successful verification advances the accepted revision. Failed/cancelled
+candidates never become patch bases: resend a corrected append against the
+accepted revision, or replace the complete file. Queries default to accepted
+code; an explicit retained candidate job ID exposes its available index with
+`complete:false`. Direct-call queries do not invent function-pointer targets.
+
+Unchanged generated `.fst`/`.fsti` proofs reuse F*'s checked-artifact validation;
+body-only edits preserve interface-only dependents. F* first batches interfaces
+and modules without interfaces, then checks each implementation separately,
+with `fly_deps=false`. This preserves interface abstraction and dependency
+checked artifacts; no custom dependency graph or admit flags are used. Exact
+generated snapshots additionally share a 32-entry LRU. Active accepted proofs
+stay pinned independently of eviction; missing/corrupt required artifacts fail
+with `proof_cache_lost`. Caches are process-local, not durable. Verification is
+serialized to bound solver memory while queries/status remain responsive.
+
+This is a trusted local compiler service, not an include-filesystem sandbox.
+Run the real integration regression with:
+
+```bash
+LIBCLANG_PATH=/usr/lib/llvm20/lib cargo test --features mcp --test mcp -- --nocapture
+```
+
 ---
 
 ## Reviewing pull requests
