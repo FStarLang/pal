@@ -343,6 +343,10 @@ impl PalMcpServer {
         if session.job.as_ref().is_some_and(|job| job.active) {
             return Err(params("session_busy", "session already has an active job"));
         }
+        self.shared
+            .verifier
+            .invalidate_all()
+            .map_err(|error| ErrorData::internal_error(error.message, None))?;
         session.includes.extend(
             include_paths
                 .into_iter()
@@ -488,7 +492,7 @@ impl PalMcpServer {
     }
 
     #[tool(
-        description = "Append include directories in order, like -I<path>, for the session's next verification. Relative paths use the server root; active jobs reject updates."
+        description = "Append include directories in order, like -I<path>, for the session's next verification. Relative paths use the server root. Invalidates all verification caches; active jobs reject updates."
     )]
     async fn add_include_paths(
         &self,
@@ -498,7 +502,7 @@ impl PalMcpServer {
     }
 
     #[tool(
-        description = "Append preprocessor definitions in order, like -DFOO or -DFOO=bar, for the session's next verification. Active jobs reject updates."
+        description = "Append preprocessor definitions in order, like -DFOO or -DFOO=bar, for the session's next verification. Invalidates all verification caches; active jobs reject updates."
     )]
     async fn add_preprocessor_definition(
         &self,
