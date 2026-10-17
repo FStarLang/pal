@@ -149,7 +149,7 @@ Both add tools preserve order and duplicates, including existing session options
 later definitions take precedence. Pass paths/definitions without `-I`/`-D` prefixes.
 They return the session ID, unchanged accepted revision, and the full `include_paths`
 (resolved paths) and `defines` lists. Updates apply to the next `pal_verify`, including
-an empty-change refresh; accepted snapshots/navigation remain unchanged until it succeeds.
+an empty-change refresh; accepted proofs/navigation remain unchanged until it succeeds.
 Updates while a job is active fail with `session_busy`; closed/unknown sessions fail
 with `unknown_session`. NUL-containing inputs reject the entire addition.
 Every successful add call, including an empty list or unused option, invalidates
