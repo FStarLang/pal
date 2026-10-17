@@ -81,12 +81,16 @@ struct Client {
 
 impl Client {
     fn start(root: &Path, wrapper: &Wrapper, repo: &Path) -> Self {
+        let mut client = Self::connect(wrapper, repo);
+        client.tool("new_root", json!({"path":root}));
+        client
+    }
+
+    fn connect(wrapper: &Wrapper, repo: &Path) -> Self {
         let stderr = wrapper.directory.path().join("server.stderr");
         let mut command = Command::new(env!("CARGO_BIN_EXE_pal"));
         command
-            .args(["mcp", "--root"])
-            .arg(root)
-            .arg("--fstar-exe")
+            .args(["mcp", "--fstar-exe"])
             .arg(&wrapper.executable)
             .arg("--pulse-dir")
             .arg(repo.join("pulse"))
@@ -1748,5 +1752,145 @@ int configured_three(void) _ensures(return == 22) { return HEADER_VALUE * FACTOR
     ] {
         invalid(&client.tool_response(tool, arguments), "unknown_session");
     }
+    client.shutdown();
+}
+
+#[test]
+fn real_mcp_new_root_resets_project() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .unwrap();
+    let fixtures = tempfile::tempdir().unwrap();
+    let source = "#include \"pal.h\"\n#include <value.h>\n#ifdef OLD\nint old_option(void) _ensures(return == 0) { return 0; }\n#endif\nint project_value(void) _ensures(return == VALUE) { return VALUE; }\n";
+    let roots: Vec<_> = [1, 2]
+        .into_iter()
+        .map(|value| {
+            let root = fixtures.path().join(format!("project{value}"));
+            fs::create_dir_all(root.join("inc")).unwrap();
+            fs::write(
+                root.join("pal.h"),
+                fs::read(repo.join("examples/pal.h")).unwrap(),
+            )
+            .unwrap();
+            fs::write(root.join("inc/value.h"), format!("#define VALUE {value}\n")).unwrap();
+            fs::write(root.join("main.c"), source).unwrap();
+            root.canonicalize().unwrap()
+        })
+        .collect();
+    let wrapper = Wrapper::new();
+    let mut client = Client::connect(&wrapper, &repo);
+    invalid(
+        &client.tool_response("pal_session", json!({"action":"open"})),
+        "no_root",
+    );
+    client.tool("new_root", json!({"path":roots[0]}));
+    let mut old = client.open(&["inc"]);
+    client.tool(
+        "add_preprocessor_definition",
+        json!({"session_id":old.session_id,"defines":["OLD"]}),
+    );
+    let (_, status, _) = client.run(&mut old, json!([reference("main.c")]), &wrapper);
+    accepted(&status);
+    for path in [
+        String::new(),
+        "bad\0root".to_owned(),
+        roots[0].join("main.c").to_string_lossy().into_owned(),
+        roots[0].join("missing").to_string_lossy().into_owned(),
+    ] {
+        invalid(
+            &client.tool_response("new_root", json!({"path":path})),
+            "invalid_path",
+        );
+    }
+    let (_, status, _) = client.run(&mut old, json!([]), &wrapper);
+    accepted(&status);
+    assert_eq!(
+        status["verification_cache_hit"], true,
+        "invalid roots discarded the working project"
+    );
+    let listener = client.listen(&old.status_uri);
+    wrapper.arm();
+    let active = client.submit(
+        &old,
+        json!([append(
+            "main.c",
+            "int pending(void) _ensures(return == 3) { return 3; }\n"
+        )]),
+    );
+    let paused = wrapper.paused();
+    let queued = client.open(&[]);
+    client.submit(
+        &queued,
+        json!([replace("queued.c", "int queued(void) { return 1; }\n")]),
+    );
+    let started = Instant::now();
+    assert_eq!(
+        client.tool("new_root", json!({"path":roots[1]})),
+        json!({"root":roots[1]})
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "root reset did not terminate old jobs promptly"
+    );
+    assert_exited(&paused);
+    assert!(
+        client.response(listener.0).get("error").is_none(),
+        "old subscription did not finish cleanly"
+    );
+    assert_eq!(
+        client.rpc("resources/list", json!({}))["result"]["resources"],
+        json!([])
+    );
+    for previous in [&old, &queued] {
+        assert!(
+            client
+                .rpc("resources/read", json!({"uri":previous.status_uri}))
+                .get("error")
+                .is_some()
+        );
+        invalid(&client.tool_response("pal_verify", json!({"session_id":previous.session_id,"base_revision":previous.accepted_revision,"changes":[]})), "unknown_session");
+        invalid(&client.tool_response("pal_query", json!({"session_id":previous.session_id,"job_id":active.job_id,"query":{"kind":"symbols","path":"main.c"}})), "unknown_session");
+    }
+    let mut fresh = client.open(&[]);
+    assert_ne!(fresh.session_id, old.session_id);
+    let (_, status, _) = client.run(&mut fresh, json!([reference("main.c")]), &wrapper);
+    failed(&status, "translation_failed");
+    client.tool(
+        "add_include_paths",
+        json!({"session_id":fresh.session_id,"include_paths":["inc"]}),
+    );
+    let (_, status, _) = client.run(&mut fresh, json!([reference("main.c")]), &wrapper);
+    accepted(&status);
+    let symbols: Vec<DocumentSymbol> =
+        data(client.query(&fresh, None, json!({"kind":"symbols","path":"main.c"})));
+    assert!(symbols.iter().any(|symbol| symbol.name == "project_value"));
+    assert!(
+        !symbols
+            .iter()
+            .any(|symbol| symbol.name == "old_option" || symbol.name == "pending")
+    );
+    let hover = client.query(
+        &fresh,
+        None,
+        query_at("hover", "main.c", at(source, "VALUE)")),
+    );
+    assert!(hover.to_string().contains("VALUE 2"), "{hover}");
+    assert_public(&hover, &roots[1]);
+    let (_, status, _) = client.run(&mut fresh, json!([]), &wrapper);
+    accepted(&status);
+    assert_eq!(status["verification_cache_hit"], true);
+    client.tool("new_root", json!({"path":roots[1]}));
+    let mut restarted = client.open(&["inc"]);
+    assert_eq!(restarted.accepted_revision, Revision(0));
+    assert_ne!(restarted.session_id, fresh.session_id);
+    let (_, status, trace) = client.run(&mut restarted, json!([reference("main.c")]), &wrapper);
+    accepted(&status);
+    assert_eq!(
+        status["verification_cache_hit"], false,
+        "same-root reset retained old cached results"
+    );
+    trace.stored("Func_project_value.fst");
+    trace.stored("Func_project_value.fsti");
+    client.close(&restarted);
     client.shutdown();
 }

@@ -191,6 +191,12 @@ impl Verifier {
         Ok(())
     }
 
+    pub async fn clear(&self) -> Result<()> {
+        self.invalidate_all()?;
+        self.cache.run_pending_tasks().await;
+        Ok(())
+    }
+
     /// Caller owns the server-wide permit from preparation through final publication.
     pub async fn verify(
         &self,

@@ -36,8 +36,6 @@ use workspace::{Change, Failure, ManagedSource, Snapshot, Toolchain};
     about = "Serve incremental PAL verification and Clang navigation over MCP stdio"
 )]
 struct McpCli {
-    #[arg(long, default_value = ".")]
-    root: PathBuf,
     #[arg(long, default_value = "fstar.exe")]
     fstar_exe: PathBuf,
     #[arg(long, default_value_os_t = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pulse"))]
@@ -52,7 +50,7 @@ pub(super) fn dispatch_if_requested() -> bool {
     }
     let cli = McpCli::parse_from(std::env::args_os().skip(1));
     let result = (|| {
-        let server = PalMcpServer::new(cli.root, cli.fstar_exe, cli.pulse_dir)?;
+        let server = PalMcpServer::new(cli.fstar_exe, cli.pulse_dir)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -182,16 +180,20 @@ struct Session {
     status: Status,
     closing: bool,
 }
+struct Project {
+    root: Option<PathBuf>,
+    sessions: BTreeMap<SessionId, Session>,
+}
 struct Shared {
-    root: PathBuf,
     verifier: Verifier,
-    sessions: Mutex<BTreeMap<SessionId, Session>>,
+    project: Mutex<Project>,
+    reset: tokio::sync::Mutex<()>,
     shutting_down: AtomicBool,
     updates: broadcast::Sender<String>,
 }
 impl Shared {
-    fn sessions(&self) -> MutexGuard<'_, BTreeMap<SessionId, Session>> {
-        self.sessions
+    fn project(&self) -> MutexGuard<'_, Project> {
+        self.project
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -212,8 +214,8 @@ impl Shared {
         message: &str,
         force: bool,
     ) {
-        let mut sessions = self.sessions();
-        let Some(session) = sessions.get_mut(session_id) else {
+        let mut project = self.project();
+        let Some(session) = project.sessions.get_mut(session_id) else {
             return;
         };
         let Some(job) = session
@@ -229,7 +231,7 @@ impl Shared {
         let changed_phase = session.status.phase != phase;
         session.status.phase = phase;
         if !message.is_empty() {
-            job.pending_message = public_text(&self.root, job.indexed.as_deref(), message);
+            job.pending_message = public_text(job.indexed.as_deref(), message);
         }
         if force || changed_phase || job.last_update.elapsed() >= Duration::from_secs(1) {
             if !job.pending_message.is_empty() {
@@ -239,10 +241,10 @@ impl Shared {
         }
     }
     fn existing_uris(&self, requested: &[String]) -> Vec<String> {
-        let sessions = self.sessions();
+        let project = self.project();
         requested
             .iter()
-            .filter(|uri| sessions.keys().any(|id| id.status_uri() == **uri))
+            .filter(|uri| project.sessions.keys().any(|id| id.status_uri() == **uri))
             .cloned()
             .collect()
     }
@@ -301,26 +303,23 @@ struct PreprocessorDefinitionInput {
     defines: Vec<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RootInput {
+    path: String,
+}
+
 impl PalMcpServer {
-    pub(super) fn new(root: PathBuf, fstar: PathBuf, pulse: PathBuf) -> workspace::Result<Self> {
-        let root = root.canonicalize().map_err(|error| {
-            Failure::new(
-                "invalid_path",
-                format!("cannot open workspace root: {error}"),
-            )
-        })?;
-        if !root.is_dir() {
-            return Err(Failure::new(
-                "invalid_path",
-                "workspace root must be a directory",
-            ));
-        }
+    pub(super) fn new(fstar: PathBuf, pulse: PathBuf) -> workspace::Result<Self> {
         let verifier = Verifier::new(Toolchain::discover()?, fstar, pulse)?;
         Ok(Self {
             shared: Arc::new(Shared {
-                root,
                 verifier,
-                sessions: Mutex::new(BTreeMap::new()),
+                project: Mutex::new(Project {
+                    root: None,
+                    sessions: BTreeMap::new(),
+                }),
+                reset: tokio::sync::Mutex::new(()),
                 shutting_down: AtomicBool::new(false),
                 updates: broadcast::channel(64).0,
             }),
@@ -335,8 +334,13 @@ impl PalMcpServer {
         defines: Vec<String>,
     ) -> Result<CallToolResult, ErrorData> {
         validate_compile_options(&include_paths, &defines)?;
-        let mut sessions = self.shared.sessions();
-        let session = sessions
+        let mut project = self.shared.project();
+        let root = project
+            .root
+            .clone()
+            .ok_or_else(|| params("no_root", "call new_root before opening a session"))?;
+        let session = project
+            .sessions
             .get_mut(&session_id)
             .filter(|session| !session.closing)
             .ok_or_else(|| params("unknown_session", "session does not exist"))?;
@@ -347,11 +351,9 @@ impl PalMcpServer {
             .verifier
             .invalidate_all()
             .map_err(|error| ErrorData::internal_error(error.message, None))?;
-        session.includes.extend(
-            include_paths
-                .into_iter()
-                .map(|path| self.shared.root.join(path)),
-        );
+        session
+            .includes
+            .extend(include_paths.into_iter().map(|path| root.join(path)));
         session.defines.extend(defines);
         Ok(CallToolResult::structured(json!({
             "session_id": session_id,
@@ -361,11 +363,16 @@ impl PalMcpServer {
         })))
     }
 
-    pub(super) async fn shutdown(&self) {
+    async fn reset_project(&self, root: Option<PathBuf>) -> workspace::Result<()> {
+        let _reset = self.shared.reset.lock().await;
+        if root.is_some() && self.shared.shutting_down.load(Ordering::Relaxed) {
+            return Err(Failure::new("worker_failed", "PAL server is shutting down"));
+        }
         let pending: Vec<_> = {
-            let mut sessions = self.shared.sessions();
-            self.shared.shutting_down.store(true, Ordering::Relaxed);
-            sessions
+            let mut project = self.shared.project();
+            project.root = None;
+            project
+                .sessions
                 .values_mut()
                 .filter_map(|session| {
                     session.closing = true;
@@ -379,12 +386,66 @@ impl PalMcpServer {
         for mut done in pending {
             let _ = done.wait_for(|done| done.is_some()).await;
         }
-        self.shared.sessions().clear();
+        let invalidated = self.shared.verifier.clear().await;
+        let mut project = self.shared.project();
+        for id in project.sessions.keys() {
+            let _ = self.shared.updates.send(id.status_uri());
+        }
+        project.sessions.clear();
+        invalidated?;
+        if !self.shared.shutting_down.load(Ordering::Relaxed) {
+            project.root = root;
+        } else if root.is_some() {
+            return Err(Failure::new("worker_failed", "PAL server is shutting down"));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn shutdown(&self) {
+        self.shared.shutting_down.store(true, Ordering::Relaxed);
+        let _ = self.reset_project(None).await;
     }
 }
 
 #[tool_router]
 impl PalMcpServer {
+    #[tool(
+        description = "Start a new PAL project at path. Cancels and joins all old jobs, removes sessions and status resources, and clears all verification caches. Relative paths use the server process working directory; invalid paths leave the current project intact."
+    )]
+    async fn new_root(
+        &self,
+        Parameters(input): Parameters<RootInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if input.path.is_empty() || input.path.contains('\0') {
+            return Err(params(
+                "invalid_path",
+                "root path must be a nonempty filesystem path",
+            ));
+        }
+        let root = PathBuf::from(input.path).canonicalize().map_err(|error| {
+            params(
+                "invalid_path",
+                &format!("cannot open workspace root: {error}"),
+            )
+        })?;
+        if !root.is_dir() {
+            return Err(params("invalid_path", "workspace root must be a directory"));
+        }
+        // Finish the reset even if the client cancels this tool request.
+        let server = self.clone();
+        tokio::spawn(async move {
+            server
+                .reset_project(Some(root.clone()))
+                .await
+                .map_err(|error| ErrorData::internal_error(error.message, None))?;
+            Ok(CallToolResult::structured(json!({"root":root})))
+        })
+        .await
+        .map_err(|error| {
+            ErrorData::internal_error(format!("project reset failed: {error}"), None)
+        })?
+    }
+
     #[tool(description = "Open a PAL verification session, cancel its job, or close it.")]
     async fn pal_session(
         &self,
@@ -410,18 +471,22 @@ impl PalMcpServer {
                     diagnostics: Diagnostics::new(),
                     error: None,
                 };
-                let includes = include_paths
-                    .into_iter()
-                    .map(|path| self.shared.root.join(path))
-                    .collect();
-                let mut sessions = self.shared.sessions();
+                let mut project = self.shared.project();
                 if self.shared.shutting_down.load(Ordering::Relaxed) {
                     return Err(ErrorData::internal_error(
                         "PAL server is shutting down",
                         None,
                     ));
                 }
-                sessions.insert(
+                let root = project
+                    .root
+                    .as_ref()
+                    .ok_or_else(|| params("no_root", "call new_root before opening a session"))?;
+                let includes = include_paths
+                    .into_iter()
+                    .map(|path| root.join(path))
+                    .collect();
+                project.sessions.insert(
                     id.clone(),
                     Session {
                         includes,
@@ -439,8 +504,9 @@ impl PalMcpServer {
             }
             SessionAction::Cancel { session_id, job_id } => {
                 let mut done = {
-                    let sessions = self.shared.sessions();
-                    let session = sessions
+                    let project = self.shared.project();
+                    let session = project
+                        .sessions
                         .get(&session_id)
                         .ok_or_else(|| params("unknown_session", "session does not exist"))?;
                     if let Some(job) = session.job.as_ref().filter(|job| job.id == job_id) {
@@ -470,8 +536,9 @@ impl PalMcpServer {
             }
             SessionAction::Close { session_id } => {
                 let pending = {
-                    let mut sessions = self.shared.sessions();
-                    let session = sessions
+                    let mut project = self.shared.project();
+                    let session = project
+                        .sessions
                         .get_mut(&session_id)
                         .ok_or_else(|| params("unknown_session", "session does not exist"))?;
                     session.closing = true;
@@ -483,7 +550,7 @@ impl PalMcpServer {
                 if let Some(mut done) = pending {
                     let _ = done.wait_for(|done| done.is_some()).await;
                 }
-                self.shared.sessions().remove(&session_id);
+                self.shared.project().sessions.remove(&session_id);
                 Ok(CallToolResult::structured(
                     json!({"session_id":session_id,"closed":true}),
                 ))
@@ -518,9 +585,14 @@ impl PalMcpServer {
         &self,
         Parameters(input): Parameters<VerifyInput>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (job_id, cancel, done, sources, includes, defines, proofs) = {
-            let mut sessions = self.shared.sessions();
-            let session = sessions
+        let (root, job_id, cancel, done, sources, includes, defines, proofs) = {
+            let mut project = self.shared.project();
+            let root = project
+                .root
+                .clone()
+                .ok_or_else(|| params("no_root", "call new_root before opening a session"))?;
+            let session = project
+                .sessions
                 .get_mut(&input.session_id)
                 .filter(|session| !session.closing)
                 .ok_or_else(|| params("unknown_session", "session does not exist"))?;
@@ -538,8 +610,7 @@ impl PalMcpServer {
                 .as_ref()
                 .map(|accepted| accepted.indexed.snapshot.sources.clone())
                 .unwrap_or_default();
-            workspace::validate_changes(&self.shared.root, &sources, &input.changes)
-                .map_err(invalid)?;
+            workspace::validate_changes(&root, &sources, &input.changes).map_err(invalid)?;
             let job_id = JobId::next()?;
             let cancel = Cancellation::new();
             let done = watch::channel(None).0;
@@ -563,6 +634,7 @@ impl PalMcpServer {
             session.status.error = None;
             self.shared.publish(session);
             (
+                root,
                 job_id,
                 cancel,
                 done,
@@ -586,6 +658,7 @@ impl PalMcpServer {
             let mut worker = tokio::spawn(async move {
                 run_job(
                     worker_shared,
+                    root,
                     worker_id,
                     worker_job,
                     sources,
@@ -602,7 +675,7 @@ impl PalMcpServer {
                 tokio::select! {
                     result = &mut worker => break result.unwrap_or_else(|error| Err(Failure::new("worker_failed", format!("verification worker failed: {error}")))),
                     _ = heartbeat.tick() => {
-                        let phase = shared.sessions().get(&id).map(|session| session.status.phase);
+                        let phase = shared.project().sessions.get(&id).map(|session| session.status.phase);
                         if let Some(phase) = phase { shared.progress(&id, &job, phase, "", false); }
                     }
                 }
@@ -623,9 +696,11 @@ impl PalMcpServer {
         Parameters(input): Parameters<QueryInput>,
     ) -> Result<CallToolResult, ErrorData> {
         let (indexed, revision, job_id, complete) = {
-            let sessions = self.shared.sessions();
-            let session = sessions
+            let project = self.shared.project();
+            let session = project
+                .sessions
                 .get(&input.session_id)
+                .filter(|session| !session.closing)
                 .ok_or_else(|| params("unknown_session", "session does not exist"))?;
             if let Some(job_id) = &input.job_id {
                 if let Some(accepted) = session
@@ -695,6 +770,7 @@ struct JobSuccess {
 
 async fn run_job(
     shared: Arc<Shared>,
+    root: PathBuf,
     id: SessionId,
     job: JobId,
     sources: Vec<ManagedSource>,
@@ -716,7 +792,6 @@ async fn run_job(
         "preparing frozen sources and semantic index",
         true,
     );
-    let root = shared.root.clone();
     let tools = shared.verifier.toolchain.clone();
     let indexed = tokio::task::spawn_blocking(move || {
         let mut snapshot = workspace::prepare(root, sources, changes, includes, defines)?;
@@ -729,8 +804,9 @@ async fn run_job(
     .await
     .map_err(|error| Failure::new("worker_failed", format!("snapshot worker failed: {error}")))??;
     {
-        let mut sessions = shared.sessions();
-        let session = sessions
+        let mut project = shared.project();
+        let session = project
+            .sessions
             .get_mut(&id)
             .ok_or_else(|| Failure::new("cancelled", "session closed"))?;
         let active = session
@@ -781,8 +857,8 @@ fn finish_job(
     result: workspace::Result<JobSuccess>,
 ) -> Phase {
     let mut _publication_permit = None;
-    let mut sessions = shared.sessions();
-    let Some(session) = sessions.get_mut(id) else {
+    let mut project = shared.project();
+    let Some(session) = project.sessions.get_mut(id) else {
         return Phase::Cancelled;
     };
     if !session
@@ -833,7 +909,6 @@ fn finish_job(
             Phase::Failed
         };
         session.status.message = public_text(
-            &shared.root,
             session.job.as_ref().and_then(|job| job.indexed.as_deref()),
             &failure.message,
         );
@@ -869,7 +944,8 @@ impl ServerHandler for PalMcpServer {
     ) -> Result<ListResourcesResult, ErrorData> {
         let resources = self
             .shared
-            .sessions()
+            .project()
+            .sessions
             .keys()
             .map(|id| {
                 Resource::new(id.status_uri(), format!("PAL session {} status", id.0))
@@ -886,8 +962,9 @@ impl ServerHandler for PalMcpServer {
         _: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let text = {
-            let sessions = self.shared.sessions();
-            let session = sessions
+            let project = self.shared.project();
+            let session = project
+                .sessions
                 .values()
                 .find(|session| session.status.session_id.status_uri() == request.uri)
                 .ok_or_else(|| {
@@ -927,6 +1004,9 @@ impl ServerHandler for PalMcpServer {
             .resource_subscriptions
             .clone()
             .unwrap_or_default();
+        if self.shared.existing_uris(&accepted).is_empty() {
+            return Ok(());
+        }
         for uri in self.shared.existing_uris(&accepted) {
             if context.sink().notify_resource_updated(uri).await.is_err() {
                 return Ok(());
@@ -941,6 +1021,9 @@ impl ServerHandler for PalMcpServer {
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
                 }
             };
+            if self.shared.existing_uris(&accepted).is_empty() {
+                return Ok(());
+            }
             for uri in uris {
                 if context.sink().notify_resource_updated(uri).await.is_err() {
                     return Ok(());
@@ -956,13 +1039,13 @@ fn params(reason: &str, message: &str) -> ErrorData {
 fn invalid(failure: Failure) -> ErrorData {
     ErrorData::invalid_params(failure.message, Some(json!({"reason":failure.code})))
 }
-fn public_text(root: &std::path::Path, indexed: Option<&Indexed>, message: &str) -> String {
+fn public_text(indexed: Option<&Indexed>, message: &str) -> String {
     let mut message = message.to_owned();
     if let Some(indexed) = indexed {
         let snapshot = &indexed.snapshot;
         message = message.replace(
             snapshot.mirror().to_string_lossy().as_ref(),
-            root.to_string_lossy().as_ref(),
+            snapshot.root.to_string_lossy().as_ref(),
         );
         message = message
             .replace(&format!("{}/", snapshot.out().display()), "")

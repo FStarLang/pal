@@ -128,17 +128,24 @@ library. The default build and ordinary translation CLI do not enable MCP.
 ```bash
 env -u ADMIT -u OTHERFLAGS make -C pulse
 cargo build --features mcp
-LIBCLANG_PATH=/usr/lib/llvm20/lib target/debug/pal mcp --root .
+LIBCLANG_PATH=/usr/lib/llvm20/lib target/debug/pal mcp
 ```
 
 `pal mcp` uses stdio exclusively for MCP JSON-RPC; compiler/verifier logs go to
-stderr. Options: `--root` (default `.`), `--fstar-exe` (default `fstar.exe`), and
+stderr. Options: `--fstar-exe` (default `fstar.exe`) and
 `--pulse-dir` (default the build-time repository's `pulse/`, override after
 relocating the executable). LLVM's selected Clang and loaded libclang must have
 the same major version; a mismatch reports how to set `LIBCLANG_PATH`.
 
+First call `new_root` with `{"path":"/path/to/project"}`, then open a session.
+There is no default project or `--root` argument; opening a session beforehand
+fails with `no_root`. Absolute and relative directory paths are accepted; relative
+paths resolve against the server process's working directory. Invalid roots fail
+with `invalid_path` without disturbing the current project.
+
 | Tool | Arguments and behavior |
 |------|------------------------|
+| `new_root` | `{"path":"/path/to/project"}` returns `{"root":"/canonical/path/to/project"}` after cancelling/joining all old work, removing all sessions/status resources, ending their subscriptions, and clearing verification caches. Calling it with the same root also starts fresh. Open a new session afterward; old IDs are never reused. |
 | `pal_session` | `{"action":"open","include_paths":[],"defines":[]}` returns a session ID, revision `0`, and status URI. `cancel` takes `session_id`/`job_id`; `close` takes `session_id` and releases its snapshots. |
 | `add_include_paths` | `{"session_id":"s1","include_paths":["include","vendor/include"]}` appends directories, like `-Iinclude -Ivendor/include`. Relative paths resolve against the server root. |
 | `add_preprocessor_definition` | `{"session_id":"s1","defines":["FOO","BAR=value"]}` appends definitions, like `-DFOO -DBAR=value`. |
