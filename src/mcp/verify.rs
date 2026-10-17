@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use moka::future::Cache;
@@ -36,6 +36,9 @@ struct VerificationKey([u8; 32]);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct VerificationContext([u8; 32]);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CacheGeneration(u64);
+
 #[derive(Debug, Eq, PartialEq)]
 struct ArtifactChecksum([u8; 32]);
 
@@ -56,6 +59,7 @@ pub struct VerifiedArtifacts {
     // The accepted session and the bounded LRU pin this lifetime independently.
     storage: Arc<tempfile::TempDir>,
     context: VerificationContext,
+    generation: CacheGeneration,
     generated: Arc<GeneratedSources>,
     checked: BTreeMap<String, ArtifactChecksum>,
 }
@@ -126,6 +130,7 @@ pub struct Verifier {
     fstar: PathBuf,
     pulse: PathBuf,
     cache: Cache<VerificationKey, Arc<VerifiedArtifacts>>,
+    generation: AtomicU64,
     // ponytail: one verifier job at a time; raise concurrency only after measuring solver memory.
     pub gate: Arc<Semaphore>,
 }
@@ -169,8 +174,21 @@ impl Verifier {
                 .max_capacity(32)
                 .eviction_policy(moka::policy::EvictionPolicy::lru())
                 .build(),
+            generation: AtomicU64::new(0),
             gate: Arc::new(Semaphore::new(1)),
         })
+    }
+
+    pub fn invalidate_all(&self) -> Result<()> {
+        self.generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
+                generation.checked_add(1)
+            })
+            .map_err(|_| {
+                Failure::new("worker_failed", "verification cache generation exhausted")
+            })?;
+        self.cache.invalidate_all();
+        Ok(())
     }
 
     /// Caller owns the server-wide permit from preparation through final publication.
@@ -296,12 +314,15 @@ impl Verifier {
             ));
         }
         let sources = Arc::new(GeneratedSources::read(snapshot)?);
+        // Tag in-flight results too: a concurrent invalidation must not revive old proofs.
+        let generation = CacheGeneration(self.generation.load(Ordering::Relaxed));
+        let accepted = accepted.filter(|previous| previous.generation == generation);
         if let Some(previous) = &accepted {
             previous.validate()?;
         }
         snapshot.recheck_inputs()?;
         let context = self.context().await?;
-        let key = VerificationKey::new(&sources, context);
+        let key = VerificationKey::new(&sources, context, generation);
         progress.publish(
             "verifying",
             "validating generated proof units and checked dependencies",
@@ -376,6 +397,7 @@ impl Verifier {
                 Ok(Arc::new(VerifiedArtifacts {
                     storage: Arc::clone(&snapshot.storage),
                     context,
+                    generation,
                     generated: Arc::clone(&sources),
                     checked,
                 }))
@@ -391,6 +413,9 @@ impl Verifier {
         if let Err(error) = self.recheck(snapshot, context, cancel).await {
             self.cache.invalidate(&key).await;
             return Err(error);
+        }
+        if generation != CacheGeneration(self.generation.load(Ordering::Relaxed)) {
+            self.cache.invalidate(&key).await;
         }
         Ok((checked, hit))
     }
@@ -541,9 +566,14 @@ impl GeneratedSources {
 }
 
 impl VerificationKey {
-    fn new(manifest: &GeneratedSources, context: VerificationContext) -> Self {
+    fn new(
+        manifest: &GeneratedSources,
+        context: VerificationContext,
+        generation: CacheGeneration,
+    ) -> Self {
         let mut hash = Sha256::new();
         field(&mut hash, &context.0);
+        field(&mut hash, &generation.0.to_le_bytes());
         for (name, code) in manifest.iter() {
             field(&mut hash, name.as_bytes());
             field(&mut hash, code);
