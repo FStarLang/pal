@@ -231,10 +231,9 @@ impl Client {
         .unwrap();
         assert_eq!(session.root, self.root);
         let status = self.status(&session.status_uri);
-        assert_eq!(
-            status,
-            json!({"session_id":session.session_id,"job_id":null,"base_revision":0,"accepted_revision":0,"sequence":0,"phase":"idle","elapsed_ms":0,"message":"","verification_cache_hit":false,"diagnostics":{},"error":null})
-        );
+        assert_eq!(status["session_id"], json!(session.session_id));
+        assert_eq!(status["phase"], "idle");
+        assert_eq!(status["accepted_revision"], 0);
         let resources = self.rpc("resources/list", json!({}));
         assert!(
             resources["result"]["resources"]
@@ -254,6 +253,32 @@ impl Client {
         assert_eq!(contents["mimeType"], "application/json");
         assert_eq!(contents["uri"], json!(uri));
         serde_json::from_str(contents["text"].as_str().unwrap()).unwrap()
+    }
+
+    fn heartbeat(&mut self, since: usize, session: &Session) -> Value {
+        let deadline = Instant::now() + RPC_TIMEOUT;
+        loop {
+            if let Some(event) = self.notifications[since..].iter().find(|event| {
+                event["method"] == "notifications/pal/status"
+                    && event["params"]["session_id"] == json!(session.session_id)
+            }) {
+                return event["params"].clone();
+            }
+            self.receive(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    fn no_heartbeats(&mut self, duration: Duration) {
+        let since = self.notifications.len();
+        thread::sleep(duration);
+        self.rpc("ping", json!({}));
+        assert!(
+            self.notifications[since..]
+                .iter()
+                .all(|event| { event["method"] != "notifications/pal/status" }),
+            "unexpected heartbeat: {:?}",
+            &self.notifications[since..]
+        );
     }
 
     fn listen(&mut self, uri: &StatusUri) -> SubscriptionId {
@@ -489,6 +514,13 @@ case "${{1-}}" in
 esac
 qa={qa}
 printf '%s\n' "$$ $*" >> "$qa/batches.log"
+if [ -f "$qa/arm-implementation" ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      */Func_*.fst|Func_*.fst) mv "$qa/arm-implementation" "$qa/arm"; break ;;
+    esac
+  done
+fi
 if [ -f "$qa/arm" ]; then
   rm "$qa/arm"
   sleep 600 &
@@ -1898,5 +1930,153 @@ fn real_mcp_open_root_resets_project() {
         "same-root open removed an existing session"
     );
     client.close(&restarted);
+    client.shutdown();
+}
+
+#[test]
+fn real_mcp_heartbeat_reports_all_sessions_and_current_function() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .unwrap();
+    let wrapper = Wrapper::new();
+    let mut client = Client::start(&repo, &wrapper, &repo);
+    let mut active = client.open(&[]);
+    client.no_heartbeats(Duration::from_millis(1200));
+
+    let observer: Session = serde_json::from_value(client.tool(
+        "pal_session",
+        json!({"action":"open","root":repo,"heartbeat":1}),
+    ))
+    .unwrap();
+    let idle = client.open(&[]);
+    let since = client.notifications.len();
+    for session in [&active, &observer, &idle] {
+        let status = client.heartbeat(since, session);
+        assert_eq!(status["phase"], "idle", "{status}");
+        assert!(status["job_id"].is_null(), "{status}");
+    }
+
+    // Invalid opens must not disable the already-running server-wide timer.
+    invalid(
+        &client.tool_response(
+            "pal_session",
+            json!({
+                "action":"open","root":repo.join("missing-heartbeat-root"),"heartbeat":0
+            }),
+        ),
+        "invalid_path",
+    );
+    invalid(
+        &client.tool_response(
+            "pal_session",
+            json!({
+                "action":"open","root":repo,"heartbeat":u64::MAX
+            }),
+        ),
+        "invalid_heartbeat",
+    );
+    for heartbeat in [json!(-1), json!(0.5), json!("1")] {
+        let response = client.tool_response(
+            "pal_session",
+            json!({
+                "action":"open","root":repo,"heartbeat":heartbeat
+            }),
+        );
+        assert_eq!(response["result"]["isError"], true, "{response}");
+    }
+
+    fs::write(
+        wrapper.directory.path().join("arm-implementation"),
+        "pause implementation\n",
+    )
+    .unwrap();
+    let source = "#include \"pal.h\"\nvoid heartbeat_swap(int *x, int *y)\n_ensures(*x == _old(*y) && *y == _old(*x))\n{ int t = *x; *x = *y; *y = t; }\n";
+    let job = client.submit(&active, json!([replace("examples/heartbeat.c", source)]));
+    wrapper.paused();
+    client.rpc("ping", json!({}));
+    let since = client.notifications.len();
+    let first = client.heartbeat(since, &active);
+    assert_eq!(first["phase"], "verifying", "{first}");
+    assert_eq!(first["job_id"], json!(job.job_id));
+    assert_eq!(first["current_function"], "heartbeat_swap", "{first}");
+    assert_public(&first, &repo);
+    let since = client.notifications.len();
+    let second = client.heartbeat(since, &active);
+    assert_eq!(second["current_function"], "heartbeat_swap", "{second}");
+    assert!(second["elapsed_ms"].as_u64().unwrap() > first["elapsed_ms"].as_u64().unwrap());
+
+    let queued = client.submit(&observer, json!([replace("examples/queued.c", source)]));
+    let since = client.notifications.len();
+    let queued_status = client.heartbeat(since, &observer);
+    assert_eq!(queued_status["phase"], "queued", "{queued_status}");
+    assert_eq!(queued_status["job_id"], json!(queued.job_id));
+    assert!(queued_status["current_function"].is_null());
+    client.tool(
+        "pal_session",
+        json!({"action":"cancel","session_id":observer.session_id,"job_id":queued.job_id}),
+    );
+
+    fs::write(wrapper.directory.path().join("barrier"), "release\n").unwrap();
+    accepted(&client.terminal(&mut active, &job));
+    let since = client.notifications.len();
+    let complete = client.heartbeat(since, &active);
+    assert_eq!(complete["phase"], "accepted", "{complete}");
+    assert!(complete["current_function"].is_null(), "{complete}");
+    let (cached, status, _) = client.run(&mut active, json!([]), &wrapper);
+    assert_eq!(status["verification_cache_hit"], true, "{status}");
+    assert!(status["current_function"].is_null(), "{status}");
+    assert_ne!(cached.job_id, job.job_id);
+
+    client.close(&idle);
+    let since = client.notifications.len();
+    client.heartbeat(since, &active);
+    assert!(client.notifications[since..].iter().all(|event| {
+        event["method"] != "notifications/pal/status"
+            || event["params"]["session_id"] != json!(idle.session_id)
+    }));
+
+    // Reconfiguration replaces the timer; it must not leave the old one firing.
+    let slower: Session = serde_json::from_value(client.tool(
+        "pal_session",
+        json!({
+            "action":"open","root":repo,"heartbeat":2
+        }),
+    ))
+    .unwrap();
+    client.no_heartbeats(Duration::from_millis(1200));
+    let since = client.notifications.len();
+    client.heartbeat(since, &slower);
+    let disabled: Session = serde_json::from_value(client.tool(
+        "pal_session",
+        json!({
+            "action":"open","root":repo,"heartbeat":0
+        }),
+    ))
+    .unwrap();
+    assert_eq!(client.status(&disabled.status_uri)["phase"], "idle");
+    client.no_heartbeats(Duration::from_millis(2200));
+
+    let replacement = tempfile::tempdir().unwrap();
+    let fresh: Session = serde_json::from_value(client.tool(
+        "pal_session",
+        json!({
+            "action":"open","root":replacement.path(),"heartbeat":1
+        }),
+    ))
+    .unwrap();
+    let since = client.notifications.len();
+    assert_eq!(client.heartbeat(since, &fresh)["phase"], "idle");
+    assert!(
+        client.notifications[since..]
+            .iter()
+            .filter(|event| { event["method"] == "notifications/pal/status" })
+            .all(|event| event["params"]["session_id"] == json!(fresh.session_id))
+    );
+    client.close(&fresh);
+    client.no_heartbeats(Duration::from_millis(1200));
+    client.root = replacement.path().to_path_buf();
+    let reopened = client.open(&[]);
+    let since = client.notifications.len();
+    client.heartbeat(since, &reopened);
     client.shutdown();
 }

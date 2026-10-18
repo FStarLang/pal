@@ -149,6 +149,8 @@ struct Status {
     phase: Phase,
     elapsed_ms: u64,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_function: Option<String>,
     verification_cache_hit: bool,
     diagnostics: Diagnostics,
     error: Option<Failure>,
@@ -171,7 +173,6 @@ struct Job {
     active: bool,
     started: Instant,
     last_update: Instant,
-    pending_message: String,
 }
 struct Session {
     includes: Vec<PathBuf>,
@@ -181,6 +182,16 @@ struct Session {
     job: Option<Job>,
     status: Status,
     closing: bool,
+}
+
+impl Session {
+    fn status(&mut self) -> &Status {
+        if let Some(job) = self.job.as_ref().filter(|job| job.active) {
+            self.status.elapsed_ms =
+                u64::try_from(job.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        }
+        &self.status
+    }
 }
 struct Project {
     root: Option<PathBuf>,
@@ -192,6 +203,7 @@ struct Shared {
     reset: tokio::sync::Mutex<()>,
     shutting_down: AtomicBool,
     updates: broadcast::Sender<String>,
+    heartbeat: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Shared {
     fn project(&self) -> MutexGuard<'_, Project> {
@@ -214,6 +226,7 @@ impl Shared {
         job_id: &JobId,
         phase: Phase,
         message: &str,
+        current_function: Option<&str>,
         force: bool,
     ) {
         let mut project = self.project();
@@ -232,13 +245,18 @@ impl Shared {
         }
         let changed_phase = session.status.phase != phase;
         session.status.phase = phase;
+        let changed_function =
+            !message.is_empty() && session.status.current_function.as_deref() != current_function;
         if !message.is_empty() {
-            job.pending_message = public_text(job.indexed.as_deref(), message);
+            session.status.message = public_text(job.indexed.as_deref(), message);
+            session.status.current_function =
+                current_function.map(|name| public_text(job.indexed.as_deref(), name));
         }
-        if force || changed_phase || job.last_update.elapsed() >= Duration::from_secs(1) {
-            if !job.pending_message.is_empty() {
-                session.status.message = std::mem::take(&mut job.pending_message);
-            }
+        if force
+            || changed_phase
+            || changed_function
+            || job.last_update.elapsed() >= Duration::from_secs(1)
+        {
             self.publish(session);
         }
     }
@@ -268,6 +286,8 @@ enum SessionAction {
         include_paths: Vec<String>,
         #[serde(default)]
         defines: Vec<String>,
+        /// Server-wide status notification interval in seconds; 0 disables, omission preserves it.
+        heartbeat: Option<u64>,
     },
     Cancel {
         session_id: SessionId,
@@ -319,6 +339,7 @@ impl PalMcpServer {
                 reset: tokio::sync::Mutex::new(()),
                 shutting_down: AtomicBool::new(false),
                 updates: broadcast::channel(64).0,
+                heartbeat: Mutex::new(None),
             }),
             tool_router: Self::tool_router(),
         })
@@ -398,8 +419,65 @@ impl PalMcpServer {
         Ok(())
     }
 
+    fn set_heartbeat(&self, seconds: u64, peer: rmcp::service::Peer<RoleServer>) {
+        let mut heartbeat = self
+            .shared
+            .heartbeat
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(task) = heartbeat.take() {
+            task.abort();
+        }
+        if seconds == 0 {
+            return;
+        }
+        let shared = Arc::downgrade(&self.shared);
+        *heartbeat = Some(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(seconds)).await;
+                let Some(shared) = shared.upgrade() else {
+                    return;
+                };
+                if shared.shutting_down.load(Ordering::Relaxed) {
+                    return;
+                }
+                let reports: Vec<_> = {
+                    let mut project = shared.project();
+                    project
+                        .sessions
+                        .values_mut()
+                        .filter(|session| !session.closing)
+                        .map(|session| serde_json::to_value(session.status()))
+                        .collect()
+                };
+                for report in reports {
+                    let Ok(report) = report else { return };
+                    let notification =
+                        CustomNotification::new("notifications/pal/status", Some(report));
+                    if peer
+                        .send_notification(ServerNotification::CustomNotification(notification))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }));
+    }
+
     pub(super) async fn shutdown(&self) {
         self.shared.shutting_down.store(true, Ordering::Relaxed);
+        let heartbeat = self
+            .shared
+            .heartbeat
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(task) = heartbeat {
+            task.abort();
+            let _ = task.await;
+        }
         let _ = self.reset_project(None).await;
     }
 }
@@ -407,19 +485,31 @@ impl PalMcpServer {
 #[tool_router]
 impl PalMcpServer {
     #[tool(
-        description = "Open a PAL verification session at a project root, cancel its job, or close it. Opening with a different root than the current project cancels and joins all old jobs, removes all sessions and status resources, and clears verification caches; opening with the same root adds a session and keeps existing sessions and caches. Relative roots use the server process working directory; invalid roots change nothing."
+        description = "Open a PAL verification session at a project root, cancel its job, or close it. Optional heartbeat seconds on open sets a server-wide interval for notifications/pal/status reports for every open session (0 disables; omission preserves). Opening with a different root cancels and joins all old jobs, removes all sessions/status resources, and clears verification caches; the same root preserves them. Relative roots use the server working directory; invalid roots change nothing."
     )]
     async fn pal_session(
         &self,
         Parameters(action): Parameters<SessionAction>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         match action {
             SessionAction::Open {
                 root,
                 include_paths,
                 defines,
+                heartbeat,
             } => {
                 validate_compile_options(&include_paths, &defines)?;
+                if heartbeat.is_some_and(|seconds| {
+                    Instant::now()
+                        .checked_add(Duration::from_secs(seconds))
+                        .is_none()
+                }) {
+                    return Err(params(
+                        "invalid_heartbeat",
+                        "heartbeat seconds exceed the timer range",
+                    ));
+                }
                 let root = canonical_root(root)?;
                 // Finish the reset and insertion even if the client cancels this tool request.
                 let server = self.clone();
@@ -441,6 +531,7 @@ impl PalMcpServer {
                         phase: Phase::Idle,
                         elapsed_ms: 0,
                         message: String::new(),
+                        current_function: None,
                         verification_cache_hit: false,
                         diagnostics: Diagnostics::new(),
                         error: None,
@@ -476,6 +567,9 @@ impl PalMcpServer {
                             closing: false,
                         },
                     );
+                    if let Some(seconds) = heartbeat {
+                        server.set_heartbeat(seconds, context.peer);
+                    }
                     Ok(CallToolResult::structured(
                         json!({"session_id":id,"accepted_revision":0,"status_uri":id.status_uri(),"root":root}),
                     ))
@@ -605,13 +699,13 @@ impl PalMcpServer {
                 active: true,
                 started: Instant::now(),
                 last_update: Instant::now(),
-                pending_message: String::new(),
             });
             session.status.job_id = Some(job_id.clone());
             session.status.base_revision = input.base_revision;
             session.status.phase = Phase::Queued;
             session.status.elapsed_ms = 0;
             session.status.message.clear();
+            session.status.current_function = None;
             session.status.verification_cache_hit = false;
             session.status.diagnostics.clear();
             session.status.error = None;
@@ -659,7 +753,7 @@ impl PalMcpServer {
                     result = &mut worker => break result.unwrap_or_else(|error| Err(Failure::new("worker_failed", format!("verification worker failed: {error}")))),
                     _ = heartbeat.tick() => {
                         let phase = shared.project().sessions.get(&id).map(|session| session.status.phase);
-                        if let Some(phase) = phase { shared.progress(&id, &job, phase, "", false); }
+                        if let Some(phase) = phase { shared.progress(&id, &job, phase, "", None, false); }
                     }
                 }
             };
@@ -792,6 +886,7 @@ async fn run_job(
         &job,
         Phase::Snapshotting,
         "preparing frozen sources and semantic index",
+        None,
         true,
     );
     let tools = shared.verifier.toolchain.clone();
@@ -824,14 +919,23 @@ async fn run_job(
     let progress_shared = shared.clone();
     let progress_id = id.clone();
     let progress_job = job.clone();
-    let progress = verify::Progress::new(move |phase: &str, message: &str| {
-        let phase = if phase == "translating" {
-            Phase::Translating
-        } else {
-            Phase::Verifying
-        };
-        progress_shared.progress(&progress_id, &progress_job, phase, message, false);
-    });
+    let progress = verify::Progress::new(
+        move |phase: &str, message: &str, current_function: Option<&str>| {
+            let phase = if phase == "translating" {
+                Phase::Translating
+            } else {
+                Phase::Verifying
+            };
+            progress_shared.progress(
+                &progress_id,
+                &progress_job,
+                phase,
+                message,
+                current_function,
+                false,
+            );
+        },
+    );
     let result = shared
         .verifier
         .verify(
@@ -920,6 +1024,7 @@ fn finish_job(
         session.status.message = "verification accepted".to_owned();
         session.status.error = None;
     }
+    session.status.current_function = None;
     if let Some(job) = &mut session.job {
         job.active = false;
     }
@@ -975,10 +1080,10 @@ impl ServerHandler for PalMcpServer {
         _: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let text = {
-            let project = self.shared.project();
+            let mut project = self.shared.project();
             let session = project
                 .sessions
-                .values()
+                .values_mut()
                 .find(|session| session.status.session_id.status_uri() == request.uri)
                 .ok_or_else(|| {
                     ErrorData::resource_not_found(
@@ -986,7 +1091,7 @@ impl ServerHandler for PalMcpServer {
                         None,
                     )
                 })?;
-            serde_json::to_string(&session.status)
+            serde_json::to_string(session.status())
                 .map_err(|error| ErrorData::internal_error(error.to_string(), None))?
         };
         Ok(ReadResourceResult::new(vec![

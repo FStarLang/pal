@@ -43,6 +43,8 @@ pub struct TranslationMetadata {
     pub diagnostics: Diagnostics,
     /// Generated basenames, including interface aliases, owned by this candidate's C declarations.
     pub owners: BTreeMap<String, (PathBuf, Range)>,
+    /// Validated implementation basenames mapped to their source C declaration names.
+    pub declarations: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +151,7 @@ pub fn translation(
         }
     }
     let mut owners = BTreeMap::new();
+    let mut declarations = BTreeMap::new();
     for source in info.source_files {
         let path = source_path(snapshot, &source.uri)?;
         let file = path.as_ref().map(|path| &snapshot.files[path]);
@@ -181,6 +184,16 @@ pub fn translation(
                 .declaration_range(path, &module.decl_name)
                 .unwrap_or(broad);
             let owner = (path.clone(), range);
+            let declaration = redactor.text(&module.decl_name);
+            if declarations
+                .get(&module.fst_file)
+                .is_some_and(|previous| previous != &declaration)
+            {
+                return Err(metadata_failure(
+                    "source-range metadata assigns a module to conflicting declarations",
+                ));
+            }
+            declarations.insert(module.fst_file.clone(), declaration);
             let interface = format!("{}i", module.fst_file);
             for name in [module.fst_file, interface] {
                 if let Some(previous) = owners.insert(name, owner.clone()) {
@@ -196,6 +209,7 @@ pub fn translation(
     Ok(TranslationMetadata {
         diagnostics,
         owners,
+        declarations,
     })
 }
 

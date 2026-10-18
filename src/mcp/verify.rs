@@ -20,14 +20,14 @@ use super::process::{self, Cancellation};
 use super::workspace::{Failure, Result, Snapshot, Toolchain};
 
 #[derive(Clone)]
-pub struct Progress(Arc<dyn Fn(&str, &str) + Send + Sync>);
+pub struct Progress(Arc<dyn Fn(&str, &str, Option<&str>) + Send + Sync>);
 
 impl Progress {
-    pub fn new(callback: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
+    pub fn new(callback: impl Fn(&str, &str, Option<&str>) + Send + Sync + 'static) -> Self {
         Self(Arc::new(callback))
     }
-    fn publish(&self, phase: &str, message: &str) {
-        (self.0)(phase, message);
+    fn publish(&self, phase: &str, message: &str, current_function: Option<&str>) {
+        (self.0)(phase, message, current_function);
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -249,7 +249,7 @@ impl Verifier {
         if let Some(failure) = &index.failure {
             return Err(failure.clone());
         }
-        progress.publish("translating", "translating frozen candidate sources");
+        progress.publish("translating", "translating frozen candidate sources", None);
         let mut arguments = vec![
             "--quiet".to_owned(),
             "--outdir".to_owned(),
@@ -268,7 +268,7 @@ impl Verifier {
             &arguments,
             &snapshot.root,
             cancel,
-            process::Output::new(move |line| output_progress.publish("translating", &line)),
+            process::Output::new(move |line| output_progress.publish("translating", &line, None)),
         )
         .await?;
         cancel.check()?;
@@ -332,6 +332,7 @@ impl Verifier {
         progress.publish(
             "verifying",
             "validating generated proof units and checked dependencies",
+            None,
         );
         let computed = AtomicBool::new(false);
         let checked = self
@@ -365,21 +366,39 @@ impl Verifier {
                         signatures.push(name);
                     }
                 }
-                let batches = std::iter::once(signatures.as_slice())
-                    .chain(implementations.iter().map(std::slice::from_ref));
-                for names in batches {
+                let batches = std::iter::once((signatures.as_slice(), None)).chain(
+                    implementations.iter().map(|name| {
+                        (
+                            std::slice::from_ref(name),
+                            metadata.declarations.get(*name).map(String::as_str),
+                        )
+                    }),
+                );
+                for (names, current_function) in batches {
                     let arguments = self.arguments(snapshot, names)?;
+                    progress.publish(
+                        "verifying",
+                        &format!("verifying proof units: {}", names.join(", ")),
+                        current_function,
+                    );
                     let output_progress = progress.clone();
+                    let output_function = current_function.map(str::to_owned);
                     let output = process::run(
                         &self.fstar,
                         &arguments,
                         &snapshot.out(),
                         cancel,
                         process::Output::new(move |line| {
-                            output_progress.publish("verifying", &line)
+                            output_progress.publish("verifying", &line, output_function.as_deref())
                         }),
                     )
-                    .await?;
+                    .await;
+                    progress.publish(
+                        "verifying",
+                        "validating generated proof units and checked dependencies",
+                        None,
+                    );
+                    let output = output?;
                     let issues = diagnostics::fstar(
                         snapshot,
                         &metadata,

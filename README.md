@@ -149,7 +149,7 @@ IDs are never reused. To clear caches without changing roots, use
 
 | Tool | Arguments and behavior |
 |------|------------------------|
-| `pal_session` | `{"action":"open","root":"/path/to/project","include_paths":[],"defines":[]}` returns the canonical `root`, a session ID, revision `0`, and status URI. `cancel` takes `session_id`/`job_id`; `close` takes `session_id` and releases its snapshots. |
+| `pal_session` | `{"action":"open","root":"/path/to/project","include_paths":[],"defines":[],"heartbeat":5}` returns the canonical `root`, a session ID, revision `0`, and status URI. Optional `heartbeat` sets the server-wide status interval in seconds. `cancel` takes `session_id`/`job_id`; `close` takes `session_id` and releases its snapshots. |
 | `add_include_paths` | `{"session_id":"s1","include_paths":["include","vendor/include"]}` appends directories, like `-Iinclude -Ivendor/include`. Relative paths resolve against the server root. |
 | `add_preprocessor_definition` | `{"session_id":"s1","defines":["FOO","BAR=value"]}` appends definitions, like `-DFOO -DBAR=value`. |
 | `pal_verify` | `{"session_id":"s1","base_revision":0,"changes":[{"op":"reference","path":"examples/example.c"}]}` immediately reserves a background job. Stale revisions and busy sessions start no job. |
@@ -184,6 +184,32 @@ Polling `resources/read` also works; updates may coalesce. RMCP's 2026-07-28
 protocol uses per-request `_meta` with `io.modelcontextprotocol/protocolVersion`
 set to `2026-07-28` and `io.modelcontextprotocol/clientCapabilities` set to `{}`.
 An older `initialize` handshake alone does not select modern subscriptions.
+
+For unsolicited status reports, open with `"heartbeat":5`. The server sends one
+`notifications/pal/status` custom notification per open session every five seconds,
+starting after the first interval, including idle, queued and terminal sessions.
+No resource subscription or progress token is required. Clients must handle this
+notification method; generic clients may ignore custom notifications.
+Its `params` is the same JSON status object returned by `resources/read`, including
+`session_id`, `job_id`, revisions, phase, live `elapsed_ms`, message, diagnostics
+and error. For example, during an isolated implementation proof:
+
+```json
+{"jsonrpc":"2.0","method":"notifications/pal/status","params":{"session_id":"s1","job_id":"j1","base_revision":0,"accepted_revision":0,"sequence":22,"phase":"verifying","elapsed_ms":23076,"message":"verifying proof units: Func_swap.fst","current_function":"swap","verification_cache_hit":false,"diagnostics":{},"error":null}}
+```
+
+`current_function` comes from PAL's validated C declaration metadata and remains
+present while that function's F* subprocess runs, even when it produces no output.
+It is absent during translation, multi-unit signature batches, cache validation,
+and terminal/idle states; batch-start messages name the proof units instead.
+
+Heartbeat seconds must be a nonnegative whole number within the platform timer
+range. `0` disables reports server-wide; omission (or `null`) preserves the current
+setting, initially disabled. A successful open with a new value replaces the timer;
+invalid opens change nothing. The setting survives root changes and closing all
+sessions, but removed/closing sessions are no longer reported. An already queued
+notification can still arrive after close/reset/disable. Disconnect/shutdown stops
+the timer. Existing resource subscriptions and their coalesced updates are unchanged.
 
 Changes are tagged `reference` (attach/refresh a local file), `replace` (complete
 inline `code`), or `append` (append `code` bytes exactly to a managed source,
