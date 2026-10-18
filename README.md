@@ -137,16 +137,19 @@ stderr. Options: `--fstar-exe` (default `fstar.exe`) and
 relocating the executable). LLVM's selected Clang and loaded libclang must have
 the same major version; a mismatch reports how to set `LIBCLANG_PATH`.
 
-First call `new_root` with `{"path":"/path/to/project"}`, then open a session.
-There is no default project or `--root` argument; opening a session beforehand
-fails with `no_root`. Absolute and relative directory paths are accepted; relative
-paths resolve against the server process's working directory. Invalid roots fail
-with `invalid_path` without disturbing the current project.
+Open a session with `{"action":"open","root":"/path/to/project"}`. There is no
+default project or `--root` argument. Absolute and relative directory paths are
+accepted; relative roots resolve against the server process's working directory.
+Invalid roots fail with `invalid_path` without disturbing the current project.
+Opening the same canonical root preserves existing sessions and caches; opening
+a different root cancels and joins old jobs, removes all old sessions/status
+resources, ends their subscriptions, and clears verification caches. Old session
+IDs are never reused. To clear caches without changing roots, use
+`add_include_paths` with an empty list.
 
 | Tool | Arguments and behavior |
 |------|------------------------|
-| `new_root` | `{"path":"/path/to/project"}` returns `{"root":"/canonical/path/to/project"}` after cancelling/joining all old work, removing all sessions/status resources, ending their subscriptions, and clearing verification caches. Calling it with the same root also starts fresh. Open a new session afterward; old IDs are never reused. |
-| `pal_session` | `{"action":"open","include_paths":[],"defines":[]}` returns a session ID, revision `0`, and status URI. `cancel` takes `session_id`/`job_id`; `close` takes `session_id` and releases its snapshots. |
+| `pal_session` | `{"action":"open","root":"/path/to/project","include_paths":[],"defines":[]}` returns the canonical `root`, a session ID, revision `0`, and status URI. `cancel` takes `session_id`/`job_id`; `close` takes `session_id` and releases its snapshots. |
 | `add_include_paths` | `{"session_id":"s1","include_paths":["include","vendor/include"]}` appends directories, like `-Iinclude -Ivendor/include`. Relative paths resolve against the server root. |
 | `add_preprocessor_definition` | `{"session_id":"s1","defines":["FOO","BAR=value"]}` appends definitions, like `-DFOO -DBAR=value`. |
 | `pal_verify` | `{"session_id":"s1","base_revision":0,"changes":[{"op":"reference","path":"examples/example.c"}]}` immediately reserves a background job. Stale revisions and busy sessions start no job. |
@@ -167,6 +170,10 @@ submissions can cache the new result normally. Failed/cancelled verification
 does not restore invalidated entries, and in-flight jobs cannot revive them.
 Installed F*/Pulse library caches are unaffected. Rejected add calls do not
 invalidate caches.
+
+The server publishes the `pal://sessions/{session_id}/status` resource template
+at connect time, before any session exists, so generic MCP clients can route
+status reads without refreshing their resource inventory.
 
 Open a session, listen for its `pal://sessions/<id>/status` resource, wait for
 the subscription acknowledgment, then submit verification. Use modern

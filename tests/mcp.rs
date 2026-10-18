@@ -54,6 +54,7 @@ struct Trace(String);
 
 #[derive(Debug, Deserialize)]
 struct Session {
+    root: PathBuf,
     session_id: SessionId,
     accepted_revision: Revision,
     status_uri: StatusUri,
@@ -68,6 +69,7 @@ struct Job {
 
 // One wire reader routes by ID; long-lived listen requests must not block ordinary RPCs.
 struct Client {
+    root: PathBuf,
     child: Child,
     stdin: Option<BufWriter<ChildStdin>>,
     wire: Receiver<Result<Value, String>>,
@@ -81,12 +83,6 @@ struct Client {
 
 impl Client {
     fn start(root: &Path, wrapper: &Wrapper, repo: &Path) -> Self {
-        let mut client = Self::connect(wrapper, repo);
-        client.tool("new_root", json!({"path":root}));
-        client
-    }
-
-    fn connect(wrapper: &Wrapper, repo: &Path) -> Self {
         let stderr = wrapper.directory.path().join("server.stderr");
         let mut command = Command::new(env!("CARGO_BIN_EXE_pal"));
         command
@@ -115,6 +111,7 @@ impl Client {
             }
         });
         let mut client = Self {
+            root: root.to_path_buf(),
             child,
             stdin: Some(stdin),
             wire,
@@ -134,6 +131,18 @@ impl Client {
             "{initialized}"
         );
         client.notify("notifications/initialized", json!({}));
+        let templates = client.rpc("resources/templates/list", json!({}));
+        assert!(
+            templates["result"]["resourceTemplates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |template| template["uriTemplate"] == "pal://sessions/{session_id}/status"
+                        && template["mimeType"] == "application/json"
+                ),
+            "{templates}"
+        );
         client
     }
 
@@ -217,9 +226,10 @@ impl Client {
     fn open(&mut self, include_paths: &[&str]) -> Session {
         let session: Session = serde_json::from_value(self.tool(
             "pal_session",
-            json!({"action":"open","include_paths":include_paths}),
+            json!({"action":"open","root":self.root,"include_paths":include_paths}),
         ))
         .unwrap();
+        assert_eq!(session.root, self.root);
         let status = self.status(&session.status_uri);
         assert_eq!(
             status,
@@ -1756,7 +1766,7 @@ int configured_three(void) _ensures(return == 22) { return HEADER_VALUE * FACTOR
 }
 
 #[test]
-fn real_mcp_new_root_resets_project() {
+fn real_mcp_open_root_resets_project() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .canonicalize()
         .unwrap();
@@ -1778,12 +1788,9 @@ fn real_mcp_new_root_resets_project() {
         })
         .collect();
     let wrapper = Wrapper::new();
-    let mut client = Client::connect(&wrapper, &repo);
-    invalid(
-        &client.tool_response("pal_session", json!({"action":"open"})),
-        "no_root",
-    );
-    client.tool("new_root", json!({"path":roots[0]}));
+    let mut client = Client::start(&roots[0], &wrapper, &repo);
+    let response = client.tool_response("pal_session", json!({"action":"open"}));
+    assert_eq!(response["result"]["isError"], true, "{response}");
     let mut old = client.open(&["inc"]);
     client.tool(
         "add_preprocessor_definition",
@@ -1798,7 +1805,7 @@ fn real_mcp_new_root_resets_project() {
         roots[0].join("missing").to_string_lossy().into_owned(),
     ] {
         invalid(
-            &client.tool_response("new_root", json!({"path":path})),
+            &client.tool_response("pal_session", json!({"action":"open","root":path})),
             "invalid_path",
         );
     }
@@ -1824,23 +1831,22 @@ fn real_mcp_new_root_resets_project() {
         json!([replace("queued.c", "int queued(void) { return 1; }\n")]),
     );
     let started = Instant::now();
-    assert_eq!(
-        client.tool("new_root", json!({"path":roots[1]})),
-        json!({"root":roots[1]})
-    );
+    client.root = roots[1].clone();
+    let mut fresh = client.open(&[]);
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "root reset did not terminate old jobs promptly"
     );
+    assert_ne!(fresh.session_id, old.session_id);
     assert_exited(&paused);
     assert!(
         client.response(listener.0).get("error").is_none(),
         "old subscription did not finish cleanly"
     );
-    assert_eq!(
-        client.rpc("resources/list", json!({}))["result"]["resources"],
-        json!([])
-    );
+    let resources = client.rpc("resources/list", json!({}));
+    let resources = resources["result"]["resources"].as_array().unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0]["uri"], json!(fresh.status_uri));
     for previous in [&old, &queued] {
         assert!(
             client
@@ -1851,8 +1857,6 @@ fn real_mcp_new_root_resets_project() {
         invalid(&client.tool_response("pal_verify", json!({"session_id":previous.session_id,"base_revision":previous.accepted_revision,"changes":[]})), "unknown_session");
         invalid(&client.tool_response("pal_query", json!({"session_id":previous.session_id,"job_id":active.job_id,"query":{"kind":"symbols","path":"main.c"}})), "unknown_session");
     }
-    let mut fresh = client.open(&[]);
-    assert_ne!(fresh.session_id, old.session_id);
     let (_, status, _) = client.run(&mut fresh, json!([reference("main.c")]), &wrapper);
     failed(&status, "translation_failed");
     client.tool(
@@ -1879,18 +1883,20 @@ fn real_mcp_new_root_resets_project() {
     let (_, status, _) = client.run(&mut fresh, json!([]), &wrapper);
     accepted(&status);
     assert_eq!(status["verification_cache_hit"], true);
-    client.tool("new_root", json!({"path":roots[1]}));
     let mut restarted = client.open(&["inc"]);
     assert_eq!(restarted.accepted_revision, Revision(0));
     assert_ne!(restarted.session_id, fresh.session_id);
-    let (_, status, trace) = client.run(&mut restarted, json!([reference("main.c")]), &wrapper);
+    let (_, status, _) = client.run(&mut restarted, json!([reference("main.c")]), &wrapper);
     accepted(&status);
     assert_eq!(
-        status["verification_cache_hit"], false,
-        "same-root reset retained old cached results"
+        status["verification_cache_hit"], true,
+        "same-root open discarded cached results"
     );
-    trace.stored("Func_project_value.fst");
-    trace.stored("Func_project_value.fsti");
+    assert_eq!(
+        client.status(&fresh.status_uri)["phase"],
+        "accepted",
+        "same-root open removed an existing session"
+    );
     client.close(&restarted);
     client.shutdown();
 }

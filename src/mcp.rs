@@ -81,6 +81,8 @@ pub(super) fn dispatch_if_requested() -> bool {
     true
 }
 
+const STATUS_URI_TEMPLATE: &str = "pal://sessions/{session_id}/status";
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize, JsonSchema)]
 #[serde(transparent)]
 struct SessionId(String);
@@ -261,6 +263,7 @@ pub(super) struct PalMcpServer {
 #[schemars(extend("type" = "object"))]
 enum SessionAction {
     Open {
+        root: String,
         #[serde(default)]
         include_paths: Vec<String>,
         #[serde(default)]
@@ -303,12 +306,6 @@ struct PreprocessorDefinitionInput {
     defines: Vec<String>,
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct RootInput {
-    path: String,
-}
-
 impl PalMcpServer {
     pub(super) fn new(fstar: PathBuf, pulse: PathBuf) -> workspace::Result<Self> {
         let verifier = Verifier::new(Toolchain::discover()?, fstar, pulse)?;
@@ -338,7 +335,7 @@ impl PalMcpServer {
         let root = project
             .root
             .clone()
-            .ok_or_else(|| params("no_root", "call new_root before opening a session"))?;
+            .ok_or_else(|| params("no_root", "open a session with a root first"))?;
         let session = project
             .sessions
             .get_mut(&session_id)
@@ -410,97 +407,83 @@ impl PalMcpServer {
 #[tool_router]
 impl PalMcpServer {
     #[tool(
-        description = "Start a new PAL project at path. Cancels and joins all old jobs, removes sessions and status resources, and clears all verification caches. Relative paths use the server process working directory; invalid paths leave the current project intact."
+        description = "Open a PAL verification session at a project root, cancel its job, or close it. Opening with a different root than the current project cancels and joins all old jobs, removes all sessions and status resources, and clears verification caches; opening with the same root adds a session and keeps existing sessions and caches. Relative roots use the server process working directory; invalid roots change nothing."
     )]
-    async fn new_root(
-        &self,
-        Parameters(input): Parameters<RootInput>,
-    ) -> Result<CallToolResult, ErrorData> {
-        if input.path.is_empty() || input.path.contains('\0') {
-            return Err(params(
-                "invalid_path",
-                "root path must be a nonempty filesystem path",
-            ));
-        }
-        let root = PathBuf::from(input.path).canonicalize().map_err(|error| {
-            params(
-                "invalid_path",
-                &format!("cannot open workspace root: {error}"),
-            )
-        })?;
-        if !root.is_dir() {
-            return Err(params("invalid_path", "workspace root must be a directory"));
-        }
-        // Finish the reset even if the client cancels this tool request.
-        let server = self.clone();
-        tokio::spawn(async move {
-            server
-                .reset_project(Some(root.clone()))
-                .await
-                .map_err(|error| ErrorData::internal_error(error.message, None))?;
-            Ok(CallToolResult::structured(json!({"root":root})))
-        })
-        .await
-        .map_err(|error| {
-            ErrorData::internal_error(format!("project reset failed: {error}"), None)
-        })?
-    }
-
-    #[tool(description = "Open a PAL verification session, cancel its job, or close it.")]
     async fn pal_session(
         &self,
         Parameters(action): Parameters<SessionAction>,
     ) -> Result<CallToolResult, ErrorData> {
         match action {
             SessionAction::Open {
+                root,
                 include_paths,
                 defines,
             } => {
                 validate_compile_options(&include_paths, &defines)?;
-                let id = SessionId::next()?;
-                let status = Status {
-                    session_id: id.clone(),
-                    job_id: None,
-                    base_revision: Revision(0),
-                    accepted_revision: Revision(0),
-                    sequence: StatusSequence(0),
-                    phase: Phase::Idle,
-                    elapsed_ms: 0,
-                    message: String::new(),
-                    verification_cache_hit: false,
-                    diagnostics: Diagnostics::new(),
-                    error: None,
-                };
-                let mut project = self.shared.project();
-                if self.shared.shutting_down.load(Ordering::Relaxed) {
-                    return Err(ErrorData::internal_error(
-                        "PAL server is shutting down",
-                        None,
-                    ));
-                }
-                let root = project
-                    .root
-                    .as_ref()
-                    .ok_or_else(|| params("no_root", "call new_root before opening a session"))?;
-                let includes = include_paths
-                    .into_iter()
-                    .map(|path| root.join(path))
-                    .collect();
-                project.sessions.insert(
-                    id.clone(),
-                    Session {
-                        includes,
-                        defines,
-                        revision: Revision(0),
-                        accepted: None,
-                        job: None,
-                        status,
-                        closing: false,
-                    },
-                );
-                Ok(CallToolResult::structured(
-                    json!({"session_id":id,"accepted_revision":0,"status_uri":id.status_uri()}),
-                ))
+                let root = canonical_root(root)?;
+                // Finish the reset and insertion even if the client cancels this tool request.
+                let server = self.clone();
+                tokio::spawn(async move {
+                    let current = server.shared.project().root.clone();
+                    if current.as_ref() != Some(&root) {
+                        server
+                            .reset_project(Some(root.clone()))
+                            .await
+                            .map_err(|error| ErrorData::internal_error(error.message, None))?;
+                    }
+                    let id = SessionId::next()?;
+                    let status = Status {
+                        session_id: id.clone(),
+                        job_id: None,
+                        base_revision: Revision(0),
+                        accepted_revision: Revision(0),
+                        sequence: StatusSequence(0),
+                        phase: Phase::Idle,
+                        elapsed_ms: 0,
+                        message: String::new(),
+                        verification_cache_hit: false,
+                        diagnostics: Diagnostics::new(),
+                        error: None,
+                    };
+                    let mut project = server.shared.project();
+                    if server.shared.shutting_down.load(Ordering::Relaxed) {
+                        return Err(ErrorData::internal_error(
+                            "PAL server is shutting down",
+                            None,
+                        ));
+                    }
+                    // ponytail: two concurrent opens with different roots race on reset; the
+                    // later reset wins and this guard only refuses to insert into the wrong project.
+                    if project.root.as_ref() != Some(&root) {
+                        return Err(params(
+                            "root_changed",
+                            "project root changed while opening the session",
+                        ));
+                    }
+                    let includes = include_paths
+                        .into_iter()
+                        .map(|path| root.join(path))
+                        .collect();
+                    project.sessions.insert(
+                        id.clone(),
+                        Session {
+                            includes,
+                            defines,
+                            revision: Revision(0),
+                            accepted: None,
+                            job: None,
+                            status,
+                            closing: false,
+                        },
+                    );
+                    Ok(CallToolResult::structured(
+                        json!({"session_id":id,"accepted_revision":0,"status_uri":id.status_uri(),"root":root}),
+                    ))
+                })
+                .await
+                .map_err(|error| {
+                    ErrorData::internal_error(format!("session open failed: {error}"), None)
+                })?
             }
             SessionAction::Cancel { session_id, job_id } => {
                 let mut done = {
@@ -590,7 +573,7 @@ impl PalMcpServer {
             let root = project
                 .root
                 .clone()
-                .ok_or_else(|| params("no_root", "call new_root before opening a session"))?;
+                .ok_or_else(|| params("no_root", "open a session with a root first"))?;
             let session = project
                 .sessions
                 .get_mut(&input.session_id)
@@ -746,6 +729,25 @@ impl PalMcpServer {
             json!({"session_id":input.session_id,"accepted_revision":revision,"job_id":job_id,"complete":complete && indexed.index.complete,"data":data}),
         ))
     }
+}
+
+fn canonical_root(path: String) -> Result<PathBuf, ErrorData> {
+    if path.is_empty() || path.contains('\0') {
+        return Err(params(
+            "invalid_path",
+            "root path must be a nonempty filesystem path",
+        ));
+    }
+    let root = PathBuf::from(path).canonicalize().map_err(|error| {
+        params(
+            "invalid_path",
+            &format!("cannot open workspace root: {error}"),
+        )
+    })?;
+    if !root.is_dir() {
+        return Err(params("invalid_path", "workspace root must be a directory"));
+    }
+    Ok(root)
 }
 
 fn validate_compile_options(include_paths: &[String], defines: &[String]) -> Result<(), ErrorData> {
@@ -955,6 +957,17 @@ impl ServerHandler for PalMcpServer {
         let mut result = ListResourcesResult::default();
         result.resources = resources;
         Ok(result)
+    }
+    async fn list_resource_templates(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        Ok(ListResourceTemplatesResult::with_all_items(vec![
+            ResourceTemplate::new(STATUS_URI_TEMPLATE, "PAL session status")
+                .with_description("Verification phase, elapsed time, diagnostics and error of one PAL session; session_id comes from pal_session open")
+                .with_mime_type("application/json"),
+        ]))
     }
     async fn read_resource(
         &self,
