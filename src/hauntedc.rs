@@ -17,7 +17,7 @@ enum IntegerSuffix {
     None,
     U,
     UL,
-    ULL,
+    Ull,
     UZ,
     L,
     LL,
@@ -28,7 +28,7 @@ impl IntegerSuffix {
         match self {
             IntegerSuffix::None => IntegerSuffix::U,
             IntegerSuffix::L => IntegerSuffix::UL,
-            IntegerSuffix::LL => IntegerSuffix::ULL,
+            IntegerSuffix::LL => IntegerSuffix::Ull,
             IntegerSuffix::Z => IntegerSuffix::UZ,
             _ => self,
         }
@@ -38,7 +38,7 @@ impl IntegerSuffix {
             IntegerSuffix::None => "",
             IntegerSuffix::U => "u",
             IntegerSuffix::UL => "ul",
-            IntegerSuffix::ULL => "ull",
+            IntegerSuffix::Ull => "ull",
             IntegerSuffix::UZ => "uz",
             IntegerSuffix::L => "l",
             IntegerSuffix::LL => "ll",
@@ -354,7 +354,7 @@ trait SourceInfoForTokens {
 struct Expr(Rc<crate::ir::Expr>);
 
 impl Expr {
-    fn to_rvalue(self) -> Rc<crate::ir::Expr> {
+    fn into_rvalue(self) -> Rc<crate::ir::Expr> {
         self.0
     }
 }
@@ -410,7 +410,7 @@ macro_rules! and_then {
 }
 
 fn mk_binop(binop: BinOp, lhs: Expr, rhs: Expr, loc: Rc<SourceInfo>) -> Expr {
-    ExprT::BinOp(binop, lhs.to_rvalue(), rhs.to_rvalue())
+    ExprT::BinOp(binop, lhs.into_rvalue(), rhs.into_rvalue())
         .with_loc(loc)
         .into()
 }
@@ -703,7 +703,7 @@ fn expr_parser<
                             signed: true,
                             width: tw.long_long_width,
                         },
-                        IntegerSuffix::ULL => TypeT::Int {
+                        IntegerSuffix::Ull => TypeT::Int {
                             signed: false,
                             width: tw.long_long_width,
                         },
@@ -751,7 +751,7 @@ fn expr_parser<
         .map_with(|(is_forall, ((ty, var), body)): (bool, _), extra| -> Expr {
             let loc = sift.resolve_source_info(&extra.span());
             let body: Expr = body;
-            let body_rv = body.to_rvalue();
+            let body_rv = body.into_rvalue();
             if is_forall {
                 ExprT::Forall(var, ty, body_rv).with_loc(loc).into()
             } else {
@@ -823,7 +823,7 @@ fn expr_parser<
                             return Err(Rich::custom(s, "_old takes exactly one argument"));
                         };
                         let arg: &Expr = arg;
-                        Ok(ExprT::Old(arg.clone().to_rvalue())
+                        Ok(ExprT::Old(arg.clone().into_rvalue())
                             .with_loc(sift.resolve_source_info(&s))
                             .into())
                     }
@@ -831,13 +831,13 @@ fn expr_parser<
                         let &[arg] = &args.as_slice() else {
                             return Err(Rich::custom(s, "_live takes exactly one argument"));
                         };
-                        Ok(ExprT::Live(arg.clone().to_rvalue())
+                        Ok(ExprT::Live(arg.clone().into_rvalue())
                             .with_loc(sift.resolve_source_info(&s))
                             .into())
                     }
                     _ => Ok(ExprT::FnCall(
                         f,
-                        args.into_iter().map(|e: Expr| e.to_rvalue()).collect(),
+                        args.into_iter().map(|e: Expr| e.into_rvalue()).collect(),
                     )
                     .with_loc(sift.resolve_source_info(&s))
                     .into()),
@@ -848,12 +848,12 @@ fn expr_parser<
         .boxed();
         let postfix_expression = left_recursion!(postfix_expression_nonrec, {
             Index(lhs, idx: Expr: assignment_expression.clone().delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))) = e =>
-                Ok(ExprT::Index(lhs.to_rvalue(), idx.to_rvalue()).with_loc(sift.resolve_source_info(&e.span())).into()),
+                Ok(ExprT::Index(lhs.into_rvalue(), idx.into_rvalue()).with_loc(sift.resolve_source_info(&e.span())).into()),
             Dot(lhs, id: Rc<Ident>: punct(Punct::Dot).ignore_then(ident.clone())) = e =>
-                Ok(ExprT::Member(lhs.to_rvalue(), id).with_loc(sift.resolve_source_info(&e.span())).into()),
+                Ok(ExprT::Member(lhs.into_rvalue(), id).with_loc(sift.resolve_source_info(&e.span())).into()),
             Arrow(lhs, id: Rc<Ident>: punct(Punct::DashGt).ignore_then(ident.clone())) = e => {
                 let loc = sift.resolve_source_info(&e.span());
-                Ok(ExprT::Member(ExprT::Deref(lhs.to_rvalue()).with_loc(loc.clone()), id).with_loc(loc).into())
+                Ok(ExprT::Member(ExprT::Deref(lhs.into_rvalue()).with_loc(loc.clone()), id).with_loc(loc).into())
             },
         }).boxed();
 
@@ -863,35 +863,35 @@ fn expr_parser<
                 punct(Punct::Star)
                     .ignore_then(cast_expression.clone())
                     .map_with(|e: Expr, extra| {
-                        ExprT::Deref(e.to_rvalue())
+                        ExprT::Deref(e.into_rvalue())
                             .with_loc(sift.resolve_source_info(&extra.span()))
                             .into()
                     }),
                 punct(Punct::Amp)
                     .ignore_then(cast_expression.clone())
                     .map_with(|e: Expr, extra| {
-                        ExprT::Ref(e.to_rvalue())
+                        ExprT::Ref(e.into_rvalue())
                             .with_loc(sift.resolve_source_info(&extra.span()))
                             .into()
                     }),
                 punct(Punct::Bang)
                     .ignore_then(cast_expression.clone())
                     .map_with(|e: Expr, extra| {
-                        ExprT::UnOp(UnOp::Not, e.to_rvalue())
+                        ExprT::UnOp(UnOp::Not, e.into_rvalue())
                             .with_loc(sift.resolve_source_info(&extra.span()))
                             .into()
                     }),
                 punct(Punct::Tilde)
                     .ignore_then(cast_expression.clone())
                     .map_with(|e: Expr, extra| {
-                        ExprT::UnOp(UnOp::BitNot, e.to_rvalue())
+                        ExprT::UnOp(UnOp::BitNot, e.into_rvalue())
                             .with_loc(sift.resolve_source_info(&extra.span()))
                             .into()
                     }),
                 punct(Punct::Dash)
                     .ignore_then(cast_expression.clone())
                     .map_with(|e: Expr, extra| {
-                        ExprT::UnOp(UnOp::Neg, e.to_rvalue())
+                        ExprT::UnOp(UnOp::Neg, e.into_rvalue())
                             .with_loc(sift.resolve_source_info(&extra.span()))
                             .into()
                     }),
@@ -932,7 +932,7 @@ fn expr_parser<
                 )
                 .map_with(
                     |(ptr, (struct_ty, field)): (Expr, (Rc<Type>, Rc<Ident>)), extra| -> Expr {
-                        ExprT::ContainerOf(ptr.to_rvalue(), struct_ty, field)
+                        ExprT::ContainerOf(ptr.into_rvalue(), struct_ty, field)
                             .with_loc(sift.resolve_source_info(&extra.span()))
                             .into()
                     },
@@ -958,7 +958,7 @@ fn expr_parser<
                         | TypeT::TypeRef(TypeRefKind::Typedef(n)) => {
                             let fields = fields
                                 .into_iter()
-                                .map(|(f, v)| (f, v.to_rvalue()))
+                                .map(|(f, v)| (f, v.into_rvalue()))
                                 .collect();
                             ExprT::StructInit(n.clone(), fields).with_loc(loc).into()
                         }
@@ -974,7 +974,7 @@ fn expr_parser<
                     }
                 },
                 Plain(ty, x: Expr: cast_expression) = e =>
-                    ExprT::Cast(x.to_rvalue(), ty).with_loc(sift.resolve_source_info(&e.span())).into(),
+                    ExprT::Cast(x.into_rvalue(), ty).with_loc(sift.resolve_source_info(&e.span())).into(),
             }).or(unary_expression))
         });
 
@@ -1022,7 +1022,7 @@ fn expr_parser<
             NEq(lhs, punct(Punct::BangEq), rhs) = e => {
                 let loc = sift.resolve_source_info(&e.span());
                 let eq = mk_binop(BinOp::Eq, lhs, rhs, loc.clone());
-                ExprT::UnOp(UnOp::Not, eq.to_rvalue()).with_loc(loc).into()
+                ExprT::UnOp(UnOp::Not, eq.into_rvalue()).with_loc(loc).into()
             },
         })
         .boxed();
@@ -1076,9 +1076,9 @@ fn expr_parser<
                     let loc = sift.resolve_source_info(&extra.span());
                     match rhs {
                         Some(ConditionalRhs::Ternary(then_expr, else_expr)) => ExprT::Cond(
-                            lhs.to_rvalue(),
-                            then_expr.to_rvalue(),
-                            else_expr.to_rvalue(),
+                            lhs.into_rvalue(),
+                            then_expr.into_rvalue(),
+                            else_expr.into_rvalue(),
                         )
                         .with_loc(loc)
                         .into(),
@@ -1143,16 +1143,16 @@ impl SourceInfoForTokens for TokenSI {
         if span.end >= self.source_infos.len() {
             return self.fallback.location().clone();
         }
-        if span.start == span.end {
-            if let SourceInfo::Original(loc) = &*self.source_infos[span.start] {
-                return loc.clone();
-            }
+        if span.start == span.end
+            && let SourceInfo::Original(loc) = &*self.source_infos[span.start]
+        {
+            return loc.clone();
         }
         let infos = &self.source_infos[span.start..span.end];
-        if let [info] = infos {
-            if let SourceInfo::Original(loc) = &**info {
-                return loc.clone();
-            }
+        if let [info] = infos
+            && let SourceInfo::Original(loc) = &**info
+        {
+            return loc.clone();
         }
         location_of_source_infos(infos).unwrap_or_else(|| self.fallback.location().clone())
     }
@@ -1271,7 +1271,7 @@ pub fn parse_expr(
             (tokens.len()..tokens.len()).into(),
         ));
     let output = match result.output() {
-        Some(output) => output.clone().to_rvalue(),
+        Some(output) => output.clone().into_rvalue(),
         None => {
             ExprT::Error(TypeT::Error.with_loc(fallback_loc.clone())).with_loc(fallback_loc.clone())
         }
@@ -1336,7 +1336,7 @@ pub fn parse_type_name(
         if !s.is_empty()
             && s.chars()
                 .next()
-                .map_or(false, |c| c.is_alphabetic() || c == '_')
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
         {
             return Some(text.val.clone().with_loc(text.loc.clone()));
         }
@@ -1412,12 +1412,12 @@ pub fn parse_refine_value_binding(
             && type_str
                 .chars()
                 .next()
-                .map_or(false, |c| c.is_alphabetic() || c == '_')
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
             && !name_str.is_empty()
             && name_str
                 .chars()
                 .next()
-                .map_or(false, |c| c.is_alphabetic() || c == '_')
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
         {
             let binding_name = name_tok.val.clone().with_loc(name_tok.loc.clone());
             let type_ident = type_tok.val.clone().with_loc(type_tok.loc.clone());
@@ -1434,6 +1434,9 @@ pub fn parse_refine_value_binding(
     None
 }
 
+/// Parsed `_let` name, return type, parameters, preconditions, and postconditions.
+pub type LetSignature = (Rc<Ident>, Rc<Type>, Vec<FnArg>, Exprs, Exprs);
+
 /// Parse a `_let` signature of the form: `_slprop foo(_array bool *r, _specnat n) _requires(...) _ensures(...)`
 /// Returns (name, return_type, params, requires, ensures) or None on parse error.
 pub fn parse_let_signature(
@@ -1442,7 +1445,7 @@ pub fn parse_let_signature(
     code: &InlineCode,
     snippets: &SnippetMap,
     target_widths: &TargetIntWidths,
-) -> Option<(Rc<Ident>, Rc<Type>, Vec<FnArg>, Exprs, Exprs)> {
+) -> Option<LetSignature> {
     let RelexedTokens {
         tokens,
         source_infos,
@@ -1490,8 +1493,7 @@ fn let_signature_parser<
     sift: &'src SIFT,
     target_widths: &'src TargetIntWidths,
     diags: &'src RefCell<Diagnostics>,
-) -> impl Parser<'tokens, I, (Rc<Ident>, Rc<Type>, Vec<FnArg>, Exprs, Exprs), Extra<'tokens, 'src>>
-{
+) -> impl Parser<'tokens, I, LetSignature, Extra<'tokens, 'src>> {
     let ret_type = type_parser(sift, target_widths);
 
     let fn_name = select! { Token::Ident(ident) => ident }
@@ -1584,7 +1586,7 @@ fn let_signature_parser<
     .padded_by(ws())
     .ignore_then(
         expr_parser(snippets, sift, target_widths, diags)
-            .map(|e| e.to_rvalue())
+            .map(|e| e.into_rvalue())
             .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
     );
 
@@ -1595,7 +1597,7 @@ fn let_signature_parser<
     .padded_by(ws())
     .ignore_then(
         expr_parser(snippets, sift, target_widths, diags)
-            .map(|e| e.to_rvalue())
+            .map(|e| e.into_rvalue())
             .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
     );
 

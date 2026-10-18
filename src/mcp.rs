@@ -735,13 +735,15 @@ impl PalMcpServer {
             let mut worker = tokio::spawn(async move {
                 run_job(
                     worker_shared,
-                    root,
                     worker_id,
                     worker_job,
-                    sources,
-                    input.changes,
-                    includes,
-                    defines,
+                    SnapshotInputs {
+                        root,
+                        sources,
+                        changes: input.changes,
+                        includes,
+                        defines,
+                    },
                     proofs,
                     worker_cancel,
                 )
@@ -864,18 +866,29 @@ struct JobSuccess {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-async fn run_job(
-    shared: Arc<Shared>,
+struct SnapshotInputs {
     root: PathBuf,
-    id: SessionId,
-    job: JobId,
     sources: Vec<ManagedSource>,
     changes: Vec<Change>,
     includes: Vec<PathBuf>,
     defines: Vec<String>,
+}
+
+async fn run_job(
+    shared: Arc<Shared>,
+    id: SessionId,
+    job: JobId,
+    inputs: SnapshotInputs,
     proofs: Option<Arc<VerifiedArtifacts>>,
     cancel: Cancellation,
 ) -> workspace::Result<JobSuccess> {
+    let SnapshotInputs {
+        root,
+        sources,
+        changes,
+        includes,
+        defines,
+    } = inputs;
     let _permit = tokio::select! {
         _ = cancel.cancelled() => return Err(Failure::new("cancelled", "verification cancelled while queued")),
         permit = shared.verifier.gate.clone().acquire_owned() => permit.map_err(|_| Failure::new("worker_failed", "verifier queue closed"))?,
@@ -1059,9 +1072,10 @@ impl ServerHandler for PalMcpServer {
                     .with_mime_type("application/json")
             })
             .collect();
-        let mut result = ListResourcesResult::default();
-        result.resources = resources;
-        Ok(result)
+        Ok(ListResourcesResult {
+            resources,
+            ..Default::default()
+        })
     }
     async fn list_resource_templates(
         &self,

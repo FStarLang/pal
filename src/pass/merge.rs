@@ -386,7 +386,8 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // refinements carried in the argument types need the same treatment, or the
     // definition is checked against a predicate mentioning names it does not
     // bind.
-    let mut arg_type_renames: Vec<(usize, HashMap<Rc<str>, Rc<Ident>>)> = Vec::new();
+    type ParamRenames = HashMap<Rc<str>, Rc<Ident>>;
+    let mut arg_type_renames: Vec<(usize, ParamRenames)> = Vec::new();
 
     // Build an Env for type comparison (need typedef resolution)
     let mut env = Env::new();
@@ -846,10 +847,10 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
         let mut refs: Vec<TypeKey> = Vec::new();
         collect_decl_type_refs(d, &mut refs);
         for r in refs {
-            if let Some(&j) = node_of_key.get(&r) {
-                if j != i {
-                    prereqs[i].push(j);
-                }
+            if let Some(&j) = node_of_key.get(&r)
+                && j != i
+            {
+                prereqs[i].push(j);
             }
         }
     }

@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     diag::{Diagnostic, Diagnostics},
-    vfs::{OverlayFS, RealFS, VFS},
+    vfs::{OverlayFS, RealFS, Vfs},
 };
 use clap::Parser;
 
@@ -94,10 +94,10 @@ fn set_default_sdkroot() {
 /// identical contents. This avoids bumping the timestamp and triggering
 /// unnecessary F* reverification.
 fn write_if_changed(path: &PathBuf, contents: &[u8]) {
-    if let Ok(existing) = std::fs::read(path) {
-        if existing == contents {
-            return;
-        }
+    if let Ok(existing) = std::fs::read(path)
+        && existing == contents
+    {
+        return;
     }
     std::fs::write(path, contents).unwrap();
 }
@@ -146,7 +146,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut vfs: Box<dyn VFS>;
+    let mut vfs: Box<dyn Vfs>;
     match &cli.tmpdir {
         Some(tmpdir) => {
             let mut overlayfs = OverlayFS::new(RealFS::new());
@@ -341,16 +341,17 @@ fn main() {
         .unwrap();
 
         // Write diagnostics
-        std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
+        std::fs::write(outdir.join("diagnostics.json"), serialize_diags(&diags)).unwrap();
 
         // Remove stale .fst/.fsti files from previous runs
         if let Ok(entries) = std::fs::read_dir(&outdir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if let Some(ext) = path.extension() {
-                    if (ext == "fst" || ext == "fsti") && !generated_files.contains(&path) {
-                        let _ = std::fs::remove_file(&path);
-                    }
+                if let Some(ext) = path.extension()
+                    && (ext == "fst" || ext == "fsti")
+                    && !generated_files.contains(&path)
+                {
+                    let _ = std::fs::remove_file(&path);
                 }
             }
         }

@@ -92,12 +92,18 @@ calls it to find LLVM libraries.
 ```bash
 make               # Rust binary + Pulse support library
 make test -j8      # translate every test case, verify with F*
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --check
+LIBCLANG_PATH="$(llvm-config --libdir)" cargo test --all-features
 cd test/swap && make                       # one test
 cargo run -- --print-ir test/swap/swap.c   # just the IR
 ```
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
+
+Clippy checks handwritten code without warnings; only four style lints are
+exempted inside Zngur's generated FFI module (`src/clang.rs`).
 
 ### Translate a file
 

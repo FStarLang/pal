@@ -256,28 +256,27 @@ fn build_index(
                 file.get_offset_location(length),
             );
             let tokens = range.tokenize();
-            if !result.tokens.contains_key(&path) {
-                let ranges = tokens
+            result.tokens.entry(path).or_insert_with_key(|path| {
+                tokens
                     .iter()
                     .filter_map(|token| span(snapshot, token.get_range()))
-                    .filter(|range| range.path == path)
+                    .filter(|range| &range.path == path)
                     .map(|range| TokenSpan {
                         start: range.start,
                         end: range.end,
                     })
-                    .collect();
-                result.tokens.insert(path, ranges);
-            }
+                    .collect()
+            });
             let entities = translation_unit.annotate(&tokens);
             annotated.push((tokens, entities));
         }
         result.walk(snapshot, translation_unit.get_entity(), None);
         for (tokens, entities) in annotated {
             for (token, entity) in tokens.into_iter().zip(entities) {
-                if token.get_kind() == TokenKind::Identifier {
-                    if let Some(entity) = entity {
-                        result.annotated_occurrence(snapshot, token, entity);
-                    }
+                if token.get_kind() == TokenKind::Identifier
+                    && let Some(entity) = entity
+                {
+                    result.annotated_occurrence(snapshot, token, entity);
                 }
             }
         }
@@ -466,19 +465,17 @@ impl SemanticIndex {
                     .is_some_and(|token| token.start == range.start && token.end == range.end)
             })
             .collect();
-        if ranges.is_empty() {
-            if let Some((path, offset)) = entity
+        if ranges.is_empty()
+            && let Some((path, offset)) = entity
                 .get_location()
                 .and_then(|location| point(snapshot, location))
-            {
-                if let Some(token) = self.token_at(&path, offset) {
-                    ranges.push(Span {
-                        path,
-                        start: token.start,
-                        end: token.end,
-                    });
-                }
-            }
+            && let Some(token) = self.token_at(&path, offset)
+        {
+            ranges.push(Span {
+                path,
+                start: token.start,
+                end: token.end,
+            });
         }
         ranges
     }
@@ -511,20 +508,19 @@ impl SemanticIndex {
                     parent == root
                         || kind == EntityKind::EnumConstantDecl
                             && parent.get_semantic_parent() == Some(root)
-                }) {
-                    if let Some(module) = PalModuleName::new(kind, &self.symbols[symbol.0].name) {
-                        if self
-                            .modules
-                            .get(&module)
-                            .is_some_and(|&previous| previous != symbol)
-                        {
-                            self.reject(Failure::new(
-                                "module_name_collision",
-                                format!("distinct C symbols emit the same PAL module {}", module.0),
-                            ));
-                        } else {
-                            self.modules.insert(module, symbol);
-                        }
+                }) && let Some(module) = PalModuleName::new(kind, &self.symbols[symbol.0].name)
+                {
+                    if self
+                        .modules
+                        .get(&module)
+                        .is_some_and(|&previous| previous != symbol)
+                    {
+                        self.reject(Failure::new(
+                            "module_name_collision",
+                            format!("distinct C symbols emit the same PAL module {}", module.0),
+                        ));
+                    } else {
+                        self.modules.insert(module, symbol);
                     }
                 }
             }
@@ -536,37 +532,33 @@ impl SemanticIndex {
                 | EntityKind::VariableRef
                 | EntityKind::MemberRef
                 | EntityKind::MacroExpansion
-        ) {
-            if let Some(target) = entity.get_reference() {
-                if let Some(symbol) = self.ensure_symbol(snapshot, target) {
-                    for range in self.name_spans(snapshot, entity) {
-                        self.occurrence(
-                            range,
-                            symbol,
-                            false,
-                            if kind == EntityKind::MacroExpansion {
-                                0
-                            } else {
-                                1
-                            },
-                        );
-                    }
-                }
+        ) && let Some(target) = entity.get_reference()
+            && let Some(symbol) = self.ensure_symbol(snapshot, target)
+        {
+            for range in self.name_spans(snapshot, entity) {
+                self.occurrence(
+                    range,
+                    symbol,
+                    false,
+                    if kind == EntityKind::MacroExpansion {
+                        0
+                    } else {
+                        1
+                    },
+                );
             }
         }
-        if kind == EntityKind::CallExpr {
-            if let (Some(caller), Some(target)) = (
+        if kind == EntityKind::CallExpr
+            && let (Some(caller), Some(target)) = (
                 caller,
                 entity
                     .get_reference()
                     .filter(|target| target.get_kind() == EntityKind::FunctionDecl),
-            ) {
-                if let Some(callee) = self.ensure_symbol(snapshot, target) {
-                    if let Some(site) = self.call_site(snapshot, entity) {
-                        self.calls.entry((caller, callee)).or_default().push(site);
-                    }
-                }
-            }
+            )
+            && let Some(callee) = self.ensure_symbol(snapshot, target)
+            && let Some(site) = self.call_site(snapshot, entity)
+        {
+            self.calls.entry((caller, callee)).or_default().push(site);
         }
         for child in entity.get_children() {
             self.walk(snapshot, child, enclosing);
@@ -577,15 +569,14 @@ impl SemanticIndex {
         if matches!(
             entity.get_kind(),
             EntityKind::DeclRefExpr | EntityKind::MemberRefExpr
-        ) {
-            if let Some(range) = self.name_spans(snapshot, entity).into_iter().next() {
-                return Some(range);
-            }
+        ) && let Some(range) = self.name_spans(snapshot, entity).into_iter().next()
+        {
+            return Some(range);
         }
-        if let Some(callee_expression) = entity.get_children().into_iter().next() {
-            if let Some(range) = self.call_site(snapshot, callee_expression) {
-                return Some(range);
-            }
+        if let Some(callee_expression) = entity.get_children().into_iter().next()
+            && let Some(range) = self.call_site(snapshot, callee_expression)
+        {
+            return Some(range);
         }
         let (path, offset) = point(snapshot, entity.get_location()?)?;
         let token = self.token_at(&path, offset)?;
@@ -760,18 +751,18 @@ impl SemanticIndex {
             Query::Callers { .. } => {
                 let mut calls = Vec::new();
                 for (&(caller, callee), sites) in &self.calls {
-                    if callee == occurrence.symbol {
-                        if let Some(item) = self.call_item(snapshot, caller)? {
-                            let ranges = sites
-                                .iter()
-                                .filter(|site| uri(&site.path) == item.uri.as_str())
-                                .map(|site| site.range(snapshot))
-                                .collect();
-                            calls.push(CallHierarchyIncomingCall {
-                                from: item,
-                                from_ranges: ranges,
-                            });
-                        }
+                    if callee == occurrence.symbol
+                        && let Some(item) = self.call_item(snapshot, caller)?
+                    {
+                        let ranges = sites
+                            .iter()
+                            .filter(|site| uri(&site.path) == item.uri.as_str())
+                            .map(|site| site.range(snapshot))
+                            .collect();
+                        calls.push(CallHierarchyIncomingCall {
+                            from: item,
+                            from_ranges: ranges,
+                        });
                     }
                 }
                 calls.sort_by(|a, b| {
@@ -784,16 +775,13 @@ impl SemanticIndex {
             Query::Callees { .. } => {
                 let mut calls = Vec::new();
                 for (&(caller, callee), sites) in &self.calls {
-                    if caller == occurrence.symbol {
-                        if let Some(item) = self.call_item(snapshot, callee)? {
-                            calls.push(CallHierarchyOutgoingCall {
-                                to: item,
-                                from_ranges: sites
-                                    .iter()
-                                    .map(|site| site.range(snapshot))
-                                    .collect(),
-                            });
-                        }
+                    if caller == occurrence.symbol
+                        && let Some(item) = self.call_item(snapshot, callee)?
+                    {
+                        calls.push(CallHierarchyOutgoingCall {
+                            to: item,
+                            from_ranges: sites.iter().map(|site| site.range(snapshot)).collect(),
+                        });
                     }
                 }
                 calls.sort_by(|a, b| {
@@ -806,11 +794,11 @@ impl SemanticIndex {
             }
             Query::Hover { .. } => {
                 let mut text = public_message(snapshot, &symbol.text);
-                if let Some(ty) = &symbol.type_name {
-                    if !ty.is_empty() {
-                        text.push_str("\nType: ");
-                        text.push_str(&public_message(snapshot, ty));
-                    }
+                if let Some(ty) = &symbol.type_name
+                    && !ty.is_empty()
+                {
+                    text.push_str("\nType: ");
+                    text.push_str(&public_message(snapshot, ty));
                 }
                 if let Some(documentation) = &symbol.documentation {
                     text.push_str("\n\n");

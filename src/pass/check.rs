@@ -47,7 +47,7 @@ impl<'a> Checker<'a> {
     fn check_has_type(&mut self, env: &Env, rval: &Expr, expected: MaybeRc<Type>) {
         if self.check_types
             && let Some(ty) = self.infer_expr(env, rval)
-            && !env.vtype_eq(ty.clone().into(), expected.clone())
+            && !env.vtype_eq(ty.clone(), expected.clone())
         {
             self.report(
                 format!(
@@ -131,12 +131,12 @@ impl<'a> Checker<'a> {
                 }
             }
             TypeT::TypeRef(TypeRefKind::Struct(n)) => {
-                if let None = env.lookup_struct(n) {
+                if env.lookup_struct(n).is_none() {
                     self.report(format!("unknown struct {}", n), &ty.loc)
                 }
             }
             TypeT::TypeRef(TypeRefKind::Union(n)) => {
-                if let None = env.lookup_union(n) {
+                if env.lookup_union(n).is_none() {
                     self.report(format!("unknown union {}", n), &ty.loc)
                 }
             }
@@ -267,7 +267,7 @@ impl<'a> Checker<'a> {
                             };
                         }
                         _ => {
-                            return self.report(format!("not a structure type: {}", t), &rval.loc);
+                            self.report(format!("not a structure type: {}", t), &rval.loc);
                         }
                     }
                 }
@@ -314,7 +314,7 @@ impl<'a> Checker<'a> {
                     && let Some(arg_ty) = self.infer_expr(env, arg)
                 {
                     match un_op {
-                        UnOp::Not => match &env.vtype_whnf(arg_ty.clone().into()).val {
+                        UnOp::Not => match &env.vtype_whnf(arg_ty.clone()).val {
                             TypeT::Bool | TypeT::Error => {}
                             _ => self.report(
                                 format!("! needs to be applied to bool, not {}", arg_ty),
@@ -336,7 +336,7 @@ impl<'a> Checker<'a> {
                         let lhs_ty = lhs_ty.clone();
                         let rhs_ty = rhs_ty.clone();
                         move |this: &mut Checker| {
-                            if !env.vtype_eq(lhs_ty.clone().into(), rhs_ty.clone().into()) {
+                            if !env.vtype_eq(lhs_ty.clone(), rhs_ty.clone()) {
                                 this.report(
                                     format!(
                                         "binop applied to mismatching types {} and {}",
@@ -352,7 +352,7 @@ impl<'a> Checker<'a> {
                         BinOp::Elvis => check_eq(self),
                         BinOp::LogAnd | BinOp::LogOr | BinOp::Implies => {
                             check_eq(self);
-                            match &env.vtype_whnf(lhs_ty.clone().into()).val {
+                            match &env.vtype_whnf(lhs_ty.clone()).val {
                                 TypeT::Bool | TypeT::SLProp | TypeT::Error => {}
                                 _ => self.report(
                                     format!(
@@ -374,8 +374,8 @@ impl<'a> Checker<'a> {
                         | BinOp::BitOr
                         | BinOp::BitXor => {
                             // Allow pointer arithmetic: array/arrayptr ± integer
-                            let lhs_w = env.vtype_whnf(lhs_ty.clone().into());
-                            let rhs_w = env.vtype_whnf(rhs_ty.clone().into());
+                            let lhs_w = env.vtype_whnf(lhs_ty.clone());
+                            let rhs_w = env.vtype_whnf(rhs_ty.clone());
                             let is_ptr_arith = matches!(bin_op, BinOp::Add | BinOp::Sub)
                                 && (matches!(
                                     &lhs_w.val,
@@ -395,7 +395,7 @@ impl<'a> Checker<'a> {
                             }
                             .with_loc(rhs.loc.clone())
                             .into();
-                            if !env.vtype_eq(rhs_ty.clone().into(), u32_ty) {
+                            if !env.vtype_eq(rhs_ty.clone(), u32_ty) {
                                 self.report(
                                     format!("shift amount must be uint32_t, not {}", rhs_ty),
                                     &rval.loc,
@@ -548,14 +548,14 @@ impl<'a> Checker<'a> {
                                 return self.report(format!("unknown structure {}", n), &rval.loc);
                             };
                             if s.get_field(field).is_none() {
-                                return self.report(
+                                self.report(
                                     format!("no field {} in structure {}", field, n),
                                     &rval.loc,
                                 );
                             }
                         }
                         t => {
-                            return self.report(
+                            self.report(
                                 format!("_container_of expects a struct type, got {}", t),
                                 &struct_ty.loc,
                             );
@@ -579,7 +579,7 @@ impl<'a> Checker<'a> {
                     && let (Some(lhs_ty), Some(rhs_ty)) =
                         (self.infer_expr(env, lhs), self.infer_expr(env, rhs))
                 {
-                    self.check_type_eq(env, rhs_ty.into(), lhs_ty.into());
+                    self.check_type_eq(env, rhs_ty, lhs_ty);
                 }
             }
             ExprT::SizeOf(ty) | ExprT::AlignOf(ty) => self.check_type(env, ty),
@@ -588,11 +588,7 @@ impl<'a> Checker<'a> {
     }
 
     fn is_pointer_type(&mut self, env: &Env, ty: MaybeRc<Type>) -> bool {
-        match &env.vtype_whnf(ty).val {
-            TypeT::Pointer(_ty, _kind) => true,
-            TypeT::Error => true,
-            _ => false,
-        }
+        matches!(&env.vtype_whnf(ty).val, TypeT::Pointer(_, _) | TypeT::Error)
     }
 
     fn check_lvalue(&mut self, env: &Env, lval: &Expr) {
@@ -635,7 +631,7 @@ impl<'a> Checker<'a> {
                 if self.check_types
                     && let Some(value_ty) = self.infer_expr(env, value)
                 {
-                    self.check_type_eq(env, value_ty.into(), ty.clone().into());
+                    self.check_type_eq(env, value_ty, ty.clone().into());
                 }
             }
             StmtT::DeclStackArray {
@@ -651,7 +647,7 @@ impl<'a> Checker<'a> {
                     && let (Some(x_ty), Some(v_ty)) =
                         (self.infer_expr(env, x), self.infer_expr(env, v))
                 {
-                    self.check_type_eq(env, v_ty.into(), x_ty.into());
+                    self.check_type_eq(env, v_ty, x_ty);
                 }
             }
             StmtT::If {
@@ -682,7 +678,7 @@ impl<'a> Checker<'a> {
                             && let (Some(scrutinee_ty), Some(pattern_ty)) =
                                 (scrutinee_ty.clone(), self.infer_expr(env, pattern))
                         {
-                            self.check_type_eq(env, pattern_ty.into(), scrutinee_ty.into());
+                            self.check_type_eq(env, pattern_ty, scrutinee_ty);
                         }
                     }
                     self.check_stmts(env, &branch.body);
@@ -895,10 +891,10 @@ impl<'a> Checker<'a> {
             env.push_decl(decl);
         }
         for decl in &tu.decls {
-            if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &decl.val {
-                if fn_decl.is_rec {
-                    env.push_fn_decl(fn_decl.clone());
-                }
+            if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &decl.val
+                && fn_decl.is_rec
+            {
+                env.push_fn_decl(fn_decl.clone());
             }
             // Pre-register struct definitions so self-referential fields resolve
             if let DeclT::StructDefn(s) = &decl.val {

@@ -7,13 +7,20 @@ use crate::{
         parse_refine_value_binding, parse_type_name, process_inline_pulse,
     },
     ir::*,
-    vfs::VFS,
+    vfs::Vfs,
 };
 use core::slice;
 use std::{collections::HashSet, rc::Rc, str::FromStr};
 
+// Zngur emits uniform constructors, unit returns and out-pointer writes.
+#[allow(
+    clippy::init_numbered_fields,
+    clippy::unit_arg,
+    clippy::unneeded_struct_pattern,
+    clippy::unused_unit
+)]
 mod generated {
-    use crate::vfs::VFS;
+    use crate::vfs::Vfs;
     use std::ops::Deref;
     include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 }
@@ -23,7 +30,7 @@ unsafe fn str_from_parts<'a>(ptr: *const u8, sz: usize) -> &'a str {
 }
 
 pub struct Ctx<'a> {
-    vfs: &'a mut dyn VFS,
+    vfs: &'a mut dyn Vfs,
     input_file_name: String,
     include_paths: Vec<String>,
     defines: Vec<String>,
@@ -38,7 +45,7 @@ impl<'a> Ctx<'a> {
         input_file_name: String,
         include_paths: Vec<String>,
         defines: Vec<String>,
-        vfs: &'a mut dyn VFS,
+        vfs: &'a mut dyn Vfs,
     ) -> Ctx<'a> {
         let input_fn: &str = &input_file_name;
         let main_file_name: Rc<str> = Rc::from(input_fn);
@@ -95,7 +102,7 @@ impl<'a> Ctx<'a> {
     fn mk_ident(&mut self, name: &str, loc: Rc<SourceInfo>) -> Rc<Ident> {
         Rc::new(Ast {
             val: self.intern_str(name),
-            loc: loc,
+            loc,
         })
     }
 
@@ -133,7 +140,7 @@ impl<'a> Ctx<'a> {
                     is_total: builder.is_total,
                     decreases: builder.decreases,
                 },
-                body: body,
+                body,
             }),
         })
     }
@@ -184,28 +191,10 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    fn add_global_var(
-        &mut self,
-        loc: Rc<SourceInfo>,
-        name: Rc<Ident>,
-        ty: Rc<Type>,
-        init: Option<Rc<Expr>>,
-        is_pure: bool,
-        is_extern: bool,
-        opaque_to_smt: bool,
-        is_enum_constant: bool,
-    ) {
+    fn add_global_var(&mut self, loc: Rc<SourceInfo>, var: GlobalVar) {
         self.translation_unit.decls.push(Ast {
             loc,
-            val: DeclT::GlobalVar(GlobalVar {
-                name,
-                ty,
-                init,
-                is_pure,
-                is_extern,
-                opaque_to_smt,
-                is_enum_constant,
-            }),
+            val: DeclT::GlobalVar(var),
         })
     }
 
@@ -433,7 +422,7 @@ impl<'a> Ctx<'a> {
     }
 }
 
-impl<'a> VFS for Ctx<'a> {
+impl<'a> Vfs for Ctx<'a> {
     fn read_vfs_file(&mut self, file_name: &str) -> crate::vfs::VFSResult {
         self.vfs.read_vfs_file(file_name)
     }
@@ -561,10 +550,10 @@ impl InlineCodeBuilder {
     }
     fn push_token(&mut self, before: &'static str, loc: Rc<SourceInfo>, tok: &str) {
         self.0.tokens.push(CodeToken {
-            before: before,
+            before,
             text: Ast {
                 val: Rc::from(tok),
-                loc: loc,
+                loc,
             },
         })
     }
@@ -581,7 +570,7 @@ fn mk_original_location(
     end_char: u32,
 ) -> Rc<SourceInfo> {
     Rc::new(SourceInfo::Original(Location {
-        file_name: file_name,
+        file_name,
         range: Range {
             start: Position {
                 line: start_line,
@@ -602,7 +591,7 @@ fn mk_fallback_sourceinfo(loc: &Rc<SourceInfo>) -> Rc<SourceInfo> {
 }
 
 fn mk_ast<T>(loc: Rc<SourceInfo>, val: T) -> Rc<Ast<T>> {
-    Rc::new(Ast { val: val, loc: loc })
+    Rc::new(Ast { val, loc })
 }
 
 fn mk_void_type(loc: Rc<SourceInfo>) -> Rc<Type> {
@@ -612,13 +601,7 @@ fn mk_bool_type(loc: Rc<SourceInfo>) -> Rc<Type> {
     mk_ast(loc, TypeT::Bool)
 }
 fn mk_int_type(loc: Rc<SourceInfo>, signed: bool, width: u32) -> Rc<Type> {
-    mk_ast(
-        loc,
-        TypeT::Int {
-            signed: signed,
-            width: width,
-        },
-    )
+    mk_ast(loc, TypeT::Int { signed, width })
 }
 fn mk_float_type(loc: Rc<SourceInfo>, width: u32) -> Rc<Type> {
     mk_ast(loc, TypeT::Float { width })
@@ -1018,7 +1001,7 @@ pub fn parse_file(
     file_name: &str,
     include_paths: &[String],
     defines: &[String],
-    vfs: &mut dyn VFS,
+    vfs: &mut dyn Vfs,
 ) -> (TranslationUnit, Diagnostics) {
     let mut ctx = Ctx::new(
         file_name.to_string(),

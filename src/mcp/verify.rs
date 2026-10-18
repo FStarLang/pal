@@ -19,8 +19,10 @@ use super::navigation::SemanticIndex;
 use super::process::{self, Cancellation};
 use super::workspace::{Failure, Result, Snapshot, Toolchain};
 
+type ProgressCallback = dyn Fn(&str, &str, Option<&str>) + Send + Sync;
+
 #[derive(Clone)]
-pub struct Progress(Arc<dyn Fn(&str, &str, Option<&str>) + Send + Sync>);
+pub struct Progress(Arc<ProgressCallback>);
 
 impl Progress {
     pub fn new(callback: impl Fn(&str, &str, Option<&str>) + Send + Sync + 'static) -> Self {
@@ -30,6 +32,12 @@ impl Progress {
         (self.0)(phase, message, current_function);
     }
 }
+struct VerificationReport<'a> {
+    progress: &'a Progress,
+    status_uri: &'a str,
+    diagnostics: &'a mut Diagnostics,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct VerificationKey([u8; 32]);
 
@@ -95,7 +103,7 @@ impl VerifiedArtifacts {
 
     fn seed(&self, snapshot: &Snapshot, manifest: &GeneratedSources) -> Result<()> {
         self.validate()?;
-        for (name, _) in &self.checked {
+        for name in self.checked.keys() {
             let source_name = name.strip_suffix(".checked").ok_or_else(|| {
                 Failure::new("proof_cache_lost", "invalid checked artifact manifest")
             })?;
@@ -214,9 +222,11 @@ impl Verifier {
                 &index,
                 accepted,
                 &cancel,
-                &progress,
-                status_uri,
-                &mut diagnostics,
+                VerificationReport {
+                    progress: &progress,
+                    status_uri,
+                    diagnostics: &mut diagnostics,
+                },
             )
             .await;
         match result {
@@ -241,10 +251,13 @@ impl Verifier {
         index: &Arc<SemanticIndex>,
         accepted: Option<Arc<VerifiedArtifacts>>,
         cancel: &Cancellation,
-        progress: &Progress,
-        status_uri: &str,
-        diagnostics: &mut Diagnostics,
+        report: VerificationReport<'_>,
     ) -> Result<(Arc<VerifiedArtifacts>, bool)> {
+        let VerificationReport {
+            progress,
+            status_uri,
+            diagnostics,
+        } = report;
         cancel.check()?;
         if let Some(failure) = &index.failure {
             return Err(failure.clone());
@@ -637,10 +650,9 @@ fn remove_stale_checked(snapshot: &Snapshot, manifest: &GeneratedSources) -> Res
             .file_name()
             .to_str()
             .and_then(|name| name.strip_suffix(".checked"))
+            && !manifest.contains_key(source)
         {
-            if !manifest.contains_key(source) {
-                fs::remove_file(entry.path()).map_err(worker_error)?;
-            }
+            fs::remove_file(entry.path()).map_err(worker_error)?;
         }
     }
     Ok(())

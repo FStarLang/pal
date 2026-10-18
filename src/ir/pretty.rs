@@ -82,7 +82,7 @@ impl<A: PrettyIR + ?Sized> PrettyIR for Rc<A> {
     }
 }
 
-impl<'a, A: PrettyIR> PrettyIR for &'a A {
+impl<A: PrettyIR> PrettyIR for &A {
     fn to_doc(&self) -> RcDoc<'_, ()> {
         A::to_doc(self)
     }

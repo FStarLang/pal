@@ -93,7 +93,7 @@ pub fn translation(
             .as_ref()
             .map(|path| workspace::uri(path))
             .unwrap_or_else(|| status_uri.to_owned());
-        let target = diagnostics.entry(target_uri).or_insert_with(Vec::new);
+        let target = diagnostics.entry(target_uri).or_default();
         for mut diagnostic in entries {
             if !matches!(
                 diagnostic.severity,
@@ -196,12 +196,12 @@ pub fn translation(
             declarations.insert(module.fst_file.clone(), declaration);
             let interface = format!("{}i", module.fst_file);
             for name in [module.fst_file, interface] {
-                if let Some(previous) = owners.insert(name, owner.clone()) {
-                    if previous != owner {
-                        return Err(metadata_failure(
-                            "source-range metadata assigns a module to conflicting declarations",
-                        ));
-                    }
+                if let Some(previous) = owners.insert(name, owner.clone())
+                    && previous != owner
+                {
+                    return Err(metadata_failure(
+                        "source-range metadata assigns a module to conflicting declarations",
+                    ));
                 }
             }
         }

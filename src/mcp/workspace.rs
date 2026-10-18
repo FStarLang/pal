@@ -812,16 +812,16 @@ impl Snapshot {
         }
         if let Ok(relative) = alias.strip_prefix(&self.root) {
             let private = self.mirror().join(relative);
-            if let Some(previous) = self.aliases.insert(private.clone(), identity.to_path_buf()) {
-                if previous != identity {
-                    return Err(Failure::new(
-                        "conflicting_changes",
-                        format!(
-                            "private alias names different captured files: {}",
-                            private.display()
-                        ),
-                    ));
-                }
+            if let Some(previous) = self.aliases.insert(private.clone(), identity.to_path_buf())
+                && previous != identity
+            {
+                return Err(Failure::new(
+                    "conflicting_changes",
+                    format!(
+                        "private alias names different captured files: {}",
+                        private.display()
+                    ),
+                ));
             }
         }
         Ok(())

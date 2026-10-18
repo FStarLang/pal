@@ -26,6 +26,7 @@ use crate::ir::Type as Type;
 use crate::ir::Stmt as Stmt;
 use crate::ir::Expr as Expr;
 use crate::ir::MatchBranch as MatchBranch;
+use crate::ir::GlobalVar as GlobalVar;
 use crate::ir::UnOp as UnOp;
 use crate::ir::BinOp as BinOp;
 use crate::ir::ParamMode as ParamMode;
@@ -140,6 +141,19 @@ mod crate::ir {
         constructor Elvis;
     }
 
+    type GlobalVar {
+        #layout(size=32, align=8);
+        constructor {
+            name: Rc<Ident>,
+            ty: Rc<Type>,
+            init: Option<Rc<Expr>>,
+            is_pure: bool,
+            is_extern: bool,
+            opaque_to_smt: bool,
+            is_enum_constant: bool
+        };
+    }
+
     type ParamMode {
         #layout(size=1, align=1);
         constructor Regular;
@@ -203,7 +217,7 @@ mod crate::clang {
         fn add_struct(&mut self, DeclBuilder);
         fn add_struct_decl(&mut self, Rc<SourceInfo>, Rc<Ident>);
         fn add_union(&mut self, DeclBuilder);
-        fn add_global_var(&mut self, Rc<SourceInfo>, Rc<Ident>, Rc<Type>, Option<Rc<Expr>>, bool, bool, bool, bool);
+        fn add_global_var(&mut self, Rc<SourceInfo>, GlobalVar);
         fn add_include(&mut self, Rc<SourceInfo>, &str, u32, &SnippetMap);
         fn add_let_decl(&mut self, Rc<SourceInfo>, bool, u32, u32, &SnippetMap);
         fn add_letimpure_decl(&mut self, Rc<SourceInfo>, u32, u32, &SnippetMap);

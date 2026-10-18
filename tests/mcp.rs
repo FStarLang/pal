@@ -498,10 +498,12 @@ struct Wrapper {
 
 impl Wrapper {
     fn new() -> Self {
-        assert!(
-            cfg!(target_os = "linux"),
-            "real process-descendant/FIFO regression requires Linux /proc and POSIX tools; no scenarios are skipped"
-        );
+        const {
+            assert!(
+                cfg!(target_os = "linux"),
+                "real process-descendant/FIFO regression requires Linux /proc and POSIX tools; no scenarios are skipped"
+            );
+        }
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("fstar-qa");
         let trace = directory.path().join("trace.log");
