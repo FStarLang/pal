@@ -78,6 +78,8 @@ static void sink_u(unsigned long long v) { g_sink ^= v; }
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
 
+union endian { uint32_t u32; uint8_t b[4]; };
+
 /* ================================================================== */
 /* SECTION 12                                                          */
 /* [DEFINED] The effective type is set to a UNION type, and the object  */
@@ -94,8 +96,6 @@ static void sink_u(unsigned long long v) { g_sink ^= v; }
 static void case_12_4_endianness_probe_through_an_allocated_union(void)
 {
     BANNER("DEFINED", "12.4: the classic endianness probe, on allocated storage");
-
-    union endian { uint32_t u32; uint8_t b[4]; };
 
     union endian *u = malloc(sizeof *u);
     if (!u) return;

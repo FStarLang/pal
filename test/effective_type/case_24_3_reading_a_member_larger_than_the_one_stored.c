@@ -77,6 +77,8 @@ static void sink_d(double v)             { g_sink ^= (unsigned long long)(v * 7.
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
 
+union big { char c; double d; };
+
 /* ================================================================== */
 /* SECTION 24                                                          */
 /* [UB] Union punning that does NOT work: the ways an object fails to   */
@@ -86,8 +88,6 @@ static void sink_d(double v)             { g_sink ^= (unsigned long long)(v * 7.
 static void case_24_3_reading_a_member_larger_than_the_one_stored(void)
 {
     BANNER("UB", "24.3: punning to a LARGER member reads bytes that were never set");
-
-    union big { char c; double d; };
 
     union big *u = malloc(sizeof *u);
     if (!u) return;

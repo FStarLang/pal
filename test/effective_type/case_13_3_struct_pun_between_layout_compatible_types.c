@@ -81,6 +81,9 @@ static _plain void *opaque(_plain void *p)
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
 
+struct a { int x, y; };
+struct b { int x, y; };          /* same layout, DIFFERENT type */
+
 /* ================================================================== */
 /* SECTION 13                                                         */
 /* [UB] Effective type IS defined (declared) and CANNOT change, and the */
@@ -90,9 +93,6 @@ static _plain void *opaque(_plain void *p)
 static void case_13_3_struct_pun_between_layout_compatible_types(void)
 {
     BANNER("UB", "13.3: two distinct struct types with identical layout are NOT compatible");
-
-    struct a { int x, y; };
-    struct b { int x, y; };          /* same layout, DIFFERENT type */
 
     struct a va = { 1, 2 };
     struct b *pb = (struct b *)opaque(&va);

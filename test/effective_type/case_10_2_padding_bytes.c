@@ -78,6 +78,8 @@ static void sink_u(unsigned long long v) { g_sink ^= v; }
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
 
+struct padded { char c; int i; };
+
 /* ================================================================== */
 /* SECTION 10                                                         */
 /* Flexible array members, padding bytes, and memset.                   */
@@ -86,8 +88,6 @@ static void sink_u(unsigned long long v) { g_sink ^= v; }
 static void case_10_2_padding_bytes(void)
 {
     BANNER("UNSPEC", "10.2: padding bytes have unspecified values -- memcmp on structs is a trap");
-
-    struct padded { char c; int i; };
 
     struct padded x, y;
     memset(&x, 0, sizeof x);

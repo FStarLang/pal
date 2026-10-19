@@ -80,6 +80,15 @@ static void sink_u(unsigned long long v) { g_sink ^= v; }
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
 
+struct tagged {
+    int kind;
+    union { int32_t i; float f; } val;      /* named union member     */
+};
+struct anon {
+    int kind;
+    union { int32_t i; float f; };          /* C11 anonymous union    */
+};
+
 /* ================================================================== */
 /* SECTION 12                                                          */
 /* [DEFINED] The effective type is set to a UNION type, and the object  */
@@ -96,15 +105,6 @@ static void sink_u(unsigned long long v) { g_sink ^= v; }
 static void case_12_6_anonymous_and_nested_unions(void)
 {
     BANNER("DEFINED", "12.6: punning through a union nested inside an allocated struct");
-
-    struct tagged {
-        int kind;
-        union { int32_t i; float f; } val;      /* named union member     */
-    };
-    struct anon {
-        int kind;
-        union { int32_t i; float f; };          /* C11 anonymous union    */
-    };
 
     struct tagged *t = malloc(sizeof *t);
     if (!t) return;
