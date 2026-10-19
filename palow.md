@@ -852,6 +852,56 @@ struct_S_alignof`, and for the same reason: it is where an object is made out
 of storage. Everything above it (the predicates, the focus and unfocus
 machinery, `unless_null`, the generated contracts) is untouched.
 
+#### Enforcement contract and acceptance matrix
+
+The enforcement migration distinguishes three independent facts about storage:
+its immutable origin (declared, or without a declared type), its effective-type
+index, and the initialization/representation of its contents. An access view
+is evidence derived from those facts, not a fourth way to change them.
+
+The source of truth is C11 6.5p6-7, together with the representation rules in
+6.2.6.1-2 and the union-member rules in 6.5.2.3. The following is the acceptance
+contract for the migration; it is not a claim that enforcement is already on.
+
+| Operation | Required behavior | Regression examples |
+|---|---|---|
+| Read a declared object through its own type | Preserve its declared type and require a valid initialized representation | effective_type 1.1 |
+| Read through a character view | Preserve origin and effective type; inspect the representation only | effective_type 2.1 |
+| Corresponding signed/unsigned access | Permit the access without establishing a different object type | effective_type 1.2 |
+| First non-character store into allocated storage | Establish the storing lvalue's type for the affected object | effective_type 3.1, 6.1 |
+| Destructively reuse allocated storage | Require exclusive ownership and explicit ghost preparation; no incompatible read before a justified initialization | effective_type 4.1 |
+| Prepare declared storage for an incompatible type | Reject; forgetting a value must not discard its declared origin | effective_type 14.2, 14.3 |
+| Read zero-filled, still-untyped storage | Permit a representation-valid access without installing a persistent type | effective_type 6.3 |
+| Copy into allocated storage | Justify the destination type from the source object, not the pointer cast or byte values alone | effective_type 5.1, 5.3 |
+| Copy into declared storage | Preserve the destination's declared type, even when the source type differs | effective_type 2.2, 14.1 |
+| Partial copy or partial initialization | Establish only the covered facts; do not initialize or relabel untouched bytes | effective_type 18.2 |
+| Field/array-element access | Retain enclosing-object information and the accessed extent | out_struct_fields, array_alloc |
+| Union representation view | Require an established permitted union view and a valid representation of the accessed member | effective_type 12.1; union_test3 |
+| Prepare, reveal, then conceal old bytes as a new type | Reject without a corresponding type-justified C initialization | dedicated enforcement regressions |
+
+Preparation is a write-only reservation, not a C store. Its obligation must
+survive raw-byte views and cannot be discharged by a representation proof
+about the old contents. A typed store or checked object-representation copy
+can complete it. A source that is only reserved for a type is not an
+established source object of that type.
+
+Retypability follows storage origin, not `freeable`: pool chunks carved from
+allocated storage remain eligible for reuse, whereas a pool backed by a
+declared character array does not erase that array's declared type. Copying
+never transfers the source's origin to the destination.
+
+The compatibility relation must not equate C type identity with machine width,
+layout, or permission for a single member access. Partial/aggregate cases with
+contested C interpretations, including effective_type 24.1, remain explicitly
+unsupported until that interpretation is specified. Generic translation or
+ownership failures are not successful negative effective-type tests.
+
+The migration is additive until the checked operations and generated ownership
+helpers can be switched together. Intermediate interfaces do not constitute
+end-to-end enforcement. Pointer-value invalidation after `free` (effective_type
+22.1), atomics, `restrict`, and returned-aggregate temporary lifetime are
+separate workstreams.
+
 #### What to watch
 
 Cost. A per-byte `Seq` index is the same shape as the per-field alignment
