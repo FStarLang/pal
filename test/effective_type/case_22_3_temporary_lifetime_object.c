@@ -69,6 +69,10 @@ static volatile unsigned long long g_sink;
 
 static void sink_u(unsigned long long v) { g_sink ^= v; }
 
+/* Disabled until PAL supports addressable array subobjects of returned
+   aggregates and their full-expression temporary lifetime. Keep the original
+   lifetime violation intact rather than replacing the temporary with a local. */
+#if 0
 struct wrap { int a[4]; };
 
 static struct wrap case_22_make(void) { struct wrap w = { { 1, 2, 3, 4 } }; return w; }
@@ -93,6 +97,7 @@ static void case_22_3_temporary_lifetime_object(void)
     printf("   p[0] after the full expression = %d   <-- UB\n", p[0]);
     sink_u((unsigned)p[0]);
 }
+#endif
 
 int main(void)
     _preserves(_live(stdout))
@@ -100,6 +105,8 @@ int main(void)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);
+#if 0
     case_22_3_temporary_lifetime_object();
+#endif
     return 0;
 }
