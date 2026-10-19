@@ -1,0 +1,4 @@
+Effective_store_bad.fst(
+Failed to prove:
+read_ok
+float32_t_ctype
