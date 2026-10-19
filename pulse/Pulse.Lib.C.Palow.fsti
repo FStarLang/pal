@@ -203,14 +203,17 @@ ghost fn mem_split_at (a: ptr) (#p: perm) (#b: bytes)
   ensures  mem_pts_to_at (a +! n) p (slice b (SZ.v n) (len b))
                          (Seq.slice e (SZ.v n) (Etype.elen e))
 
-(* The bytes at an address determine their index, just as they determine each
-   other (`mem_pts_to_injective`). This is what makes the equality above safe
-   to use in both directions: eliminating the existential gives you *the*
-   index, not merely *an* index. *)
+ghost fn mem_share_at (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  requires mem_pts_to_at a p b e
+  ensures mem_pts_to_at a (p /. 2.0R) b e ** mem_pts_to_at a (p /. 2.0R) b e
+
+(* Agreement is for the same extent: a prefix and its enclosing range may
+   share their base address without having equal index sequences. *)
 ghost fn mem_pts_to_at_injective (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
                                  (#e1 #e2: Etype.etypes)
   preserves mem_pts_to_at a p1 b1 e1
   preserves mem_pts_to_at a p2 b2 e2
+  requires pure (len b1 == len b2)
   ensures   pure (e1 == e2)
 
 ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)

@@ -1,0 +1,4 @@
+Prepared_read_bad.fst(
+Cannot prove:
+mem_pts_to_at a 1.0R
+Effective.prepared a uint32_t_ctype
