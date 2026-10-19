@@ -1,5 +1,5 @@
 /*
- * Standalone case 22.1: C11 effective type (6.5p6) and strict aliasing (6.5p7).
+ * Standalone case 22.1 (printf): C11 effective type (6.5p6) and strict aliasing (6.5p7).
  *
  * Reference (N1570, the public C11 committee draft):
  *   https://port70.net/~nsz/c/c11/n1570.html#6.5p6
@@ -45,8 +45,8 @@
  *     [UB?]      a genuinely contested corner; see the case's own note
  *
  * Build and run from this file's directory:
- *   cc -std=c11 -O2 -Wall -Wextra case_22_1_use_a_freed_pointer_VALUE.c -o case_22_1
- *   ./case_22_1
+ *   cc -std=c11 -O2 -Wall -Wextra case_22_1_use_a_freed_pointer_VALUE_printf.c -o case_22_1_printf
+ *   ./case_22_1_printf
  *
  * This executable runs its case unconditionally, including any UB.
  * Compile with -O2 (not -fno-strict-aliasing) to allow aliasing optimizations.
@@ -60,16 +60,7 @@
 #include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <stddef.h>
-
-/* ------------------------------------------------------------------ */
-/* Plumbing: opaque sinks so the optimizer cannot delete the accesses. */
-/* ------------------------------------------------------------------ */
-
-static volatile unsigned long long g_sink;
-
-static void sink_p(_plain const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
 
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
@@ -79,9 +70,9 @@ static void sink_p(_plain const void *v)        { g_sink ^= (unsigned long long)
 /* [UB] The object is gone: lifetime, not type, is the problem.         */
 /* ================================================================== */
 
-static void case_22_1_use_a_freed_pointer_VALUE(void)
+static void case_22_1_use_a_freed_pointer_VALUE_printf(void)
 {
-    BANNER("UB", "22.1: even READING a freed pointer's value is UB (not just dereferencing)");
+    BANNER("UB", "22.1 (printf): reading a freed pointer's value without dereferencing");
 
     int *p = malloc(sizeof(int));
     if (!p) return;
@@ -89,10 +80,9 @@ static void case_22_1_use_a_freed_pointer_VALUE(void)
     free(p);
 
     /* 6.2.4p2 / J.2: the value of a pointer becomes INDETERMINATE when the
-       object it points to reaches the end of its lifetime.  Printing or
-       comparing `p` -- without any dereference at all -- is already UB. */
+       object it points to reaches the end of its lifetime.  Passing `p`
+       to printf -- without any dereference at all -- is already UB. */
     printf("   freed pointer value = %p   <-- UB\n", (void *)p);
-    if (p != NULL) sink_p(p);
 }
 
 int main(void)
@@ -101,6 +91,6 @@ int main(void)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);
-    case_22_1_use_a_freed_pointer_VALUE();
+    case_22_1_use_a_freed_pointer_VALUE_printf();
     return 0;
 }
