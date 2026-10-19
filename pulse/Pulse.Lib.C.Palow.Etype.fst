@@ -74,12 +74,47 @@ type ctype =
 
 let tchar : ctype = TScalar SChar
 
+(* Descriptors are canonical per translation unit: equality includes the tag,
+   constructor, and member descriptors. Equal byte sizes are only layout
+   information, never evidence of C type compatibility. *)
+let nominal_compatible (t: ctype) (u: ctype) : bool = t = u
+
+let scalar_compatible (s: scalar) (u: scalar) : bool =
+  s = u ||
+  (match s, u with
+   | SInt16, SUInt16 | SUInt16, SInt16
+   | SInt32, SUInt32 | SUInt32, SInt32
+   | SInt64, SUInt64 | SUInt64, SInt64 -> true
+   | _ -> false)
+
+let scalar_compatible_equivalence (a: scalar) (b: scalar) (c: scalar)
+  : Lemma (scalar_compatible a a /\
+           (scalar_compatible a b <==> scalar_compatible b a) /\
+           (scalar_compatible a b /\ scalar_compatible b c ==> scalar_compatible a c))
+  = ()
+
+(* int8_t is signed char in this model. Both signed and unsigned character
+   lvalues have the character-access exception; this is not a claim that
+   arbitrary equal-width scalar types are compatible. *)
+let character_type (t: ctype) : bool =
+  t = tchar || t = TScalar SInt8
+
+let type_compatible (t: ctype) (u: ctype) : bool =
+  nominal_compatible t u ||
+  (match t, u with
+   | TScalar s, TScalar v -> scalar_compatible s v
+   | _ -> false)
+
 let rec csize (t: ctype) : Tot nat (decreases t) =
   match t with
   | TScalar s -> scalar_size s
   | TStruct _ n _ -> n
   | TUnion _ n _ -> n
   | TArr e n -> csize e * n
+
+(* A deliberately weak layout test: equal storage extents. It is useful for
+   byte transfers, but must not be used in place of type_compatible. *)
+let layout_compatible (t: ctype) (u: ctype) : bool = csize t = csize u
 
 (* `access_ok` recurses into members, which are not subterms of the aggregate
    in the sense F* checks automatically, so it decreases on an explicit size.
@@ -107,7 +142,8 @@ let emod (x: int) (m: nat) : int = if m = 0 then x else x % m
    condition of 6.5p7, spelled out by cases:
 
    - a character type may access anything;
-   - a type may access itself at offset 0;
+   - a type, or its corresponding signed/unsigned scalar, may access itself
+     at offset 0;
    - an array delegates to its element type, modulo the element size, which is
      what makes `a[i]` an access to the element rather than to the array; and
    - an aggregate delegates to each member at that member's offset. For a
@@ -128,8 +164,8 @@ let emod (x: int) (m: nat) : int = if m = 0 then x else x % m
    `access_ok_trans`). *)
 let rec access_ok (ty: ctype) (off: int) (u: ctype) : Tot bool (decreases %[ctype_size ty; 0]) =
   0 < csize u && 0 <= off && off + csize u <= csize ty &&
-  (u = tchar ||
-  (off = 0 && ty = u) ||
+  (character_type u ||
+  (off = 0 && type_compatible ty u) ||
   (match ty with
    | TArr e n -> 0 <= off && off < csize e * n && access_ok e (emod off (csize e)) u
    | TStruct _ _ ms -> access_ok_members ms off u
@@ -140,6 +176,13 @@ and access_ok_members (ms: list (nat & ctype)) (off: int) (u: ctype)
   match ms with
   | [] -> false
   | (o, m) :: r -> access_ok m (off - o) u || access_ok_members r off u
+
+let compatible_scalar_access (a: scalar) (b: scalar) (off: int) (u: ctype)
+  : Lemma (requires scalar_compatible a b /\ access_ok (TScalar b) off u)
+          (ensures access_ok (TScalar a) off u)
+  = match u with
+    | TScalar c -> scalar_compatible_equivalence a b c
+    | _ -> ()
 
 (* Stepping an offset within an element never carries out of it, because an
    access fits inside the object it is an access to. *)
@@ -164,7 +207,12 @@ let rec access_ok_trans (ty: ctype) (d: int) (s: ctype) (off: int) (fld: ctype)
   : Lemma (requires access_ok ty d s /\ access_ok s off fld)
           (ensures  access_ok ty (d + off) fld)
           (decreases %[ctype_size ty; 0])
-  = if s = tchar || (d = 0 && ty = s) then () else
+  = if character_type s then ()
+    else if d = 0 && type_compatible ty s then
+      (match ty, s with
+       | TScalar a, TScalar b -> compatible_scalar_access a b off fld
+       | _ -> ())
+    else
     match ty with
     | TScalar _ -> ()
     | TArr e n ->
@@ -248,11 +296,166 @@ let store_entry (en: option etype_entry) (u: ctype) (k: nat) : option etype_entr
 let store_etypes (e: etypes) (u: ctype { elen e == csize u }) : e':etypes { elen e' == elen e } =
   Seq.init (elen e) (fun k -> store_entry (eget e k) u k)
 
-(* `memcpy` transports the entries along with the bytes, matching the C rule
-   that a byte-copied object inherits the source object's effective type. That
-   is just "the destination index becomes the source index", so there is no
-   separate definition -- it is the same transport that gives `memcpy` its byte
-   spec in `Pulse.Lib.C.Palow.Machine`. *)
+(* The legacy store functions above compute labels, not permissions. In
+   particular store_fixed_stable does not justify a cross-type typed store.
+   Checked clients should use the state transitions below.
+
+   A preparation is write-only ghost intent, not a store and not an
+   established source type. It retains the destination's original entries,
+   including its immutable declared/allocated origin. Initialization and
+   ownership are separate obligations of the byte layer: Ready means ready
+   for an effective-type check, not that any bytes have been initialized. *)
+type etype_state =
+  | Ready : etypes -> etype_state
+  | Pending : etypes -> ctype -> etype_state
+
+let state_etypes (s: etype_state) : etypes =
+  match s with Ready e | Pending e _ -> e
+
+let state_read_ok (s: etype_state) (u: ctype) : prop =
+  match s with
+  | Ready e -> read_ok e u
+  | Pending _ _ -> False
+
+(* Conservatively require one complete mutable object (or wholly untyped
+   storage). A field slice of a larger object, a mixture of objects, and mixed
+   typed/untyped ranges cannot be prepared. Exclusive, full byte ownership
+   must additionally be supplied by the eventual separation-logic caller. *)
+let full_mutable (e: etypes) : prop =
+  0 < elen e /\
+  ((forall (k: nat). k < elen e ==> eget e k == None) \/
+   (exists (t: ctype).
+     elen e == csize t /\
+     (forall (k: nat). k < elen e ==>
+       eget e k == Some ({ ty = t; off = k; fixed = false }))))
+
+let prepare_write_ok (s: etype_state) (target: ctype) : prop =
+  match s with
+  | Ready e -> full_mutable e /\ elen e == csize target
+  | Pending _ _ -> False
+
+let prepare_write (s: etype_state) (target: ctype { prepare_write_ok s target })
+  : etype_state =
+  Pending (state_etypes s) target
+
+(* A completion names the ACTUAL storing lvalue, not an enclosing aggregate.
+   A scalar member store cannot complete a preparation for a union, even when
+   their sizes match. Character writes preserve all labels and cannot complete
+   a pending noncharacter preparation. *)
+let store_complete_ok (s: etype_state) (lvalue: ctype) : prop =
+  let e = state_etypes s in
+  elen e == csize lvalue /\
+  (match s with
+   | Ready _ -> read_ok e lvalue \/ full_mutable e
+   | Pending _ target ->
+     full_mutable e /\ nominal_compatible target lvalue)
+
+let complete_store (s: etype_state) (lvalue: ctype { store_complete_ok s lvalue })
+  : etype_state =
+  let e = state_etypes s in
+  Ready (if character_type lvalue then e else store_etypes e lvalue)
+
+(* A source must already carry one whole object's nominal type on EVERY
+   byte. read_ok is insufficient: its None fallback and its subobject/union
+   rules deliberately allow reads that do not establish that object type.
+   This conservative copy rule does not infer whole objects from fields. *)
+let established_type (e: etypes) (t: ctype) : prop =
+  0 < elen e /\ elen e == csize t /\
+  (forall (k: nat). k < elen e ==>
+    (match eget e k with
+     | None -> False
+     | Some en -> en.ty == t /\ en.off == k))
+
+let source_type (e: etypes) : option ctype =
+  if elen e = 0 then None else
+  match eget e 0 with None -> None | Some en -> Some en.ty
+
+let declared_destination (e: etypes) : prop =
+  forall (k: nat). k < elen e ==>
+    (match eget e k with None -> False | Some en -> en.fixed)
+
+(* Declared destinations retain their types even for cross-type byte copies.
+   Mutable destinations accept only full-object copies: the source must
+   establish the prepared type, or a type already readable at the destination.
+   Fresh untyped storage uses the latter's C11 fallback without first acquiring
+   a persistent type from a read. Pending sources are NEVER eligible.
+
+   Partial/ambiguous mutable copies are intentionally unsupported here; they
+   need a finer object/initialization model, not broader access compatibility.
+   Partial declared copies are allowed, but these rules say nothing about
+   initialization of the rest of the enclosing object. *)
+let copy_complete_ok (dst: etype_state) (src: etype_state) : prop =
+  let d = state_etypes dst in
+  let s = state_etypes src in
+  elen d == elen s /\
+  (match src with
+   | Pending _ _ -> False
+   | Ready _ ->
+     match dst with
+     | Ready _ ->
+       declared_destination d \/
+       (full_mutable d /\
+        (match source_type s with
+         | None -> False
+         | Some t -> established_type s t /\ read_ok d t))
+     | Pending _ target ->
+       full_mutable d /\ elen d == csize target /\
+       established_type s target)
+
+(* Only the destination decides fixed origin. Copying from a declared object
+   into allocated storage must NOT turn that allocation into declared storage.
+   This helper computes labels; copy_complete_ok supplies its permission. *)
+let copy_entry (dst: option etype_entry) (src: option etype_entry)
+  : option etype_entry =
+  match dst with
+  | Some en ->
+    if en.fixed then dst else
+    (match src with
+     | None -> None
+     | Some en -> Some ({ ty = en.ty; off = en.off; fixed = false }))
+  | None ->
+    match src with
+    | None -> None
+    | Some en -> Some ({ ty = en.ty; off = en.off; fixed = false })
+
+let complete_copy (dst: etype_state)
+                  (src: etype_state { copy_complete_ok dst src })
+  : etype_state =
+  let d = state_etypes dst in
+  let s = state_etypes src in
+  Ready (Seq.init (elen d) (fun k -> copy_entry (eget d k) (eget s k)))
+
+(* Splice only the completed slice back into an enclosing byte index.
+   Neither completion nor splicing asserts whole-object initialization. *)
+let replace_etypes (whole: etypes) (lo: nat) (hi: nat { lo <= hi /\ hi <= elen whole })
+                   (part: etypes { elen part == hi - lo })
+  : e:etypes { elen e == elen whole } =
+  Seq.append (Seq.slice whole 0 lo)
+    (Seq.append part (Seq.slice whole hi (elen whole)))
+
+let complete_copy_declared_stable (dst: etype_state)
+    (src: etype_state { copy_complete_ok dst src })
+  : Lemma (requires declared_destination (state_etypes dst))
+          (ensures state_etypes (complete_copy dst src) == state_etypes dst)
+  = Seq.lemma_eq_intro (state_etypes (complete_copy dst src)) (state_etypes dst)
+
+let complete_copy_fixed_origin (dst: etype_state)
+    (src: etype_state { copy_complete_ok dst src })
+    (k: nat { k < elen (state_etypes dst) })
+  : Lemma
+      (match eget (state_etypes (complete_copy dst src)) k with
+       | None -> True
+       | Some en ->
+         en.fixed ==>
+         eget (state_etypes dst) k == Some en)
+  = ()
+
+let replace_etypes_outside (whole: etypes) (lo: nat)
+    (hi: nat { lo <= hi /\ hi <= elen whole })
+    (part: etypes { elen part == hi - lo })
+    (k: nat { k < elen whole /\ (k < lo \/ hi <= k) })
+  : Lemma (eget (replace_etypes whole lo hi part) k == eget whole k)
+  = ()
 
 (* ---------------------------------------------------------------------------
    Theorems
