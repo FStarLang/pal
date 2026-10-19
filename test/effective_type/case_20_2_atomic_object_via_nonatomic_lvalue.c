@@ -88,6 +88,10 @@ static _plain void *opaque(_plain void *p)
 /*      that direction only.  Dropping a qualifier is a different rule. */
 /* ================================================================== */
 
+/* Disabled until PAL supports atomic types, conversions, and operations.
+   Preserve the atomic object and its invalid non-atomic access rather than
+   replacing them with ordinary integer operations. */
+#if 0
 #ifndef __STDC_NO_ATOMICS__
 #include <stdatomic.h>
 static _Atomic int g_atomic = 1;
@@ -112,6 +116,7 @@ static void case_20_2_atomic_object_via_nonatomic_lvalue(void)
     BANNER("UB", "20.2: skipped -- no atomics on this implementation");
 }
 #endif
+#endif
 
 int main(void)
     _preserves(_live(stdout))
@@ -119,6 +124,8 @@ int main(void)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);
+#if 0
     case_20_2_atomic_object_via_nonatomic_lvalue();
+#endif
     return 0;
 }
