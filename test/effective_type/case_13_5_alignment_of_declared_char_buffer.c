@@ -99,7 +99,7 @@ static void case_13_5_alignment_of_declared_char_buffer(void)
     /* Even with _Alignas this would still be an effective-type violation;
        without it, the cast itself is UB (6.3.2.3p7) if buf is not suitably
        aligned for `double`. */
-    double *pd = (double *)opaque(buf + 1);   /* deliberately odd offset */
+    double *pd = (double *)opaque(&buf[1]);   /* deliberately odd offset */
     *pd = 1.0;                                 /* UB x2 */
     printf("   %g   <-- UB\n", *pd);
     sink_d(*pd);
