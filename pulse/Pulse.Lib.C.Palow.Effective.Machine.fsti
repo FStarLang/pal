@@ -20,6 +20,10 @@ module SZ = FStar.SizeT
 let fresh_index (n: nat) : e:ET.etypes { ET.elen e == n } =
   Seq.create n None
 
+let store_index (e: ET.etypes) (t: ET.ctype { ET.elen e == ET.csize t })
+  : ET.etypes =
+  if ET.character_type t then e else ET.store_etypes e t
+
 fn malloc (n: SZ.t)
   returns a: ptr
   ensures unless_null a
@@ -57,7 +61,7 @@ fn store (a: ptr) (t: erased ET.ctype) (b: bytes)
   requires pure (ET.elen e == len old /\ len b == len old /\
                  len b == ET.csize (reveal t) /\ initialized b /\
                  ET.read_ok e (reveal t))
-  ensures mem_pts_to_at a 1.0R b (ET.store_etypes e (reveal t))
+  ensures mem_pts_to_at a 1.0R b (store_index e (reveal t))
 
 (* A character store preserves the old index. Noncharacter whole-object
    initialization establishes the explicitly reserved target type. *)

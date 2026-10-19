@@ -296,6 +296,11 @@ let store_entry (en: option etype_entry) (u: ctype) (k: nat) : option etype_entr
 let store_etypes (e: etypes) (u: ctype { elen e == csize u }) : e':etypes { elen e' == elen e } =
   Seq.init (elen e) (fun k -> store_entry (eget e k) u k)
 
+let store_read_ok (e: etypes) (t: ctype { elen e == csize t })
+  : Lemma (requires read_ok e t)
+          (ensures read_ok (store_etypes e t) t)
+  = ()
+
 (* The legacy store functions above compute labels, not permissions. In
    particular store_fixed_stable does not justify a cross-type typed store.
    Checked clients should use the state transitions below.

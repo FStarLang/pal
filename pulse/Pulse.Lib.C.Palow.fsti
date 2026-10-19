@@ -222,12 +222,3 @@ ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
                      (n: SZ.t { SZ.v n == len b1 })
   requires mem_pts_to_at a p b1 e1 ** mem_pts_to_at (a +! n) p b2 e2
   ensures  mem_pts_to_at a p (append b1 b2) (Seq.append e1 e2)
-
-(* A store at type `u` relabels allocated storage and leaves declared objects
-   alone; a read at `u` requires the covered entries to be compatible with it.
-   These are the two hooks the typed operations in `Pulse.Lib.C.Palow.Machine`
-   will take once enforcement is switched on. *)
-ghost fn mem_store_etypes (a: ptr) (#b: bytes) (#e: Etype.etypes)
-                          (u: Etype.ctype { Etype.elen e == Etype.csize u })
-  requires mem_pts_to_at a 1.0R b e
-  ensures  mem_pts_to_at a 1.0R b (Etype.store_etypes e u)

@@ -750,10 +750,12 @@ Where the rule bites is *re-typing*. Fresh `malloc` storage has an all-`None`
 index, which satisfies `read_ok` at every type, so claiming it costs nothing.
 Once it has been written at `uint32_t`, claiming the same bytes at another
 type fails -- which is the point. C allows the retype, so it has to be
-available, but only as an explicit ghost step on full permission
-(`mem_store_etypes`), which is exactly right: you cannot retype storage you
-share, and it has no effect on a declared object, whose store is undefined
-behaviour rather than a retype.
+available, but only by explicitly preparing fully owned allocated storage
+with `Effective.prepare`, then actually initializing it through the checked
+machine interface. Preparation returns an opaque write-only reservation;
+it does not relabel the old bytes as a readable value. The former
+`mem_store_etypes` ghost hook has been removed because it allowed precisely
+that byte-preserving shortcut. Declared storage cannot be prepared.
 
 #### How fine is the index?
 
