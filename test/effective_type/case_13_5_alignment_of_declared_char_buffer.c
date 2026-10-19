@@ -61,6 +61,7 @@
  * Case 13.4: A declared char array cannot acquire int effective type through an int store; alignment may be a separate problem.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -73,11 +74,13 @@ static volatile unsigned long long g_sink;
 
 static void sink_d(double v)             { g_sink ^= (unsigned long long)(v * 7.0); }
 
-static void sink_p(const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
+static void sink_p(_plain const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
 
 /* An "opaque" identity for pointers: defeats constant propagation without
    itself being UB. */
-static void *opaque(void *p) { sink_p(p); return p; }
+static _plain void *opaque(_plain void *p)
+    _ensures(return == p)
+{ sink_p(p); return p; }
 
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
@@ -103,6 +106,8 @@ static void case_13_5_alignment_of_declared_char_buffer(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

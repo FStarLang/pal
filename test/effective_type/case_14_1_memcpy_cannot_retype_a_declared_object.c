@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -72,11 +73,13 @@ static void sink_u(unsigned long long v) { g_sink ^= v; }
 
 static void sink_d(double v)             { g_sink ^= (unsigned long long)(v * 7.0); }
 
-static void sink_p(const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
+static void sink_p(_plain const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
 
 /* An "opaque" identity for pointers: defeats constant propagation without
    itself being UB. */
-static void *opaque(void *p) { sink_p(p); return p; }
+static _plain void *opaque(_plain void *p)
+    _ensures(return == p)
+{ sink_p(p); return p; }
 
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
@@ -110,6 +113,8 @@ static void case_14_1_memcpy_cannot_retype_a_declared_object(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stddef.h>
 
@@ -88,12 +89,14 @@ static void case_22_3_temporary_lifetime_object(void)
        with temporary lifetime.  Its lifetime ends at the end of the full
        expression, and -- note -- any attempt to MODIFY it is UB even while
        it is alive. */
-    const int *p = case_22_make().a;     /* lifetime ends at this semicolon */
+    _array const int *p = case_22_make().a; /* lifetime ends at this semicolon */
     printf("   p[0] after the full expression = %d   <-- UB\n", p[0]);
     sink_u((unsigned)p[0]);
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

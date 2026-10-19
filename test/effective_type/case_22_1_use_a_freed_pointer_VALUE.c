@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -68,7 +69,7 @@
 
 static volatile unsigned long long g_sink;
 
-static void sink_p(const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
+static void sink_p(_plain const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
 
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
@@ -95,6 +96,8 @@ static void case_22_1_use_a_freed_pointer_VALUE(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

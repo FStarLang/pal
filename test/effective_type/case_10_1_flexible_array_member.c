@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -92,13 +93,25 @@ static void case_10_1_flexible_array_member(void)
        for each element.  6.7.2.1p18 blesses the `f->a[i]` lvalues as long as
        the allocation is big enough. */
     f->n = n;
-    for (size_t i = 0; i < n; i++) f->a[i] = (int)(i * 10);
+    for (size_t i = 0; i < n; i++)
+        _invariant(_live(i) && _live(n) && n == 4 && i <= n)
+        _invariant((_slprop)_inline_pulse(
+            exists* (v: Seq.seq (option Int32.t)).
+            array_pts_to (maybe_repr int32_t_repr 4) 4
+                (SizeT.v int32_t_alignof) ($(f) +! struct_fam_offsetof_a) 1.0R v **
+            pure (Seq.length v == SizeT.v $(n)) **
+            pure (forall (j: nat).
+                j < Seq.length v /\ j < SizeT.v $(i) /\ j < 4 ==>
+                Seq.index v j == Some (Int32.int_to_t (j * 10)))))
+        f->a[i] = (int)(i * 10);
     printf("   fam n=%zu a=[%d %d %d %d]\n", f->n, f->a[0], f->a[1], f->a[2], f->a[3]);
     sink_u((unsigned)f->a[3]);
     free(f);
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -61,6 +61,7 @@
  * Case 2.3: A declared union permits member punning; the resulting value can be unspecified or a trap representation.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,6 +122,8 @@ static void case_12_2_memcpy_propagates_a_union_type(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

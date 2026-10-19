@@ -61,6 +61,7 @@
  * Case 12.1: Assigning *u as a whole union installs the union effective type in allocated storage before member punning.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -123,6 +124,8 @@ static void case_24_1_member_store_does_not_install_the_union(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -63,6 +63,7 @@
  * Case 4.1: Successive non-character stores to allocated storage install new types; each read uses the most recently installed type.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,11 +79,13 @@ static volatile unsigned long long g_sink;
 
 static void sink_u(unsigned long long v) { g_sink ^= v; }
 
-static void sink_p(const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
+static void sink_p(_plain const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
 
 /* An "opaque" identity for pointers: defeats constant propagation without
    itself being UB. */
-static void *opaque(void *p) { sink_p(p); return p; }
+static _plain void *opaque(_plain void *p)
+    _ensures(return == p)
+{ sink_p(p); return p; }
 
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
@@ -119,7 +122,7 @@ static void case_11_1_escape_hatches(void)
     printf("   (2) union       : %#x\n", (unsigned)u.i);
 
     /* 3. Character-type lvalues (2.1): always legal, any object. */
-    unsigned char *b = (unsigned char *)&f;
+    _array unsigned char *b = (unsigned char *)&f;
     printf("   (3) char access : %02x%02x%02x%02x\n", b[3], b[2], b[1], b[0]);
 
     /* 4. Re-typing genuinely untyped (allocated) storage (4.1). */
@@ -146,6 +149,8 @@ static void case_11_1_escape_hatches(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

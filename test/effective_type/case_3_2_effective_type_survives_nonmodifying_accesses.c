@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -87,16 +88,22 @@ static void case_3_2_effective_type_survives_nonmodifying_accesses(void)
 
     *p = 1000;                  /* effective type := int */
     for (int i = 0; i < 3; i++) /* each of these is a *non-modifying* access, */
+        _invariant(_live(i) && 0 <= i && i <= 3)
+        _invariant(_live(g_sink))
+        _invariant((_slprop)_inline_pulse(int32_t_pts_to $(p) 1.0R 1000l))
         sink_u((unsigned)*p);   /* so the effective type stays `int`. */
 
     /* A *modifying* access through the SAME type is of course also fine and
        simply re-installs the same effective type. */
     *p += 1;
+    _assert(*p == 1001);
     printf("   *p = %d\n", *p);
     free(p);
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

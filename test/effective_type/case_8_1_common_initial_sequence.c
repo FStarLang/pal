@@ -61,6 +61,7 @@
  * Case 13.3: Distinct struct types in one translation unit are incompatible even with identical layouts; casting between them does not permit punning.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stddef.h>
 
@@ -106,6 +107,8 @@ static void case_8_1_common_initial_sequence(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

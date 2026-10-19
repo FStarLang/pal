@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -88,8 +89,10 @@ static void case_6_2_character_store_does_NOT_install_a_type(void)
     /* R2 only fires for a "lvalue having a type that is NOT a character
        type".  So these stores do NOT make the effective type
        `unsigned char`: the object still has no effective type. */
-    unsigned char *b = p;
+    _array unsigned char *b = p;
     for (size_t i = 0; i < sizeof(int); i++)
+        _invariant(_live(i) && i <= sizeof(int))
+        _invariant(_live(b))
         b[i] = (unsigned char)(i + 1);
 
     /* Therefore R4 applies to the following read, and the effective type for
@@ -103,6 +106,8 @@ static void case_6_2_character_store_does_NOT_install_a_type(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

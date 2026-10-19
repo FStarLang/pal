@@ -61,6 +61,7 @@
  * Case 13.4: A declared char array cannot acquire int effective type through an int store; alignment may be a separate problem.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stddef.h>
 
@@ -101,6 +102,8 @@ static void case_9_2_the_three_character_types(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

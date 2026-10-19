@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stddef.h>
 
@@ -85,11 +86,14 @@ static void case_1_1_declared_type_accessed_as_itself(void)
                                    Forever. Nothing can change that. */
     int *p = &n;
     *p = 43;                    /* lvalue type int == effective type int. OK. */
+    _assert(n == 43);
     printf("   n = %d\n", *p);
     sink_u((unsigned)n);
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

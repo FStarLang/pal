@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -91,9 +92,11 @@ static void case_5_2_character_array_copy_propagates(void)
 
     /* "or is copied as an array of character type" -- an explicit byte loop
        counts, exactly like memcpy. */
-    const unsigned char *s = (const unsigned char *)&src;
-    unsigned char       *d = dst;
+    _array const unsigned char *s = (const unsigned char *)&src;
+    _array unsigned char       *d = dst;
     for (size_t i = 0; i < sizeof src; i++)
+        _invariant(_live(i) && i <= sizeof(struct point))
+        _invariant(_live(s) && _live(d))
         d[i] = s[i];
 
     struct point *dp = dst;             /* effective type is struct point */
@@ -103,6 +106,8 @@ static void case_5_2_character_array_copy_propagates(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

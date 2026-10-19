@@ -63,6 +63,7 @@
  *   assumed `int *` and `double *` cannot alias and reordered.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -108,6 +109,8 @@ static void case_16_1_read_before_the_retyping_store(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -68,6 +68,7 @@
  * Case 12.5: Whole-union and double stores alternately retype allocated storage; each read follows the store that installed its own type.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -124,6 +125,8 @@ static void case_24_6_retyping_out_from_under_the_union(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

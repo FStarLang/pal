@@ -62,6 +62,7 @@
  *   22.2 prints 2 rather than 7: the dead stack slot was recycled.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -74,11 +75,13 @@ static volatile unsigned long long g_sink;
 
 static void sink_u(unsigned long long v) { g_sink ^= v; }
 
-static void sink_p(const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
+static void sink_p(_plain const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
 
 /* An "opaque" identity for pointers: defeats constant propagation without
    itself being UB. */
-static void *opaque(void *p) { sink_p(p); return p; }
+static _plain void *opaque(_plain void *p)
+    _ensures(return == p)
+{ sink_p(p); return p; }
 
 static int *g_dangling_auto;
 
@@ -108,6 +111,8 @@ static void case_22_2_dangling_automatic_object(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

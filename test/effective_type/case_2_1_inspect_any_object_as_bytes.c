@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stddef.h>
 
@@ -84,15 +85,19 @@ static void case_2_1_inspect_any_object_as_bytes(void)
     double d = 1.0;
     /* Effective type of `d` is double and is unchangeable.  But a character
        lvalue is always allowed, so dumping the representation is legal. */
-    unsigned char *b = (unsigned char *)&d;
+    _array unsigned char *b = (unsigned char *)&d;
     printf("   repr of 1.0:");
     for (size_t i = 0; i < sizeof d; i++)
+        _invariant(_live(i) && i <= sizeof(double))
+        _invariant(_live(b))
         printf(" %02x", b[i]);
     putchar('\n');
     sink_u(b[0]);
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

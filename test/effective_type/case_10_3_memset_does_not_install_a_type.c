@@ -62,6 +62,7 @@
  * Case 6.3: calloc zeroes bytes without installing a persistent effective type; an unsigned read of all-zero bytes yields zero.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +102,8 @@ static void case_10_3_memset_does_not_install_a_type(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

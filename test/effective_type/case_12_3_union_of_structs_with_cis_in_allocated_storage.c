@@ -62,6 +62,7 @@
  * Case 8.1: A declared union containing structs with a common initial sequence permits inspecting that common part through either struct member.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -113,6 +114,8 @@ static void case_12_3_union_of_structs_with_cis_in_allocated_storage(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

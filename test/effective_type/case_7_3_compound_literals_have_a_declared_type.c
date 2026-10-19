@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stddef.h>
 
@@ -87,7 +88,7 @@ static void case_7_3_compound_literals_have_a_declared_type(void)
     /* 6.5.2.5p5: the compound literal's type name gives it a declared type,
        so R1 applies -- it behaves like a named variable, not like malloc.
        At block scope it has automatic storage duration. */
-    int *p = (int[]){ 10, 20, 30 };          /* declared type int[3] */
+    _array int *p = (int[]){ 10, 20, 30 };   /* declared type int[3] */
     printf("   compound literal: %d %d %d\n", p[0], p[1], p[2]);
     sink_u((unsigned)p[1]);
 
@@ -100,6 +101,8 @@ static void case_7_3_compound_literals_have_a_declared_type(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

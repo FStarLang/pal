@@ -62,6 +62,7 @@
  *   10.2's memcmp reports DIFFERENT for two structs with identical members.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
@@ -103,6 +104,8 @@ static void case_10_2_padding_bytes(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

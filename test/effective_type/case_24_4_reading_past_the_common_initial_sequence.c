@@ -62,6 +62,7 @@
  * Case 12.3: A whole-union store in allocated storage also permits inspecting the common initial sequence of its struct members.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -113,6 +114,8 @@ static void case_24_4_reading_past_the_common_initial_sequence(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stddef.h>
 
@@ -78,12 +79,24 @@ static void sink_u(unsigned long long v) { g_sink ^= v; }
 /* ================================================================== */
 
 static void case_7_4_vla_has_a_declared_type(void)
+    _requires(sizeof(int) <= SIZE_MAX / 4)
 {
     BANNER("DEFINED", "7.4: a VLA has a declared type too (only its bound is dynamic)");
 
     size_t n = 4;
     int vla[n];                                /* declared type: int[n] */
-    for (size_t i = 0; i < n; i++) vla[i] = (int)(i * i);
+    for (size_t i = 0; i < n; i++)
+        _invariant(_live(i) && _live(n) && n == 4 && i <= n)
+        _invariant((_slprop)_inline_pulse(
+            exists* (v: Seq.seq (option Int32.t)).
+            array_pts_to (maybe_repr int32_t_repr 4) 4
+                (SizeT.v int32_t_alignof) $&(vla) 1.0R v **
+            pure (Seq.length v == SizeT.v $(n)) **
+            pure (forall (j: nat).
+                j < Seq.length v /\ j < SizeT.v $(i) /\ j < 4 ==>
+                Seq.index v j == Some (Int32.int_to_t (j * j)))))
+        vla[i] = (int)(i * i);
+    _assert(vla[0] == 0 && vla[1] == 1 && vla[2] == 4 && vla[3] == 9);
     printf("   vla = %d %d %d %d\n", vla[0], vla[1], vla[2], vla[3]);
     sink_u((unsigned)vla[3]);
 
@@ -92,6 +105,8 @@ static void case_7_4_vla_has_a_declared_type(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -57,6 +57,7 @@
  * or -O1 -g -fsanitize=undefined,address; sanitizers do not detect all UB.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -77,22 +78,26 @@ static void case_4_2_retype_after_free_and_realloc(void)
     void *p = malloc(sizeof(int) * 4);
     if (!p) return;
     for (int i = 0; i < 4; i++)
-        ((int *)p)[i] = i;               /* effective types := int */
+        _invariant(_live(i) && 0 <= i && i <= 4)
+        ((effective_int_array)p)[i] = i; /* effective types := int */
 
     void *q = realloc(p, sizeof(double) * 4);
     if (!q) { free(p); return; }
     /* realloc copies the old bytes "as if" by memcpy, so by R3 the first
        chunk still has effective type int -- reading it as int is fine... */
-    printf("   preserved ints: %d %d\n", ((int *)q)[0], ((int *)q)[1]);
+    printf("   preserved ints: %d %d\n", ((effective_int_array)q)[0], ((effective_int_array)q)[1]);
     /* ...and because q still has no *declared* type, a fresh store re-types
        it (R2). */
     for (int i = 0; i < 4; i++)
-        ((double *)q)[i] = i * 0.5;
-    printf("   now doubles  : %g %g\n", ((double *)q)[0], ((double *)q)[3]);
+        _invariant(_live(i) && 0 <= i && i <= 4)
+        ((effective_double_array)q)[i] = i * 0.5;
+    printf("   now doubles  : %g %g\n", ((effective_double_array)q)[0], ((effective_double_array)q)[3]);
     free(q);
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

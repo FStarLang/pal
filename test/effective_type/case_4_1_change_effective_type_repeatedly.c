@@ -61,6 +61,7 @@
  * Case 16.1: An int store followed by a double read is invalid, and after a double store an int read is invalid instead.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -109,6 +110,8 @@ static void case_4_1_change_effective_type_repeatedly(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -62,6 +62,7 @@
  * Case 24.1: Whether a union-member store in allocated storage installs only the member type or establishes a union is contested; a whole-union store avoids that question.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -128,6 +129,8 @@ static void case_12_1_store_whole_union_then_pun(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);

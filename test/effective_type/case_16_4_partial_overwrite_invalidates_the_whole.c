@@ -62,6 +62,7 @@
  *   16.4 prints 9.75 after `*(int *)p = 1` clobbered the low half.
  */
 
+#include "annotations.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -75,11 +76,13 @@ static volatile unsigned long long g_sink;
 
 static void sink_d(double v)             { g_sink ^= (unsigned long long)(v * 7.0); }
 
-static void sink_p(const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
+static void sink_p(_plain const void *v)        { g_sink ^= (unsigned long long)(uintptr_t)v; }
 
 /* An "opaque" identity for pointers: defeats constant propagation without
    itself being UB. */
-static void *opaque(void *p) { sink_p(p); return p; }
+static _plain void *opaque(_plain void *p)
+    _ensures(return == p)
+{ sink_p(p); return p; }
 
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
@@ -109,6 +112,8 @@ static void case_16_4_partial_overwrite_invalidates_the_whole(void)
 }
 
 int main(void)
+    _preserves(_live(stdout))
+    _preserves_value(stdout)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);
