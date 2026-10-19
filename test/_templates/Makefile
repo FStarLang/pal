@@ -8,6 +8,7 @@ OBJ_DIR ?= obj
 C_FILES := $(wildcard *.c)
 H_FILES := $(wildcard *.h)
 PAL_OPTS :=
+SHOULD_FAIL ?= should-fail
 STANDALONE ?= $(if $(wildcard standalone),1,0)
 
 ifeq ($(STANDALONE),1)
@@ -24,6 +25,7 @@ $(STANDALONE_TARGETS):
 	+$(MAKE) --no-print-directory STANDALONE=0 C_FILES=$(basename $@).c \
 		OUT_DIR=$(OUT_DIR)/$(basename $@) CACHE_DIR=$(CACHE_DIR)/$(basename $@) \
 		OBJ_DIR=$(OBJ_DIR)/$(basename $@) DEPEND=$(OUT_DIR)/$(basename $@)/.depend \
+		SHOULD_FAIL=$(if $(wildcard $(basename $@).should-fail),$(basename $@).should-fail,$(SHOULD_FAIL)) \
 		$(patsubst .%,%,$(suffix $@))
 
 else
@@ -57,23 +59,27 @@ $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
 # A negative test carries a `should-fail` file: verification must fail, and
 # every line of that file must appear in the output. Without the second half a
 # test could start failing for some unrelated reason and still look like it was
-# doing its job.
-ifneq ($(wildcard should-fail),)
+# doing its job. Standalone cases can instead carry `<case>.should-fail`.
+ifneq ($(wildcard $(SHOULD_FAIL)),)
 verify: $(OUT_DIR)/.stamp
-	@if $(MAKE) --no-print-directory -f ../verify.mk \
-		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
-		HELPERS=$(HELPERS) >$(OUT_DIR)/verify.log 2>&1; then \
-		echo "ERROR: $(CURDIR) verified, but should-fail says it must not" >&2; \
+	@if ! grep -q '[^[:space:]]' "$(SHOULD_FAIL)"; then \
+		echo "ERROR: $(SHOULD_FAIL) must name an expected diagnostic" >&2; \
 		exit 1; \
 	fi; \
-	while IFS= read -r pat; do \
+	if $(MAKE) --no-print-directory -f ../verify.mk \
+		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
+		HELPERS=$(HELPERS) >$(OUT_DIR)/verify.log 2>&1; then \
+		echo "ERROR: $(CURDIR) verified, but $(SHOULD_FAIL) says it must not" >&2; \
+		exit 1; \
+	fi; \
+	while IFS= read -r pat || [ -n "$$pat" ]; do \
 		[ -z "$$pat" ] && continue; \
 		if ! grep -qF -- "$$pat" $(OUT_DIR)/verify.log; then \
 			echo "ERROR: $(CURDIR) failed, but not for the expected reason:" >&2; \
 			echo "       no line of the output contains '$$pat'" >&2; \
 			exit 1; \
 		fi; \
-	done < should-fail; \
+	done < "$(SHOULD_FAIL)"; \
 	echo "Failed as expected: $(CURDIR)"
 else
 verify: $(OUT_DIR)/.stamp
