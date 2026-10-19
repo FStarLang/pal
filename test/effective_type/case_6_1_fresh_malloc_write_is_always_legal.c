@@ -86,12 +86,12 @@ static void case_6_1_fresh_malloc_write_is_always_legal(void)
     /* Nothing has been stored yet, so there is no prior effective type for a
        later lvalue to conflict with.  Whatever type you first use *is* the
        effective type (R2 for a store, R4 for anything else). */
-    void *p = malloc(sizeof(long double));
+    void *p = malloc(sizeof(double));
     if (!p) return;
 
-    *(long double *)p = 1.5L;           /* first touch wins */
-    printf("   *(long double*)p = %Lg\n", *(long double *)p);
-    sink_d((double)*(long double *)p);
+    *(double *)p = 1.5;           /* first touch wins */
+    printf("   *(double*)p = %g\n", *(double *)p);
+    sink_d(*(double *)p);
     free(p);
 }
 

@@ -92,15 +92,15 @@ static void case_17_1_retype_beyond_the_allocation(void)
 {
     BANNER("UB", "17.1: re-typing to a type larger than the allocated object");
 
-    void *p = malloc(sizeof(int));     /* only sizeof(int) bytes exist */
+    void *p = malloc(sizeof(double) - 1); /* one byte too small for a double */
     if (!p) return;
 
-    /* R2 would happily make the effective type `long double`, but the store
+    /* R2 would happily make the effective type `double`, but the store
        writes past the end of the allocated object: UB for a completely
        different reason (6.5.6p8 / 7.22.3p1). */
-    *(long double *)opaque(p) = 1.0L;  /* heap overflow -- UB */
-    printf("   wrote a long double into %zu bytes   <-- UB\n", sizeof(int));
-    sink_d((double)*(long double *)p);
+    *(double *)opaque(p) = 1.0;  /* heap overflow -- UB */
+    printf("   wrote a double into %zu bytes   <-- UB\n", sizeof(double) - 1);
+    sink_d(*(double *)p);
     free(p);
 }
 
