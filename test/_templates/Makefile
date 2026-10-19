@@ -8,6 +8,25 @@ OBJ_DIR ?= obj
 C_FILES := $(wildcard *.c)
 H_FILES := $(wildcard *.h)
 PAL_OPTS :=
+STANDALONE ?= $(if $(wildcard standalone),1,0)
+
+ifeq ($(STANDALONE),1)
+
+all: $(C_FILES:.c=.all)
+translate: $(C_FILES:.c=.translate)
+verify: $(C_FILES:.c=.verify)
+compile: $(C_FILES:.c=.compile)
+clean: $(C_FILES:.c=.clean)
+
+STANDALONE_TARGETS := $(foreach goal,all translate verify compile clean,$(C_FILES:.c=.$(goal)))
+.PHONY: $(STANDALONE_TARGETS)
+$(STANDALONE_TARGETS):
+	+$(MAKE) --no-print-directory STANDALONE=0 C_FILES=$(basename $@).c \
+		OUT_DIR=$(OUT_DIR)/$(basename $@) CACHE_DIR=$(CACHE_DIR)/$(basename $@) \
+		OBJ_DIR=$(OBJ_DIR)/$(basename $@) DEPEND=$(OUT_DIR)/$(basename $@)/.depend \
+		$(patsubst .%,%,$(suffix $@))
+
+else
 
 # The memory model's own modules are checked once, in `pulse/`, and found from
 # there rather than re-verified in every test.
@@ -71,3 +90,5 @@ $(OBJ_DIR)/%.o: %.c $(C_FILES) $(H_FILES)
 
 clean:
 	rm -rf $(OUT_DIR) $(CACHE_DIR) $(OBJ_DIR) .depend
+
+endif
