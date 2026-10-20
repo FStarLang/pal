@@ -89,7 +89,7 @@ static void case_7_4_vla_has_a_declared_type(void)
         _invariant(_live(i) && _live(n) && n == 4 && i <= n)
         _invariant((_slprop)_inline_pulse(
             exists* (v: Seq.seq (option Int32.t)).
-            array_pts_to (maybe_repr int32_t_repr 4) 4
+            array_pts_to int32_t_ctype (maybe_repr int32_t_repr 4) 4
                 (SizeT.v int32_t_alignof) $&(vla) 1.0R v **
             pure (Seq.length v == SizeT.v $(n)) **
             pure (forall (j: nat).

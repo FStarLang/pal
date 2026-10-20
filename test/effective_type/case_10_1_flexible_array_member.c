@@ -97,7 +97,7 @@ static void case_10_1_flexible_array_member(void)
         _invariant(_live(i) && _live(n) && n == 4 && i <= n)
         _invariant((_slprop)_inline_pulse(
             exists* (v: Seq.seq (option Int32.t)).
-            array_pts_to (maybe_repr int32_t_repr 4) 4
+            array_pts_to int32_t_ctype (maybe_repr int32_t_repr 4) 4
                 (SizeT.v int32_t_alignof) ($(f) +! struct_fam_offsetof_a) 1.0R v **
             pure (Seq.length v == SizeT.v $(n)) **
             pure (forall (j: nat).
