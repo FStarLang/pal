@@ -113,3 +113,49 @@ ghost fn claim_component (#t: Type0) (parent child: ET.ctype)
   ET.read_ok_slice e parent off child;
   fold value child repr alignment a p x (Seq.slice e off (off + ET.csize child));
 }
+
+ghost fn reveal_storage (ct: ET.ctype) (alignment: SZ.t) (a: ptr)
+                        (#e: ET.etypes)
+  requires storage ct alignment a e
+  ensures exists* b. mem_pts_to_at a 1.0R b e
+    ** pure (len b == ET.csize ct /\ ET.elen e == len b /\
+             ET.read_ok e ct /\ aligned a alignment)
+{
+  unfold storage ct alignment a e;
+}
+
+ghost fn claim_storage (ct: ET.ctype) (alignment: SZ.t) (a: ptr)
+                       (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (len b == ET.csize ct /\ ET.elen e == len b /\
+                 ET.read_ok e ct /\ aligned a alignment)
+  ensures storage ct alignment a e
+{
+  fold storage ct alignment a e;
+}
+
+(* A reservation requires the actual complete old index, not just an
+   allocation token or a nominal type remembered by a caller. *)
+ghost fn prepare_storage (old: ET.ctype) (alignment: SZ.t) (a: ptr)
+                         (target: ET.ctype) (#e: ET.etypes)
+  requires storage old alignment a e
+  requires pure (ET.full_mutable e /\ ET.elen e == ET.csize target)
+  ensures E.prepared a target
+{
+  unfold storage old alignment a e;
+  E.prepare a target;
+}
+
+fn write_existing (#t: Type0) (ct: erased ET.ctype) (repr: t -> bytes -> prop)
+                  (alignment: SZ.t) (a: ptr) (x: t) (b: bytes)
+                  (#e: ET.etypes { ET.elen e == ET.csize (reveal ct) })
+  requires storage (reveal ct) alignment a e
+  requires pure (repr x b /\ len b == ET.csize (reveal ct) /\ initialized b /\
+    (forall (k: nat). k < ET.elen e ==> Some? (ET.eget e k)))
+  ensures value (reveal ct) repr alignment a 1.0R x e
+{
+  unfold storage (reveal ct) alignment a e;
+  ET.store_readable_stable e (reveal ct);
+  M.store a ct b;
+  fold value (reveal ct) repr alignment a 1.0R x e;
+}

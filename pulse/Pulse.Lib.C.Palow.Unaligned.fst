@@ -1,21 +1,5 @@
 module Pulse.Lib.C.Palow.Unaligned
-(* ---------------------------------------------------------------------------
-   Unaligned access
 
-   A field of a packed struct may sit at an address its type's alignment does
-   not divide. Every typed points-to states that alignment, so such a field is
-   held at the byte level instead: `elem_pts_to T_repr a p x` is the bytes at
-   `a` representing `x`, with nothing said about where `a` is, and
-   `bytes_uninit a n` is `n` bytes of storage.
-
-   The operations on them add nothing to what is trusted. Each copies the bytes
-   with `memcpy` to or from an aligned temporary on the stack and uses the
-   type's ordinary aligned operation there. That is a model of what a compiler
-   does for a packed member, not the code it emits: the Pulse is verified, and
-   the C is what gets compiled.
-
-   The per-type blocks are mechanically generated from one template.
-   --------------------------------------------------------------------------- *)
 #lang-pulse
 open Pulse
 open Pulse.Lib.C.Palow.Bytes
@@ -36,775 +20,603 @@ module I16 = FStar.Int16
 module I32 = FStar.Int32
 module I64 = FStar.Int64
 
-let bytes_uninit ([@@@mkey] a: ptr) (n: nat) : slprop =
-  exists* b. mem_pts_to a 1.0R b ** pure (len b == n)
+module ET = Pulse.Lib.C.Palow.Etype
+module EM = Pulse.Lib.C.Palow.Effective.Machine
+module I = Pulse.Lib.C.Palow.Machine.Intrinsics
+module Enc = Pulse.Lib.C.Palow.Encoding
+open Pulse.Lib.C.Palow.Encoding
 
-ghost fn bytes_claim_uninit (a: ptr) (n: nat) (#b: bytes)
-  requires mem_pts_to a 1.0R b
-  requires pure (len b == n)
-  ensures  bytes_uninit a n
+(* Unaligned typed operations obey the same metadata checks as aligned ones.
+   They do not use source-level memcpy's effective-type transition to model
+   an implementation detail of a load or store. *)
+let bytes_uninit (ct: ET.ctype) ([@@@mkey] a: ptr) (n: nat) : slprop =
+  exists* b e. mem_pts_to_at a 1.0R b e
+    ** pure (len b == n /\ n == ET.csize ct /\ ET.elen e == len b /\ ET.read_ok e ct)
+
+ghost fn bytes_claim_uninit (ct: ET.ctype) (a: ptr) (n: nat)
+                             (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (len b == n /\ n == ET.csize ct /\ ET.elen e == len b /\ ET.read_ok e ct)
+  ensures bytes_uninit ct a n
 {
-  fold bytes_uninit a n;
+  fold bytes_uninit ct a n;
 }
 
-ghost fn bytes_reveal_uninit (a: ptr) (n: nat)
-  requires bytes_uninit a n
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == n)
+ghost fn bytes_reveal_uninit (ct: ET.ctype) (a: ptr) (n: nat)
+  requires bytes_uninit ct a n
+  ensures exists* b e. mem_pts_to_at a 1.0R b e
+    ** pure (len b == n /\ n == ET.csize ct /\ ET.elen e == len b /\ ET.read_ok e ct)
 {
-  unfold bytes_uninit a n;
+  unfold bytes_uninit ct a n;
 }
-
-(* bool_t *)
 
 ghost fn bool_t_forget_u (a: ptr) (#x: bool)
-  requires elem_pts_to bool_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v bool_t_sizeof)
+  requires elem_pts_to bool_t_ctype bool_t_repr a 1.0R x
+  ensures  bytes_uninit bool_t_ctype a (SZ.v bool_t_sizeof)
 {
-  unfold elem_pts_to bool_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to bool_t_ctype bool_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   bool_t_repr_len x b;
-  fold bytes_uninit a (SZ.v bool_t_sizeof);
+  fold bytes_uninit bool_t_ctype a (SZ.v bool_t_sizeof);
 }
 
 fn bool_t_read_u (a: ptr) (#p: perm) (#x: erased bool)
-  preserves elem_pts_to bool_t_repr a p x
+  preserves elem_pts_to bool_t_ctype bool_t_repr a p x
   returns  y : bool
   ensures  rewrites_to y (reveal x)
 {
-  let t = bool_t_stack_alloc ();
-  bool_t_reveal_uninit t;
-  unfold elem_pts_to bool_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  bool_t_repr_len x bs;
-  memcpy t a bool_t_sizeof;
-  bool_t_conceal t #1.0R #bs #x;
-  let y = bool_t_read t;
-  bool_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  bool_t_repr_len x bt;
-  bool_t_claim_uninit t;
-  bool_t_stack_free t;
-  fold elem_pts_to bool_t_repr a p x;
+  elem_reveal bool_t_ctype bool_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  bool_t_repr_no_prov (reveal x) b;
+  let y = I.bool_t_read_at a #p #x #(hide b) #e;
+  elem_conceal bool_t_ctype bool_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn bool_t_write_uninit_u (a: ptr) (y: bool)
-  requires bytes_uninit a (SZ.v bool_t_sizeof)
-  ensures  elem_pts_to bool_t_repr a 1.0R y
+  requires bytes_uninit bool_t_ctype a (SZ.v bool_t_sizeof)
+  ensures  elem_pts_to bool_t_ctype bool_t_repr a 1.0R y
 {
-  let t = bool_t_stack_alloc ();
-  bool_t_write_uninit t y;
-  bool_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  bool_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v bool_t_sizeof);
-  memcpy a t bool_t_sizeof;
-  fold elem_pts_to bool_t_repr a 1.0R y;
-  bool_t_claim_uninit t;
-  bool_t_stack_free t;
+  unfold bytes_uninit bool_t_ctype a (SZ.v bool_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v bool_t_sizeof) None (if y then 1 else 0);
+  bool_t_repr_no_prov y b;
+  EM.store a (hide bool_t_ctype) b;
+  ET.store_read_ok e bool_t_ctype;
+  elem_conceal bool_t_ctype bool_t_repr a #1.0R #b #y #(EM.store_index e bool_t_ctype)
 }
 
 fn bool_t_write_u (a: ptr) (y: bool) (#x: erased bool)
-  requires elem_pts_to bool_t_repr a 1.0R x
-  ensures  elem_pts_to bool_t_repr a 1.0R y
+  requires elem_pts_to bool_t_ctype bool_t_repr a 1.0R x
+  ensures  elem_pts_to bool_t_ctype bool_t_repr a 1.0R y
 {
   bool_t_forget_u a;
-  bool_t_write_uninit_u a y;
+  bool_t_write_uninit_u a y
 }
 
-(* int8_t *)
-
 ghost fn int8_t_forget_u (a: ptr) (#x: I8.t)
-  requires elem_pts_to int8_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v int8_t_sizeof)
+  requires elem_pts_to int8_t_ctype int8_t_repr a 1.0R x
+  ensures  bytes_uninit int8_t_ctype a (SZ.v int8_t_sizeof)
 {
-  unfold elem_pts_to int8_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to int8_t_ctype int8_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   int8_t_repr_len x b;
-  fold bytes_uninit a (SZ.v int8_t_sizeof);
+  fold bytes_uninit int8_t_ctype a (SZ.v int8_t_sizeof);
 }
 
 fn int8_t_read_u (a: ptr) (#p: perm) (#x: erased I8.t)
-  preserves elem_pts_to int8_t_repr a p x
+  preserves elem_pts_to int8_t_ctype int8_t_repr a p x
   returns  y : I8.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = int8_t_stack_alloc ();
-  int8_t_reveal_uninit t;
-  unfold elem_pts_to int8_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  int8_t_repr_len x bs;
-  memcpy t a int8_t_sizeof;
-  int8_t_conceal t #1.0R #bs #x;
-  let y = int8_t_read t;
-  int8_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  int8_t_repr_len x bt;
-  int8_t_claim_uninit t;
-  int8_t_stack_free t;
-  fold elem_pts_to int8_t_repr a p x;
+  elem_reveal int8_t_ctype int8_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  int8_t_repr_no_prov (reveal x) b;
+  let y = I.int8_t_read_at a #p #x #(hide b) #e;
+  elem_conceal int8_t_ctype int8_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn int8_t_write_uninit_u (a: ptr) (y: I8.t)
-  requires bytes_uninit a (SZ.v int8_t_sizeof)
-  ensures  elem_pts_to int8_t_repr a 1.0R y
+  requires bytes_uninit int8_t_ctype a (SZ.v int8_t_sizeof)
+  ensures  elem_pts_to int8_t_ctype int8_t_repr a 1.0R y
 {
-  let t = int8_t_stack_alloc ();
-  int8_t_write_uninit t y;
-  int8_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  int8_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v int8_t_sizeof);
-  memcpy a t int8_t_sizeof;
-  fold elem_pts_to int8_t_repr a 1.0R y;
-  int8_t_claim_uninit t;
-  int8_t_stack_free t;
+  unfold bytes_uninit int8_t_ctype a (SZ.v int8_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v int8_t_sizeof) None (to_bits 8 (I8.v y));
+  int8_t_repr_no_prov y b;
+  EM.store a (hide int8_t_ctype) b;
+  ET.store_read_ok e int8_t_ctype;
+  elem_conceal int8_t_ctype int8_t_repr a #1.0R #b #y #(EM.store_index e int8_t_ctype)
 }
 
 fn int8_t_write_u (a: ptr) (y: I8.t) (#x: erased I8.t)
-  requires elem_pts_to int8_t_repr a 1.0R x
-  ensures  elem_pts_to int8_t_repr a 1.0R y
+  requires elem_pts_to int8_t_ctype int8_t_repr a 1.0R x
+  ensures  elem_pts_to int8_t_ctype int8_t_repr a 1.0R y
 {
   int8_t_forget_u a;
-  int8_t_write_uninit_u a y;
+  int8_t_write_uninit_u a y
 }
 
-(* uint8_t *)
-
 ghost fn uint8_t_forget_u (a: ptr) (#x: U8.t)
-  requires elem_pts_to uint8_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v uint8_t_sizeof)
+  requires elem_pts_to uint8_t_ctype uint8_t_repr a 1.0R x
+  ensures  bytes_uninit uint8_t_ctype a (SZ.v uint8_t_sizeof)
 {
-  unfold elem_pts_to uint8_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to uint8_t_ctype uint8_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   uint8_t_repr_len x b;
-  fold bytes_uninit a (SZ.v uint8_t_sizeof);
+  fold bytes_uninit uint8_t_ctype a (SZ.v uint8_t_sizeof);
 }
 
 fn uint8_t_read_u (a: ptr) (#p: perm) (#x: erased U8.t)
-  preserves elem_pts_to uint8_t_repr a p x
+  preserves elem_pts_to uint8_t_ctype uint8_t_repr a p x
   returns  y : U8.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = uint8_t_stack_alloc ();
-  uint8_t_reveal_uninit t;
-  unfold elem_pts_to uint8_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  uint8_t_repr_len x bs;
-  memcpy t a uint8_t_sizeof;
-  uint8_t_conceal t #1.0R #bs #x;
-  let y = uint8_t_read t;
-  uint8_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  uint8_t_repr_len x bt;
-  uint8_t_claim_uninit t;
-  uint8_t_stack_free t;
-  fold elem_pts_to uint8_t_repr a p x;
+  elem_reveal uint8_t_ctype uint8_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  uint8_t_repr_no_prov (reveal x) b;
+  let y = I.uint8_t_read_at a #p #x #(hide b) #e;
+  elem_conceal uint8_t_ctype uint8_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn uint8_t_write_uninit_u (a: ptr) (y: U8.t)
-  requires bytes_uninit a (SZ.v uint8_t_sizeof)
-  ensures  elem_pts_to uint8_t_repr a 1.0R y
+  requires bytes_uninit uint8_t_ctype a (SZ.v uint8_t_sizeof)
+  ensures  elem_pts_to uint8_t_ctype uint8_t_repr a 1.0R y
 {
-  let t = uint8_t_stack_alloc ();
-  uint8_t_write_uninit t y;
-  uint8_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  uint8_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v uint8_t_sizeof);
-  memcpy a t uint8_t_sizeof;
-  fold elem_pts_to uint8_t_repr a 1.0R y;
-  uint8_t_claim_uninit t;
-  uint8_t_stack_free t;
+  unfold bytes_uninit uint8_t_ctype a (SZ.v uint8_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v uint8_t_sizeof) None (U8.v y);
+  uint8_t_repr_no_prov y b;
+  EM.store a (hide uint8_t_ctype) b;
+  ET.store_read_ok e uint8_t_ctype;
+  elem_conceal uint8_t_ctype uint8_t_repr a #1.0R #b #y #(EM.store_index e uint8_t_ctype)
 }
 
 fn uint8_t_write_u (a: ptr) (y: U8.t) (#x: erased U8.t)
-  requires elem_pts_to uint8_t_repr a 1.0R x
-  ensures  elem_pts_to uint8_t_repr a 1.0R y
+  requires elem_pts_to uint8_t_ctype uint8_t_repr a 1.0R x
+  ensures  elem_pts_to uint8_t_ctype uint8_t_repr a 1.0R y
 {
   uint8_t_forget_u a;
-  uint8_t_write_uninit_u a y;
+  uint8_t_write_uninit_u a y
 }
 
-(* int16_t *)
-
 ghost fn int16_t_forget_u (a: ptr) (#x: I16.t)
-  requires elem_pts_to int16_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v int16_t_sizeof)
+  requires elem_pts_to int16_t_ctype int16_t_repr a 1.0R x
+  ensures  bytes_uninit int16_t_ctype a (SZ.v int16_t_sizeof)
 {
-  unfold elem_pts_to int16_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to int16_t_ctype int16_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   int16_t_repr_len x b;
-  fold bytes_uninit a (SZ.v int16_t_sizeof);
+  fold bytes_uninit int16_t_ctype a (SZ.v int16_t_sizeof);
 }
 
 fn int16_t_read_u (a: ptr) (#p: perm) (#x: erased I16.t)
-  preserves elem_pts_to int16_t_repr a p x
+  preserves elem_pts_to int16_t_ctype int16_t_repr a p x
   returns  y : I16.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = int16_t_stack_alloc ();
-  int16_t_reveal_uninit t;
-  unfold elem_pts_to int16_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  int16_t_repr_len x bs;
-  memcpy t a int16_t_sizeof;
-  int16_t_conceal t #1.0R #bs #x;
-  let y = int16_t_read t;
-  int16_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  int16_t_repr_len x bt;
-  int16_t_claim_uninit t;
-  int16_t_stack_free t;
-  fold elem_pts_to int16_t_repr a p x;
+  elem_reveal int16_t_ctype int16_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  int16_t_repr_no_prov (reveal x) b;
+  let y = I.int16_t_read_at a #p #x #(hide b) #e;
+  elem_conceal int16_t_ctype int16_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn int16_t_write_uninit_u (a: ptr) (y: I16.t)
-  requires bytes_uninit a (SZ.v int16_t_sizeof)
-  ensures  elem_pts_to int16_t_repr a 1.0R y
+  requires bytes_uninit int16_t_ctype a (SZ.v int16_t_sizeof)
+  ensures  elem_pts_to int16_t_ctype int16_t_repr a 1.0R y
 {
-  let t = int16_t_stack_alloc ();
-  int16_t_write_uninit t y;
-  int16_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  int16_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v int16_t_sizeof);
-  memcpy a t int16_t_sizeof;
-  fold elem_pts_to int16_t_repr a 1.0R y;
-  int16_t_claim_uninit t;
-  int16_t_stack_free t;
+  unfold bytes_uninit int16_t_ctype a (SZ.v int16_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v int16_t_sizeof) None (to_bits 16 (I16.v y));
+  int16_t_repr_no_prov y b;
+  EM.store a (hide int16_t_ctype) b;
+  ET.store_read_ok e int16_t_ctype;
+  elem_conceal int16_t_ctype int16_t_repr a #1.0R #b #y #(EM.store_index e int16_t_ctype)
 }
 
 fn int16_t_write_u (a: ptr) (y: I16.t) (#x: erased I16.t)
-  requires elem_pts_to int16_t_repr a 1.0R x
-  ensures  elem_pts_to int16_t_repr a 1.0R y
+  requires elem_pts_to int16_t_ctype int16_t_repr a 1.0R x
+  ensures  elem_pts_to int16_t_ctype int16_t_repr a 1.0R y
 {
   int16_t_forget_u a;
-  int16_t_write_uninit_u a y;
+  int16_t_write_uninit_u a y
 }
 
-(* uint16_t *)
-
 ghost fn uint16_t_forget_u (a: ptr) (#x: U16.t)
-  requires elem_pts_to uint16_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v uint16_t_sizeof)
+  requires elem_pts_to uint16_t_ctype uint16_t_repr a 1.0R x
+  ensures  bytes_uninit uint16_t_ctype a (SZ.v uint16_t_sizeof)
 {
-  unfold elem_pts_to uint16_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to uint16_t_ctype uint16_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   uint16_t_repr_len x b;
-  fold bytes_uninit a (SZ.v uint16_t_sizeof);
+  fold bytes_uninit uint16_t_ctype a (SZ.v uint16_t_sizeof);
 }
 
 fn uint16_t_read_u (a: ptr) (#p: perm) (#x: erased U16.t)
-  preserves elem_pts_to uint16_t_repr a p x
+  preserves elem_pts_to uint16_t_ctype uint16_t_repr a p x
   returns  y : U16.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = uint16_t_stack_alloc ();
-  uint16_t_reveal_uninit t;
-  unfold elem_pts_to uint16_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  uint16_t_repr_len x bs;
-  memcpy t a uint16_t_sizeof;
-  uint16_t_conceal t #1.0R #bs #x;
-  let y = uint16_t_read t;
-  uint16_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  uint16_t_repr_len x bt;
-  uint16_t_claim_uninit t;
-  uint16_t_stack_free t;
-  fold elem_pts_to uint16_t_repr a p x;
+  elem_reveal uint16_t_ctype uint16_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  uint16_t_repr_no_prov (reveal x) b;
+  let y = I.uint16_t_read_at a #p #x #(hide b) #e;
+  elem_conceal uint16_t_ctype uint16_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn uint16_t_write_uninit_u (a: ptr) (y: U16.t)
-  requires bytes_uninit a (SZ.v uint16_t_sizeof)
-  ensures  elem_pts_to uint16_t_repr a 1.0R y
+  requires bytes_uninit uint16_t_ctype a (SZ.v uint16_t_sizeof)
+  ensures  elem_pts_to uint16_t_ctype uint16_t_repr a 1.0R y
 {
-  let t = uint16_t_stack_alloc ();
-  uint16_t_write_uninit t y;
-  uint16_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  uint16_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v uint16_t_sizeof);
-  memcpy a t uint16_t_sizeof;
-  fold elem_pts_to uint16_t_repr a 1.0R y;
-  uint16_t_claim_uninit t;
-  uint16_t_stack_free t;
+  unfold bytes_uninit uint16_t_ctype a (SZ.v uint16_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v uint16_t_sizeof) None (U16.v y);
+  uint16_t_repr_no_prov y b;
+  EM.store a (hide uint16_t_ctype) b;
+  ET.store_read_ok e uint16_t_ctype;
+  elem_conceal uint16_t_ctype uint16_t_repr a #1.0R #b #y #(EM.store_index e uint16_t_ctype)
 }
 
 fn uint16_t_write_u (a: ptr) (y: U16.t) (#x: erased U16.t)
-  requires elem_pts_to uint16_t_repr a 1.0R x
-  ensures  elem_pts_to uint16_t_repr a 1.0R y
+  requires elem_pts_to uint16_t_ctype uint16_t_repr a 1.0R x
+  ensures  elem_pts_to uint16_t_ctype uint16_t_repr a 1.0R y
 {
   uint16_t_forget_u a;
-  uint16_t_write_uninit_u a y;
+  uint16_t_write_uninit_u a y
 }
 
-(* int32_t *)
-
 ghost fn int32_t_forget_u (a: ptr) (#x: I32.t)
-  requires elem_pts_to int32_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v int32_t_sizeof)
+  requires elem_pts_to int32_t_ctype int32_t_repr a 1.0R x
+  ensures  bytes_uninit int32_t_ctype a (SZ.v int32_t_sizeof)
 {
-  unfold elem_pts_to int32_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to int32_t_ctype int32_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   int32_t_repr_len x b;
-  fold bytes_uninit a (SZ.v int32_t_sizeof);
+  fold bytes_uninit int32_t_ctype a (SZ.v int32_t_sizeof);
 }
 
 fn int32_t_read_u (a: ptr) (#p: perm) (#x: erased I32.t)
-  preserves elem_pts_to int32_t_repr a p x
+  preserves elem_pts_to int32_t_ctype int32_t_repr a p x
   returns  y : I32.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = int32_t_stack_alloc ();
-  int32_t_reveal_uninit t;
-  unfold elem_pts_to int32_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  int32_t_repr_len x bs;
-  memcpy t a int32_t_sizeof;
-  int32_t_conceal t #1.0R #bs #x;
-  let y = int32_t_read t;
-  int32_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  int32_t_repr_len x bt;
-  int32_t_claim_uninit t;
-  int32_t_stack_free t;
-  fold elem_pts_to int32_t_repr a p x;
+  elem_reveal int32_t_ctype int32_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  int32_t_repr_no_prov (reveal x) b;
+  let y = I.int32_t_read_at a #p #x #(hide b) #e;
+  elem_conceal int32_t_ctype int32_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn int32_t_write_uninit_u (a: ptr) (y: I32.t)
-  requires bytes_uninit a (SZ.v int32_t_sizeof)
-  ensures  elem_pts_to int32_t_repr a 1.0R y
+  requires bytes_uninit int32_t_ctype a (SZ.v int32_t_sizeof)
+  ensures  elem_pts_to int32_t_ctype int32_t_repr a 1.0R y
 {
-  let t = int32_t_stack_alloc ();
-  int32_t_write_uninit t y;
-  int32_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  int32_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v int32_t_sizeof);
-  memcpy a t int32_t_sizeof;
-  fold elem_pts_to int32_t_repr a 1.0R y;
-  int32_t_claim_uninit t;
-  int32_t_stack_free t;
+  unfold bytes_uninit int32_t_ctype a (SZ.v int32_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v int32_t_sizeof) None (to_bits 32 (I32.v y));
+  int32_t_repr_no_prov y b;
+  EM.store a (hide int32_t_ctype) b;
+  ET.store_read_ok e int32_t_ctype;
+  elem_conceal int32_t_ctype int32_t_repr a #1.0R #b #y #(EM.store_index e int32_t_ctype)
 }
 
 fn int32_t_write_u (a: ptr) (y: I32.t) (#x: erased I32.t)
-  requires elem_pts_to int32_t_repr a 1.0R x
-  ensures  elem_pts_to int32_t_repr a 1.0R y
+  requires elem_pts_to int32_t_ctype int32_t_repr a 1.0R x
+  ensures  elem_pts_to int32_t_ctype int32_t_repr a 1.0R y
 {
   int32_t_forget_u a;
-  int32_t_write_uninit_u a y;
+  int32_t_write_uninit_u a y
 }
 
-(* uint32_t *)
-
 ghost fn uint32_t_forget_u (a: ptr) (#x: U32.t)
-  requires elem_pts_to uint32_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v uint32_t_sizeof)
+  requires elem_pts_to uint32_t_ctype uint32_t_repr a 1.0R x
+  ensures  bytes_uninit uint32_t_ctype a (SZ.v uint32_t_sizeof)
 {
-  unfold elem_pts_to uint32_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to uint32_t_ctype uint32_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   uint32_t_repr_len x b;
-  fold bytes_uninit a (SZ.v uint32_t_sizeof);
+  fold bytes_uninit uint32_t_ctype a (SZ.v uint32_t_sizeof);
 }
 
 fn uint32_t_read_u (a: ptr) (#p: perm) (#x: erased U32.t)
-  preserves elem_pts_to uint32_t_repr a p x
+  preserves elem_pts_to uint32_t_ctype uint32_t_repr a p x
   returns  y : U32.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = uint32_t_stack_alloc ();
-  uint32_t_reveal_uninit t;
-  unfold elem_pts_to uint32_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  uint32_t_repr_len x bs;
-  memcpy t a uint32_t_sizeof;
-  uint32_t_conceal t #1.0R #bs #x;
-  let y = uint32_t_read t;
-  uint32_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  uint32_t_repr_len x bt;
-  uint32_t_claim_uninit t;
-  uint32_t_stack_free t;
-  fold elem_pts_to uint32_t_repr a p x;
+  elem_reveal uint32_t_ctype uint32_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  uint32_t_repr_no_prov (reveal x) b;
+  let y = I.uint32_t_read_at a #p #x #(hide b) #e;
+  elem_conceal uint32_t_ctype uint32_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn uint32_t_write_uninit_u (a: ptr) (y: U32.t)
-  requires bytes_uninit a (SZ.v uint32_t_sizeof)
-  ensures  elem_pts_to uint32_t_repr a 1.0R y
+  requires bytes_uninit uint32_t_ctype a (SZ.v uint32_t_sizeof)
+  ensures  elem_pts_to uint32_t_ctype uint32_t_repr a 1.0R y
 {
-  let t = uint32_t_stack_alloc ();
-  uint32_t_write_uninit t y;
-  uint32_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  uint32_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v uint32_t_sizeof);
-  memcpy a t uint32_t_sizeof;
-  fold elem_pts_to uint32_t_repr a 1.0R y;
-  uint32_t_claim_uninit t;
-  uint32_t_stack_free t;
+  unfold bytes_uninit uint32_t_ctype a (SZ.v uint32_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v uint32_t_sizeof) None (U32.v y);
+  uint32_t_repr_no_prov y b;
+  EM.store a (hide uint32_t_ctype) b;
+  ET.store_read_ok e uint32_t_ctype;
+  elem_conceal uint32_t_ctype uint32_t_repr a #1.0R #b #y #(EM.store_index e uint32_t_ctype)
 }
 
 fn uint32_t_write_u (a: ptr) (y: U32.t) (#x: erased U32.t)
-  requires elem_pts_to uint32_t_repr a 1.0R x
-  ensures  elem_pts_to uint32_t_repr a 1.0R y
+  requires elem_pts_to uint32_t_ctype uint32_t_repr a 1.0R x
+  ensures  elem_pts_to uint32_t_ctype uint32_t_repr a 1.0R y
 {
   uint32_t_forget_u a;
-  uint32_t_write_uninit_u a y;
+  uint32_t_write_uninit_u a y
 }
 
-(* int64_t *)
-
 ghost fn int64_t_forget_u (a: ptr) (#x: I64.t)
-  requires elem_pts_to int64_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v int64_t_sizeof)
+  requires elem_pts_to int64_t_ctype int64_t_repr a 1.0R x
+  ensures  bytes_uninit int64_t_ctype a (SZ.v int64_t_sizeof)
 {
-  unfold elem_pts_to int64_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to int64_t_ctype int64_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   int64_t_repr_len x b;
-  fold bytes_uninit a (SZ.v int64_t_sizeof);
+  fold bytes_uninit int64_t_ctype a (SZ.v int64_t_sizeof);
 }
 
 fn int64_t_read_u (a: ptr) (#p: perm) (#x: erased I64.t)
-  preserves elem_pts_to int64_t_repr a p x
+  preserves elem_pts_to int64_t_ctype int64_t_repr a p x
   returns  y : I64.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = int64_t_stack_alloc ();
-  int64_t_reveal_uninit t;
-  unfold elem_pts_to int64_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  int64_t_repr_len x bs;
-  memcpy t a int64_t_sizeof;
-  int64_t_conceal t #1.0R #bs #x;
-  let y = int64_t_read t;
-  int64_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  int64_t_repr_len x bt;
-  int64_t_claim_uninit t;
-  int64_t_stack_free t;
-  fold elem_pts_to int64_t_repr a p x;
+  elem_reveal int64_t_ctype int64_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  int64_t_repr_no_prov (reveal x) b;
+  let y = I.int64_t_read_at a #p #x #(hide b) #e;
+  elem_conceal int64_t_ctype int64_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn int64_t_write_uninit_u (a: ptr) (y: I64.t)
-  requires bytes_uninit a (SZ.v int64_t_sizeof)
-  ensures  elem_pts_to int64_t_repr a 1.0R y
+  requires bytes_uninit int64_t_ctype a (SZ.v int64_t_sizeof)
+  ensures  elem_pts_to int64_t_ctype int64_t_repr a 1.0R y
 {
-  let t = int64_t_stack_alloc ();
-  int64_t_write_uninit t y;
-  int64_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  int64_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v int64_t_sizeof);
-  memcpy a t int64_t_sizeof;
-  fold elem_pts_to int64_t_repr a 1.0R y;
-  int64_t_claim_uninit t;
-  int64_t_stack_free t;
+  unfold bytes_uninit int64_t_ctype a (SZ.v int64_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v int64_t_sizeof) None (to_bits 64 (I64.v y));
+  int64_t_repr_no_prov y b;
+  EM.store a (hide int64_t_ctype) b;
+  ET.store_read_ok e int64_t_ctype;
+  elem_conceal int64_t_ctype int64_t_repr a #1.0R #b #y #(EM.store_index e int64_t_ctype)
 }
 
 fn int64_t_write_u (a: ptr) (y: I64.t) (#x: erased I64.t)
-  requires elem_pts_to int64_t_repr a 1.0R x
-  ensures  elem_pts_to int64_t_repr a 1.0R y
+  requires elem_pts_to int64_t_ctype int64_t_repr a 1.0R x
+  ensures  elem_pts_to int64_t_ctype int64_t_repr a 1.0R y
 {
   int64_t_forget_u a;
-  int64_t_write_uninit_u a y;
+  int64_t_write_uninit_u a y
 }
 
-(* uint64_t *)
-
 ghost fn uint64_t_forget_u (a: ptr) (#x: U64.t)
-  requires elem_pts_to uint64_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v uint64_t_sizeof)
+  requires elem_pts_to uint64_t_ctype uint64_t_repr a 1.0R x
+  ensures  bytes_uninit uint64_t_ctype a (SZ.v uint64_t_sizeof)
 {
-  unfold elem_pts_to uint64_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to uint64_t_ctype uint64_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   uint64_t_repr_len x b;
-  fold bytes_uninit a (SZ.v uint64_t_sizeof);
+  fold bytes_uninit uint64_t_ctype a (SZ.v uint64_t_sizeof);
 }
 
 fn uint64_t_read_u (a: ptr) (#p: perm) (#x: erased U64.t)
-  preserves elem_pts_to uint64_t_repr a p x
+  preserves elem_pts_to uint64_t_ctype uint64_t_repr a p x
   returns  y : U64.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = uint64_t_stack_alloc ();
-  uint64_t_reveal_uninit t;
-  unfold elem_pts_to uint64_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  uint64_t_repr_len x bs;
-  memcpy t a uint64_t_sizeof;
-  uint64_t_conceal t #1.0R #bs #x;
-  let y = uint64_t_read t;
-  uint64_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  uint64_t_repr_len x bt;
-  uint64_t_claim_uninit t;
-  uint64_t_stack_free t;
-  fold elem_pts_to uint64_t_repr a p x;
+  elem_reveal uint64_t_ctype uint64_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  uint64_t_repr_no_prov (reveal x) b;
+  let y = I.uint64_t_read_at a #p #x #(hide b) #e;
+  elem_conceal uint64_t_ctype uint64_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn uint64_t_write_uninit_u (a: ptr) (y: U64.t)
-  requires bytes_uninit a (SZ.v uint64_t_sizeof)
-  ensures  elem_pts_to uint64_t_repr a 1.0R y
+  requires bytes_uninit uint64_t_ctype a (SZ.v uint64_t_sizeof)
+  ensures  elem_pts_to uint64_t_ctype uint64_t_repr a 1.0R y
 {
-  let t = uint64_t_stack_alloc ();
-  uint64_t_write_uninit t y;
-  uint64_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  uint64_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v uint64_t_sizeof);
-  memcpy a t uint64_t_sizeof;
-  fold elem_pts_to uint64_t_repr a 1.0R y;
-  uint64_t_claim_uninit t;
-  uint64_t_stack_free t;
+  unfold bytes_uninit uint64_t_ctype a (SZ.v uint64_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v uint64_t_sizeof) None (U64.v y);
+  uint64_t_repr_no_prov y b;
+  EM.store a (hide uint64_t_ctype) b;
+  ET.store_read_ok e uint64_t_ctype;
+  elem_conceal uint64_t_ctype uint64_t_repr a #1.0R #b #y #(EM.store_index e uint64_t_ctype)
 }
 
 fn uint64_t_write_u (a: ptr) (y: U64.t) (#x: erased U64.t)
-  requires elem_pts_to uint64_t_repr a 1.0R x
-  ensures  elem_pts_to uint64_t_repr a 1.0R y
+  requires elem_pts_to uint64_t_ctype uint64_t_repr a 1.0R x
+  ensures  elem_pts_to uint64_t_ctype uint64_t_repr a 1.0R y
 {
   uint64_t_forget_u a;
-  uint64_t_write_uninit_u a y;
+  uint64_t_write_uninit_u a y
 }
 
-(* size_t *)
-
 ghost fn size_t_forget_u (a: ptr) (#x: SZ.t)
-  requires elem_pts_to size_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v size_t_sizeof)
+  requires elem_pts_to size_t_ctype size_t_repr a 1.0R x
+  ensures  bytes_uninit size_t_ctype a (SZ.v size_t_sizeof)
 {
-  unfold elem_pts_to size_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to size_t_ctype size_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   size_t_repr_len x b;
-  fold bytes_uninit a (SZ.v size_t_sizeof);
+  fold bytes_uninit size_t_ctype a (SZ.v size_t_sizeof);
 }
 
 fn size_t_read_u (a: ptr) (#p: perm) (#x: erased SZ.t)
-  preserves elem_pts_to size_t_repr a p x
+  preserves elem_pts_to size_t_ctype size_t_repr a p x
   returns  y : SZ.t
   ensures  rewrites_to y (reveal x)
 {
-  let t = size_t_stack_alloc ();
-  size_t_reveal_uninit t;
-  unfold elem_pts_to size_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  size_t_repr_len x bs;
-  memcpy t a size_t_sizeof;
-  size_t_conceal t #1.0R #bs #x;
-  let y = size_t_read t;
-  size_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  size_t_repr_len x bt;
-  size_t_claim_uninit t;
-  size_t_stack_free t;
-  fold elem_pts_to size_t_repr a p x;
+  elem_reveal size_t_ctype size_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  size_t_repr_no_prov (reveal x) b;
+  let y = I.size_t_read_at a #p #x #(hide b) #e;
+  elem_conceal size_t_ctype size_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn size_t_write_uninit_u (a: ptr) (y: SZ.t)
-  requires bytes_uninit a (SZ.v size_t_sizeof)
-  ensures  elem_pts_to size_t_repr a 1.0R y
+  requires bytes_uninit size_t_ctype a (SZ.v size_t_sizeof)
+  ensures  elem_pts_to size_t_ctype size_t_repr a 1.0R y
 {
-  let t = size_t_stack_alloc ();
-  size_t_write_uninit t y;
-  size_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  size_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v size_t_sizeof);
-  memcpy a t size_t_sizeof;
-  fold elem_pts_to size_t_repr a 1.0R y;
-  size_t_claim_uninit t;
-  size_t_stack_free t;
+  unfold bytes_uninit size_t_ctype a (SZ.v size_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v size_t_sizeof) None (SZ.v y);
+  size_t_repr_no_prov y b;
+  EM.store a (hide size_t_ctype) b;
+  ET.store_read_ok e size_t_ctype;
+  elem_conceal size_t_ctype size_t_repr a #1.0R #b #y #(EM.store_index e size_t_ctype)
 }
 
 fn size_t_write_u (a: ptr) (y: SZ.t) (#x: erased SZ.t)
-  requires elem_pts_to size_t_repr a 1.0R x
-  ensures  elem_pts_to size_t_repr a 1.0R y
+  requires elem_pts_to size_t_ctype size_t_repr a 1.0R x
+  ensures  elem_pts_to size_t_ctype size_t_repr a 1.0R y
 {
   size_t_forget_u a;
-  size_t_write_uninit_u a y;
+  size_t_write_uninit_u a y
 }
 
-(* float32_t *)
-
 ghost fn float32_t_forget_u (a: ptr) (#x: float32)
-  requires elem_pts_to float32_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v float32_t_sizeof)
+  requires elem_pts_to float32_t_ctype float32_t_repr a 1.0R x
+  ensures  bytes_uninit float32_t_ctype a (SZ.v float32_t_sizeof)
 {
-  unfold elem_pts_to float32_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to float32_t_ctype float32_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   float32_t_repr_len x b;
-  fold bytes_uninit a (SZ.v float32_t_sizeof);
+  fold bytes_uninit float32_t_ctype a (SZ.v float32_t_sizeof);
 }
 
 fn float32_t_read_u (a: ptr) (#p: perm) (#x: erased float32)
-  preserves elem_pts_to float32_t_repr a p x
+  preserves elem_pts_to float32_t_ctype float32_t_repr a p x
   returns  y : float32
   ensures  rewrites_to y (reveal x)
 {
-  let t = float32_t_stack_alloc ();
-  float32_t_reveal_uninit t;
-  unfold elem_pts_to float32_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  float32_t_repr_len x bs;
-  memcpy t a float32_t_sizeof;
-  float32_t_conceal t #1.0R #bs #x;
-  let y = float32_t_read t;
-  float32_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  float32_t_repr_len x bt;
-  float32_t_claim_uninit t;
-  float32_t_stack_free t;
-  fold elem_pts_to float32_t_repr a p x;
+  elem_reveal float32_t_ctype float32_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  float32_t_repr_no_prov (reveal x) b;
+  let y = I.float32_t_read_at a #p #x #(hide b) #e;
+  elem_conceal float32_t_ctype float32_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn float32_t_write_uninit_u (a: ptr) (y: float32)
-  requires bytes_uninit a (SZ.v float32_t_sizeof)
-  ensures  elem_pts_to float32_t_repr a 1.0R y
+  requires bytes_uninit float32_t_ctype a (SZ.v float32_t_sizeof)
+  ensures  elem_pts_to float32_t_ctype float32_t_repr a 1.0R y
 {
-  let t = float32_t_stack_alloc ();
-  float32_t_write_uninit t y;
-  float32_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  float32_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v float32_t_sizeof);
-  memcpy a t float32_t_sizeof;
-  fold elem_pts_to float32_t_repr a 1.0R y;
-  float32_t_claim_uninit t;
-  float32_t_stack_free t;
+  unfold bytes_uninit float32_t_ctype a (SZ.v float32_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v float32_t_sizeof) None (float32_bits y);
+  float32_t_repr_no_prov y b;
+  EM.store a (hide float32_t_ctype) b;
+  ET.store_read_ok e float32_t_ctype;
+  elem_conceal float32_t_ctype float32_t_repr a #1.0R #b #y #(EM.store_index e float32_t_ctype)
 }
 
 fn float32_t_write_u (a: ptr) (y: float32) (#x: erased float32)
-  requires elem_pts_to float32_t_repr a 1.0R x
-  ensures  elem_pts_to float32_t_repr a 1.0R y
+  requires elem_pts_to float32_t_ctype float32_t_repr a 1.0R x
+  ensures  elem_pts_to float32_t_ctype float32_t_repr a 1.0R y
 {
   float32_t_forget_u a;
-  float32_t_write_uninit_u a y;
+  float32_t_write_uninit_u a y
 }
 
-(* float64_t *)
-
 ghost fn float64_t_forget_u (a: ptr) (#x: float64)
-  requires elem_pts_to float64_t_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v float64_t_sizeof)
+  requires elem_pts_to float64_t_ctype float64_t_repr a 1.0R x
+  ensures  bytes_uninit float64_t_ctype a (SZ.v float64_t_sizeof)
 {
-  unfold elem_pts_to float64_t_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to float64_t_ctype float64_t_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   float64_t_repr_len x b;
-  fold bytes_uninit a (SZ.v float64_t_sizeof);
+  fold bytes_uninit float64_t_ctype a (SZ.v float64_t_sizeof);
 }
 
 fn float64_t_read_u (a: ptr) (#p: perm) (#x: erased float64)
-  preserves elem_pts_to float64_t_repr a p x
+  preserves elem_pts_to float64_t_ctype float64_t_repr a p x
   returns  y : float64
   ensures  rewrites_to y (reveal x)
 {
-  let t = float64_t_stack_alloc ();
-  float64_t_reveal_uninit t;
-  unfold elem_pts_to float64_t_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  float64_t_repr_len x bs;
-  memcpy t a float64_t_sizeof;
-  float64_t_conceal t #1.0R #bs #x;
-  let y = float64_t_read t;
-  float64_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  float64_t_repr_len x bt;
-  float64_t_claim_uninit t;
-  float64_t_stack_free t;
-  fold elem_pts_to float64_t_repr a p x;
+  elem_reveal float64_t_ctype float64_t_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  float64_t_repr_no_prov (reveal x) b;
+  let y = I.float64_t_read_at a #p #x #(hide b) #e;
+  elem_conceal float64_t_ctype float64_t_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn float64_t_write_uninit_u (a: ptr) (y: float64)
-  requires bytes_uninit a (SZ.v float64_t_sizeof)
-  ensures  elem_pts_to float64_t_repr a 1.0R y
+  requires bytes_uninit float64_t_ctype a (SZ.v float64_t_sizeof)
+  ensures  elem_pts_to float64_t_ctype float64_t_repr a 1.0R y
 {
-  let t = float64_t_stack_alloc ();
-  float64_t_write_uninit t y;
-  float64_t_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  float64_t_repr_len y bt;
-  unfold bytes_uninit a (SZ.v float64_t_sizeof);
-  memcpy a t float64_t_sizeof;
-  fold elem_pts_to float64_t_repr a 1.0R y;
-  float64_t_claim_uninit t;
-  float64_t_stack_free t;
+  unfold bytes_uninit float64_t_ctype a (SZ.v float64_t_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  let b = Enc.encode (SZ.v float64_t_sizeof) None (float64_bits y);
+  float64_t_repr_no_prov y b;
+  EM.store a (hide float64_t_ctype) b;
+  ET.store_read_ok e float64_t_ctype;
+  elem_conceal float64_t_ctype float64_t_repr a #1.0R #b #y #(EM.store_index e float64_t_ctype)
 }
 
 fn float64_t_write_u (a: ptr) (y: float64) (#x: erased float64)
-  requires elem_pts_to float64_t_repr a 1.0R x
-  ensures  elem_pts_to float64_t_repr a 1.0R y
+  requires elem_pts_to float64_t_ctype float64_t_repr a 1.0R x
+  ensures  elem_pts_to float64_t_ctype float64_t_repr a 1.0R y
 {
   float64_t_forget_u a;
-  float64_t_write_uninit_u a y;
+  float64_t_write_uninit_u a y
 }
 
-(* ptr *)
-
 ghost fn ptr_forget_u (a: ptr) (#x: ptr)
-  requires elem_pts_to ptr_repr a 1.0R x
-  ensures  bytes_uninit a (SZ.v ptr_sizeof)
+  requires elem_pts_to ptr_ctype ptr_repr a 1.0R x
+  ensures  bytes_uninit ptr_ctype a (SZ.v ptr_sizeof)
 {
-  unfold elem_pts_to ptr_repr a 1.0R x;
-  with b. assert (mem_pts_to a 1.0R b);
+  unfold elem_pts_to ptr_ctype ptr_repr a 1.0R x;
+  with b e. assert (mem_pts_to_at a 1.0R b e);
   ptr_repr_len x b;
-  fold bytes_uninit a (SZ.v ptr_sizeof);
+  fold bytes_uninit ptr_ctype a (SZ.v ptr_sizeof);
 }
 
 fn ptr_read_u (a: ptr) (#p: perm) (#x: erased ptr)
-  preserves elem_pts_to ptr_repr a p x
+  preserves elem_pts_to ptr_ctype ptr_repr a p x
   returns  y : ptr
   ensures  rewrites_to y (reveal x)
 {
-  let t = ptr_stack_alloc ();
-  ptr_reveal_uninit t;
-  unfold elem_pts_to ptr_repr a p x;
-  with bs. assert (mem_pts_to a p bs);
-  ptr_repr_len x bs;
-  memcpy t a ptr_sizeof;
-  ptr_conceal t #1.0R #bs #x;
-  let y = ptr_read t;
-  ptr_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  ptr_repr_len x bt;
-  ptr_claim_uninit t;
-  ptr_stack_free t;
-  fold elem_pts_to ptr_repr a p x;
+  elem_reveal ptr_ctype ptr_repr a;
+  with b e. assert (mem_pts_to_at a p b e);
+  ptr_repr_len (reveal x) b;
+  let y = I.ptr_read_at a #p #x #(hide b) #e;
+  elem_conceal ptr_ctype ptr_repr a #p #b #(reveal x) #e;
   y
 }
 
 fn ptr_write_uninit_u (a: ptr) (y: ptr)
-  requires bytes_uninit a (SZ.v ptr_sizeof)
-  ensures  elem_pts_to ptr_repr a 1.0R y
+  requires bytes_uninit ptr_ctype a (SZ.v ptr_sizeof)
+  ensures  elem_pts_to ptr_ctype ptr_repr a 1.0R y
 {
-  let t = ptr_stack_alloc ();
-  ptr_write_uninit t y;
-  ptr_reveal t;
-  with bt. assert (mem_pts_to t 1.0R bt);
-  ptr_repr_len y bt;
-  unfold bytes_uninit a (SZ.v ptr_sizeof);
-  memcpy a t ptr_sizeof;
-  fold elem_pts_to ptr_repr a 1.0R y;
-  ptr_claim_uninit t;
-  ptr_stack_free t;
+  unfold bytes_uninit ptr_ctype a (SZ.v ptr_sizeof);
+  with old e. assert (mem_pts_to_at a 1.0R old e);
+  I.ptr_store a y;
+  ET.store_read_ok e ptr_ctype;
+  elem_conceal ptr_ctype ptr_repr a #1.0R #(Enc.encode (SZ.v ptr_sizeof) (prov_of y) (addr_of y)) #y #(EM.store_index e ptr_ctype)
 }
 
 fn ptr_write_u (a: ptr) (y: ptr) (#x: erased ptr)
-  requires elem_pts_to ptr_repr a 1.0R x
-  ensures  elem_pts_to ptr_repr a 1.0R y
+  requires elem_pts_to ptr_ctype ptr_repr a 1.0R x
+  ensures  elem_pts_to ptr_ctype ptr_repr a 1.0R y
 {
   ptr_forget_u a;
-  ptr_write_uninit_u a y;
+  ptr_write_uninit_u a y
 }
 

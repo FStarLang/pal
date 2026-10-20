@@ -7,6 +7,8 @@ open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 
 module ET = Pulse.Lib.C.Palow.Etype
+module Alloc = Pulse.Lib.C.Palow.Alloc
+module SZ = FStar.SizeT
 
 let mutable_index (e: ET.etypes) : prop =
   ET.full_mutable e
@@ -17,7 +19,17 @@ val prepared ([@@@mkey] a: ptr) (t: ET.ctype) : slprop
 
 ghost fn prepare (a: ptr) (t: ET.ctype) (#b: bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e
-  requires pure (len b == ET.csize t /\ ET.elen e == len b /\ mutable_index e)
+  requires pure (len b == ET.csize t /\ ET.elen e == len b /\ ET.full_mutable e)
+  ensures prepared a t
+
+(* The allocation wrapper preserves deallocation eligibility, but does not
+   infer metadata origin or uniformity from the free token. *)
+ghost fn prepare_allocation (a: ptr) (n: SZ.t) (t: ET.ctype)
+                            (#b: bytes) (#e: ET.etypes)
+  preserves Alloc.freeable a n
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (len b == SZ.v n /\ SZ.v n == ET.csize t /\ ET.elen e == len b /\
+                 ET.full_mutable e)
   ensures prepared a t
 
 (* This is an access view, not a replacement effective type. *)

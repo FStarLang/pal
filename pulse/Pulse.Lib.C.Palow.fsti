@@ -177,20 +177,16 @@ ghost fn mem_join (a: ptr) (#p: perm) (#b1 #b2: bytes) (n: SZ.t { SZ.v n == len 
    layer 0 that cannot be made cheaply after the fact: adding an index to
    `mem_pts_to` touches every module in the stack.
 
-   In this first cut the index is present but not *enforced*: no layer-1
-   predicate constrains it, so `mem_pts_to` -- which hides it -- is all anyone
-   uses, and every existing proof goes through unchanged. Turning enforcement
-   on means making the typed loads and stores in `Pulse.Lib.C.Palow.Machine`
-   demand `Etype.read_ok` and produce `Etype.store_etypes`, and making each
-   typed points-to carry `read_ok e t_ctype` for the index it holds. The
-   aggregate, array and union lemmas do not mention the index at all, since
-   splitting and joining bytes splits and joins the index alongside them.
+   Checked typed ownership constrains the actual index, and machine operations
+   preserve or update that same witness. `mem_pts_to` remains an existential
+   raw-byte view; hiding an index does not grant permission to pick a different
+   one when restoring typed ownership. In particular, independent field views
+   do not establish a nominal aggregate type. Index-preserving helpers and
+   contracts are needed wherever an enclosing object's witness must survive
+   a field access or a call. See palow.md for generator migration status.
    --------------------------------------------------------------------------- *)
 
-(* Splitting a range splits its index at the same point. This is the reason the
-   aggregate and array lemmas survive the addition of effective types untouched:
-   they are stated over `mem_pts_to`, and the index follows the bytes.
-
+(* Splitting a range splits its index at the same point.
    `mem_split` and `mem_join` above are consequences of these two rather than
    independent assumptions -- unfold, split the index with the bytes, fold --
    and are stated separately only because this module has no implementation to

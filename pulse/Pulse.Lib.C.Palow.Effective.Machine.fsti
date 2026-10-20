@@ -2,7 +2,7 @@ module Pulse.Lib.C.Palow.Effective.Machine
 
 (* Indexed machine operations. Their contracts change bytes only at actual
    stores/copies; ghost preparation alone never produces readable ownership.
-   The legacy machine interface remains in use until the emitter cutover. *)
+   Machine's typed implementations delegate to this interface. *)
 
 #lang-pulse
 open Pulse

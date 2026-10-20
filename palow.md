@@ -846,13 +846,20 @@ of a `struct T { uint32_t y, z; }`, and they are not one. An aggregate's index
 is strictly more than the conjunction of its fields', so it cannot be dropped
 at the aggregate boundary and rebuilt from the fields.
 
-Putting the two together: the index must be named at the bytes-to-object
-boundary — `t_conceal`, `struct_S_claim_uninit`, `_claim_*_flex`, `_of_elem`,
-which take `mem_pts_to_at` rather than `mem_pts_to` — and nowhere else. That is
-the same small set of entry points that already carries `aligned a
-struct_S_alignof`, and for the same reason: it is where an object is made out
-of storage. Everything above it (the predicates, the focus and unfocus
-machinery, `unless_null`, the generated contracts) is untouched.
+The bytes-to-object boundaries — `t_conceal`, `struct_S_claim_uninit`,
+`_claim_*_flex`, `_of_elem` — must take actual indexed storage rather than an
+existential raw-byte view. This is necessary but not sufficient: the index must
+also survive field focus, updates, unfocus, and calls when restoring nominal
+aggregate ownership. An existential scalar postcondition alone does not prove
+that its enclosing aggregate's original index was preserved.
+
+The checked library therefore supplies explicit-index scalar and array
+operations and nominal aggregate split/join proofs. Generated contracts and
+field helpers still need the corresponding migration. Field-by-field writes
+into fresh allocated storage establish the affected member types; they must
+not be described as establishing one nominal aggregate type without further
+justification. Member-access ownership and whole-object access evidence must
+remain distinct.
 
 #### Enforcement contract and acceptance matrix
 

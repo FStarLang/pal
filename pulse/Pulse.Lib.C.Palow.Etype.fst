@@ -275,6 +275,10 @@ let read_ok (e: etypes) (u: ctype) : prop =
      | None -> True
      | Some en -> b2t (access_ok en.ty (en.off - k) u)))
 
+let read_ok_of (t: ctype) (fixed: bool)
+  : Lemma (read_ok (etypes_of t fixed) t)
+  = ()
+
 (* A byte is relabelled only if its current type does not already license the
    store. That condition is what keeps the index from being *too* fine: writing
    an `int` through a pointer to the first member of a `struct a` must not turn
@@ -300,6 +304,27 @@ let store_read_ok (e: etypes) (t: ctype { elen e == csize t })
   : Lemma (requires read_ok e t)
           (ensures read_ok (store_etypes e t) t)
   = ()
+
+(* A typed store preserves already-established enclosing labels. Fallback
+   None entries are deliberately excluded: their first noncharacter store
+   does establish the lvalue's type. *)
+let store_readable_stable (e: etypes) (t: ctype { elen e == csize t })
+  : Lemma (requires read_ok e t /\
+            (forall (k: nat). k < elen e ==> Some? (eget e k)))
+          (ensures store_etypes e t == e)
+  = Seq.lemma_eq_intro (store_etypes e t) e
+
+(* Allocation origin is independent of the current, possibly heterogeneous
+   effective types. Only None or mutable labels can inhabit malloc storage. *)
+let all_mutable (e: etypes) : prop =
+  forall (k: nat). k < elen e ==>
+    (match eget e k with | None -> True | Some en -> not en.fixed)
+
+let all_mutable_of (t: ctype)
+  : Lemma (all_mutable (etypes_of t false)) = ()
+
+let all_mutable_store (e: etypes) (t: ctype { elen e == csize t })
+  : Lemma (requires all_mutable e) (ensures all_mutable (store_etypes e t)) = ()
 
 (* The legacy store functions above compute labels, not permissions. In
    particular store_fixed_stable does not justify a cross-type typed store.
@@ -333,6 +358,9 @@ let full_mutable (e: etypes) : prop =
      elen e == csize t /\
      (forall (k: nat). k < elen e ==>
        eget e k == Some ({ ty = t; off = k; fixed = false }))))
+
+let full_mutable_all_mutable (e: etypes)
+  : Lemma (requires full_mutable e) (ensures all_mutable e) = ()
 
 let prepare_write_ok (s: etype_state) (target: ctype) : prop =
   match s with
@@ -453,6 +481,12 @@ let complete_copy_fixed_origin (dst: etype_state)
        | Some en ->
          en.fixed ==>
          eget (state_etypes dst) k == Some en)
+  = ()
+
+let all_mutable_copy (dst: etype_state)
+                     (src: etype_state { copy_complete_ok dst src })
+  : Lemma (requires all_mutable (state_etypes dst))
+          (ensures all_mutable (state_etypes (complete_copy dst src)))
   = ()
 
 let replace_etypes_outside (whole: etypes) (lo: nat)
