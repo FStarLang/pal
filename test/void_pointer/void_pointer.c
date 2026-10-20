@@ -66,9 +66,14 @@ void *select_ptr(_Bool flag, int32_t *ip, struct counter *sp)
 /* A client of `select_ptr`. `core_to_ref` grants no ownership, so each branch
  * moves ownership already held for `ip`/`sp` onto the recovered pointer to
  * read it, then moves it back so the caller keeps it unchanged. */
-int32_t read_selected(_Bool flag, int32_t *ip, struct counter *sp)
-  _ensures((!flag || return == *ip))
-  _ensures((flag || return == sp->n))
+int32_t read_selected(_Bool flag, _plain int32_t *ip, _plain struct counter *sp)
+  _requires(_inline_pulse(
+    exists* (iv: Int32.t) (sv: $type(struct counter)).
+      int32_t_pts_to $(ip) 1.0R iv ** struct_counter_pts_to $(sp) 1.0R sv))
+  _ensures(_inline_pulse(
+    exists* (iv: Int32.t) (sv: $type(struct counter)).
+      int32_t_pts_to $(ip) 1.0R iv ** struct_counter_pts_to $(sp) 1.0R sv **
+      pure ($(return) == (if $(flag) then iv else sv.fld_n))))
 {
   void *p = select_ptr(flag, ip, sp);
   if (flag) {
@@ -85,4 +90,3 @@ int32_t read_selected(_Bool flag, int32_t *ip, struct counter *sp)
     return sv.n;
   }
 }
-

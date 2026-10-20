@@ -1060,6 +1060,7 @@ _include_pulse(Itemx_spec,
   unfold let itemx_valid ([@@@mkey] this: Pulse.Lib.C.Palow.Ptr.ptr) (vo: Struct_itemx.struct_itemx) : slprop =
     Struct_itemx.struct_itemx_pts_to this 1.0R vo **
     Pulse.Lib.C.Palow.Alloc.freeable this Struct_itemx.struct_itemx_sizeof **
+    pure (Pulse.Lib.C.Palow.allocated_region this (FStar.SizeT.v Struct_itemx.struct_itemx_sizeof)) **
     Fp_shim.is_valid vo.Struct_itemx.fld_destroy true (Fp_shim.pre_of Funcptr_destroy_impl.func_destroy_impl__fp) (Fp_shim.post_of Funcptr_destroy_impl.func_destroy_impl__fp)
 )
 

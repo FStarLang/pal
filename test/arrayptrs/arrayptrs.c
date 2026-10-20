@@ -216,6 +216,7 @@ _arrayptr const int *binary_search(_arrayptr const int *lo, _arrayptr const int 
 void use_binary_search(_array const int *arr, int target, size_t length)
   _requires(length == arr._length && length <= 10000)
 {
+  _ghost_stmt(RA.borrow_public_read int32_t_ctype int32_t_repr $(arr) 4sz int32_t_alignof);
   _arrayptr const int *lo = arr;
   _arrayptr const int *hi = arr + length;
   _arrayptr const int *result = binary_search(lo, hi, target);
@@ -227,4 +228,5 @@ void use_binary_search(_array const int *arr, int target, size_t length)
     int val = *result;
     _ghost_stmt(Arrayptrs_include2.unfocus_at $(arr) $(result));
   }
+  _ghost_stmt(RA.restore_public_read int32_t_ctype int32_t_repr $(arr) 4sz int32_t_alignof);
 }

@@ -9,7 +9,8 @@ typedef enum state {
 } state;
 
 struct staged {
-    state tag;
+    /* Canonical storage keeps this about compound literals, not enum identity. */
+    uint32_t tag;
     uint32_t bytes;
 };
 
