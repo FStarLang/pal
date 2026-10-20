@@ -1,0 +1,4 @@
+Prepared_source_bad.fst(
+Cannot prove:
+mem_pts_to_at src
+Effective.prepared src uint32_t_ctype

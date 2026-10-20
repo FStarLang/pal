@@ -55,4 +55,16 @@ _include_pulse(Effective_machine,
         (ET.Ready (ET.etypes_of uint32_t_ctype true)))))
     as (mem_pts_to_at dst 1.0R bs (ET.etypes_of float32_t_ctype true));
   }
+
+  ghost fn share_prefix (a: ptr)
+    requires mem_pts_to_at a 1.0R (zeroed 4) (ET.etypes_of uint32_t_ctype true)
+    ensures mem_pts_to_at a 0.5R (zeroed 4) (ET.etypes_of uint32_t_ctype true)
+    ensures mem_pts_to_at a 0.5R (slice (zeroed 4) 0 1)
+              (FStar.Seq.slice (ET.etypes_of uint32_t_ctype true) 0 1)
+    ensures mem_pts_to_at (a +! 1sz) 0.5R (slice (zeroed 4) 1 4)
+              (FStar.Seq.slice (ET.etypes_of uint32_t_ctype true) 1 4)
+  {
+    mem_share_at a;
+    mem_split_at a #0.5R #(zeroed 4) #(ET.etypes_of uint32_t_ctype true) 1sz;
+  }
 )
