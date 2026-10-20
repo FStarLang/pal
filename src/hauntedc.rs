@@ -1760,6 +1760,13 @@ pub fn process_inline_pulse(
             kind: AuxFnKind::Activate,
         });
 
+    let prepare_antiquot =
+        dollar_keyword("prepare").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
+            dollar_span,
+            body_span,
+            kind: AuxFnKind::Prepare,
+        });
+
     let unfold_uninit_antiquot =
         dollar_keyword_uninit("unfold").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
             dollar_span,
@@ -1832,6 +1839,7 @@ pub fn process_inline_pulse(
         unfold_antiquot,
         fold_antiquot,
         activate_antiquot,
+        prepare_antiquot,
         scattered_antiquot,
         gathered_antiquot,
         witness_antiquot,

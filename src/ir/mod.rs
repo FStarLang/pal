@@ -661,6 +661,8 @@ pub enum AuxFnKind {
     /// uninitialized. Union-only; has no struct form. Emits the per-arm
     /// activation fn `union_<U>__activate_<arm>`.
     Activate,
+    /// `$prepare(T) $(p)` reserves owned allocated storage for a new type.
+    Prepare,
     /// `$scattered(struct S) $(p)` — says that `*p` is already in pieces:
     /// its fields are owned one by one, those the body writes as storage.
     /// Palow-only; it emits nothing, and only tells the emitter to fill the
@@ -681,6 +683,7 @@ impl AuxFnKind {
             AuxFnKind::Fold => "fold",
             AuxFnKind::FoldUninit => "fold-uninit",
             AuxFnKind::Activate => "activate",
+            AuxFnKind::Prepare => "prepare",
             AuxFnKind::Scattered => "scattered",
             AuxFnKind::Gathered => "gathered",
         }
