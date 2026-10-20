@@ -1,0 +1,2 @@
+Func_case_13_4_char_array_used_as_int_storage.fst(
+all_some_sz (Seq.create 8 None)

@@ -1,2 +1,2 @@
+error: `Func_case_15_2_installed_struct_read_as_unrelated_struct`: its body is not translated: a field of `p`, which holds no value yet
 error: `Func_sink_d`: its body is not translated: a conversion from a 64-bit float to uint64_t
-error: `Func_case_15_2_installed_struct_read_as_unrelated_struct`: its body is not translated: a dereference of local `np`, whose target the contract does not grant

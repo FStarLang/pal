@@ -1,0 +1,2 @@
+Func_case_14_3_reuse_of_a_declared_struct_as_another_struct.fst(
+all_some_sz (Seq.create 128 None)

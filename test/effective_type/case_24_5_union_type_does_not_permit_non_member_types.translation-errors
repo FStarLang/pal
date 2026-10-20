@@ -1,2 +1,1 @@
 error: `Func_sink_d`: its body is not translated: a conversion from a 64-bit float to uint64_t
-error: `Func_case_24_5_union_type_does_not_permit_non_member_types`: its body is not translated: a dereference of local `pd`, whose target the contract does not grant

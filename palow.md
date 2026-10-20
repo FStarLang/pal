@@ -1057,21 +1057,56 @@ as undefined. The four previously disabled cases remain separate, as do the
 three 22.1 lifetime tests whose freed pointer *values* are not invalidated by
 the current model.
 
+#### Typed view aliases
+
+A local pointer that is assigned once from the address of a named place, and
+never rebound, is a *view alias* of that place: `T *q = (T *)&obj;`,
+`T *q = (T *)id(&obj);` where `id` returns a parameter (its body is just that
+`return`, or its contract says `_ensures(return == p)`), `T *q = (T *)id(a)`
+for a local array `a` (a view of `a[0]`), `T *q = &(*p).f` where `p` is
+itself an alias, and `T *q = (T *)p` where `p` holds a `malloc`/`calloc`
+block for the whole call. Only pointer-to-pointer conversions are looked
+through: a round trip through `uintptr_t` loses the qualifiers and provenance
+the IR does not track, so it is not a view.
+
+`*q` is then `*(T *)&place`. The place is first resolved structurally: a view
+at the type of the first member (or of the enclosing struct, for a first
+member) is that member (or that struct). Otherwise the access goes through
+`Pulse.Lib.C.Palow.Effective.View`. A scalar read or store converts the
+place's ownership to the view type with `View.elem_view`, which requires
+`View.view_ok`: both types are scalars of equal size, the stored effective
+type permits the view (`access_ok`, i.e. same type up to signedness or
+character access), and every representation of the source type is a
+representation of the view type. The ownership is converted back after the
+access. An aggregate view requires `View.aggregate_view_ok`, which is false:
+distinct struct types are never compatible, so a layout-compatible pun is a
+checked rejection rather than a translation error.
+
 The 75 original corpus files are partitioned as follows; an expected frontend
 failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 9 |
+| Verified enabled cases within the supported target/model | 13 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
-| Explicit unsupported-translation expectations | 57 |
+| Checked view rejections (13.2, 13.3 and 14.2) | 3 |
+| Checked rejections before the UB access (13.4, 14.3, 16.2 and 17.3) | 4 |
+| Explicit unsupported-translation expectations | 46 |
 | Disabled cases (16.3, 20.2, 21.1 and 22.3) | 4 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 
-The nine supported cases are 1.1, 2.2, 3.2, 4.1, 6.3, 7.1, 7.4, 10.1 and
-10.3. The two initialization failures exercise indeterminate reads, not an
-incompatible effective type. The separate native-C regressions exercise
+The thirteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.2, 4.1, 6.3, 7.1, 7.4,
+8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
+The two initialization failures exercise indeterminate reads, not an
+incompatible effective type. The three view rejections fail on
+`View.view_ok` or `View.aggregate_view_ok` at the incompatible access. The
+other four fail earlier, for a reason that is not the effective-type
+violation itself: 16.2 and 17.3 store into a fresh `malloc` block without an
+explicit retype, and 13.4 and 14.3 pass an uninitialized local array to a
+function. Of the unsupported expectations, 13.1, 13.5, 16.1 and 24.5 are
+masked only by `sink_d`; their own bodies translate and are rejected by F*
+(13.1 on `View.view_ok`). The separate native-C regressions exercise
 preparation, non-sticky zero views, copying, contextual ownership and the
 conservative type-identity boundaries without relying on the original corpus's
 unsupported constructs.

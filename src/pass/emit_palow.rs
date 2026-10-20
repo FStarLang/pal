@@ -11036,7 +11036,8 @@ fn alias_of(e: &Expr, t: &Touched) -> Option<Rc<Expr>> {
         ExprT::Deref(x) => x,
         _ => e,
     };
-    t.aliases.get(&lvalue_name(inner)?).cloned()
+    let place = t.aliases.get(&lvalue_name(inner)?)?;
+    Some(view_place(place).unwrap_or(place).clone())
 }
 
 fn touch_expr(e: &Expr, t: &mut Touched) {
@@ -11271,7 +11272,15 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
             // name, not an object, and the address it takes does not escape.
             StmtT::Assign(a, b)
                 if lvalue_name(a).is_some_and(|n| t.aliases.contains_key(&n))
-                    && matches!(&strip_vattr(b).val, ExprT::Ref(..)) => {}
+                    && matches!(&strip_casts(b).val, ExprT::Ref(..)) => {}
+            // Through an identity function the call still happens, with
+            // whatever else it touches; only the address does not escape.
+            StmtT::Assign(a, b)
+                if lvalue_name(a).is_some_and(|n| t.aliases.contains_key(&n))
+                    && matches!(&strip_casts(b).val, ExprT::FnCall(..)) =>
+            {
+                touch_expr(b, t)
+            }
             StmtT::Assign(a, b) => {
                 touch_write(a, t);
                 touch_expr(a, t);
@@ -11706,6 +11715,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     let mut written: HashSet<String> = HashSet::new();
     let mut lived: HashSet<String> = HashSet::new();
     let mut decayed: HashSet<String> = HashSet::new();
+    let idents = identity_fns(tu);
     for decl in &tu.decls {
         let DeclT::FnDefn(d) = &decl.val else {
             continue;
@@ -11714,7 +11724,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             aliases: {
                 let mut e = base.clone();
                 e.push_fn_decl_args_for_body(&d.decl);
-                alias_map(&d.body, &|x| ptr_base(&tds, &e, x))
+                alias_map(&d.body, &|x| ptr_base(&tds, &e, x), &idents)
             },
             ..Touched::default()
         };
@@ -11926,21 +11936,10 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                     .map(|a| a.mode == ParamMode::Consumed)
                     .collect(),
                 allocated: sig.ret_block.clone(),
-                return_alias: defn.and_then(|d| {
-                    let [st] = d.body.as_slice() else {
-                        return None;
-                    };
-                    let StmtT::Return(Some(value)) = &st.val else {
-                        return None;
-                    };
-                    let ExprT::Var(name) = &strip_casts(value).val else {
-                        return None;
-                    };
-                    fndecl
-                        .args
-                        .iter()
-                        .position(|a| a.name.as_ref().is_some_and(|n| n.val == name.val))
-                }),
+                return_alias: defn.and_then(syntactic_identity_param),
+                view_identity: defn
+                    .and_then(identity_param)
+                    .or_else(|| contract_identity_param(fndecl)),
             },
         );
         items.push(FnItem {
@@ -12166,6 +12165,7 @@ module K = Pulse.Lib.C.Palow.Effective.Context\n\
 module RA = Pulse.Lib.C.Palow.Effective.Retained.Array\n\
 module KA = Pulse.Lib.C.Palow.Effective.Context.Array\n\
 module Relation = Pulse.Lib.C.Palow.Effective.Relation\n\
+module View = Pulse.Lib.C.Palow.Effective.View\n\
 module Int8 = FStar.Int8\n\
 module Int16 = FStar.Int16\n\
 module Int32 = FStar.Int32\n\
@@ -12708,6 +12708,9 @@ struct Callee {
     /// A cast-only return of an unchanged parameter preserves its source view,
     /// even when the return declaration changes the apparent pointer type.
     return_alias: Option<usize>,
+    /// The parameter the call returns unchanged, by its body or by its
+    /// contract, so that a typed view of it is a view of the argument.
+    view_identity: Option<usize>,
 }
 
 /// Cloneable so that a speculative attempt can be rolled back *in full*
@@ -13832,6 +13835,17 @@ impl<'a> Body<'a> {
     fn addr(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
             return self.addr(&p);
+        }
+        match self.typed_view(e) {
+            Some(Err(place)) => return self.addr(&place),
+            // An aggregate seen at a type that is neither its own nor one of
+            // its first members: 6.5p7 has no case for it, and the verifier
+            // is told so.
+            Some(Ok((_, from, to))) if is_aggregate(&from) || is_aggregate(&to) => {
+                self.lines
+                    .push(format!("View.aggregate_view {from}_ctype {to}_ctype;"));
+            }
+            _ => {}
         }
         // The pointer itself, rather than what it points at. Its address is
         // the place's, but handing it out means handing out ownership of the
@@ -16787,9 +16801,79 @@ impl<'a> Body<'a> {
         Ok(result)
     }
 
+    /// `*(T *)&place` where `T` is not `place`'s own type: the place, and the
+    /// Palow names of its type and of `T`. A conversion that changes nothing
+    /// about which object is accessed is resolved to that object instead.
+    fn typed_view(&self, e: &Expr) -> Option<Result<(Rc<Expr>, String, String), Rc<Expr>>> {
+        view_place(e)?;
+        let resolved = resolve_view(self.tds, &self.env, &Rc::new(e.clone()));
+        let Some(place) = view_place(&resolved) else {
+            return Some(Err(resolved));
+        };
+        let from = palow_name(self.tds, &*self.ty_of(place).ok()?)?;
+        let to = palow_name(self.tds, &*self.ty_of(e).ok()?)?;
+        Some(Ok((place.clone(), from, to)))
+    }
+
+    /// Reinterpret the ownership of the scalar at `a` from type `from` to type
+    /// `to`. `View.elem_view` is where 6.5p7 is checked: the bytes' effective
+    /// type has to license the access, and they have to represent a value of
+    /// the new type. What the old value was is not carried across.
+    fn retype_view(&mut self, a: &str, from: &str, to: &str) {
+        self.lines.push(format!("{from}_to_elem {a};"));
+        let lemma = match (from, to) {
+            ("int8_t", "uint8_t") => Some("repr_int8_uint8"),
+            ("uint8_t", "int8_t") => Some("repr_uint8_int8"),
+            ("int16_t", "uint16_t") => Some("repr_int16_uint16"),
+            ("uint16_t", "int16_t") => Some("repr_uint16_int16"),
+            ("int32_t", "uint32_t") => Some("repr_int32_uint32"),
+            ("uint32_t", "int32_t") => Some("repr_uint32_int32"),
+            ("int64_t", "uint64_t") => Some("repr_int64_uint64"),
+            ("uint64_t", "int64_t") => Some("repr_uint64_int64"),
+            ("uint64_t", "size_t") => Some("repr_uint64_size_t"),
+            ("size_t", "uint64_t") => Some("repr_size_t_uint64"),
+            ("bool_t", "int8_t") => Some("repr_bool_int8"),
+            ("bool_t", "uint8_t") => Some("repr_bool_uint8"),
+            _ => None,
+        };
+        if let Some(l) = lemma {
+            self.lines.push(format!("View.{l} ();"));
+        }
+        self.lines.push(format!(
+            "View.elem_view {from}_ctype {from}_repr {to}_ctype {to}_repr {a};"
+        ));
+        self.lines.push(format!("{to}_of_elem {a};"));
+    }
+
+    /// The address of a scalar typed view, ready for an access at type `to`.
+    /// `Ok(None)` when `e` is not such a view.
+    fn open_view(&mut self, e: &Expr) -> Result<Option<(String, String, String)>, String> {
+        let Some(Ok((place, from, to))) = self.typed_view(e) else {
+            return Ok(None);
+        };
+        if is_aggregate(&from) || is_aggregate(&to) {
+            return Ok(None);
+        }
+        let a = self.addr(&place)?;
+        if self.retained.contains(&a) {
+            return Err("a typed view of retained storage".to_string());
+        }
+        self.retype_view(&a, &from, &to);
+        Ok(Some((a, from, to)))
+    }
+
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
             return self.rvalue(&p);
+        }
+        if let Some(Err(place)) = self.typed_view(e) {
+            return self.rvalue(&place);
+        }
+        if let Some((a, from, to)) = self.open_view(e)? {
+            let t = self.fresh("view");
+            self.lines.push(format!("let {t} = {to}_read {a};"));
+            self.retype_view(&a, &to, &from);
+            return Ok(t);
         }
         if let Some(v) = lvalue_name(e) {
             if let Some(a) = self.alias_addr(&v) {
@@ -20089,6 +20173,14 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(lhs) {
             return self.store(&p, pn, value);
         }
+        if let Some(Err(place)) = self.typed_view(lhs) {
+            return self.store(&place, pn, value);
+        }
+        if let Some((a, from, to)) = self.open_view(lhs)? {
+            self.lines.push(format!("{to}_write {a} {value};"));
+            self.retype_view(&a, &to, &from);
+            return Ok(());
+        }
         if let ExprT::Deref(inner) = &lhs.val {
             self.check_pointer_object_access(inner)?;
         }
@@ -21242,6 +21334,12 @@ impl<'a> Body<'a> {
                 // a name and not an object.
                 if let Some(v) = lvalue_name(lhs) {
                     if self.aliases.contains_key(&v) || self.is_array_alias(&v) {
+                        // An identity function is still called, for whatever
+                        // else it does; only its result is already known.
+                        if let ExprT::FnCall(..) = &strip_casts(rhs).val {
+                            let call = Rc::new(strip_casts(rhs).clone());
+                            return self.stmt_inner(&StmtT::Call(call).with_loc(s.loc.clone()));
+                        }
                         return Ok(());
                     }
                 }
@@ -23607,34 +23705,56 @@ fn ptr_base(tds: &Typedefs, env: &Env, e: &Expr) -> bool {
     }
 }
 
-fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, Rc<Expr>> {
+fn alias_map(
+    body: &Stmts,
+    ptr_base: &dyn Fn(&Expr) -> bool,
+    idents: &HashMap<String, usize>,
+) -> HashMap<String, Rc<Expr>> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
-    let locals: HashSet<String> = body
+    let local_tys: HashMap<String, Rc<Type>> = body
         .iter()
         .filter_map(|s| match &s.val {
-            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            StmtT::Decl(n, ty) => Some((n.val.to_string(), ty.clone())),
             _ => None,
         })
         .collect();
+    let locals: HashSet<String> = local_tys.keys().cloned().collect();
+    // What `q` stands for when it holds the address of `place` converted to
+    // its own type: the place itself if nothing converted it, and otherwise a
+    // typed view `*(T *)&place` of it, which the body resolves against the
+    // place's own type (`Body::simplify_view`).
+    let view_of = |q: &str, place: &Rc<Expr>, direct: bool, loc: &Rc<SourceInfo>| -> Rc<Expr> {
+        match local_tys.get(q) {
+            Some(qty) if !direct => {
+                let r = ExprT::Ref(place.clone()).with_loc(loc.clone()) as Rc<Expr>;
+                let c = ExprT::Cast(r, qty.clone()).with_loc(loc.clone()) as Rc<Expr>;
+                ExprT::Deref(c).with_loc(loc.clone()) as Rc<Expr>
+            }
+            _ => place.clone(),
+        }
+    };
 
     // Every `q = &place` in the body, in order, with a repeated `q` dropped:
-    // a pointer assigned twice is an object after all.
-    let mut cand: Vec<(String, Rc<Expr>)> = Vec::new();
+    // a pointer assigned twice is an object after all. The address may also
+    // be converted on the way, or passed through a function that returns it
+    // unchanged (`_ensures(return == p)` with a body that is just that
+    // `return`): either way `q` still points at `place`.
+    let mut cand: Vec<(String, Rc<Expr>, Rc<Expr>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for st in body.iter() {
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
         };
-        let (Some(q), ExprT::Ref(place)) = (lvalue_name(lhs), &strip_vattr(rhs).val) else {
+        let (Some(q), Some((place, direct))) = (lvalue_name(lhs), view_root(rhs, idents)) else {
             continue;
         };
         if !locals.contains(&q) {
             continue;
         }
         if !seen.insert(q.clone()) {
-            cand.retain(|(n, _)| *n != q);
+            cand.retain(|(n, _, _)| *n != q);
             continue;
         }
         // The alias assignment is itself the one rebinding of `q`.
@@ -23642,12 +23762,19 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
             continue;
         }
         if !matches!(
-            &strip_vattr(place).val,
+            &strip_vattr(&place).val,
             ExprT::Var(..) | ExprT::Member(..) | ExprT::Index(..)
         ) {
             continue;
         }
-        cand.push((q, place.clone()));
+        // A converted address is a view, and the place it views must not
+        // depend on memory the body may write: `(void *)&p->data[p->begin]`
+        // names a different element once `p->begin` changes.
+        if !direct && !fixed_place(&place) {
+            continue;
+        }
+        let value = view_of(&q, &place, direct, &st.loc);
+        cand.push((q, place, value));
     }
 
     // Taking the address of a *named* object counts as rebinding it, because
@@ -23659,18 +23786,21 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
     // fixpoint rather than a single pass.
     loop {
         let mut discount: HashMap<String, usize> = HashMap::new();
-        for (_, place) in &cand {
+        for (_, place, _) in &cand {
             if let Some(n) = lvalue_name(place) {
                 *discount.entry(n).or_insert(0) += 1;
             }
         }
         let before = cand.len();
-        cand.retain(|(_, place)| {
+        cand.retain(|(_, place, value)| {
             // `&x` for a named object is a fixed address whatever is stored
             // in `x`, so an assignment to `x` is a write to the object the
             // alias already stands for and not a change of which object that
-            // is. Only a place computed *through* a name has to ask.
-            if matches!(&strip_vattr(place).val, ExprT::Var(..)) {
+            // is. Only a place computed *through* a name has to ask. A view
+            // of a member of a named object is fixed in the same way.
+            if matches!(&strip_vattr(place).val, ExprT::Var(..))
+                || (!Rc::ptr_eq(place, value) && fixed_place(place))
+            {
                 return true;
             }
             let mut used = Touched::default();
@@ -23696,8 +23826,17 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
     //
     // No `&` was taken here, so nothing is charged to the fixpoint above and
     // nothing has to be paid back.
-    let mut out: HashMap<String, Rc<Expr>> = cand.into_iter().collect();
-    for st in body.iter() {
+    let mut out: HashMap<String, Rc<Expr>> = cand.into_iter().map(|(q, _, v)| (q, v)).collect();
+    // Where each local's one top-level assignment is, and what it assigns.
+    let mut first_assign: HashMap<String, (usize, Rc<Expr>)> = HashMap::new();
+    for (i, st) in body.iter().enumerate() {
+        if let StmtT::Assign(lhs, rhs) = &st.val
+            && let Some(n) = lvalue_name(lhs)
+        {
+            first_assign.entry(n).or_insert((i, rhs.clone()));
+        }
+    }
+    for (i, st) in body.iter().enumerate() {
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
         };
@@ -23731,11 +23870,67 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         }
         // `q = p` where `p` is itself an alias: a second name for the same
         // place. Copying the place rather than pointing at `p` is what keeps
-        // the two names interchangeable.
-        if let ExprT::Var(v) = &strip_casts(rhs).val
+        // the two names interchangeable. A conversion on the way makes `q` a
+        // typed view of that place, as for `q = (T *)&place` above.
+        if let Some(ExprT::Var(v)) = through_identity(rhs, idents).map(|e| &e.val)
             && let Some(place) = out.get(&*v.val.to_string()).cloned()
         {
-            out.insert(q, place);
+            let direct = !matches!(&strip_vattr(rhs).val, ExprT::Cast(..) | ExprT::FnCall(..));
+            let value = view_of(&q, &place, direct, &st.loc);
+            out.insert(q, value);
+            continue;
+        }
+        // `q = &(*p).f` where `p` is an alias: the member of the place `p`
+        // stands for, possibly viewed at another type.
+        if let Some((place, direct)) = view_root(rhs, idents)
+            && let Some(place) = subst_alias_root(&place, &out)
+        {
+            let value = view_of(&q, &place, direct, &st.loc);
+            out.insert(q, value);
+            continue;
+        }
+        // `q = (T *)id(a)` where `a` is a local array: a view of its first
+        // element, which the access then checks against the array's
+        // element type like any other typed view.
+        if let Some(ExprT::Var(v)) = through_identity(rhs, idents).map(|e| &e.val)
+            && let Some(qty) = local_tys.get(&q)
+            && let Some(aty) = local_tys.get(&*v.val.to_string())
+            && matches!(&aty.val, TypeT::FixedArray(..))
+            && matches!(&strip_vattr(rhs).val, ExprT::Cast(..) | ExprT::FnCall(..))
+        {
+            let loc = &st.loc;
+            let zero = ExprT::IntLit(Rc::new(BigInt::from(0)), TypeT::SizeT.with_loc(loc.clone()))
+                .with_loc(loc.clone());
+            let base = ExprT::Var(v.clone()).with_loc(loc.clone()) as Rc<Expr>;
+            let elem = ExprT::Index(base, zero as Rc<Expr>).with_loc(loc.clone()) as Rc<Expr>;
+            let r = ExprT::Ref(elem).with_loc(loc.clone()) as Rc<Expr>;
+            let c = ExprT::Cast(r, qty.clone()).with_loc(loc.clone()) as Rc<Expr>;
+            out.insert(q, ExprT::Deref(c).with_loc(loc.clone()) as Rc<Expr>);
+            continue;
+        }
+        // `T *q = p;` where `p` holds a fresh allocation for the whole call:
+        // `*q` is `*(T *)p`, the typed access to the block that the body
+        // already knows how to check against the block's effective type.
+        if let Some(ExprT::Var(v)) = through_identity(rhs, idents).map(|e| &e.val)
+            && let Some(qty) = local_tys.get(&q)
+            && let pv = v.val.to_string()
+            && locals.contains(&pv)
+            && !out.contains_key(&pv)
+            && t.rebound.get(&pv) == Some(&1)
+            && let Some((j, init)) = first_assign.get(&pv)
+            && *j < i
+            && match &strip_casts(init).val {
+                ExprT::Malloc(..)
+                | ExprT::MallocArray(..)
+                | ExprT::Calloc(..)
+                | ExprT::CallocArray(..) => true,
+                ExprT::FnCall(f, _) => matches!(&*f.val.to_string(), "malloc" | "calloc"),
+                _ => false,
+            }
+        {
+            let base = ExprT::Var(v.clone()).with_loc(st.loc.clone()) as Rc<Expr>;
+            let c = ExprT::Cast(base, qty.clone()).with_loc(st.loc.clone()) as Rc<Expr>;
+            out.insert(q, ExprT::Deref(c).with_loc(st.loc.clone()) as Rc<Expr>);
             continue;
         }
         if !derived_ptr(rhs) {
@@ -23750,6 +23945,222 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         );
     }
     out
+}
+
+/// The expression a pointer value is computed from once conversions and calls
+/// to functions that return a parameter unchanged are looked through.
+/// Only pointer-to-pointer conversions are looked through: a round trip
+/// through an integer such as `uintptr_t` is not a view of anything.
+fn through_identity<'e>(e: &'e Expr, idents: &HashMap<String, usize>) -> Option<&'e Expr> {
+    match &strip_ptr_casts(e).val {
+        ExprT::FnCall(f, args) => {
+            let i = *idents.get(&*f.val.to_string())?;
+            through_identity(args.get(i)?, idents)
+        }
+        _ => Some(strip_ptr_casts(e)),
+    }
+}
+
+fn strip_ptr_casts(e: &Expr) -> &Expr {
+    match &strip_vattr(e).val {
+        ExprT::Cast(inner, ty) if matches!(&ty.val, TypeT::Pointer(..)) => strip_ptr_casts(inner),
+        _ => strip_vattr(e),
+    }
+}
+
+/// `&place`, possibly converted or passed through an identity function: the
+/// place, and whether the address reaches `q` exactly as written.
+fn view_root(e: &Expr, idents: &HashMap<String, usize>) -> Option<(Rc<Expr>, bool)> {
+    if let ExprT::Ref(place) = &strip_vattr(e).val {
+        // `&(*&s).first` is how the frontend spells `(T *)&s` converted to
+        // its first member's type: a view, not a plain address.
+        let p = deref_ref(place);
+        let direct = Rc::ptr_eq(&p, place);
+        return Some((p, direct));
+    }
+    match through_identity(e, idents).map(|e| &e.val) {
+        Some(ExprT::Ref(place)) => Some((deref_ref(place), false)),
+        _ => None,
+    }
+}
+
+/// A member place `(*p).f...` rooted at an alias `p`, with `*p` replaced by
+/// the place `p` stands for.
+fn subst_alias_root(e: &Rc<Expr>, out: &HashMap<String, Rc<Expr>>) -> Option<Rc<Expr>> {
+    match &strip_vattr(e).val {
+        ExprT::Deref(inner) => match &strip_casts(inner).val {
+            ExprT::Var(v) => out.get(&*v.val.to_string()).cloned(),
+            _ => None,
+        },
+        ExprT::Member(b, f) => {
+            let b = subst_alias_root(b, out)?;
+            Some(ExprT::Member(b, f.clone()).with_loc(e.loc.clone()) as Rc<Expr>)
+        }
+        _ => None,
+    }
+}
+
+/// A place whose address is fixed for the whole call: a member chain from a
+/// named object, possibly indexed by a constant.
+fn fixed_place(e: &Expr) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::Var(_) => true,
+        ExprT::Member(b, _) => fixed_place(b),
+        ExprT::Index(b, i) => matches!(&strip_casts(i).val, ExprT::IntLit(..)) && fixed_place(b),
+        _ => false,
+    }
+}
+
+/// A place with every `*&x` written as `x`. The frontend spells a pointer to
+/// a struct converted to its first member's type as `&(*&s).first`.
+fn deref_ref(e: &Rc<Expr>) -> Rc<Expr> {
+    match &strip_vattr(e).val {
+        ExprT::Deref(inner) => match &strip_vattr(inner).val {
+            ExprT::Ref(x) => deref_ref(x),
+            _ => e.clone(),
+        },
+        ExprT::Member(b, f) => {
+            let b2 = deref_ref(b);
+            if Rc::ptr_eq(&b2, b) {
+                e.clone()
+            } else {
+                ExprT::Member(b2, f.clone()).with_loc(e.loc.clone()) as Rc<Expr>
+            }
+        }
+        _ => e.clone(),
+    }
+}
+
+/// The place a typed view `*(T *)&place` is a view of.
+fn view_place(e: &Expr) -> Option<&Rc<Expr>> {
+    let ExprT::Deref(inner) = &strip_vattr(e).val else {
+        return None;
+    };
+    if !matches!(&strip_vattr(inner).val, ExprT::Cast(..)) {
+        return None;
+    }
+    match &strip_casts(inner).val {
+        ExprT::Ref(place) => Some(place),
+        _ => None,
+    }
+}
+
+/// `*(T *)&place` with the conversion resolved where it changes nothing about
+/// which object is accessed: `T` is the place's own type up to qualifiers, or
+/// the place is reached through first members (6.7.2.1p15), in either
+/// direction. Anything else stays a typed view of `place`, and an access
+/// through it has to be justified by 6.5p7.
+fn resolve_view(tds: &Typedefs, env: &Env, e: &Rc<Expr>) -> Rc<Expr> {
+    let Some(place) = view_place(e) else {
+        return e.clone();
+    };
+    let place = resolve_view(tds, env, place);
+    let name = |x: &Expr| {
+        env.infer_expr(x)
+            .ok()
+            .and_then(|t| palow_name(tds, &t.to_rc()))
+    };
+    let Some(want) = name(e) else {
+        return e.clone();
+    };
+    let first = |x: &Rc<Expr>| -> Option<Rc<Expr>> {
+        let ty = env.infer_expr(x).ok()?.to_rc();
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &tds.resolve(&ty).val else {
+            return None;
+        };
+        let f = tds.structs.get(&*n.val)?.fields.first()?;
+        if f.offset != 0 {
+            return None;
+        }
+        let id = Rc::new(Ast {
+            val: Rc::<str>::from(f.name.as_str()),
+            loc: x.loc.clone(),
+        });
+        Some(ExprT::Member(x.clone(), id).with_loc(x.loc.clone()) as Rc<Expr>)
+    };
+    // Down into first members, then up out of them.
+    let mut down = place.clone();
+    for _ in 0..16 {
+        if name(&down).as_deref() == Some(&want) {
+            return down;
+        }
+        match first(&down) {
+            Some(m) => down = m,
+            None => break,
+        }
+    }
+    let mut up = place.clone();
+    loop {
+        let ExprT::Member(b, f) = &strip_vattr(&up).val else {
+            break;
+        };
+        match first(b) {
+            Some(m) if matches!(&m.val, ExprT::Member(_, g) if g.val == f.val) => up = b.clone(),
+            _ => break,
+        }
+        if name(&up).as_deref() == Some(&want) {
+            return up;
+        }
+    }
+    e.clone()
+}
+
+/// The identity functions of a translation unit: those whose whole body
+/// returns one parameter, possibly converted. A call to one is the parameter.
+fn identity_fns(tu: &TranslationUnit) -> HashMap<String, usize> {
+    let mut out = HashMap::new();
+    for decl in &tu.decls {
+        let i = match &decl.val {
+            DeclT::FnDefn(d) => identity_param(d).map(|i| (&d.decl.name, i)),
+            DeclT::FnDecl(d) => contract_identity_param(d).map(|i| (&d.name, i)),
+            _ => None,
+        };
+        if let Some((name, i)) = i {
+            out.insert(name.val.to_string(), i);
+        }
+    }
+    out
+}
+
+/// The parameter a function returns: syntactically, when its body is only
+/// `return p;`, or because its contract says `return == p`, which F* proves.
+fn identity_param(d: &FnDefn) -> Option<usize> {
+    contract_identity_param(&d.decl).or_else(|| syntactic_identity_param(d))
+}
+
+fn syntactic_identity_param(d: &FnDefn) -> Option<usize> {
+    let [st] = d.body.as_slice() else {
+        return None;
+    };
+    let StmtT::Return(Some(value)) = &st.val else {
+        return None;
+    };
+    let ExprT::Var(name) = &strip_casts(value).val else {
+        return None;
+    };
+    d.decl
+        .args
+        .iter()
+        .position(|a| a.name.as_ref().is_some_and(|n| n.val == name.val))
+}
+
+fn contract_identity_param(d: &FnDecl) -> Option<usize> {
+    let var = |e: &Expr| match &strip_casts(e).val {
+        ExprT::Var(v) => Some(v.val.to_string()),
+        _ => None,
+    };
+    d.ensures.iter().find_map(|e| {
+        let ExprT::BinOp(BinOp::Eq, l, r) = &strip_casts(e).val else {
+            return None;
+        };
+        let other = match (var(l).as_deref(), var(r).as_deref()) {
+            (Some("return"), Some(o)) | (Some(o), Some("return")) => o.to_string(),
+            _ => return None,
+        };
+        d.args
+            .iter()
+            .position(|a| a.name.as_ref().is_some_and(|n| *n.val == *other))
+    })
 }
 
 /// An expression with its virtual attributes and conversions removed. A
@@ -24002,7 +24413,26 @@ fn emit_body(
     // An array parameter's ownership is a sequence, so every access through it
     // goes through `array_focus` rather than a plain read. Record what each one
     // needs to be focused: the element's Palow type and its size.
-    let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
+    let idents: HashMap<String, usize> = callees
+        .iter()
+        .filter_map(|(n, c)| c.view_identity.map(|i| (n.clone(), i)))
+        .collect();
+    // A view is resolved against the type of the place it views, which is
+    // usually a local declared in the body itself.
+    let mut view_env = env.clone();
+    for s in defn.body.iter() {
+        if let StmtT::Decl(n, ty) = &s.val {
+            view_env.push_var_decl(n, ty.clone(), crate::env::LocalDeclKind::RValue);
+        }
+    }
+    let aliases: HashMap<String, Rc<Expr>> =
+        alias_map(&defn.body, &|x| ptr_base(tds, &env, x), &idents)
+            .into_iter()
+            .map(|(q, v)| {
+                let v = resolve_view(tds, &view_env, &v);
+                (q, v)
+            })
+            .collect();
     let mut arrays = HashMap::new();
     for a in &defn.decl.args {
         // An `_arrayptr` is not an array here: Palow grants it nothing, so

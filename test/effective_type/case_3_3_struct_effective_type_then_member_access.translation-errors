@@ -1,1 +1,1 @@
-error: `Func_case_3_3_struct_effective_type_then_member_access`: its body is not translated: a dereference of local `sp`, whose target the contract does not grant
+error: `Func_case_3_3_struct_effective_type_then_member_access`: its body is not translated: a field of `raw`, which holds no value yet
