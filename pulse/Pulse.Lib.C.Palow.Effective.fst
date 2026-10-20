@@ -19,6 +19,7 @@ ghost fn prepare (a: ptr) (t: ET.ctype) (#b: bytes) (#e: ET.etypes)
   requires pure (len b == ET.csize t /\ ET.elen e == len b /\ ET.full_mutable e)
   ensures prepared a t
 {
+  ET.full_mutable_all_mutable e;
   fold prepared a t;
 }
 
@@ -31,6 +32,30 @@ ghost fn prepare_allocation (a: ptr) (n: SZ.t) (t: ET.ctype)
   ensures prepared a t
 {
   prepare a t;
+}
+
+ghost fn prepare_allocated (a: ptr) (n: SZ.t) (t: ET.ctype)
+                           (#b: bytes) (#e: ET.etypes)
+  preserves Alloc.freeable a n
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (allocated_region a (SZ.v n) /\ len b == SZ.v n /\
+                 SZ.v n == ET.csize t /\ ET.elen e == len b)
+  ensures prepared a t
+{
+  allocated_region_index a n;
+  fold prepared a t;
+}
+
+ghost fn prepare_region (a: ptr) (t: ET.ctype) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (allocated_region a (ET.csize t) /\ len b == ET.csize t /\
+                 ET.elen e == len b)
+  ensures prepared a t
+{
+  mem_pts_to_at_fits a;
+  SZ.fits_nonneg (addr_of a + len b);
+  allocated_region_index a (SZ.uint_to_t (len b));
+  fold prepared a t;
 }
 
 let readable ([@@@mkey] a: ptr) (p: perm) (b: bytes) (t: ET.ctype) : slprop =

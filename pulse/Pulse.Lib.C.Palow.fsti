@@ -58,6 +58,45 @@ val mem_pts_to_at_eq (a: ptr) (p: perm) (b: bytes)
   : Lemma (mem_pts_to a p b ==
            (exists* e. mem_pts_to_at a p b e ** pure (Etype.elen e == len b)))
 
+(* Storage origin is immutable for a provenance-bearing allocation. These
+   certificates describe that origin, not the current contents or a chosen
+   access view. In particular, a mutable effective type has no fixed snapshot. *)
+val fixed_metadata (a: ptr) (e: Etype.etypes) : prop
+val allocated_region (a: ptr) (n: nat) : prop
+
+ghost fn remember_fixed_metadata (a: ptr) (#p: perm) (#b: bytes)
+                                 (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (Etype.elen e == len b /\ Etype.declared_destination e)
+  ensures pure (fixed_metadata a e)
+
+ghost fn fixed_metadata_index (a: ptr) (#p: perm) (#b: bytes)
+                              (#e #remembered: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (fixed_metadata a remembered /\ len b == Etype.elen remembered)
+  ensures pure (e == remembered)
+
+ghost fn fixed_metadata_subrange (a: ptr) (off n: SZ.t) (#p: perm)
+                                 (#b: bytes) (#e: Etype.etypes)
+                                 (#remembered: Etype.etypes {
+                                   SZ.v off + SZ.v n <= Etype.elen remembered })
+  preserves mem_pts_to_at (a +! off) p b e
+  requires pure (fixed_metadata a remembered /\ len b == SZ.v n /\
+                 SZ.v off + SZ.v n <= Etype.elen remembered)
+  ensures pure (e == Seq.slice remembered (SZ.v off) (SZ.v off + SZ.v n))
+
+ghost fn allocated_region_subrange (a: ptr) (whole off n: SZ.t)
+  requires pure (allocated_region a (SZ.v whole) /\
+                 SZ.v off + SZ.v n <= SZ.v whole)
+  ensures pure (allocated_region (a +! off) (SZ.v n))
+
+ghost fn allocated_region_index (a: ptr) (n: SZ.t) (#p: perm) (#b: bytes)
+                                (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (allocated_region a (SZ.v n) /\ len b == SZ.v n /\
+                 Etype.elen e == len b)
+  ensures pure (Etype.all_mutable e)
+
 val mem_pts_to_timeless (a: ptr) (p: perm) (b: bytes)
   : Lemma (timeless (mem_pts_to a p b))
           [SMTPat (timeless (mem_pts_to a p b))]

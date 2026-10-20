@@ -29,6 +29,41 @@ module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module M = FStar.Math.Lemmas
 module ET = Pulse.Lib.C.Palow.Etype
+module Rel = Pulse.Lib.C.Palow.Effective.Relation
+
+let object_read_ok (e: ET.etypes) (ct: ET.ctype) : prop =
+  match ct with
+  | ET.TScalar _ -> ET.read_ok e ct
+  | _ -> Rel.view_read_ok e ct
+
+(* Memberwise initialization permits aggregate element access, but is not a
+   nominal source-type certificate for a later byte copy. *)
+let model_memberwise_element_is_not_nominal ()
+  : Lemma
+      (let scalar = ET.TScalar ET.SInt32 in
+       let aggregate = ET.TStruct "ArrayElement" 8 [(0, scalar); (4, scalar)] in
+       let e = Seq.append (ET.etypes_of scalar false) (ET.etypes_of scalar false) in
+       object_read_ok e aggregate /\ not (ET.read_ok e aggregate) /\
+       not (ET.established_type e aggregate))
+  = let scalar = ET.TScalar ET.SInt32 in
+    let aggregate = ET.TStruct "ArrayElement" 8 [(0, scalar); (4, scalar)] in
+    let e = Seq.append (ET.etypes_of scalar false) (ET.etypes_of scalar false) in
+    Rel.view_of_retains (Seq.create 8 None) e aggregate
+
+let model_scalar_element_keeps_real_read_guard ()
+  : Lemma
+      (let integer = ET.TScalar ET.SInt32 in
+       let floating = ET.TScalar ET.SFloat32 in
+       let e = ET.etypes_of integer false in
+       object_read_ok e integer /\ not (object_read_ok e floating))
+  = ()
+
+let object_read_ok_nominal (e: ET.etypes) (ct: ET.ctype)
+  : Lemma (requires ET.read_ok e ct)
+          (ensures object_read_ok e ct)
+  = match ct with
+    | ET.TScalar _ -> ()
+    | _ -> Rel.read_ok_view e ct
 
 (* Arrays expose independently accessible elements. This does not assert that
    scalar stores have established a nominal enclosing array object. *)
@@ -40,7 +75,7 @@ let elem_etypes (esize: nat) (e: ET.etypes) (i: nat) : ET.etypes =
 let array_read_ok (ct: ET.ctype) (esize n: nat) (e: ET.etypes) : prop =
   esize == ET.csize ct /\ ET.elen e == esize * n /\
   (forall (i: nat). i < n ==>
-    ET.read_ok (elem_etypes esize e i) ct)
+    object_read_ok (elem_etypes esize e i) ct)
 
 #push-options "--z3rlimit 40"
 let array_read_ok_split (ct: ET.ctype) (esize n: nat) (e: ET.etypes)
@@ -50,8 +85,9 @@ let array_read_ok_split (ct: ET.ctype) (esize n: nat) (e: ET.etypes)
                    array_read_ok ct esize (n - k)
                      (Seq.slice e (esize * k) (ET.elen e)))
   = let pre (i: nat) : Lemma (i < k ==>
-        ET.read_ok (elem_etypes esize (Seq.slice e 0 (esize * k)) i) ct) =
+        object_read_ok (elem_etypes esize (Seq.slice e 0 (esize * k)) i) ct) =
       if i < k then begin
+        assert (object_read_ok (elem_etypes esize e i) ct);
         M.distributivity_add_right esize i 1;
         M.lemma_mult_le_right esize (i + 1) k;
         Seq.slice_slice e 0 (esize * k) (esize * i) (esize * i + esize)
@@ -59,14 +95,17 @@ let array_read_ok_split (ct: ET.ctype) (esize n: nat) (e: ET.etypes)
     in
     Classical.forall_intro pre;
     let post (i: nat) : Lemma (i < n - k ==>
-        ET.read_ok (elem_etypes esize (Seq.slice e (esize * k) (ET.elen e)) i) ct) =
+        object_read_ok (elem_etypes esize (Seq.slice e (esize * k) (ET.elen e)) i) ct) =
       if i < n - k then begin
+        assert (object_read_ok (elem_etypes esize e (k + i)) ct);
         M.distributivity_add_right esize i 1;
         M.lemma_mult_le_right esize (i + 1) (n - k);
         M.distributivity_sub_right esize n k;
         M.distributivity_add_right esize k i;
         Seq.slice_slice e (esize * k) (ET.elen e)
-          (esize * i) (esize * i + esize)
+          (esize * i) (esize * i + esize);
+        assert (elem_etypes esize (Seq.slice e (esize * k) (ET.elen e)) i ==
+                elem_etypes esize e (k + i))
       end
     in
     Classical.forall_intro post;
@@ -78,21 +117,25 @@ let array_read_ok_join (ct: ET.ctype) (esize n m: nat) (e1 e2: ET.etypes)
   = M.distributivity_add_right esize n m;
     let e = Seq.append e1 e2 in
     let aux (i: nat) : Lemma (i < n + m ==>
-        ET.read_ok (elem_etypes esize e i) ct) =
+        object_read_ok (elem_etypes esize e i) ct) =
       if i < n then begin
+        assert (object_read_ok (elem_etypes esize e1 i) ct);
         M.distributivity_add_right esize i 1;
         M.lemma_mult_le_right esize (i + 1) n;
         Seq.lemma_append_len_disj e1 e2 e1 e2;
         Seq.slice_slice e 0 (ET.elen e1) (esize * i) (esize * i + esize);
-        Seq.lemma_eq_intro (Seq.slice e 0 (ET.elen e1)) e1
+        Seq.lemma_eq_intro (Seq.slice e 0 (ET.elen e1)) e1;
+        assert (elem_etypes esize e i == elem_etypes esize e1 i)
       end else if i < n + m then begin
         let j = i - n in
+        assert (object_read_ok (elem_etypes esize e2 j) ct);
         M.distributivity_add_right esize j 1;
         M.lemma_mult_le_right esize (j + 1) m;
         M.distributivity_add_right esize n j;
         Seq.lemma_eq_intro (Seq.slice e (ET.elen e1) (ET.elen e)) e2;
         Seq.slice_slice e (ET.elen e1) (ET.elen e)
-          (esize * j) (esize * j + esize)
+          (esize * j) (esize * j + esize);
+        assert (elem_etypes esize e i == elem_etypes esize e2 j)
       end
     in
     Classical.forall_intro aux
@@ -105,13 +148,30 @@ let array_read_ok_nominal (ct: ET.ctype) (n: nat) (fixed: bool)
   = let esize = ET.csize ct in
     let e = ET.etypes_of (ET.TArr ct n) fixed in
     ET.read_ok_of (ET.TArr ct n) fixed;
-    let aux (i: nat) : Lemma (i < n ==> ET.read_ok (elem_etypes esize e i) ct) =
+    let aux (i: nat) : Lemma (i < n ==> object_read_ok (elem_etypes esize e i) ct) =
       if i < n then begin
         M.distributivity_add_right esize i 1;
         M.lemma_mult_le_right esize (i + 1) n;
         M.swap_mul esize i;
         M.multiple_modulo_lemma i esize;
-        ET.read_ok_slice e (ET.TArr ct n) (esize * i) ct
+        ET.read_ok_slice e (ET.TArr ct n) (esize * i) ct;
+        object_read_ok_nominal (elem_etypes esize e i) ct
+      end
+    in
+    Classical.forall_intro aux
+
+let array_read_ok_from_type (ct: ET.ctype) (n: nat) (e: ET.etypes)
+  : Lemma (requires ET.csize ct > 0 /\ ET.read_ok e (ET.TArr ct n))
+          (ensures array_read_ok ct (ET.csize ct) n e)
+  = let esize = ET.csize ct in
+    let aux (i: nat) : Lemma (i < n ==> object_read_ok (elem_etypes esize e i) ct) =
+      if i < n then begin
+        M.distributivity_add_right esize i 1;
+        M.lemma_mult_le_right esize (i + 1) n;
+        M.swap_mul esize i;
+        M.multiple_modulo_lemma i esize;
+        ET.read_ok_slice e (ET.TArr ct n) (esize * i) ct;
+        object_read_ok_nominal (elem_etypes esize e i) ct
       end
     in
     Classical.forall_intro aux
@@ -370,7 +430,7 @@ ghost fn array_join (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop) (a: 
 let elem_pts_to (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop)
                 ([@@@mkey] a: ptr) (p: perm) (x: t) : slprop =
   exists* b e. mem_pts_to_at a p b e
-    ** pure (t_repr x b /\ len b == ET.csize ct /\ ET.elen e == len b /\ ET.read_ok e ct)
+    ** pure (t_repr x b /\ len b == ET.csize ct /\ ET.elen e == len b /\ object_read_ok e ct)
 
 let singleton_repr (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat) (x: t) (b: bytes)
   : Lemma (requires len b == esize /\ t_repr x b)
@@ -502,7 +562,7 @@ ghost fn array_unfocus (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop) (
 ghost fn elem_reveal (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop) (a: ptr) (#p: perm) (#x: t)
   requires elem_pts_to ct t_repr a p x
   ensures  exists* b e. mem_pts_to_at a p b e
-    ** pure (t_repr x b /\ len b == ET.csize ct /\ ET.elen e == len b /\ ET.read_ok e ct)
+    ** pure (t_repr x b /\ len b == ET.csize ct /\ ET.elen e == len b /\ object_read_ok e ct)
 {
   unfold elem_pts_to ct t_repr a p x;
 }
@@ -511,7 +571,7 @@ ghost fn elem_conceal (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop) (a
                       (#p: perm) (#b: bytes) (#x: t) (#e: ET.etypes)
   requires mem_pts_to_at a p b e
   requires pure (t_repr x b)
-  requires pure (len b == ET.csize ct /\ ET.elen e == len b /\ ET.read_ok e ct)
+  requires pure (len b == ET.csize ct /\ ET.elen e == len b /\ object_read_ok e ct)
   ensures  elem_pts_to ct t_repr a p x
 {
   fold elem_pts_to ct t_repr a p x;
@@ -573,7 +633,7 @@ let elem_pts_to_at (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop)
                    ([@@@mkey] a: ptr) (p: perm) (x: t) (e: ET.etypes) : slprop =
   exists* b. mem_pts_to_at a p b e
     ** pure (t_repr x b /\ len b == ET.csize ct /\
-             ET.elen e == len b /\ ET.read_ok e ct)
+             ET.elen e == len b /\ object_read_ok e ct)
 
 ghost fn array_reveal_at (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop)
                          (a: ptr) (esize ealign: SZ.t)
@@ -604,7 +664,7 @@ ghost fn elem_reveal_at (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop)
   requires elem_pts_to_at ct t_repr a p x e
   ensures exists* b. mem_pts_to_at a p b e
     ** pure (t_repr x b /\ len b == ET.csize ct /\
-             ET.elen e == len b /\ ET.read_ok e ct)
+             ET.elen e == len b /\ object_read_ok e ct)
 {
   unfold elem_pts_to_at ct t_repr a p x e;
 }
@@ -613,7 +673,7 @@ ghost fn elem_conceal_at (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop)
                          (a: ptr) (#p: perm) (#b: bytes) (#x: t) (#e: ET.etypes)
   requires mem_pts_to_at a p b e
   requires pure (t_repr x b /\ len b == ET.csize ct /\
-                 ET.elen e == len b /\ ET.read_ok e ct)
+                 ET.elen e == len b /\ object_read_ok e ct)
   ensures elem_pts_to_at ct t_repr a p x e
 {
   fold elem_pts_to_at ct t_repr a p x e;
@@ -819,7 +879,7 @@ ghost fn elem_maybe_reveal (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> pro
                            (#x: option t)
   requires elem_pts_to ct (maybe_repr t_repr (SZ.v esize)) a 1.0R x
   requires pure (forall (v: t) (b: bytes). t_repr v b ==> len b == SZ.v esize)
-  ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (ET.elen e == len b /\ ET.read_ok e ct /\ len b == SZ.v esize)
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (ET.elen e == len b /\ object_read_ok e ct /\ len b == SZ.v esize)
 {
   unfold elem_pts_to ct (maybe_repr t_repr (SZ.v esize)) a 1.0R x;
 }

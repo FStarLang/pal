@@ -11,7 +11,7 @@ module Alloc = Pulse.Lib.C.Palow.Alloc
 module SZ = FStar.SizeT
 
 let mutable_index (e: ET.etypes) : prop =
-  ET.full_mutable e
+  ET.all_mutable e
 
 (* Unlike ordinary value-forgetting, preparation hides the bytes themselves.
    Only a machine initialization can produce readable ownership again. *)
@@ -30,6 +30,22 @@ ghost fn prepare_allocation (a: ptr) (n: SZ.t) (t: ET.ctype)
   requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v n /\ SZ.v n == ET.csize t /\ ET.elen e == len b /\
                  ET.full_mutable e)
+  ensures prepared a t
+
+(* The immutable allocation certificate establishes only origin. Reserving the
+   entire allocation hides its previous, potentially heterogeneous, index. *)
+ghost fn prepare_allocated (a: ptr) (n: SZ.t) (t: ET.ctype)
+                           (#b: bytes) (#e: ET.etypes)
+  preserves Alloc.freeable a n
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (allocated_region a (SZ.v n) /\ len b == SZ.v n /\
+                 SZ.v n == ET.csize t /\ ET.elen e == len b)
+  ensures prepared a t
+
+ghost fn prepare_region (a: ptr) (t: ET.ctype) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (allocated_region a (ET.csize t) /\ len b == ET.csize t /\
+                 ET.elen e == len b)
   ensures prepared a t
 
 (* This is an access view, not a replacement effective type. *)

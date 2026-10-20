@@ -120,6 +120,7 @@ fn ptr_write (a: ptr) (y: ptr) (#x: erased ptr)
 fn uint32_t_stack_alloc ()
   returns  a : ptr
   ensures  uint32_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of uint32_t_ctype true))
 {
   let a = EM.stack_alloc uint32_t_sizeof (hide uint32_t_ctype);
   aligned_divides a max_align uint32_t_alignof;
@@ -147,6 +148,7 @@ fn ptr_write_uninit (a: ptr) (y: ptr)
 fn ptr_stack_alloc ()
   returns  a : ptr
   ensures  ptr_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of ptr_ctype true))
 {
   let a = EM.stack_alloc ptr_sizeof (hide ptr_ctype);
   aligned_divides a max_align ptr_alignof;
@@ -202,6 +204,7 @@ fn bool_t_write_uninit (a: ptr) (y: bool)
 fn bool_t_stack_alloc ()
   returns  a : ptr
   ensures  bool_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of bool_t_ctype true))
 {
   let a = EM.stack_alloc bool_t_sizeof (hide bool_t_ctype);
   aligned_divides a max_align bool_t_alignof;
@@ -257,6 +260,7 @@ fn int8_t_write_uninit (a: ptr) (y: I8.t)
 fn int8_t_stack_alloc ()
   returns  a : ptr
   ensures  int8_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of int8_t_ctype true))
 {
   let a = EM.stack_alloc int8_t_sizeof (hide int8_t_ctype);
   aligned_divides a max_align int8_t_alignof;
@@ -312,6 +316,7 @@ fn int16_t_write_uninit (a: ptr) (y: I16.t)
 fn int16_t_stack_alloc ()
   returns  a : ptr
   ensures  int16_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of int16_t_ctype true))
 {
   let a = EM.stack_alloc int16_t_sizeof (hide int16_t_ctype);
   aligned_divides a max_align int16_t_alignof;
@@ -367,6 +372,7 @@ fn int32_t_write_uninit (a: ptr) (y: I32.t)
 fn int32_t_stack_alloc ()
   returns  a : ptr
   ensures  int32_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of int32_t_ctype true))
 {
   let a = EM.stack_alloc int32_t_sizeof (hide int32_t_ctype);
   aligned_divides a max_align int32_t_alignof;
@@ -422,6 +428,7 @@ fn int64_t_write_uninit (a: ptr) (y: I64.t)
 fn int64_t_stack_alloc ()
   returns  a : ptr
   ensures  int64_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of int64_t_ctype true))
 {
   let a = EM.stack_alloc int64_t_sizeof (hide int64_t_ctype);
   aligned_divides a max_align int64_t_alignof;
@@ -451,6 +458,7 @@ fn uint8_t_write_uninit (a: ptr) (y: U8.t)
 fn uint8_t_stack_alloc ()
   returns  a : ptr
   ensures  uint8_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of uint8_t_ctype true))
 {
   let a = EM.stack_alloc uint8_t_sizeof (hide uint8_t_ctype);
   aligned_divides a max_align uint8_t_alignof;
@@ -506,6 +514,7 @@ fn uint16_t_write_uninit (a: ptr) (y: U16.t)
 fn uint16_t_stack_alloc ()
   returns  a : ptr
   ensures  uint16_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of uint16_t_ctype true))
 {
   let a = EM.stack_alloc uint16_t_sizeof (hide uint16_t_ctype);
   aligned_divides a max_align uint16_t_alignof;
@@ -561,6 +570,7 @@ fn uint64_t_write_uninit (a: ptr) (y: U64.t)
 fn uint64_t_stack_alloc ()
   returns  a : ptr
   ensures  uint64_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of uint64_t_ctype true))
 {
   let a = EM.stack_alloc uint64_t_sizeof (hide uint64_t_ctype);
   aligned_divides a max_align uint64_t_alignof;
@@ -616,6 +626,7 @@ fn size_t_write_uninit (a: ptr) (y: SZ.t)
 fn size_t_stack_alloc ()
   returns  a : ptr
   ensures  size_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of size_t_ctype true))
 {
   let a = EM.stack_alloc size_t_sizeof (hide size_t_ctype);
   aligned_divides a max_align size_t_alignof;
@@ -671,6 +682,7 @@ fn float32_t_write_uninit (a: ptr) (y: float32)
 fn float32_t_stack_alloc ()
   returns  a : ptr
   ensures  float32_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of float32_t_ctype true))
 {
   let a = EM.stack_alloc float32_t_sizeof (hide float32_t_ctype);
   aligned_divides a max_align float32_t_alignof;
@@ -726,6 +738,7 @@ fn float64_t_write_uninit (a: ptr) (y: float64)
 fn float64_t_stack_alloc ()
   returns  a : ptr
   ensures  float64_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of float64_t_ctype true))
 {
   let a = EM.stack_alloc float64_t_sizeof (hide float64_t_ctype);
   aligned_divides a max_align float64_t_alignof;
@@ -765,7 +778,7 @@ fn mem_stack_alloc (n: SZ.t) (ct: erased ET.ctype)
   requires pure (SZ.v n == ET.csize (reveal ct))
   returns a: ptr
   ensures mem_pts_to_at a 1.0R (uninit (SZ.v n)) (ET.etypes_of (reveal ct) true)
-    ** pure (aligned a max_align)
+    ** pure (aligned a max_align /\ fixed_metadata a (ET.etypes_of (reveal ct) true))
 {
   EM.stack_alloc n ct
 }

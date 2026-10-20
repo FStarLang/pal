@@ -51,11 +51,13 @@ val freeable_timeless (a: ptr) (n: SZ.t)
    come from `aligned_alloc`. *)
 fn malloc (n: SZ.t)
   returns  a : ptr
+  ensures pure (is_null a \/ allocated_region a (SZ.v n))
   ensures  unless_null a (mem_pts_to_at a 1.0R (uninit (SZ.v n)) (Seq.create (SZ.v n) None) ** freeable a n
                           ** pure (aligned a max_align))
 
 fn calloc (n: SZ.t)
   returns  a : ptr
+  ensures pure (is_null a \/ allocated_region a (SZ.v n))
   ensures  unless_null a (mem_pts_to_at a 1.0R (zeroed (SZ.v n)) (Seq.create (SZ.v n) None) ** freeable a n
                           ** pure (aligned a max_align))
 

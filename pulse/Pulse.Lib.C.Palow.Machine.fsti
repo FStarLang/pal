@@ -75,6 +75,7 @@ fn ptr_write (a: ptr) (y: ptr) (#x: erased ptr)
 fn uint32_t_stack_alloc ()
   returns  a : ptr
   ensures  uint32_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of uint32_t_ctype true))
 
 fn uint32_t_stack_free (a: ptr)
   requires uint32_t_pts_to_uninit a
@@ -86,6 +87,7 @@ fn ptr_write_uninit (a: ptr) (y: ptr)
 fn ptr_stack_alloc ()
   returns  a : ptr
   ensures  ptr_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of ptr_ctype true))
 
 fn ptr_stack_free (a: ptr)
   requires ptr_pts_to_uninit a
@@ -106,6 +108,7 @@ fn bool_t_write_uninit (a: ptr) (y: bool)
 fn bool_t_stack_alloc ()
   returns  a : ptr
   ensures  bool_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of bool_t_ctype true))
 
 fn bool_t_stack_free (a: ptr)
   requires bool_t_pts_to_uninit a
@@ -126,6 +129,7 @@ fn int8_t_write_uninit (a: ptr) (y: I8.t)
 fn int8_t_stack_alloc ()
   returns  a : ptr
   ensures  int8_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of int8_t_ctype true))
 
 fn int8_t_stack_free (a: ptr)
   requires int8_t_pts_to_uninit a
@@ -146,6 +150,7 @@ fn int16_t_write_uninit (a: ptr) (y: I16.t)
 fn int16_t_stack_alloc ()
   returns  a : ptr
   ensures  int16_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of int16_t_ctype true))
 
 fn int16_t_stack_free (a: ptr)
   requires int16_t_pts_to_uninit a
@@ -166,6 +171,7 @@ fn int32_t_write_uninit (a: ptr) (y: I32.t)
 fn int32_t_stack_alloc ()
   returns  a : ptr
   ensures  int32_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of int32_t_ctype true))
 
 fn int32_t_stack_free (a: ptr)
   requires int32_t_pts_to_uninit a
@@ -186,6 +192,7 @@ fn int64_t_write_uninit (a: ptr) (y: I64.t)
 fn int64_t_stack_alloc ()
   returns  a : ptr
   ensures  int64_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of int64_t_ctype true))
 
 fn int64_t_stack_free (a: ptr)
   requires int64_t_pts_to_uninit a
@@ -197,6 +204,7 @@ fn uint8_t_write_uninit (a: ptr) (y: U8.t)
 fn uint8_t_stack_alloc ()
   returns  a : ptr
   ensures  uint8_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of uint8_t_ctype true))
 
 fn uint8_t_stack_free (a: ptr)
   requires uint8_t_pts_to_uninit a
@@ -217,6 +225,7 @@ fn uint16_t_write_uninit (a: ptr) (y: U16.t)
 fn uint16_t_stack_alloc ()
   returns  a : ptr
   ensures  uint16_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of uint16_t_ctype true))
 
 fn uint16_t_stack_free (a: ptr)
   requires uint16_t_pts_to_uninit a
@@ -237,6 +246,7 @@ fn uint64_t_write_uninit (a: ptr) (y: U64.t)
 fn uint64_t_stack_alloc ()
   returns  a : ptr
   ensures  uint64_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of uint64_t_ctype true))
 
 fn uint64_t_stack_free (a: ptr)
   requires uint64_t_pts_to_uninit a
@@ -257,6 +267,7 @@ fn size_t_write_uninit (a: ptr) (y: SZ.t)
 fn size_t_stack_alloc ()
   returns  a : ptr
   ensures  size_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of size_t_ctype true))
 
 fn size_t_stack_free (a: ptr)
   requires size_t_pts_to_uninit a
@@ -277,6 +288,7 @@ fn float32_t_write_uninit (a: ptr) (y: float32)
 fn float32_t_stack_alloc ()
   returns  a : ptr
   ensures  float32_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of float32_t_ctype true))
 
 fn float32_t_stack_free (a: ptr)
   requires float32_t_pts_to_uninit a
@@ -297,6 +309,7 @@ fn float64_t_write_uninit (a: ptr) (y: float64)
 fn float64_t_stack_alloc ()
   returns  a : ptr
   ensures  float64_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of float64_t_ctype true))
 
 fn float64_t_stack_free (a: ptr)
   requires float64_t_pts_to_uninit a
@@ -321,7 +334,7 @@ fn mem_stack_alloc (n: SZ.t) (ct: erased ET.ctype)
   requires pure (SZ.v n == ET.csize (reveal ct))
   returns a: ptr
   ensures mem_pts_to_at a 1.0R (uninit (SZ.v n)) (ET.etypes_of (reveal ct) true)
-    ** pure (aligned a max_align)
+    ** pure (aligned a max_align /\ fixed_metadata a (ET.etypes_of (reveal ct) true))
 
 fn mem_stack_free (a: ptr) (#b: erased bytes) (#e: ET.etypes)
   requires mem_pts_to_at a 1.0R b e

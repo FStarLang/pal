@@ -30,6 +30,7 @@ fn array_stack_alloc (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop) (es
   requires pure (SZ.v esize % SZ.v ealign == 0 /\ SZ.v max_align % SZ.v ealign == 0
                  /\ SZ.v esize > 0 /\ SZ.v esize == ET.csize ct)
   returns a : ptr
+  ensures pure (fixed_metadata a (ET.etypes_of (ET.TArr ct (SZ.v n)) true))
   ensures array_pts_to ct (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) a 1.0R
                        (Seq.create (SZ.v n) (None #t))
 {
