@@ -1,1 +1,1 @@
-error: `Func_case_15_3_memcpy_installed_type_then_wrong_read`: its body is not translated: a dereference of local `pll`, whose target the contract does not grant
+error: unsupported addressable integer type identity: effective-type descriptors do not distinguish long long

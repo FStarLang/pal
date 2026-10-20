@@ -537,11 +537,66 @@ public:
     return {};
   }
 
+  QualType noncanonicalIntegerStorage(QualType t,
+                                      std::unordered_set<const Type *> &seen) {
+    t = t.getCanonicalType().getUnqualifiedType();
+    if (!seen.insert(t.getTypePtr()).second)
+      return {};
+    if (t->isEnumeralType())
+      return t;
+    if (t->isIntegerType() && !t->isBooleanType() && !t->isAnyCharacterType()) {
+      auto canonical = astCtx->getIntTypeForBitwidth(astCtx->getIntWidth(t),
+                                                     t->isSignedIntegerType());
+      if (!canonical.isNull() && !astCtx->hasSameType(t, canonical))
+        return t;
+    } else if (auto array = astCtx->getAsArrayType(t)) {
+      return noncanonicalIntegerStorage(array->getElementType(), seen);
+    } else if (auto record = t->getAs<RecordType>()) {
+      if (auto definition = record->getDecl()->getDefinition()) {
+        for (auto field : definition->fields()) {
+          auto unsupported = noncanonicalIntegerStorage(field->getType(), seen);
+          if (!unsupported.isNull())
+            return unsupported;
+        }
+      }
+    } else if (auto function = t->getAs<FunctionProtoType>()) {
+      auto unsupported =
+          noncanonicalIntegerStorage(function->getReturnType(), seen);
+      if (!unsupported.isNull())
+        return unsupported;
+      for (auto param : function->param_types()) {
+        unsupported = noncanonicalIntegerStorage(param, seen);
+        if (!unsupported.isNull())
+          return unsupported;
+      }
+    }
+    return {};
+  }
+
+  bool unsupportedIntegerStoragePointer(QualType t, SourceRange range,
+                                        Rc<ir::SourceInfo> loc) {
+    if (!t->isPointerType())
+      return false;
+    std::unordered_set<const Type *> seen;
+    auto unsupported = noncanonicalIntegerStorage(t->getPointeeType(), seen);
+    if (unsupported.isNull())
+      return false;
+    reportUnsupported(range, loc,
+                      "unsupported addressable integer type identity: "
+                      "effective-type descriptors "
+                      "do not distinguish ",
+                      unsupported.getAsString());
+    return true;
+  }
+
   Rc<ir::Type> trQualType(QualType t, SourceRange range,
                           AnonNameGen *liftStructs = nullptr,
                           FunctionProtoTypeLoc protoLoc = {}) {
     t = t.IgnoreParens();
     auto loc = getRange(range);
+    // Preserve the known layout for error recovery; TranslationErrors rejects
+    // the unsupported type instead of later passes seeing an unresolved type.
+    unsupportedIntegerStoragePointer(t, range, loc.clone());
 
     if (t.getAsString() == "size_t") {
       return mk_sizet(std::move(loc));
@@ -1134,6 +1189,11 @@ public:
 
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
+    if (unsupportedIntegerStoragePointer(e->getType(), e->getSourceRange(),
+                                         loc.clone())) {
+      auto ty = trQualType(e->getType(), e->getSourceRange());
+      return mk_rvalue_err(std::move(loc), std::move(ty));
+    }
 
     if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
       return trRValue(generic->getResultExpr());
