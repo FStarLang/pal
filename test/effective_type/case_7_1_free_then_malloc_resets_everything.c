@@ -85,6 +85,7 @@ static void case_7_1_free_then_malloc_resets_everything(void)
 
     void *p = malloc(sizeof(double));
     if (!p) return;
+    _ghost_stmt($prepare(double) $(p));
     *(double *)p = 1.5;          /* effective type := double */
     free(p);                     /* object's lifetime ends                */
 
@@ -92,6 +93,7 @@ static void case_7_1_free_then_malloc_resets_everything(void)
        DIFFERENT object with no effective type.  R2/R4 start over. */
     void *q = malloc(sizeof(double));
     if (!q) return;
+    _ghost_stmt($prepare(long) $(q));
     *(long *)q = 99;             /* perfectly fine: new object, new type  */
     printf("   recycled storage as long = %ld\n", *(long *)q);
     sink_u((unsigned long long)*(long *)q);

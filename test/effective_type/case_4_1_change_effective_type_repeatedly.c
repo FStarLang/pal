@@ -87,19 +87,24 @@ static void case_4_1_change_effective_type_repeatedly(void)
     void *p = malloc(64);
     if (!p) return;
 
+    _ghost_stmt($prepare(int) $(p));
     *(int *)p = 7;                       /* effective type := int   */
     printf("   as int    : %d\n", *(int *)p);
 
+    _ghost_stmt($prepare(float) $(p));
     *(float *)p = 1.25f;                 /* effective type := float */
     printf("   as float  : %g\n", (double)*(float *)p);
 
+    _ghost_stmt($prepare(double) $(p));
     *(double *)p = 9.5;                  /* effective type := double */
     printf("   as double : %g\n", *(double *)p);
 
+    _ghost_stmt($prepare(struct point) $(p));
     *(struct point *)p = (struct point){ 1, 2 };  /* := struct point */
     printf("   as struct : {%d,%d}\n",
            ((struct point *)p)->x, ((struct point *)p)->y);
 
+    _ghost_stmt($prepare(long) $(p));
     *(long *)p = 123456789L;             /* effective type := long  */
     printf("   as long   : %ld\n", *(long *)p);
 

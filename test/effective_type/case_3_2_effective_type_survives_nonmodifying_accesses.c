@@ -90,7 +90,7 @@ static void case_3_2_effective_type_survives_nonmodifying_accesses(void)
     for (int i = 0; i < 3; i++) /* each of these is a *non-modifying* access, */
         _invariant(_live(i) && 0 <= i && i <= 3)
         _invariant(_live(g_sink))
-        _invariant((_slprop)_inline_pulse(int32_t_pts_to $(p) 1.0R 1000l))
+        _invariant(*p == 1000)
         sink_u((unsigned)*p);   /* so the effective type stays `int`. */
 
     /* A *modifying* access through the SAME type is of course also fine and

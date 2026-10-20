@@ -1,0 +1,4 @@
+prepared storage cannot be a representation-copy source
+copying pointer-valued objects requires pointer-type-specific effective-type descriptors
+`destination` is read before it is written
+copy source does not establish the prepared target type
