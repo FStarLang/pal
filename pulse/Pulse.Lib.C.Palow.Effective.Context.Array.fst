@@ -235,6 +235,24 @@ ghost fn restore_array (#t: Type0) (ct: ET.ctype) (repr: t -> bytes -> prop)
   claim root lo ct repr a esize alignment #p #xs #base #actual;
 }
 
+fn memset_zero (#t: Type0) (ct: ET.ctype) (repr: t -> bytes -> prop)
+    (a: ptr) (esize alignment n nbytes: SZ.t) (z: t)
+    (#root: ET.ctype) (#lo: nat)
+    (#xs: erased (Seq.seq t)) (#base: ET.etypes)
+  requires value root lo ct repr (SZ.v esize) (SZ.v alignment) base a 1.0R xs
+  requires pure (Seq.length xs == SZ.v n /\ SZ.v nbytes == SZ.v esize * SZ.v n)
+  requires pure (repr z (zeroed (SZ.v esize)))
+  ensures value root lo ct repr (SZ.v esize) (SZ.v alignment) base a 1.0R
+    (Seq.create (SZ.v n) z)
+{
+  borrow_array ct repr a esize alignment;
+  with current. assert (RA.value ct repr (SZ.v esize) (SZ.v alignment)
+    current a 1.0R xs);
+  RA.memset_zero ct repr a esize alignment n nbytes z;
+  restore_array ct repr a esize alignment
+    #root #lo #1.0R #(Seq.create (SZ.v n) z) #base #current;
+}
+
 ghost fn borrow_storage (#t: Type0) (ct: ET.ctype) (repr: t -> bytes -> prop)
     (a: ptr) (esize alignment n: SZ.t)
     (#root: ET.ctype) (#lo: nat) (#base: ET.etypes)

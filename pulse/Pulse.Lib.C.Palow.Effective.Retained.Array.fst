@@ -11,6 +11,7 @@ module ET = Pulse.Lib.C.Palow.Etype
 module Rel = Pulse.Lib.C.Palow.Effective.Relation
 module R = Pulse.Lib.C.Palow.Effective.Retained
 module V = Pulse.Lib.C.Palow.Effective.Value
+module M = Pulse.Lib.C.Palow.Machine
 module Seq = FStar.Seq
 module SZ = FStar.SizeT
 module Math = FStar.Math.Lemmas
@@ -236,6 +237,26 @@ ghost fn offset_fits (#t: Type0) (ct: ET.ctype) (repr: t -> bytes -> prop)
   SZ.fits_lte (SZ.v esize * SZ.v i) (addr_of a + len b);
   A.array_conceal_at ct repr a esize alignment #p #b #xs #actual;
   conceal ct repr a esize alignment #p #xs #base #actual;
+}
+
+fn memset_zero (#t: Type0) (ct: ET.ctype) (repr: t -> bytes -> prop)
+    (a: ptr) (esize alignment n nbytes: SZ.t) (z: t)
+    (#xs: erased (Seq.seq t)) (#base: ET.etypes)
+  requires value ct repr (SZ.v esize) (SZ.v alignment) base a 1.0R xs
+  requires pure (Seq.length xs == SZ.v n /\ SZ.v nbytes == SZ.v esize * SZ.v n)
+  requires pure (repr z (zeroed (SZ.v esize)))
+  ensures value ct repr (SZ.v esize) (SZ.v alignment) base a 1.0R
+    (Seq.create (SZ.v n) z)
+{
+  reveal ct repr a esize alignment;
+  with b actual. assert (mem_pts_to_at a 1.0R b actual);
+  M.memset_zero a nbytes;
+  Classical.forall_intro
+    (Classical.move_requires (A.elem_bytes_zeroed (SZ.v esize) (SZ.v n)));
+  A.array_conceal_at ct repr a esize alignment
+    #1.0R #(zeroed (SZ.v nbytes)) #(Seq.create (SZ.v n) z) #actual;
+  conceal ct repr a esize alignment
+    #1.0R #(Seq.create (SZ.v n) z) #base #actual;
 }
 
 ghost fn split (#t: Type0) (ct: ET.ctype) (repr: t -> bytes -> prop)
