@@ -7,13 +7,17 @@ fn llvm_config_flags(args: &[&str]) -> Vec<String> {
         .expect("Cannot find llvm-config")
         .stdout
         .split(|c| c.is_ascii_whitespace())
-        .filter(|flag| !flag.is_empty())
+        .filter(|flag| flag.len() > 0)
         .map(|flag| str::from_utf8(flag).unwrap().into())
         .collect()
 }
 
 fn split_off<'a>(prefix: &str, s: &'a str) -> Option<&'a str> {
-    s.strip_prefix(prefix)
+    if s.starts_with(prefix) {
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
 }
 
 fn take_until(s: &str, c: char) -> &str {

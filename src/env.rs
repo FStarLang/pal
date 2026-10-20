@@ -453,7 +453,7 @@ impl Env {
             ExprT::FloatLit(_, ty) => Ok(ty.clone().into()),
             ExprT::Ref(v) => Ok(expr
                 .reuse_loc(TypeT::Pointer(
-                    self.infer_expr(v)?.into_rc(),
+                    self.infer_expr(v)?.to_rc(),
                     PointerKind::Ref,
                 ))
                 .into()),
@@ -705,7 +705,7 @@ impl Env {
 
     pub fn vtype_whnf(&self, a: MaybeRc<Type>) -> MaybeRc<Type> {
         let mut a = a;
-        while let Some(a_next) = self.vtype_whnf_step(&a) {
+        while let Some(a_next) = self.vtype_whnf_step(&*a) {
             a = a_next
         }
         a

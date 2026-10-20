@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use crate::{
     ir::{Location, Position, Range},
-    vfs::Vfs,
+    vfs::VFS,
 };
 
 impl Position {
-    pub fn to_lsp(self) -> lsp_types::Position {
+    pub fn to_lsp(&self) -> lsp_types::Position {
         // TODO: it's unclear where we get the zero positions from
         lsp_types::Position {
             line: self.line.saturating_sub(1),
@@ -16,7 +16,7 @@ impl Position {
 }
 
 impl Range {
-    pub fn to_lsp(self) -> lsp_types::Range {
+    pub fn to_lsp(&self) -> lsp_types::Range {
         lsp_types::Range {
             start: self.start.to_lsp(),
             end: self.end.to_lsp(),
@@ -92,7 +92,7 @@ impl Diagnostics {
         self.diags.iter().any(|d| d.level.is_error())
     }
 
-    pub fn print_to_stderr<'a>(&'a self, vfs: &mut dyn Vfs) {
+    pub fn print_to_stderr<'a>(&'a self, vfs: &mut dyn VFS) {
         use codespan_reporting::diagnostic::*;
         use codespan_reporting::term::termcolor::StandardStream;
         use codespan_reporting::{files::Files, term};

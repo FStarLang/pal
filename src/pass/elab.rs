@@ -93,12 +93,12 @@ fn indirect_field_path(
             continue;
         }
         let fty = env.vtype_whnf(f.val.logical_type(&f.loc).into());
-        if let TypeT::TypeRef(inner) = &fty.val
-            && let Some(mut sub) = indirect_field_path(env, inner, target)
-        {
-            let mut path = vec![Rc::new(fname.clone())];
-            path.append(&mut sub);
-            return Some(path);
+        if let TypeT::TypeRef(inner) = &fty.val {
+            if let Some(mut sub) = indirect_field_path(env, inner, target) {
+                let mut path = vec![Rc::new(fname.clone())];
+                path.append(&mut sub);
+                return Some(path);
+            }
         }
     }
     None
@@ -109,7 +109,7 @@ impl<'a> Elaborator<'a> {
         self.diags.report(Diagnostic {
             loc: loc.location().clone(),
             level: DiagnosticLevel::Error,
-            msg,
+            msg: msg,
         });
     }
 
@@ -342,21 +342,24 @@ impl<'a> Elaborator<'a> {
             ExprT::Member(x, a) => {
                 self.elab_rvalue(env, Rc::make_mut(x), None);
                 // Convert _active on union member → VAttr::Active
-                if &*a.val == "_active"
-                    && let ExprT::Member(base, fld) = &x.val
-                    && let Ok(t) = env.infer_expr(base)
-                {
-                    let t = env.vtype_whnf(t);
-                    if let TypeT::TypeRef(TypeRefKind::Union(n)) = &t.val {
-                        let Some(u) = env.lookup_union(n) else {
-                            return self.report(format!("unknown union {}", n), &rval.loc);
-                        };
-                        if u.get_field(fld).is_none() {
-                            return self
-                                .report(format!("no field {} in union {}", fld, n), &rval.loc);
+                if &*a.val == "_active" {
+                    if let ExprT::Member(base, fld) = &x.val {
+                        if let Ok(t) = env.infer_expr(base) {
+                            let t = env.vtype_whnf(t);
+                            if let TypeT::TypeRef(TypeRefKind::Union(n)) = &t.val {
+                                let Some(u) = env.lookup_union(n) else {
+                                    return self.report(format!("unknown union {}", n), &rval.loc);
+                                };
+                                if u.get_field(fld).is_none() {
+                                    return self.report(
+                                        format!("no field {} in union {}", fld, n),
+                                        &rval.loc,
+                                    );
+                                }
+                                rval.val = ExprT::VAttr(VAttr::Active(fld.clone()), base.clone());
+                                return;
+                            }
                         }
-                        rval.val = ExprT::VAttr(VAttr::Active(fld.clone()), base.clone());
-                        return;
                     }
                 }
                 if let Ok(t) = env.infer_expr(x) {
@@ -501,10 +504,10 @@ impl<'a> Elaborator<'a> {
                 if let Some(param_types) = param_types {
                     for (arg, param_ty) in args.iter_mut().zip(param_types.iter()) {
                         let expected_ty = env.vtype_whnf(param_ty.clone().into());
-                        if let Ok(actual_ty) = env.infer_expr(arg)
-                            && !env.vtype_eq(actual_ty, expected_ty.clone())
-                        {
-                            cast_to(arg, (*expected_ty).clone().into());
+                        if let Ok(actual_ty) = env.infer_expr(arg) {
+                            if !env.vtype_eq(actual_ty, expected_ty.clone()) {
+                                cast_to(arg, (*expected_ty).clone().into());
+                            }
                         }
                     }
                 }
@@ -532,10 +535,10 @@ impl<'a> Elaborator<'a> {
                 if let Some(param_types) = param_types {
                     for (arg, param_ty) in args.iter_mut().zip(param_types.iter()) {
                         let expected_ty = env.vtype_whnf(param_ty.clone().into());
-                        if let Ok(actual_ty) = env.infer_expr(arg)
-                            && !env.vtype_eq(actual_ty, expected_ty.clone())
-                        {
-                            cast_to(arg, (*expected_ty).clone().into());
+                        if let Ok(actual_ty) = env.infer_expr(arg) {
+                            if !env.vtype_eq(actual_ty, expected_ty.clone()) {
+                                cast_to(arg, (*expected_ty).clone().into());
+                            }
                         }
                     }
                 }
@@ -553,35 +556,35 @@ impl<'a> Elaborator<'a> {
             ExprT::MallocArray(ty, count) | ExprT::CallocArray(ty, count) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 self.elab_rvalue(env, Rc::make_mut(count), None);
-                if let Ok(count_ty) = env.infer_expr(count)
-                    && !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT)
-                {
-                    cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                if let Ok(count_ty) = env.infer_expr(count) {
+                    if !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT) {
+                        cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                    }
                 }
             }
             ExprT::MallocFlex(ty, count) | ExprT::CallocFlex(ty, count) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 self.elab_rvalue(env, Rc::make_mut(count), None);
-                if let Ok(count_ty) = env.infer_expr(count)
-                    && !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT)
-                {
-                    cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                if let Ok(count_ty) = env.infer_expr(count) {
+                    if !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT) {
+                        cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                    }
                 }
             }
             ExprT::Memset(ty, ptr, value, count) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 self.elab_rvalue(env, Rc::make_mut(ptr), None);
                 self.elab_rvalue(env, Rc::make_mut(value), Some(ty));
-                if let Ok(value_ty) = env.infer_expr(value)
-                    && !env.vtype_eq(value_ty, ty.clone().into())
-                {
-                    cast_to(value, ty.clone());
+                if let Ok(value_ty) = env.infer_expr(value) {
+                    if !env.vtype_eq(value_ty, ty.clone().into()) {
+                        cast_to(value, ty.clone());
+                    }
                 }
                 self.elab_rvalue(env, Rc::make_mut(count), None);
-                if let Ok(count_ty) = env.infer_expr(count)
-                    && !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT)
-                {
-                    cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                if let Ok(count_ty) = env.infer_expr(count) {
+                    if !matches!(&env.vtype_whnf(count_ty).val, TypeT::SizeT) {
+                        cast_to(count, TypeT::SizeT.with_loc(count.loc.clone()));
+                    }
                 }
             }
             ExprT::MemsetZero(ty, ptr) => {
@@ -631,11 +634,11 @@ impl<'a> Elaborator<'a> {
                 if *bin_op == BinOp::Eq {
                     let lhs_ty = env.vtype_whnf(lhs_ty.clone());
                     if let TypeT::Pointer(_, _) = &lhs_ty.val {
-                        if let ExprT::IntLit(n, rhs_ty) = &mut Rc::make_mut(rhs).val
-                            && **n == BigInt::ZERO
-                        {
-                            *rhs_ty = lhs_ty.into_rc();
-                            return;
+                        if let ExprT::IntLit(n, rhs_ty) = &mut Rc::make_mut(rhs).val {
+                            if **n == BigInt::ZERO {
+                                *rhs_ty = lhs_ty.to_rc();
+                                return;
+                            }
                         }
                         if let ExprT::Cast(inner, rhs_ty) = &mut Rc::make_mut(rhs).val
                             && matches!(&inner.val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
@@ -644,7 +647,7 @@ impl<'a> Elaborator<'a> {
                                 TypeT::Pointer(_, _)
                             )
                         {
-                            *rhs_ty = lhs_ty.into_rc();
+                            *rhs_ty = lhs_ty.to_rc();
                             return;
                         }
                     }
@@ -669,7 +672,7 @@ impl<'a> Elaborator<'a> {
                             _ => false,
                         };
                         if is_null_lit {
-                            rhs.val = ExprT::IntLit(Rc::new(BigInt::ZERO), lhs_ty.into_rc());
+                            rhs.val = ExprT::IntLit(Rc::new(BigInt::ZERO), lhs_ty.to_rc());
                             return;
                         }
                     }
@@ -708,10 +711,10 @@ impl<'a> Elaborator<'a> {
                         // The result type of `a ?: b` is cast to the meet of the two operands.
                         if let Some(meet_type) = env.meet_type(lhs_ty.clone(), rhs_ty.clone()) {
                             if !env.vtype_eq(lhs_ty, meet_type.clone()) {
-                                cast_to(lhs, meet_type.clone().into_rc())
+                                cast_to(lhs, meet_type.clone().to_rc())
                             }
                             if !env.vtype_eq(rhs_ty, meet_type.clone()) {
-                                cast_to(rhs, meet_type.into_rc())
+                                cast_to(rhs, meet_type.to_rc())
                             }
                         } else {
                             self.report(
@@ -734,10 +737,10 @@ impl<'a> Elaborator<'a> {
                         if is_slprop {
                             if let Some(meet_type) = meet {
                                 if !env.vtype_eq(lhs_ty, meet_type.clone()) {
-                                    cast_to(lhs, meet_type.clone().into_rc())
+                                    cast_to(lhs, meet_type.clone().to_rc())
                                 }
                                 if !env.vtype_eq(rhs_ty, meet_type.clone()) {
-                                    cast_to(rhs, meet_type.into_rc())
+                                    cast_to(rhs, meet_type.to_rc())
                                 }
                             }
                         } else {
@@ -804,10 +807,10 @@ impl<'a> Elaborator<'a> {
                                 .into();
                             }
                             if !env.vtype_eq(lhs_ty, meet_type.clone()) {
-                                cast_to(lhs, meet_type.clone().into_rc())
+                                cast_to(lhs, meet_type.clone().to_rc())
                             }
                             if !env.vtype_eq(rhs_ty, meet_type.clone()) {
-                                cast_to(rhs, meet_type.into_rc())
+                                cast_to(rhs, meet_type.to_rc())
                             }
                         } else {
                             self.report(
@@ -827,7 +830,7 @@ impl<'a> Elaborator<'a> {
                         .with_loc(rhs.loc.clone())
                         .into();
                         if !env.vtype_eq(rhs_ty, u32_ty.clone()) {
-                            cast_to(rhs, u32_ty.into_rc())
+                            cast_to(rhs, u32_ty.to_rc())
                         }
                     }
                 }
@@ -858,11 +861,12 @@ impl<'a> Elaborator<'a> {
                     .collect();
                 for ((_fld_name, fld_val), expected_ty) in fields.iter_mut().zip(field_types) {
                     self.elab_rvalue(env, Rc::make_mut(fld_val), expected_ty.as_deref());
-                    if let Some(exp) = expected_ty
-                        && let Ok(v_ty) = env.infer_expr(fld_val)
-                        && !env.vtype_eq(v_ty, exp.clone().into())
-                    {
-                        cast_to(fld_val, exp);
+                    if let Some(exp) = expected_ty {
+                        if let Ok(v_ty) = env.infer_expr(fld_val) {
+                            if !env.vtype_eq(v_ty, exp.clone().into()) {
+                                cast_to(fld_val, exp);
+                            }
+                        }
                     }
                 }
             }
@@ -884,17 +888,20 @@ impl<'a> Elaborator<'a> {
                 // them out to the destination's declared length here, using
                 // the `expected` type threaded down from the enclosing
                 // declaration, assignment, or struct field.
-                if *is_static
-                    && let Some(exp) = expected
-                    && let TypeT::FixedArray(_, target_len) = env.vtype_whnf(exp.clone().into()).val
-                {
-                    let target_len = target_len as usize;
-                    let pad_loc = rval.loc.clone();
-                    while elems.len() < target_len {
-                        elems.push(
-                            ExprT::IntLit(Rc::new(BigInt::ZERO), elem_ty.clone())
-                                .with_loc(pad_loc.clone()),
-                        );
+                if *is_static {
+                    if let Some(exp) = expected {
+                        if let TypeT::FixedArray(_, target_len) =
+                            env.vtype_whnf(exp.clone().into()).val
+                        {
+                            let target_len = target_len as usize;
+                            let pad_loc = rval.loc.clone();
+                            while elems.len() < target_len {
+                                elems.push(
+                                    ExprT::IntLit(Rc::new(BigInt::ZERO), elem_ty.clone())
+                                        .with_loc(pad_loc.clone()),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -906,14 +913,14 @@ impl<'a> Elaborator<'a> {
                 // Unify branch types
                 let then_ty = env.infer_expr(then_expr).ok();
                 let else_ty = env.infer_expr(else_expr).ok();
-                if let (Some(t_ty), Some(e_ty)) = (then_ty, else_ty)
-                    && let Some(meet) = env.meet_type(t_ty.clone(), e_ty.clone())
-                {
-                    if !env.vtype_eq(t_ty, meet.clone()) {
-                        cast_to(then_expr, meet.clone().into_rc());
-                    }
-                    if !env.vtype_eq(e_ty, meet.clone()) {
-                        cast_to(else_expr, meet.into_rc());
+                if let (Some(t_ty), Some(e_ty)) = (then_ty, else_ty) {
+                    if let Some(meet) = env.meet_type(t_ty.clone(), e_ty.clone()) {
+                        if !env.vtype_eq(t_ty, meet.clone()) {
+                            cast_to(then_expr, meet.clone().to_rc());
+                        }
+                        if !env.vtype_eq(e_ty, meet.clone()) {
+                            cast_to(else_expr, meet.to_rc());
+                        }
                     }
                 }
             }
@@ -924,10 +931,10 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(rhs), expected_rhs);
                 self.check_flex_array_assign(env, lhs, rhs);
                 // Cast RHS to LHS type if needed
-                if let (Ok(x_ty), Ok(v_ty)) = (env.infer_expr(lhs), env.infer_expr(rhs))
-                    && !env.vtype_eq(x_ty.clone(), v_ty)
-                {
-                    cast_to(rhs, x_ty.into_rc());
+                if let (Ok(x_ty), Ok(v_ty)) = (env.infer_expr(lhs), env.infer_expr(rhs)) {
+                    if !env.vtype_eq(x_ty.clone(), v_ty) {
+                        cast_to(rhs, x_ty.to_rc());
+                    }
                 }
             }
         }
@@ -984,7 +991,7 @@ impl<'a> Elaborator<'a> {
                         )
                     );
                     if !is_kind_refinement {
-                        cast_to(v, x_ty.into_rc());
+                        cast_to(v, x_ty.to_rc());
                     }
                 }
             }
@@ -998,8 +1005,8 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(cond), Some(&bool_ty));
                 self.cast_to_bool(env, cond);
                 self.elab_slprops(env, Rc::make_mut(ensures));
-                self.elab_stmts(env, Rc::make_mut(then_branch).as_mut_slice());
-                self.elab_stmts(env, Rc::make_mut(else_branch).as_mut_slice());
+                self.elab_stmts(env, Rc::make_mut(then_branch));
+                self.elab_stmts(env, Rc::make_mut(else_branch));
             }
             StmtT::Match {
                 scrutinee,
@@ -1014,9 +1021,9 @@ impl<'a> Elaborator<'a> {
                     for pattern in Rc::make_mut(&mut branch.patterns) {
                         self.elab_rvalue(env, Rc::make_mut(pattern), scrutinee_ty.as_deref());
                     }
-                    self.elab_stmts(env, Rc::make_mut(&mut branch.body).as_mut_slice());
+                    self.elab_stmts(env, Rc::make_mut(&mut branch.body));
                 }
-                self.elab_stmts(env, Rc::make_mut(default_branch).as_mut_slice());
+                self.elab_stmts(env, Rc::make_mut(default_branch));
                 self.elab_slprops(env, Rc::make_mut(ensures));
             }
             StmtT::While {
@@ -1040,18 +1047,19 @@ impl<'a> Elaborator<'a> {
                     self.elab_rvalue(env, Rc::make_mut(e), Some(&bool_ty));
                     self.cast_to_bool(env, e);
                 }
-                self.elab_stmts(env, Rc::make_mut(body).as_mut_slice());
+                self.elab_stmts(env, Rc::make_mut(body));
             }
             StmtT::Break | StmtT::Continue => {}
             StmtT::Return(x) => {
                 if let Some(x) = x {
                     let expected_ret = env.return_type.as_ref().map(|t| t.as_ref());
                     self.elab_rvalue(env, Rc::make_mut(x), expected_ret);
-                    if let Some(ret_ty) = &env.return_type
-                        && let Ok(v_ty) = env.infer_expr(x)
-                        && !env.vtype_eq(v_ty, ret_ty.clone().into())
-                    {
-                        cast_to(x, ret_ty.clone());
+                    if let Some(ret_ty) = &env.return_type {
+                        if let Ok(v_ty) = env.infer_expr(x) {
+                            if !env.vtype_eq(v_ty, ret_ty.clone().into()) {
+                                cast_to(x, ret_ty.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -1070,7 +1078,7 @@ impl<'a> Elaborator<'a> {
                 label: _,
                 ensures,
             } => {
-                self.elab_stmts(env, Rc::make_mut(body).as_mut_slice());
+                self.elab_stmts(env, Rc::make_mut(body));
                 self.elab_slprops(env, Rc::make_mut(ensures));
             }
             StmtT::Error => {}
@@ -1080,7 +1088,7 @@ impl<'a> Elaborator<'a> {
     /// Look ahead from a Decl to find a following assignment that refines the
     /// pointer kind (e.g. `int *a = malloc(sizeof(int) * 10)` → Array), and
     /// update the Decl's type before it is pushed to the environment.
-    fn refine_decl_pointer_kind(env: &Env, stmts: &mut [Rc<Stmt>], decl_idx: usize) {
+    fn refine_decl_pointer_kind(env: &Env, stmts: &mut Vec<Rc<Stmt>>, decl_idx: usize) {
         let StmtT::Decl(decl_name, decl_ty) = &stmts[decl_idx].val else {
             return;
         };
@@ -1130,11 +1138,12 @@ impl<'a> Elaborator<'a> {
             ) {
                 break;
             }
-            if let StmtT::Decl(_, decl_ty) = &mut Rc::make_mut(&mut stmts[decl_idx]).val
-                && let TypeT::Pointer(_, kind) = &mut Rc::make_mut(decl_ty).val
-                && (*kind == PointerKind::Unknown || *kind == PointerKind::Ref)
-            {
-                *kind = rhs_kind.clone();
+            if let StmtT::Decl(_, decl_ty) = &mut Rc::make_mut(&mut stmts[decl_idx]).val {
+                if let TypeT::Pointer(_, kind) = &mut Rc::make_mut(decl_ty).val {
+                    if *kind == PointerKind::Unknown || *kind == PointerKind::Ref {
+                        *kind = rhs_kind.clone();
+                    }
+                }
             }
             break;
         }
@@ -1244,7 +1253,7 @@ impl<'a> Elaborator<'a> {
         false
     }
 
-    fn elab_stmts(&mut self, env: &Env, stmts: &mut [Rc<Stmt>]) {
+    fn elab_stmts(&mut self, env: &Env, stmts: &mut Vec<Rc<Stmt>>) {
         let mut env = env.clone();
         let mut i = 0;
         while i < stmts.len() {
@@ -1300,13 +1309,13 @@ impl<'a> Elaborator<'a> {
             // size_t) are not well-founded under F*'s `<<` relation, so
             // termination checking fails. Coerce them to mathematical
             // integers (`SpecInt`), which emits e.g. `SizeT.v (...)`.
-            if let Ok(dec_ty) = env.infer_expr(dec)
-                && matches!(
+            if let Ok(dec_ty) = env.infer_expr(dec) {
+                if matches!(
                     &env.vtype_whnf(dec_ty).val,
                     TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT
-                )
-            {
-                cast_to(dec, TypeT::SpecInt.with_loc(dec.loc.clone()));
+                ) {
+                    cast_to(dec, TypeT::SpecInt.with_loc(dec.loc.clone()));
+                }
             }
         }
     }
@@ -1368,10 +1377,10 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(&mut let_decl.body), Some(&ret_type));
                 if matches!(ret_type.val, TypeT::SLProp) {
                     self.cast_to_slprop(env, &mut let_decl.body);
-                } else if let Ok(v_ty) = env.infer_expr(&let_decl.body)
-                    && !env.vtype_eq(v_ty, ret_type.clone().into())
-                {
-                    cast_to(&mut let_decl.body, ret_type);
+                } else if let Ok(v_ty) = env.infer_expr(&let_decl.body) {
+                    if !env.vtype_eq(v_ty, ret_type.clone().into()) {
+                        cast_to(&mut let_decl.body, ret_type);
+                    }
                 }
             }
             DeclT::GlobalVar(GlobalVar {
@@ -1538,13 +1547,13 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // Main pass: full elaboration. Bodies and specifications can now see
     // properly elaborated signatures for every other declaration.
     for decl in &mut tu.decls {
-        if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &mut decl.val
-            && fn_decl.is_rec
-        {
-            // Elaborate the fn_decl's types before pre-registering so
-            // recursive calls see Ref instead of Unknown pointer kinds.
-            elab.elab_fn_decl(&env, fn_decl);
-            env.push_fn_decl(fn_decl.clone());
+        if let DeclT::FnDefn(FnDefn { decl: fn_decl, .. }) = &mut decl.val {
+            if fn_decl.is_rec {
+                // Elaborate the fn_decl's types before pre-registering so
+                // recursive calls see Ref instead of Unknown pointer kinds.
+                elab.elab_fn_decl(&env, fn_decl);
+                env.push_fn_decl(fn_decl.clone());
+            }
         }
         // Pre-register struct definitions so self-referential fields resolve
         if let DeclT::StructDefn(s) = &decl.val {

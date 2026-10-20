@@ -11,7 +11,7 @@ enum S<T> {
 }
 
 impl<T: Clone> MaybeRc<T> {
-    pub fn into_rc(self) -> Rc<T> {
+    pub fn to_rc(self) -> Rc<T> {
         match self.0 {
             S::Rc(x) => x,
             S::Own(x) => Rc::new(x),

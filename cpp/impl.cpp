@@ -3641,11 +3641,10 @@ public:
           opaque_to_smt = true;
         }
       }
-      return ctx.add_global_var(
-          std::move(loc), rust::pal::ir::GlobalVar(std::move(id), std::move(ty),
-                                                   std::move(init), is_pure,
-                                                   is_extern, opaque_to_smt,
-                                                   /*is_enum_constant=*/false));
+      return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
+                                std::move(init), is_pure, is_extern,
+                                opaque_to_smt,
+                                /*is_enum_constant=*/false);
     } else if (auto *ED = dyn_cast<EnumDecl>(D)) {
       // Enum declarations need no IR representation of their own; Clang inlines
       // enumerators as integer literals wherever they appear in a *body*.
@@ -3669,16 +3668,14 @@ public:
         auto lit =
             mk_int_lit(ecdLoc.clone(), mk_bigint(toStr(StringRef(valStr))),
                        trQualType(ecdQt, ecd->getSourceRange()));
-        ctx.add_global_var(
-            std::move(ecdLoc),
-            rust::pal::ir::GlobalVar(std::move(ecdId), std::move(ecdTy),
-                                     OptExpr::Some(std::move(lit)),
-                                     /*is_pure=*/true,
-                                     // An enumerator is defined right here,
-                                     // never in another translation unit.
-                                     /*is_extern=*/false,
-                                     /*opaque_to_smt=*/false,
-                                     /*is_enum_constant=*/true));
+        ctx.add_global_var(std::move(ecdLoc), std::move(ecdId),
+                           std::move(ecdTy), OptExpr::Some(std::move(lit)),
+                           /*is_pure=*/true,
+                           // An enumerator is defined right here, never in
+                           // another translation unit.
+                           /*is_extern=*/false,
+                           /*opaque_to_smt=*/false,
+                           /*is_enum_constant=*/true);
       }
       return {};
     } else if (dyn_cast<EmptyDecl>(D)) {

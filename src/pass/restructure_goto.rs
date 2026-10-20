@@ -147,8 +147,11 @@ fn check_gotos_stmts(diags: &mut Diagnostics, stmts: &[Rc<Stmt>], innermost: Opt
 }
 
 fn restructure_decl(decl: &mut Decl) {
-    if let DeclT::FnDefn(FnDefn { body, .. }) = &mut decl.val {
-        restructure_stmts(body);
+    match &mut decl.val {
+        DeclT::FnDefn(FnDefn { body, .. }) => {
+            restructure_stmts(body);
+        }
+        _ => {}
     }
 }
 

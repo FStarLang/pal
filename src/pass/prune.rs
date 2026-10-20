@@ -91,7 +91,7 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
         TypeT::SizeT => {}
         TypeT::PtrdiffT => {}
         TypeT::Pointer(to, kind) => {
-            scan_type(deps, to);
+            scan_type(deps, &*to);
             match kind {
                 PointerKind::Unknown => {}
                 PointerKind::Ref => {}
@@ -406,7 +406,7 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
         for arg in args {
             scan_type(ds, &arg.ty)
         }
-        scan_type(ds, ret_type);
+        scan_type(ds, &ret_type);
 
         for r in requires {
             scan_expr(ds, r);
@@ -421,8 +421,8 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
         match &decl.val {
             DeclT::FnDefn(FnDefn { decl, body }) => {
                 let ds = deps.deps_for(n);
-                scan_fn_decl(ds, decl);
-                scan_stmts(ds, body);
+                scan_fn_decl(ds, &decl);
+                scan_stmts(ds, &body);
             }
             DeclT::FnDecl(fn_decl) => {
                 scan_fn_decl(deps.deps_for(n), fn_decl);
@@ -497,7 +497,7 @@ pub fn prune(tu: &mut TranslationUnit) {
     scan_translation_unit(&mut deps, tu);
     for decl in &tu.decls {
         if in_main_file(&tu.main_file_names, &decl.loc) {
-            deps.add_root(decl_name(decl))
+            deps.add_root(decl_name(&decl))
         }
     }
     let deps = deps.propagate();

@@ -16,7 +16,7 @@ impl VFSEntry {
 
 pub type VFSResult = Result<Rc<VFSEntry>, String>;
 
-pub trait Vfs {
+pub trait VFS {
     fn read_vfs_file(&mut self, file_name: &str) -> VFSResult;
 }
 
@@ -41,7 +41,7 @@ fn read_real_vfs_file(file_name: &str) -> VFSResult {
     }))
 }
 
-impl Vfs for RealFS {
+impl VFS for RealFS {
     fn read_vfs_file(&mut self, file_name: &str) -> VFSResult {
         if let Some(result) = self.cache.get(file_name) {
             return result.clone();
@@ -75,7 +75,7 @@ impl<BaseFS> OverlayFS<BaseFS> {
     }
 }
 
-impl<BaseFS: Vfs> Vfs for OverlayFS<BaseFS> {
+impl<BaseFS: VFS> VFS for OverlayFS<BaseFS> {
     fn read_vfs_file(&mut self, file_name: &str) -> VFSResult {
         match self.overlays.get(file_name) {
             Some(entry) => Ok(entry.clone()),

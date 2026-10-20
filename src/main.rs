@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     diag::{Diagnostic, Diagnostics},
-    vfs::{OverlayFS, RealFS, Vfs},
+    vfs::{OverlayFS, RealFS, VFS},
 };
 use clap::Parser;
 
@@ -146,7 +146,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut vfs: Box<dyn Vfs>;
+    let mut vfs: Box<dyn VFS>;
     match &cli.tmpdir {
         Some(tmpdir) => {
             let mut overlayfs = OverlayFS::new(RealFS::new());

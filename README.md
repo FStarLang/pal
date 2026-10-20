@@ -92,18 +92,12 @@ calls it to find LLVM libraries.
 ```bash
 make               # Rust binary + Pulse support library
 make test -j8      # translate every test case, verify with F*
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --check
-LIBCLANG_PATH="$(llvm-config --libdir)" cargo test --all-features
 cd test/swap && make                       # one test
 cargo run -- --print-ir test/swap/swap.c   # just the IR
 ```
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
-
-Clippy checks handwritten code without warnings; only four style lints are
-exempted inside Zngur's generated FFI module (`src/clang.rs`).
 
 ### Translate a file
 
@@ -128,126 +122,16 @@ pal [OPTIONS] <FILES>...
 
 ### Optional MCP server
 
-Requires Rust 1.88+, matching Clang/libclang 20+, and the verified Pulse support
-library. The default build and ordinary translation CLI do not enable MCP.
-
 ```bash
-env -u ADMIT -u OTHERFLAGS make -C pulse
-cargo build --features mcp
-LIBCLANG_PATH=/usr/lib/llvm20/lib target/debug/pal mcp
+env -u ADMIT -u OTHERFLAGS make -C pulse && cargo build --features mcp
+LIBCLANG_PATH=/usr/lib/llvm20/lib target/debug/pal mcp   # JSON-RPC on stdio, logs on stderr
 ```
 
-`pal mcp` uses stdio exclusively for MCP JSON-RPC; compiler/verifier logs go to
-stderr. Options: `--fstar-exe` (default `fstar.exe`) and
-`--pulse-dir` (default the build-time repository's `pulse/`, override after
-relocating the executable). LLVM's selected Clang and loaded libclang must have
-the same major version; a mismatch reports how to set `LIBCLANG_PATH`.
-
-Open a session with `{"action":"open","root":"/path/to/project"}`. There is no
-default project or `--root` argument. Absolute and relative directory paths are
-accepted; relative roots resolve against the server process's working directory.
-Invalid roots fail with `invalid_path` without disturbing the current project.
-Opening the same canonical root preserves existing sessions and caches; opening
-a different root cancels and joins old jobs, removes all old sessions/status
-resources, ends their subscriptions, and clears verification caches. Old session
-IDs are never reused. To clear caches without changing roots, use
-`add_include_paths` with an empty list.
-
-| Tool | Arguments and behavior |
-|------|------------------------|
-| `pal_session` | `{"action":"open","root":"/path/to/project","include_paths":[],"defines":[],"heartbeat":5}` returns the canonical `root`, a session ID, revision `0`, and status URI. Optional `heartbeat` sets the server-wide status interval in seconds. `cancel` takes `session_id`/`job_id`; `close` takes `session_id` and releases its snapshots. |
-| `add_include_paths` | `{"session_id":"s1","include_paths":["include","vendor/include"]}` appends directories, like `-Iinclude -Ivendor/include`. Relative paths resolve against the server root. |
-| `add_preprocessor_definition` | `{"session_id":"s1","defines":["FOO","BAR=value"]}` appends definitions, like `-DFOO -DBAR=value`. |
-| `pal_verify` | `{"session_id":"s1","base_revision":0,"changes":[{"op":"reference","path":"examples/example.c"}]}` immediately reserves a background job. Stale revisions and busy sessions start no job. |
-| `pal_query` | Takes `session_id`, optional `job_id`, and a tagged `query`: `symbols` with `path`; or `definition`, `references`, `callers`, `callees`, `hover` with `path` and zero-based UTF-16 `position`. References optionally include `include_declaration`. |
-
-Both add tools preserve order and duplicates, including existing session options;
-later definitions take precedence. Pass paths/definitions without `-I`/`-D` prefixes.
-They return the session ID, unchanged accepted revision, and the full `include_paths`
-(resolved paths) and `defines` lists. Updates apply to the next `pal_verify`, including
-an empty-change refresh; accepted proofs/navigation remain unchanged until it succeeds.
-Updates while a job is active fail with `session_busy`; closed/unknown sessions fail
-with `unknown_session`. NUL-containing inputs reject the entire addition.
-Every successful add call, including an empty list or unused option, invalidates
-all server-wide exact-result entries and disables reuse of previously accepted
-generated checked artifacts across sessions. The next verification starts with
-an empty generated-proof cache even if emitted code is unchanged; subsequent
-submissions can cache the new result normally. Failed/cancelled verification
-does not restore invalidated entries, and in-flight jobs cannot revive them.
-Installed F*/Pulse library caches are unaffected. Rejected add calls do not
-invalidate caches.
-
-The server publishes the `pal://sessions/{session_id}/status` resource template
-at connect time, before any session exists, so generic MCP clients can route
-status reads without refreshing their resource inventory.
-
-Open a session, listen for its `pal://sessions/<id>/status` resource, wait for
-the subscription acknowledgment, then submit verification. Use modern
-`subscriptions/listen` with `notifications.resourceSubscriptions: [status_uri]`;
-each `notifications/resources/updated` carries its subscription request ID.
-Read the resource for the latest phase, elapsed time, diagnostics and error.
-Polling `resources/read` also works; updates may coalesce. RMCP's 2026-07-28
-protocol uses per-request `_meta` with `io.modelcontextprotocol/protocolVersion`
-set to `2026-07-28` and `io.modelcontextprotocol/clientCapabilities` set to `{}`.
-An older `initialize` handshake alone does not select modern subscriptions.
-
-For unsolicited status reports, open with `"heartbeat":5`. The server sends one
-`notifications/pal/status` custom notification per open session every five seconds,
-starting after the first interval, including idle, queued and terminal sessions.
-No resource subscription or progress token is required. Clients must handle this
-notification method; generic clients may ignore custom notifications.
-Its `params` is the same JSON status object returned by `resources/read`, including
-`session_id`, `job_id`, revisions, phase, live `elapsed_ms`, message, diagnostics
-and error. For example, during an isolated implementation proof:
-
-```json
-{"jsonrpc":"2.0","method":"notifications/pal/status","params":{"session_id":"s1","job_id":"j1","base_revision":0,"accepted_revision":0,"sequence":22,"phase":"verifying","elapsed_ms":23076,"message":"verifying proof units: Func_swap.fst","current_function":"swap","verification_cache_hit":false,"diagnostics":{},"error":null}}
-```
-
-`current_function` comes from PAL's validated C declaration metadata and remains
-present while that function's F* subprocess runs, even when it produces no output.
-It is absent during translation, multi-unit signature batches, cache validation,
-and terminal/idle states; batch-start messages name the proof units instead.
-
-Heartbeat seconds must be a nonnegative whole number within the platform timer
-range. `0` disables reports server-wide; omission (or `null`) preserves the current
-setting, initially disabled. A successful open with a new value replaces the timer;
-invalid opens change nothing. The setting survives root changes and closing all
-sessions, but removed/closing sessions are no longer reported. An already queued
-notification can still arrive after close/reset/disable. Disconnect/shutdown stops
-the timer. Existing resource subscriptions and their coalesced updates are unchanged.
-
-Changes are tagged `reference` (attach/refresh a local file), `replace` (complete
-inline `code`), or `append` (append `code` bytes exactly to a managed source,
-without inserting a newline). Paths must be root-relative `.c`/`.h` paths;
-absolute paths, traversal and escaping symlinks are rejected. Headers are include
-overlays, not standalone translation units. References and implicit project
-headers refresh on each submission; `changes: []` refreshes existing roots.
-Inputs changing during a job fail rather than silently publishing mixed bytes.
-Submitted sources and generated files are never written into the user's tree.
-
-Only successful verification advances the accepted revision. Failed/cancelled
-candidates never become patch bases: resend a corrected append against the
-accepted revision, or replace the complete file. Queries default to accepted
-code; an explicit retained candidate job ID exposes its available index with
-`complete:false`. Direct-call queries do not invent function-pointer targets.
-
-Unchanged generated `.fst`/`.fsti` proofs reuse F*'s checked-artifact validation;
-body-only edits preserve interface-only dependents. F* first batches interfaces
-and modules without interfaces, then checks each implementation separately,
-with `fly_deps=false`. This preserves interface abstraction and dependency
-checked artifacts; no custom dependency graph or admit flags are used. Exact
-generated snapshots additionally share a 32-entry LRU. Active accepted proofs
-stay pinned independently of eviction; missing/corrupt required artifacts fail
-with `proof_cache_lost`. Caches are process-local, not durable. Verification is
-serialized to bound solver memory while queries/status remain responsive.
-
-This is a trusted local compiler service, not an include-filesystem sandbox.
-Run the real integration regression with:
-
-```bash
-LIBCLANG_PATH=/usr/lib/llvm20/lib cargo test --features mcp --test mcp -- --nocapture
-```
+Tools: `pal_session` (open a project root, cancel, close), `add_include_paths`,
+`add_preprocessor_definition`, `pal_verify` (background job; status at
+`pal://sessions/<id>/status`), `pal_query` (symbols, definition, references, callers,
+callees, hover). Unchanged generated proofs reuse F\* checked artifacts and a 32-entry
+in-memory LRU, both process-local; new include paths, definitions or root drop the proof caches.
 
 ---
 

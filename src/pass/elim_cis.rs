@@ -165,10 +165,10 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // Detect eliminable unions.
     let mut elim: HashMap<Rc<IdentT>, ElimUnion> = HashMap::new();
     for decl in tu.decls.iter() {
-        if let DeclT::UnionDefn(u) = &decl.val
-            && let Some(info) = is_simple_cis(&env, u)
-        {
-            elim.insert(u.name.val.clone(), info);
+        if let DeclT::UnionDefn(u) = &decl.val {
+            if let Some(info) = is_simple_cis(&env, u) {
+                elim.insert(u.name.val.clone(), info);
+            }
         }
     }
     if elim.is_empty() {
@@ -204,16 +204,16 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         rewrite_types_decl(&mut decl.val, &elim);
     }
     for decl in tu.decls.iter_mut() {
-        if let DeclT::UnionDefn(u) = &decl.val
-            && let Some(info) = elim.get(&u.name.val)
-        {
-            decl.val = DeclT::StructDefn(StructDefn {
-                name: u.name.clone(),
-                refines: TypeT::TypeRef(TypeRefKind::Struct(u.name.clone()))
-                    .with_loc(u.name.loc.clone()),
-                fields: vec![info.named_field.clone()],
-                eager_unfold_pred: false,
-            });
+        if let DeclT::UnionDefn(u) = &decl.val {
+            if let Some(info) = elim.get(&u.name.val) {
+                decl.val = DeclT::StructDefn(StructDefn {
+                    name: u.name.clone(),
+                    refines: TypeT::TypeRef(TypeRefKind::Struct(u.name.clone()))
+                        .with_loc(u.name.loc.clone()),
+                    fields: vec![info.named_field.clone()],
+                    eager_unfold_pred: false,
+                });
+            }
         }
     }
 }
