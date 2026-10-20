@@ -1,0 +1,1 @@
+error: `Func_case_14_2_store_does_not_retype_automatic_storage`: its body is not translated: a dereference of local `pf`, whose target the contract does not grant

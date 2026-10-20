@@ -1,0 +1,1 @@
+error: `Func_case_14_3_reuse_of_a_declared_struct_as_another_struct`: its body is not translated: a dereference of local `p`, whose target the contract does not grant

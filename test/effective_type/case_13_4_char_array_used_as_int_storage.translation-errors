@@ -1,0 +1,1 @@
+error: `Func_case_13_4_char_array_used_as_int_storage`: its body is not translated: a dereference of local `pi`, whose target the contract does not grant

@@ -1,0 +1,1 @@
+error: `Func_case_24_1_member_store_does_not_install_the_union`: its body is not translated: a read of union member `i`, which is not known to be the live one here

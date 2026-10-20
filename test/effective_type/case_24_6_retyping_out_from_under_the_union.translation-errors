@@ -1,0 +1,1 @@
+error: `Func_case_24_6_retyping_out_from_under_the_union`: its body is not translated: a dereference of local `u`, whose target the contract does not grant

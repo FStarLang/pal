@@ -1,0 +1,1 @@
+error: `Func_case_23_1_modify_a_const_object`: its body is not translated: a dereference of local `p`, whose target the contract does not grant

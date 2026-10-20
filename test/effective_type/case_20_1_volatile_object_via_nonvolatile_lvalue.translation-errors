@@ -1,0 +1,1 @@
+error: `Func_case_20_1_volatile_object_via_nonvolatile_lvalue`: its body is not translated: a dereference of local `p`, whose target the contract does not grant

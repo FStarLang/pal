@@ -1,0 +1,2 @@
+error: `Func_sink_d`: its body is not translated: a conversion from a 64-bit float to uint64_t
+error: `Func_case_12_5_union_type_installed_then_replaced`: its body is not translated: a read of union member `f`, which is not known to be the live one here
