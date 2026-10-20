@@ -22969,8 +22969,19 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             Ok(format!("(float32_of_float64 {})", v))
         }
         (TypeT::Float { width: a }, TypeT::Float { width: b }) if a == b => Ok(v.to_string()),
-        // An integer converts to the nearest representable value, and every
-        // integer C has fits in an `int64_t`, which is what `of_int` takes.
+        // An integer converts to the nearest representable value. Every C
+        // integer type but `uint64_t` fits in an `int64_t`, which is what
+        // `of_int` takes; a `uint64_t` has its own conversion, because going
+        // through `int64_t` would wrap its upper half to negative numbers.
+        (
+            TypeT::Int {
+                signed: false,
+                width: 64,
+            },
+            TypeT::Float {
+                width: w @ (32 | 64),
+            },
+        ) => Ok(format!("(float{}_of_uint64 {})", w, v)),
         (
             TypeT::Int { signed, width },
             TypeT::Float {

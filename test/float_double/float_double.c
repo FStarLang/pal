@@ -1,10 +1,24 @@
 #include "pal.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef struct {
     float f;
     double d;
 } float_pair;
+
+// `uint64_t` does not fit in `int64_t`: its conversion must not wrap.
+double uint64_to_double(uint64_t x) {
+    return (double) x;
+}
+
+float uint64_to_float(uint64_t x) {
+    return (float) x;
+}
+
+double uint32_to_double(uint32_t x) {
+    return (double) x;
+}
 
 float id_float(float x) {
     return x;

@@ -56,6 +56,22 @@ val float64_bits_injective (x y: float64)
 val float64_of_float32 (x: float32) : float64
 val float32_of_float64 (x: float64) : float32
 
+(* Conversion from a `uint64_t`. F* only has `of_int` from an `Int64.t`, which
+   covers every C integer type but this one: the values from 2^63 up have no
+   `Int64.t`, and reaching `of_int` through `uint64_to_int64` would wrap them
+   to negative numbers, which C's `(double) u` does not do (6.3.1.4p2). Below
+   2^63 the two agree, and that is all that is said about them. *)
+val float64_of_uint64 (x: FStar.UInt64.t) : float64
+val float32_of_uint64 (x: FStar.UInt64.t) : float32
+
+val float64_of_uint64_small (x: FStar.UInt64.t)
+  : Lemma (requires FStar.UInt64.v x < pow2 63)
+          (ensures  float64_of_uint64 x == F64.of_int (FStar.Int64.int_to_t (FStar.UInt64.v x)))
+
+val float32_of_uint64_small (x: FStar.UInt64.t)
+  : Lemma (requires FStar.UInt64.v x < pow2 63)
+          (ensures  float32_of_uint64 x == F32.of_int (FStar.Int64.int_to_t (FStar.UInt64.v x)))
+
 val float64_of_float32_injective (x y: float32)
   : Lemma (requires float64_of_float32 x == float64_of_float32 y)
           (ensures  x == y)
