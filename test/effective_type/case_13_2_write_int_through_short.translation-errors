@@ -1,1 +1,0 @@
-error: `Func_case_13_2_write_int_through_short`: its body is not translated: a dereference of local `ps`, whose target the contract does not grant
