@@ -207,6 +207,43 @@ ghost fn mem_share_at (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
   requires mem_pts_to_at a p b e
   ensures mem_pts_to_at a (p /. 2.0R) b e ** mem_pts_to_at a (p /. 2.0R) b e
 
+[@@allow_ambiguous]
+ghost fn mem_gather_at (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
+                       (#e1 #e2: Etype.etypes)
+  requires mem_pts_to_at a p1 b1 e1 ** mem_pts_to_at a p2 b2 e2
+  requires pure (len b1 == len b2)
+  ensures mem_pts_to_at a (p1 +. p2) b1 e1 ** pure (b1 == b2 /\ e1 == e2)
+
+ghost fn mem_pts_to_at_not_null (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (len b > 0)
+  ensures pure (not (is_null a) /\ Some? (prov_of a))
+
+ghost fn mem_pts_to_at_fits (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  ensures pure (SZ.fits (addr_of a + len b))
+
+ghost fn mem_pts_to_at_perm_bound (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (len b > 0)
+  ensures pure (p <=. 1.0R)
+
+[@@allow_ambiguous]
+ghost fn mem_pts_to_at_disjoint (a1 a2: ptr) (#p2: perm) (#b1 #b2: bytes)
+                                (#e1 #e2: Etype.etypes)
+  preserves mem_pts_to_at a1 1.0R b1 e1
+  preserves mem_pts_to_at a2 p2 b2 e2
+  requires pure (len b1 > 0 /\ len b2 > 0)
+  ensures pure (disjoint_ranges a1 (len b1) a2 (len b2))
+
+[@@allow_ambiguous]
+ghost fn mem_pts_to_at_bytes_injective (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
+                                       (#e1 #e2: Etype.etypes)
+  preserves mem_pts_to_at a p1 b1 e1
+  preserves mem_pts_to_at a p2 b2 e2
+  requires pure (len b1 == len b2)
+  ensures pure (b1 == b2)
+
 (* Agreement is for the same extent: a prefix and its enclosing range may
    share their base address without having equal index sequences. *)
 ghost fn mem_pts_to_at_injective (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
