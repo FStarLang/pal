@@ -12863,6 +12863,25 @@ struct BranchResult {
 }
 
 fn join_blocks(left: &[Block], right: &[Block], what: &str) -> Result<Vec<Block>, String> {
+    // Bytes known to be zero are in particular defined, so a path that wrote
+    // some of them with character stores joins one that did not.
+    let weaken = |bs: &[Block]| -> Vec<Block> {
+        bs.iter()
+            .map(|b| {
+                let mut b = b.clone();
+                let other = left
+                    .iter()
+                    .chain(right)
+                    .any(|o| o.var == b.var && o.tmp == b.tmp && o.fill == "defined");
+                if b.fill == "zeroed" && other {
+                    b.fill = "defined";
+                    b.init = true;
+                }
+                b
+            })
+            .collect()
+    };
+    let (left, right) = (&weaken(left)[..], &weaken(right)[..]);
     if left
         .iter()
         .filter(|b| !b.freed)
@@ -17001,6 +17020,143 @@ impl<'a> Body<'a> {
         format!("{pn}_{operation}{suffix}")
     }
 
+    /// `b[i]` where `b` is an `unsigned char *` naming raw, untyped storage
+    /// whose bytes are all values without provenance: what `calloc` gave, or
+    /// what earlier such stores left. A character access installs no
+    /// effective type (C11 6.5p6-7), so the block stays raw and the access is
+    /// a single byte of it. The block's index and the subscript.
+    fn raw_byte_access(&self, e: &Expr) -> Option<(usize, Rc<Expr>, Rc<Expr>)> {
+        let ExprT::Index(base, idx) = &strip_vattr(e).val else {
+            return None;
+        };
+        let bty = self.ty_of(base).ok()?;
+        let TypeT::Pointer(elem, _) = &peel(self.tds, &bty).val else {
+            return None;
+        };
+        if !matches!(
+            peel(self.tds, elem).val,
+            TypeT::Int {
+                width: 8,
+                signed: false,
+                ..
+            }
+        ) {
+            return None;
+        }
+        // `T *b = p;` makes `b` a name for `*p`, and so for `p`'s block.
+        let name = match &strip_vattr(base).val {
+            ExprT::Var(v) => match self.aliases.get(&*v.val) {
+                Some(place) => match &strip_vattr(place).val {
+                    ExprT::Deref(inner) => self.block_name(inner)?,
+                    _ => return None,
+                },
+                None => self.block_name(base)?,
+            },
+            _ => self.block_name(base)?,
+        };
+        let i = self.blocks.iter().position(|b| {
+            b.var == name
+                && b.checked
+                && !b.freed
+                && b.pn.is_empty()
+                && b.bytes.is_some()
+                && b.split.is_none()
+                && b.parent.is_none()
+                && b.prepared.is_none()
+                && b.view_size.is_none()
+                && b.array.is_none()
+                && b.flex.is_none()
+                && b.taken.is_none()
+                && (b.fill == "zeroed" || b.fill == "defined")
+        })?;
+        Some((i, base.clone(), idx.clone()))
+    }
+
+    /// A load or store of one byte of a raw block; see `raw_byte_access`.
+    /// The block's bytes stay defined -- initialised and provenance-free --
+    /// whatever is stored, so the block's `fill` records only that.
+    fn raw_byte(&mut self, e: &Expr, value: Option<&str>) -> Result<Option<String>, String> {
+        let Some((i, _, idx)) = self.raw_byte_access(e) else {
+            return Ok(None);
+        };
+        let k = self.index(&idx)?;
+        let a = self.blocks[i].tmp.clone();
+        match value {
+            Some(v) => {
+                self.lines.push(format!(
+                    "Pulse.Lib.C.Palow.RawBytes.byte_store {a} {k} {v};"
+                ));
+                self.blocks[i].fill = "defined";
+                self.blocks[i].init = true;
+                Ok(Some(String::new()))
+            }
+            None => {
+                let t = self.fresh("byte");
+                self.lines.push(format!(
+                    "let {t} = Pulse.Lib.C.Palow.RawBytes.byte_load {a} {k};"
+                ));
+                Ok(Some(t))
+            }
+        }
+    }
+
+    /// A non-character read of the start of a raw block whose bytes are
+    /// defined but not known: the value is whatever they decode to. The
+    /// block has no effective type, so any type may read it.
+    fn read_untyped_defined(&mut self, i: usize, expr: &Expr) -> Result<String, String> {
+        let ty = self.ty_of(expr)?;
+        let pn = palow_name(self.tds, &ty)
+            .filter(|pn| {
+                matches!(
+                    pn.as_str(),
+                    "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "ulong_long_t"
+                )
+            })
+            .ok_or_else(|| {
+                format!(
+                    "a read of byte-written storage at {}, which has no byte decoding",
+                    describe(&ty)
+                )
+            })?;
+        let a = self.blocks[i].tmp.clone();
+        let size = format!("{pn}_sizeof");
+        let whole_bytes = self.fresh("raw_whole_bytes");
+        let whole_index = self.fresh("raw_whole_index");
+        let bytes = self.fresh("raw_view_bytes");
+        let index = self.fresh("raw_view_index");
+        let result = self.fresh("raw_view");
+        self.lines.push(format!(
+            "with {whole_bytes} {whole_index}. assert (mem_pts_to_at {a} 1.0R {whole_bytes} {whole_index});"
+        ));
+        self.lines.push(format!("mem_split_at {a} {size};"));
+        self.lines.push(format!(
+            "with {bytes} {index}. assert (mem_pts_to_at {a} 1.0R {bytes} {index});"
+        ));
+        self.lines
+            .push(format!("Pulse.Lib.C.Palow.RawBytes.{pn}_decode {bytes};"));
+        self.lines.push(format!(
+            "let {result} = Pulse.Lib.C.Palow.Machine.Intrinsics.{pn}_read_at {a} #1.0R #(hide (Pulse.Lib.C.Palow.RawBytes.{pn}_of_bytes {bytes})) #(hide {bytes}) #{index};"
+        ));
+        self.lines.push(format!("mem_join_at {a} {size};"));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.Bytes.slice_append {whole_bytes} (SizeT.v {size});"
+        ));
+        self.lines
+            .push(format!("KA.slices_join {whole_index} (SizeT.v {size});"));
+        let joined_bytes = self.fresh("raw_joined_bytes");
+        let joined_index = self.fresh("raw_joined_index");
+        self.lines.push(format!(
+            "with {joined_bytes} {joined_index}. assert (mem_pts_to_at {a} 1.0R {joined_bytes} {joined_index});"
+        ));
+        self.lines.push(format!(
+            "assert (pure ({joined_bytes} == {whole_bytes} /\\ {joined_index} == {whole_index}));"
+        ));
+        self.lines.push(format!(
+            "rewrite (mem_pts_to_at {a} 1.0R {joined_bytes} {joined_index}) as (mem_pts_to_at {a} 1.0R {whole_bytes} {whole_index});"
+        ));
+        Ok(result)
+    }
+
     fn read_untyped_zeroed(&mut self, i: usize, expr: &Expr) -> Result<String, String> {
         let ty = self.ty_of(expr)?;
         if !matches!(&self.tds.resolve(&ty).val, TypeT::Int { .. }) {
@@ -17125,6 +17281,9 @@ impl<'a> Body<'a> {
     }
 
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(t) = self.raw_byte(e, None)? {
+            return Ok(t);
+        }
         if let Some(p) = self.unalias(e) {
             return self.rvalue(&p);
         }
@@ -17241,6 +17400,19 @@ impl<'a> Body<'a> {
                     })
                 {
                     return self.read_untyped_zeroed(i, e);
+                }
+                if let Some(name) = self.block_name(inner)
+                    && let Some(i) = self.blocks.iter().position(|b| {
+                        b.var == name
+                            && b.checked
+                            && !b.freed
+                            && b.pn.is_empty()
+                            && b.split.is_none()
+                            && b.view_size.is_none()
+                            && b.fill == "defined"
+                    })
+                {
+                    return self.read_untyped_defined(i, e);
                 }
                 if let Some(name) = self.block_name(inner)
                     && let Some(b) = self
@@ -20819,6 +20991,9 @@ impl<'a> Body<'a> {
 
     /// Store into an lvalue, choosing the initialising store for unwritten storage.
     fn store(&mut self, lhs: &Expr, pn: &str, value: &str) -> Result<(), String> {
+        if self.raw_byte(lhs, Some(value))?.is_some() {
+            return Ok(());
+        }
         if let Some(p) = self.unalias(lhs) {
             return self.store(&p, pn, value);
         }
@@ -21124,6 +21299,38 @@ impl<'a> Body<'a> {
             touch_stmts(b, &mut t);
             t.written
         });
+        // A body that may store bytes into calloc'ed storage leaves it
+        // defined rather than zero, and the invariant has to say only that.
+        if let Some(w) = &written {
+            for n in w.iter() {
+                let name = match self.aliases.get(n).map(|p| &strip_vattr(p).val) {
+                    Some(ExprT::Deref(inner)) => match self.block_name(inner) {
+                        Some(name) => name,
+                        None => continue,
+                    },
+                    Some(_) => continue,
+                    None => self
+                        .slots
+                        .iter()
+                        .rev()
+                        .find(|s| s.name == *n)
+                        .and_then(|s| s.holds_block.get(""))
+                        .cloned()
+                        .unwrap_or_else(|| n.clone()),
+                };
+                for b in self.blocks.iter_mut() {
+                    if b.var == name
+                        && b.checked
+                        && !b.freed
+                        && b.pn.is_empty()
+                        && b.fill == "zeroed"
+                    {
+                        b.fill = "defined";
+                        b.init = true;
+                    }
+                }
+            }
+        }
         let mut deref_slots: Vec<(String, String)> = Vec::new();
         for s in self.slots.clone() {
             let s = &s;
@@ -21277,8 +21484,17 @@ impl<'a> Body<'a> {
                 let bytes = self.fresh("inv_heap_bytes");
                 let index = self.fresh("inv_heap_index");
                 binders.push(format!("({bytes}: bytes) ({index}: ET.etypes)"));
+                // Raw storage written only by character stores keeps the
+                // allocator's untyped index, and its bytes stay defined.
+                let plain = b.pn.is_empty() && b.view_size.is_none() && b.split.is_none();
+                let fact = match b.fill {
+                    "defined" if plain => format!(
+                        " /\\ {index} == Pulse.Lib.C.Palow.Effective.Machine.fresh_index (len {bytes}) /\\ Pulse.Lib.C.Palow.RawBytes.defined {bytes}"
+                    ),
+                    _ => String::new(),
+                };
                 owns.push(format!(
-                    "mem_pts_to_at {address} 1.0R {bytes} {index} ** pure (len {bytes} == {length} /\\ ET.elen {index} == len {bytes})"
+                    "mem_pts_to_at {address} 1.0R {bytes} {index} ** pure (len {bytes} == {length} /\\ ET.elen {index} == len {bytes}{fact})"
                 ));
             }
         }

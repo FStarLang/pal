@@ -1,2 +1,2 @@
 Func_case_17_4_retype_pointer_to_integer_bytes.fst(
-uint64_t_pts_to tmp2_p
+View.view_ok ptr_ctype ptr_repr uint64_t_ctype uint64_t_repr
