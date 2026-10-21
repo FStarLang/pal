@@ -45,8 +45,7 @@ COLOR next_color(COLOR c)
 
 // A validating accessor: the input is an untrusted byte, and the contract
 // states exactly the invariant the body establishes on every path.
-// Use the compatible integer storage type until enum-tagged views are modeled.
-void classify(uint8_t raw, _out uint32_t *out)
+void classify(uint8_t raw, _out COLOR *out)
   _ensures(*out < Color_Max)
 {
   if (raw >= Color_Max)
