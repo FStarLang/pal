@@ -1,4 +1,4 @@
 Func_sink_d.fst(
 Pulse.Lib.C.Palow.Float.float64_fits (FStar.Float64.mul var_v
 Func_case_16_1_read_before_the_retyping_store.fst(
-int32_t_pts_to tmp2_p
+float64_t_pts_to tmp2_p

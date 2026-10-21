@@ -20208,6 +20208,40 @@ impl<'a> Body<'a> {
         // Whatever was known about the code pointers here is stale now; the
         // caller re-establishes it if the store was a decay.
         self.clear_fn_notes(lhs);
+        // C11 6.5p6: a store through a non-character lvalue into allocated
+        // storage makes the lvalue's type the effective type of the object.
+        // So a whole-object store into a block that is still raw bytes, or
+        // that holds an object of another type, first does what an explicit
+        // `$prepare(T)` would: give up the old contents and reserve the
+        // prefix for `T`. The store below then initializes it. A character
+        // store installs no type, and stays a byte access. Declared
+        // storage is never a block here, and a block that is an array, a
+        // flexible struct, in pieces, or handed over by a callee keeps its
+        // existing rules.
+        if let ExprT::Deref(inner) = &lhs.val
+            && let Some(name) = self.block_name(inner)
+            && let Some(b) = self
+                .blocks
+                .iter()
+                .find(|b| b.var == name && b.checked && !b.freed)
+            && b.prepared.is_none()
+            && b.taken.is_none()
+            && b.array.is_none()
+            && b.flex.is_none()
+            && b.scattered.is_empty()
+            && (b.pn.is_empty() || b.pn != pn)
+            && !matches!(
+                peel(self.tds, &*self.ty_of(lhs)?).val,
+                TypeT::Int { width: 8, .. }
+            )
+        {
+            let ty = self.ty_of(lhs)?;
+            // An aggregate the model cannot initialize whole keeps its old
+            // (checked) failure rather than becoming a translation error.
+            if !is_aggregate(pn) || whole_initialize_supported(self.tds, &ty) {
+                self.prepare_block(&ty, inner)?;
+            }
+        }
         if let ExprT::Deref(inner) = &lhs.val
             && let Some(name) = self.block_name(inner)
             && let Some(i) = self

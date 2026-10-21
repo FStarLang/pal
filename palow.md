@@ -925,9 +925,20 @@ Neither the annotation nor a pointer cast initializes the prefix. A genuine
 matching typed store, or a checked copy from an established matching source,
 is still required. A reserved prefix may instead be abandoned by freeing the
 original allocation. Different pending types or initialization states do not
-silently merge at a branch join or loop back edge. This explicit-preparation
-discipline is intentionally stricter than C: C11 6.5p6 itself allows a
-non-character store to replace an allocated object's effective type.
+silently merge at a branch join or loop back edge.
+
+C11 6.5p6 lets a non-character store replace an allocated object's effective
+type, so a whole-object store does the preparation itself: when `*q = v`
+targets a live, null-checked allocated block whose contents are raw bytes or
+an object of another type, the translator first emits exactly what
+`$prepare(T)` would (forgetting the old contents) and then the store
+initializes the prefix. The explicit annotation therefore remains useful only
+to reserve storage ahead of a copy. The implicit retype is deliberately
+narrow. A character store installs no type and stays a byte access. Reads
+never retype, so a read through another type still fails at the read. Array,
+flexible-struct, field-by-field and callee-provided blocks keep their existing
+rules, and an aggregate without a whole-object initialization keeps its
+checked failure. Declared storage is never a block and is never retyped.
 
 Compatible structural views are not nominal establishment. The
 `Effective.Relation` rules retain existing indexed entries and constrain fresh
@@ -1087,36 +1098,36 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 15 |
+| Verified enabled cases within the supported target/model | 18 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (13.1, 13.2, 13.3 and 14.2) | 4 |
-| Checked rejections before the UB access (13.4, 13.5, 14.3, 16.1, 16.2, 17.3 and 24.5) | 7 |
-| Defined programs rejected for want of an explicit retype (3.1 and 6.1) | 2 |
-| Explicit unsupported-translation expectations | 38 |
+| Checked rejections at the UB access (15.2, 16.1, 16.2 and 17.3) | 4 |
+| Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
+| Explicit unsupported-translation expectations | 36 |
 | Disabled cases (16.3, 20.2, 21.1 and 22.3) | 4 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 
-The fifteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.2, 4.1, 5.1, 6.3, 7.1,
-7.2, 7.4, 8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
+The eighteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
+6.1, 6.3, 7.1, 7.2, 7.4, 8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
 incompatible effective type. The four view rejections fail on
-`View.view_ok` or `View.aggregate_view_ok` at the incompatible access. The
-other seven fail earlier, for a reason that is not the effective-type
-violation itself: 16.1, 16.2, 17.3 and 24.5 store into a fresh `malloc`
-block without an explicit retype, and 13.4, 13.5 and 14.3 pass an
-uninitialized local array to a function. The same missing retype rejects
-3.1 and 6.1, which are defined C: a store into allocated storage installs
-its type there, but the model asks for the retype to be explicit.
+`View.view_ok` or `View.aggregate_view_ok` at the incompatible access. In
+15.2, 16.1, 16.2 and 17.3 a store has retyped the allocated block, and the
+later read through another type fails for want of that type's ownership --
+the read is the undefined access. The other four fail earlier, for a reason
+that is not the effective-type violation itself: 24.5 stores a whole union,
+which has no whole-object initialization, and 13.4, 13.5 and 14.3 pass an
+uninitialized local array to a function.
 
 The corpus helper `sink_d` computes `(unsigned long long)(v * 7.0)` for an
 arbitrary `double v`. That conversion is undefined unless the truncated value
 fits in the target type (6.3.1.4p1), so `Func_sink_d` is rejected on
 `float64_fits` in every case that uses it, and those cases record that
-failure alongside their own. In 5.1 and 7.2, which were rejected by it
-alone, `sink_d` carries `_requires(0.0 <= v && v <= 1000.0)`: the float value
+failure alongside their own. In 3.1, 5.1, 6.1 and 7.2, which were rejected
+by it alone, `sink_d` carries `_requires(0.0 <= v && v <= 1000.0)`: the float value
 semantics below make `v * 7.0` provably within range, and the callers, which
-pass the literals 2.5 and 3.25, discharge the precondition.
+pass small literals, discharge the precondition.
 
 The separate native-C regressions exercise
 preparation, non-sticky zero views, copying, contextual ownership and the
