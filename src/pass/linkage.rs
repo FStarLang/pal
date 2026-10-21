@@ -26,6 +26,81 @@ pub struct CSymbol {
     pub loc: Rc<SourceInfo>,
 }
 
+pub struct HeaderStatic {
+    name: Rc<str>,
+    context: String,
+    signature: String,
+    loc: Rc<SourceInfo>,
+}
+
+pub fn header_statics(units: &[(TranslationUnit, UnitSymbols)]) -> Vec<HeaderStatic> {
+    if units.len() < 2 {
+        return Vec::new();
+    }
+    units
+        .iter()
+        .flat_map(|(tu, symbols)| {
+            symbols.symbols.iter().filter_map(|symbol| {
+                (symbol.kind == 0
+                    && symbol.internal
+                    && symbol.definition
+                    && !tu
+                        .main_file_names
+                        .contains(&symbol.loc.location().file_name))
+                .then(|| HeaderStatic {
+                    name: Rc::from(format!("{}{}", symbols.identity.prefix, symbol.name)),
+                    context: symbols.context.clone(),
+                    signature: symbol.signature.clone(),
+                    loc: symbol.loc.clone(),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Compare after elaboration, retaining all dependency names. In particular,
+/// otherwise identical references to different TU-local entities must not match.
+pub fn shared_header_proofs(
+    tu: &TranslationUnit,
+    candidates: &[HeaderStatic],
+    addr_taken: &HashSet<Rc<str>>,
+) -> HashMap<Rc<str>, Rc<str>> {
+    let definitions: HashMap<_, _> = tu
+        .decls
+        .iter()
+        .filter_map(|decl| match &decl.val {
+            DeclT::FnDefn(defn) => Some((defn.decl.name.val.clone(), defn)),
+            _ => None,
+        })
+        .collect();
+    let mut candidates: Vec<_> = candidates.iter().collect();
+    candidates.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut representatives = HashMap::new();
+    let mut shared = HashMap::new();
+    for candidate in candidates {
+        let Some(defn) = definitions.get(&candidate.name) else {
+            continue;
+        };
+        if defn.decl.is_rec || addr_taken.contains(&candidate.name) {
+            continue;
+        }
+        let mut normalized = (*defn).clone();
+        Rc::make_mut(&mut normalized.decl.name).val = Rc::from("");
+        let key = (
+            &candidate.context,
+            &candidate.signature,
+            &candidate.loc,
+            normalized,
+        );
+        if let Some(representative) = representatives.get(&key) {
+            shared.insert(candidate.name.clone(), Rc::clone(representative));
+        } else {
+            representatives.insert(key, candidate.name.clone());
+        }
+    }
+    shared
+}
+
 fn error(diags: &mut Diagnostics, loc: &SourceInfo, message: impl Into<String>) {
     diags.report(Diagnostic {
         loc: loc.location().clone(),

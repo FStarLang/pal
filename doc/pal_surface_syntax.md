@@ -24,6 +24,18 @@ containing the declaration. Thus each inclusion of a shared header's statics
 remains independent, even when the original definitions are byte-identical.
 External names and single-file private names retain their existing spelling.
 
+Identical header-local functions can share their body verification without
+merging their TU-specific names. After elaboration, PAL compares the complete
+function bodies, contracts and types, requiring the same header source range,
+canonical C signature and compilation context. One deterministic representative
+retains the original body; the other copies forward to it with their original
+interfaces. Pure copies use a definition alias. The forwarding functions still
+undergo interface/call checking, but do not repeat the original body proof.
+Dependency names are not normalized: references to distinct TU-local objects or
+helpers prevent reuse, as do macro-dependent differences in bodies or contracts.
+Recursive and address-taken functions are conservatively excluded. Single-file
+translation is unchanged.
+
 PAL canonicalizes the selected input paths, finds their common parent ancestor,
 and hashes each input's normalized relative path. Moving an unchanged selected
 source tree to a different root, reversing the input order, or using a symlink

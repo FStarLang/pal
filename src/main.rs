@@ -197,6 +197,7 @@ fn main() {
         diags.merge(file_diags);
     }
     pass::linkage::prepare(&mut units, &mut diags);
+    let header_statics = pass::linkage::header_statics(&units);
     for (tu, _) in units {
         combined_tu
             .main_file_names
@@ -297,7 +298,7 @@ fn main() {
 
     // Emit per-declaration modules
     let t = Instant::now();
-    let modules = pass::emit::emit_multifile(&mut diags, &combined_tu);
+    let modules = pass::emit::emit_multifile(&mut diags, &combined_tu, &header_statics);
     if cli.time_passes {
         eprintln!(
             "  emit ({} modules): {:.3}s",

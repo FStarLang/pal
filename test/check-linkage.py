@@ -42,6 +42,25 @@ def manifest(out):
 reference = manifest(Path(original_out))
 
 
+def check_proof_reuse(out):
+    for filename, expected in (("expected-shared-proofs.txt", 1), ("expected-separate-proofs.txt", 0)):
+        config = fixture / filename
+        if not config.exists():
+            continue
+        for name in config.read_text().split():
+            copies = sorted(out.glob(f"Func___pal_tu_*_{name}.fst"))
+            assert len(copies) == 2, (name, copies)
+            references = [
+                (source, target)
+                for source in copies for target in copies if source != target
+                if f"{target.stem}.func_{target.stem.removeprefix('Func_')}" in source.read_text()
+            ]
+            assert len(references) == expected, (name, references)
+
+
+check_proof_reuse(Path(original_out))
+
+
 def check_case(name, inputs, compare=True, native=False, two_private=False):
     case = work / name
     case.mkdir(parents=True, exist_ok=True)
@@ -50,6 +69,8 @@ def check_case(name, inputs, compare=True, native=False, two_private=False):
     diagnostics = json.loads((out / "diagnostics.json").read_text())
     assert not any(d["severity"] == 1 for ds in diagnostics.values() for d in ds), diagnostics
     generated = manifest(out)
+    if len(inputs) > 1:
+        check_proof_reuse(out)
     if compare:
         assert generated == reference, {
             "case": name,
@@ -113,6 +134,12 @@ for root_name in ("root-a", "different/depth/root-b"):
 if identical:
     single = check_case("single", source_files[:1], compare=False)
     assert "Func_private_value.fst" in single and "Global_private_number.fst" in single
+    assert not any("__pal_tu_" in name for name in single)
+
+if (fixture / "expected-shared-proofs.txt").exists():
+    single = check_case("single", source_files[:1], compare=False)
+    for name in (fixture / "expected-shared-proofs.txt").read_text().split():
+        assert f"Func_{name}.fst" in single
     assert not any("__pal_tu_" in name for name in single)
 
 (work / "result.json").write_text(json.dumps(results, indent=2) + "\n")
