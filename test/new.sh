@@ -1,8 +1,13 @@
 #!/bin/bash
 set -e
 
-if [ -z "$1" ]; then
-  echo "Usage: $0 <test_name>"
+DIAGNOSTIC=0
+if [ "${1:-}" = "-d" ]; then
+  DIAGNOSTIC=1
+  shift
+fi
+if [ -z "${1:-}" ]; then
+  echo "Usage: $0 [-d] <test_name>"
   echo "Creates a new test directory with the required symlinks."
   exit 1
 fi
@@ -16,7 +21,12 @@ if [ -d "$DIR/$NAME" ]; then
 fi
 
 mkdir -p "$DIR/$NAME"
-ln -s ../_templates/Makefile "$DIR/$NAME/Makefile"
+if [ "$DIAGNOSTIC" = 1 ]; then
+  ln -s ../_templates/Makefile.diagnostic "$DIR/$NAME/Makefile"
+  echo "# Expected translation diagnostic substrings" > "$DIR/$NAME/expected-diagnostics.txt"
+else
+  ln -s ../_templates/Makefile "$DIR/$NAME/Makefile"
+fi
 ln -s ../_templates/fstar.fst.config.json "$DIR/$NAME/fstar.fst.config.json"
 ln -s ../_templates/pal.config.json "$DIR/$NAME/pal.config.json"
 ln -s ../pal.h "$DIR/$NAME/pal.h"

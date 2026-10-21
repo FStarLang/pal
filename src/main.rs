@@ -168,9 +168,14 @@ fn main() {
         decls: Vec::new(),
     };
     let mut diags = Diagnostics::empty();
+    let identities = pass::linkage::identities(&cli.files).unwrap_or_else(|message| {
+        eprintln!("{message}");
+        std::process::exit(1);
+    });
+    let mut units = Vec::new();
 
     let parse_start = Instant::now();
-    for file in &cli.files {
+    for (file, identity) in cli.files.iter().zip(&identities) {
         let file_name = std::path::absolute(file)
             .unwrap()
             .to_string_lossy()
@@ -181,13 +186,22 @@ fn main() {
             std::process::exit(1);
         }
 
-        let (tu, file_diags) =
-            clang::parse_file(&file_name, &cli.include_paths, &cli.defines, &mut *vfs);
+        let (tu, file_diags, symbols) = clang::parse_file(
+            &file_name,
+            &cli.include_paths,
+            &cli.defines,
+            identity,
+            &mut *vfs,
+        );
+        units.push((tu, symbols));
+        diags.merge(file_diags);
+    }
+    pass::linkage::prepare(&mut units, &mut diags);
+    for (tu, _) in units {
         combined_tu
             .main_file_names
             .push(tu.main_file_names[0].clone());
         combined_tu.decls.extend(tu.decls);
-        diags.merge(file_diags);
     }
     if cli.time_passes {
         eprintln!(

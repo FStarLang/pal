@@ -1,0 +1,8 @@
+shadowed TU-local name in C antiquotation is unsupported after block flattening
+raw Pulse reference to a TU-local C entity; use a C antiquotation
+block-scope static storage is not supported
+reserved translation-unit identity prefix
+incompatible translated object declarations of annotation_object
+unsupported linker symbol alias
+reserved translation-unit identity prefix in binding
+incompatible translated definitions of redeclared_pointer
