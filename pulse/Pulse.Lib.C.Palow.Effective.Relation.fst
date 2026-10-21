@@ -9,10 +9,27 @@ open Pulse.Lib.C.Palow.Etype
    label can be introduced only at an actual char subobject. Scalar leaves
    admit C's corresponding signed/unsigned access views, but aggregate tags
    remain nominal. Every step, including the root, checks its extent. *)
+(* Unlike `ET.type_compatible`, this relation is transitive: an enumerated
+   type is a subobject path only to itself, never to its underlying integer
+   type. That access remains allowed by `ET.access_ok`, but it does not make a
+   path through which a different enumerated type could be reached. *)
+let strict_compatible (ct: ET.ctype) (child: ET.ctype) : bool =
+  ET.nominal_compatible ct child ||
+  (match ct, child with
+   | ET.TScalar s, ET.TScalar v -> ET.counterpart_compatible s v
+   | _ -> false)
+
+let strict_compatible_type_compatible (ct: ET.ctype) (child: ET.ctype)
+  : Lemma (requires strict_compatible ct child)
+          (ensures ET.type_compatible ct child)
+  = match ct, child with
+    | ET.TScalar s, ET.TScalar v -> ET.counterpart_scalar_compatible s v
+    | _ -> ()
+
 let rec strict_subobject (ct: ET.ctype) (off: int) (child: ET.ctype)
   : Tot bool (decreases %[ET.ctype_size ct; 0]) =
   0 < ET.csize child && 0 <= off && off + ET.csize child <= ET.csize ct &&
-  ((off = 0 && ET.type_compatible ct child) ||
+  ((off = 0 && strict_compatible ct child) ||
    (match ct with
     | ET.TScalar _ -> false
     | ET.TArr element n ->
@@ -32,18 +49,25 @@ and strict_subobject_members (members: list (nat & ET.ctype))
 let strict_subobject_refl (ct: ET.ctype { 0 < ET.csize ct })
   : Lemma (strict_subobject ct 0 ct) = ()
 
+(* A subobject path never changes enumerated type at a scalar, so it may be
+   composed with any further access. *)
+let strict_subobject_compose_ok (ct: ET.ctype) (off: int) (child: ET.ctype)
+  : Lemma (requires strict_subobject ct off child)
+          (ensures ET.compose_ok ct child)
+  = ()
+
 let rec strict_subobject_access (ct: ET.ctype) (off: int) (child: ET.ctype)
   : Lemma (requires strict_subobject ct off child)
           (ensures ET.access_ok ct off child)
           (decreases %[ET.ctype_size ct; 0])
-  = match ct with
+  = if off = 0 && strict_compatible ct child then
+      strict_compatible_type_compatible ct child
+    else match ct with
     | ET.TScalar _ -> ()
     | ET.TArr element _ ->
-      if not (off = 0 && ET.type_compatible ct child) then
-        strict_subobject_access element (ET.emod off (ET.csize element)) child
+      strict_subobject_access element (ET.emod off (ET.csize element)) child
     | ET.TStruct _ _ members | ET.TUnion _ _ members ->
-      if not (off = 0 && ET.type_compatible ct child) then
-        strict_subobject_members_access members off child
+      strict_subobject_members_access members off child
 and strict_subobject_members_access (members: list (nat & ET.ctype))
     (off: int) (child: ET.ctype)
   : Lemma (requires strict_subobject_members members off child)
@@ -62,10 +86,10 @@ let rec strict_subobject_trans (ct: ET.ctype) (off: int) (child: ET.ctype)
                     strict_subobject child inner leaf)
           (ensures strict_subobject ct (off + inner) leaf)
           (decreases %[ET.ctype_size ct; 0])
-  = if off = 0 && ET.type_compatible ct child then
+  = if off = 0 && strict_compatible ct child then
       (match ct, child, leaf with
        | ET.TScalar a, ET.TScalar b, ET.TScalar c ->
-         ET.scalar_compatible_equivalence a b c
+         ET.counterpart_equivalence a b c
        | _ -> ())
     else match ct with
     | ET.TScalar _ -> ()
@@ -265,7 +289,9 @@ let view_scalar (e: ET.etypes) (scalar: ET.scalar)
                     strict_subobject (ET.TScalar scalar) (k - en.off) en.ty)
           (ensures ET.access_ok en.ty (en.off - k) (ET.TScalar scalar))
       = match en.ty with
-        | ET.TScalar s -> ET.scalar_compatible_equivalence scalar s scalar
+        | ET.TScalar s ->
+          ET.counterpart_equivalence scalar s scalar;
+          ET.counterpart_scalar_compatible s scalar
         | _ -> ()
     in ()
 
@@ -354,8 +380,10 @@ let view_read_ok_slice (e: ET.etypes) (parent: ET.ctype) (off: nat)
           if ET.access_ok en.ty (en.off - k) child then () else begin
             assert (ET.eget e (off + k) == Some en);
             view_read_ok_entry e parent (off + k);
-            if ET.access_ok en.ty (en.off - (off + k)) parent then
-              ET.access_ok_trans en.ty (en.off - (off + k)) parent off child;
+            if ET.access_ok en.ty (en.off - (off + k)) parent then begin
+              strict_subobject_compose_ok parent off child;
+              ET.access_ok_trans en.ty (en.off - (off + k)) parent off child
+            end;
             assert (not en.fixed /\ en.off < ET.csize en.ty /\
                     strict_subobject parent (off + k - en.off) en.ty);
             assert (strict_subobject child (k - en.off) en.ty)

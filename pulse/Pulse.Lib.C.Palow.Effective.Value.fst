@@ -105,7 +105,7 @@ ghost fn claim_component (#t: Type0) (parent child: ET.ctype)
                          (#p: perm) (#x: t) (#b: bytes) (#e: ET.etypes)
                          (off: nat { off + ET.csize child <= ET.elen e })
   requires mem_pts_to_at a p b (Seq.slice e off (off + ET.csize child))
-  requires pure (ET.read_ok e parent /\ ET.access_ok parent off child /\
+  requires pure (ET.read_ok e parent /\ ET.access_ok parent off child /\ ET.compose_ok parent child /\
                  repr x b /\ len b == ET.csize child /\ aligned a alignment)
   ensures value child repr alignment a p x
             (Seq.slice e off (off + ET.csize child))

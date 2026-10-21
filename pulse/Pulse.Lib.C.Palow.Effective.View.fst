@@ -39,7 +39,10 @@ module U64 = FStar.UInt64
 (* The effective-type half of 6.5p7 for a view of the same width: an object of
    type `cs` has an accessible `cv` at offset 0. *)
 let view_compatible (cs cv: ET.ctype) : bool =
-  ET.TScalar? cs && ET.TScalar? cv && ET.csize cs = ET.csize cv && ET.access_ok cs 0 cv
+  ET.TScalar? cs && ET.TScalar? cv && ET.csize cs = ET.csize cv && ET.access_ok cs 0 cv &&
+  (* A view does not retype its object: through an `unsigned int` view of an
+     `enum A`, an `enum B` is still not accessible. *)
+  ET.compose_ok cs cv
 
 let view_byte_ok (e: ET.etypes) (cs cv: ET.ctype) (k: nat)
   : Lemma (requires ET.read_ok e cs /\ view_compatible cs cv)
@@ -135,6 +138,12 @@ let repr_int64_uint64 () : Lemma (repr_view int64_t_repr uint64_t_repr) =
 
 let repr_uint64_int64 () : Lemma (repr_view uint64_t_repr int64_t_repr) =
   repr_view_intro uint64_t_repr int64_t_repr (fun x -> I64.int_to_t (signed_of 64 (U64.v x))) (fun _ _ -> ())
+
+let repr_llong_ullong () : Lemma (repr_view long_long_t_repr ulong_long_t_repr) =
+  repr_view_intro long_long_t_repr ulong_long_t_repr (fun x -> U64.uint_to_t (to_bits 64 (I64.v x))) (fun _ _ -> ())
+
+let repr_ullong_llong () : Lemma (repr_view ulong_long_t_repr long_long_t_repr) =
+  repr_view_intro ulong_long_t_repr long_long_t_repr (fun x -> I64.int_to_t (signed_of 64 (U64.v x))) (fun _ _ -> ())
 
 let repr_uint64_size_t () : Lemma (repr_view uint64_t_repr size_t_repr) =
   repr_view_intro uint64_t_repr size_t_repr (fun x -> SZ.uint64_to_sizet x) (fun _ _ -> ())

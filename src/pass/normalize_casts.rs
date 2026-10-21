@@ -186,6 +186,7 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
             let TypeT::Int {
                 signed: target_signed,
                 width: target_width,
+                ..
             } = env.vtype_whnf(target_ty.clone().into()).val
             else {
                 return;
@@ -194,6 +195,7 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
                 TypeT::Int {
                     signed: false,
                     width,
+                    ..
                 } => normalize_unsigned(value, width),
                 TypeT::Int { signed: true, .. } => value.as_ref().clone(),
                 _ => return,

@@ -155,6 +155,17 @@ pub enum PointerKind {
     Core,
 }
 
+/// The C identity of an integer type beyond its sign and width.
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub enum IntIdent {
+    /// The canonical type of its sign and width (`int`, `long`, ...).
+    Std,
+    /// `long long` / `unsigned long long`, which share `long`'s width.
+    LongLong,
+    /// An enumerated type, by its (unique) tag.
+    Enum(Rc<str>),
+}
+
 pub type Type = Ast<TypeT>;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum TypeT {
@@ -163,6 +174,12 @@ pub enum TypeT {
     Int {
         signed: bool,
         width: u32,
+        /// Which C type of that sign and width this is. Values of equal sign
+        /// and width are interchangeable (`Env::vtype_eq` ignores this), but
+        /// an object's effective type is not: `long long` is not `long`, and
+        /// an enumerated type is neither its underlying type nor any other
+        /// enumerated type.
+        ident: IntIdent,
     },
     Float {
         width: u32,

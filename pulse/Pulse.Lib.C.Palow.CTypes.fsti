@@ -1084,6 +1084,223 @@ let size_t_repr_len (x: SZ.t) (b: bytes)
    `Encoding.to_bits`.
    --------------------------------------------------------------------------- *)
 
+(* long long / unsigned long long: the same representation as int64_t /
+   uint64_t, but distinct effective types (6.2.5p4; 6.2.7p1). *)
+
+(* ------------------------------- long_long_t ------------------------------- *)
+
+let long_long_t_sizeof : SZ.t = 8sz
+let long_long_t_alignof : SZ.t = 8sz
+let long_long_t_ctype : ET.ctype = ET.TScalar ET.SLLong
+
+let long_long_t_repr (x: I64.t) (b: bytes) : prop =
+  b == encode (SZ.v long_long_t_sizeof) None (to_bits 64 (I64.v x))
+
+val long_long_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I64.t) : slprop
+
+
+val long_long_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop
+
+
+val long_long_t_repr_no_prov (x: I64.t) (b: bytes)
+  : Lemma (requires long_long_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v long_long_t_sizeof)
+
+
+val long_long_t_repr_injective (x y: I64.t) (b: bytes)
+  : Lemma (requires long_long_t_repr x b /\ long_long_t_repr y b)
+          (ensures  x == y)
+
+
+ghost fn long_long_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I64.t)
+  preserves long_long_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+ghost fn long_long_t_pts_to_uninit_not_null (a: ptr)
+  preserves long_long_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+[@@allow_ambiguous]
+ghost fn long_long_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
+  preserves long_long_t_pts_to a p1 x
+  preserves long_long_t_pts_to a p2 y
+  ensures   pure (x == y)
+
+
+ghost fn long_long_t_share (a: ptr) (#p: perm) (#x: I64.t)
+  requires long_long_t_pts_to a p x
+  ensures  long_long_t_pts_to a (p /. 2.0R) x ** long_long_t_pts_to a (p /. 2.0R) x
+
+
+[@@allow_ambiguous]
+ghost fn long_long_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
+  requires long_long_t_pts_to a p1 x ** long_long_t_pts_to a p2 y
+  ensures  long_long_t_pts_to a (p1 +. p2) x ** pure (x == y)
+
+
+ghost fn long_long_t_reveal (a: ptr) (#p: perm) (#x: I64.t)
+  requires long_long_t_pts_to a p x
+  ensures  exists* b e. mem_pts_to_at a p b e ** pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype /\ long_long_t_repr x b /\ aligned a long_long_t_alignof)
+
+
+ghost fn long_long_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: I64.t) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
+  requires pure (long_long_t_repr x b)
+  requires pure (aligned a long_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype)
+  ensures  long_long_t_pts_to a p x
+
+
+ghost fn long_long_t_forget (a: ptr) (#x: I64.t)
+  requires long_long_t_pts_to a 1.0R x
+  ensures  long_long_t_pts_to_uninit a
+
+
+ghost fn long_long_t_claim (a: ptr) (#b: bytes) (x: I64.t) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (long_long_t_repr x b)
+  requires pure (aligned a long_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype)
+  ensures  long_long_t_pts_to a 1.0R x
+
+ghost fn long_long_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (len b == SZ.v long_long_t_sizeof /\ aligned a long_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype)
+  ensures  long_long_t_pts_to_uninit a
+
+
+ghost fn long_long_t_reveal_uninit (a: ptr)
+  requires long_long_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype /\ len b == SZ.v long_long_t_sizeof /\ aligned a long_long_t_alignof)
+
+
+
+(* ------------------------------- ulong_long_t ------------------------------- *)
+
+let ulong_long_t_sizeof : SZ.t = 8sz
+let ulong_long_t_alignof : SZ.t = 8sz
+let ulong_long_t_ctype : ET.ctype = ET.TScalar ET.SULLong
+
+let ulong_long_t_repr (x: U64.t) (b: bytes) : prop =
+  b == encode (SZ.v ulong_long_t_sizeof) None (U64.v x)
+
+val ulong_long_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U64.t) : slprop
+
+
+val ulong_long_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop
+
+
+val ulong_long_t_repr_no_prov (x: U64.t) (b: bytes)
+  : Lemma (requires ulong_long_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v ulong_long_t_sizeof)
+
+
+val ulong_long_t_repr_injective (x y: U64.t) (b: bytes)
+  : Lemma (requires ulong_long_t_repr x b /\ ulong_long_t_repr y b)
+          (ensures  x == y)
+
+
+ghost fn ulong_long_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U64.t)
+  preserves ulong_long_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+ghost fn ulong_long_t_pts_to_uninit_not_null (a: ptr)
+  preserves ulong_long_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
+[@@allow_ambiguous]
+ghost fn ulong_long_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U64.t)
+  preserves ulong_long_t_pts_to a p1 x
+  preserves ulong_long_t_pts_to a p2 y
+  ensures   pure (x == y)
+
+
+ghost fn ulong_long_t_share (a: ptr) (#p: perm) (#x: U64.t)
+  requires ulong_long_t_pts_to a p x
+  ensures  ulong_long_t_pts_to a (p /. 2.0R) x ** ulong_long_t_pts_to a (p /. 2.0R) x
+
+
+[@@allow_ambiguous]
+ghost fn ulong_long_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U64.t)
+  requires ulong_long_t_pts_to a p1 x ** ulong_long_t_pts_to a p2 y
+  ensures  ulong_long_t_pts_to a (p1 +. p2) x ** pure (x == y)
+
+
+ghost fn ulong_long_t_reveal (a: ptr) (#p: perm) (#x: U64.t)
+  requires ulong_long_t_pts_to a p x
+  ensures  exists* b e. mem_pts_to_at a p b e ** pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype /\ ulong_long_t_repr x b /\ aligned a ulong_long_t_alignof)
+
+
+ghost fn ulong_long_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U64.t) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
+  requires pure (ulong_long_t_repr x b)
+  requires pure (aligned a ulong_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype)
+  ensures  ulong_long_t_pts_to a p x
+
+
+ghost fn ulong_long_t_forget (a: ptr) (#x: U64.t)
+  requires ulong_long_t_pts_to a 1.0R x
+  ensures  ulong_long_t_pts_to_uninit a
+
+
+ghost fn ulong_long_t_claim (a: ptr) (#b: bytes) (x: U64.t) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (ulong_long_t_repr x b)
+  requires pure (aligned a ulong_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype)
+  ensures  ulong_long_t_pts_to a 1.0R x
+
+ghost fn ulong_long_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (len b == SZ.v ulong_long_t_sizeof /\ aligned a ulong_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype)
+  ensures  ulong_long_t_pts_to_uninit a
+
+
+ghost fn ulong_long_t_reveal_uninit (a: ptr)
+  requires ulong_long_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype /\ len b == SZ.v ulong_long_t_sizeof /\ aligned a ulong_long_t_alignof)
+
+
+
+ghost fn long_long_t_of_elem (a: ptr) (#p: perm) (#x: I64.t)
+  requires elem_pts_to long_long_t_ctype long_long_t_repr a p x
+  requires pure (aligned a long_long_t_alignof)
+  ensures  long_long_t_pts_to a p x
+
+
+ghost fn long_long_t_to_elem (a: ptr) (#p: perm) (#x: I64.t)
+  requires long_long_t_pts_to a p x
+  ensures  elem_pts_to long_long_t_ctype long_long_t_repr a p x
+  ensures  pure (aligned a long_long_t_alignof)
+
+
+ghost fn ulong_long_t_of_elem (a: ptr) (#p: perm) (#x: U64.t)
+  requires elem_pts_to ulong_long_t_ctype ulong_long_t_repr a p x
+  requires pure (aligned a ulong_long_t_alignof)
+  ensures  ulong_long_t_pts_to a p x
+
+
+ghost fn ulong_long_t_to_elem (a: ptr) (#p: perm) (#x: U64.t)
+  requires ulong_long_t_pts_to a p x
+  ensures  elem_pts_to ulong_long_t_ctype ulong_long_t_repr a p x
+  ensures  pure (aligned a ulong_long_t_alignof)
+
+
+let long_long_t_repr_len (x: I64.t) (b: bytes)
+  : Lemma (requires long_long_t_repr x b) (ensures len b == SZ.v long_long_t_sizeof)
+  = long_long_t_repr_no_prov x b
+
+let ulong_long_t_repr_len (x: U64.t) (b: bytes)
+  : Lemma (requires ulong_long_t_repr x b) (ensures len b == SZ.v ulong_long_t_sizeof)
+  = ulong_long_t_repr_no_prov x b
+
 (* ------------------------------ float32_t ------------------------------ *)
 
 let float32_t_sizeof : SZ.t = 4sz

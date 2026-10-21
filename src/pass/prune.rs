@@ -86,6 +86,7 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
         TypeT::Int {
             signed: _,
             width: _,
+            ..
         } => {}
         TypeT::Float { width: _ } => {}
         TypeT::SizeT => {}

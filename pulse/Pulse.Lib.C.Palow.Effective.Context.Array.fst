@@ -55,7 +55,8 @@ let scalar_array_slice_compatible (s: ET.scalar) (n: nat) (i: nat { i < n })
               match en.ET.ty with
               | ET.TScalar leaf ->
                 scalar_array_leaf_offset width i k en.ET.off;
-                ET.scalar_compatible_equivalence s leaf s
+                ET.counterpart_equivalence s leaf s;
+                ET.counterpart_scalar_compatible leaf s
               | _ -> ()
         in Classical.forall_intro inner
     in Classical.forall_intro aux
@@ -150,8 +151,9 @@ let rec retains_elements_lift (root: ET.ctype) (lo: nat) (ct: ET.ctype)
       let paths (i: nat) : Lemma (i < n - 1 ==>
         Rel.strict_subobject root (lo + esize + esize * i) ct) =
         if i < n - 1 then begin
-          assert (Rel.strict_subobject root (lo + esize * (1 + i)) ct);
-          Math.distributivity_add_right esize 1 i
+          Math.distributivity_add_right esize 1 i;
+          assert (lo + esize * (1 + i) == lo + esize + esize * i);
+          assert (Rel.strict_subobject root (lo + esize * (1 + i)) ct)
         end
       in
       Classical.forall_intro paths;

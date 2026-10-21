@@ -1012,15 +1012,33 @@ unknown returned or reassigned views cannot gain stored-pointer access merely
 from their result type. Truly address-only calls remain allowed. This is
 bounded source tracking, not a general pointer-provenance analysis.
 
-The IR also canonicalizes integer ranks and enumeration tags to width and
-signedness. Until it preserves those identities, the frontend rejects pointers
-exposing an enum or a noncanonical integer rank, including containing
-records/arrays and function-pointer signatures.
-For example, on LP64, `long long *` is unsupported rather than being treated
-as compatible with `long *` just because both have eight-byte representations.
-Direct, non-address-taken long-long and enum values remain usable. This is a
-conservative frontend restriction, not a checked rejection of every program
-using that type.
+Integer type identity. The IR keeps, besides width and signedness, which C
+type an integer is (`IntIdent`): a standard one, `long long`, or an
+enumeration with its tag. Each has its own effective-type descriptor:
+`ET.SLLong`/`ET.SULLong` for `long long`, and `ET.SEnum tag base` for an
+enumeration whose underlying type is `unsigned int` or `int`. On LP64,
+`long long` therefore has `int64_t`'s representation but not its type:
+`long long *` is not `long *`, and reading one through the other fails
+`View.view_ok` (15.3, 17.5). The `long_long_t`/`ulong_long_t` operations are
+copies of the `int64_t`/`uint64_t` ones at the new descriptors.
+
+An enumeration is compatible with its underlying type (6.7.2.2p4), so also
+accessible through that type's counterpart, but two enumerations are not
+compatible with each other. Compatibility is therefore not transitive, and
+`Etype` requires `compose_ok` wherever it chains two compatibilities: a
+view from an enumeration to its underlying type exists, a view from any other
+type to an enumeration does not. Enumerations are one library family per
+underlying type, `Pulse.Lib.C.Palow.Enum*`, parameterized by the tag
+(`enum_u32_read (tag: string)`); each enumeration the output names gets a
+generated `Enum_<tag>` module of `unfold` aliases (`enum_u32_color_read`), so
+the emitter spells it like any other scalar. An enumerated object read or
+written through `unsigned int`/`int` uses the family's `read_as`/`write_as`
+operations (9.1), since the view back to the enumeration is not available.
+Reading one enumeration through another fails at the access
+(`effective_integer_rank_bad/enum_identity`).
+
+The frontend still rejects a pointer to an enumeration whose underlying type
+is not `int` or `unsigned int`, or which has no definition or name.
 
 Similarly, zero-filled native views
 require a proved representation: integer zero is supported without changing
@@ -1134,21 +1152,23 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 19 |
+| Verified enabled cases within the supported target/model | 20 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
-| Checked view rejections (13.1, 13.2, 13.3 and 14.2) | 4 |
+| Checked view rejections (13.1, 13.2, 13.3, 14.2, 15.3 and 17.5) | 6 |
 | Checked rejections at the UB access (14.1, 15.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 17.4, 18.1 and 18.2) | 12 |
 | Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
-| Explicit unsupported-translation expectations | 26 |
+| Explicit unsupported-translation expectations | 23 |
 | Disabled cases (4.2, 16.3, 20.2, 21.1 and 22.3) | 5 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 
-The nineteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
-5.3, 6.1, 6.3, 7.1, 7.2, 7.4, 8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
+The twenty supported cases are 1.1, 1.2, 1.3, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
+5.3, 6.1, 6.3, 7.1, 7.2, 7.4, 8.2, 9.1, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
-incompatible effective type. The four view rejections fail on
-`View.view_ok` or `View.aggregate_view_ok` at the incompatible access. In
+incompatible effective type. The six view rejections fail on
+`View.view_ok` or `View.aggregate_view_ok` at the incompatible access; in
+15.3 and 17.5 that is a `long long` read of an allocated block holding a
+`double` or a `long` (see "Integer type identity" above). In
 15.1, 15.2, 16.1, 16.2, 16.4, 17.1 and 17.3 a store or copy has retyped the
 allocated block, and the later read through another type fails for want of
 that type's ownership -- the read is the undefined access. 17.4 is the same

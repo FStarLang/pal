@@ -122,7 +122,7 @@ impl PrettyIR for TypeT {
         match self {
             TypeT::Void => RcDoc::text("void"),
             TypeT::Bool => RcDoc::text("_Bool"),
-            TypeT::Int { signed, width } => RcDoc::text(if *signed {
+            TypeT::Int { signed, width, .. } => RcDoc::text(if *signed {
                 format!("int{}_t", width)
             } else {
                 format!("uint{}_t", width)

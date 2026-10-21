@@ -537,14 +537,48 @@ public:
     return {};
   }
 
+  bool isLongLong(QualType t) {
+    t = t.getCanonicalType();
+    return t->isSpecificBuiltinType(BuiltinType::LongLong) ||
+           t->isSpecificBuiltinType(BuiltinType::ULongLong);
+  }
+
+  // The tag PAL names an enumerated type by: its own tag, or else the typedef
+  // that names an anonymous enum. Empty when the enum is not supported as an
+  // effective type: no name, or an underlying type other than `int` or
+  // `unsigned int` (the ones Clang picks for C enums that fit).
+  std::string supportedEnumTag(QualType t) {
+    auto ed = dyn_cast_or_null<EnumDecl>(t.getCanonicalType()->getAsTagDecl());
+    if (!ed)
+      return {};
+    if (auto def = ed->getDefinition())
+      ed = def;
+    else
+      return {};
+    auto underlying = ed->getIntegerType();
+    if (underlying.isNull())
+      return {};
+    underlying = underlying.getCanonicalType();
+    if (!underlying->isSpecificBuiltinType(BuiltinType::Int) &&
+        !underlying->isSpecificBuiltinType(BuiltinType::UInt))
+      return {};
+    if (ed->getIdentifier())
+      return ed->getName().str();
+    if (auto tdef = ed->getTypedefNameForAnonDecl())
+      return tdef->getName().str();
+    return {};
+  }
+
   QualType noncanonicalIntegerStorage(QualType t,
                                       std::unordered_set<const Type *> &seen) {
     t = t.getCanonicalType().getUnqualifiedType();
     if (!seen.insert(t.getTypePtr()).second)
       return {};
     if (t->isEnumeralType())
-      return t;
+      return supportedEnumTag(t).empty() ? t : QualType();
     if (t->isIntegerType() && !t->isBooleanType() && !t->isAnyCharacterType()) {
+      if (isLongLong(t))
+        return {};
       auto canonical = astCtx->getIntTypeForBitwidth(astCtx->getIntWidth(t),
                                                      t->isSignedIntegerType());
       if (!canonical.isNull() && !astCtx->hasSameType(t, canonical))
@@ -690,6 +724,12 @@ public:
     if (t->isSignedIntegerType() || t->isUnsignedIntegerType()) {
       bool isSigned = t->isSignedIntegerType();
       unsigned width = astCtx->getIntWidth(t);
+      // An object's effective type is its exact C type, so keep the identity
+      // of the types that share a representation with another one.
+      if (auto tag = supportedEnumTag(t); !tag.empty())
+        return mk_enum_type(std::move(loc), isSigned, width, toStr(tag));
+      if (isLongLong(t))
+        return mk_long_long_type(std::move(loc), isSigned);
       return mk_int_type(std::move(loc), isSigned, width);
     }
 

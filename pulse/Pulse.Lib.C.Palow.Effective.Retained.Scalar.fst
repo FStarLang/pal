@@ -155,6 +155,35 @@ let uint64_t_reveal_uninit_retained = R.reveal_storage uint64_t_ctype uint64_t_a
 let uint64_t_retain = R.retain_opaque uint64_t_ctype uint64_t_repr uint64_t_alignof uint64_t_repr_len uint64_t_pts_to uint64_t_reveal
 let uint64_t_release_retained = R.release_opaque uint64_t_ctype uint64_t_repr uint64_t_alignof uint64_t_pts_to uint64_t_conceal
 
+(* long long / unsigned long long: the same representation as int64_t /
+   uint64_t, but distinct effective types (6.2.5p4; 6.2.7p1). *)
+
+let long_long_t_read_field = C.read_field long_long_t_ctype long_long_t_repr long_long_t_alignof M.long_long_t_read_at
+let long_long_t_write_field = C.write_field long_long_t_ctype long_long_t_repr long_long_t_alignof M.long_long_t_write_uninit_at
+let long_long_t_write_uninit_field = C.write_uninit_field long_long_t_ctype long_long_t_repr long_long_t_alignof M.long_long_t_write_uninit_at
+let long_long_t_forget_field = C.forget long_long_t_ctype long_long_t_repr long_long_t_alignof
+
+let ulong_long_t_read_field = C.read_field ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof M.ulong_long_t_read_at
+let ulong_long_t_write_field = C.write_field ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof M.ulong_long_t_write_uninit_at
+let ulong_long_t_write_uninit_field = C.write_uninit_field ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof M.ulong_long_t_write_uninit_at
+let ulong_long_t_forget_field = C.forget ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof
+
+let long_long_t_read_retained = R.read_retained long_long_t_ctype long_long_t_repr long_long_t_alignof M.long_long_t_read_at
+let long_long_t_write_retained = R.write_retained long_long_t_ctype long_long_t_repr long_long_t_alignof M.long_long_t_write_uninit_at
+let long_long_t_write_uninit_retained = R.write_uninit_retained long_long_t_ctype long_long_t_repr long_long_t_alignof M.long_long_t_write_uninit_at
+let long_long_t_forget_retained = R.forget long_long_t_ctype long_long_t_repr long_long_t_alignof
+let long_long_t_reveal_uninit_retained = R.reveal_storage long_long_t_ctype long_long_t_alignof
+let long_long_t_retain = R.retain_opaque long_long_t_ctype long_long_t_repr long_long_t_alignof long_long_t_repr_len long_long_t_pts_to long_long_t_reveal
+let long_long_t_release_retained = R.release_opaque long_long_t_ctype long_long_t_repr long_long_t_alignof long_long_t_pts_to long_long_t_conceal
+
+let ulong_long_t_read_retained = R.read_retained ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof M.ulong_long_t_read_at
+let ulong_long_t_write_retained = R.write_retained ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof M.ulong_long_t_write_uninit_at
+let ulong_long_t_write_uninit_retained = R.write_uninit_retained ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof M.ulong_long_t_write_uninit_at
+let ulong_long_t_forget_retained = R.forget ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof
+let ulong_long_t_reveal_uninit_retained = R.reveal_storage ulong_long_t_ctype ulong_long_t_alignof
+let ulong_long_t_retain = R.retain_opaque ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof ulong_long_t_repr_len ulong_long_t_pts_to ulong_long_t_reveal
+let ulong_long_t_release_retained = R.release_opaque ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof ulong_long_t_pts_to ulong_long_t_conceal
+
 let size_t_read_retained = R.read_retained size_t_ctype size_t_repr size_t_alignof M.size_t_read_at
 let size_t_write_retained = R.write_retained size_t_ctype size_t_repr size_t_alignof M.size_t_write_uninit_at
 let size_t_write_uninit_retained = R.write_uninit_retained size_t_ctype size_t_repr size_t_alignof M.size_t_write_uninit_at

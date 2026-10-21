@@ -353,6 +353,32 @@ impl FieldShape {
     }
 }
 
+/// The standard Palow scalar whose object representation `pn` shares. `long
+/// long` is a distinct type from `long` (and an enumerated type from its
+/// underlying type), but encodes its values the same way and has the same
+/// library surface, so code that only cares about the representation can
+/// treat it as that scalar.
+fn repr_pn(pn: &str) -> &str {
+    match pn {
+        "long_long_t" => "int64_t",
+        "ulong_long_t" => "uint64_t",
+        _ if pn.starts_with("enum_u32_") => "uint32_t",
+        _ if pn.starts_with("enum_i32_") => "int32_t",
+        _ => pn,
+    }
+}
+
+/// The size of the scalar Palow type `pn`, or `None` for an aggregate.
+fn scalar_pn_size(pn: &str) -> Option<u64> {
+    match repr_pn(pn) {
+        "bool_t" | "int8_t" | "uint8_t" => Some(1),
+        "int16_t" | "uint16_t" => Some(2),
+        "int32_t" | "uint32_t" | "float32_t" => Some(4),
+        "int64_t" | "uint64_t" | "size_t" | "float64_t" | "ptr" => Some(8),
+        _ => None,
+    }
+}
+
 /// The Palow types that have unaligned accesses, in
 /// `Pulse.Lib.C.Palow.Unaligned`.
 const UNALIGNED_TYPES: &[&str] = &[
@@ -365,6 +391,8 @@ const UNALIGNED_TYPES: &[&str] = &[
     "uint16_t",
     "uint32_t",
     "uint64_t",
+    "long_long_t",
+    "ulong_long_t",
     "size_t",
     "float32_t",
     "float64_t",
@@ -777,7 +805,7 @@ fn describe(ty: &Type) -> String {
     match &ty.val {
         TypeT::Void => "void".to_string(),
         TypeT::Bool => "_Bool".to_string(),
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             format!("{}int{}_t", if *signed { "" } else { "u" }, width)
         }
         TypeT::Pointer(..) => "a pointer".to_string(),
@@ -903,13 +931,22 @@ struct Chunk {
     origin: Option<Origin>,
 }
 
+/// An enumerated object accessed through its underlying integer type or that
+/// type's counterpart (6.5p7): the enumeration's own `read_as`/`write_as`
+/// operations, since a view back from the integer type to the enumeration is
+/// not available (compatibility is not transitive).
+fn enum_access(from: &str, to: &str) -> bool {
+    (from.starts_with("enum_u32_") || from.starts_with("enum_i32_"))
+        && matches!(to, "uint32_t" | "int32_t")
+}
+
 /// The Palow name of a C type: the prefix of its `_pts_to`, `_repr`, `_read`
 /// and `_sizeof` definitions. `None` for types the model does not cover yet.
 /// The F* module whose `v` takes a machine integer to a mathematical one.
 fn int_module(tds: &Typedefs, ty: &Type) -> Option<String> {
     // `peel`: a `_plain` or refined scalar is still that scalar.
     match &peel(tds, ty).val {
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             Some(format!("{}Int{}", if *signed { "" } else { "U" }, width))
         }
         TypeT::SizeT => Some("SizeT".to_string()),
@@ -946,9 +983,17 @@ fn is_plain_chain(ty: &Type) -> bool {
 fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
     match &tds.resolve(ty).val {
         TypeT::Bool => Some("bool_t".to_string()),
-        TypeT::Int { signed, width } => {
-            Some(format!("{}int{}_t", if *signed { "" } else { "u" }, width))
-        }
+        TypeT::Int {
+            signed,
+            width,
+            ident,
+        } => Some(match ident {
+            IntIdent::Std => format!("{}int{}_t", if *signed { "" } else { "u" }, width),
+            IntIdent::LongLong => format!("{}long_long_t", if *signed { "" } else { "u" }),
+            IntIdent::Enum(tag) => {
+                format!("enum_{}{}_{}", if *signed { "i" } else { "u" }, width, tag)
+            }
+        }),
         TypeT::SizeT => Some("size_t".to_string()),
         // A float is an object with a size and an object representation, like
         // any other scalar; what is special about it lives in the arithmetic,
@@ -990,7 +1035,7 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
     match &tds.resolve(ty).val {
         TypeT::Void => Some("unit".to_string()),
         TypeT::Bool => Some("bool".to_string()),
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             Some(format!("{}Int{}.t", if *signed { "" } else { "U" }, width))
         }
         TypeT::SizeT => Some("SizeT.t".to_string()),
@@ -2362,7 +2407,12 @@ impl<'a> Spec<'a> {
         } else {
             (signed, width)
         };
-        let ty = TypeT::Int { signed, width }.with_loc(e.loc.clone());
+        let ty = TypeT::Int {
+            signed,
+            width,
+            ident: crate::ir::IntIdent::Std,
+        }
+        .with_loc(e.loc.clone());
         self.lower_bits(e, &ty)
     }
 
@@ -2373,7 +2423,7 @@ impl<'a> Spec<'a> {
             {
                 let t = self.ty_of(inner).ok()?;
                 match peel(self.tds, &t).val {
-                    TypeT::Int { signed, width } => Some((signed, width)),
+                    TypeT::Int { signed, width, .. } => Some((signed, width)),
                     _ => None,
                 }
             }
@@ -2395,7 +2445,7 @@ impl<'a> Spec<'a> {
     fn lower_bits(&self, e: &Expr, ty: &Rc<Type>) -> Option<Rc<Expr>> {
         let loc = e.loc.clone();
         let lit = |n: BigInt| -> Option<Rc<Expr>> {
-            let TypeT::Int { signed, width } = ty.val else {
+            let TypeT::Int { signed, width, .. } = ty.val else {
                 return None;
             };
             let m = BigInt::from(1) << width;
@@ -2447,7 +2497,7 @@ impl<'a> Spec<'a> {
                 _ => None,
             };
         }
-        let TypeT::Int { signed, width } = peel(self.tds, ty).val else {
+        let TypeT::Int { signed, width, .. } = peel(self.tds, ty).val else {
             return None;
         };
         let m = format!("{}Int{}", if signed { "" } else { "U" }, width);
@@ -2459,6 +2509,7 @@ impl<'a> Spec<'a> {
                 let TypeT::Int {
                     signed: rs,
                     width: rw,
+                    ..
                 } = peel(self.tds, &rty).val
                 else {
                     return None;
@@ -2968,6 +3019,7 @@ impl<'a> Spec<'a> {
                         TypeT::Int {
                             signed: false,
                             width,
+                            ..
                         },
                     ) => Ok(format!(
                         "(0{} `Pulse.Lib.C.UInt{}.sub_wrap` {})",
@@ -5667,7 +5719,7 @@ const HEADER: &str = r#"(* Generated by pal.
 fn scalar_shape(tds: &Typedefs, ty: &Type) -> Option<(u64, bool, bool)> {
     match &tds.resolve(ty).val {
         TypeT::Bool => Some((1, true, false)),
-        TypeT::Int { signed, width } => Some((*width as u64 / 8, false, *signed)),
+        TypeT::Int { signed, width, .. } => Some((*width as u64 / 8, false, *signed)),
         _ => None,
     }
 }
@@ -5759,6 +5811,7 @@ fn bit_unit(
     let ty = TypeT::Int {
         signed: false,
         width: (us * 8) as u32,
+        ident: crate::ir::IntIdent::Std,
     }
     .with_loc(loc.clone());
     Ok((format!("bits{}", start), ty, start, members))
@@ -6898,7 +6951,7 @@ fn fresh_pointer_record(tds: &Typedefs, si: &StructInfo) -> bool {
         && si.fields.iter().any(|f| active_union(f.shape.pn()))
         && si.fields.iter().all(|f| {
             matches!(&f.shape, FieldShape::One { pn } if
-                active_union(pn) || matches!(pn.as_str(),
+                active_union(pn) || matches!(repr_pn(pn),
                     "bool_t" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" |
                     "int8_t" | "int16_t" | "int32_t" | "int64_t" | "size_t" |
                     "ptr" | "float32_t" | "float64_t"))
@@ -7664,7 +7717,7 @@ fn contextual_scalar_struct(si: &StructInfo) -> bool {
         && si.fields.iter().all(|f| {
             matches!(f.shape, FieldShape::One { .. })
                 && matches!(
-                    f.shape.pn(),
+                    repr_pn(f.shape.pn()),
                     "bool_t"
                         | "uint8_t"
                         | "uint16_t"
@@ -7689,7 +7742,7 @@ fn contextual_struct(tds: &Typedefs, si: &StructInfo) -> bool {
             && !si.fields.is_empty()
             && si.fields.iter().all(|f| {
                 let scalar = matches!(
-                    f.shape.pn(),
+                    repr_pn(f.shape.pn()),
                     "bool_t"
                         | "uint8_t"
                         | "uint16_t"
@@ -7730,7 +7783,7 @@ fn whole_initialize_supported(tds: &Typedefs, ty: &Type) -> bool {
     };
     if !pn.starts_with("struct_") {
         return matches!(
-            pn.as_str(),
+            repr_pn(&pn),
             "bool_t"
                 | "uint8_t"
                 | "uint16_t"
@@ -7755,7 +7808,7 @@ fn whole_initialize_supported(tds: &Typedefs, ty: &Type) -> bool {
                 f.shape,
                 FieldShape::One { .. } | FieldShape::Unaligned { .. }
             ) && matches!(
-                f.shape.pn(),
+                repr_pn(f.shape.pn()),
                 "bool_t"
                     | "uint8_t"
                     | "uint16_t"
@@ -7822,12 +7875,13 @@ fn emit_contextual_unaligned_ops(tds: &Typedefs, sn: &str, f: &StructField) -> S
             "float32_t" => "float32_bits y".to_string(),
             "float64_t" => "float64_bits y".to_string(),
             _ => {
-                let prefix = if pn.starts_with("uint") {
+                let rp = repr_pn(pn);
+                let prefix = if rp.starts_with("uint") {
                     "UInt"
                 } else {
                     "Int"
                 };
-                let width = pn
+                let width = rp
                     .trim_start_matches("uint")
                     .trim_start_matches("int")
                     .trim_end_matches("_t");
@@ -8734,7 +8788,7 @@ fn emit_contextual_scalar_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64,
             Region::Gap(_, n) => Some(format!("zeroed {n}")),
             Region::Field(f) => {
                 let v = format!("x.fld_{}", f.name);
-                let bits = match f.shape.pn() {
+                let bits = match repr_pn(f.shape.pn()) {
                     "bool_t" => format!("(if {v} then 1 else 0)"),
                     "uint8_t" => format!("UInt8.v {v}"),
                     "uint16_t" => format!("UInt16.v {v}"),
@@ -9169,7 +9223,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 }
                 let pn = f.shape.pn();
                 let v = format!("x.fld_{}", f.name);
-                let bits = match pn {
+                let bits = match repr_pn(pn) {
                     "bool_t" => format!("(if {v} then 1 else 0)"),
                     "uint8_t" => format!("UInt8.v {v}"),
                     "uint16_t" => format!("UInt16.v {v}"),
@@ -12116,6 +12170,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         }
     }
 
+    let chunks = with_enum_aliases(chunks);
     let mut modules = into_modules(chunks, &ifaces);
     for m in &mut modules {
         m.code = widen_sizet_literals(&m.code);
@@ -12232,6 +12287,127 @@ module Float64 = FStar.Float64\n\
 /// the text is generated: every definition starts at column zero and every
 /// continuation line is indented, which the emitter maintains anyway because
 /// Pulse is indentation-sensitive.
+/// The enumerated-type families of `Pulse.Lib.C.Palow.Enum*`, by module: the
+/// suffixes of `enum_{u32,i32}_<suffix> (tag: string)`.
+const ENUM_FAMILY: &[(&str, &[&str])] = &[
+    (
+        "Pulse.Lib.C.Palow.Enum.Base",
+        &[
+            "agree",
+            "alignof",
+            "claim",
+            "claim_uninit",
+            "conceal",
+            "ctype",
+            "forget",
+            "gather",
+            "of_elem",
+            "pts_to",
+            "pts_to_not_null",
+            "pts_to_uninit",
+            "pts_to_uninit_not_null",
+            "repr",
+            "repr_injective",
+            "repr_len",
+            "repr_no_prov",
+            "reveal",
+            "reveal_uninit",
+            "share",
+            "sizeof",
+            "to_elem",
+        ],
+    ),
+    (
+        "Pulse.Lib.C.Palow.Enum",
+        &[
+            "initialize",
+            "initialize_at",
+            "read",
+            "read_as_int32_t",
+            "read_as_uint32_t",
+            "read_at",
+            "stack_alloc",
+            "stack_free",
+            "write",
+            "write_as_int32_t",
+            "write_as_uint32_t",
+            "write_at",
+            "write_existing",
+            "write_uninit",
+            "write_uninit_at",
+        ],
+    ),
+    (
+        "Pulse.Lib.C.Palow.Enum.Retained",
+        &[
+            "forget_field",
+            "forget_retained",
+            "read_field",
+            "read_retained",
+            "release_retained",
+            "retain",
+            "reveal_uninit_retained",
+            "write_field",
+            "write_retained",
+            "write_uninit_field",
+            "write_uninit_retained",
+        ],
+    ),
+];
+
+/// An enumerated type's operations are the library family applied to its tag.
+/// Each enumeration the output names gets a module `Enum_<tag>` of `unfold`
+/// aliases (`enum_u32_color_read = enum_u32_read "color"`), so the rest of the
+/// emitter spells it like any other scalar, `{pn}_read`, and Pulse still sees
+/// the library's definitions when it matches resources.
+fn with_enum_aliases(chunks: Vec<Chunk>) -> Vec<Chunk> {
+    let mut used: BTreeSet<(String, String)> = BTreeSet::new();
+    for ch in &chunks {
+        for w in ch
+            .code
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+        {
+            let Some(fam) = ["u32", "i32"]
+                .into_iter()
+                .find(|f| w.starts_with(&format!("enum_{f}_")))
+            else {
+                continue;
+            };
+            let rest = &w["enum_u32_".len()..];
+            let best = ENUM_FAMILY
+                .iter()
+                .flat_map(|(_, ss)| ss.iter())
+                .filter(|s| rest.len() > s.len() + 1 && rest.ends_with(&format!("_{s}")))
+                .max_by_key(|s| s.len());
+            if let Some(s) = best {
+                let tag = &rest[..rest.len() - s.len() - 1];
+                used.insert((fam.to_string(), tag.to_string()));
+            }
+        }
+    }
+    let mut out: Vec<Chunk> = used
+        .into_iter()
+        .map(|(fam, tag)| {
+            let mut code = format!("(* `enum {tag}`: the enum_{fam} family at this tag. *)\n\n");
+            for (m, ss) in ENUM_FAMILY {
+                for s in *ss {
+                    code += &format!(
+                        "unfold let enum_{fam}_{tag}_{s} = {m}.enum_{fam}_{s} \"{tag}\"\n"
+                    );
+                }
+            }
+            code += "\n";
+            Chunk {
+                module: format!("Enum_{tag}"),
+                code,
+                origin: None,
+            }
+        })
+        .collect();
+    out.extend(chunks);
+    out
+}
+
 fn defined_names(code: &str) -> Vec<String> {
     const MODIFIERS: &[&str] = &[
         "assume",
@@ -14264,6 +14440,7 @@ impl<'a> Body<'a> {
             TypeT::Int {
                 signed: false,
                 width,
+                ..
             } if *width != 8 => Ok(format!("(sizet_of_uint{} {})", width, v)),
             // A `ptrdiff_t` is an `int64_t` on this target, and a negative one
             // wraps to the `size_t` whose *addition* is the subtraction C
@@ -16907,6 +17084,8 @@ impl<'a> Body<'a> {
             ("uint32_t", "int32_t") => Some("repr_uint32_int32"),
             ("int64_t", "uint64_t") => Some("repr_int64_uint64"),
             ("uint64_t", "int64_t") => Some("repr_uint64_int64"),
+            ("long_long_t", "ulong_long_t") => Some("repr_llong_ullong"),
+            ("ulong_long_t", "long_long_t") => Some("repr_ullong_llong"),
             ("uint64_t", "size_t") => Some("repr_uint64_size_t"),
             ("size_t", "uint64_t") => Some("repr_size_t_uint64"),
             ("bool_t", "int8_t") => Some("repr_bool_int8"),
@@ -16935,7 +17114,9 @@ impl<'a> Body<'a> {
         if self.retained.contains(&a) {
             return Err("a typed view of retained storage".to_string());
         }
-        self.retype_view(&a, &from, &to);
+        if !enum_access(&from, &to) {
+            self.retype_view(&a, &from, &to);
+        }
         Ok(Some((a, from, to)))
     }
 
@@ -16948,8 +17129,13 @@ impl<'a> Body<'a> {
         }
         if let Some((a, from, to)) = self.open_view(e)? {
             let t = self.fresh("view");
-            self.lines.push(format!("let {t} = {to}_read {a};"));
-            self.retype_view(&a, &to, &from);
+            if enum_access(&from, &to) {
+                self.lines
+                    .push(format!("let {t} = {from}_read_as_{to} {a};"));
+            } else {
+                self.lines.push(format!("let {t} = {to}_read {a};"));
+                self.retype_view(&a, &to, &from);
+            }
             return Ok(t);
         }
         if let Some(v) = lvalue_name(e) {
@@ -17066,9 +17252,20 @@ impl<'a> Body<'a> {
                         );
                     }
                     let a = b.tmp.clone();
+                    let held = b.pn.clone();
                     let ty = self.ty_of(e)?;
                     let pn = palow_name(self.tds, &ty)
                         .ok_or_else(|| format!("a dereference yields {}", describe(&ty)))?;
+                    // A read at another scalar type of the same size is a
+                    // view of the object the block holds: 6.5p7 decides,
+                    // in `View.elem_view`, whether that type may read it.
+                    let view = held != pn
+                        && !self.retained.contains(&a)
+                        && scalar_pn_size(&held).is_some()
+                        && scalar_pn_size(&held) == scalar_pn_size(&pn);
+                    if view {
+                        self.retype_view(&a, &held, &pn);
+                    }
                     let t = self.fresh("deref");
                     self.lines.push(format!(
                         "let {} = {} {};",
@@ -17076,6 +17273,9 @@ impl<'a> Body<'a> {
                         self.memory_op(&pn, "read", &a),
                         a
                     ));
+                    if view {
+                        self.retype_view(&a, &pn, &held);
+                    }
                     return Ok(t);
                 }
                 if let ExprT::Var(v) = &inner.val {
@@ -17484,7 +17684,9 @@ impl<'a> Body<'a> {
                     return Ok(if post { old } else { new });
                 }
                 let one = match &peel(self.tds, &ty).val {
-                    TypeT::Int { signed, width } => format!("1{}", int_suffix(*signed, *width)?),
+                    TypeT::Int { signed, width, .. } => {
+                        format!("1{}", int_suffix(*signed, *width)?)
+                    }
                     TypeT::SizeT => "1sz".to_string(),
                     _ => return Err(format!("an increment of {}", describe(&ty))),
                 };
@@ -17510,8 +17712,7 @@ impl<'a> Body<'a> {
                 match &self.tds.resolve(&ty).val {
                     TypeT::Int {
                         signed: false,
-                        width,
-                    } => Ok(format!(
+                        width, .. } => Ok(format!(
                         "(0{} `Pulse.Lib.C.UInt{}.sub_wrap` {})",
                         int_suffix(false, *width)?,
                         width,
@@ -17519,8 +17720,7 @@ impl<'a> Body<'a> {
                     )),
                     TypeT::Int {
                         signed: true,
-                        width,
-                    } if self.signed_ok => Ok(format!(
+                        width, .. } if self.signed_ok => Ok(format!(
                         "(0{} `FStar.Int{}.sub` {})",
                         int_suffix(true, *width)?,
                         width,
@@ -20622,8 +20822,13 @@ impl<'a> Body<'a> {
             return self.store(&place, pn, value);
         }
         if let Some((a, from, to)) = self.open_view(lhs)? {
-            self.lines.push(format!("{to}_write {a} {value};"));
-            self.retype_view(&a, &to, &from);
+            if enum_access(&from, &to) {
+                self.lines
+                    .push(format!("{from}_write_as_{to} {a} {value};"));
+            } else {
+                self.lines.push(format!("{to}_write {a} {value};"));
+                self.retype_view(&a, &to, &from);
+            }
             return Ok(());
         }
         if let ExprT::Deref(inner) = &lhs.val {
@@ -23283,7 +23488,7 @@ impl<'a> Body<'a> {
 
 fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> {
     match &peel(tds, ty).val {
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             let suffix = int_suffix(*signed, *width)?;
             if *n < BigInt::ZERO {
                 if !*signed {
@@ -23323,6 +23528,7 @@ fn convert(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             val: TypeT::Int {
                 signed: true,
                 width: 64,
+                ident: crate::ir::IntIdent::Std,
             },
             loc: t.loc.clone(),
         },
@@ -23338,10 +23544,12 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: s1,
                 width: w1,
+                ..
             },
             TypeT::Int {
                 signed: s2,
                 width: w2,
+                ..
             },
         ) => Ok(format!(
             "(FStar.Int.Cast.{}_to_{} {})",
@@ -23350,11 +23558,11 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             v
         )),
         // C's `_Bool` converts to 0 or 1, and back by comparison with zero.
-        (TypeT::Bool, TypeT::Int { signed, width }) => {
+        (TypeT::Bool, TypeT::Int { signed, width, .. }) => {
             let one = int_suffix(*signed, *width)?;
             Ok(format!("(if {} then 1{} else 0{})", v, one, one))
         }
-        (TypeT::Int { signed, width }, TypeT::Bool) => {
+        (TypeT::Int { signed, width, .. }, TypeT::Bool) => {
             let z = int_suffix(*signed, *width)?;
             let m = format!("{}Int{}", if *signed { "" } else { "U" }, width);
             Ok(format!("(not ({} `{}.eq` 0{}))", v, m, z))
@@ -23365,6 +23573,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: false,
                 width,
+                ..
             },
             TypeT::SizeT,
         ) => Ok(match width {
@@ -23379,6 +23588,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: false,
                 width,
+                ..
             },
         ) if *width == 32 || *width == 64 => {
             Ok(format!("(FStar.SizeT.sizet_to_uint{} {})", width, v))
@@ -23388,6 +23598,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: false,
                 width,
+                ..
             },
         ) => Ok(format!(
             "(FStar.Int.Cast.uint64_to_uint{} (FStar.SizeT.sizet_to_uint64 {}))",
@@ -23401,6 +23612,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: true,
                 width,
+                ..
             },
         ) => Ok(format!(
             "(FStar.Int.Cast.uint64_to_int{} (FStar.SizeT.sizet_to_uint64 {}))",
@@ -23410,6 +23622,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: true,
                 width,
+                ..
             },
             TypeT::SizeT,
         ) => Ok(format!(
@@ -23470,13 +23683,14 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: false,
                 width: 64,
+                ..
             },
             TypeT::Float {
                 width: w @ (32 | 64),
             },
         ) => Ok(format!("(float{}_of_uint64 {})", w, v)),
         (
-            TypeT::Int { signed, width },
+            TypeT::Int { signed, width, .. },
             TypeT::Float {
                 width: w @ (32 | 64),
             },
@@ -23501,6 +23715,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed,
                 width: n @ (8 | 16 | 32 | 64),
+                ..
             },
         ) => Ok(format!(
             "(float{}_to_{}int{} {})",
@@ -23616,7 +23831,7 @@ fn dyadic(x: f64, bits: u32) -> Option<(i64, u32)> {
 /// and unlike F*'s `lognot` the solver can reason about either -- including
 /// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
 fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
-    let TypeT::Int { signed, width } = peel(tds, ty).val else {
+    let TypeT::Int { signed, width, .. } = peel(tds, ty).val else {
         return None;
     };
     let all = if signed {
@@ -23725,7 +23940,7 @@ fn zero_repr_proof(tds: &Typedefs, ty: &Type) -> Option<Vec<String>> {
 fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     let t = peel(tds, ty);
     match &t.val {
-        TypeT::Int { signed, width } => Ok(format!("0{}", int_suffix(*signed, *width)?)),
+        TypeT::Int { signed, width, .. } => Ok(format!("0{}", int_suffix(*signed, *width)?)),
         TypeT::SizeT => Ok("0sz".to_string()),
         TypeT::Bool => Ok("false".to_string()),
         // C says a pointer zero-initialised by a brace initialiser, by static
@@ -23797,7 +24012,7 @@ fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {
     let t = peel(tds, ty);
     let m = match &t.val {
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             format!("{}Int{}", if *signed { "" } else { "U" }, width)
         }
         TypeT::SizeT => "SizeT".to_string(),
@@ -23910,6 +24125,7 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     if let TypeT::Int {
         signed: false,
         width,
+        ..
     } = &t.val
     {
         let wrap = format!("Pulse.Lib.C.UInt{}", width);

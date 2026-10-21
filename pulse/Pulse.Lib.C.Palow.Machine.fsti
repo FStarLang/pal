@@ -690,6 +690,117 @@ fn uint64_t_initialize (a: ptr) (y: U64.t)
   requires pure (aligned a uint64_t_alignof)
   ensures uint64_t_pts_to a 1.0R y
 
+(* long long / unsigned long long: the same representation as int64_t /
+   uint64_t, but distinct effective types (6.2.5p4; 6.2.7p1). *)
+
+fn long_long_t_read (a: ptr) (#p: perm) (#x: erased I64.t)
+  preserves long_long_t_pts_to a p x
+  returns  y : I64.t
+  ensures  rewrites_to y (reveal x)
+
+fn long_long_t_write (a: ptr) (y: I64.t) (#x: erased I64.t)
+  requires long_long_t_pts_to a 1.0R x
+  ensures  long_long_t_pts_to a 1.0R y
+
+fn long_long_t_write_uninit (a: ptr) (y: I64.t)
+  requires long_long_t_pts_to_uninit a
+  ensures  long_long_t_pts_to a 1.0R y
+
+fn long_long_t_stack_alloc ()
+  returns  a : ptr
+  ensures  long_long_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of long_long_t_ctype true))
+
+fn long_long_t_stack_free (a: ptr)
+  requires long_long_t_pts_to_uninit a
+
+fn ulong_long_t_read (a: ptr) (#p: perm) (#x: erased U64.t)
+  preserves ulong_long_t_pts_to a p x
+  returns  y : U64.t
+  ensures  rewrites_to y (reveal x)
+
+fn ulong_long_t_write (a: ptr) (y: U64.t) (#x: erased U64.t)
+  requires ulong_long_t_pts_to a 1.0R x
+  ensures  ulong_long_t_pts_to a 1.0R y
+
+fn ulong_long_t_write_uninit (a: ptr) (y: U64.t)
+  requires ulong_long_t_pts_to_uninit a
+  ensures  ulong_long_t_pts_to a 1.0R y
+
+fn ulong_long_t_stack_alloc ()
+  returns  a : ptr
+  ensures  ulong_long_t_pts_to_uninit a
+  ensures pure (fixed_metadata a (ET.etypes_of ulong_long_t_ctype true))
+
+fn ulong_long_t_stack_free (a: ptr)
+  requires ulong_long_t_pts_to_uninit a
+
+fn long_long_t_read_at (a: ptr) (#p: perm) (#x: erased I64.t) (#e: ET.etypes)
+  preserves V.value long_long_t_ctype long_long_t_repr long_long_t_alignof a p x e
+  returns y: I64.t
+  ensures rewrites_to y (reveal x)
+
+fn long_long_t_write_at (a: ptr) (y: I64.t) (#x: erased I64.t)
+    (#e: ET.etypes { ET.elen e == ET.csize long_long_t_ctype })
+  requires V.value long_long_t_ctype long_long_t_repr long_long_t_alignof a 1.0R x e
+  ensures V.value long_long_t_ctype long_long_t_repr long_long_t_alignof a 1.0R y (EM.store_index e long_long_t_ctype)
+
+fn long_long_t_write_uninit_at (a: ptr) (y: I64.t)
+    (#e: ET.etypes { ET.elen e == ET.csize long_long_t_ctype })
+  requires V.storage long_long_t_ctype long_long_t_alignof a e
+  ensures V.value long_long_t_ctype long_long_t_repr long_long_t_alignof a 1.0R y (EM.store_index e long_long_t_ctype)
+
+fn long_long_t_write_existing (a: ptr) (y: I64.t)
+    (#e: ET.etypes { ET.elen e == ET.csize long_long_t_ctype })
+  requires V.storage long_long_t_ctype long_long_t_alignof a e
+  requires pure (forall (k: nat). k < ET.elen e ==> Some? (ET.eget e k))
+  ensures V.value long_long_t_ctype long_long_t_repr long_long_t_alignof a 1.0R y e
+
+fn long_long_t_initialize_at (a: ptr) (y: I64.t)
+  requires E.prepared a long_long_t_ctype
+  requires pure (aligned a long_long_t_alignof)
+  ensures exists* e. V.value long_long_t_ctype long_long_t_repr long_long_t_alignof a 1.0R y e
+    ** pure (E.mutable_index e /\
+      (not (ET.character_type long_long_t_ctype) ==> e == ET.etypes_of long_long_t_ctype false))
+
+fn long_long_t_initialize (a: ptr) (y: I64.t)
+  requires E.prepared a long_long_t_ctype
+  requires pure (aligned a long_long_t_alignof)
+  ensures long_long_t_pts_to a 1.0R y
+
+fn ulong_long_t_read_at (a: ptr) (#p: perm) (#x: erased U64.t) (#e: ET.etypes)
+  preserves V.value ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a p x e
+  returns y: U64.t
+  ensures rewrites_to y (reveal x)
+
+fn ulong_long_t_write_at (a: ptr) (y: U64.t) (#x: erased U64.t)
+    (#e: ET.etypes { ET.elen e == ET.csize ulong_long_t_ctype })
+  requires V.value ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a 1.0R x e
+  ensures V.value ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a 1.0R y (EM.store_index e ulong_long_t_ctype)
+
+fn ulong_long_t_write_uninit_at (a: ptr) (y: U64.t)
+    (#e: ET.etypes { ET.elen e == ET.csize ulong_long_t_ctype })
+  requires V.storage ulong_long_t_ctype ulong_long_t_alignof a e
+  ensures V.value ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a 1.0R y (EM.store_index e ulong_long_t_ctype)
+
+fn ulong_long_t_write_existing (a: ptr) (y: U64.t)
+    (#e: ET.etypes { ET.elen e == ET.csize ulong_long_t_ctype })
+  requires V.storage ulong_long_t_ctype ulong_long_t_alignof a e
+  requires pure (forall (k: nat). k < ET.elen e ==> Some? (ET.eget e k))
+  ensures V.value ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a 1.0R y e
+
+fn ulong_long_t_initialize_at (a: ptr) (y: U64.t)
+  requires E.prepared a ulong_long_t_ctype
+  requires pure (aligned a ulong_long_t_alignof)
+  ensures exists* e. V.value ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a 1.0R y e
+    ** pure (E.mutable_index e /\
+      (not (ET.character_type ulong_long_t_ctype) ==> e == ET.etypes_of ulong_long_t_ctype false))
+
+fn ulong_long_t_initialize (a: ptr) (y: U64.t)
+  requires E.prepared a ulong_long_t_ctype
+  requires pure (aligned a ulong_long_t_alignof)
+  ensures ulong_long_t_pts_to a 1.0R y
+
 fn size_t_read_at (a: ptr) (#p: perm) (#x: erased SZ.t) (#e: ET.etypes)
   preserves V.value size_t_ctype size_t_repr size_t_alignof a p x e
   returns y: SZ.t

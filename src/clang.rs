@@ -667,8 +667,29 @@ fn mk_int_type(loc: Rc<SourceInfo>, signed: bool, width: u32) -> Rc<Type> {
     mk_ast(
         loc,
         TypeT::Int {
-            signed: signed,
-            width: width,
+            signed,
+            width,
+            ident: crate::ir::IntIdent::Std,
+        },
+    )
+}
+fn mk_long_long_type(loc: Rc<SourceInfo>, signed: bool) -> Rc<Type> {
+    mk_ast(
+        loc,
+        TypeT::Int {
+            signed,
+            width: 64,
+            ident: crate::ir::IntIdent::LongLong,
+        },
+    )
+}
+fn mk_enum_type(loc: Rc<SourceInfo>, signed: bool, width: u32, tag: &str) -> Rc<Type> {
+    mk_ast(
+        loc,
+        TypeT::Int {
+            signed,
+            width,
+            ident: crate::ir::IntIdent::Enum(tag.into()),
         },
     )
 }

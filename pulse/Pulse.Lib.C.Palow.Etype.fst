@@ -49,15 +49,22 @@ type scalar =
   | SBool
   | SInt8 | SInt16 | SInt32 | SInt64
   | SUInt16 | SUInt32 | SUInt64
+  | SLLong | SULLong
   | SFloat32 | SFloat64
   | SPtr
+  | SEnum : tag: string -> base: scalar -> scalar
 
-let scalar_size (s: scalar) : nat =
+(* `long long` is a type of its own even where it has the width of `long`:
+   `SLLong` is not `SInt64`, and only `SULLong` is its counterpart. An
+   enumerated type carries its tag and the integer type the implementation
+   chose for it (6.7.2.2p4); it has that type's size. *)
+let rec scalar_size (s: scalar) : pos =
   match s with
   | SChar | SBool | SInt8 -> 1
   | SInt16 | SUInt16 -> 2
   | SInt32 | SUInt32 | SFloat32 -> 4
-  | SInt64 | SUInt64 | SFloat64 | SPtr -> 8
+  | SInt64 | SUInt64 | SLLong | SULLong | SFloat64 | SPtr -> 8
+  | SEnum _ b -> scalar_size b
 
 (* An aggregate carries its tag name as well as its layout, because C's notion
    of compatible type is by tag, not by shape: two structs with identical
@@ -79,18 +86,64 @@ let tchar : ctype = TScalar SChar
    information, never evidence of C type compatibility. *)
 let nominal_compatible (t: ctype) (u: ctype) : bool = t = u
 
-let scalar_compatible (s: scalar) (u: scalar) : bool =
+(* A type and its corresponding signed/unsigned type (6.5p7). An enumerated
+   type takes part only as itself here; this relation is an equivalence. *)
+let counterpart_compatible (s: scalar) (u: scalar) : bool =
   s = u ||
   (match s, u with
    | SInt16, SUInt16 | SUInt16, SInt16
    | SInt32, SUInt32 | SUInt32, SInt32
-   | SInt64, SUInt64 | SUInt64, SInt64 -> true
+   | SInt64, SUInt64 | SUInt64, SInt64
+   | SLLong, SULLong | SULLong, SLLong -> true
    | _ -> false)
 
-let scalar_compatible_equivalence (a: scalar) (b: scalar) (c: scalar)
+let counterpart_equivalence (a: scalar) (b: scalar) (c: scalar)
+  : Lemma (counterpart_compatible a a /\
+           (counterpart_compatible a b <==> counterpart_compatible b a) /\
+           (counterpart_compatible a b /\ counterpart_compatible b c ==>
+            counterpart_compatible a c))
+  = ()
+
+(* An enumerated type is compatible with its underlying integer type
+   (6.7.2.2p4), and so may also be accessed through that type's counterpart.
+   Two distinct enumerated types are NOT compatible, even with the same
+   underlying type: compatibility is not transitive, and `enum A` reached
+   through `unsigned int` does not license `enum B`. *)
+let scalar_compatible (s: scalar) (u: scalar) : bool =
+  match s, u with
+  | SEnum _ _, SEnum _ _ -> s = u
+  | SEnum _ b, _ -> counterpart_compatible b u
+  | _, SEnum _ b -> counterpart_compatible s b
+  | _ -> counterpart_compatible s u
+
+let scalar_compatible_refl_sym (a: scalar) (b: scalar)
   : Lemma (scalar_compatible a a /\
-           (scalar_compatible a b <==> scalar_compatible b a) /\
-           (scalar_compatible a b /\ scalar_compatible b c ==> scalar_compatible a c))
+           (scalar_compatible a b <==> scalar_compatible b a))
+  = ()
+
+let counterpart_scalar_compatible (a: scalar) (b: scalar)
+  : Lemma (requires counterpart_compatible a b)
+          (ensures scalar_compatible a b)
+  = ()
+
+let scalar_compatible_size (a: scalar) (b: scalar)
+  : Lemma (requires scalar_compatible a b)
+          (ensures scalar_size a == scalar_size b)
+  = match a, b with
+    | SEnum _ a', SEnum _ b' -> ()
+    | SEnum _ a', _ -> assert_norm (scalar_size a == scalar_size a')
+    | _, SEnum _ b' -> assert_norm (scalar_size b == scalar_size b')
+    | _ -> ()
+
+(* The one transitivity that does hold: the chain may not end in a different
+   enumerated type than the one it passes through. *)
+let scalar_compose_ok (b: scalar) (c: scalar) : bool =
+  not (SEnum? c) || b = c
+
+let scalar_compatible_trans (a: scalar) (b: scalar) (c: scalar)
+  : Lemma (requires scalar_compatible a b /\ scalar_compatible b c /\
+                    scalar_compose_ok b c)
+          (ensures scalar_compatible a c)
   = ()
 
 (* int8_t is signed char in this model. Both signed and unsigned character
@@ -177,11 +230,21 @@ and access_ok_members (ms: list (nat & ctype)) (off: int) (u: ctype)
   | [] -> false
   | (o, m) :: r -> access_ok m (off - o) u || access_ok_members r off u
 
+(* Composing two accesses is sound unless the second one names an enumerated
+   type that the intermediate view is not: see `scalar_compatible`. *)
+let compose_ok (s: ctype) (fld: ctype) : bool =
+  match s, fld with
+  | TScalar b, TScalar c -> scalar_compose_ok b c
+  | _ -> true
+
 let compatible_scalar_access (a: scalar) (b: scalar) (off: int) (u: ctype)
-  : Lemma (requires scalar_compatible a b /\ access_ok (TScalar b) off u)
+  : Lemma (requires scalar_compatible a b /\ access_ok (TScalar b) off u /\
+                    compose_ok (TScalar b) u)
           (ensures access_ok (TScalar a) off u)
-  = match u with
-    | TScalar c -> scalar_compatible_equivalence a b c
+  = scalar_compatible_size a b;
+    match u with
+    | TScalar c ->
+      if character_type u then () else scalar_compatible_trans a b c
     | _ -> ()
 
 (* Stepping an offset within an element never carries out of it, because an
@@ -204,7 +267,7 @@ let mod_add_no_carry (d: nat) (q: pos) (off: nat)
    uint32_t". Without it, every aggregate predicate would have to carry the
    index so that field claims could be justified from it directly. *)
 let rec access_ok_trans (ty: ctype) (d: int) (s: ctype) (off: int) (fld: ctype)
-  : Lemma (requires access_ok ty d s /\ access_ok s off fld)
+  : Lemma (requires access_ok ty d s /\ access_ok s off fld /\ compose_ok s fld)
           (ensures  access_ok ty (d + off) fld)
           (decreases %[ctype_size ty; 0])
   = if character_type s then ()
@@ -225,7 +288,7 @@ let rec access_ok_trans (ty: ctype) (d: int) (s: ctype) (off: int) (fld: ctype)
     | TStruct _ _ ms -> access_ok_trans_members ms d s off fld
     | TUnion _ _ ms -> access_ok_trans_members ms d s off fld
 and access_ok_trans_members (ms: list (nat & ctype)) (d: int) (s: ctype) (off: int) (fld: ctype)
-  : Lemma (requires access_ok_members ms d s /\ access_ok s off fld)
+  : Lemma (requires access_ok_members ms d s /\ access_ok s off fld /\ compose_ok s fld)
           (ensures  access_ok_members ms (d + off) fld)
           (decreases %[members_size ms; 1])
   = match ms with
@@ -622,7 +685,8 @@ let retype_declared ()
 (* Downward: an index that licenses a read at `s` licenses a read of `s`'s
    member `fld` over exactly that member's bytes. *)
 let read_ok_slice (e: etypes) (s: ctype) (off: nat) (fld: ctype)
-  : Lemma (requires read_ok e s /\ access_ok s off fld /\ off + csize fld <= elen e)
+  : Lemma (requires read_ok e s /\ access_ok s off fld /\ compose_ok s fld /\
+                    off + csize fld <= elen e)
           (ensures  read_ok (Seq.slice e off (off + csize fld)) fld)
   = let e' = Seq.slice e off (off + csize fld) in
     let aux (k: nat { k < elen e' })
@@ -631,7 +695,9 @@ let read_ok_slice (e: etypes) (s: ctype) (off: nat) (fld: ctype)
                | Some en -> b2t (access_ok en.ty (en.off - k) fld))
       = match eget e' k with
         | None -> ()
-        | Some en -> access_ok_trans en.ty (en.off - (off + k)) s off fld
+        | Some en ->
+          access_ok_trans en.ty (en.off - (off + k)) s off fld;
+          assert (en.off - (off + k) + off == en.off - k)
     in
     FStar.Classical.forall_intro aux
 

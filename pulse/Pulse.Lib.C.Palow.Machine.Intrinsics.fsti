@@ -193,6 +193,34 @@ fn uint64_t_read_at (a: ptr) (#p: perm) (#x: erased U64.t)
   ensures rewrites_to y (reveal x)
 
 
+(* long long / unsigned long long: the same representation as int64_t /
+   uint64_t, but distinct effective types (6.2.5p4; 6.2.7p1). *)
+
+fn long_long_t_stack_free (a: ptr)
+  requires long_long_t_pts_to_uninit a
+
+fn ulong_long_t_stack_free (a: ptr)
+  requires ulong_long_t_pts_to_uninit a
+
+
+fn long_long_t_read_at (a: ptr) (#p: perm) (#x: erased I64.t)
+                     (#b: erased bytes) (#e: ET.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (long_long_t_repr x b /\ len b == ET.csize long_long_t_ctype /\
+                 ET.elen e == len b /\ ET.read_ok e long_long_t_ctype /\ initialized b)
+  returns y: I64.t
+  ensures rewrites_to y (reveal x)
+
+
+fn ulong_long_t_read_at (a: ptr) (#p: perm) (#x: erased U64.t)
+                     (#b: erased bytes) (#e: ET.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (ulong_long_t_repr x b /\ len b == ET.csize ulong_long_t_ctype /\
+                 ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype /\ initialized b)
+  returns y: U64.t
+  ensures rewrites_to y (reveal x)
+
+
 fn size_t_read_at (a: ptr) (#p: perm) (#x: erased SZ.t)
                      (#b: erased bytes) (#e: ET.etypes)
   preserves mem_pts_to_at a p b e

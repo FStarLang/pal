@@ -209,6 +209,7 @@ impl<'a> Elaborator<'a> {
             TypeT::Int {
                 signed: _,
                 width: _,
+                ..
             } => {}
             TypeT::Float { width: _ } => {}
             TypeT::SizeT => {}
@@ -798,6 +799,7 @@ impl<'a> Elaborator<'a> {
                                 meet_type = TypeT::Int {
                                     signed: true,
                                     width: 32,
+                                    ident: crate::ir::IntIdent::Std,
                                 }
                                 .with_loc(lhs.loc.clone())
                                 .into();
@@ -822,6 +824,7 @@ impl<'a> Elaborator<'a> {
                         let u32_ty: MaybeRc<Type> = TypeT::Int {
                             signed: false,
                             width: 32,
+                            ident: crate::ir::IntIdent::Std,
                         }
                         .with_loc(rhs.loc.clone())
                         .into();

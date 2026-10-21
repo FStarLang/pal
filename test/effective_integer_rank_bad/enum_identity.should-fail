@@ -1,0 +1,3 @@
+Func_read_other_enum.fst(
+R.value (Pulse.Lib.C.Palow.Enum.Base.enum_u32_ctype "first_kind")
+R.value (Pulse.Lib.C.Palow.Enum.Base.enum_u32_ctype "second_kind")

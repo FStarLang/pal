@@ -496,7 +496,11 @@ fn type_parser<
                     None | Some(_) => tw.int_width,
                 }
             };
-            Ok(TypeT::Int { signed, width })
+            Ok(TypeT::Int {
+                signed,
+                width,
+                ident: crate::ir::IntIdent::Std,
+            })
         });
 
     let ident = select! { Token::Ident(ident) => ident }
@@ -615,7 +619,11 @@ fn expr_parser<
                         None | Some(_) => tw.int_width,
                     }
                 };
-                Ok(TypeT::Int { signed, width })
+                Ok(TypeT::Int {
+                    signed,
+                    width,
+                    ident: crate::ir::IntIdent::Std,
+                })
             });
 
         let ident = select! { Token::Ident(ident) => ident }
@@ -710,22 +718,27 @@ fn expr_parser<
                         IntegerSuffix::U => TypeT::Int {
                             signed: false,
                             width: tw.int_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::L => TypeT::Int {
                             signed: true,
                             width: tw.long_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::UL => TypeT::Int {
                             signed: false,
                             width: tw.long_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::LL => TypeT::Int {
                             signed: true,
                             width: tw.long_long_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::ULL => TypeT::Int {
                             signed: false,
                             width: tw.long_long_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::Z | IntegerSuffix::UZ => TypeT::SizeT,
                     };

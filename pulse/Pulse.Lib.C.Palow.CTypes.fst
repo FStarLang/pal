@@ -1421,6 +1421,310 @@ ghost fn size_t_to_elem (a: ptr) (#p: perm) (#x: SZ.t)
    `Encoding.to_bits`.
    --------------------------------------------------------------------------- *)
 
+(* long long / unsigned long long: the same representation as int64_t /
+   uint64_t, but distinct effective types (6.2.5p4; 6.2.7p1). *)
+
+(* ------------------------------- long_long_t ------------------------------- *)
+
+
+
+let long_long_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: I64.t) : slprop =
+  T.value long_long_t_ctype long_long_t_repr long_long_t_alignof a p x
+
+let long_long_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
+  T.storage long_long_t_ctype long_long_t_alignof a
+
+let long_long_t_repr_no_prov (x: I64.t) (b: bytes)
+  : Lemma (requires long_long_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v long_long_t_sizeof)
+  = ()
+
+let long_long_t_repr_injective (x y: I64.t) (b: bytes)
+  : Lemma (requires long_long_t_repr x b /\ long_long_t_repr y b)
+          (ensures  x == y)
+  = assert_norm (pow2 (8 * 8) == pow2 64);
+    encode_injective (SZ.v long_long_t_sizeof) None (to_bits 64 (I64.v x)) (to_bits 64 (I64.v y));
+    to_bits_injective 64 (I64.v x) (I64.v y)
+
+ghost fn long_long_t_pts_to_not_null (a: ptr) (#p: perm) (#x: I64.t)
+  preserves long_long_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold long_long_t_pts_to a p x;
+  T.not_null long_long_t_ctype long_long_t_repr long_long_t_alignof a;
+  fold long_long_t_pts_to a p x;
+}
+
+ghost fn long_long_t_pts_to_uninit_not_null (a: ptr)
+  preserves long_long_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold long_long_t_pts_to_uninit a;
+  T.storage_not_null long_long_t_ctype long_long_t_alignof a;
+  fold long_long_t_pts_to_uninit a;
+}
+
+[@@allow_ambiguous]
+ghost fn long_long_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
+  preserves long_long_t_pts_to a p1 x
+  preserves long_long_t_pts_to a p2 y
+  ensures   pure (x == y)
+{
+  unfold long_long_t_pts_to a p1 x;
+  unfold long_long_t_pts_to a p2 y;
+  T.agree long_long_t_ctype long_long_t_repr long_long_t_alignof long_long_t_repr_injective a;
+  fold long_long_t_pts_to a p1 x;
+  fold long_long_t_pts_to a p2 y;
+}
+
+ghost fn long_long_t_share (a: ptr) (#p: perm) (#x: I64.t)
+  requires long_long_t_pts_to a p x
+  ensures  long_long_t_pts_to a (p /. 2.0R) x ** long_long_t_pts_to a (p /. 2.0R) x
+{
+  unfold long_long_t_pts_to a p x;
+  T.share long_long_t_ctype long_long_t_repr long_long_t_alignof a;
+  fold long_long_t_pts_to a (p /. 2.0R) x;
+  fold long_long_t_pts_to a (p /. 2.0R) x;
+}
+
+[@@allow_ambiguous]
+ghost fn long_long_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: I64.t)
+  requires long_long_t_pts_to a p1 x ** long_long_t_pts_to a p2 y
+  ensures  long_long_t_pts_to a (p1 +. p2) x ** pure (x == y)
+{
+  unfold long_long_t_pts_to a p1 x;
+  unfold long_long_t_pts_to a p2 y;
+  T.gather long_long_t_ctype long_long_t_repr long_long_t_alignof long_long_t_repr_injective a;
+  fold long_long_t_pts_to a (p1 +. p2) x;
+}
+
+ghost fn long_long_t_reveal (a: ptr) (#p: perm) (#x: I64.t)
+  requires long_long_t_pts_to a p x
+  ensures  exists* b e. mem_pts_to_at a p b e ** pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype /\ long_long_t_repr x b /\ aligned a long_long_t_alignof)
+{
+  unfold long_long_t_pts_to a p x;
+  T.reveal_value long_long_t_ctype long_long_t_repr long_long_t_alignof a;
+}
+
+ghost fn long_long_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: I64.t) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
+  requires pure (long_long_t_repr x b)
+  requires pure (aligned a long_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype)
+  ensures  long_long_t_pts_to a p x
+{
+  long_long_t_repr_no_prov x b;
+  T.claim long_long_t_ctype long_long_t_repr long_long_t_alignof a #p #x #b #e;
+  fold long_long_t_pts_to a p x;
+}
+
+ghost fn long_long_t_forget (a: ptr) (#x: I64.t)
+  requires long_long_t_pts_to a 1.0R x
+  ensures  long_long_t_pts_to_uninit a
+{
+  unfold long_long_t_pts_to a 1.0R x;
+  T.forget long_long_t_ctype long_long_t_repr long_long_t_alignof a;
+  fold long_long_t_pts_to_uninit a;
+}
+
+ghost fn long_long_t_claim (a: ptr) (#b: bytes) (x: I64.t) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (long_long_t_repr x b)
+  requires pure (aligned a long_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype)
+  ensures  long_long_t_pts_to a 1.0R x
+{
+  long_long_t_repr_no_prov x b;
+  T.claim long_long_t_ctype long_long_t_repr long_long_t_alignof a #1.0R #x #b #e;
+  fold long_long_t_pts_to a 1.0R x;
+}
+
+ghost fn long_long_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (len b == SZ.v long_long_t_sizeof /\ aligned a long_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype)
+  ensures  long_long_t_pts_to_uninit a
+{
+  T.claim_storage long_long_t_ctype long_long_t_alignof a;
+  fold long_long_t_pts_to_uninit a;
+}
+
+ghost fn long_long_t_reveal_uninit (a: ptr)
+  requires long_long_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (ET.elen e == len b /\ ET.read_ok e long_long_t_ctype /\ len b == SZ.v long_long_t_sizeof /\ aligned a long_long_t_alignof)
+{
+  unfold long_long_t_pts_to_uninit a;
+  T.reveal_storage long_long_t_ctype long_long_t_alignof a;
+}
+
+(* ------------------------------- ulong_long_t ------------------------------- *)
+
+
+
+let ulong_long_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U64.t) : slprop =
+  T.value ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a p x
+
+let ulong_long_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
+  T.storage ulong_long_t_ctype ulong_long_t_alignof a
+
+let ulong_long_t_repr_no_prov (x: U64.t) (b: bytes)
+  : Lemma (requires ulong_long_t_repr x b)
+          (ensures  no_prov b /\ initialized b /\ len b == SZ.v ulong_long_t_sizeof)
+  = ()
+
+let ulong_long_t_repr_injective (x y: U64.t) (b: bytes)
+  : Lemma (requires ulong_long_t_repr x b /\ ulong_long_t_repr y b)
+          (ensures  x == y)
+  = assert_norm (pow2 (8 * 8) == pow2 64);
+    encode_injective (SZ.v ulong_long_t_sizeof) None (U64.v x) (U64.v y)
+
+ghost fn ulong_long_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U64.t)
+  preserves ulong_long_t_pts_to a p x
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold ulong_long_t_pts_to a p x;
+  T.not_null ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a;
+  fold ulong_long_t_pts_to a p x;
+}
+
+ghost fn ulong_long_t_pts_to_uninit_not_null (a: ptr)
+  preserves ulong_long_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold ulong_long_t_pts_to_uninit a;
+  T.storage_not_null ulong_long_t_ctype ulong_long_t_alignof a;
+  fold ulong_long_t_pts_to_uninit a;
+}
+
+[@@allow_ambiguous]
+ghost fn ulong_long_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U64.t)
+  preserves ulong_long_t_pts_to a p1 x
+  preserves ulong_long_t_pts_to a p2 y
+  ensures   pure (x == y)
+{
+  unfold ulong_long_t_pts_to a p1 x;
+  unfold ulong_long_t_pts_to a p2 y;
+  T.agree ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof ulong_long_t_repr_injective a;
+  fold ulong_long_t_pts_to a p1 x;
+  fold ulong_long_t_pts_to a p2 y;
+}
+
+ghost fn ulong_long_t_share (a: ptr) (#p: perm) (#x: U64.t)
+  requires ulong_long_t_pts_to a p x
+  ensures  ulong_long_t_pts_to a (p /. 2.0R) x ** ulong_long_t_pts_to a (p /. 2.0R) x
+{
+  unfold ulong_long_t_pts_to a p x;
+  T.share ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a;
+  fold ulong_long_t_pts_to a (p /. 2.0R) x;
+  fold ulong_long_t_pts_to a (p /. 2.0R) x;
+}
+
+[@@allow_ambiguous]
+ghost fn ulong_long_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U64.t)
+  requires ulong_long_t_pts_to a p1 x ** ulong_long_t_pts_to a p2 y
+  ensures  ulong_long_t_pts_to a (p1 +. p2) x ** pure (x == y)
+{
+  unfold ulong_long_t_pts_to a p1 x;
+  unfold ulong_long_t_pts_to a p2 y;
+  T.gather ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof ulong_long_t_repr_injective a;
+  fold ulong_long_t_pts_to a (p1 +. p2) x;
+}
+
+ghost fn ulong_long_t_reveal (a: ptr) (#p: perm) (#x: U64.t)
+  requires ulong_long_t_pts_to a p x
+  ensures  exists* b e. mem_pts_to_at a p b e ** pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype /\ ulong_long_t_repr x b /\ aligned a ulong_long_t_alignof)
+{
+  unfold ulong_long_t_pts_to a p x;
+  T.reveal_value ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a;
+}
+
+ghost fn ulong_long_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U64.t) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
+  requires pure (ulong_long_t_repr x b)
+  requires pure (aligned a ulong_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype)
+  ensures  ulong_long_t_pts_to a p x
+{
+  ulong_long_t_repr_no_prov x b;
+  T.claim ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a #p #x #b #e;
+  fold ulong_long_t_pts_to a p x;
+}
+
+ghost fn ulong_long_t_forget (a: ptr) (#x: U64.t)
+  requires ulong_long_t_pts_to a 1.0R x
+  ensures  ulong_long_t_pts_to_uninit a
+{
+  unfold ulong_long_t_pts_to a 1.0R x;
+  T.forget ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a;
+  fold ulong_long_t_pts_to_uninit a;
+}
+
+ghost fn ulong_long_t_claim (a: ptr) (#b: bytes) (x: U64.t) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (ulong_long_t_repr x b)
+  requires pure (aligned a ulong_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype)
+  ensures  ulong_long_t_pts_to a 1.0R x
+{
+  ulong_long_t_repr_no_prov x b;
+  T.claim ulong_long_t_ctype ulong_long_t_repr ulong_long_t_alignof a #1.0R #x #b #e;
+  fold ulong_long_t_pts_to a 1.0R x;
+}
+
+ghost fn ulong_long_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
+  requires pure (len b == SZ.v ulong_long_t_sizeof /\ aligned a ulong_long_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype)
+  ensures  ulong_long_t_pts_to_uninit a
+{
+  T.claim_storage ulong_long_t_ctype ulong_long_t_alignof a;
+  fold ulong_long_t_pts_to_uninit a;
+}
+
+ghost fn ulong_long_t_reveal_uninit (a: ptr)
+  requires ulong_long_t_pts_to_uninit a
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (ET.elen e == len b /\ ET.read_ok e ulong_long_t_ctype /\ len b == SZ.v ulong_long_t_sizeof /\ aligned a ulong_long_t_alignof)
+{
+  unfold ulong_long_t_pts_to_uninit a;
+  T.reveal_storage ulong_long_t_ctype ulong_long_t_alignof a;
+}
+
+ghost fn long_long_t_of_elem (a: ptr) (#p: perm) (#x: I64.t)
+  requires elem_pts_to long_long_t_ctype long_long_t_repr a p x
+  requires pure (aligned a long_long_t_alignof)
+  ensures  long_long_t_pts_to a p x
+{
+  elem_reveal long_long_t_ctype long_long_t_repr a;
+  long_long_t_conceal a #p #_ #x;
+}
+
+ghost fn long_long_t_to_elem (a: ptr) (#p: perm) (#x: I64.t)
+  requires long_long_t_pts_to a p x
+  ensures  elem_pts_to long_long_t_ctype long_long_t_repr a p x
+  ensures  pure (aligned a long_long_t_alignof)
+{
+  long_long_t_reveal a;
+  elem_conceal long_long_t_ctype long_long_t_repr a #p #_ #x;
+}
+
+ghost fn ulong_long_t_of_elem (a: ptr) (#p: perm) (#x: U64.t)
+  requires elem_pts_to ulong_long_t_ctype ulong_long_t_repr a p x
+  requires pure (aligned a ulong_long_t_alignof)
+  ensures  ulong_long_t_pts_to a p x
+{
+  elem_reveal ulong_long_t_ctype ulong_long_t_repr a;
+  ulong_long_t_conceal a #p #_ #x;
+}
+
+ghost fn ulong_long_t_to_elem (a: ptr) (#p: perm) (#x: U64.t)
+  requires ulong_long_t_pts_to a p x
+  ensures  elem_pts_to ulong_long_t_ctype ulong_long_t_repr a p x
+  ensures  pure (aligned a ulong_long_t_alignof)
+{
+  ulong_long_t_reveal a;
+  elem_conceal ulong_long_t_ctype ulong_long_t_repr a #p #_ #x;
+}
+
 (* ------------------------------ float32_t ------------------------------ *)
 
 
