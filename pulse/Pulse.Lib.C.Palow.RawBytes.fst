@@ -206,6 +206,17 @@ let none_wf (n: nat)
           [SMTPat (ET.etypes_wf (Seq.create n None))]
   = ()
 
+(* Bytes some type may read belong to objects they fit inside. *)
+let read_ok_wf (e: ET.etypes) (t: ET.ctype)
+  : Lemma (requires ET.read_ok e t)
+          (ensures ET.etypes_wf e)
+  = ()
+
+let initialized_value (b: bytes) (i: nat)
+  : Lemma (requires initialized b /\ i < len b)
+          (ensures Some? (value_of b i))
+  = ()
+
 let fresh_wf (n: nat)
   : Lemma (ET.etypes_wf (EM.fresh_index n))
           [SMTPat (ET.etypes_wf (EM.fresh_index n))]

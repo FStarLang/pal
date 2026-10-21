@@ -17072,6 +17072,91 @@ impl<'a> Body<'a> {
         Some((i, base.clone(), idx.clone()))
     }
 
+    /// `b[i]` where `b` is an `unsigned char *` naming a declared scalar
+    /// local: `unsigned char *b = (unsigned char *)&d;`. Character lvalues
+    /// may read any object (C11 6.5p7), so the read is of one byte of `d`'s
+    /// representation. The slot's index and the subscript.
+    fn slot_byte_access(&self, e: &Expr) -> Option<(usize, Rc<Expr>)> {
+        let ExprT::Index(base, idx) = &strip_vattr(e).val else {
+            return None;
+        };
+        let bty = self.ty_of(base).ok()?;
+        let TypeT::Pointer(elem, _) = &peel(self.tds, &bty).val else {
+            return None;
+        };
+        if !matches!(
+            peel(self.tds, elem).val,
+            TypeT::Int {
+                width: 8,
+                signed: false,
+                ..
+            }
+        ) {
+            return None;
+        }
+        let ExprT::Var(v) = &strip_vattr(base).val else {
+            return None;
+        };
+        let place = self.aliases.get(&*v.val)?;
+        let ExprT::Deref(inner) = &strip_vattr(place).val else {
+            return None;
+        };
+        let ExprT::Ref(obj) = &strip_casts(inner).val else {
+            return None;
+        };
+        let ExprT::Var(d) = &strip_vattr(obj).val else {
+            return None;
+        };
+        let i = self.slots.iter().rposition(|s| s.name == *d.val)?;
+        let s = &self.slots[i];
+        if !s.init
+            || s.global
+            || s.array.is_some()
+            || s.union_arm.is_some()
+            || !s.scattered.is_empty()
+            || is_aggregate(&s.palow_ty)
+            || self.retained.contains(&s.addr)
+        {
+            return None;
+        }
+        Some((i, idx.clone()))
+    }
+
+    /// A read of one byte of a declared scalar; see `slot_byte_access`. The
+    /// typed ownership is revealed as bytes for the read and concealed again
+    /// straight after, so the object keeps its value and its type.
+    fn slot_byte(&mut self, e: &Expr) -> Result<Option<String>, String> {
+        let Some((i, idx)) = self.slot_byte_access(e) else {
+            return Ok(None);
+        };
+        let k = self.index(&idx)?;
+        let (a, pn) = (self.slots[i].addr.clone(), self.slots[i].palow_ty.clone());
+        let p = self.fresh("byte_perm");
+        let x = self.fresh("byte_obj");
+        let bytes = self.fresh("byte_bytes");
+        let index = self.fresh("byte_index");
+        let t = self.fresh("byte");
+        self.lines
+            .push(format!("with {p} {x}. assert ({pn}_pts_to {a} {p} {x});"));
+        self.lines.push(format!("{pn}_reveal {a};"));
+        self.lines.push(format!(
+            "with {bytes} {index}. assert (mem_pts_to_at {a} {p} {bytes} {index});"
+        ));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.RawBytes.read_ok_wf {index} {pn}_ctype;"
+        ));
+        self.lines.push(format!("{pn}_repr_no_prov {x} {bytes};"));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.RawBytes.initialized_value {bytes} (SizeT.v {k});"
+        ));
+        self.lines.push(format!(
+            "let {t} = Pulse.Lib.C.Palow.RawBytes.byte_load {a} {k};"
+        ));
+        self.lines
+            .push(format!("{pn}_conceal {a} #{p} #{bytes} #{x} #{index};"));
+        Ok(Some(t))
+    }
+
     /// A load or store of one byte of a raw block; see `raw_byte_access`.
     /// The block's bytes stay defined -- initialised and provenance-free --
     /// whatever is stored, so the block's `fill` records only that.
@@ -17282,6 +17367,9 @@ impl<'a> Body<'a> {
 
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(t) = self.raw_byte(e, None)? {
+            return Ok(t);
+        }
+        if let Some(t) = self.slot_byte(e)? {
             return Ok(t);
         }
         if let Some(p) = self.unalias(e) {
