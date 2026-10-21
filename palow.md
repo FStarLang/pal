@@ -1152,18 +1152,18 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 20 |
+| Verified enabled cases within the supported target/model | 21 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (13.1, 13.2, 13.3, 14.2, 15.3 and 17.5) | 6 |
 | Checked rejections at the UB access (14.1, 15.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 17.4, 18.1 and 18.2) | 12 |
 | Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
-| Explicit unsupported-translation expectations | 23 |
+| Explicit unsupported-translation expectations | 22 |
 | Disabled cases (4.2, 16.3, 20.2, 21.1 and 22.3) | 5 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 
-The twenty supported cases are 1.1, 1.2, 1.3, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
-5.3, 6.1, 6.3, 7.1, 7.2, 7.4, 8.2, 9.1, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
+The twenty-one supported cases are 1.1, 1.2, 1.3, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
+5.3, 6.1, 6.3, 7.1, 7.2, 7.3, 7.4, 8.2, 9.1, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
 incompatible effective type. The six view rejections fail on
 `View.view_ok` or `View.aggregate_view_ok` at the incompatible access; in

@@ -13190,6 +13190,10 @@ struct Body<'a> {
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
+    /// Array-view locals bound once to an array compound literal:
+    /// `_array int *p = (int[]){1, 2};`. The literal gets storage when the
+    /// binding is reached, and from then on `p` is another name for it.
+    literal_aliases: HashSet<String>,
     /// Which member of a union at a given address is live, where the emitter
     /// knows. C's rule is that reading a member other than the one last
     /// written is not reading what you wrote, and Palow says the same thing by
@@ -21916,6 +21920,7 @@ impl<'a> Body<'a> {
             StmtT::Decl(name, ty) => {
                 if self.aliases.contains_key(&*name.val.to_string())
                     || self.is_array_alias(&name.val.to_string())
+                    || self.literal_aliases.contains(&*name.val.to_string())
                 {
                     return Ok(());
                 }
@@ -22026,6 +22031,12 @@ impl<'a> Body<'a> {
                 // The alias itself: nothing is stored, because the pointer is
                 // a name and not an object.
                 if let Some(v) = lvalue_name(lhs) {
+                    if self.literal_aliases.contains(&v) {
+                        let lit = Rc::new(strip_casts(rhs).clone());
+                        let a = self.array_literal(&lit)?;
+                        self.array_aliases.insert(v, a);
+                        return Ok(());
+                    }
                     if self.aliases.contains_key(&v) || self.is_array_alias(&v) {
                         // An identity function is still called, for whatever
                         // else it does; only its result is already known.
@@ -24480,6 +24491,36 @@ fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
     out
 }
 
+/// The array-view locals bound exactly once, to an array compound literal.
+/// See `literal_aliases`.
+fn literal_alias_set(tds: &Typedefs, body: &Stmts) -> HashSet<String> {
+    let mut t = Touched::default();
+    touch_stmts(body, &mut t);
+    let locals: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, ty) if extent(tds, ty) == Some(Extent::Array) => Some(n.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut out = HashSet::new();
+    for st in body.iter() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
+            continue;
+        }
+        if matches!(strip_casts(rhs).val, ExprT::ArrayInit { .. }) {
+            out.insert(q);
+        }
+    }
+    out
+}
+
 /// Whether an expression is a pointer or an array, so that adding to it is
 /// pointer arithmetic rather than ordinary addition. A type that cannot be
 /// inferred here -- a local declared in the body, which this env does not
@@ -25568,6 +25609,7 @@ fn emit_body(
         byte_bases: byte_base_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
+        literal_aliases: literal_alias_set(tds, &defn.body),
         active: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
