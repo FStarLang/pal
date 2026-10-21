@@ -25263,10 +25263,130 @@ fn hoist_identity_calls(tu: &TranslationUnit) -> TranslationUnit {
     let mut tu = tu.clone();
     for d in tu.decls.iter_mut() {
         if let DeclT::FnDefn(f) = &mut d.val {
-            f.body = hoist_stmts(&f.body, &idents);
+            f.body = byte_copy_loops(&hoist_stmts(&f.body, &idents));
         }
     }
     tu
+}
+
+/// A hand-written byte copy, `for (i = 0; i < n; i++) d[i] = s[i];` with
+/// `d` and `s` character views bound once to `dst` and `src`, is `memcpy`:
+/// 6.5p6 says a copy "as an array of character type" gives the destination
+/// the source's effective type exactly as `memcpy` does. The loop becomes
+/// `memcpy(dst, src, n); i = n;`, which is what it computes.
+fn byte_copy_loops(ss: &Stmts) -> Stmts {
+    let mut out: Stmts = Vec::new();
+    for (k, s) in ss.iter().enumerate() {
+        let rec = |b: &Stmts| Rc::new(byte_copy_loops(b));
+        let s = match &s.val {
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => StmtT::If {
+                cond: cond.clone(),
+                then_branch: rec(then_branch),
+                else_branch: rec(else_branch),
+                ensures: ensures.clone(),
+            }
+            .with_loc(s.loc.clone()),
+            StmtT::While { .. } if let Some(rw) = byte_copy_loop(&ss[..k], s) => {
+                out.extend(rw);
+                continue;
+            }
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: rec(body),
+            }
+            .with_loc(s.loc.clone()),
+            _ => s.clone(),
+        };
+        out.push(s);
+    }
+    out
+}
+
+fn byte_copy_loop(before: &[Rc<Stmt>], s: &Stmt) -> Option<Stmts> {
+    let StmtT::While {
+        cond,
+        body,
+        ensures,
+        ..
+    } = &s.val
+    else {
+        return None;
+    };
+    if !ensures.is_empty() || body.len() != 2 {
+        return None;
+    }
+    let ExprT::BinOp(BinOp::Lt, iv, n) = &strip_vattr(cond).val else {
+        return None;
+    };
+    let ExprT::Var(i) = &strip_casts(iv).val else {
+        return None;
+    };
+    let is_i = |e: &Expr| matches!(&strip_casts(e).val, ExprT::Var(v) if v.val == i.val);
+    // `n` is evaluated once instead of on every iteration, so it has to be
+    // a constant.
+    if !matches!(&strip_casts(n).val, ExprT::SizeOf(..) | ExprT::IntLit(..)) {
+        return None;
+    }
+    let StmtT::Assign(lhs, rhs) = &body[0].val else {
+        return None;
+    };
+    let (ExprT::Index(d, di), ExprT::Index(src, si)) =
+        (&strip_vattr(lhs).val, &strip_casts(rhs).val)
+    else {
+        return None;
+    };
+    if !is_i(di) || !is_i(si) {
+        return None;
+    }
+    let incr = match &body[1].val {
+        StmtT::Call(e) => matches!(
+            &strip_vattr(e).val,
+            ExprT::PostIncr(x) | ExprT::PreIncr(x) if is_i(x)
+        ),
+        _ => false,
+    };
+    if !incr {
+        return None;
+    }
+    let (ExprT::Var(d), ExprT::Var(src)) = (&strip_vattr(d).val, &strip_casts(src).val) else {
+        return None;
+    };
+    // Where each view and the counter were last bound, with nothing but
+    // declarations and other bindings after it.
+    let bound = |v: &Rc<Ident>| -> Option<Rc<Expr>> {
+        before.iter().rev().find_map(|st| match &st.val {
+            StmtT::Assign(l, r) if matches!(&strip_vattr(l).val, ExprT::Var(x) if x.val == v.val) => {
+                Some(r.clone())
+            }
+            _ => None,
+        })
+    };
+    let zero = bound(i)?;
+    if !matches!(&strip_casts(&zero).val, ExprT::IntLit(z, _) if **z == BigInt::from(0)) {
+        return None;
+    }
+    let (dst, from) = (bound(d)?, bound(src)?);
+    let loc = s.loc.clone();
+    let memcpy = Rc::<str>::from("memcpy").with_loc(loc.clone());
+    let call = ExprT::FnCall(memcpy, vec![dst, from, n.clone()]).with_loc(loc.clone());
+    Some(vec![
+        StmtT::Call(call).with_loc(loc.clone()),
+        StmtT::Assign(iv.clone(), n.clone()).with_loc(loc),
+    ])
 }
 
 fn hoist_stmts(ss: &Stmts, idents: &HashMap<String, usize>) -> Stmts {

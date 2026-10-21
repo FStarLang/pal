@@ -942,7 +942,12 @@ through an unsigned integer type decodes whatever those bytes are
 (`RawBytes.<T>_of_bytes`), which is what 6.2 does. A character read may
 also inspect a declared scalar: through `unsigned char *b = (unsigned char
 *)&d`, `b[i]` reveals `d`'s representation and is `RawBytes.byte_load` of
-its `i`-th byte, after which `d` is concealed again unchanged (2.1). Reads
+its `i`-th byte, after which `d` is concealed again unchanged (2.1). A
+hand-written byte copy `for (i = 0; i < n; i++) d[i] = s[i];` between two
+character views bound to `dst` and `src`, with `n` a constant, is
+translated as `memcpy(dst, src, n); i = n;` -- C11 6.5p6 gives a copy "as an
+array of character type" exactly `memcpy`'s effect on the effective type
+(5.2). Reads
 never retype, so a read through another type still fails at the read. Array,
 flexible-struct, field-by-field and callee-provided blocks keep their existing
 rules, and an aggregate without a whole-object initialization keeps its
@@ -1160,18 +1165,18 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 23 |
+| Verified enabled cases within the supported target/model | 24 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 8 |
 | Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1 and 18.2) | 10 |
 | Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
-| Explicit unsupported-translation expectations | 20 |
+| Explicit unsupported-translation expectations | 19 |
 | Disabled cases (4.2, 16.3, 20.2, 21.1 and 22.3) | 5 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 
-The twenty-three supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
-5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.2, 9.1, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
+The twenty-four supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
+5.2, 5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.2, 9.1, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
 incompatible effective type. The eight view rejections fail on
 `View.view_ok` or `View.aggregate_view_ok` at the incompatible access. In
