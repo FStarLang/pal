@@ -4433,9 +4433,27 @@ impl<'a> Emitter<'a> {
                             .map(|ty| env.vtype_whnf(ty))
                             .is_some_and(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Ref)))
                     {
+                        // Bind a side-effecting index (`&a[i++]`) first: Pulse
+                        // would otherwise evaluate it twice, once for the call
+                        // and once for the `#s` refinement (#371). Pure indices
+                        // stay inline so user ghost code can mention them.
+                        let mut idx_doc = self.emit_rvalue(env, idx);
+                        let mut idx_bind = Doc::nil();
+                        if expr_may_have_side_effects(idx) {
+                            let idx_tmp = self.fresh_tmp("borrow_idx");
+                            idx_bind = Doc::text("let ")
+                                .append(idx_tmp.clone())
+                                .append(Doc::text(" ="))
+                                .append(Doc::line())
+                                .append(idx_doc)
+                                .append(";")
+                                .nest(2)
+                                .group()
+                                .append(Doc::hardline());
+                            idx_doc = idx_tmp;
+                        }
                         let arr_doc = self.emit_rvalue(env, arr);
-                        let idx_doc = self.emit_rvalue(env, idx);
-                        return self
+                        let assign = self
                             .emit_lvalue(env, x)
                             .append(Doc::line())
                             .append(":=")
@@ -4445,6 +4463,7 @@ impl<'a> Emitter<'a> {
                             .append(";")
                             .group()
                             .nest(2);
+                        return idx_bind.append(assign);
                     }
                     // `x = <arrayptr>` where `x` is a `ref` local: borrow the
                     // cell the arrayptr points at out of its (still-live) parent
@@ -7642,6 +7661,35 @@ impl<'a> Emitter<'a> {
 /// Append remaining statements to a block (for if/else continuation in pure functions).
 fn append_rest(block_stmts: &[Rc<Stmt>], rest: &[Rc<Stmt>]) -> Vec<Rc<Stmt>> {
     block_stmts.iter().chain(rest.iter()).cloned().collect()
+}
+
+/// Conservative check: false only for expressions built from variables,
+/// literals and side-effect-free operators (reads are not counted as effects).
+fn expr_may_have_side_effects(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::Var(_)
+        | ExprT::BoolLit(_)
+        | ExprT::IntLit(..)
+        | ExprT::FloatLit(..)
+        | ExprT::FnRef(_)
+        | ExprT::SizeOf(_)
+        | ExprT::AlignOf(_) => false,
+        ExprT::Deref(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a)
+        | ExprT::Ref(a)
+        | ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _) => expr_may_have_side_effects(a),
+        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) => {
+            expr_may_have_side_effects(a) || expr_may_have_side_effects(b)
+        }
+        ExprT::Cond(a, b, c) => {
+            expr_may_have_side_effects(a)
+                || expr_may_have_side_effects(b)
+                || expr_may_have_side_effects(c)
+        }
+        _ => true,
+    }
 }
 
 impl<'a> Emitter<'a> {
