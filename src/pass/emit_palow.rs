@@ -2076,6 +2076,27 @@ impl<'a> Spec<'a> {
         {
             {
                 let ty = self.ty_of(l)?;
+                // A floating-point comparison is the IEEE one the body would
+                // perform, a `bool`: there is no mathematical order to fall
+                // back to, since a NaN compares false with everything.
+                if let TypeT::Float {
+                    width: fw @ (32 | 64),
+                } = self.tds.resolve(&ty).val
+                {
+                    let f = match op {
+                        BinOp::Lt => "lt",
+                        BinOp::LEq => "lte",
+                        BinOp::Eq => "ieee_eq",
+                        _ => return Err("an unsupported operator in a contract".to_string()),
+                    };
+                    return Ok(format!(
+                        "(Float{}.{} {} {} == true)",
+                        fw,
+                        f,
+                        self.value(l, w)?,
+                        self.value(r, w)?
+                    ));
+                }
                 if matches!(op, BinOp::Eq) {
                     // `_Bool` equality is equivalence of the two conditions,
                     // not equality of two values: one side is often a
@@ -23051,17 +23072,71 @@ fn float_mod(tds: &Typedefs, ty: &Type) -> Option<String> {
     }
 }
 
-/// A C floating-point literal. F* takes one as a string and replaces it with
-/// the corresponding C constant at extraction, so the only work here is to
-/// drop C's width suffix -- which is already in the type, and which F* would
-/// not recognise.
+/// A C floating-point literal, with C's width suffix dropped -- it is already
+/// in the type, and F* would not recognise it. When the literal is a plain
+/// decimal, it is rounded here exactly as C rounds it (Rust's parser is
+/// correctly rounded, at the literal's own width) and emitted as
+/// `float{w}_lit "text" num den k`, which carries the value `num / 2^k` for
+/// proofs; anything else stays an opaque `of_literal`.
 fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String> {
     let m = float_mod(tds, ty).ok_or_else(|| format!("a literal of {}", describe(ty)))?;
     let digits = text.trim_end_matches(['f', 'F', 'l', 'L']);
     if digits.is_empty() || digits.contains('"') {
         return Err("a float literal that is not a plain constant".to_string());
     }
-    Ok(format!("({}.of_literal \"{}\")", m, digits))
+    let exact = if m == "Float64" {
+        digits.parse::<f64>().ok().and_then(|x| dyadic(x, 53))
+    } else {
+        digits
+            .parse::<f32>()
+            .ok()
+            .and_then(|x| dyadic(f64::from(x), 24))
+    };
+    Ok(match exact {
+        Some((num, k)) => format!(
+            "(float{}_lit \"{}\" {} {} {})",
+            &m[5..],
+            digits,
+            num,
+            BigInt::from(1) << k,
+            k
+        ),
+        None => format!("({}.of_literal \"{}\")", m, digits),
+    })
+}
+
+/// A finite `x` as `num / 2^k` in lowest terms, provided `|num| < 2^bits` --
+/// the shape `float{w}_lit` needs to state the value.
+fn dyadic(x: f64, bits: u32) -> Option<(i64, u32)> {
+    if !x.is_finite() {
+        return None;
+    }
+    let raw = x.to_bits();
+    let exp = ((raw >> 52) & 0x7ff) as i32;
+    let frac = (raw & ((1u64 << 52) - 1)) as i64;
+    let (mut num, mut e) = if exp == 0 {
+        (frac, -1074)
+    } else {
+        (frac | (1i64 << 52), exp - 1075)
+    };
+    if num == 0 {
+        return Some((0, 0));
+    }
+    while num % 2 == 0 && e < 0 {
+        num /= 2;
+        e += 1;
+    }
+    while e > 0 && num < (1i64 << bits) {
+        num *= 2;
+        e -= 1;
+    }
+    if e > 0 || num >= (1i64 << bits) {
+        return None;
+    }
+    if raw >> 63 == 1 {
+        num = -num;
+    }
+    Some((num, (-e) as u32))
 }
 
 /// `~a`, written as the subtraction it equals in two's complement: `-1 - a`

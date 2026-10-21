@@ -69,7 +69,7 @@
 
 static volatile unsigned long long g_sink;
 
-static void sink_d(double v)             { g_sink ^= (unsigned long long)(v * 7.0); }
+static void sink_d(double v) _requires(0.0 <= v && v <= 1000.0) { g_sink ^= (unsigned long long)(v * 7.0); }
 
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)

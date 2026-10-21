@@ -201,3 +201,132 @@ let float64_to_uint32 (x: float64 { float64_fits x 0 4294967295 }) : FStar.UInt3
 let float64_to_uint64 (x: float64 { float64_fits x 0 18446744073709551615 }) : FStar.UInt64.t =
   float64_trunc_bounds x 0 18446744073709551615;
   FStar.UInt64.uint_to_t (float64_trunc x)
+
+(* ---------------------------------------------------------------------------
+   The value of a float, for proofs. Everything above treats a float as an
+   opaque bit pattern; a program that needs to know *which* number it holds --
+   to discharge a conversion's range, say -- needs a little more, and this is
+   that little, stated so that each axiom is true of IEEE-754 binary32 and
+   binary64 with round-to-nearest:
+
+   - `value` is the real number a finite float denotes, and `None` for a NaN
+     or an infinity.
+   - A C literal is `float{w}_lit s num den k`: the literal whose source text is
+     `s`, which the translator has already rounded to `num / den` with
+     `den = 2^k`. The string is only the label extraction would print; the
+     facts come from `num`, `den` and `k`, and are only claimed when they
+     describe a representable value. `of_literal s` itself is left alone:
+     giving it a value would let two calls disagree about the same string.
+   - `lt`/`lte` agree with the order on values when both are finite, and a
+     float between two finite ones is finite.
+   - `mul` of two finite floats whose exact product is safely below the
+     overflow threshold is finite and within a relative error of half an ulp,
+     plus an absolute error for underflow; the absolute term is stated far
+     more loosely than it is, which keeps it a true statement.
+   - Comparisons with integers follow from the value.
+   --------------------------------------------------------------------------- *)
+module R = FStar.Real
+
+let rabs (x: R.real) : R.real = if R.(x >=. zero) then x else R.(zero -. x)
+
+val float64_value (x: float64) : option R.real
+
+let float64_finite (x: float64) : prop = Some? (float64_value x)
+
+let float64_val (x: float64 { float64_finite x }) : R.real = Some?.v (float64_value x)
+
+val float64_lit (s: string) (num: int) (den: pos) (k: nat)
+  : x: float64 {
+      (den == pow2 k /\ k <= 1074 /\ - 9007199254740992 < num /\ num < 9007199254740992) ==>
+      (float64_finite x /\ R.(float64_val x *. of_int den == of_int num))
+    }
+
+val float64_of_int_value (n: FStar.Int64.t)
+  : Lemma (requires - 9007199254740992 <= FStar.Int64.v n /\ FStar.Int64.v n <= 9007199254740992)
+          (ensures  float64_finite (F64.of_int n) /\
+                    float64_val (F64.of_int n) == R.of_int (FStar.Int64.v n))
+          [SMTPat (F64.of_int n)]
+
+val float64_lte_value (x y: float64)
+  : Lemma (requires float64_finite x /\ float64_finite y)
+          (ensures  (F64.lte x y <==> R.(float64_val x <=. float64_val y)))
+          [SMTPat (F64.lte x y)]
+
+val float64_lt_value (x y: float64)
+  : Lemma (requires float64_finite x /\ float64_finite y)
+          (ensures  (F64.lt x y <==> R.(float64_val x <. float64_val y)))
+          [SMTPat (F64.lt x y)]
+
+val float64_between_finite (a x b: float64)
+  : Lemma (requires float64_finite a /\ float64_finite b /\ F64.lte a x /\ F64.lte x b)
+          (ensures  float64_finite x)
+          [SMTPat (F64.lte a x); SMTPat (F64.lte x b)]
+
+val float64_mul_value (x y: float64)
+  : Lemma (requires float64_finite x /\ float64_finite y /\
+                    R.(rabs (float64_val x *. float64_val y) <. 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0R))
+          (ensures  float64_finite (F64.mul x y) /\
+                    R.(rabs (float64_val (F64.mul x y) -. float64_val x *. float64_val y)
+                       <=. rabs (float64_val x *. float64_val y) *. 0.00000000000000011102230246251565404236316680908203125R +. 0.5R))
+          [SMTPat (F64.mul x y)]
+
+val float64_gt_int_value (x: float64) (n: int)
+  : Lemma (requires float64_finite x /\ R.(float64_val x >. of_int n))
+          (ensures  float64_gt_int x n)
+          [SMTPat (float64_gt_int x n)]
+
+val float64_lt_int_value (x: float64) (n: int)
+  : Lemma (requires float64_finite x /\ R.(float64_val x <. of_int n))
+          (ensures  float64_lt_int x n)
+          [SMTPat (float64_lt_int x n)]
+
+val float32_value (x: float32) : option R.real
+
+let float32_finite (x: float32) : prop = Some? (float32_value x)
+
+let float32_val (x: float32 { float32_finite x }) : R.real = Some?.v (float32_value x)
+
+val float32_lit (s: string) (num: int) (den: pos) (k: nat)
+  : x: float32 {
+      (den == pow2 k /\ k <= 149 /\ - 16777216 < num /\ num < 16777216) ==>
+      (float32_finite x /\ R.(float32_val x *. of_int den == of_int num))
+    }
+
+val float32_of_int_value (n: FStar.Int64.t)
+  : Lemma (requires - 16777216 <= FStar.Int64.v n /\ FStar.Int64.v n <= 16777216)
+          (ensures  float32_finite (F32.of_int n) /\
+                    float32_val (F32.of_int n) == R.of_int (FStar.Int64.v n))
+          [SMTPat (F32.of_int n)]
+
+val float32_lte_value (x y: float32)
+  : Lemma (requires float32_finite x /\ float32_finite y)
+          (ensures  (F32.lte x y <==> R.(float32_val x <=. float32_val y)))
+          [SMTPat (F32.lte x y)]
+
+val float32_lt_value (x y: float32)
+  : Lemma (requires float32_finite x /\ float32_finite y)
+          (ensures  (F32.lt x y <==> R.(float32_val x <. float32_val y)))
+          [SMTPat (F32.lt x y)]
+
+val float32_between_finite (a x b: float32)
+  : Lemma (requires float32_finite a /\ float32_finite b /\ F32.lte a x /\ F32.lte x b)
+          (ensures  float32_finite x)
+          [SMTPat (F32.lte a x); SMTPat (F32.lte x b)]
+
+val float32_mul_value (x y: float32)
+  : Lemma (requires float32_finite x /\ float32_finite y /\
+                    R.(rabs (float32_val x *. float32_val y) <. 100000000000000000000000000000000000000.0R))
+          (ensures  float32_finite (F32.mul x y) /\
+                    R.(rabs (float32_val (F32.mul x y) -. float32_val x *. float32_val y)
+                       <=. rabs (float32_val x *. float32_val y) *. 0.000000059604644775390625R +. 0.5R))
+          [SMTPat (F32.mul x y)]
+
+val float32_gt_int_value (x: float32) (n: int)
+  : Lemma (requires float32_finite x /\ R.(float32_val x >. of_int n))
+          (ensures  float32_gt_int x n)
+          [SMTPat (float32_gt_int x n)]
+
+val float32_lt_int_value (x: float32) (n: int)
+  : Lemma (requires float32_finite x /\ R.(float32_val x <. of_int n))
+          (ensures  float32_lt_int x n)
+          [SMTPat (float32_lt_int x n)]

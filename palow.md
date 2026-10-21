@@ -1087,19 +1087,18 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 13 |
+| Verified enabled cases within the supported target/model | 15 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (13.1, 13.2, 13.3 and 14.2) | 4 |
 | Checked rejections before the UB access (13.4, 13.5, 14.3, 16.1, 16.2, 17.3 and 24.5) | 7 |
 | Defined programs rejected for want of an explicit retype (3.1 and 6.1) | 2 |
-| Defined programs rejected only by `sink_d` (5.1 and 7.2) | 2 |
 | Explicit unsupported-translation expectations | 38 |
 | Disabled cases (16.3, 20.2, 21.1 and 22.3) | 4 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 
-The thirteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.2, 4.1, 6.3, 7.1, 7.4,
-8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
+The fifteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.2, 4.1, 5.1, 6.3, 7.1,
+7.2, 7.4, 8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
 incompatible effective type. The four view rejections fail on
 `View.view_ok` or `View.aggregate_view_ok` at the incompatible access. The
@@ -1114,9 +1113,10 @@ The corpus helper `sink_d` computes `(unsigned long long)(v * 7.0)` for an
 arbitrary `double v`. That conversion is undefined unless the truncated value
 fits in the target type (6.3.1.4p1), so `Func_sink_d` is rejected on
 `float64_fits` in every case that uses it, and those cases record that
-failure alongside their own. 5.1 and 7.2 are rejected by it alone: their
-bodies verify. Floating-point arithmetic is uninterpreted in F*, so no
-caller could establish the range even with a `_requires` on `sink_d`.
+failure alongside their own. In 5.1 and 7.2, which were rejected by it
+alone, `sink_d` carries `_requires(0.0 <= v && v <= 1000.0)`: the float value
+semantics below make `v * 7.0` provably within range, and the callers, which
+pass the literals 2.5 and 3.25, discharge the precondition.
 
 The separate native-C regressions exercise
 preparation, non-sticky zero views, copying, contextual ownership and the
@@ -4348,7 +4348,7 @@ new facts about memory.
    -- the two blocks were generated from the `int32_t` and `int64_t` ones by
    substitution, which is the clearest evidence that nothing about floating
    point is special *to the memory model*. The translator side is the
-   arithmetic: literals go to `of_literal`, the operators to F\*'s, and the
+   arithmetic: literals go to `float{w}_lit`, the operators to F\*'s, and the
    conversions say what C says -- widening `float` to `double` is exact and
    narrowing rounds, so they are two functions and only one is invertible,
    where a model without them would have to route the conversion through an
@@ -4361,7 +4361,28 @@ new facts about memory.
    `float{w}_gt_int`/`float{w}_lt_int` against mathematical integers. Those
    comparisons are axiomatized only for values `of_int` produces exactly, so
    `(int32_t)(double)x` for an `int16_t x` verifies and an arbitrary
-   `(int32_t)d` does not (`test/float_to_int_bad`). `==` is `ieee_eq` and not F\*
+   `(int32_t)d` does not (`test/float_to_int_bad`).
+
+   To let a contract bound a float, the library gives a float a value, again
+   by axioms each true of IEEE-754 round-to-nearest: `float{w}_value x` is
+   the real it denotes, `None` for a NaN or an infinity. A decimal literal is
+   rounded by the translator exactly as C rounds it (at the literal's own
+   width) and emitted as `float{w}_lit "2.5" 5 2 1`, whose refinement gives
+   its value `num / 2^k` -- conditionally on that being a representable
+   value, so the axiom cannot be instantiated falsely; `of_literal` itself
+   gets no value, since two calls on one string could otherwise disagree.
+   `of_int` of a small integer has its exact value; `lt`/`lte` agree with
+   the order on values of finite operands, and a float between two finite
+   ones is finite; `mul` of finite operands whose exact product is below
+   `1e300` (`1e38` for `float`) is finite and within half an ulp of it, plus
+   a deliberately loose absolute `0.5` for underflow; and a value above or
+   below an integer gives `gt_int`/`lt_int`. Contracts may now contain float
+   constants and `<`, `<=`, `==` on floats, emitted as the IEEE comparison.
+   That is enough for `_requires(0.0 <= v && v <= 1000.0)` to prove
+   `(unsigned long long)(v * 7.0)` defined. Addition, subtraction, division
+   and the conversions have no value axioms yet. The one cost is extraction:
+   `float{w}_lit` is abstract, so extracting it would need mapping back to
+   the C literal it carries. `==` is `ieee_eq` and not F\*
    equality, since C's `==` identifies the two zeros and makes a NaN unequal
    to itself. The whole of `test/float_double` -- its functions and a struct
    with padding between a `float` and a `double` -- now translates with no
