@@ -115,6 +115,16 @@ fn memcpy_prepared (dst src: ptr) (n: SZ.t) (t: erased ET.ctype)
                  ET.established_type es (reveal t))
   ensures mem_pts_to_at dst 1.0R bs (ET.etypes_of (reveal t) false)
 
+(* C11 6.5p6: an object with no effective type gives the copy none either
+   ("if it has one"). The bytes, initialized or not, are copied verbatim, so a
+   later typed read still needs them initialized. *)
+fn memcpy_untyped (dst src: ptr) (n: SZ.t)
+          (#p: perm) (#bs #bd: erased bytes)
+  preserves mem_pts_to_at src p bs (Seq.create (SZ.v n) None)
+  requires mem_pts_to_at dst 1.0R bd (Seq.create (SZ.v n) None)
+  requires pure (len bs == SZ.v n /\ len bd == SZ.v n)
+  ensures mem_pts_to_at dst 1.0R bs (Seq.create (SZ.v n) None)
+
 (* Character filling changes representation and initialization, not type. *)
 fn memset_zero (dst: ptr) (n: SZ.t) (#bd: erased bytes) (#ed: ET.etypes)
   requires mem_pts_to_at dst 1.0R bd ed

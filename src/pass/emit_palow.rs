@@ -10741,6 +10741,26 @@ fn emit_array_fill_helpers(tds: &Typedefs, tu: &TranslationUnit) -> Option<Chunk
 }
 
 /// A subscript's index when it is a constant, after the casts C wraps it in.
+/// A byte count known at translation time.
+fn const_bytes(tds: &Typedefs, e: &Expr) -> Option<u64> {
+    match &e.val {
+        ExprT::IntLit(n, _) => u64::try_from(&**n).ok(),
+        ExprT::SizeOf(t) => palow_sizeof(tds, t),
+        ExprT::Cast(inner, _) | ExprT::VAttr(_, inner) => const_bytes(tds, inner),
+        ExprT::BinOp(op, a, b) => {
+            let (a, b) = (const_bytes(tds, a)?, const_bytes(tds, b)?);
+            match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                BinOp::Div => a.checked_div(b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn const_index(e: &ExprT) -> Option<u64> {
     match e {
         ExprT::IntLit(n, _) => u64::try_from(&**n).ok(),
@@ -11553,6 +11573,7 @@ pub fn decl_name(decl: &Decl) -> String {
 }
 
 pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
+    let tu = &hoist_identity_calls(tu);
     let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
     for decl in &tu.decls {
@@ -12538,6 +12559,9 @@ struct Block {
     /// Whether the null test has been passed. Until it has, the block is under
     /// `unless_null` and unusable.
     checked: bool,
+    /// Whether this path has found the pointer null, and so spent its guard:
+    /// there is nothing to free, and `free` of it does nothing.
+    null: bool,
     /// Whether the pointee has been written. `malloc` hands back uninitialised
     /// storage, so the first store through the pointer is an initialising one.
     init: bool,
@@ -12564,6 +12588,15 @@ struct Block {
     /// type, so the length has to be carried from the allocation site to
     /// everything that asks how big the object is.
     flex: Option<FlexBlock>,
+    /// For a block carved out of a raw parent at a constant offset
+    /// (`T *p = (T *)(raw + k)`): the parent's local and the offset, as a
+    /// `SizeT.t` literal. The child's alignment is then the parent's, shifted
+    /// by the offset -- which is where a misaligned interior pointer fails.
+    parent: Option<(String, String)>,
+    /// For a raw block a child has been carved out of: the child's local and
+    /// the offset. The parent then owns only the bytes before the offset until
+    /// it is freed.
+    split: Option<(String, String)>,
 }
 
 /// The tail of a flexible-array-member allocation.
@@ -12963,6 +12996,10 @@ struct Body<'a> {
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
     pointer_views: HashMap<String, Option<Rc<Expr>>>,
+    /// For a local bound once to fresh `malloc`/`calloc` storage, the pointer
+    /// type its first pointer-typed access gave the storage. `ptr_ctype` does
+    /// not tell pointer types apart, so the emitter keeps them consistent.
+    alloc_ptr_types: RefCell<HashMap<String, Rc<Type>>>,
     /// Locals bound once to a converted parameter, `void *b = (void *)q;`:
     /// the structure a byte offset from `b` lands in. See `byte_base_map`.
     byte_bases: HashMap<String, Rc<Expr>>,
@@ -13083,6 +13120,25 @@ impl<'a> Body<'a> {
             peel(self.tds, target).val,
             TypeT::Pointer(..) | TypeT::FnPtr { .. }
         ) {
+            return Ok(());
+        }
+        // Storage with no effective type takes that of the first store into
+        // it (C11 6.5p6); every later pointer-typed access must agree.
+        if let ExprT::Var(v) = &strip_casts(pointer).val
+            && let Some(Some(src)) = self.pointer_views.get(&*v.val)
+            && let ExprT::FnCall(f, _) = &strip_casts(src).val
+            && matches!(f.val.as_ref(), "malloc" | "calloc")
+        {
+            let mut tys = self.alloc_ptr_types.borrow_mut();
+            let first = tys
+                .entry(v.val.to_string())
+                .or_insert_with(|| target.clone());
+            if !same_pointer_object_type(self.tds, first, target) {
+                return Err(
+                    "incompatible stored-pointer reinterpretation is unsupported: ptr_ctype does not distinguish C pointee types"
+                        .to_string(),
+                );
+            }
             return Ok(());
         }
         let source = self.pointer_object_source(pointer, &mut HashSet::new())?;
@@ -16990,6 +17046,7 @@ impl<'a> Body<'a> {
                             && b.checked
                             && !b.freed
                             && b.pn.is_empty()
+                            && b.split.is_none()
                             && b.fill == "zeroed"
                     })
                 {
@@ -18938,6 +18995,9 @@ impl<'a> Body<'a> {
             array: None,
             flex: None,
             bytes: None,
+            null: false,
+            parent: None,
+            split: None,
         });
         Ok(())
     }
@@ -19036,6 +19096,9 @@ impl<'a> Body<'a> {
                 "uninit"
             },
             checked: false,
+            null: false,
+            parent: None,
+            split: None,
             init: false,
             freed: false,
             prepared: None,
@@ -19141,6 +19204,9 @@ impl<'a> Body<'a> {
             pn: sn,
             fill: if zero.is_some() { "zeroed" } else { "uninit" },
             checked: false,
+            null: false,
+            parent: None,
+            split: None,
             init: false,
             freed: false,
             prepared: None,
@@ -19264,6 +19330,9 @@ impl<'a> Body<'a> {
                 "uninit"
             },
             checked: false,
+            null: false,
+            parent: None,
+            split: None,
             init: false,
             freed: false,
             prepared: None,
@@ -19313,6 +19382,9 @@ impl<'a> Body<'a> {
                 "uninit"
             },
             checked: false,
+            null: false,
+            parent: None,
+            split: None,
             init: zero.is_some(),
             freed: false,
             prepared: None,
@@ -19448,6 +19520,7 @@ impl<'a> Body<'a> {
     fn mark_checked(&mut self, i: usize, live: bool) {
         let b = &mut self.blocks[i];
         b.checked = live;
+        b.null = !live;
         if live && b.zero.is_some() && b.array.is_none() && b.flex.is_none() {
             b.init = true;
         }
@@ -19669,6 +19742,30 @@ impl<'a> Body<'a> {
             self.lines.push(format!("free var_{};", name));
             return Ok(());
         }
+        // `free(NULL)` does nothing, and a pointer not yet tested may be
+        // either: the test happens here instead.
+        if let Some(i) = self
+            .blocks
+            .iter()
+            .position(|b| b.var == name && !b.checked && !b.freed)
+        {
+            let b = &self.blocks[i];
+            if !b.null {
+                if b.taken.is_some() {
+                    return Err(format!(
+                        "a `free` of `{}`, which may be null and was handed over by a call",
+                        name
+                    ));
+                }
+                let sl = Self::block_slprop(b);
+                self.lines.push(format!(
+                    "if (is_null {0}) {{ elim_unless_null_null {0} {1}; }} else {{ elim_unless_null {0} {1}; free {0}; }};",
+                    b.tmp, sl
+                ));
+            }
+            self.blocks[i].freed = true;
+            return Ok(());
+        }
         let found = self
             .blocks
             .iter()
@@ -19679,6 +19776,22 @@ impl<'a> Body<'a> {
         // is either, which is why this goes through the step that asks the
         // ownership rather than the caller; and if the splice did not in fact
         // grant it, F* rejects the `free`.
+        if let Some(i) = found
+            && self.blocks[i].parent.is_some()
+        {
+            return Err(format!(
+                "a `free` of `{}`, which points into the middle of a block",
+                name
+            ));
+        }
+        if let Some(i) = found
+            && let Some((child, k)) = self.blocks[i].split.clone()
+        {
+            self.release_child(&child)?;
+            let tmp = self.blocks[i].tmp.clone();
+            self.lines.push(format!("mem_join_at {} {};", tmp, k));
+            self.blocks[i].split = None;
+        }
         let Some(i) = found else {
             // A struct the contract owns in pieces has no whole to give up:
             // the ownership `free` needs is the ownership the contract has,
@@ -19724,6 +19837,10 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         if self.blocks[i].pn.is_empty() {
+            if let Some(size) = &self.blocks[i].view_size {
+                self.lines
+                    .push(format!("mem_join_at {} {};", self.blocks[i].tmp, size));
+            }
             self.lines.push(format!("free {};", self.blocks[i].tmp));
             self.blocks[i].freed = true;
             return Ok(());
@@ -19805,10 +19922,24 @@ impl<'a> Body<'a> {
 
     /// Reserve a prefix without exposing its old contents.
     fn prepare_block(&mut self, ty: &Type, obj: &Expr) -> Result<(), String> {
-        if matches!(
-            peel(self.tds, ty).val,
-            TypeT::Pointer(..) | TypeT::FnPtr { .. }
-        ) {
+        // `ptr_ctype` is one descriptor for every pointer type, so a pointer
+        // can be installed only where the emitter itself pins which pointer
+        // type the storage holds (see `alloc_ptr_types`).
+        let pinned = matches!(peel(self.tds, ty).val, TypeT::Pointer(..))
+            && match &strip_casts(obj).val {
+                ExprT::Var(v) => self
+                    .alloc_ptr_types
+                    .borrow()
+                    .get(&*v.val)
+                    .is_some_and(|t| same_pointer_object_type(self.tds, t, ty)),
+                _ => false,
+            };
+        if !pinned
+            && matches!(
+                peel(self.tds, ty).val,
+                TypeT::Pointer(..) | TypeT::FnPtr { .. }
+            )
+        {
             return Err(
                 "preparing pointer-valued storage requires pointer-type-specific effective-type descriptors"
                     .to_string(),
@@ -19837,6 +19968,22 @@ impl<'a> Body<'a> {
                     .to_string(),
             );
         }
+        if b.split.is_some() {
+            return Err("preparation of a block split at an interior pointer".to_string());
+        }
+        // A child is aligned as its parent is, shifted by its offset.
+        let align_from = match &b.parent {
+            Some((pv, k)) => {
+                let pt = self
+                    .blocks
+                    .iter()
+                    .find(|p| p.var == *pv && !p.freed)
+                    .map(|p| p.tmp.clone())
+                    .ok_or_else(|| "an interior pointer whose block is gone".to_string())?;
+                Some((pt, k.clone()))
+            }
+            None => None,
+        };
         let a = b.tmp.clone();
         let n = b
             .bytes
@@ -19861,8 +20008,15 @@ impl<'a> Body<'a> {
             "Pulse.Lib.C.Palow.Effective.prepare_region {} {}_ctype;",
             a, pn
         ));
-        self.lines
-            .push(format!("aligned_divides {} max_align {}_alignof;", a, pn));
+        match align_from {
+            Some((pt, k)) => self.lines.push(format!(
+                "aligned_field {} max_align {} {}_alignof;",
+                pt, k, pn
+            )),
+            None => self
+                .lines
+                .push(format!("aligned_divides {} max_align {}_alignof;", a, pn)),
+        }
         let b = &mut self.blocks[i];
         b.bytes = Some(n);
         b.pn = pn.clone();
@@ -19871,6 +20025,130 @@ impl<'a> Body<'a> {
         b.init = false;
         b.zero = None;
         b.taken = None;
+        Ok(())
+    }
+
+    /// `(T *)(raw + k)` for a constant `k` inside a raw, unviewed block: the
+    /// block's index and the offset in bytes.
+    fn interior_of(&self, e: &Expr) -> Option<(usize, u64, u64)> {
+        let ExprT::BinOp(BinOp::Add, base, off) = &strip_casts(e).val else {
+            return None;
+        };
+        let k = const_index(&strip_vattr(off).val)?;
+        let esize = self.elem_size(&*self.ty_of(base).ok()?)?;
+        let k = k.checked_mul(esize)?;
+        let name = self.block_name(base)?;
+        let i = self.blocks.iter().position(|b| {
+            b.var == name
+                && b.checked
+                && !b.freed
+                && !b.null
+                && b.pn.is_empty()
+                && b.view_size.is_none()
+                && b.prepared.is_none()
+                && b.taken.is_none()
+                && b.array.is_none()
+                && b.flex.is_none()
+                && b.scattered.is_empty()
+                && b.split.is_none()
+                && b.parent.is_none()
+        })?;
+        let total: u64 = self.blocks[i]
+            .bytes
+            .as_ref()?
+            .strip_suffix("sz")?
+            .parse()
+            .ok()?;
+        (0 < k && k < total).then_some((i, k, total))
+    }
+
+    /// Carve the bytes from offset `k` on out of raw block `i`, as a block of
+    /// its own held by `var`. The parent keeps the bytes before `k` until it
+    /// is freed, which gives the child back first.
+    fn carve_block(&mut self, var: &str, i: usize, k: u64, total: u64) -> Result<(), String> {
+        if self
+            .blocks
+            .iter()
+            .any(|b| b.var == var && b.checked && !b.freed)
+        {
+            return Err(format!("`{}` already holds a block", var));
+        }
+        let (pvar, ptmp, n, fill) = {
+            let b = &self.blocks[i];
+            (
+                b.var.clone(),
+                b.tmp.clone(),
+                b.bytes.clone().unwrap(),
+                b.fill,
+            )
+        };
+        let ks = format!("{k}sz");
+        let rest = format!("{}sz", total - k);
+        self.lines.push(format!("mem_split_at {ptmp} {ks};"));
+        self.lines
+            .push(format!("allocated_region_subrange {ptmp} {n} {ks} {rest};"));
+        self.blocks[i].split = Some((var.to_string(), ks.clone()));
+        self.blocks.retain(|b| b.var != var);
+        self.blocks.push(Block {
+            var: var.to_string(),
+            tmp: format!("({ptmp} +! {ks})"),
+            pn: String::new(),
+            fill,
+            checked: true,
+            null: false,
+            parent: Some((pvar, ks)),
+            split: None,
+            init: false,
+            freed: false,
+            prepared: None,
+            view_size: None,
+            scattered: BTreeSet::new(),
+            zero: None,
+            taken: None,
+            array: None,
+            flex: None,
+            bytes: Some(rest),
+        });
+        Ok(())
+    }
+
+    /// Return a carved-out child to raw bytes, ready to be joined back.
+    fn release_child(&mut self, child: &str) -> Result<(), String> {
+        let j = self
+            .blocks
+            .iter()
+            .position(|b| b.var == child && b.parent.is_some() && !b.freed)
+            .ok_or_else(|| format!("the interior block `{}` is no longer tracked", child))?;
+        let b = self.blocks[j].clone();
+        if b.prepared.is_some() {
+            return Err(format!(
+                "a `free` while the interior block `{}` is prepared but not initialized",
+                child
+            ));
+        }
+        if b.array.is_some() || b.flex.is_some() || !b.scattered.is_empty() {
+            return Err(format!(
+                "a `free` while the interior block `{}` is in pieces",
+                child
+            ));
+        }
+        if !b.pn.is_empty() {
+            if fresh_pointer_object(self.tds, &b.pn) && b.zero.is_none() {
+                if b.init {
+                    self.lines.push(format!("{}_reveal {};", b.pn, b.tmp));
+                }
+            } else {
+                if b.init {
+                    self.lines.push(format!("{}_forget {};", b.pn, b.tmp));
+                }
+                self.lines
+                    .push(format!("{}_reveal_uninit {};", b.pn, b.tmp));
+            }
+        }
+        if let Some(size) = &b.view_size {
+            self.lines.push(format!("mem_join_at {} {};", b.tmp, size));
+        }
+        self.blocks[j].freed = true;
         Ok(())
     }
 
@@ -19909,6 +20187,7 @@ impl<'a> Body<'a> {
                         && !b.freed
                         && b.pn.is_empty()
                         && b.prepared.is_none()
+                        && b.split.is_none()
                 })
             })
             .ok_or_else(|| {
@@ -19961,6 +20240,11 @@ impl<'a> Body<'a> {
                         .to_string(),
                 );
             }
+            if b.split.is_some() || b.parent.is_some() {
+                return Err(
+                    "representation copy of a block split at an interior pointer".to_string(),
+                );
+            }
             return Ok((CopyObject::Block(i), b.tmp.clone(), b.pn.clone(), b.init));
         }
         Err("representation copy of a computed pointer requires an indexed region view".to_string())
@@ -20008,18 +20292,71 @@ impl<'a> Body<'a> {
             ));
             return Ok(da);
         }
-        if let CopyObject::Block(_) = dst {
+        // A copy of only the leading bytes of the source object. Into a declared
+        // object it changes the representation but not the type; into allocated
+        // storage it leaves no complete object behind, and the machine refuses
+        // it (see `copy_complete_ok`).
+        let source_size =
+            self.ty_of(strip_casts(&args[1]))
+                .ok()
+                .and_then(|t| match &peel(self.tds, &t).val {
+                    TypeT::Pointer(t, _) => palow_sizeof(self.tds, t),
+                    _ => None,
+                });
+        let prefix = matches!(
+            (const_bytes(self.tds, &args[2]), source_size),
+            (Some(k), Some(s)) if 0 < k && k < s
+        );
+        if prefix && !initialized {
+            return Err("a partial copy of an uninitialized object".to_string());
+        }
+        // Neither object has an effective type, so neither does the copy (C11
+        // 6.5p6, "if it has one"): only the bytes move.
+        if let (CopyObject::Block(i), CopyObject::Block(j)) = (src, dst)
+            && spn.is_empty()
+            && dpn.is_empty()
+            && !prefix
+        {
+            let (sb, db) = (&self.blocks[i], &self.blocks[j]);
+            if let (Some(sn), Some(dn), None, None, None) = (
+                sb.bytes.clone(),
+                db.bytes.clone(),
+                &sb.view_size,
+                &db.view_size,
+                &db.prepared,
+            ) {
+                self.lines.push(format!(
+                    "assert (pure (SizeT.v {n} == SizeT.v {sn} /\\ SizeT.v {n} == SizeT.v {dn}));"
+                ));
+                self.lines
+                    .push(format!("memcpy_untyped {} {} {};", da, sa, n));
+                let fill = self.blocks[i].fill;
+                let d = &mut self.blocks[j];
+                d.init = initialized;
+                d.fill = fill;
+                d.zero = None;
+                return Ok(da);
+            }
+        }
+        if let CopyObject::Block(_) = dst
+            && !prefix
+        {
             dpn = spn.clone();
         }
-        if spn.is_empty() || dpn.is_empty() {
+        if prefix && let CopyObject::Block(i) = dst {
+            dpn = self.blocks[i].pn.clone();
+        }
+        if spn.is_empty() || (dpn.is_empty() && !prefix) {
             return Err(
                 "copying untyped raw storage requires an explicit byte-region specification"
                     .to_string(),
             );
         }
         self.lines.push(format!(
-            "assert (pure (SizeT.v {} == SizeT.v {}_sizeof));",
-            n, spn
+            "assert (pure (SizeT.v {} {} SizeT.v {}_sizeof));",
+            n,
+            if prefix { "<" } else { "==" },
+            spn
         ));
         if matches!(dst, CopyObject::Slot(_)) {
             self.lines.push(format!(
@@ -20027,7 +20364,21 @@ impl<'a> Body<'a> {
                 n, dpn
             ));
         }
-        let conversion = if spn != dpn && initialized {
+        let conversion = if prefix {
+            match dst {
+                CopyObject::Block(_) => None,
+                CopyObject::Slot(_) => {
+                    let from = spn.strip_suffix("_t").unwrap_or(&spn);
+                    let to = dpn.strip_suffix("_t").unwrap_or(&dpn);
+                    if !matches!((from, to), ("float64", "uint32" | "int32")) {
+                        return Err(format!(
+                            "a partial representation copy from `{spn}` to `{dpn}` requires a checked representation conversion"
+                        ));
+                    }
+                    Some(format!("Pulse.Lib.C.Palow.Copy.{}_{}_prefix", from, to))
+                }
+            }
+        } else if spn != dpn && initialized {
             let from = spn.strip_suffix("_t").unwrap_or(&spn);
             let to = dpn.strip_suffix("_t").unwrap_or(&dpn);
             if !matches!(
@@ -20046,7 +20397,36 @@ impl<'a> Body<'a> {
         let x = self.fresh("copy_value");
         let bs = self.fresh("copy_source");
         let es = self.fresh("copy_source_index");
-        if initialized {
+        // A block whose last operation was its type-establishing store still
+        // has the index that store gave it, `etypes_of t false`; the indexed
+        // view keeps it, and the copy needs it to transfer that type.
+        let established = match src {
+            CopyObject::Block(i) if initialized && !is_aggregate(&spn) => {
+                let tmp = self.blocks[i].tmp.clone();
+                let init = format!("{}_initialize {} ", spn, tmp);
+                self.lines
+                    .iter()
+                    .rposition(|l| mentions_word(l, &tmp))
+                    .filter(|&k| self.lines[k].starts_with(&init))
+            }
+            _ => None,
+        };
+        if let Some(k) = established {
+            let l = self.lines[k].replacen("_initialize ", "_initialize_at ", 1);
+            self.lines[k] = l;
+            self.lines.push(format!(
+                "with {} {} {}. assert (Pulse.Lib.C.Palow.Effective.Value.value {}_ctype {}_repr {}_alignof {} {} {} {});",
+                p, x, es, spn, spn, spn, sa, p, x, es
+            ));
+            self.lines.push(format!(
+                "Pulse.Lib.C.Palow.Effective.Value.reveal_value {}_ctype {}_repr {}_alignof {};",
+                spn, spn, spn, sa
+            ));
+            self.lines.push(format!(
+                "with {}. assert (mem_pts_to_at {} {} {} {} ** pure ({}_repr {} {}));",
+                bs, sa, p, bs, es, spn, x, bs
+            ));
+        } else if initialized {
             self.lines.push(format!(
                 "with {} {}. assert ({}_pts_to {} {} {});",
                 p, x, spn, sa, p, x
@@ -20085,6 +20465,9 @@ impl<'a> Body<'a> {
             CopyObject::Block(i) => self.blocks[i].prepared.clone(),
             CopyObject::Slot(_) => None,
         };
+        if prefix && prepared.is_some() {
+            return Err("a partial copy into prepared storage".to_string());
+        }
         if let Some(target) = &prepared {
             if target != &spn {
                 return Err("copy source does not establish the prepared target type".to_string());
@@ -20129,9 +20512,14 @@ impl<'a> Body<'a> {
                     "fixed_metadata_index {} #1.0R #{} #{} #(Pulse.Lib.C.Palow.Etype.etypes_of {}_ctype true);",
                     da, bd, ed, dpn
                 ));
+                let source = if prefix {
+                    format!("(Seq.slice {} 0 (SizeT.v {}))", es, n)
+                } else {
+                    es.clone()
+                };
                 self.lines.push(format!(
                     "Pulse.Lib.C.Palow.Etype.complete_copy_declared_stable (Pulse.Lib.C.Palow.Etype.Ready {}) (Pulse.Lib.C.Palow.Etype.Ready {});",
-                    ed, es
+                    ed, source
                 ));
             } else if let CopyObject::Block(i) = dst {
                 let total = self.blocks[i].bytes.as_ref().unwrap();
@@ -20144,21 +20532,57 @@ impl<'a> Body<'a> {
                     da, n, bd, ed
                 ));
             }
+            if prefix {
+                if matches!(dst, CopyObject::Slot(_)) {
+                    self.lines.push(format!(
+                        "Pulse.Lib.C.Palow.Copy.copy_read_ok {} (Seq.slice {} 0 (SizeT.v {})) {}_ctype;",
+                        ed, es, n, dpn
+                    ));
+                }
+                self.lines.push(format!(
+                    "memcpy_prefix {} {} {} #{} #{} #{} #{} #{};",
+                    da, sa, n, p, bs, bd, ed, es
+                ));
+            } else {
+                self.lines.push(format!(
+                    "Pulse.Lib.C.Palow.Copy.copy_read_ok {} {} {}_ctype;",
+                    ed, es, dpn
+                ));
+                self.lines.push(format!(
+                    "memcpy {} {} {} #{} #{} #{} #{} #{};",
+                    da,
+                    sa,
+                    n,
+                    if initialized { &p } else { "1.0R" },
+                    bs,
+                    bd,
+                    ed,
+                    es
+                ));
+            }
+        }
+        if prefix {
             self.lines.push(format!(
-                "Pulse.Lib.C.Palow.Copy.copy_read_ok {} {} {}_ctype;",
-                ed, es, dpn
+                "{}_conceal {} #{} #{} #{} #{};",
+                spn, sa, p, bs, x, es
             ));
-            self.lines.push(format!(
-                "memcpy {} {} {} #{} #{} #{} #{} #{};",
-                da,
-                sa,
-                n,
-                if initialized { &p } else { "1.0R" },
-                bs,
-                bd,
-                ed,
-                es
-            ));
+            match dst {
+                CopyObject::Slot(i) => {
+                    self.lines.push(format!(
+                        "{}_claim {} #(slice {} 0 (SizeT.v {})) {};",
+                        dpn, da, bs, n, copied_value
+                    ));
+                    self.slots[i].init = true;
+                }
+                CopyObject::Block(i) => {
+                    // The leading bytes are initialized, but they are no
+                    // complete object: the block holds raw bytes.
+                    self.blocks[i].pn = String::new();
+                    self.blocks[i].init = true;
+                    self.blocks[i].prepared = None;
+                }
+            }
+            return Ok(da);
         }
         if initialized {
             self.lines.push(format!(
@@ -20629,9 +21053,12 @@ impl<'a> Body<'a> {
                     b.tmp.clone(),
                     format!(
                         "SizeT.v {}",
-                        b.bytes
-                            .as_ref()
-                            .ok_or_else(|| "an untyped allocation without its extent".to_string())?
+                        match &b.split {
+                            Some((_, k)) => k,
+                            None => b.bytes.as_ref().ok_or_else(|| {
+                                "an untyped allocation without its extent".to_string()
+                            })?,
+                        }
                     ),
                 ))
             } else {
@@ -21367,6 +21794,12 @@ impl<'a> Body<'a> {
                         let (which, n, size) = self.raw_alloc_of(init).unwrap();
                         self.allocate_raw(name, which, &n, size.as_deref())?
                     }
+                    _ if self.interior_of(init).is_some() => {
+                        let (i, k, total) = self.interior_of(init).unwrap();
+                        let v = self.rvalue(init)?;
+                        self.carve_block(&name.val, i, k, total)?;
+                        v
+                    }
                     _ => {
                         let v = self.rvalue(init)?;
                         self.take_block(name, Some(ty), init, &v)?;
@@ -21473,6 +21906,11 @@ impl<'a> Body<'a> {
                     }
                     if let Some((which, n, size)) = self.raw_alloc_of(rhs) {
                         let value = self.allocate_raw(v, which, &n, size.as_deref())?;
+                        return self.store(lhs, &pn, &value);
+                    }
+                    if let Some((i, k, total)) = self.interior_of(rhs) {
+                        let value = self.rvalue(rhs)?;
+                        self.carve_block(&v.val, i, k, total)?;
                         return self.store(lhs, &pn, &value);
                     }
                 }
@@ -24244,6 +24682,232 @@ fn resolve_view(tds: &Typedefs, env: &Env, e: &Rc<Expr>) -> Rc<Expr> {
     e.clone()
 }
 
+/// Whether `ident` occurs in `line` as a whole identifier.
+fn mentions_word(line: &str, ident: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '\'';
+    line.match_indices(ident).any(|(k, _)| {
+        !line[..k].chars().next_back().is_some_and(word)
+            && !line[k + ident.len()..].chars().next().is_some_and(word)
+    })
+}
+
+/// A call to an identity function is its argument, so `*(T *)opaque(p)`
+/// accesses `*p`. Where such a call is dereferenced in place, or handed to a
+/// byte copy, the call is hoisted into a statement of its own -- it still
+/// runs, for whatever else it does -- and the access names the argument
+/// directly. Only a side-effect-free argument is duplicated this way. A
+/// disjunctive null guard is split here too (see `hoist_stmts`).
+fn hoist_identity_calls(tu: &TranslationUnit) -> TranslationUnit {
+    let idents = identity_fns(tu);
+    let mut tu = tu.clone();
+    for d in tu.decls.iter_mut() {
+        if let DeclT::FnDefn(f) = &mut d.val {
+            f.body = hoist_stmts(&f.body, &idents);
+        }
+    }
+    tu
+}
+
+fn hoist_stmts(ss: &Stmts, idents: &HashMap<String, usize>) -> Stmts {
+    let mut out = Vec::new();
+    for s in ss {
+        let mut pre = Vec::new();
+        let mut h = |e: &Rc<Expr>| hoist_expr(e, false, idents, &mut pre);
+        let val = match &s.val {
+            StmtT::Call(e) => StmtT::Call(h(e)),
+            // `T *x = (T *)opaque(p);` binds `x` to `p` itself.
+            StmtT::Let(n, t, e) if matches!(t.val, TypeT::Pointer(..)) => {
+                StmtT::Let(n.clone(), t.clone(), hoist_expr(e, true, idents, &mut pre))
+            }
+            StmtT::Let(n, t, e) => StmtT::Let(n.clone(), t.clone(), h(e)),
+            // `x = (T *)opaque(p + k);` likewise binds `x` to the interior
+            // pointer itself, which is what lets it name a carved-out block.
+            StmtT::Assign(l, r)
+                if matches!(strip_vattr(l).val, ExprT::Var(_))
+                    && matches!(
+                        strip_casts(&hoist_expr(r, true, idents, &mut Vec::new())).val,
+                        ExprT::BinOp(BinOp::Add, ..)
+                    )
+                    && !matches!(strip_casts(r).val, ExprT::BinOp(..)) =>
+            {
+                StmtT::Assign(l.clone(), hoist_expr(r, true, idents, &mut pre))
+            }
+            StmtT::Assign(l, r) => {
+                let l = h(l);
+                StmtT::Assign(l, h(r))
+            }
+            StmtT::Return(Some(e)) => StmtT::Return(Some(h(e))),
+            // `if (!a || !b) { ...; return; }` is the guard of two
+            // allocations at once. With side-effect-free tests it is the same
+            // as testing one pointer at a time, which is what lets each arm
+            // know which of them it holds.
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } if let ExprT::BinOp(BinOp::LogOr, x, y) = &strip_vattr(cond).val
+                && pure_test(x)
+                && pure_test(y)
+                && ensures.is_empty()
+                && matches!(then_branch.last().map(|s| &s.val), Some(StmtT::Return(_))) =>
+            {
+                let inner = StmtT::If {
+                    cond: y.clone(),
+                    then_branch: then_branch.clone(),
+                    else_branch: else_branch.clone(),
+                    ensures: ensures.clone(),
+                }
+                .with_loc(s.loc.clone());
+                let outer = StmtT::If {
+                    cond: x.clone(),
+                    then_branch: then_branch.clone(),
+                    else_branch: Rc::new(vec![inner]),
+                    ensures: ensures.clone(),
+                }
+                .with_loc(s.loc.clone());
+                out.extend(hoist_stmts(&vec![outer], idents));
+                continue;
+            }
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => StmtT::If {
+                cond: h(cond),
+                then_branch: Rc::new(hoist_stmts(then_branch, idents)),
+                else_branch: Rc::new(hoist_stmts(else_branch, idents)),
+                ensures: ensures.clone(),
+            },
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: Rc::new(hoist_stmts(body, idents)),
+            },
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => StmtT::Match {
+                scrutinee: scrutinee.clone(),
+                branches: Rc::new(
+                    branches
+                        .iter()
+                        .map(|b| {
+                            Rc::new(MatchBranch {
+                                patterns: b.patterns.clone(),
+                                body: Rc::new(hoist_stmts(&b.body, idents)),
+                            })
+                        })
+                        .collect(),
+                ),
+                default_branch: Rc::new(hoist_stmts(default_branch, idents)),
+                ensures: ensures.clone(),
+            },
+            StmtT::GotoBlock {
+                body,
+                label,
+                ensures,
+            } => StmtT::GotoBlock {
+                body: Rc::new(hoist_stmts(body, idents)),
+                label: label.clone(),
+                ensures: ensures.clone(),
+            },
+            v => v.clone(),
+        };
+        for c in pre {
+            out.push(StmtT::Call(c).with_loc(s.loc.clone()));
+        }
+        out.push(val.with_loc(s.loc.clone()));
+    }
+    out
+}
+
+fn hoist_expr(
+    e: &Rc<Expr>,
+    pointer: bool,
+    idents: &HashMap<String, usize>,
+    pre: &mut Vec<Rc<Expr>>,
+) -> Rc<Expr> {
+    let loc = || e.loc.clone();
+    match &e.val {
+        ExprT::FnCall(f, args) if pointer => {
+            if let Some(a) = idents.get(&*f.val.to_string()).and_then(|i| args.get(*i))
+                && pure_place(a)
+            {
+                pre.push(e.clone());
+                return hoist_expr(a, true, idents, pre);
+            }
+            e.clone()
+        }
+        ExprT::FnCall(f, args) => {
+            let copy = matches!(&*f.val.to_string(), "memcpy" | "memmove");
+            let args = args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| hoist_expr(a, copy && i < 2, idents, pre))
+                .collect();
+            ExprT::FnCall(f.clone(), args).with_loc(loc())
+        }
+        ExprT::Cast(x, t) => {
+            ExprT::Cast(hoist_expr(x, pointer, idents, pre), t.clone()).with_loc(loc())
+        }
+        ExprT::VAttr(a, x) => {
+            ExprT::VAttr(a.clone(), hoist_expr(x, pointer, idents, pre)).with_loc(loc())
+        }
+        ExprT::Deref(x) => ExprT::Deref(hoist_expr(x, true, idents, pre)).with_loc(loc()),
+        ExprT::Member(x, f) => {
+            ExprT::Member(hoist_expr(x, false, idents, pre), f.clone()).with_loc(loc())
+        }
+        ExprT::Index(x, i) => {
+            let x = hoist_expr(x, true, idents, pre);
+            ExprT::Index(x, hoist_expr(i, false, idents, pre)).with_loc(loc())
+        }
+        ExprT::UnOp(o, x) => {
+            ExprT::UnOp(o.clone(), hoist_expr(x, false, idents, pre)).with_loc(loc())
+        }
+        ExprT::BinOp(o, x, y) => {
+            let x = hoist_expr(x, false, idents, pre);
+            ExprT::BinOp(o.clone(), x, hoist_expr(y, false, idents, pre)).with_loc(loc())
+        }
+        _ => e.clone(),
+    }
+}
+
+/// Whether a condition reads only locals and constants.
+fn pure_test(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::Var(_) | ExprT::IntLit(..) | ExprT::BoolLit(_) => true,
+        ExprT::Cast(x, _) | ExprT::VAttr(_, x) | ExprT::UnOp(UnOp::Not, x) => pure_test(x),
+        ExprT::BinOp(BinOp::Eq | BinOp::LogAnd | BinOp::LogOr, x, y) => {
+            pure_test(x) && pure_test(y)
+        }
+        _ => false,
+    }
+}
+
+/// Whether evaluating an expression twice is the same as evaluating it once.
+fn pure_place(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::Var(_) | ExprT::IntLit(..) => true,
+        ExprT::Cast(x, _) | ExprT::VAttr(_, x) | ExprT::Ref(x) | ExprT::Member(x, _) => {
+            pure_place(x)
+        }
+        ExprT::BinOp(BinOp::Add | BinOp::Sub, x, y) => pure_place(x) && pure_place(y),
+        _ => false,
+    }
+}
+
 /// The identity functions of a translation unit: those whose whole body
 /// returns one parameter, possibly converted. A call to one is the parameter.
 fn identity_fns(tu: &TranslationUnit) -> HashMap<String, usize> {
@@ -24684,6 +25348,7 @@ fn emit_body(
         aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
         pointer_views: pointer_view_sources(&defn.body),
+        alloc_ptr_types: RefCell::new(HashMap::new()),
         byte_bases: byte_base_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),

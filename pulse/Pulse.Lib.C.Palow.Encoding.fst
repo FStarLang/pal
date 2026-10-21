@@ -125,6 +125,22 @@ let encode_injective (n: nat) (p: prov) (x y: nat)
   = decode_encode_exact n p x;
     decode_encode_exact n p y
 
+(* The first `m` bytes of an `n`-byte encoding are the `m`-byte encoding of
+   the low `8 * m` bits: what a byte copy of an object's prefix carries. *)
+#push-options "--z3rlimit 30"
+let encode_prefix (n: nat) (m: nat { m <= n }) (p: prov) (x: nat)
+  : Lemma (slice (encode n p x) 0 m == encode m p (x % pow2 (8 * m)))
+  = let lhs = slice (encode n p x) 0 m in
+    let rhs = encode m p (x % pow2 (8 * m)) in
+    let aux (i: nat { i < m }) : Lemma (get lhs i == get rhs i) =
+      M.pow2_modulo_division_lemma_1 x (8 * i) (8 * m);
+      M.pow2_modulo_modulo_lemma_1 (x / pow2 (8 * i)) 8 (8 * m - 8 * i);
+      assert_norm (pow2 8 == 256)
+    in
+    Classical.forall_intro aux;
+    bytes_ext lhs rhs
+#pop-options
+
 (* ---------------------------------------------------------------------------
    Signed integers
 

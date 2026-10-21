@@ -45,6 +45,26 @@ let float64_int64_repr (x: float64) (b: bytes)
   : Lemma (requires float64_t_repr x b)
           (ensures int64_t_repr (float64_int64_value x) b) = ()
 
+(* A byte copy of only the leading bytes of an object. Each witness decodes
+   the low bits of the source representation; an exact-width integer has no
+   trap representations, so any such prefix is a value. *)
+let float64_uint32_prefix_value (x: float64) : U32.t =
+  U32.uint_to_t (float64_bits x % pow2 32)
+
+let float64_int32_prefix_value (x: float64) : I32.t =
+  let n = float64_bits x % pow2 32 in
+  I32.int_to_t (if n < pow2 31 then n else n - pow2 32)
+
+let float64_uint32_prefix_repr (x: float64) (b: bytes)
+  : Lemma (requires float64_t_repr x b)
+          (ensures len b == 8 /\ uint32_t_repr (float64_uint32_prefix_value x) (slice b 0 4))
+  = Enc.encode_prefix 8 4 None (float64_bits x)
+
+let float64_int32_prefix_repr (x: float64) (b: bytes)
+  : Lemma (requires float64_t_repr x b)
+          (ensures len b == 8 /\ int32_t_repr (float64_int32_prefix_value x) (slice b 0 4))
+  = Enc.encode_prefix 8 4 None (float64_bits x)
+
 let copy_read_ok (dst src: ET.etypes) (ct: ET.ctype)
   : Lemma
       (requires ET.copy_complete_ok (ET.Ready dst) (ET.Ready src) /\

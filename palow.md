@@ -1047,13 +1047,20 @@ object and an equally sized declared destination, or an allocated destination
 prefix with sufficient extent. An existing allocated type must be compatible
 with the source and its metadata must satisfy the complete-copy rule; an
 incompatible reuse requires explicit preparation first. A wholly untyped
-destination can acquire its type from an established source. A source without
-an established type is currently unsupported by the checked complete-copy
-rule, even when its bytes are initialized; fallback readability alone must
-not complete a prepared destination. Distinct owned objects use the disjoint copy
+destination can acquire its type from an established source. A source whose type
+was installed by a whole-object store in the same body is established: the
+emitter initializes it with `{T}_initialize_at` and reveals the indexed value,
+so the complete-copy rule sees the type. A copy between two wholly untyped
+allocations (C11 6.5p6, "if it has one") goes through the trusted
+`memcpy_untyped`: the bytes move verbatim and both index sequences stay
+`None`. Otherwise a source without an established type is unsupported by the
+checked complete-copy rule, even when its bytes are initialized; fallback
+readability alone must not complete a prepared destination. A copy of a
+constant prefix of an established object (`memcpy_prefix`) moves the bytes
+and the prefix of the index, leaving no complete object at the destination. Distinct owned objects use the disjoint copy
 operation for both `memcpy` and `memmove`; an identical-object `memmove` is a
 no-op, while identical-object `memcpy` requires zero length. Computed regions,
-array regions, partially copied objects, overlapping non-identical views and
+array regions, overlapping non-identical views and
 source regions with nonuniform type information still need frontend region lowering. A failed
 whole-object size obligation is not evidence of C undefined behavior.
 
@@ -1061,8 +1068,7 @@ The original `effective_type` corpus keeps case-specific diagnostic
 expectations for unsupported translation, including declared/allocated alias
 regions, character-array access and copies, inactive/common-initial-sequence
 union views, and nonzero `memset`.
-The two-allocation cleanup cases also need null-condition ownership
-bookkeeping. These expectations deliberately include defined C programs:
+These expectations deliberately include defined C programs:
 they record missing frontend support, not permission to classify the programs
 as undefined. The four previously disabled cases remain separate, as do the
 three 22.1 lifetime tests whose freed pointer *values* are not invalidated by
@@ -1093,29 +1099,62 @@ access. An aggregate view requires `View.aggregate_view_ok`, which is false:
 distinct struct types are never compatible, so a layout-compatible pun is a
 checked rejection rather than a translation error.
 
+#### Identity calls, guards and interior pointers in allocated storage
+
+Before emission, a call to an identity function whose argument is
+side-effect free (a local, a constant, a member, an address, a cast, or a sum
+or difference of these) is hoisted into a statement of its own where it is
+dereferenced, handed to `memcpy`/`memmove`, or bound to a pointer local: the
+call still runs, and the access names the argument directly. A guard
+`if (!a || !b) { ...; return; }` with side-effect-free tests is split into two
+nested tests, so that each arm knows which allocations it holds. `free` of an
+allocation not yet tested for null tests it in place.
+
+Pointer-typed allocated storage. `ptr_ctype` is one descriptor for every
+pointer type, so an allocated block can receive a pointer value only where
+the emitter pins which pointer type it holds: the first pointer-typed access
+through a local bound to `malloc`/`calloc` records the type, and every later
+pointer-typed access must agree. A later read at a non-pointer type (17.4)
+then fails for want of that type's ownership.
+
+Interior pointers. `T *p = (T *)(raw + k)` for a constant `k` inside a raw,
+not yet typed allocation carves the bytes from `k` on out of the block
+(`mem_split_at`, `allocated_region_subrange`) as a block of their own held by
+`p`. Its first store prepares it like any allocated block, except that its
+alignment comes from the parent's, shifted by the offset (`aligned_field`),
+which requires `k` to be a multiple of `alignof(T)`. `free` of the parent
+returns the child to raw bytes and joins it back first; `free` of the
+interior pointer itself is refused. While carved, the parent supports neither
+copies nor `memset` nor typed accesses of its own.
+
 The 75 original corpus files are partitioned as follows; an expected frontend
 failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 18 |
+| Verified enabled cases within the supported target/model | 19 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (13.1, 13.2, 13.3 and 14.2) | 4 |
-| Checked rejections at the UB access (15.2, 16.1, 16.2 and 17.3) | 4 |
+| Checked rejections at the UB access (14.1, 15.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 17.4, 18.1 and 18.2) | 12 |
 | Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
-| Explicit unsupported-translation expectations | 36 |
+| Explicit unsupported-translation expectations | 27 |
 | Disabled cases (16.3, 20.2, 21.1 and 22.3) | 4 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 
-The eighteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
-6.1, 6.3, 7.1, 7.2, 7.4, 8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
+The nineteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
+5.3, 6.1, 6.3, 7.1, 7.2, 7.4, 8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
 incompatible effective type. The four view rejections fail on
 `View.view_ok` or `View.aggregate_view_ok` at the incompatible access. In
-15.2, 16.1, 16.2 and 17.3 a store has retyped the allocated block, and the
-later read through another type fails for want of that type's ownership --
-the read is the undefined access. The other four fail earlier, for a reason
+15.1, 15.2, 16.1, 16.2, 16.4, 17.1 and 17.3 a store or copy has retyped the
+allocated block, and the later read through another type fails for want of
+that type's ownership -- the read is the undefined access. 17.4 is the same
+with a pointer type installed (see "Pointer-typed allocated storage" below).
+14.1 and 18.2 copy only a prefix of an object, and the read of the
+incomplete object fails; 18.1 copies an untyped, uninitialized source and the
+typed read of the copy fails. 17.2 fails on the alignment obligation of the
+interior pointer it retypes (`aligned_field`, `1 % alignof(double) == 0`). The other four fail earlier, for a reason
 that is not the effective-type violation itself: 24.5 stores a whole union,
 which has no whole-object initialization, and 13.4, 13.5 and 14.3 pass an
 uninitialized local array to a function.

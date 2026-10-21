@@ -325,6 +325,26 @@ fn memcpy (dst src: ptr) (n: SZ.t)
   ensures mem_pts_to_at dst 1.0R bs
     (ET.state_etypes (ET.complete_copy (ET.Ready ed) (ET.Ready es)))
 
+(* A byte copy of the leading `n` bytes of a larger source object. *)
+fn memcpy_prefix (dst src: ptr) (n: SZ.t)
+          (#p: perm) (#bs: erased bytes { SZ.v n <= len bs }) (#bd: erased bytes)
+          (#ed: ET.etypes)
+          (#es: ET.etypes { ET.elen es == len bs /\
+                            ET.copy_complete_ok (ET.Ready ed) (ET.Ready (Seq.slice es 0 (SZ.v n))) })
+  preserves mem_pts_to_at src p bs es
+  requires mem_pts_to_at dst 1.0R bd ed
+  requires pure (len bd == SZ.v n /\ ET.elen ed == len bd)
+  ensures mem_pts_to_at dst 1.0R (slice bs 0 (SZ.v n))
+    (ET.state_etypes (ET.complete_copy (ET.Ready ed) (ET.Ready (Seq.slice es 0 (SZ.v n)))))
+
+(* A byte copy between objects that have no effective type. *)
+fn memcpy_untyped (dst src: ptr) (n: SZ.t)
+          (#p: perm) (#bs #bd: erased bytes)
+  preserves mem_pts_to_at src p bs (Seq.create (SZ.v n) None)
+  requires mem_pts_to_at dst 1.0R bd (Seq.create (SZ.v n) None)
+  requires pure (len bs == SZ.v n /\ len bd == SZ.v n)
+  ensures mem_pts_to_at dst 1.0R bs (Seq.create (SZ.v n) None)
+
 fn memset_zero (dst: ptr) (n: SZ.t) (#bd: erased bytes) (#ed: ET.etypes)
   requires mem_pts_to_at dst 1.0R bd ed
   requires pure (len bd == SZ.v n /\ ET.elen ed == len bd)

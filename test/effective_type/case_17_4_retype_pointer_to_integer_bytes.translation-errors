@@ -1,1 +1,0 @@
-error: `Func_case_17_4_retype_pointer_to_integer_bytes`: its body is not translated: stored-pointer access from an unknown returned or reassigned source view is unsupported

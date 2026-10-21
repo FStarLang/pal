@@ -330,3 +330,11 @@ val float32_lt_int_value (x: float32) (n: int)
   : Lemma (requires float32_finite x /\ R.(float32_val x <. of_int n))
           (ensures  float32_lt_int x n)
           [SMTPat (float32_lt_int x n)]
+
+(* Widening a `float` to `double` is exact (C17 6.3.1.5p1): every binary32
+   value is a binary64 value. *)
+val float64_of_float32_value (x: float32)
+  : Lemma (requires float32_finite x)
+          (ensures  float64_finite (float64_of_float32 x) /\
+                    float64_val (float64_of_float32 x) == float32_val x)
+          [SMTPat (float64_of_float32 x)]
