@@ -22997,6 +22997,25 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             };
             Ok(format!("(Float{}.of_int {})", w, widen))
         }
+        // A float converts to an integer by truncating toward zero, and only
+        // when the result is representable: anything else is undefined
+        // (6.3.1.4p1). The conversion's refinement is that range, so here is
+        // where a program has to show its float fits.
+        (
+            TypeT::Float {
+                width: w @ (32 | 64),
+            },
+            TypeT::Int {
+                signed,
+                width: n @ (8 | 16 | 32 | 64),
+            },
+        ) => Ok(format!(
+            "(float{}_to_{}int{} {})",
+            w,
+            if *signed { "" } else { "u" },
+            n,
+            v
+        )),
         // A float is true when it is unequal to zero, which is C's rule and
         // also `ieee_eq`'s: a NaN is not equal to zero, and so is true.
         (

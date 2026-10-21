@@ -1,2 +1,1 @@
-error: `Func_sink_d`: its body is not translated: a conversion from a 64-bit float to uint64_t
 error: `Func_case_17_1_retype_beyond_the_allocation`: its body is not translated: a dereference of a computed pointer, whose target the contract does not grant

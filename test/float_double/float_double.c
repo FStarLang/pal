@@ -20,6 +20,20 @@ double uint32_to_double(uint32_t x) {
     return (double) x;
 }
 
+// A float converts to an integer only when it fits; an integer that is exact
+// in the format comes back as itself.
+int32_t int16_round_trip(int16_t x)
+    _ensures(return == x)
+{
+    return (int32_t) (double) x;
+}
+
+uint8_t small_float_to_uint8(void)
+    _ensures(return == 3)
+{
+    return (uint8_t) (float) 3;
+}
+
 float id_float(float x) {
     return x;
 }

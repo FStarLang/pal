@@ -1,2 +1,1 @@
-error: `Func_sink_d`: its body is not translated: a conversion from a 64-bit float to uint64_t
 error: `Func_case_5_3_memcpy_allocated_to_allocated`: its body is not translated: a `free` of `a`, which does not hold a checked block

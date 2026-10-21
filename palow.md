@@ -1049,7 +1049,7 @@ whole-object size obligation is not evidence of C undefined behavior.
 The original `effective_type` corpus keeps case-specific diagnostic
 expectations for unsupported translation, including declared/allocated alias
 regions, character-array access and copies, inactive/common-initial-sequence
-union views, nonzero `memset`, and float-to-integer conversion in `sink_d`.
+union views, and nonzero `memset`.
 The two-allocation cleanup cases also need null-condition ownership
 bookkeeping. These expectations deliberately include defined C programs:
 they record missing frontend support, not permission to classify the programs
@@ -1089,9 +1089,11 @@ failure is never counted as a successful strict-aliasing proof.
 |---|---:|
 | Verified enabled cases within the supported target/model | 13 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
-| Checked view rejections (13.2, 13.3 and 14.2) | 3 |
-| Checked rejections before the UB access (13.4, 14.3, 16.2 and 17.3) | 4 |
-| Explicit unsupported-translation expectations | 46 |
+| Checked view rejections (13.1, 13.2, 13.3 and 14.2) | 4 |
+| Checked rejections before the UB access (13.4, 13.5, 14.3, 16.1, 16.2, 17.3 and 24.5) | 7 |
+| Defined programs rejected for want of an explicit retype (3.1 and 6.1) | 2 |
+| Defined programs rejected only by `sink_d` (5.1 and 7.2) | 2 |
+| Explicit unsupported-translation expectations | 38 |
 | Disabled cases (16.3, 20.2, 21.1 and 22.3) | 4 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
@@ -1099,14 +1101,24 @@ failure is never counted as a successful strict-aliasing proof.
 The thirteen supported cases are 1.1, 1.2, 1.3, 2.2, 3.2, 4.1, 6.3, 7.1, 7.4,
 8.2, 9.2, 10.1 and 10.3; 1.2, 1.3, 8.2 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
-incompatible effective type. The three view rejections fail on
+incompatible effective type. The four view rejections fail on
 `View.view_ok` or `View.aggregate_view_ok` at the incompatible access. The
-other four fail earlier, for a reason that is not the effective-type
-violation itself: 16.2 and 17.3 store into a fresh `malloc` block without an
-explicit retype, and 13.4 and 14.3 pass an uninitialized local array to a
-function. Of the unsupported expectations, 13.1, 13.5, 16.1 and 24.5 are
-masked only by `sink_d`; their own bodies translate and are rejected by F*
-(13.1 on `View.view_ok`). The separate native-C regressions exercise
+other seven fail earlier, for a reason that is not the effective-type
+violation itself: 16.1, 16.2, 17.3 and 24.5 store into a fresh `malloc`
+block without an explicit retype, and 13.4, 13.5 and 14.3 pass an
+uninitialized local array to a function. The same missing retype rejects
+3.1 and 6.1, which are defined C: a store into allocated storage installs
+its type there, but the model asks for the retype to be explicit.
+
+The corpus helper `sink_d` computes `(unsigned long long)(v * 7.0)` for an
+arbitrary `double v`. That conversion is undefined unless the truncated value
+fits in the target type (6.3.1.4p1), so `Func_sink_d` is rejected on
+`float64_fits` in every case that uses it, and those cases record that
+failure alongside their own. 5.1 and 7.2 are rejected by it alone: their
+bodies verify. Floating-point arithmetic is uninterpreted in F*, so no
+caller could establish the range even with a `_requires` on `sink_d`.
+
+The separate native-C regressions exercise
 preparation, non-sticky zero views, copying, contextual ownership and the
 conservative type-identity boundaries without relying on the original corpus's
 unsupported constructs.
@@ -4340,9 +4352,18 @@ new facts about memory.
    conversions say what C says -- widening `float` to `double` is exact and
    narrowing rounds, so they are two functions and only one is invertible,
    where a model without them would have to route the conversion through an
-   integer and get a different answer. `==` is `ieee_eq` and not F\*
+   integer and get a different answer. An integer converts with F\*'s
+   `of_int`, except a `uint64_t`, whose upper half has no `Int64.t` and goes
+   through `float{32,64}_of_uint64` instead. A float converts to an integer
+   with `float{w}_to_{u,}int{n}`, which truncates and whose refinement is
+   C's range condition (6.3.1.4p1): `float{w}_fits x lo hi`, i.e. `x` is
+   strictly between `lo - 1` and `hi + 1`, stated with exact comparisons
+   `float{w}_gt_int`/`float{w}_lt_int` against mathematical integers. Those
+   comparisons are axiomatized only for values `of_int` produces exactly, so
+   `(int32_t)(double)x` for an `int16_t x` verifies and an arbitrary
+   `(int32_t)d` does not (`test/float_to_int_bad`). `==` is `ieee_eq` and not F\*
    equality, since C's `==` identifies the two zeros and makes a NaN unequal
-   to itself. The whole of `test/float_double` -- four functions and a struct
+   to itself. The whole of `test/float_double` -- its functions and a struct
    with padding between a `float` and a `double` -- now translates with no
    skip, no dropped contract and no admit.
 

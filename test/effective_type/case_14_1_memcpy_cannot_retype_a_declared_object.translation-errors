@@ -1,2 +1,1 @@
-error: `Func_sink_d`: its body is not translated: a conversion from a 64-bit float to uint64_t
 error: `Func_case_14_1_memcpy_cannot_retype_a_declared_object`: its body is not translated: representation copy of a computed pointer requires an indexed region view
