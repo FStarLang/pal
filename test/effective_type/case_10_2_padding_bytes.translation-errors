@@ -1,2 +1,0 @@
-error: memset is only supported with a zero fill value
-error: `Func_case_10_2_padding_bytes`: its body is not translated: a call in statement position that is not one: this expression

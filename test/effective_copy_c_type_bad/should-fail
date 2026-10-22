@@ -1,2 +1,2 @@
 Func_read_wrong_copied_type.fst(
-uint32_t_pts_to
+View.view_ok float32_t_ctype float32_t_repr uint32_t_ctype uint32_t_repr

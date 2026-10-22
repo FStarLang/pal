@@ -92,7 +92,7 @@ verify: $(OUT_DIR)/.stamp
 		echo "ERROR: $(SHOULD_FAIL) must name an expected diagnostic" >&2; \
 		exit 1; \
 	fi; \
-	if $(MAKE) --no-print-directory -f ../verify.mk \
+	if $(MAKE) --no-print-directory -k -f ../verify.mk \
 		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
 		HELPERS=$(HELPERS) $(NEGATIVE_FILES) >$(OUT_DIR)/verify.log 2>&1; then \
 		echo "ERROR: $(CURDIR) verified, but $(SHOULD_FAIL) says it must not" >&2; \
