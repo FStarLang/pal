@@ -9551,7 +9551,12 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                     pn = pn,
                     val = val
                 );
-                r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+                // The literal length spares the joins below from unfolding
+                // `{pn}_sizeof` themselves, which Z3 does not always find.
+                r += &format!(
+                    "  {}_repr_len {} {};\n  assert (pure (len {} == {}));\n",
+                    pn, val, v, v, f.size
+                );
             }
             Region::Gap(off, n) => {
                 r += &format!(
@@ -10609,19 +10614,77 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         );
         claim_at(f, &mut alloc);
     }
+    // Each split, with the claim of the piece it cuts off, is a ghost function
+    // of its own. Inline, every split leaves its lemmas about `slice b` and
+    // `Seq.slice e` in the context of all the later ones, and Pulse checks each
+    // step against everything before it: on the sixty-nine-field struct in
+    // `test/dpe`, once the effective-type index joined the bytes, that was
+    // well over half an hour and most of a CI runner's memory. Out of line,
+    // each step sees only its own facts, and `_claim_uninit` chains
+    // resources with no pure context to speak of.
+    //
+    // Between steps, what is left to carve travels as `{sn}_carve`, folded, so
+    // that calling a step is a resource match: passing `#b #e` with their
+    // refinements, and the slices in the step's specification, cost the
+    // caller a dozen queries a step against its whole context.
+    if !bounds.is_empty() {
+        c += &format!(
+            "let {sn}_carve (a: ptr) (n: nat {{ n <= SizeT.v {sn}_sizeof }}) : slprop =\n  exists* (b: bytes {{ len b == SizeT.v {sn}_sizeof }}) (e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof }}).\n    mem_pts_to_at a 1.0R (slice b 0 n) (Seq.slice e 0 n) **\n    pure (aligned a {sn}_alignof /\\ ET.read_ok e {sn}_ctype{declared_guard})\n\n"
+        );
+    }
     let mut upper = si.size;
     for off in bounds.iter().rev() {
-        alloc += &format!(
-            "  {sn}_index_prefix_length e {upper};\n  {sn}_index_prefix_length e {off};\n  mem_split_at a {}sz;\n  Seq.slice_slice e 0 {upper} {off} {upper};\n  Seq.slice_slice e 0 {upper} 0 {off};\n  slice_prefix b {upper} {off} {upper};\n  slice_prefix b {upper} 0 {off};\n  with prefix{off} eprefix{off}. assert (mem_pts_to_at a 1.0R prefix{off} eprefix{off} ** pure (len prefix{off} == {off}));\n  rewrite (mem_pts_to_at a 1.0R prefix{off} eprefix{off}) as (mem_pts_to_at a 1.0R (slice b 0 {off}) (Seq.slice e 0 {off}));\n  with suffix{off} esuffix{off}. assert (mem_pts_to_at (a +! {off}sz) 1.0R suffix{off} esuffix{off} ** pure (len suffix{off} == {upper} - {off}));\n  rewrite (mem_pts_to_at (a +! {off}sz) 1.0R suffix{off} esuffix{off}) as (mem_pts_to_at (a +! {off}sz) 1.0R (slice b {off} {upper}) (Seq.slice e {off} {upper}));\n",
-            off
+        let first = upper == si.size;
+        let mut body = if first {
+            String::new()
+        } else {
+            format!(
+                "  unfold {sn}_carve a {upper};\n  with b e. assert (mem_pts_to_at a 1.0R (slice b 0 {upper}) (Seq.slice e 0 {upper}));\n"
+            )
+        };
+        body += &format!(
+            "  {sn}_index_prefix_length e {upper};\n  {sn}_index_prefix_length e {off};\n  mem_split_at a {off}sz;\n  Seq.slice_slice e 0 {upper} {off} {upper};\n  Seq.slice_slice e 0 {upper} 0 {off};\n  slice_prefix b {upper} {off} {upper};\n  slice_prefix b {upper} 0 {off};\n  with prefix{off} eprefix{off}. assert (mem_pts_to_at a 1.0R prefix{off} eprefix{off} ** pure (len prefix{off} == {off}));\n  rewrite (mem_pts_to_at a 1.0R prefix{off} eprefix{off}) as (mem_pts_to_at a 1.0R (slice b 0 {off}) (Seq.slice e 0 {off}));\n  with suffix{off} esuffix{off}. assert (mem_pts_to_at (a +! {off}sz) 1.0R suffix{off} esuffix{off} ** pure (len suffix{off} == {upper} - {off}));\n  rewrite (mem_pts_to_at (a +! {off}sz) 1.0R suffix{off} esuffix{off}) as (mem_pts_to_at (a +! {off}sz) 1.0R (slice b {off} {upper}) (Seq.slice e {off} {upper}));\n"
         );
-        upper = *off;
-        if let Some(f) = field_at(*off) {
-            alloc += &format!("  {sn}_claim_field_{} a #b #e;\n", f.name);
+        let piece = match field_at(*off) {
+            Some(f) => {
+                body += &format!("  {sn}_claim_field_{} a #b #e;\n", f.name);
+                f.shape
+                    .uninit(&format!("(a +! {sn}_offsetof_{})", f.name))
+                    .unwrap()
+            }
+            None => format!(
+                "exists* g e. mem_pts_to_at (a +! {off}sz) 1.0R g e ** pure (len g == {} /\\ ET.elen e == len g)",
+                upper - off
+            ),
+        };
+        body += &format!("  fold {sn}_carve a {off};\n");
+        if first {
+            c += &format!(
+                "ghost fn {sn}_claim_step_{off} (a: ptr) (#b: bytes {{ len b == SizeT.v {sn}_sizeof }}) (#e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof }})\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (aligned a {sn}_alignof /\\ ET.read_ok e {sn}_ctype{declared_guard})\n  ensures {sn}_carve a {off}\n  ensures {piece}\n{{\n{body}}}\n\n"
+            );
+            alloc += &format!("  {sn}_claim_step_{off} a #b #e;\n");
+        } else {
+            c += &format!(
+                "ghost fn {sn}_claim_step_{off} (a: ptr)\n  requires {sn}_carve a {upper}\n  ensures {sn}_carve a {off}\n  ensures {piece}\n{{\n{body}}}\n\n"
+            );
+            alloc += &format!("  {sn}_claim_step_{off} a;\n");
         }
+        upper = *off;
     }
     if let Some(f) = field_at(0) {
-        alloc += &format!("  {sn}_claim_field_{} a #b #e;\n", f.name);
+        if bounds.is_empty() {
+            alloc += &format!("  {sn}_claim_field_{} a #b #e;\n", f.name);
+        } else {
+            let piece = f
+                .shape
+                .uninit(&format!("(a +! {sn}_offsetof_{})", f.name))
+                .unwrap();
+            c += &format!(
+                "ghost fn {sn}_claim_step_0 (a: ptr)\n  requires {sn}_carve a {upper}\n  ensures {piece}\n{{\n  unfold {sn}_carve a {upper};\n  with b e. assert (mem_pts_to_at a 1.0R (slice b 0 {upper}) (Seq.slice e 0 {upper}));\n  {sn}_claim_field_{} a #b #e;\n}}\n\n",
+                f.name
+            );
+            alloc += &format!("  {sn}_claim_step_0 a;\n");
+        }
     }
     // Claiming raw storage at this type is the carve on its own; a stack
     // allocation is that plus the allocation. Separating them is what lets a
@@ -10712,15 +10775,48 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         free += &format!("  drop_mem_pts_to_at_nil {};\n", at(f.offset));
     }
     free += &format!("  unfold {}_padding a 1.0R;\n", sn);
+    // As with the carve, each reveal-and-join is a ghost function of its own,
+    // and the prefix joined so far travels between them as `{sn}_prefix`,
+    // folded: inline, every join left its existential witnesses and length
+    // facts in the context of all the later ones, and on the sixty-nine-field
+    // struct in `test/dpe` each join was checked in ten seconds against the
+    // ones before it.
+    c += &format!(
+        "let {sn}_prefix (a: ptr) (n: nat) : slprop =\n  exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == n /\\ ET.elen e == len b)\n\n"
+    );
     if let Some(f) = field_at(0) {
         reveal_at(f, &mut free);
+        free += &format!(
+            "  fold {sn}_prefix a {};\n",
+            bounds.first().copied().unwrap_or(si.size)
+        );
     }
     for (i, off) in bounds.iter().enumerate() {
-        if let Some(f) = field_at(*off) {
-            reveal_at(f, &mut free);
-        }
         let next = bounds.get(i + 1).copied().unwrap_or(si.size);
-        free += &format!("  {sn}_join_uninit a {}sz {};\n", off, next - off);
+        let mut body = format!("  unfold {sn}_prefix a {off};\n");
+        let piece = match field_at(*off) {
+            Some(f) => {
+                reveal_at(f, &mut body);
+                f.shape
+                    .uninit(&format!("(a +! {sn}_offsetof_{})", f.name))
+                    .unwrap()
+            }
+            None => format!(
+                "exists* g e. mem_pts_to_at (a +! {off}sz) 1.0R g e ** pure (len g == {} /\\ ET.elen e == len g)",
+                next - off
+            ),
+        };
+        body += &format!(
+            "  {sn}_join_uninit a {off}sz {};\n  fold {sn}_prefix a {next};\n",
+            next - off
+        );
+        c += &format!(
+            "ghost fn {sn}_reveal_step_{off} (a: ptr)\n  requires {sn}_prefix a {off}\n  requires {piece}\n  ensures {sn}_prefix a {next}\n{{\n{body}}}\n\n"
+        );
+        free += &format!("  {sn}_reveal_step_{off} a;\n");
+    }
+    if field_at(0).is_some() {
+        free += &format!("  unfold {sn}_prefix a {};\n", si.size);
     }
     c += &format!(
         "ghost fn {sn}_reveal_uninit (a: ptr)\n\
