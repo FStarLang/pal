@@ -6735,6 +6735,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          \x20 requires emp\n\
          \x20 returns  a: ptr\n\
          \x20 ensures  {un}_pts_to_uninit a\n\
+         \x20 ensures  pure (fixed_metadata a (ET.etypes_of {un}_ctype true))\n\
          {{\n  let a = mem_stack_alloc {un}_sizeof (hide {un}_ctype);\n  \
          aligned_divides a max_align {un}_alignof;\n  \
          ET.read_ok_of {un}_ctype true;\n  \
@@ -11388,6 +11389,28 @@ struct Touched {
     /// value -- which for a pointer is what it points at -- is passed to a
     /// call, stored or returned.
     escaped: HashSet<String>,
+    /// The locals the body declares.
+    locals: HashSet<String>,
+    /// `x = e` into a declared local `x`: the roots of `e` escape only if `x`
+    /// itself does (`close_escaped`).
+    flows: Vec<(String, HashSet<String>)>,
+}
+
+impl Touched {
+    /// `escaped`, closed under `flows`.
+    fn close_escaped(mut self) -> HashSet<String> {
+        loop {
+            let before = self.escaped.len();
+            for (x, roots) in &self.flows {
+                if self.escaped.contains(x) {
+                    self.escaped.extend(roots.iter().cloned());
+                }
+            }
+            if self.escaped.len() == before {
+                return self.escaped;
+            }
+        }
+    }
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -11487,8 +11510,23 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         }
         ExprT::FnCall(n, args) => {
             t.calls.insert(n.val.to_string());
+            // `memcpy` and `memmove` are translated in place (`copy_object`):
+            // the bytes move, but no address is handed to anything. Nor does
+            // `free` keep the pointer it is given: the block is gone after it.
+            let copy = matches!(n.val.as_ref(), "memcpy" | "memmove");
+            let free = n.val.as_ref() == "free";
             for a in args.iter() {
-                value_roots(a, &mut t.escaped);
+                if free {
+                } else if !copy {
+                    value_roots(a, &mut t.escaped);
+                } else if let ExprT::Ref(x) = &strip_casts(a).val {
+                    if let Some(n) = lvalue_name(strip_vattr(x)) {
+                        t.addressed.insert(n);
+                    }
+                    touch_write(x, t);
+                    touch_expr(x, t);
+                    continue;
+                }
                 touch_expr(a, t);
             }
         }
@@ -11728,7 +11766,14 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
                 touch_expr(b, t)
             }
             StmtT::Assign(a, b) => {
-                value_roots(b, &mut t.escaped);
+                match &strip_vattr(a).val {
+                    ExprT::Var(x) if t.locals.contains(&*x.val.to_string()) => {
+                        let mut roots = HashSet::new();
+                        value_roots(b, &mut roots);
+                        t.flows.push((x.val.to_string(), roots));
+                    }
+                    _ => value_roots(b, &mut t.escaped),
+                }
                 touch_write(a, t);
                 touch_expr(a, t);
                 touch_expr(b, t);
@@ -11776,8 +11821,10 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
                 touch_exprs(ensures, t);
             }
             StmtT::Label { ensures, .. } => touch_exprs(ensures, t),
-            StmtT::Decl(..)
-            | StmtT::Freeze(_)
+            StmtT::Decl(n, _) => {
+                t.locals.insert(n.val.to_string());
+            }
+            StmtT::Freeze(_)
             | StmtT::Break
             | StmtT::Continue
             | StmtT::Return(None)
@@ -21735,7 +21782,7 @@ impl<'a> Body<'a> {
             return Err(format!("`{}` requires three arguments", name.val));
         }
         let (src, sa, spn, initialized) = self.copy_place(&args[1])?;
-        let (dst, da, mut dpn, old_init) = self.copy_place(&args[0])?;
+        let (dst, da, dpn, old_init) = self.copy_place(&args[0])?;
         if spn == "ptr" || dpn == "ptr" {
             return Err(
                 "copying pointer-valued objects requires pointer-type-specific effective-type descriptors"
@@ -21743,6 +21790,43 @@ impl<'a> Body<'a> {
             );
         }
         let n = self.index(&args[2])?;
+        // A copy of a whole declared union into allocated storage gives the
+        // storage the union's type (6.5p6: the source's effective type), so it
+        // is prepared for the union exactly as a whole-union store prepares
+        // it, and ends up in the `_heap` family holding the same member.
+        let mut heap_copy = None;
+        if let (CopyObject::Slot(si), CopyObject::Block(_)) = (src, dst)
+            && initialized
+            && let Some(un) = spn.strip_prefix("union_")
+            && self
+                .tds
+                .unions
+                .get(un)
+                .is_some_and(|ui| union_heap_capable(self.tds, ui))
+            && const_bytes(self.tds, &args[2]).is_some_and(|k| {
+                self.tds
+                    .unions
+                    .get(un)
+                    .is_some_and(|ui| ui.members.iter().map(|m| m.size).max() == Some(k))
+            })
+        {
+            let sty = self
+                .ty_of(strip_casts(&args[1]))
+                .ok()
+                .and_then(|t| match &peel(self.tds, &t).val {
+                    TypeT::Pointer(t, _) => Some(t.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| "a union copy whose source type is unknown".to_string())?;
+            let live = self.active.get(&self.slots[si].addr).cloned();
+            self.prepare_block(&sty, &args[0])?;
+            heap_copy = Some(live);
+        }
+        let (dst, da, mut dpn, old_init) = if heap_copy.is_some() {
+            self.copy_place(&args[0])?
+        } else {
+            (dst, da, dpn, old_init)
+        };
         if let CopyObject::Block(i) = src
             && self.blocks[i].prepared.is_some()
         {
@@ -22069,7 +22153,12 @@ impl<'a> Body<'a> {
                 "{}_conceal {} #{} #{} #{} #{};",
                 spn, sa, p, bs, x, es
             ));
-            if is_aggregate(&dpn) {
+            if heap_copy.is_some() {
+                self.lines.push(format!(
+                    "fold {}_heap_pts_to {} 1.0R {};",
+                    dpn, da, copied_value
+                ));
+            } else if is_aggregate(&dpn) {
                 self.lines.push(format!(
                     "{}_conceal {} #1.0R #{} #{};",
                     dpn, da, bs, copied_value
@@ -22085,10 +22174,17 @@ impl<'a> Body<'a> {
         match dst {
             CopyObject::Slot(i) => self.slots[i].init = initialized,
             CopyObject::Block(i) => {
-                self.blocks[i].pn = dpn;
+                self.blocks[i].pn = if heap_copy.is_some() {
+                    format!("{}_heap", dpn)
+                } else {
+                    dpn
+                };
                 self.blocks[i].init = initialized;
                 self.blocks[i].prepared = None;
             }
+        }
+        if let Some(Some(live)) = heap_copy {
+            self.active.insert(da.clone(), live);
         }
         Ok(da)
     }
@@ -23950,21 +24046,10 @@ impl<'a> Body<'a> {
                 else_branch,
                 ensures,
             } => {
-                // Either arm may make a different member live, and the two
-                // arms need not agree, so nothing survives the join -- except
-                // for a union in allocated storage that neither arm touches
-                // the live member of: its predicate is the same in both.
-                let heap_active: HashMap<String, String> = self
-                    .active
-                    .iter()
-                    .filter(|(a, _)| {
-                        self.blocks
-                            .iter()
-                            .any(|b| b.tmp == **a && b.pn.ends_with("_heap"))
-                    })
-                    .map(|(a, m)| (a.clone(), m.clone()))
-                    .collect();
-                self.active = heap_active;
+                // Either arm may make a different member live, so a member
+                // survives the join only if both arms leave it live (checked
+                // after them, below): the union's predicate is then the same
+                // in both.
                 // A `_ensures` that says only what is live needs no
                 // translation: Pulse computes the join of an `if` itself, so
                 // the annotation exists to be checked and not to make the code
@@ -24351,7 +24436,6 @@ impl<'a> Body<'a> {
                     else_branch,
                     ..
                 } if returns(then_branch) || returns(else_branch) => {
-                    self.active.clear();
                     // A test of a freshly allocated pointer is the one
                     // condition that is not just a value: it decides which arm
                     // owns the block, so each arm opens by eliminating the
@@ -24378,6 +24462,9 @@ impl<'a> Body<'a> {
                     // through. Appending it to that arm is what turns an early
                     // `return` into an expression.
                     let after = &stmts[i + 1..];
+                    // Neither arm joins the other -- each ends the function --
+                    // so each starts from what was live after the condition.
+                    let entry_active = self.active.clone();
                     let mut then_stmts: Vec<Rc<Stmt>> = then_branch.to_vec();
                     let mut else_stmts: Vec<Rc<Stmt>> = else_branch.to_vec();
                     if !returns(then_branch) {
@@ -24423,6 +24510,7 @@ impl<'a> Body<'a> {
                         }
                     };
                     open(self, pt_live_then);
+                    self.active = entry_active.clone();
                     let r = self.tail_arm(&then_stmts);
                     let (mut then_lines, then_val) = match r {
                         Ok(r) => r,
@@ -24437,6 +24525,7 @@ impl<'a> Body<'a> {
                         self.mark_checked(i, !live_then);
                     }
                     open(self, !pt_live_then);
+                    self.active = entry_active;
                     let r = self.tail_arm(&else_stmts);
                     let (mut else_lines, else_val) = match r {
                         Ok(r) => r,
@@ -24447,6 +24536,7 @@ impl<'a> Body<'a> {
                     };
                     close(self, !pt_live_then, &mut else_lines);
                     self.blocks = entry_blocks;
+                    self.active.clear();
                     let then_lines: Vec<String> = then_pre.into_iter().chain(then_lines).collect();
                     let else_lines: Vec<String> = else_pre.into_iter().chain(else_lines).collect();
                     if then_val != else_val {
@@ -27323,7 +27413,7 @@ fn emit_body(
     let escaped = {
         let mut t = Touched::default();
         touch_stmts(&defn.body, &mut t);
-        t.escaped
+        t.close_escaped()
     };
     let mut arrays = HashMap::new();
     for a in &defn.decl.args {

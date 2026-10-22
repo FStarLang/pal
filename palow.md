@@ -1198,12 +1198,12 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 30 |
+| Verified enabled cases within the supported target/model | 31 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (11.1, 13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 9 |
 | Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 23.1, 23.2 and 24.5) | 13 |
 | Checked rejections before the UB access (13.4, 13.5 and 14.3) | 3 |
-| Explicit unsupported-translation expectations | 8 |
+| Explicit unsupported-translation expectations | 7 |
 | Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
 | Accepted known gaps (the three 22.1 lifetime-value variants, and 12.6) | 4 |
 | Total | 75 |
@@ -1266,10 +1266,22 @@ inside the live member `l`, since the bytes past it are unspecified
 storage holds also survives an `if` whose arms both leave it live, which is
 what the nested `c ? "little" : d ? "big" : "mixed"` of 12.4 needs; that
 variadic argument is evaluated as the `if`s a conditional in statement
-position is, since only its conditions oblige anything. Other array members
-and struct members are not read through the heap family, so 12.3 and 24.4
-(struct members, with a common initial sequence) and 12.2 (a union type
-propagated by `memcpy`) remain unsupported. A union nested in an allocated struct is tracked when the
+position is, since only its conditions oblige anything. The live member of a local union likewise
+survives an `if` whose arms both leave it live, and either arm of an `if`
+with an early `return`.
+
+A whole-object `memcpy` from an initialized declared union into allocated
+storage (6.5p6: the copy gives the destination the effective type of the
+source, the union's) prepares the destination for the union, copies with
+`Machine.memcpy_prepared` -- whose result index is exactly the heap family's
+-- and folds `union_X_heap_pts_to` at the source's value, carrying the
+source's live member over (12.2). `memcpy`, `memmove` and `free` do not make
+their arguments escape, and a pointer assigned to a local escapes only if
+that local does.
+
+Other array members and struct members are not read through the heap
+family, so 12.3 and 24.4 (struct members, with a common initial sequence)
+remain unsupported. A union nested in an allocated struct is tracked when the
 struct is stored whole with a brace initialiser naming the member (12.6), but
 the typed claim of the malloc'd struct then fails on
 `ET.declared_destination`: the struct's family is the declared one whenever
