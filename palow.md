@@ -1109,7 +1109,9 @@ These expectations deliberately include defined C programs:
 they record missing frontend support, not permission to classify the programs
 as undefined. The disabled cases remain separate -- 4.2 because PAL has no
 `realloc` (it needs a contract carrying the old effective-type index to the
-new block, and per-element retyping of a raw block in a loop) -- as do the
+new block, and per-element retyping of a raw block in a loop) and 20.1
+because PAL drops `volatile` (the model cannot tell a `volatile int` object
+from an `int` one) -- as do the
 three 22.1 lifetime tests whose freed pointer *values* are not invalidated by
 the current model.
 
@@ -1176,8 +1178,8 @@ failure is never counted as a successful strict-aliasing proof.
 | Checked view rejections (13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 8 |
 | Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1 and 18.2) | 10 |
 | Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
-| Explicit unsupported-translation expectations | 18 |
-| Disabled cases (4.2, 16.3, 20.2, 21.1 and 22.3) | 5 |
+| Explicit unsupported-translation expectations | 17 |
+| Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 

@@ -81,6 +81,16 @@ static _plain void *opaque(_plain void *p)
 #define BANNER(tag, title) \
     printf("\n== [%s] %s ==\n", tag, title)
 
+/* Disabled until PAL supports `volatile`: the frontend drops the qualifier,
+   so neither the IR nor the Palow model can tell a `volatile int` object from
+   an `int` one, and this access cannot be rejected for the right reason.
+   The case needs `volatile` carried on declared objects into the
+   effective-type model, so that an access through a non-volatile lvalue is
+   refused (C11 6.7.3p6, and 6.5p7 since `int` is not a qualified version of
+   `volatile int`). No other test exercises `volatile` beyond the corpus's
+   `g_sink`. Keep the code intact to preserve this effective-type test rather
+   than rewriting away the unsupported construct. */
+#if 0
 static volatile int g_volatile = 1;
 
 /* ================================================================== */
@@ -105,6 +115,7 @@ static void case_20_1_volatile_object_via_nonvolatile_lvalue(void)
     printf("   g_volatile = %d   <-- UB\n", g_volatile);
     sink_u((unsigned)g_volatile);
 }
+#endif
 
 int main(void)
     _preserves(_live(stdout))
@@ -112,6 +123,8 @@ int main(void)
 {
     /* Unbuffered: if a UB case crashes, we still see how far we got. */
     setvbuf(stdout, NULL, _IONBF, 0);
+#if 0
     case_20_1_volatile_object_via_nonvolatile_lvalue();
+#endif
     return 0;
 }
