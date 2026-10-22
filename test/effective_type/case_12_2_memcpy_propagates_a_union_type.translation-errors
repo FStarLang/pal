@@ -1,1 +1,1 @@
-error: `Func_case_12_2_memcpy_propagates_a_union_type`: its body is not translated: a read of union member `i`, which is not known to be the live one here
+error: `Func_case_12_2_memcpy_propagates_a_union_type`: its body is not translated: a member of `union upun` in allocated storage whose effective type is not that union here: only a store of a whole union value gives it one (6.5p6)

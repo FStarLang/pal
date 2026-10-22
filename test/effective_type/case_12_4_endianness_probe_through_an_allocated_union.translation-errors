@@ -1,1 +1,1 @@
-error: `Func_case_12_4_endianness_probe_through_an_allocated_union`: its body is not translated: an allocated `union endian`, whose effective type the union model does not track
+error: `Func_case_12_4_endianness_probe_through_an_allocated_union`: its body is not translated: a read of member `b` of a `union endian` in allocated storage, which is not a provenance-free scalar

@@ -368,6 +368,26 @@ fn repr_pn(pn: &str) -> &str {
     }
 }
 
+/// The bits a provenance-free scalar of Palow type `pn` encodes `v` as, which
+/// is what `Encoding.encode` lays out in its bytes; `None` for anything else.
+fn scalar_bits(pn: &str, v: &str) -> Option<String> {
+    Some(match repr_pn(pn) {
+        "bool_t" => format!("(if {v} then 1 else 0)"),
+        "uint8_t" => format!("UInt8.v {v}"),
+        "uint16_t" => format!("UInt16.v {v}"),
+        "uint32_t" => format!("UInt32.v {v}"),
+        "uint64_t" => format!("UInt64.v {v}"),
+        "size_t" => format!("SizeT.v {v}"),
+        "int8_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 8 (Int8.v {v})"),
+        "int16_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 16 (Int16.v {v})"),
+        "int32_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 32 (Int32.v {v})"),
+        "int64_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 64 (Int64.v {v})"),
+        "float32_t" => format!("Pulse.Lib.C.Palow.Float.float32_bits {v}"),
+        "float64_t" => format!("Pulse.Lib.C.Palow.Float.float64_bits {v}"),
+        _ => return None,
+    })
+}
+
 /// The size of the scalar Palow type `pn`, or `None` for an aggregate.
 fn scalar_pn_size(pn: &str) -> Option<u64> {
     match repr_pn(pn) {
@@ -6785,6 +6805,178 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     if active_pointer_members(tds, ui).is_some() {
         c = emit_active_pointer_union(tds, name, c);
     }
+    if union_heap_capable(tds, ui) {
+        c += &emit_heap_union(tds, name);
+    }
+    c
+}
+
+/// A member a union in allocated storage can be stored whole as and read
+/// back through: a scalar without provenance, which has a byte encoding and
+/// a typed read at an exact index.
+fn heap_member(m: &UnionMember) -> Option<&str> {
+    const HEAP: &[&str] = &[
+        "bool_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "long_long_t",
+        "ulong_long_t",
+        "size_t",
+        "float32_t",
+        "float64_t",
+    ];
+    match &m.shape {
+        FieldShape::One { pn } if m.size > 0 && HEAP.contains(&pn.as_str()) => Some(pn.as_str()),
+        _ => None,
+    }
+}
+
+/// Whether a union gets the allocated-storage family `_heap`.
+fn union_heap_capable(tds: &Typedefs, ui: &UnionInfo) -> bool {
+    active_pointer_members(tds, ui).is_none() && ui.members.iter().any(|m| heap_member(m).is_some())
+}
+
+/// A union in allocated storage (C11 6.5p6): a store of the whole union
+/// through an lvalue of union type makes the union the effective type of the
+/// bytes, and from then on every member is read through the union.
+///
+/// The declared family cannot say this. It leans on declared bytes never
+/// changing type, which is what lets it hand a member out and recover the
+/// union's types when it comes back. Allocated bytes have no such snapshot,
+/// so this family never hands a member out: the bytes keep exactly the index
+/// `Machine.initialize` gave them -- the union's own -- and a member read is
+/// a typed read at a slice of that index, put back before it returns. That
+/// is also why it has no member store: a store through a member lvalue
+/// installs the member's type, not the union's (24.1).
+///
+/// Only members that are provenance-free scalars are stored or read; the
+/// reread between them is the declared family's, at this predicate.
+fn emit_heap_union(tds: &Typedefs, name: &str) -> String {
+    let ui = &tds.unions[name];
+    let un = format!("union_{}", name);
+    let ctor = |m: &UnionMember| format!("Union_{}_{}", name, m.name);
+    let size = ui.members.iter().map(|m| m.size).max().unwrap_or(0);
+    let mut c = String::new();
+    c += &format!(
+        "let {un}_heap_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop =\n  \
+         exists* b. mem_pts_to_at a p b (ET.etypes_of {un}_ctype false) ** pure ({un}_repr u b /\\ aligned a {un}_alignof)\n\n\
+         let {un}_heap_pts_to_uninit ([@@@mkey] a: ptr) : slprop =\n  \
+         exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b)\n\n\
+         let {un}_heap_storable (x: {un}) : bool =\n  match x with\n"
+    );
+    for m in &ui.members {
+        c += &format!("  | {} _ -> {}\n", ctor(m), heap_member(m).is_some());
+    }
+    c += &format!(
+        "\nlet {un}_heap_encode (x: {un} {{ {un}_heap_storable x }}) : b:bytes {{ {un}_repr x b /\\ initialized b }} =\n  match x with\n"
+    );
+    for m in &ui.members {
+        let Some(pn) = heap_member(m) else {
+            continue;
+        };
+        c += &format!(
+            "  | {k} v ->\n    \
+             let r0 = Pulse.Lib.C.Palow.Encoding.encode {msz} None ({bits}) in\n    \
+             let r1 = zeroed {rest} in\n    \
+             initialized_append r0 r1;\n    \
+             append_slice_left r0 r1;\n    \
+             append r0 r1\n",
+            k = ctor(m),
+            msz = m.size,
+            bits = scalar_bits(pn, "v").unwrap(),
+            rest = size - m.size,
+        );
+    }
+    c += &format!(
+        "\nfn {un}_heap_initialize (a: ptr) (x: {un})\n\
+         \x20 requires Pulse.Lib.C.Palow.Effective.prepared a {un}_ctype\n\
+         \x20 requires pure (aligned a {un}_alignof /\\ {un}_heap_storable x)\n\
+         \x20 ensures  {un}_heap_pts_to a 1.0R x\n\
+         {{\n  let b = {un}_heap_encode x;\n  \
+         Pulse.Lib.C.Palow.Effective.Machine.initialize a (hide {un}_ctype) b;\n  \
+         fold {un}_heap_pts_to a 1.0R x;\n}}\n\n\
+         ghost fn {un}_heap_forget (a: ptr) (#u: {un})\n\
+         \x20 requires {un}_heap_pts_to a 1.0R u\n\
+         \x20 ensures  {un}_heap_pts_to_uninit a\n\
+         {{\n  unfold {un}_heap_pts_to a 1.0R u;\n  fold {un}_heap_pts_to_uninit a;\n}}\n\n\
+         ghost fn {un}_heap_reveal_uninit (a: ptr)\n\
+         \x20 requires {un}_heap_pts_to_uninit a\n\
+         \x20 ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b)\n\
+         {{\n  unfold {un}_heap_pts_to_uninit a;\n}}\n\n"
+    );
+    for m in &ui.members {
+        let Some(pn) = heap_member(m) else {
+            continue;
+        };
+        let mty = field_type(tds, &m.ty).unwrap();
+        c += &format!(
+            "fn {un}_heap_read_{f} (a: ptr) (#p: perm) (#v: erased ({mty}))\n\
+             \x20 preserves {un}_heap_pts_to a p ({k} v)\n\
+             \x20 returns  y: {mty}\n\
+             \x20 ensures  pure (y == reveal v)\n\
+             {{\n  \
+             unfold {un}_heap_pts_to a p ({k} v);\n  \
+             with b. assert (mem_pts_to_at a p b (ET.etypes_of {un}_ctype false));\n  \
+             {un}_member_aligned a;\n  \
+             ET.read_ok_of {un}_ctype false;\n  \
+             ET.read_ok_slice (ET.etypes_of {un}_ctype false) {un}_ctype 0 {pn}_ctype;\n  \
+             mem_split_at a {msz}sz;\n  \
+             Pulse.Lib.C.Palow.Effective.Value.claim {pn}_ctype {pn}_repr {pn}_alignof a #p #(reveal v) #(slice b 0 {msz});\n  \
+             let y = {pn}_read_at a;\n  \
+             Pulse.Lib.C.Palow.Effective.Value.reveal_value {pn}_ctype {pn}_repr {pn}_alignof a;\n  \
+             with bx. assert (mem_pts_to_at a p bx (Seq.slice (ET.etypes_of {un}_ctype false) 0 {msz}));\n  \
+             mem_join_at a {msz}sz;\n  \
+             append_slice_left bx (slice b {msz} {size});\n  \
+             Seq.lemma_split (ET.etypes_of {un}_ctype false) {msz};\n  \
+             fold {un}_heap_pts_to a p ({k} v);\n  \
+             y\n}}\n\n",
+            f = m.name,
+            k = ctor(m),
+            msz = m.size,
+        );
+    }
+    for l in &ui.members {
+        for m in &ui.members {
+            let Some((lpn, mpn)) = rereadable(l, m) else {
+                continue;
+            };
+            let lty = field_type(tds, &l.ty).unwrap();
+            let mty = field_type(tds, &m.ty).unwrap();
+            let valid = if mpn == "bool_t" {
+                format!(
+                    "\x20 requires pure (forall (b: bytes). {lpn}_repr v b ==> Pulse.Lib.C.Palow.RawBytes.bool_t_valid (slice b 0 1))\n"
+                )
+            } else {
+                String::new()
+            };
+            c += &format!(
+                "ghost fn {un}_heap_reread_{l}_{m} (a: ptr) (#p: perm) (#v: {lty})\n\
+                 \x20 requires {un}_heap_pts_to a p ({kl} v)\n\
+                 {valid}\
+                 \x20 ensures  exists* (w: {mty}). {un}_heap_pts_to a p ({km} w)\n\
+                 {{\n  \
+                 unfold {un}_heap_pts_to a p ({kl} v);\n  \
+                 with b. assert (mem_pts_to_at a p b (ET.etypes_of {un}_ctype false) ** pure ({un}_repr ({kl} v) b));\n  \
+                 {lpn}_repr_no_prov v (slice b 0 {lsz});\n  \
+                 Pulse.Lib.C.Palow.RawBytes.defined_slice (slice b 0 {lsz}) 0 {msz};\n  \
+                 slice_prefix b {lsz} 0 {msz};\n  \
+                 Pulse.Lib.C.Palow.RawBytes.{mpn}_decode (slice b 0 {msz});\n  \
+                 fold {un}_heap_pts_to a p ({km} (Pulse.Lib.C.Palow.RawBytes.{mpn}_of_bytes (slice b 0 {msz})));\n}}\n\n",
+                l = l.name,
+                m = m.name,
+                kl = ctor(l),
+                km = ctor(m),
+                lsz = l.size,
+                msz = m.size,
+            );
+        }
+    }
     c
 }
 
@@ -7887,6 +8079,9 @@ fn whole_initialize_supported(tds: &Typedefs, ty: &Type) -> bool {
     let Some(pn) = palow_name(tds, ty) else {
         return false;
     };
+    if let Some(ui) = pn.strip_prefix("union_").and_then(|n| tds.unions.get(n)) {
+        return union_heap_capable(tds, ui);
+    }
     if !pn.starts_with("struct_") {
         return matches!(
             repr_pn(&pn),
@@ -8893,22 +9088,7 @@ fn emit_contextual_scalar_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64,
         .map(|r| match r {
             Region::Gap(_, n) => Some(format!("zeroed {n}")),
             Region::Field(f) => {
-                let v = format!("x.fld_{}", f.name);
-                let bits = match repr_pn(f.shape.pn()) {
-                    "bool_t" => format!("(if {v} then 1 else 0)"),
-                    "uint8_t" => format!("UInt8.v {v}"),
-                    "uint16_t" => format!("UInt16.v {v}"),
-                    "uint32_t" => format!("UInt32.v {v}"),
-                    "uint64_t" => format!("UInt64.v {v}"),
-                    "size_t" => format!("SizeT.v {v}"),
-                    "int8_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 8 (Int8.v {v})"),
-                    "int16_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 16 (Int16.v {v})"),
-                    "int32_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 32 (Int32.v {v})"),
-                    "int64_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 64 (Int64.v {v})"),
-                    "float32_t" => format!("Pulse.Lib.C.Palow.Float.float32_bits {v}"),
-                    "float64_t" => format!("Pulse.Lib.C.Palow.Float.float64_bits {v}"),
-                    _ => return None,
-                };
+                let bits = scalar_bits(f.shape.pn(), &format!("x.fld_{}", f.name))?;
                 Some(format!(
                     "Pulse.Lib.C.Palow.Encoding.encode {} None ({bits})",
                     f.size
@@ -14831,6 +15011,7 @@ impl<'a> Body<'a> {
                         ));
                     }
                     return Ok(Focus {
+                        read_as: None,
                         write_fn: format!("{}_write", pn),
                         unaligned: false,
                         pn,
@@ -14872,6 +15053,7 @@ impl<'a> Body<'a> {
                 )];
                 close_write.extend(ff.close_write);
                 Ok(Focus {
+                    read_as: None,
                     write_fn: match unaligned {
                         true if self
                             .tds
@@ -14951,6 +15133,9 @@ impl<'a> Body<'a> {
         let un = self
             .union_of(base)
             .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
+        if let Some(f) = self.heap_union_member(base, &un, f, writing, via_pointer)? {
+            return Ok(f);
+        }
         if writing
             && let Some(ui) = un
                 .strip_prefix("union_")
@@ -15085,6 +15270,7 @@ impl<'a> Body<'a> {
             v
         };
         Ok(Focus {
+            read_as: None,
             bits: None,
             pn: pn.clone(),
             write_fn: shape.write_fn(),
@@ -15098,6 +15284,106 @@ impl<'a> Body<'a> {
             close_read: close(base_close_read),
             close_write: close(base_close_write),
         })
+    }
+
+    /// A member of a union in allocated storage, which is `None` when `base`
+    /// is not such a union. The storage holds the union -- the `_heap`
+    /// family -- only after a store of a whole union value (6.5p6); before
+    /// that, or after a store of anything else, it does not, and no member of
+    /// the union can be read from it. A member is never focused out of it,
+    /// and never written to: see `emit_heap_union`.
+    fn heap_union_member(
+        &mut self,
+        base: &Expr,
+        un: &str,
+        f: &Ident,
+        writing: bool,
+        via_pointer: bool,
+    ) -> Result<Option<Focus>, String> {
+        let Some(ui) = un
+            .strip_prefix("union_")
+            .and_then(|n| self.tds.unions.get(n))
+        else {
+            return Ok(None);
+        };
+        if !union_heap_capable(self.tds, ui) {
+            return Ok(None);
+        }
+        let base = match self.unalias(base) {
+            Some(p) => (*p).clone(),
+            None => base.clone(),
+        };
+        let ExprT::Deref(pointer) = &strip_vattr(&base).val else {
+            return Ok(None);
+        };
+        let Some(name) = self.block_name(pointer) else {
+            return Ok(None);
+        };
+        let Some(b) = self
+            .blocks
+            .iter()
+            .find(|b| b.var == name && b.checked && !b.freed)
+        else {
+            return Ok(None);
+        };
+        let uname = un.trim_start_matches("union_");
+        if b.pn != format!("{}_heap", un) || !b.init {
+            return Err(format!(
+                "a member of `union {}` in allocated storage whose effective type is not that union here: only a store of a whole union value gives it one (6.5p6)",
+                uname
+            ));
+        }
+        if writing {
+            return Err(format!(
+                "a store to member `{}` of a `union {}` in allocated storage: it would make the member's type the effective type of the bytes, not the union's (6.5p6), and the union model has no step for that",
+                f.val, uname
+            ));
+        }
+        let a = b.tmp.clone();
+        let m = ui
+            .members
+            .iter()
+            .find(|m| m.name == *f.val)
+            .ok_or_else(|| format!("no member `{}` in `union {}`", f.val, uname))?;
+        let Some(pn) = heap_member(m) else {
+            return Err(format!(
+                "a read of member `{}` of a `union {}` in allocated storage, which is not a provenance-free scalar",
+                f.val, uname
+            ));
+        };
+        match self.active.get(&a).cloned() {
+            Some(l) if l == *f.val => {}
+            Some(l) if !via_pointer => {
+                let lm = ui.members.iter().find(|x| x.name == l).unwrap();
+                if rereadable(lm, m).is_none() {
+                    return Err(format!(
+                        "a read of union member `{}` while `{}` is the live one: its bytes are not known to be a value of its type",
+                        f.val, l
+                    ));
+                }
+                self.lines
+                    .push(format!("{}_heap_reread_{}_{} {};", un, l, f.val, a));
+                self.active.insert(a.clone(), f.val.to_string());
+            }
+            _ => {
+                return Err(format!(
+                    "a read of union member `{}`, which is not known to be the live one here",
+                    f.val
+                ));
+            }
+        }
+        Ok(Some(Focus {
+            bits: None,
+            pn: pn.to_string(),
+            write_fn: m.shape.write_fn(),
+            unaligned: false,
+            read_as: Some(format!("{}_heap_read_{}", un, f.val)),
+            at: a,
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+        }))
     }
 
     /// Type punning: a read of `u.m.f` where the live member is not `m`.
@@ -15242,6 +15528,7 @@ impl<'a> Body<'a> {
         let mut close = vec![format!("{}_unpun_{}_{}_{} {};", un, live, m, fname, a)];
         close.extend(bcr);
         Ok(Some(Focus {
+            read_as: None,
             bits: None,
             pn: pn.clone(),
             write_fn: format!("{}_write", pn),
@@ -15356,6 +15643,7 @@ impl<'a> Body<'a> {
                 return None;
             }
             return Some(Focus {
+                read_as: None,
                 bits: None,
                 write_fn: format!(
                     "{}_write{}",
@@ -15423,6 +15711,7 @@ impl<'a> Body<'a> {
         // scattering happens *inside* that, not instead of it.
         close_write.extend(ff.close_write.iter().cloned());
         Some(Focus {
+            read_as: None,
             bits: None,
             write_fn: format!(
                 "{}_write_uninit{}",
@@ -16373,6 +16662,7 @@ impl<'a> Body<'a> {
             close_read.extend(cl_read);
             close_write.extend(cl_write);
             return Ok(Focus {
+                read_as: None,
                 bits: None,
                 at,
                 write_fn: format!("{pn}_write{}_retained", if maybe { "_uninit" } else { "" }),
@@ -16406,6 +16696,7 @@ impl<'a> Body<'a> {
             close_read.extend(cl_read);
             close_write.extend(cl_write);
             return Ok(Focus {
+                read_as: None,
                 bits: None,
                 at,
                 write_fn: format!("{}_write", pn),
@@ -16470,6 +16761,7 @@ impl<'a> Body<'a> {
         close_read.extend(cl_read);
         close_write.extend(cl_write);
         Ok(Focus {
+            read_as: None,
             bits: None,
             at,
             write_fn: format!("{}_write_uninit", pn),
@@ -20322,6 +20614,47 @@ impl<'a> Body<'a> {
         // for good; allocated storage has none to keep until a store gives
         // it one. Only the unions whose members are all pointers have the
         // allocated form so far.
+        // A union whose members can be stored whole has the allocated form
+        // `_heap`: the storage starts as raw bytes, and the first store of a
+        // whole union gives it the union's type (see `prepare_block`).
+        if pn.starts_with("union_")
+            && zero.is_none()
+            && pn
+                .strip_prefix("union_")
+                .and_then(|n| self.tds.unions.get(n))
+                .is_some_and(|ui| union_heap_capable(self.tds, ui))
+        {
+            let size = format!("{}_sizeof", pn);
+            let tmp = self.fresh(&var.val);
+            self.lines
+                .push(format!("let {} = {} {};", tmp, which, size));
+            self.blocks.retain(|b| b.var != *var.val);
+            self.blocks.push(Block {
+                var: var.val.to_string(),
+                tmp: tmp.clone(),
+                pn: String::new(),
+                fill: if which == "calloc" {
+                    "zeroed"
+                } else {
+                    "uninit"
+                },
+                checked: false,
+                null: false,
+                parent: None,
+                split: None,
+                init: false,
+                freed: false,
+                prepared: None,
+                view_size: None,
+                scattered: BTreeSet::new(),
+                zero: None,
+                taken: None,
+                array: None,
+                flex: None,
+                bytes: Some(size),
+            });
+            return Ok(tmp);
+        }
         if pn.starts_with("union_") && zero.is_none() && !fresh_pointer_object(self.tds, pn) {
             return Err(format!(
                 "an allocated `union {}`, whose effective type the union model does not track",
@@ -20907,6 +21240,18 @@ impl<'a> Body<'a> {
         }
         let pn = palow_name(self.tds, ty)
             .ok_or_else(|| format!("preparing storage for {}", describe(ty)))?;
+        if let Some(n) = pn.strip_prefix("union_")
+            && !self
+                .tds
+                .unions
+                .get(n)
+                .is_some_and(|ui| union_heap_capable(self.tds, ui))
+        {
+            return Err(format!(
+                "an allocated `union {}`, whose effective type the union model does not track",
+                n
+            ));
+        }
         let name = self
             .block_name(obj)
             .ok_or_else(|| "preparation requires owned allocated storage".to_string())?;
@@ -20977,9 +21322,15 @@ impl<'a> Body<'a> {
                 .lines
                 .push(format!("aligned_divides {} max_align {}_alignof;", a, pn)),
         }
+        // Whatever union was live in the old contents is gone with them.
+        self.active.remove(&a);
         let b = &mut self.blocks[i];
         b.bytes = Some(n);
-        b.pn = pn.clone();
+        b.pn = if pn.starts_with("union_") {
+            format!("{}_heap", pn)
+        } else {
+            pn.clone()
+        };
         b.view_size = Some(size);
         b.prepared = Some(pn);
         b.init = false;
@@ -21732,8 +22083,14 @@ impl<'a> Body<'a> {
                     );
                 }
             }
+            // A union in allocated storage is the `_heap` family.
+            let opn = if op == "initialize" && b.pn == format!("{}_heap", pn) {
+                b.pn.clone()
+            } else {
+                pn.to_string()
+            };
             self.lines
-                .push(format!("{}_{} {} {};", pn, op, b.tmp, value));
+                .push(format!("{}_{} {} {};", opn, op, b.tmp, value));
             self.blocks[i].prepared = None;
             self.blocks[i].init = true;
             return Ok(());
@@ -25200,6 +25557,9 @@ struct Focus {
     /// Set when the place is a misaligned field of a packed struct, owned by
     /// `elem_pts_to` and accessed through an aligned temporary.
     unaligned: bool,
+    /// A read that is one call of its own rather than the read of `pn`:
+    /// a member of a union in allocated storage, which is never focused.
+    read_as: Option<String>,
     open_read: Vec<String>,
     open_write: Vec<String>,
     close_read: Vec<String>,
@@ -25218,6 +25578,9 @@ fn misaligned_addr(field: &str) -> String {
 
 impl Focus {
     fn read_fn(&self) -> String {
+        if let Some(r) = &self.read_as {
+            return r.clone();
+        }
         if self.write_fn.ends_with("_field") {
             return self
                 .write_fn
