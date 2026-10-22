@@ -1198,14 +1198,14 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 26 |
+| Verified enabled cases within the supported target/model | 27 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
-| Checked view rejections (13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 8 |
+| Checked view rejections (11.1, 13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 9 |
 | Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 23.1 and 23.2) | 12 |
 | Checked rejections before the UB access (13.4, 13.5 and 14.3) | 3 |
-| Explicit unsupported-translation expectations | 15 |
+| Explicit unsupported-translation expectations | 12 |
 | Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
-| Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
+| Accepted known gaps (the three 22.1 lifetime-value variants, and 12.6) | 4 |
 | Total | 75 |
 
 Four negative union cases were added on top of the original corpus, to cover
@@ -1216,7 +1216,8 @@ through the union; contested, like 24.1), 24.9 (a common initial sequence
 broken by `int` vs `unsigned`, then a same-offset same-type field read past
 it) and 24.10 (the common initial sequence read in a function where the union
 declaration is not visible). All four are UB, and all four are currently
-explicit unsupported-translation expectations, like the other union cases;
+explicit unsupported-translation expectations, like the other union cases,
+except 24.7, which translates and fails at the reread (below);
 24.9 and 24.10 are refused with a diagnostic naming the rule they break
 (the common initial sequence is empty; the address of a member not known to
 be live escapes into a function that cannot see the union), and 24.8 at the
@@ -1235,12 +1236,29 @@ as long as no address of the union escapes in the body. `&u.m` of the live
 member may be passed to a function, which then sees only `m`. A union
 acquired by allocated storage (`malloc`, a cast, a whole-union store) is
 refused, because the model does not yet track union effective types of
-allocated storage.
+allocated storage. A union nested in an allocated struct is tracked when the
+struct is stored whole with a brace initialiser naming the member (12.6), but
+the typed claim of the malloc'd struct then fails on
+`ET.declared_destination`, the same limitation; 12.6 is an accepted known gap
+until allocated unions are supported.
 
-The twenty-six supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
+Rereading a local union through another scalar member (6.5.2.3p3, footnote
+95) is supported when the read member is no wider than the live one and every
+bit pattern of its size is a value of its type: a signed or unsigned integer
+type, or `_Bool`. Each such pair gets a generated ghost step
+`union_X_reread_l_m`, which reinterprets the prefix of the live member's
+bytes through the raw-byte decoders of `Pulse.Lib.C.Palow.RawBytes`. A
+`_Bool` target additionally requires that the byte be 0 or 1 (6.2.6.1p5):
+24.7 fails on exactly that obligation. Floating-point targets are refused
+(no axiom makes every bit pattern a value), and so is a reread through a
+pointer to the member (24.8). 2.3 verifies with this. 11.1 verifies up to
+its section (5), the GCC `may_alias` extension, which is not standard C and
+fails on `View.view_ok` like 13.1.
+
+The twenty-seven supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 4.1, 5.1,
 5.2, 5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 9.1, 9.2, 10.1, 10.2 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
-incompatible effective type. The eight view rejections fail on
+incompatible effective type. The nine view rejections fail on
 `View.view_ok` or `View.aggregate_view_ok` at the incompatible access. In
 15.1 a store has installed `int` and the read is through `float`; 17.4 is
 the same with a pointer type installed and read through `uint64_t` (see

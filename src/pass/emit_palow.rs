@@ -6261,6 +6261,49 @@ fn collect_union(
 /// member also represent any other member they happen to encode, and that
 /// non-injectivity is exactly what makes type punning expressible rather than
 /// a thing to be ruled out.
+/// The Palow names of the live member `l` and the member `m` read in its
+/// place, when the union can be reread from the one to the other; see
+/// `emit_union`.
+fn rereadable<'a>(l: &'a UnionMember, m: &'a UnionMember) -> Option<(&'a str, &'a str)> {
+    const SOURCES: &[&str] = &[
+        "bool_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "long_long_t",
+        "ulong_long_t",
+        "size_t",
+        "float32_t",
+        "float64_t",
+    ];
+    const TARGETS: &[&str] = &[
+        "bool_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "long_long_t",
+        "ulong_long_t",
+    ];
+    let (FieldShape::One { pn: lpn }, FieldShape::One { pn: mpn }) = (&l.shape, &m.shape) else {
+        return None;
+    };
+    (l.name != m.name
+        && m.size <= l.size
+        && SOURCES.contains(&lpn.as_str())
+        && TARGETS.contains(&mpn.as_str()))
+    .then_some((lpn.as_str(), mpn.as_str()))
+}
+
 fn emit_union(tds: &Typedefs, name: &str) -> String {
     let ui = &tds.unions[name];
     let un = format!("union_{}", name);
@@ -6591,6 +6634,50 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
                     sn = sn,
                 );
             }
+        }
+    }
+
+    // Rereading the union through another member (6.5.2.3p3, footnote 95):
+    // the bytes the live member left are reinterpreted as the other member.
+    // Only where that is a value for every such byte pattern is it offered:
+    // an integer read of the bytes of a scalar without provenance, no wider
+    // than it -- the bytes past the live member are unspecified (6.2.6.1p7).
+    // A `_Bool` read additionally has to establish that the byte is 0 or 1
+    // (6.2.6.1p5), which is the precondition the caller is left with.
+    for l in &ui.members {
+        for m in &ui.members {
+            let Some((lpn, mpn)) = rereadable(l, m) else {
+                continue;
+            };
+            let lty = field_type(tds, &l.ty).unwrap();
+            let mty = field_type(tds, &m.ty).unwrap();
+            let valid = if mpn == "bool_t" {
+                format!(
+                    "\x20 requires pure (forall (b: bytes). {lpn}_repr v b ==> Pulse.Lib.C.Palow.RawBytes.bool_t_valid (slice b 0 1))\n"
+                )
+            } else {
+                String::new()
+            };
+            c += &format!(
+                "ghost fn {un}_reread_{l}_{m} (a: ptr) (#p: perm) (#v: {lty})\n\
+                 \x20 requires {un}_pts_to a p ({kl} v)\n\
+                 {valid}\
+                 \x20 ensures  exists* (w: {mty}). {un}_pts_to a p ({km} w)\n\
+                 {{\n  \
+                 unfold {un}_pts_to a p ({kl} v);\n  \
+                 with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr ({kl} v) b));\n  \
+                 {lpn}_repr_no_prov v (slice b 0 {lsz});\n  \
+                 Pulse.Lib.C.Palow.RawBytes.defined_slice (slice b 0 {lsz}) 0 {msz};\n  \
+                 slice_prefix b {lsz} 0 {msz};\n  \
+                 Pulse.Lib.C.Palow.RawBytes.{mpn}_decode (slice b 0 {msz});\n  \
+                 fold {un}_pts_to a p ({km} (Pulse.Lib.C.Palow.RawBytes.{mpn}_of_bytes (slice b 0 {msz})));\n}}\n\n",
+                l = l.name,
+                m = m.name,
+                kl = ctor(l),
+                km = ctor(m),
+                lsz = l.size,
+                msz = m.size,
+            );
         }
     }
 
@@ -14907,6 +14994,29 @@ impl<'a> Body<'a> {
         };
         let pn = shape.pn().to_string();
         let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
+        // Another member is known to be the live one: reread the union
+        // through this one, where its bytes are a value of this one's type.
+        // Only through the union itself, never through a pointer to a member.
+        if !writing
+            && !via_pointer
+            && let Some(l) = self.active.get(&a).cloned()
+            && l != *f.val
+            && let Some(ui) = un
+                .strip_prefix("union_")
+                .and_then(|n| self.tds.unions.get(n))
+            && let Some(lm) = ui.members.iter().find(|x| x.name == l)
+            && let Some(mm) = ui.members.iter().find(|x| x.name == *f.val)
+        {
+            if rereadable(lm, mm).is_none() {
+                return Err(format!(
+                    "a read of union member `{}` while `{}` is the live one: its bytes are not known to be a value of its type",
+                    f.val, l
+                ));
+            }
+            self.lines
+                .push(format!("{}_reread_{}_{} {};", un, l, f.val, a));
+            self.active.insert(a.clone(), f.val.to_string());
+        }
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
             // The other way to know is the contract. There the union's value
             // is whatever the caller passed, so the tag is a fact rather than
@@ -16896,6 +17006,16 @@ impl<'a> Body<'a> {
     /// the emitter can see the tag in the source expression and does not have
     /// to read it back out of a value it just erased.
     fn note_union_store(&mut self, lhs: &Expr, rhs: &Expr) {
+        // A struct initialiser tags each union it initialises, at the member
+        // it names: `*t = (struct s){ .u = { .f = x } }` makes `t->u.f` live.
+        if let ExprT::StructInit(_, fields) = &strip_vattr(rhs).val {
+            for (f, v) in fields {
+                let place =
+                    ExprT::Member(Rc::new(lhs.clone()), f.clone()).with_loc(lhs.loc.clone());
+                self.note_union_store(&place, v);
+            }
+            return;
+        }
         let ExprT::UnionInit(_, m, _) = &strip_vattr(rhs).val else {
             return;
         };
@@ -18961,7 +19081,16 @@ impl<'a> Body<'a> {
                     .map(|b| b.tmp.clone()),
             )
             .collect();
-        self.active.retain(|a, _| private.contains(a));
+        // A union nested in a private object is as private as it is: its
+        // address is the object's plus offsets, `((t +! o1) +! o2)`.
+        self.active.retain(|a, _| {
+            let root = a.trim_start_matches('(');
+            private.contains(a)
+                || private.iter().any(|p| {
+                    root.strip_prefix(p.as_str())
+                        .is_some_and(|r| r.starts_with(" +! "))
+                })
+        });
         Ok(format!("({})", out))
     }
 
@@ -23599,6 +23728,23 @@ impl<'a> Body<'a> {
                     None => (Vec::new(), Vec::new()),
                 };
                 self.lines.push(format!("if ({})", c));
+                // An arm that retypes a block more than once before freeing it
+                // leaves one existential package of facts per retype, and
+                // Pulse fails to join such an arm with the null one on its
+                // own. The join is the frame either way, so it is stated.
+                let retypes = |ls: &[String]| {
+                    ls.iter()
+                        .filter(|l| l.contains("Pulse.Lib.C.Palow.Effective.prepare_region"))
+                        .count()
+                };
+                if !states_own
+                    && nt.is_some()
+                    && !has_surviving
+                    && retypes(&then.lines).max(retypes(&els.lines)) > 1
+                {
+                    let join = self.frame_slprop(&Vec::new(), "an `if`", "    ")?;
+                    self.lines.push(format!("  ensures {}", join));
+                }
                 if states_own {
                     // Pulse does not frame an `if`'s annotation, so it has to
                     // be the whole state at the join: the author's ownership

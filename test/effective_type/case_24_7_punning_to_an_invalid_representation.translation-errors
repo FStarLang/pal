@@ -1,1 +1,0 @@
-error: `Func_case_24_7_punning_to_an_invalid_representation`: its body is not translated: a read of union member `b`, which is not known to be the live one here

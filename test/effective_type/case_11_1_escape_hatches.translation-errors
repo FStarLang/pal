@@ -1,1 +1,0 @@
-error: `Func_case_11_1_escape_hatches`: its body is not translated: a read of union member `i`, which is not known to be the live one here

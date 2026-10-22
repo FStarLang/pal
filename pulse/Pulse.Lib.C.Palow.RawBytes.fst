@@ -33,6 +33,10 @@ module U8 = FStar.UInt8
 module U16 = FStar.UInt16
 module U32 = FStar.UInt32
 module U64 = FStar.UInt64
+module I8 = FStar.Int8
+module I16 = FStar.Int16
+module I32 = FStar.Int32
+module I64 = FStar.Int64
 module M = FStar.Math.Lemmas
 
 (* What a character store of `y` leaves in the byte it writes. *)
@@ -158,6 +162,65 @@ let ulong_long_t_of_bytes (b: bytes) : U64.t = uint64_t_of_bytes b
 let ulong_long_t_decode (b: bytes)
   : Lemma (requires len b == 8 /\ defined b)
           (ensures ulong_long_t_repr (ulong_long_t_of_bytes b) b)
+  = decode_complete b
+
+(* A signed integer is encoded as its two's-complement residue (`to_bits`), so
+   decoding one is the inverse map on residues. *)
+let of_bits (w: pos) (n: nat { n < pow2 w })
+  : x:int { -(pow2 (w - 1)) <= x /\ x < pow2 (w - 1) /\ to_bits w x == n }
+  = M.pow2_double_sum (w - 1);
+    if n < pow2 (w - 1) then n else n - pow2 w
+
+let int8_t_of_bytes (b: bytes) : I8.t =
+  if decode_nat b < pow2 8 then I8.int_to_t (of_bits 8 (decode_nat b)) else 0y
+
+let int8_t_decode (b: bytes)
+  : Lemma (requires len b == 1 /\ defined b)
+          (ensures int8_t_repr (int8_t_of_bytes b) b)
+  = decode_complete b
+
+let int16_t_of_bytes (b: bytes) : I16.t =
+  if decode_nat b < pow2 16 then I16.int_to_t (of_bits 16 (decode_nat b)) else 0s
+
+let int16_t_decode (b: bytes)
+  : Lemma (requires len b == 2 /\ defined b)
+          (ensures int16_t_repr (int16_t_of_bytes b) b)
+  = decode_complete b
+
+let int32_t_of_bytes (b: bytes) : I32.t =
+  if decode_nat b < pow2 32 then I32.int_to_t (of_bits 32 (decode_nat b)) else 0l
+
+let int32_t_decode (b: bytes)
+  : Lemma (requires len b == 4 /\ defined b)
+          (ensures int32_t_repr (int32_t_of_bytes b) b)
+  = decode_complete b
+
+let int64_t_of_bytes (b: bytes) : I64.t =
+  if decode_nat b < pow2 64 then I64.int_to_t (of_bits 64 (decode_nat b)) else 0L
+
+let int64_t_decode (b: bytes)
+  : Lemma (requires len b == 8 /\ defined b)
+          (ensures int64_t_repr (int64_t_of_bytes b) b)
+  = decode_complete b
+
+let long_long_t_of_bytes (b: bytes) : I64.t = int64_t_of_bytes b
+
+let long_long_t_decode (b: bytes)
+  : Lemma (requires len b == 8 /\ defined b)
+          (ensures long_long_t_repr (long_long_t_of_bytes b) b)
+  = decode_complete b
+
+(* `_Bool` has one value bit (6.2.5p2, 6.2.6.2p1), and every target PAL
+   supports gives the other bits no meaning: a byte other than 0 or 1 is not a
+   `_Bool` value, and reading one is undefined (6.2.6.1p5). Hence the extra
+   precondition, which is what a pun into a `_Bool` has to establish. *)
+let bool_t_valid (b: bytes) : prop = defined b /\ decode_nat b <= 1
+
+let bool_t_of_bytes (b: bytes) : bool = decode_nat b = 1
+
+let bool_t_decode (b: bytes)
+  : Lemma (requires len b == 1 /\ bool_t_valid b)
+          (ensures bool_t_repr (bool_t_of_bytes b) b)
   = decode_complete b
 
 (* ---------------------------------------------------------------------------
