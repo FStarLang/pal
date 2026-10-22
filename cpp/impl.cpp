@@ -1163,6 +1163,18 @@ public:
   // Whether an ignored variadic argument can be dropped without losing a
   // proof obligation: evaluating it must have no side effects, read no memory
   // other than non-volatile locals, and have no undefined behavior.
+  /// `c ? x : d ? y : z` whose leaves are all inert: what evaluating it
+  /// obliges is what evaluating the conditions on the path taken does.
+  bool inertVariadicConditional(Expr *e) {
+    auto *co = dyn_cast<ConditionalOperator>(e->IgnoreParenImpCasts());
+    if (!co)
+      return false;
+    auto leaf = [&](Expr *a) {
+      return canOmitVariadicArgument(a) || inertVariadicConditional(a);
+    };
+    return leaf(co->getTrueExpr()) && leaf(co->getFalseExpr());
+  }
+
   bool canOmitVariadicArgument(Expr *e) {
     if (e->HasSideEffects(*astCtx))
       return false;
@@ -2543,6 +2555,14 @@ public:
             arg = co->getCond();
             if (canOmitVariadicArgument(arg))
               continue;
+          }
+          // Nested, the conditions past the first are evaluated only on
+          // their own path, so the argument becomes the `if`s that a
+          // conditional in statement position is: each inert arm drops out.
+          if (inertVariadicConditional(arg)) {
+            hoistedVarargs.insert(arg);
+            trStmt(stmts, arg->IgnoreParenImpCasts());
+            continue;
           }
           auto argLoc = getRange(arg->getSourceRange());
           auto ty = trQualType(arg->getType(), arg->getSourceRange());

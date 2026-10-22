@@ -1198,12 +1198,12 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 28 |
+| Verified enabled cases within the supported target/model | 30 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (11.1, 13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 9 |
 | Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 23.1, 23.2 and 24.5) | 13 |
 | Checked rejections before the UB access (13.4, 13.5 and 14.3) | 3 |
-| Explicit unsupported-translation expectations | 10 |
+| Explicit unsupported-translation expectations | 8 |
 | Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
 | Accepted known gaps (the three 22.1 lifetime-value variants, and 12.6) | 4 |
 | Total | 75 |
@@ -1257,10 +1257,19 @@ stale read); a store of another whole union value retypes it to the union
 again (12.5, which verifies). 24.5 fails at its `double` read of a block
 holding a `union upun`, for want of the `double` ownership. 24.3 is refused
 at the read of the wider `double` member, as a floating-point reread target.
-Members that are arrays or structs are not read through the heap family, so
-12.1 and 12.4 (character arrays), 12.3 and 24.4 (struct members, with a
-common initial sequence), and 12.2 (a union type propagated by `memcpy`)
-remain unsupported. A union nested in an allocated struct is tracked when the
+An element `u->b[i]` of an `unsigned char` array member is a character read
+(6.5p7, last bullet) of byte `i` of the live member's representation:
+`union_X_heap_read_byte_l` (`RawBytes.byte_load` on the union's own bytes,
+which leaves them and their index as they are), with `i` required to lie
+inside the live member `l`, since the bytes past it are unspecified
+(6.2.6.1p7). 12.1 and 12.4 verify with it. The member a union in allocated
+storage holds also survives an `if` whose arms both leave it live, which is
+what the nested `c ? "little" : d ? "big" : "mixed"` of 12.4 needs; that
+variadic argument is evaluated as the `if`s a conditional in statement
+position is, since only its conditions oblige anything. Other array members
+and struct members are not read through the heap family, so 12.3 and 24.4
+(struct members, with a common initial sequence) and 12.2 (a union type
+propagated by `memcpy`) remain unsupported. A union nested in an allocated struct is tracked when the
 struct is stored whole with a brace initialiser naming the member (12.6), but
 the typed claim of the malloc'd struct then fails on
 `ET.declared_destination`: the struct's family is the declared one whenever
@@ -1279,8 +1288,8 @@ pointer to the member (24.8). 2.3 verifies with this. 11.1 verifies up to
 its section (5), the GCC `may_alias` extension, which is not standard C and
 fails on `View.view_ok` like 13.1.
 
-The twenty-eight supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 4.1, 5.1,
-5.2, 5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 9.1, 9.2, 10.1, 10.2, 10.3 and 12.5; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
+The thirty supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 4.1, 5.1,
+5.2, 5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 9.1, 9.2, 10.1, 10.2, 10.3, 12.1, 12.4 and 12.5; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
 incompatible effective type. The nine view rejections fail on
 `View.view_ok` or `View.aggregate_view_ok` at the incompatible access. In

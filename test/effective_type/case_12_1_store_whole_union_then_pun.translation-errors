@@ -1,1 +1,0 @@
-error: `Func_case_12_1_store_whole_union_then_pun`: its body is not translated: a read of member `b` of a `union upun` in allocated storage, which is not a provenance-free scalar

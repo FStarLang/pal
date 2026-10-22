@@ -6941,6 +6941,37 @@ fn emit_heap_union(tds: &Typedefs, name: &str) -> String {
             msz = m.size,
         );
     }
+    // A character read of one byte of the live member, for `u->b[i]` with
+    // `b` an `unsigned char` array member (see `heap_union_byte`).
+    let bytes = ui
+        .members
+        .iter()
+        .any(|m| matches!(&m.shape, FieldShape::Array { pn, esize: 1, .. } if pn == "uint8_t"));
+    for m in ui.members.iter().filter(|_| bytes) {
+        let Some(pn) = heap_member(m) else {
+            continue;
+        };
+        let mty = field_type(tds, &m.ty).unwrap();
+        c += &format!(
+            "fn {un}_heap_read_byte_{f} (a: ptr) (i: SizeT.t) (#p: perm) (#v: erased ({mty}))\n\
+             \x20 preserves {un}_heap_pts_to a p ({k} v)\n\
+             \x20 requires pure (SizeT.v i < {msz})\n\
+             \x20 returns  y: UInt8.t\n\
+             {{\n  \
+             unfold {un}_heap_pts_to a p ({k} v);\n  \
+             with b. assert (mem_pts_to_at a p b (ET.etypes_of {un}_ctype false) ** pure ({un}_repr ({k} v) b));\n  \
+             {pn}_repr_no_prov v (slice b 0 {msz});\n  \
+             Pulse.Lib.C.Palow.RawBytes.initialized_value (slice b 0 {msz}) (SizeT.v i);\n  \
+             ET.read_ok_of {un}_ctype false;\n  \
+             Pulse.Lib.C.Palow.RawBytes.read_ok_wf (ET.etypes_of {un}_ctype false) {un}_ctype;\n  \
+             let y = Pulse.Lib.C.Palow.RawBytes.byte_load a i;\n  \
+             fold {un}_heap_pts_to a p ({k} v);\n  \
+             y\n}}\n\n",
+            f = m.name,
+            k = ctor(m),
+            msz = m.size,
+        );
+    }
     for l in &ui.members {
         for m in &ui.members {
             let Some((lpn, mpn)) = rereadable(l, m) else {
@@ -15085,7 +15116,10 @@ impl<'a> Body<'a> {
                     close_write,
                 })
             }
-            ExprT::Index(base, idx) => self.focus_elem(base, Some(idx), writing),
+            ExprT::Index(base, idx) => match self.heap_union_byte(base, idx, writing)? {
+                Some(f) => Ok(f),
+                None => self.focus_elem(base, Some(idx), writing),
+            },
             _ => Err(format!("a place that is {}", expr_kind_of(&e.val))),
         }
     }
@@ -15292,14 +15326,10 @@ impl<'a> Body<'a> {
     /// that, or after a store of anything else, it does not, and no member of
     /// the union can be read from it. A member is never focused out of it,
     /// and never written to: see `emit_heap_union`.
-    fn heap_union_member(
-        &mut self,
-        base: &Expr,
-        un: &str,
-        f: &Ident,
-        writing: bool,
-        via_pointer: bool,
-    ) -> Result<Option<Focus>, String> {
+    /// The allocated block `base` -- `*p` -- is, when `un` has the `_heap`
+    /// family and `p` is a live block; an error when the block does not
+    /// hold the union (6.5p6).
+    fn heap_union_block(&self, base: &Expr, un: &str) -> Result<Option<String>, String> {
         let Some(ui) = un
             .strip_prefix("union_")
             .and_then(|n| self.tds.unions.get(n))
@@ -15326,20 +15356,94 @@ impl<'a> Body<'a> {
         else {
             return Ok(None);
         };
-        let uname = un.trim_start_matches("union_");
         if b.pn != format!("{}_heap", un) || !b.init {
             return Err(format!(
                 "a member of `union {}` in allocated storage whose effective type is not that union here: only a store of a whole union value gives it one (6.5p6)",
-                uname
+                un.trim_start_matches("union_")
             ));
         }
+        Ok(Some(b.tmp.clone()))
+    }
+
+    /// `u->b[i]` for an `unsigned char` array member `b` of a union in
+    /// allocated storage: a character read of byte `i` of the live member's
+    /// representation (6.5p7, last bullet), which leaves the union as it is.
+    /// The bytes past the live member are unspecified (6.2.6.1p7) and are not
+    /// read: the index has to be inside the live member.
+    fn heap_union_byte(
+        &mut self,
+        base: &Expr,
+        idx: &Expr,
+        writing: bool,
+    ) -> Result<Option<Focus>, String> {
+        let ExprT::Member(inner, f) = &strip_casts(strip_vattr(base)).val else {
+            return Ok(None);
+        };
+        let Some(un) = self.union_of(inner) else {
+            return Ok(None);
+        };
+        let Some(ui) = un
+            .strip_prefix("union_")
+            .and_then(|n| self.tds.unions.get(n))
+        else {
+            return Ok(None);
+        };
+        let Some(m) = ui.members.iter().find(|m| m.name == *f.val) else {
+            return Ok(None);
+        };
+        if !matches!(&m.shape, FieldShape::Array { pn, esize: 1, .. } if pn == "uint8_t") {
+            return Ok(None);
+        }
+        let Some(a) = self.heap_union_block(inner, &un)? else {
+            return Ok(None);
+        };
+        if writing {
+            return Err(format!(
+                "a store to an element of member `{}` of a `union {}` in allocated storage: it would make the member's type the effective type of the bytes, not the union's (6.5p6), and the union model has no step for that",
+                f.val,
+                un.trim_start_matches("union_")
+            ));
+        }
+        let Some(l) = self.active.get(&a).cloned() else {
+            return Err(format!(
+                "a read of an element of union member `{}`, while no member is known to be the live one here",
+                f.val
+            ));
+        };
+        let i = self.index(idx)?;
+        Ok(Some(Focus {
+            bits: None,
+            pn: "uint8_t".to_string(),
+            write_fn: "uint8_t_write".to_string(),
+            unaligned: false,
+            read_as: Some(format!("{}_heap_read_byte_{} {}", un, l, a)),
+            at: i,
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+        }))
+    }
+
+    fn heap_union_member(
+        &mut self,
+        base: &Expr,
+        un: &str,
+        f: &Ident,
+        writing: bool,
+        via_pointer: bool,
+    ) -> Result<Option<Focus>, String> {
+        let Some(a) = self.heap_union_block(base, un)? else {
+            return Ok(None);
+        };
+        let ui = &self.tds.unions[un.trim_start_matches("union_")];
+        let uname = un.trim_start_matches("union_");
         if writing {
             return Err(format!(
                 "a store to member `{}` of a `union {}` in allocated storage: it would make the member's type the effective type of the bytes, not the union's (6.5p6), and the union model has no step for that",
                 f.val, uname
             ));
         }
-        let a = b.tmp.clone();
         let m = ui
             .members
             .iter()
@@ -23847,8 +23951,20 @@ impl<'a> Body<'a> {
                 ensures,
             } => {
                 // Either arm may make a different member live, and the two
-                // arms need not agree, so nothing survives the join.
-                self.active.clear();
+                // arms need not agree, so nothing survives the join -- except
+                // for a union in allocated storage that neither arm touches
+                // the live member of: its predicate is the same in both.
+                let heap_active: HashMap<String, String> = self
+                    .active
+                    .iter()
+                    .filter(|(a, _)| {
+                        self.blocks
+                            .iter()
+                            .any(|b| b.tmp == **a && b.pn.ends_with("_heap"))
+                    })
+                    .map(|(a, m)| (a.clone(), m.clone()))
+                    .collect();
+                self.active = heap_active;
                 // A `_ensures` that says only what is live needs no
                 // translation: Pulse computes the join of an `if` itself, so
                 // the annotation exists to be checked and not to make the code
@@ -23961,11 +24077,15 @@ impl<'a> Body<'a> {
                 if let Some((p, _)) = pt.as_ref().filter(|_| pt_live_then) {
                     self.unguarded.push(p.clone());
                 }
+                // What the condition left live is what both arms start from.
+                let heap_active = self.active.clone();
                 let then = self.branch(then_branch);
                 if pt.is_some() && pt_live_then {
                     self.unguarded.pop();
                 }
                 let mut then = then?;
+                let then_active = std::mem::take(&mut self.active);
+                self.active.extend(heap_active.clone());
                 let then_blocks = self.blocks.clone();
                 self.blocks = entry_blocks.clone();
                 self.out_params = entry_out;
@@ -23983,6 +24103,10 @@ impl<'a> Body<'a> {
                     self.unguarded.pop();
                 }
                 let mut els = els?;
+                let else_active = std::mem::take(&mut self.active);
+                self.active.extend(heap_active.into_iter().filter(|(a, m)| {
+                    then_active.get(a) == Some(m) && else_active.get(a) == Some(m)
+                }));
                 if let Some((p, _)) = &pt {
                     let payload = &self.null_payload[p];
                     let live = if pt_live_then { &mut then } else { &mut els };
