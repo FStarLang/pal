@@ -27,14 +27,16 @@ float union_member(void)
     return r;
 }
 
+/* A character store into untyped storage installs no effective type
+   (6.5p6): the byte is defined, and the storage stays raw. */
 uint8_t character_store(void)
     _ensures(return == 5)
 {
-    uint8_t *p = malloc(sizeof *p);
+    void *p = malloc(1);
     if (!p)
         return 5;
-    *p = 5;
-    uint8_t r = *p;
+    *(unsigned char *)p = 5;
+    uint8_t r = *(unsigned char *)p;
     free(p);
     return r;
 }

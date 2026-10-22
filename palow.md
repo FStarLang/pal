@@ -940,9 +940,12 @@ their fresh index already accepts the copy. No test needs the explicit
 annotation any more; it remains available to reserve storage ahead of an
 operation the translator does not prepare itself. The implicit retype is deliberately
 narrow. A character store installs no type and stays a byte access:
-`b[i] = y` through an `unsigned char *` naming raw `calloc` storage is
-`RawBytes.byte_store`, which leaves the untyped index alone and the bytes
-*defined* (initialised, without provenance). A later read of such storage
+`b[i] = y` (or `*b = y`) through an `unsigned char *` naming raw storage is
+`RawBytes.byte_store`, which leaves the untyped index alone. On `calloc`
+storage the bytes stay *defined* (initialised, without provenance); on
+`malloc` storage only the bytes written are, and the bytes' own term
+(`upd_byte`) records which, so a character read of a written byte succeeds and
+one of an unwritten byte -- or a wider read covering one -- fails. A later read of such storage
 through an unsigned integer type decodes whatever those bytes are
 (`RawBytes.<T>_of_bytes`), which is what 6.2 does. A character read may
 also inspect a declared scalar: through `unsigned char *b = (unsigned char
@@ -955,8 +958,16 @@ array of character type" exactly `memcpy`'s effect on the effective type
 (5.2). A
 `memset(&x, c, sizeof x)` with a constant nonzero `c` is a whole-object
 store of the value every integer member decodes from `c` replicated; like a
-zero fill it says nothing about the padding, which stays unspecified (any
-other member type is refused). `memcmp` of two whole, initialised objects
+zero fill it says nothing about the padding, which stays unspecified. A
+floating member gets `float{w}_of_bits` of those bits and a zero fill gets
+`Float{w}.zero` (+0.0): on an Annex F target every bit pattern is a float
+(`Float.float{w}_bits_of_bits`). Pointer and `_Bool` members are refused. For
+a declared object `x` the count may also be a constant equal to `sizeof x`
+(`memset(&x, 0, 4)`); a count covering only part of `x` is refused. A whole
+`memcpy` between declared scalars of the same width converts the
+representation in either direction between `float` and `uint32_t`/`int32_t`
+and between `double` and `uint64_t`/`int64_t` (`Copy.uint32_float32` etc.),
+keeping the destination's declared type. `memcmp` of two whole, initialised objects
 of the compared size checks that ownership and returns an unconstrained
 `int`: with padding, C leaves the result unspecified (10.2). Reads
 never retype, so a read through another type still fails at the read. Array,

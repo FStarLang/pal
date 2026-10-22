@@ -2010,6 +2010,27 @@ public:
           return mk_rvalue_err(std::move(loc),
                                trQualType(c->getType(), c->getSourceRange()));
         }
+        // `memset(&x, c, n)` with `x` a declared object and `n` a constant
+        // equal to `sizeof x` fills the whole of `x`, exactly as `sizeof x`
+        // would. Only a declared object: allocated storage has no type to
+        // take the size of, and a fill must not give it one (6.5p6).
+        auto declaredObjectSize = [&](Expr *ptrArg, Expr *sizeArg) -> bool {
+          auto *addr = dyn_cast<UnaryOperator>(ptrArg->IgnoreParenImpCasts());
+          if (!addr || addr->getOpcode() != UO_AddrOf)
+            return false;
+          auto *ref =
+              dyn_cast<DeclRefExpr>(addr->getSubExpr()->IgnoreParenImpCasts());
+          if (!ref || !isa<VarDecl>(ref->getDecl()))
+            return false;
+          auto objQt = addr->getSubExpr()->getType();
+          if (objQt->isIncompleteType() || objQt->isDependentType() ||
+              objQt->isArrayType())
+            return false;
+          Expr::EvalResult szRes;
+          return sizeArg->EvaluateAsInt(szRes, *astCtx) && szRes.Val.isInt() &&
+                 szRes.Val.getInt() ==
+                     astCtx->getTypeSizeInChars(objQt).getQuantity();
+        };
         // A constant nonzero fill of one whole object, `memset(&x, c,
         // sizeof x)`, stays a call: the emitter stores the value every member
         // decodes from that byte, which only it can compute.
@@ -2023,9 +2044,11 @@ public:
               c->getArg(0)->IgnoreParenImpCasts()->getType()->getPointeeType();
           objectFill =
               c->getArg(1)->EvaluateAsInt(fill, *astCtx) && fill.Val.isInt() &&
-              fill.Val.getInt() != 0 && sz && sz->getKind() == UETT_SizeOf &&
-              !pointee.isNull() &&
-              astCtx->hasSameUnqualifiedType(sz->getTypeOfArgument(), pointee);
+              fill.Val.getInt() != 0 &&
+              ((sz && sz->getKind() == UETT_SizeOf && !pointee.isNull() &&
+                astCtx->hasSameUnqualifiedType(sz->getTypeOfArgument(),
+                                               pointee)) ||
+               declaredObjectSize(c->getArg(0), c->getArg(2)));
         }
         if (((fd->getName() == "memset" && c->getNumArgs() == 3) ||
              isMemsetAlias) &&
@@ -2067,6 +2090,15 @@ public:
                                       trRValue(ptrArg));
               }
             }
+          }
+          // The same with the size spelled as a constant: `memset(&x, 0, 4)`.
+          if (!isMemsetAlias && declaredObjectSize(c->getArg(0), sizeArg)) {
+            auto *obj = cast<UnaryOperator>(c->getArg(0)->IgnoreParenImpCasts())
+                            ->getSubExpr();
+            auto objTy = trQualType(obj->getType().getUnqualifiedType(),
+                                    obj->getSourceRange());
+            return mk_memset_zero(std::move(loc), std::move(objTy),
+                                  trRValue(ptrArg));
           }
           // Zeroing a whole array: `f(arr, N)` where `arr` is an array-typed
           // lvalue that decays to the pointer argument and `N` is its size in

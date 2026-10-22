@@ -18086,15 +18086,25 @@ impl<'a> Body<'a> {
         format!("{pn}_{operation}{suffix}")
     }
 
-    /// `b[i]` where `b` is an `unsigned char *` naming raw, untyped storage
-    /// whose bytes are all values without provenance: what `calloc` gave, or
-    /// what earlier such stores left. A character access installs no
-    /// effective type (C11 6.5p6-7), so the block stays raw and the access is
-    /// a single byte of it. The block's index and the subscript.
-    fn raw_byte_access(&self, e: &Expr) -> Option<(usize, Rc<Expr>, Rc<Expr>)> {
-        let ExprT::Index(base, idx) = &strip_vattr(e).val else {
-            return None;
+    /// `b[i]`, or `*b` as `b[0]`, where `b` is an `unsigned char *` naming
+    /// raw, untyped storage. A character access installs no effective type
+    /// (C11 6.5p6-7), so the block stays raw and the access is a single byte
+    /// of it. A store may go anywhere in such a block, `malloc`'s
+    /// uninitialised bytes included; a load needs the byte written, which
+    /// the block's bytes say when they are all defined (`calloc`, or stores
+    /// into those) and the stores themselves say otherwise (`written`). The
+    /// block's index and the subscript.
+    fn raw_byte_access(&self, e: &Expr, store: bool) -> Option<(usize, Rc<Expr>, Rc<Expr>)> {
+        let (base, idx) = match &strip_vattr(e).val {
+            ExprT::Index(base, idx) => (base.clone(), idx.clone()),
+            ExprT::Deref(base) => (
+                base.clone(),
+                ExprT::IntLit(Rc::new(BigInt::ZERO), TypeT::SizeT.with_loc(e.loc.clone()))
+                    .with_loc(e.loc.clone()),
+            ),
+            _ => return None,
         };
+        let base = &base;
         let bty = self.ty_of(base).ok()?;
         let TypeT::Pointer(elem, _) = &peel(self.tds, &bty).val else {
             return None;
@@ -18133,9 +18143,12 @@ impl<'a> Body<'a> {
                 && b.array.is_none()
                 && b.flex.is_none()
                 && b.taken.is_none()
-                && (b.fill == "zeroed" || b.fill == "defined")
+                && (b.fill == "zeroed"
+                    || b.fill == "defined"
+                    || b.fill == "written"
+                    || (store && b.fill == "uninit"))
         })?;
-        Some((i, base.clone(), idx.clone()))
+        Some((i, base.clone(), idx))
     }
 
     /// `b[i]` where `b` is an `unsigned char *` naming a declared scalar
@@ -18227,7 +18240,7 @@ impl<'a> Body<'a> {
     /// The block's bytes stay defined -- initialised and provenance-free --
     /// whatever is stored, so the block's `fill` records only that.
     fn raw_byte(&mut self, e: &Expr, value: Option<&str>) -> Result<Option<String>, String> {
-        let Some((i, _, idx)) = self.raw_byte_access(e) else {
+        let Some((i, _, idx)) = self.raw_byte_access(e, value.is_some()) else {
             return Ok(None);
         };
         let k = self.index(&idx)?;
@@ -18237,8 +18250,14 @@ impl<'a> Body<'a> {
                 self.lines.push(format!(
                     "Pulse.Lib.C.Palow.RawBytes.byte_store {a} {k} {v};"
                 ));
-                self.blocks[i].fill = "defined";
-                self.blocks[i].init = true;
+                // Stores into uninitialised bytes define only the bytes they
+                // write, which the bytes' own term records for a later load.
+                if matches!(self.blocks[i].fill, "uninit" | "written") {
+                    self.blocks[i].fill = "written";
+                } else {
+                    self.blocks[i].fill = "defined";
+                    self.blocks[i].init = true;
+                }
                 Ok(Some(String::new()))
             }
             None => {
@@ -21886,7 +21905,11 @@ impl<'a> Body<'a> {
                 })
             })
             .ok_or_else(|| {
-                "a raw `memset` without a complete owned untyped allocation".to_string()
+                if matches!(&strip_casts(target).val, ExprT::Ref(_)) {
+                    "a `memset` of part of a declared object".to_string()
+                } else {
+                    "a raw `memset` without a complete owned untyped allocation".to_string()
+                }
             })?;
         let a = self.blocks[i].tmp.clone();
         let extent = self.blocks[i]
@@ -21908,18 +21931,31 @@ impl<'a> Body<'a> {
     /// integer member holds `c` replicated across its width: a whole-object
     /// store of that value. As for a zero fill, the store says nothing about
     /// the padding, which stays owned and unspecified -- the safe direction.
-    /// Any other member type is refused: a pointer, a `_Bool` or a floating
-    /// value made of arbitrary bytes need not be a value at all.
+    /// A floating member holds the float those bits spell, since on an
+    /// Annex F target every bit pattern is one (`float{w}_of_bits`). Any
+    /// other member type is refused: a pointer or a `_Bool` made of
+    /// arbitrary bytes need not be a value at all.
     fn fill_object(&mut self, target: &Expr, value: &Expr, count: &Expr) -> Result<(), String> {
         let byte = int_lit(value)
             .and_then(|v| u8::try_from(v.rem_euclid(256)).ok())
             .ok_or_else(|| "a `memset` whose fill is not a constant".to_string())?;
         let p = strip_casts(target);
+        let pty = self.ty_of(p)?;
         let ty = match &strip_casts(count).val {
             ExprT::SizeOf(ty) => ty.clone(),
-            _ => return Err("a `memset` with a fill other than zero".to_string()),
+            // The frontend passes a constant count on only when it is the
+            // size of the pointee, which is then the object filled.
+            _ => match pointee(self.tds, &pty) {
+                Some(pt) if int_lit(count).is_some() => pt.clone(),
+                _ => return Err("a `memset` with a fill other than zero".to_string()),
+            },
         };
-        let pty = self.ty_of(p)?;
+        let size = palow_sizeof(self.tds, &ty);
+        if !matches!(&strip_casts(count).val, ExprT::SizeOf(_))
+            && (size.is_none() || int_lit(count) != size)
+        {
+            return Err("a `memset` with a fill other than zero".to_string());
+        }
         if !pointee(self.tds, &pty).is_some_and(|pt| {
             palow_sizeof(self.tds, pt).is_some()
                 && palow_sizeof(self.tds, pt) == palow_sizeof(self.tds, &ty)
@@ -22213,7 +22249,10 @@ impl<'a> Body<'a> {
             let to = dpn.strip_suffix("_t").unwrap_or(&dpn);
             if !matches!(
                 (from, to),
-                ("float32", "uint32" | "int32") | ("float64", "uint64" | "int64")
+                ("float32", "uint32" | "int32")
+                    | ("float64", "uint64" | "int64")
+                    | ("uint32" | "int32", "float32")
+                    | ("uint64" | "int64", "float64")
             ) {
                 return Err(format!(
                     "representation copy from `{spn}` to `{dpn}` requires a checked representation conversion"
@@ -25752,6 +25791,10 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
         // value that matters, because that is what a comparison with `NULL`
         // will ask about.
         TypeT::Pointer(..) => Ok("null".to_string()),
+        // All-zero bits are `+0.0`, which is `zero` (`float{w}_bits_zero`).
+        TypeT::Float { .. } => float_mod(tds, ty)
+            .map(|m| format!("{m}.zero"))
+            .ok_or_else(|| format!("a zeroed {}", describe(t))),
         TypeT::TypeRef(TypeRefKind::Struct(name)) => {
             let Some(si) = tds.structs.get(&*name.val) else {
                 return Err(format!("a zeroed struct {}", name.val));
@@ -25802,6 +25845,17 @@ fn fill_value(tds: &Typedefs, ty: &Type, byte: u8) -> Result<String, String> {
                 n -= BigInt::from(1u8) << *width;
             }
             int_literal(tds, &n, ty)
+        }
+        // On an Annex F target every bit pattern is a float, if possibly a
+        // NaN; `float{w}_of_bits` names the one these bytes spell.
+        TypeT::Float {
+            width: w @ (32 | 64),
+        } => {
+            let mut n = BigInt::ZERO;
+            for _ in 0..w / 8 {
+                n = (n << 8u8) + BigInt::from(byte);
+            }
+            Ok(format!("(float{w}_of_bits {n})"))
         }
         TypeT::TypeRef(TypeRefKind::Struct(name)) => {
             let Some(si) = tds.structs.get(&*name.val) else {

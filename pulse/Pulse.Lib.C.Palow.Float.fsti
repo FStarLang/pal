@@ -24,7 +24,8 @@ module Pulse.Lib.C.Palow.Float
    cases where C likewise keeps the two apart as objects. What it does *not*
    claim is the converse: nothing here says that every `w`-bit pattern is a
    value, because C does not say that either (a trap representation is
-   allowed), and no part of Palow needs it.
+   allowed). That converse is stated separately, below, under the
+   assumption that the target follows Annex F.
 
    This interface is axiomatized: there is no `.fst`. It has to be its own
    module for exactly that reason -- `CTypes` has an implementation, so it
@@ -48,6 +49,34 @@ val float32_bits_injective (x y: float32)
 val float64_bits_injective (x y: float64)
   : Lemma (requires float64_bits x == float64_bits y)
           (ensures  x == y)
+
+(* Every bit pattern is a value. C alone does not say so -- a floating type
+   may have trap representations -- but a target that conforms to Annex F
+   (IEC 60559, which `__STDC_IEC_559__` announces and every target PAL
+   supports does) has none: each `w`-bit pattern is a finite number, an
+   infinity, or a NaN, and a NaN is a value too. So `float{w}_of_bits` is a
+   right inverse of `float{w}_bits`, which with injectivity makes the two a
+   bijection. This is what lets bytes written as an integer be read as a
+   float: `memcpy` of a `uint32_t` into a `float`, or `memset` of a `float`.
+
+   The axioms are consistent because `F32.t` and `F64.t` are abstract: the
+   binary32 and binary64 bit patterns themselves are a model of everything
+   in this module. `+0.0` is the all-zero pattern, and `F32.zero` -- that is,
+   `of_int 0` -- is `+0.0` and not `-0.0`, as IEC 60559 conversion of the
+   integer 0 gives. *)
+val float32_of_bits (n: nat { n < pow2 32 }) : float32
+val float64_of_bits (n: nat { n < pow2 64 }) : float64
+
+val float32_bits_of_bits (n: nat { n < pow2 32 })
+  : Lemma (float32_bits (float32_of_bits n) == n)
+          [SMTPat (float32_of_bits n)]
+
+val float64_bits_of_bits (n: nat { n < pow2 64 })
+  : Lemma (float64_bits (float64_of_bits n) == n)
+          [SMTPat (float64_of_bits n)]
+
+val float32_bits_zero : unit -> Lemma (float32_bits F32.zero == 0)
+val float64_bits_zero : unit -> Lemma (float64_bits F64.zero == 0)
 
 (* Conversion between the two widths. C's `(double) f` is exact and `(float) d`
    rounds, so only one direction has an inverse, and only that direction is
