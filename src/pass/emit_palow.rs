@@ -18362,6 +18362,9 @@ impl<'a> Body<'a> {
         if matches!(name.val.to_string().as_str(), "memcpy" | "memmove") {
             return self.copy_object(name, args);
         }
+        if name.val.as_ref() == "memcmp" {
+            self.compared_objects(args)?;
+        }
         // A callee that was handed a pointer may have made a different member
         // live, and nothing in the signature says otherwise. The emitter's
         // record of which member is live is knowledge it put there itself, so
@@ -20621,7 +20624,7 @@ impl<'a> Body<'a> {
             return Err("`memset` requires three arguments".to_string());
         };
         if !is_zero(value) {
-            return Err("a raw `memset` with a fill other than zero".to_string());
+            return self.fill_object(target, value, count);
         }
         let array = strip_casts(target);
         let nbytes = match &strip_casts(count).val {
@@ -20669,6 +20672,71 @@ impl<'a> Body<'a> {
             "Pulse.Lib.C.Palow.Machine.memset_zero {a} {extent};"
         ));
         self.blocks[i].fill = "zeroed";
+        Ok(())
+    }
+
+    /// `memset(p, c, sizeof *p)` with a constant `c != 0`, which the frontend
+    /// passes on only for that shape. Every byte of `*p` becomes `c`, so each
+    /// integer member holds `c` replicated across its width: a whole-object
+    /// store of that value. As for a zero fill, the store says nothing about
+    /// the padding, which stays owned and unspecified -- the safe direction.
+    /// Any other member type is refused: a pointer, a `_Bool` or a floating
+    /// value made of arbitrary bytes need not be a value at all.
+    fn fill_object(&mut self, target: &Expr, value: &Expr, count: &Expr) -> Result<(), String> {
+        let byte = int_lit(value)
+            .and_then(|v| u8::try_from(v.rem_euclid(256)).ok())
+            .ok_or_else(|| "a `memset` whose fill is not a constant".to_string())?;
+        let p = strip_casts(target);
+        let ty = match &strip_casts(count).val {
+            ExprT::SizeOf(ty) => ty.clone(),
+            _ => return Err("a `memset` with a fill other than zero".to_string()),
+        };
+        let pty = self.ty_of(p)?;
+        if !pointee(self.tds, &pty).is_some_and(|pt| {
+            palow_sizeof(self.tds, pt).is_some()
+                && palow_sizeof(self.tds, pt) == palow_sizeof(self.tds, &ty)
+        }) {
+            return Err("a `memset` with a fill other than zero".to_string());
+        }
+        if matches!(
+            &peel(self.tds, &ty).val,
+            TypeT::TypeRef(TypeRefKind::Struct(..))
+        ) && !storable_struct(self.tds, &ty)
+        {
+            return Err(format!("a `memset` of {}", describe(&ty)));
+        }
+        let v = fill_value(self.tds, &ty, byte)?;
+        let pn =
+            palow_name(self.tds, &ty).ok_or_else(|| format!("a `memset` of {}", describe(&ty)))?;
+        let place = deref_of(&Rc::new(p.clone()));
+        self.store(&place, &pn, &v)
+    }
+
+    /// `memcmp(p, q, n)` reads the `n` bytes of two whole objects. Its result
+    /// is left to the callee's (unconstrained) contract: when an object has
+    /// padding, C leaves those bytes unspecified (6.2.6.1p6), so the result is
+    /// too. What is checked here is that the read is defined: each side is
+    /// an object owned in full, initialised, and exactly `n` bytes long.
+    fn compared_objects(&mut self, args: &Exprs) -> Result<(), String> {
+        let [p, q, count] = args.as_slice() else {
+            return Err("`memcmp` requires three arguments".to_string());
+        };
+        let n = match &strip_casts(count).val {
+            ExprT::SizeOf(ty) => palow_sizeof(self.tds, ty),
+            _ => int_lit(count).and_then(|n| u64::try_from(n).ok()),
+        };
+        for arg in [p, q] {
+            let (_, addr, pn, init) = self.copy_place(arg)?;
+            let ty = self.ty_of(strip_casts(arg))?;
+            let size = pointee(self.tds, &ty).and_then(|pt| palow_sizeof(self.tds, pt));
+            if !init || n.is_none() || size != n {
+                return Err("a `memcmp` that is not of two whole initialised objects".to_string());
+            }
+            let (perm, value) = (self.fresh("memcmp_perm"), self.fresh("memcmp_value"));
+            self.lines.push(format!(
+                "with {perm} {value}. assert ({pn}_pts_to {addr} {perm} {value});"
+            ));
+        }
         Ok(())
     }
 
@@ -24298,6 +24366,51 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
             Ok(format!("({{ {} }})", record_fields(vals, false)))
         }
         _ => Err(format!("a zeroed {}", describe(t))),
+    }
+}
+
+/// The value of an object of type `ty` all of whose bytes are `byte`; see
+/// `fill_object`.
+fn fill_value(tds: &Typedefs, ty: &Type, byte: u8) -> Result<String, String> {
+    let t = peel(tds, ty);
+    match &t.val {
+        TypeT::Int { signed, width, .. } => {
+            let mut n = BigInt::ZERO;
+            for _ in 0..width / 8 {
+                n = (n << 8u8) + BigInt::from(byte);
+            }
+            if *signed && n >= BigInt::from(1u8) << (width - 1) {
+                n -= BigInt::from(1u8) << *width;
+            }
+            int_literal(tds, &n, ty)
+        }
+        TypeT::TypeRef(TypeRefKind::Struct(name)) => {
+            let Some(si) = tds.structs.get(&*name.val) else {
+                return Err(format!("a `memset` of struct {}", name.val));
+            };
+            let mut vals = Vec::new();
+            for f in &si.fields {
+                vals.push(match &f.shape {
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
+                        format!("fld_{} = {}", f.name, fill_value(tds, &f.ty, byte)?)
+                    }
+                    FieldShape::Array { len, .. } => {
+                        let Some((elem, _)) = flat_array(tds, &f.ty) else {
+                            return Err(format!("a `memset` of field `{}`", f.name));
+                        };
+                        format!(
+                            "fld_{} = Seq.create {} {}",
+                            f.name,
+                            len,
+                            fill_value(tds, elem, byte)?
+                        )
+                    }
+                    _ => return Err(format!("a `memset` of field `{}`", f.name)),
+                });
+            }
+            Ok(format!("({{ {} }})", record_fields(vals, false)))
+        }
+        _ => Err(format!("a nonzero `memset` of {}", describe(t))),
     }
 }
 

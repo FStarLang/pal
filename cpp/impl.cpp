@@ -1998,8 +1998,26 @@ public:
           return mk_rvalue_err(std::move(loc),
                                trQualType(c->getType(), c->getSourceRange()));
         }
-        if ((fd->getName() == "memset" && c->getNumArgs() == 3) ||
-            isMemsetAlias) {
+        // A constant nonzero fill of one whole object, `memset(&x, c,
+        // sizeof x)`, stays a call: the emitter stores the value every member
+        // decodes from that byte, which only it can compute.
+        bool objectFill = false;
+        if (fd->getName() == "memset" && c->getNumArgs() == 3 &&
+            !isMemsetAlias) {
+          Expr::EvalResult fill;
+          auto *sz = dyn_cast<UnaryExprOrTypeTraitExpr>(
+              c->getArg(2)->IgnoreParenImpCasts());
+          auto pointee =
+              c->getArg(0)->IgnoreParenImpCasts()->getType()->getPointeeType();
+          objectFill =
+              c->getArg(1)->EvaluateAsInt(fill, *astCtx) && fill.Val.isInt() &&
+              fill.Val.getInt() != 0 && sz && sz->getKind() == UETT_SizeOf &&
+              !pointee.isNull() &&
+              astCtx->hasSameUnqualifiedType(sz->getTypeOfArgument(), pointee);
+        }
+        if (((fd->getName() == "memset" && c->getNumArgs() == 3) ||
+             isMemsetAlias) &&
+            !objectFill) {
           auto *ptrArg = c->getArg(0);
           // Strip implicit void* cast
           if (auto *ic = dyn_cast<ImplicitCastExpr>(ptrArg)) {
@@ -2515,6 +2533,17 @@ public:
           auto *arg = call->getArg(i);
           if (canOmitVariadicArgument(arg) || hoistedVarargs.count(arg))
             continue;
+          // `c ? "a" : "b"`: the arm chosen is inert and dropped, so what
+          // evaluating the argument obliges is what evaluating `c` does.
+          if (auto *co =
+                  dyn_cast<ConditionalOperator>(arg->IgnoreParenImpCasts());
+              co && canOmitVariadicArgument(co->getTrueExpr()) &&
+              canOmitVariadicArgument(co->getFalseExpr())) {
+            hoistedVarargs.insert(arg);
+            arg = co->getCond();
+            if (canOmitVariadicArgument(arg))
+              continue;
+          }
           auto argLoc = getRange(arg->getSourceRange());
           auto ty = trQualType(arg->getType(), arg->getSourceRange());
           auto name = "__pal_vararg_" + std::to_string(rvalueHoistCounter++);
