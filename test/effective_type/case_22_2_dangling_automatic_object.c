@@ -106,6 +106,23 @@ static void case_22_2_dangling_automatic_object(void)
     case_22_stash_local();
     /* The object no longer exists, so it has no effective type to speak of;
        6.5p6 never gets a chance to apply. */
+    /* PAL: every function's contract carries the full permission on the
+       global's own pointer cell (`ptr_pts_to addr_var_g_dangling_auto 1.0R
+       gval_g_dangling_auto`), whose value is a bare address, but no
+       permission whatsoever on its target: case_22_stash_local stores only
+       the address of `local`, and `local`'s ownership is released when that
+       function returns.  So here PAL holds the pointer and nothing behind it,
+       which is exactly a dangling pointer, and the dereference below is
+       refused ("a dereference of local `g_dangling_auto`, whose target the
+       contract does not grant").
+
+       This is sound: the UB access is never accepted.  It is not
+       user-friendly, though: the rejection is a translation error, which
+       this test records as an unsupported translation, rather than a
+       verification failure at the access pointing at the missing
+       ownership.  Nor can a contract help: PAL has no way to grant
+       ownership of a global pointer's target (`_live(*g_dangling_auto)` is
+       accepted but translated to `pure (True)`). */
     printf("   *g_dangling_auto = %d   <-- UB\n", *g_dangling_auto);
     sink_u((unsigned)*g_dangling_auto);
 }
