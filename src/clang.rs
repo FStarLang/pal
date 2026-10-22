@@ -987,6 +987,9 @@ fn mk_lvalue_err(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
 fn mk_var_decl(loc: Rc<SourceInfo>, id: Rc<Ident>, ty: Rc<Type>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::Decl(id, ty))
 }
+fn mk_freeze(loc: Rc<SourceInfo>, id: Rc<Ident>) -> Rc<Stmt> {
+    mk_ast(loc, StmtT::Freeze(id))
+}
 fn mk_let_stmt(loc: Rc<SourceInfo>, id: Rc<Ident>, ty: Rc<Type>, value: Rc<Expr>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::Let(id, ty, value))
 }

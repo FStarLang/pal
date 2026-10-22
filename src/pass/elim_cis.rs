@@ -324,6 +324,7 @@ fn rewrite_stmt(env: &Env, stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion
             }
         }
         StmtT::Decl(..)
+        | StmtT::Freeze(_)
         | StmtT::Break
         | StmtT::Continue
         | StmtT::Return(None)
@@ -633,6 +634,7 @@ fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
             }
         }
         StmtT::Break
+        | StmtT::Freeze(_)
         | StmtT::Continue
         | StmtT::Return(None)
         | StmtT::GhostStmt(_)

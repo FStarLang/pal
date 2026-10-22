@@ -10749,6 +10749,7 @@ fn collect_array_fill_stmts(tds: &Typedefs, ss: &Stmts, out: &mut BTreeMap<Strin
                 }
             }
             StmtT::Return(None)
+            | StmtT::Freeze(_)
             | StmtT::Break
             | StmtT::Continue
             | StmtT::Goto(..)
@@ -11425,6 +11426,7 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
             }
             StmtT::Label { ensures, .. } => touch_exprs(ensures, t),
             StmtT::Decl(..)
+            | StmtT::Freeze(_)
             | StmtT::Break
             | StmtT::Continue
             | StmtT::Return(None)
@@ -11501,6 +11503,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     holds_fn: BTreeMap::new(),
                     holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
+                    frozen: false,
                 }
             }
             None => {
@@ -11530,6 +11533,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     holds_fn: BTreeMap::new(),
                     holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
+                    frozen: false,
                 }
             }
         };
@@ -12654,12 +12658,36 @@ struct Slot {
     /// -- `_scatter_uninit` has run and `_gather` has not -- and the fields
     /// named here hold values while the rest is still storage.
     scattered: BTreeSet<String>,
+    /// Set once a `const` local has been initialised. Half of its points-to
+    /// is put away under `held`, so what the body has is enough to read it
+    /// and not enough to write it; the end of its lifetime takes the half
+    /// back.
+    frozen: bool,
 }
 
 impl Slot {
+    /// The half of a frozen slot that is put away.
+    fn held_body(&self) -> String {
+        format!(
+            "(exists* x. {}_pts_to {} (1.0R /. 2.0R) x)",
+            self.palow_ty, self.addr
+        )
+    }
+
+    fn held(&self) -> String {
+        format!("Pulse.Lib.C.Palow.Held.held {}", self.held_body())
+    }
+
     /// What the slot owns, at a given value.
     fn pts_to(&self, value: &str) -> String {
         match &self.array {
+            None if self.frozen => format!(
+                "{}_pts_to {} (1.0R /. 2.0R) {} ** {}",
+                self.palow_ty,
+                self.addr,
+                value,
+                self.held()
+            ),
             None => format!("{}_pts_to {} 1.0R {}", self.palow_ty, self.addr, value),
             Some((esize, maybe)) => format!(
                 "array_pts_to {a}_ctype {r} (SizeT.v {e}) (SizeT.v {a}_alignof) {n} 1.0R {v}",
@@ -13491,6 +13519,7 @@ impl<'a> Body<'a> {
                 holds_fn: BTreeMap::new(),
                 holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
+                frozen: false,
                 filling: Some((len, BTreeSet::new())),
             });
             return Ok(());
@@ -13521,6 +13550,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
             filling: None,
         });
         Ok(())
@@ -13597,6 +13627,7 @@ impl<'a> Body<'a> {
                 holds_fn: BTreeMap::new(),
                 holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
+                frozen: false,
             });
             return;
         }
@@ -13631,6 +13662,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
         });
     }
 
@@ -14103,6 +14135,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
         });
         Ok(format!("loc_{}", name))
     }
@@ -15331,6 +15364,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
         });
         Ok(Some((ff.at, ff.close_read, ff.close_write)))
     }
@@ -19322,6 +19356,7 @@ impl<'a> Body<'a> {
                 holds_fn: BTreeMap::new(),
                 holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
+                frozen: false,
             });
             return Ok(pn);
         }
@@ -19354,6 +19389,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
         });
         Ok(pn)
     }
@@ -22358,6 +22394,7 @@ impl<'a> Body<'a> {
                     holds_fn: BTreeMap::new(),
                     holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
+                    frozen: false,
                 });
                 Ok(())
             }
@@ -22672,6 +22709,31 @@ impl<'a> Body<'a> {
             StmtT::Assert(e) => {
                 let p = self.prop(e)?;
                 self.lines.push(format!("assert (pure ({}));", p));
+                Ok(())
+            }
+            // A `const` local has just been given its value. Half of the
+            // points-to is put away, so a read still finds what it needs and
+            // a write -- through the name or through a pointer that has had
+            // its `const` cast off -- does not. Only a scalar can be split
+            // this way; any other `const` object stays as it was.
+            StmtT::Freeze(x) => {
+                if let Some(j) = self.slots.iter().rposition(|s| *s.name == *x.val)
+                    && let s = &self.slots[j]
+                    && s.init
+                    && !s.frozen
+                    && !s.global
+                    && s.array.is_none()
+                    && s.scattered.is_empty()
+                    && !self.retained.contains(&s.addr)
+                    && SHAREABLE_SCALARS.contains(&s.palow_ty.as_str())
+                {
+                    let (pn, addr) = (s.palow_ty.clone(), s.addr.clone());
+                    self.lines.push(format!("{pn}_share {addr};"));
+                    self.slots[j].frozen = true;
+                    let held = self.slots[j].held_body();
+                    self.lines
+                        .push(format!("Pulse.Lib.C.Palow.Held.hold {held};"));
+                }
                 Ok(())
             }
             StmtT::Break | StmtT::Continue if !self.in_loop => {
@@ -23862,12 +23924,39 @@ impl<'a> Body<'a> {
                 }
                 self.lines.push(format!("{}_gather_uninit {};", pn, addr));
             } else if init {
+                if self.slots[i].frozen {
+                    let held = self.slots[i].held_body();
+                    self.lines
+                        .push(format!("Pulse.Lib.C.Palow.Held.unhold {held};"));
+                    self.lines.push(format!("{pn}_gather {addr};"));
+                }
                 self.lines.push(format!("{}_forget {};", pn, addr));
             }
             self.lines.push(format!("{}_stack_free {};", pn, addr));
         }
     }
 }
+
+/// The Palow types whose points-to can be split in two and put back.
+const SHAREABLE_SCALARS: &[&str] = &[
+    "bool_t",
+    "enum_i32",
+    "enum_u32",
+    "float32_t",
+    "float64_t",
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "long_long_t",
+    "ulong_long_t",
+    "size_t",
+    "ptr",
+];
 
 fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> {
     match &peel(tds, ty).val {
@@ -25373,13 +25462,218 @@ fn mentions_word(line: &str, ident: &str) -> bool {
 /// disjunctive null guard is split here too (see `hoist_stmts`).
 fn hoist_identity_calls(tu: &TranslationUnit) -> TranslationUnit {
     let idents = identity_fns(tu);
+    let tds = Typedefs::new(tu);
+    let is_ptr_ty = |t: &Type| matches!(peel(&tds, t).val, TypeT::Pointer(..));
+    let ptr_rets: HashSet<String> = tu
+        .decls
+        .iter()
+        .filter_map(|d| match &d.val {
+            DeclT::FnDefn(f) if is_ptr_ty(&f.decl.ret_type) => Some(f.decl.name.val.to_string()),
+            DeclT::FnDecl(f) if is_ptr_ty(&f.ret_type) => Some(f.name.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut bodies = Vec::new();
+    for d in &tu.decls {
+        if let DeclT::FnDefn(f) = &d.val {
+            let mut names = HashMap::new();
+            for a in &f.decl.args {
+                if let Some(n) = &a.name {
+                    names.insert(n.val.to_string(), is_ptr_ty(&a.ty));
+                }
+            }
+            local_pointer_names(&f.body, &is_ptr_ty, &mut names);
+            let rt = RoundTrip {
+                ptrs: names
+                    .into_iter()
+                    .filter(|(_, p)| *p)
+                    .map(|(n, _)| n)
+                    .collect(),
+                ptr_rets: &ptr_rets,
+                is_int: &|t: &Type| {
+                    matches!(
+                        peel(&tds, t).val,
+                        TypeT::Int { width: 64, .. } | TypeT::SizeT
+                    )
+                },
+                is_ptr_ty: &is_ptr_ty,
+            };
+            bodies.push(rt.stmts(&f.body));
+        }
+    }
     let mut tu = tu.clone();
+    let mut bodies = bodies.into_iter();
     for d in tu.decls.iter_mut() {
         if let DeclT::FnDefn(f) = &mut d.val {
-            f.body = byte_copy_loops(&hoist_stmts(&f.body, &idents));
+            let body = bodies.next().unwrap();
+            f.body = byte_copy_loops(&hoist_stmts(&body, &idents));
         }
     }
     tu
+}
+
+/// The names a body declares, and whether each is a pointer. A name declared
+/// once as a pointer and once as something else is not one.
+fn local_pointer_names(
+    ss: &Stmts,
+    is_ptr: &dyn Fn(&Type) -> bool,
+    out: &mut HashMap<String, bool>,
+) {
+    for s in ss {
+        match &s.val {
+            StmtT::Decl(n, t) | StmtT::Let(n, t, _) => {
+                let p = is_ptr(t);
+                let e = out.entry(n.val.to_string()).or_insert(p);
+                *e = *e && p;
+            }
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                local_pointer_names(then_branch, is_ptr, out);
+                local_pointer_names(else_branch, is_ptr, out);
+            }
+            StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => {
+                local_pointer_names(body, is_ptr, out)
+            }
+            StmtT::Match {
+                branches,
+                default_branch,
+                ..
+            } => {
+                for b in branches.iter() {
+                    local_pointer_names(&b.body, is_ptr, out);
+                }
+                local_pointer_names(default_branch, is_ptr, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `(T *)(uintptr_t)p` with `p` a pointer is `(T *)p`. 7.20.1.4p1: a valid
+/// pointer converted to `uintptr_t` and back compares equal to the original,
+/// and an immediate round trip is the one case where nothing in between can
+/// have taken the address apart, so the pointer keeps the provenance it had.
+/// Any other conversion from an integer is still the invalid pointer.
+struct RoundTrip<'a> {
+    ptrs: HashSet<String>,
+    ptr_rets: &'a HashSet<String>,
+    is_int: &'a dyn Fn(&Type) -> bool,
+    is_ptr_ty: &'a dyn Fn(&Type) -> bool,
+}
+
+impl RoundTrip<'_> {
+    fn stmts(&self, ss: &Stmts) -> Stmts {
+        ss.iter()
+            .map(|s| {
+                let e = |x: &Rc<Expr>| self.expr(x);
+                let b = |x: &Rc<Stmts>| Rc::new(self.stmts(x));
+                let val = match &s.val {
+                    StmtT::Call(x) => StmtT::Call(e(x)),
+                    StmtT::Let(n, t, x) => StmtT::Let(n.clone(), t.clone(), e(x)),
+                    StmtT::Assign(l, r) => StmtT::Assign(e(l), e(r)),
+                    StmtT::Return(Some(x)) => StmtT::Return(Some(e(x))),
+                    StmtT::If {
+                        cond,
+                        then_branch,
+                        else_branch,
+                        ensures,
+                    } => StmtT::If {
+                        cond: e(cond),
+                        then_branch: b(then_branch),
+                        else_branch: b(else_branch),
+                        ensures: ensures.clone(),
+                    },
+                    StmtT::While {
+                        cond,
+                        inv,
+                        requires,
+                        ensures,
+                        body,
+                    } => StmtT::While {
+                        cond: cond.clone(),
+                        inv: inv.clone(),
+                        requires: requires.clone(),
+                        ensures: ensures.clone(),
+                        body: b(body),
+                    },
+                    StmtT::Match {
+                        scrutinee,
+                        branches,
+                        default_branch,
+                        ensures,
+                    } => StmtT::Match {
+                        scrutinee: scrutinee.clone(),
+                        branches: Rc::new(
+                            branches
+                                .iter()
+                                .map(|br| {
+                                    Rc::new(MatchBranch {
+                                        patterns: br.patterns.clone(),
+                                        body: b(&br.body),
+                                    })
+                                })
+                                .collect(),
+                        ),
+                        default_branch: b(default_branch),
+                        ensures: ensures.clone(),
+                    },
+                    StmtT::GotoBlock {
+                        body,
+                        label,
+                        ensures,
+                    } => StmtT::GotoBlock {
+                        body: b(body),
+                        label: label.clone(),
+                        ensures: ensures.clone(),
+                    },
+                    v => v.clone(),
+                };
+                val.with_loc(s.loc.clone())
+            })
+            .collect()
+    }
+
+    fn is_ptr(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Var(n) => self.ptrs.contains(&*n.val),
+            ExprT::Cast(_, t) => (self.is_ptr_ty)(t),
+            ExprT::Ref(_) => true,
+            ExprT::FnCall(f, _) => self.ptr_rets.contains(&*f.val),
+            _ => false,
+        }
+    }
+
+    fn expr(&self, e: &Rc<Expr>) -> Rc<Expr> {
+        let loc = || e.loc.clone();
+        let r = |x: &Rc<Expr>| self.expr(x);
+        match &e.val {
+            ExprT::Cast(x, t) => {
+                let x = r(x);
+                if (self.is_ptr_ty)(t)
+                    && let ExprT::Cast(y, ti) = &strip_vattr(&x).val
+                    && (self.is_int)(ti)
+                    && self.is_ptr(y)
+                {
+                    return ExprT::Cast(y.clone(), t.clone()).with_loc(loc());
+                }
+                ExprT::Cast(x, t.clone()).with_loc(loc())
+            }
+            ExprT::FnCall(f, args) => {
+                ExprT::FnCall(f.clone(), args.iter().map(r).collect()).with_loc(loc())
+            }
+            ExprT::VAttr(a, x) => ExprT::VAttr(a.clone(), r(x)).with_loc(loc()),
+            ExprT::Deref(x) => ExprT::Deref(r(x)).with_loc(loc()),
+            ExprT::Ref(x) => ExprT::Ref(r(x)).with_loc(loc()),
+            ExprT::Member(x, f) => ExprT::Member(r(x), f.clone()).with_loc(loc()),
+            ExprT::Index(x, i) => ExprT::Index(r(x), r(i)).with_loc(loc()),
+            ExprT::UnOp(o, x) => ExprT::UnOp(o.clone(), r(x)).with_loc(loc()),
+            ExprT::BinOp(o, x, y) => ExprT::BinOp(o.clone(), r(x), r(y)).with_loc(loc()),
+            _ => e.clone(),
+        }
+    }
 }
 
 /// A hand-written byte copy, `for (i = 0; i < n; i++) d[i] = s[i];` with
@@ -25520,8 +25814,9 @@ fn hoist_stmts(ss: &Stmts, idents: &HashMap<String, usize>) -> Stmts {
                 if matches!(strip_vattr(l).val, ExprT::Var(_))
                     && matches!(
                         strip_casts(&hoist_expr(r, true, idents, &mut Vec::new())).val,
-                        ExprT::BinOp(BinOp::Add, ..)
+                        ExprT::BinOp(BinOp::Add, ..) | ExprT::Ref(_) | ExprT::Var(_)
                     )
+                    && matches!(strip_casts(r).val, ExprT::FnCall(..))
                     && !matches!(strip_casts(r).val, ExprT::BinOp(..)) =>
             {
                 StmtT::Assign(l.clone(), hoist_expr(r, true, idents, &mut pre))
@@ -26226,6 +26521,7 @@ fn emit_body(
                     holds_fn: BTreeMap::new(),
                     holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
+                    frozen: false,
                 });
             }
             continue;
@@ -26788,6 +27084,7 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         StmtT::Match { .. } => "a `switch`",
         StmtT::While { .. } => "a loop",
         StmtT::Break => "a `break`",
+        StmtT::Freeze(..) => "a `const` declaration",
         StmtT::Continue => "a `continue`",
         StmtT::Return(..) => "a non-tail `return`",
         StmtT::Assert(..) => "an assertion",

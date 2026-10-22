@@ -3445,6 +3445,9 @@ public:
               stmts.push(mk_assign(dloc.clone(),
                                    mk_lvalue_var(dloc.clone(), id.clone()),
                                    std::move(init)));
+              // A `const` object may be read but never modified (6.7.3p6).
+              if (qt.isConstQualified())
+                stmts.push(mk_freeze(dloc.clone(), id.clone()));
             }
           }
         } else if (auto fd = dyn_cast<FunctionDecl>(d); fd && !fd->hasBody()) {

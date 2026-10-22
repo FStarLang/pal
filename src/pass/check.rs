@@ -709,6 +709,7 @@ impl<'a> Checker<'a> {
                 loop_env.enter_loop();
                 self.check_stmts(&loop_env, body);
             }
+            StmtT::Freeze(_) => {}
             StmtT::Break | StmtT::Continue => {
                 if !env.in_loop() {
                     self.report(

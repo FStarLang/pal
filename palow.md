@@ -1124,8 +1124,10 @@ never rebound, is a *view alias* of that place: `T *q = (T *)&obj;`,
 for a local array `a` (a view of `a[0]`), `T *q = &(*p).f` where `p` is
 itself an alias, and `T *q = (T *)p` where `p` holds a `malloc`/`calloc`
 block for the whole call. Only pointer-to-pointer conversions are looked
-through: a round trip through `uintptr_t` loses the qualifiers and provenance
-the IR does not track, so it is not a view.
+through, with one exception: an immediate round trip `(T *)(uintptr_t)p` of a
+pointer `p` is `(T *)p`, because 7.20.1.4p1 guarantees the result compares
+equal to `p` and nothing in between can have taken the address apart. Any
+other conversion from an integer is still PNVI's invalid pointer.
 
 `*q` is then `*(T *)&place`. The place is first resolved structurally: a view
 at the type of the first member (or of the enclosing struct, for a first
@@ -1139,6 +1141,19 @@ representation of the view type. The ownership is converted back after the
 access. An aggregate view requires `View.aggregate_view_ok`, which is false:
 distinct struct types are never compatible, so a layout-compatible pun is a
 checked rejection rather than a translation error.
+
+#### `const` objects
+
+6.7.3p6 makes any attempt to modify an object defined with a
+const-qualified type undefined, however the pointer used for it was
+obtained. The frontend marks a `const` local right after its initialization,
+and from there the emitter keeps half of the local's points-to put away
+under `Pulse.Lib.C.Palow.Held.held`, which the prover does not see through.
+The half left in sight is enough to read the object and not enough to write
+it, so a store to it fails on the permission; the end of the local's
+lifetime takes the half back (`unhold`, `_gather`) before releasing the
+storage. Only scalar locals are frozen this way; a `const` aggregate or
+array local is still treated as mutable.
 
 #### Identity calls, guards and interior pointers in allocated storage
 
@@ -1176,9 +1191,9 @@ failure is never counted as a successful strict-aliasing proof.
 | Verified enabled cases within the supported target/model | 25 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 8 |
-| Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1 and 18.2) | 10 |
+| Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2 and 23.1) | 11 |
 | Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
-| Explicit unsupported-translation expectations | 17 |
+| Explicit unsupported-translation expectations | 16 |
 | Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
@@ -1197,7 +1212,10 @@ allocated block, and the later read through another type fails for want of
 that type's ownership -- the read is the undefined access.
 14.1 and 18.2 copy only a prefix of an object, and the read of the
 incomplete object fails; 18.1 copies an untyped, uninitialized source and the
-typed read of the copy fails. 17.2 fails on the alignment obligation of the
+typed read of the copy fails. 23.1 modifies a `const int` through a pointer
+whose `const` was cast off (and laundered through `uintptr_t` and an identity
+call); the store fails for want of the full permission -- see "`const`
+objects" below. 17.2 fails on the alignment obligation of the
 interior pointer it retypes (`aligned_field`, `1 % alignof(double) == 0`). The other four fail earlier, for a reason
 that is not the effective-type violation itself: 24.5 stores a whole union,
 which has no whole-object initialization, and 13.4, 13.5 and 14.3 pass an

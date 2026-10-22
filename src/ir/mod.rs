@@ -475,6 +475,9 @@ pub enum StmtT {
     Break,
     Continue,
     Return(Option<Rc<Expr>>),
+    /// The local, just initialised, was declared `const`: from here on the
+    /// program may read it but not modify it (6.7.3p6).
+    Freeze(Rc<Ident>),
     Assert(Rc<Expr>),
     GhostStmt(Rc<InlinePulseCode>),
     Goto(Rc<Ident>),

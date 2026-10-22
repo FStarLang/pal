@@ -823,7 +823,12 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
             }
             exprs(ensures, out);
         }
-        StmtT::Return(None) | StmtT::Break | StmtT::Continue | StmtT::Goto(_) | StmtT::Error => {}
+        StmtT::Return(None)
+        | StmtT::Freeze(_)
+        | StmtT::Break
+        | StmtT::Continue
+        | StmtT::Goto(_)
+        | StmtT::Error => {}
     }
 }
 /// emitted after the type definitions it references by-value or by-pointer.

@@ -288,7 +288,12 @@ fn normalize_stmt(env: &Env, stmt: &mut Stmt) {
             normalize_stmts(env, Rc::make_mut(body));
             normalize_exprs(env, Rc::make_mut(ensures));
         }
-        StmtT::Break | StmtT::Continue | StmtT::Return(None) | StmtT::Goto(_) | StmtT::Error => {}
+        StmtT::Break
+        | StmtT::Freeze(_)
+        | StmtT::Continue
+        | StmtT::Return(None)
+        | StmtT::Goto(_)
+        | StmtT::Error => {}
     }
 }
 

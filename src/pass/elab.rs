@@ -1048,7 +1048,7 @@ impl<'a> Elaborator<'a> {
                 }
                 self.elab_stmts(env, Rc::make_mut(body));
             }
-            StmtT::Break | StmtT::Continue => {}
+            StmtT::Break | StmtT::Continue | StmtT::Freeze(_) => {}
             StmtT::Return(x) => {
                 if let Some(x) = x {
                     let expected_ret = env.return_type.as_ref().map(|t| t.as_ref());

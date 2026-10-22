@@ -593,6 +593,7 @@ impl PrettyIR for StmtT {
                 .append(pretty_block(body))
                 .group(),
             StmtT::Break => RcDoc::text("break;"),
+            StmtT::Freeze(x) => RcDoc::text(format!("_freeze({});", x.val)),
             StmtT::Continue => RcDoc::text("continue;"),
             StmtT::Return(Some(v)) => RcDoc::text("return")
                 .append(RcDoc::line())

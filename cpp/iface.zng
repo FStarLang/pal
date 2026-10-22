@@ -335,6 +335,7 @@ mod crate::clang {
     fn mk_lvalue_err(Rc<SourceInfo>, Rc<Type>) -> Rc<Expr>;
 
     fn mk_var_decl(Rc<SourceInfo>, Rc<Ident>, Rc<Type>) -> Rc<Stmt>;
+    fn mk_freeze(Rc<SourceInfo>, Rc<Ident>) -> Rc<Stmt>;
     fn mk_let_stmt(Rc<SourceInfo>, Rc<Ident>, Rc<Type>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_decl_stack_array(Rc<SourceInfo>, Rc<Ident>, Rc<Type>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_assign(Rc<SourceInfo>, Rc<Expr>, Rc<Expr>) -> Rc<Stmt>;
