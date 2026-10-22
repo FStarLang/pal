@@ -1,4 +1,4 @@
-Prepared_read_bad.fst(
+Func_read_fresh.fst(
 Cannot prove:
-mem_pts_to_at a 1.0R
-Effective.prepared a uint32_t_ctype
+uint32_t_pts_to tmp1_p
+uint32_t_pts_to_uninit tmp1_p

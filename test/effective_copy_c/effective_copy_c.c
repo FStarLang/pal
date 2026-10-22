@@ -40,28 +40,13 @@ int copy_into_allocated(void)
     return result;
 }
 
-int copy_into_prepared(void)
-    _ensures(return == 0 || return == 37)
-{
-    int source = 37;
-    void *target = malloc(16);
-    if (!target)
-        return 0;
-    _ghost_stmt($prepare(int) $(target));
-    memcpy(target, &source, sizeof source);
-    int result = *(int *)target;
-    free(target);
-    return result;
-}
-
-int copy_into_prepared_typed_allocation(void)
+int copy_into_typed_allocation(void)
     _ensures(return == 0 || return == 37)
 {
     int source = 37;
     int *target = malloc(sizeof *target);
     if (!target)
         return 0;
-    _ghost_stmt($prepare(int) $(target));
     memcpy(target, &source, sizeof source);
     int result = *target;
     free(target);

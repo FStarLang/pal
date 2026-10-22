@@ -22107,6 +22107,39 @@ impl<'a> Body<'a> {
         if prefix && !initialized {
             return Err("a partial copy of an uninitialized object".to_string());
         }
+        // A whole copy into typed allocated storage gives it the source's
+        // effective type (6.5p6), as a store would. The typed view only says
+        // the bytes are readable at the old type, so the block is first
+        // prepared for the source type, exactly as a store prepares it.
+        let (dst, da, mut dpn, old_init) = if let CopyObject::Block(j) = dst
+            && heap_copy.is_none()
+            && initialized
+            && !prefix
+            && !spn.is_empty()
+            && !is_aggregate(&spn)
+            && let Some(sty) =
+                source_size.and(self.ty_of(strip_casts(&args[1])).ok().and_then(|t| {
+                    match &peel(self.tds, &t).val {
+                        TypeT::Pointer(t, _) => Some(t.clone()),
+                        _ => None,
+                    }
+                }))
+            && const_bytes(self.tds, &args[2]) == source_size
+            && {
+                let b = &self.blocks[j];
+                !b.pn.is_empty()
+                    && b.prepared.is_none()
+                    && b.taken.is_none()
+                    && b.array.is_none()
+                    && b.flex.is_none()
+                    && b.scattered.is_empty()
+                    && b.split.is_none()
+            } {
+            self.prepare_block(&sty, &args[0])?;
+            self.copy_place(&args[0])?
+        } else {
+            (dst, da, dpn, old_init)
+        };
         // Neither object has an effective type, so neither does the copy (C11
         // 6.5p6, "if it has one"): only the bytes move.
         if let (CopyObject::Block(i), CopyObject::Block(j)) = (src, dst)

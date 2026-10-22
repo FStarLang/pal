@@ -1,2 +1,0 @@
-a store through a type different from the prepared target
-preparing pointer-valued storage requires pointer-type-specific effective-type descriptors

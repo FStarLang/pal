@@ -14,49 +14,43 @@ int retype_allocated(void)
     void *p = malloc(64);
     if (!p)
         return 0;
-    _ghost_stmt($prepare(int) $(p));
     *(int *)p = 7;
     int result = *(int *)p;
-    _ghost_stmt($prepare(float) $(p));
     *(float *)p = 1.25f;
     float f = *(float *)p;
-    _ghost_stmt($prepare(double) $(p));
     *(double *)p = 2.5;
     double d = *(double *)p;
-    _ghost_stmt($prepare(struct point) $(p));
     *(struct point *)p = (struct point){ 11, 13 };
     free(p);
     return result;
 }
 
-void abandon_prepared(void)
+void abandon_allocation(void)
 {
     void *p = malloc(64);
     if (!p)
         return;
-    _ghost_stmt($prepare(double) $(p));
     free(p);
 }
 
-void join_prepared(int flag)
+void join_stores(int flag)
 {
     void *p = malloc(16);
     if (!p)
         return;
     if (flag)
-        _ghost_stmt($prepare(int) $(p));
+        *(int *)p = 1;
     else
-        _ghost_stmt($prepare(int) $(p));
+        *(int *)p = 2;
     *(int *)p = 3;
     free(p);
 }
 
-void prepared_across_loop(void)
+void allocation_across_loop(void)
 {
     void *p = malloc(16);
     if (!p)
         return;
-    _ghost_stmt($prepare(double) $(p));
     int i = 0;
     while (i < 2)
         _invariant(0 <= i && i <= 2)
@@ -71,7 +65,6 @@ void initialized_prefix_loop(void)
     void *p = malloc(16);
     if (!p)
         return;
-    _ghost_stmt($prepare(int) $(p));
     *(int *)p = 1;
     int i = 0;
     while (i < 2)
@@ -83,12 +76,11 @@ void initialized_prefix_loop(void)
     free(p);
 }
 
-void prepare_after_abort(void)
+void store_after_abort(void)
 {
     void *p = malloc(16);
     if (!p)
         abort();
-    _ghost_stmt($prepare(int) $(p));
     *(int *)p = 9;
     free(p);
 }

@@ -2,12 +2,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-int read_prepared(void)
+int read_uninitialized_allocation(void)
 {
     void *p = malloc(16);
     if (!p)
         return 0;
-    _ghost_stmt($prepare(int) $(p));
     int result = *(int *)p;
     free(p);
     return result;

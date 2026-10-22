@@ -1,15 +1,15 @@
 #include "pal.h"
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
-/* A prepared reservation cannot be used as initialized byte ownership. */
-_include_pulse(Prepared_read_bad,
-  module Effective = Pulse.Lib.C.Palow.Effective
-
-  ghost
-  fn bad (a: ptr)
-    requires Effective.prepared a uint32_t_ctype
-    ensures exists* b e. mem_pts_to_at a 1.0R b e
-  {
-    unfold Effective.prepared a uint32_t_ctype;
-  }
-)
+/* Fresh allocated storage holds no value to read. */
+uint32_t read_fresh(void)
+{
+    uint32_t *p = malloc(sizeof *p);
+    if (!p)
+        return 0;
+    uint32_t r = *p;
+    free(p);
+    return r;
+}

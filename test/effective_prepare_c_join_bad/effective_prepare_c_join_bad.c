@@ -2,14 +2,18 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-void join_different_types(int flag)
+/* After the join, the storage holds an `int` or a `float`; reading it as an
+   `int` is undefined on the second path. */
+int join_different_types(int flag)
 {
     void *p = malloc(16);
     if (!p)
-        return;
+        return 0;
     if (flag)
-        _ghost_stmt($prepare(int) $(p));
+        *(int *)p = 1;
     else
-        _ghost_stmt($prepare(float) $(p));
+        *(float *)p = 1.25f;
+    int result = *(int *)p;
     free(p);
+    return result;
 }

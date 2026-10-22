@@ -932,8 +932,13 @@ type, so a whole-object store does the preparation itself: when `*q = v`
 targets a live, null-checked allocated block whose contents are raw bytes or
 an object of another type, the translator first emits exactly what
 `$prepare(T)` would (forgetting the old contents) and then the store
-initializes the prefix. The explicit annotation therefore remains useful only
-to reserve storage ahead of a copy. The implicit retype is deliberately
+initializes the prefix. A whole `memcpy` of an initialized scalar into a
+typed allocated block (`int *t = malloc(sizeof *t); memcpy(t, &s, sizeof s)`)
+is prepared for the source's type in the same way, since 6.5p6 gives the
+storage the source's effective type; raw blocks need no preparation, because
+their fresh index already accepts the copy. No test needs the explicit
+annotation any more; it remains available to reserve storage ahead of an
+operation the translator does not prepare itself. The implicit retype is deliberately
 narrow. A character store installs no type and stays a byte access:
 `b[i] = y` through an `unsigned char *` naming raw `calloc` storage is
 `RawBytes.byte_store`, which leaves the untyped index alone and the bytes
@@ -990,9 +995,14 @@ separate workstreams.
 
 #### Regression expectations
 
-`effective_retype_c` and `effective_copy_c` exercise the C frontend and emitted
-operations, in addition to the model-level `effective_machine` and
-`effective_values` tests. An expected failure is not evidence of effective-type
+The `effective_*` tests are plain C, without `_ghost_stmt` or
+`_include_pulse`, except `effective_prefix_agreement_bad` (a soundness check
+of the byte model itself, with no C counterpart) and the two pointer-object
+tests whose ghost `rewrite` moves ownership across a proven pointer equality
+(`effective_pointer_value_cast`, `effective_pointer_object_bad/bad_returned_public_local_call`).
+`effective_retype_c`, `effective_copy_c`, `effective_machine`,
+`effective_values`, `effective_store_c` and `effective_untyped_copy` are the
+positive ones. An expected failure is not evidence of effective-type
 enforcement unless it reaches the corresponding checked operation.
 
 The test template therefore distinguishes two kinds of expectations.
