@@ -1219,7 +1219,10 @@ declaration is not visible). All four are UB, and all four are currently
 explicit unsupported-translation expectations, like the other union cases;
 24.9 and 24.10 are refused with a diagnostic naming the rule they break
 (the common initial sequence is empty; the address of a member not known to
-be live escapes into a function that cannot see the union).
+be live escapes into a function that cannot see the union), and 24.8 at the
+read through a pointer to an inactive member: punning is licensed only
+through the union (6.5.2.3p3, footnote 95), so a read through a pointer
+bound to `&u.m` is accepted only where `m` is known to be live.
 
 Common initial sequences (6.5.2.3p6) are supported for local unions: a read
 of `u.m.f` while struct member `l` is live is rewritten to the read of the

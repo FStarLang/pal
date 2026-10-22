@@ -13309,6 +13309,11 @@ struct Body<'a> {
     /// The locals an address into is taken of somewhere in the body; see
     /// `Touched::escaped`.
     escaped: HashSet<String>,
+    /// Whether the place being opened was reached through a pointer bound to
+    /// the address of a union member rather than spelled as a member access.
+    /// Reading another member's bytes is only licensed through the union
+    /// (6.5.2.3p3, footnote 95), so such a read is never a pun.
+    via_pointer: bool,
     /// Union members the function's own `_requires` says are the live ones,
     /// as the C lvalue naming the union object and the member's name. A read
     /// of a union member is only sound where the member is the live one, and
@@ -14698,8 +14703,12 @@ impl<'a> Body<'a> {
     /// with nothing in between: the object is in pieces until then.
     fn place(&mut self, e: &Expr, writing: bool) -> Result<Focus, String> {
         if let Some(p) = self.unalias(e) {
-            return self.place(&p, writing);
+            let outer = std::mem::replace(&mut self.via_pointer, true);
+            let r = self.place(&p, writing);
+            self.via_pointer = outer;
+            return r;
         }
+        let via_pointer = std::mem::take(&mut self.via_pointer);
         if !writing
             && let ExprT::Member(base, f) = &strip_vattr(e).val
             && let Some(focus) = self.punned_field(base, f)?
@@ -14708,6 +14717,7 @@ impl<'a> Body<'a> {
         }
         match &strip_vattr(e).val {
             ExprT::Member(base, f) if self.union_of(base).is_some() => {
+                self.via_pointer = via_pointer;
                 self.union_member(base, f, writing)
             }
             ExprT::Member(base, f) => {
@@ -14850,6 +14860,7 @@ impl<'a> Body<'a> {
     /// what you wrote; the emitter allows the read exactly where it put the
     /// value there itself.
     fn union_member(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<Focus, String> {
+        let via_pointer = std::mem::take(&mut self.via_pointer);
         let un = self
             .union_of(base)
             .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
@@ -14922,6 +14933,12 @@ impl<'a> Body<'a> {
                     .iter()
                     .any(|(obj, m)| *m == *f.val && same_lvalue(obj, &named))
             {
+                if via_pointer {
+                    return Err(format!(
+                        "a read of union member `{}` through a pointer to it, which is not known to be the live one here: punning is only licensed through the union (6.5.2.3p3, footnote 95)",
+                        f.val
+                    ));
+                }
                 return Err(format!(
                     "a read of union member `{}`, which is not known to be the live one here",
                     f.val
@@ -17626,7 +17643,10 @@ impl<'a> Body<'a> {
             return Ok(t);
         }
         if let Some(p) = self.unalias(e) {
-            return self.rvalue(&p);
+            let outer = std::mem::replace(&mut self.via_pointer, true);
+            let r = self.rvalue(&p);
+            self.via_pointer = outer;
+            return r;
         }
         if let Some(Err(place)) = self.typed_view(e) {
             return self.rvalue(&place);
@@ -26792,6 +26812,7 @@ fn emit_body(
         literal_drops: Vec::new(),
         active: HashMap::new(),
         escaped,
+        via_pointer: false,
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
         // on nothing.

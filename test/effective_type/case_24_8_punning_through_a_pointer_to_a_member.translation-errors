@@ -1,1 +1,1 @@
-error: `Func_case_24_8_punning_through_a_pointer_to_a_member`: its body is not translated: a read of union member `i`, which is not known to be the live one here
+error: `Func_case_24_8_punning_through_a_pointer_to_a_member`: its body is not translated: a read of union member `i` through a pointer to it, which is not known to be the live one here: punning is only licensed through the union (6.5.2.3p3, footnote 95)
