@@ -1155,6 +1155,16 @@ lifetime takes the half back (`unhold`, `_gather`) before releasing the
 storage. Only scalar locals are frozen this way; a `const` aggregate or
 array local is still treated as mutable.
 
+#### String literals bound to locals
+
+`char *s = "..."` (possibly through an identity call) does not copy the
+literal: `s` is bound to `literal_addr` of the literal itself, with the
+fractional share obtained from `acquire_literal_<n>`, and the share is
+dropped (`literal_share_drop`) when the function returns. Reads through `s`
+focus on that share; a store through `s` needs the full permission, which a
+literal never gives out, so modifying a string literal (6.4.5p7) fails to
+verify.
+
 #### Identity calls, guards and interior pointers in allocated storage
 
 Before emission, a call to an identity function whose argument is
@@ -1191,9 +1201,9 @@ failure is never counted as a successful strict-aliasing proof.
 | Verified enabled cases within the supported target/model | 25 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 8 |
-| Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2 and 23.1) | 11 |
+| Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 23.1 and 23.2) | 12 |
 | Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
-| Explicit unsupported-translation expectations | 16 |
+| Explicit unsupported-translation expectations | 15 |
 | Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
@@ -1215,7 +1225,10 @@ incomplete object fails; 18.1 copies an untyped, uninitialized source and the
 typed read of the copy fails. 23.1 modifies a `const int` through a pointer
 whose `const` was cast off (and laundered through `uintptr_t` and an identity
 call); the store fails for want of the full permission -- see "`const`
-objects" below. 17.2 fails on the alignment obligation of the
+objects" below. 23.2 writes into a string literal through a `char *` local
+bound to it; the store fails for want of the full permission, since a
+literal only ever lends fractional shares (6.4.5p7, see "String literals
+bound to locals" below). 17.2 fails on the alignment obligation of the
 interior pointer it retypes (`aligned_field`, `1 % alignof(double) == 0`). The other four fail earlier, for a reason
 that is not the effective-type violation itself: 24.5 stores a whole union,
 which has no whole-object initialization, and 13.4, 13.5 and 14.3 pass an

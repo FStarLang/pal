@@ -13241,6 +13241,9 @@ struct Body<'a> {
     /// `_array int *p = (int[]){1, 2};`. The literal gets storage when the
     /// binding is reached, and from then on `p` is another name for it.
     literal_aliases: HashSet<String>,
+    /// The read-only shares of string literals that array-view locals were
+    /// bound to, put down when the function is left.
+    literal_drops: Vec<String>,
     /// Which member of a union at a given address is live, where the emitter
     /// knows. C's rule is that reading a member other than the one last
     /// written is not reading what you wrote, and Palow says the same thing by
@@ -19250,6 +19253,43 @@ impl<'a> Body<'a> {
         name
     }
 
+    /// An array-view local bound to a string literal. Unlike a compound
+    /// literal, a string literal has static storage that the program may not
+    /// modify (6.4.5p7), so the local is not given storage of its own: it
+    /// names the literal's, under the same read-only share a `const` array
+    /// argument gets. A read through it goes through; a store fails for want
+    /// of the full permission.
+    fn literal_view(&mut self, v: &str, lit: &Expr) -> Result<(), String> {
+        let ty = self.ty_of(lit)?;
+        let TypeT::FixedArray(elem, _) = &peel(self.tds, &ty).val else {
+            return Err("a literal that is not a fixed array".to_string());
+        };
+        let (Some(fty), Some(esize)) = (fstar_type(self.tds, elem), palow_sizeof(self.tds, elem))
+        else {
+            return Err(format!("a literal of {}", describe(self.tds.resolve(elem))));
+        };
+        let saved = self.pending_close.len();
+        let addr = self.literal_share_arg(lit)?;
+        self.literal_drops
+            .extend(self.pending_close.drain(saved..).collect::<Vec<_>>());
+        let pn = palow_name(self.tds, elem).unwrap();
+        self.lines.push(format!("let var_{} = {};", v, addr));
+        self.arrays.insert(
+            v.to_string(),
+            ArrayParam {
+                pn,
+                fty,
+                esize: format!("{}sz", esize),
+                // The term the ownership is stated at: Pulse does not see
+                // through the `let`.
+                addr,
+                maybe: false,
+                known_len: true,
+            },
+        );
+        Ok(())
+    }
+
     fn literal_share_arg(&mut self, a: &Expr) -> Result<String, String> {
         let mut lit = Rc::new(strip_vattr(a).clone());
         while let ExprT::Cast(inner, _) = &lit.clone().val {
@@ -22442,6 +22482,12 @@ impl<'a> Body<'a> {
                 if let Some(v) = lvalue_name(lhs) {
                     if self.literal_aliases.contains(&v) {
                         let lit = Rc::new(strip_casts(rhs).clone());
+                        if let ExprT::ArrayInit {
+                            is_static: true, ..
+                        } = &strip_vattr(&lit).val
+                        {
+                            return self.literal_view(&v, &lit);
+                        }
                         let a = self.array_literal(&lit)?;
                         self.array_aliases.insert(v, a);
                         return Ok(());
@@ -23832,6 +23878,9 @@ impl<'a> Body<'a> {
     }
 
     fn release_from(&mut self, mark: usize) {
+        if mark == 0 {
+            self.lines.extend(self.literal_drops.clone());
+        }
         // Leaving the function: anything still held has to go, including a
         // validity seeded for a use that did not consume it -- storing a
         // decayed function in a slot, say.
@@ -25814,7 +25863,13 @@ fn hoist_stmts(ss: &Stmts, idents: &HashMap<String, usize>) -> Stmts {
                 if matches!(strip_vattr(l).val, ExprT::Var(_))
                     && matches!(
                         strip_casts(&hoist_expr(r, true, idents, &mut Vec::new())).val,
-                        ExprT::BinOp(BinOp::Add, ..) | ExprT::Ref(_) | ExprT::Var(_)
+                        ExprT::BinOp(BinOp::Add, ..)
+                            | ExprT::Ref(_)
+                            | ExprT::Var(_)
+                            | ExprT::ArrayInit {
+                                is_static: true,
+                                ..
+                            }
                     )
                     && matches!(strip_casts(r).val, ExprT::FnCall(..))
                     && !matches!(strip_casts(r).val, ExprT::BinOp(..)) =>
@@ -25993,6 +26048,15 @@ fn pure_place(e: &Expr) -> bool {
             pure_place(x)
         }
         ExprT::BinOp(BinOp::Add | BinOp::Sub, x, y) => pure_place(x) && pure_place(y),
+        // A string literal denotes the same static array wherever it is
+        // written: its address is a function of its contents.
+        ExprT::ArrayInit {
+            is_static: true,
+            elems,
+            ..
+        } => elems
+            .iter()
+            .all(|x| matches!(strip_vattr(x).val, ExprT::IntLit(..))),
         _ => false,
     }
 }
@@ -26442,6 +26506,7 @@ fn emit_body(
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
         literal_aliases: literal_alias_set(tds, &defn.body),
+        literal_drops: Vec::new(),
         active: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting

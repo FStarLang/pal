@@ -1,0 +1,2 @@
+Func_case_23_2_modify_a_string_literal.fst(
+int8_t_pts_to (literal_addr literal_1 +! SizeT.uint_to_t 0)
