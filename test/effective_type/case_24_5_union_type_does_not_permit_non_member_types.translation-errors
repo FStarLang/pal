@@ -1,0 +1,1 @@
+error: `Func_case_24_5_union_type_does_not_permit_non_member_types`: its body is not translated: an allocated `union upun`, whose effective type the union model does not track

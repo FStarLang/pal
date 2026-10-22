@@ -1,1 +1,1 @@
-error: `Func_case_12_3_union_of_structs_with_cis_in_allocated_storage`: its body is not translated: a read of union member `a`, which is not known to be the live one here
+error: `Func_case_12_3_union_of_structs_with_cis_in_allocated_storage`: its body is not translated: an allocated `union cis`, whose effective type the union model does not track

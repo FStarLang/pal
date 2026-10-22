@@ -7711,6 +7711,25 @@ fn same_pointer_object_type(tds: &Typedefs, a: &Type, b: &Type) -> bool {
     }
 }
 
+/// How many leading fields two structs have in common in the sense of
+/// 6.5.2.3p6: corresponding members of compatible types. A bit-field ends
+/// the run -- its storage unit is not a member, and equal widths are not
+/// something this checks.
+fn common_initial_sequence(tds: &Typedefs, a: &StructInfo, b: &StructInfo) -> usize {
+    let unit = |si: &StructInfo, n: &str| si.bitfields.iter().any(|(_, bf)| bf.unit == n);
+    a.fields
+        .iter()
+        .zip(&b.fields)
+        .take_while(|(x, y)| {
+            !unit(a, &x.name)
+                && !unit(b, &y.name)
+                && x.offset == y.offset
+                && x.size == y.size
+                && same_pointer_object_type(tds, &x.ty, &y.ty)
+        })
+        .count()
+}
+
 fn contextual_scalar_struct(si: &StructInfo) -> bool {
     si.has_bytes
         && !si.fields.is_empty()
@@ -11066,6 +11085,11 @@ struct Touched {
     /// The named objects whose own address the body takes. Each of them needs
     /// storage, wherever in the body the `&` happens to appear.
     addressed: HashSet<String>,
+    /// The named objects something other than the body itself may reach: an
+    /// address into one is taken anywhere (`&x`, `&x.f`, `&x.a[i]`), or its
+    /// value -- which for a pointer is what it points at -- is passed to a
+    /// call, stored or returned.
+    escaped: HashSet<String>,
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -11136,6 +11160,23 @@ fn alias_of(e: &Expr, t: &Touched) -> Option<Rc<Expr>> {
     Some(view_place(place).unwrap_or(place).clone())
 }
 
+/// The names whose value an expression may be: `p`, `(T *)p`, `c ? p : q`,
+/// `p + 1`. Over-approximate: these are the objects a copy of the value can
+/// reach.
+fn value_roots(e: &Expr, out: &mut HashSet<String>) {
+    match &strip_vattr(e).val {
+        ExprT::Var(v) => {
+            out.insert(v.val.to_string());
+        }
+        ExprT::Cast(x, _) | ExprT::AssignExpr(_, x) => value_roots(x, out),
+        ExprT::Cond(_, b, c) | ExprT::BinOp(_, b, c) => {
+            value_roots(b, out);
+            value_roots(c, out);
+        }
+        _ => {}
+    }
+}
+
 fn touch_expr(e: &Expr, t: &mut Touched) {
     if let Some(p) = alias_of(e, t) {
         touch_expr(&p, t);
@@ -11149,6 +11190,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         ExprT::FnCall(n, args) => {
             t.calls.insert(n.val.to_string());
             for a in args.iter() {
+                value_roots(a, &mut t.escaped);
                 touch_expr(a, t);
             }
         }
@@ -11159,6 +11201,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         ExprT::FnPtrCall(f, args) => {
             touch_expr(f, t);
             for a in args.iter() {
+                value_roots(a, &mut t.escaped);
                 touch_expr(a, t);
             }
         }
@@ -11194,6 +11237,9 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
             if let Some(n) = lvalue_name(strip_vattr(x)) {
                 t.addressed.insert(n);
             }
+            if let Some(b) = lvalue_base(x) {
+                t.escaped.insert(b);
+            }
             touch_write(x, t);
             touch_expr(x, t);
         }
@@ -11202,6 +11248,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
             touch_expr(y, t);
         }
         ExprT::AssignExpr(x, y) => {
+            value_roots(y, &mut t.escaped);
             touch_write(x, t);
             touch_expr(x, t);
             touch_expr(y, t);
@@ -11218,11 +11265,13 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         }
         ExprT::StructInit(_, fs) => {
             for (_, x) in fs {
+                value_roots(x, &mut t.escaped);
                 touch_expr(x, t);
             }
         }
         ExprT::ArrayInit { elems, .. } => {
             for x in elems {
+                value_roots(x, &mut t.escaped);
                 touch_expr(x, t);
             }
         }
@@ -11361,8 +11410,11 @@ fn touch_exprs(es: &Exprs, t: &mut Touched) {
 fn touch_stmts(ss: &Stmts, t: &mut Touched) {
     for s in ss.iter() {
         match &s.val {
-            StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => touch_expr(e, t),
-            StmtT::Let(_, _, e) => touch_expr(e, t),
+            StmtT::Call(e) | StmtT::Assert(e) => touch_expr(e, t),
+            StmtT::Return(Some(e)) | StmtT::Let(_, _, e) => {
+                value_roots(e, &mut t.escaped);
+                touch_expr(e, t)
+            }
             StmtT::DeclStackArray { size, .. } => touch_expr(size, t),
             // The alias assignment itself stores nothing: the pointer is a
             // name, not an object, and the address it takes does not escape.
@@ -11378,6 +11430,7 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
                 touch_expr(b, t)
             }
             StmtT::Assign(a, b) => {
+                value_roots(b, &mut t.escaped);
                 touch_write(a, t);
                 touch_expr(a, t);
                 touch_expr(b, t);
@@ -13253,6 +13306,9 @@ struct Body<'a> {
     /// changed it. Keyed by the address expression, which is the emitter's own
     /// name for the object.
     active: HashMap<String, String>,
+    /// The locals an address into is taken of somewhere in the body; see
+    /// `Touched::escaped`.
+    escaped: HashSet<String>,
     /// Union members the function's own `_requires` says are the live ones,
     /// as the C lvalue naming the union object and the member's name. A read
     /// of a union member is only sound where the member is the live one, and
@@ -13538,8 +13594,15 @@ impl<'a> Body<'a> {
         // uninitialised. Anything already recorded there described the union
         // and no longer does.
         self.slots.retain(|s| s.addr != a);
+        self.push_arm_slot(&un, &arm.val.to_string(), pn, fty, a);
+        Ok(())
+    }
+
+    /// Record that the storage of struct-typed arm `arm` of union `un` is
+    /// what is held at `a`, uninitialised, to be filled field by field.
+    fn push_arm_slot(&mut self, un: &str, arm: &str, pn: String, fty: String, a: String) {
         self.slots.push(Slot {
-            name: format!("*{}.{}", a, arm.val),
+            name: format!("*{}.{}", a, arm),
             addr: a,
             palow_ty: pn,
             fstar_ty: fty,
@@ -13549,14 +13612,75 @@ impl<'a> Body<'a> {
             // The union's own storage is released by whoever owns it; this
             // slot only records what is in it.
             global: true,
-            union_arm: Some((un, arm.val.to_string())),
+            union_arm: Some((un.to_string(), arm.to_string())),
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
             frozen: false,
             filling: None,
         });
-        Ok(())
+    }
+
+    /// `u.m.f = x` where `u` is a local union and `m` a struct-typed arm that
+    /// is not the live one. This is the write that makes `m` live (6.5.2.3p3
+    /// footnote 95: the member last stored is the one the union holds), but
+    /// it only stores one field, so there is no arm *value* to store: the
+    /// union gives up what it held, the arm's storage is handed over, and the
+    /// fields are filled one at a time exactly as `$activate` arranges. The
+    /// union's own slot stays, because the local's storage is still released
+    /// as a union; it holds a value again once the last field is written.
+    fn activate_local_struct_arm(&mut self, b2: &Expr, f2: &Ident) -> Option<String> {
+        let un = self.union_of(b2)?;
+        let uname = un.strip_prefix("union_")?.to_string();
+        let m = self
+            .tds
+            .unions
+            .get(&uname)?
+            .members
+            .iter()
+            .find(|m| m.name == *f2.val)?;
+        let mty = m.ty.clone();
+        let TypeT::TypeRef(TypeRefKind::Struct(_)) = &peel(self.tds, &mty).val else {
+            return None;
+        };
+        let (pn, fty) = (palow_name(self.tds, &mty)?, fstar_type(self.tds, &mty)?);
+        self.scatter_fields(&pn)?;
+        let mark = self.lines.len();
+        let closing = self.pending_close.len();
+        let a = match self.addr_only(b2) {
+            Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => a,
+            _ => {
+                self.lines.truncate(mark);
+                self.pending_close.truncate(closing);
+                return None;
+            }
+        };
+        if self.active.get(&a).map(String::as_str) == Some(&*f2.val.to_string()) {
+            return None;
+        }
+        let i = self.slots.iter().rposition(|s| {
+            s.addr == a
+                && s.palow_ty == un
+                && !s.global
+                && s.array.is_none()
+                && s.union_arm.is_none()
+        })?;
+        // Anything still being filled at this address is another arm, and
+        // switching away from it would drop the fields written so far.
+        if self.slots[i + 1..].iter().any(|s| s.addr == a) {
+            return None;
+        }
+        let from_uninit = !self.slots[i].init;
+        self.lines.push(format!(
+            "{}_switch{}_{} {};",
+            un,
+            if from_uninit { "_uninit" } else { "" },
+            f2.val,
+            a
+        ));
+        self.active.insert(a.clone(), f2.val.to_string());
+        self.push_arm_slot(&un, &f2.val.to_string(), pn, fty, a.clone());
+        Some(a)
     }
 
     /// Close whichever array element a `$fold` ends the bracket of. The most
@@ -14578,7 +14702,7 @@ impl<'a> Body<'a> {
         }
         if !writing
             && let ExprT::Member(base, f) = &strip_vattr(e).val
-            && let Some(focus) = self.punned_field(base, f)
+            && let Some(focus) = self.punned_field(base, f)?
         {
             return Ok(focus);
         }
@@ -14865,50 +14989,58 @@ impl<'a> Body<'a> {
     /// no such value, and a pun stated at the whole member would be unsound.
     /// Stating it at the field is what makes the program provable while
     /// leaving the rest of the arm unreadable -- which is what C promises.
-    fn punned_field(&mut self, base: &Expr, f: &Ident) -> Option<Focus> {
+    fn punned_field(&mut self, base: &Expr, f: &Ident) -> Result<Option<Focus>, String> {
         let base = match self.unalias(base) {
             Some(p) => (*p).clone(),
             None => base.clone(),
         };
         let ExprT::Member(u, m) = &strip_vattr(&base).val else {
-            return None;
+            return Ok(None);
         };
         let (u, m) = (u.clone(), m.val.to_string());
-        let un = self.union_of(&u)?;
-        let uname = un.strip_prefix("union_")?.to_string();
-        let mty = self
-            .field_ty(
-                &u,
-                &Ast {
-                    val: m.clone().into(),
-                    loc: base.loc.clone(),
-                },
-            )
-            .ok()?;
+        let Some(un) = self.union_of(&u) else {
+            return Ok(None);
+        };
+        let Some(uname) = un.strip_prefix("union_").map(str::to_string) else {
+            return Ok(None);
+        };
+        let Ok(mty) = self.field_ty(
+            &u,
+            &Ast {
+                val: m.clone().into(),
+                loc: base.loc.clone(),
+            },
+        ) else {
+            return Ok(None);
+        };
         let sname = match &peel(self.tds, &mty).val {
             TypeT::TypeRef(TypeRefKind::Struct(n)) => n.val.to_string(),
-            _ => return None,
+            _ => return Ok(None),
         };
         let fname = f.val.to_string();
-        let si = self.tds.structs.get(&sname)?;
-        let fld = si.fields.iter().find(|x| x.name == fname)?;
-        if fld.offset != 0 {
-            return None;
-        }
-        let FieldShape::One { pn } = &fld.shape else {
-            return None;
+        let Some(si) = self.tds.structs.get(&sname) else {
+            return Ok(None);
         };
-        let (sn, pn) = (format!("struct_{}", sname), pn.clone());
+        let Some(fld) = si.fields.iter().find(|x| x.name == fname) else {
+            return Ok(None);
+        };
+        // Only meaningful for a scalar live member; a struct one is the
+        // common initial sequence below.
+        let scalar_pun = match &fld.shape {
+            FieldShape::One { pn } if fld.offset == 0 => Some(pn.clone()),
+            _ => None,
+        };
+        let sn = format!("struct_{}", sname);
         // Everything below may emit, so anything that turns out not to be a
         // pun has to leave the body as it found it.
         let mark = self.lines.len();
         let Ok((a, bcr, _)) = self.base_addr(&u, false) else {
             self.lines.truncate(mark);
-            return None;
+            return Ok(None);
         };
         let give_up = |me: &mut Self| {
             me.lines.truncate(mark);
-            None
+            Ok(None)
         };
         let Some(live) = self.active.get(&a).cloned() else {
             return give_up(self);
@@ -14922,13 +15054,67 @@ impl<'a> Body<'a> {
         let Some(lm) = ui.members.iter().find(|x| x.name == live) else {
             return give_up(self);
         };
+        // The live member is a struct too: 6.5.2.3p6, the common initial
+        // sequence. Reading `f` of `m` while `l` is live is reading the
+        // corresponding field of `l`, which is a value in hand -- so the read
+        // *is* that read, and nothing about the bytes has to be argued.
+        if let TypeT::TypeRef(TypeRefKind::Struct(ln)) = &peel(self.tds, &lm.ty).val {
+            let ln = ln.val.to_string();
+            self.lines.truncate(mark);
+            let (Some(lsi), Some(msi)) = (self.tds.structs.get(&ln), self.tds.structs.get(&sname))
+            else {
+                return Ok(None);
+            };
+            let cis = common_initial_sequence(self.tds, lsi, msi);
+            let Some(k) = msi.fields.iter().take(cis).position(|x| x.name == fname) else {
+                return Err(if cis == 0 {
+                    format!(
+                        "a read of `{}.{}` while `{}` is the live member of union {}: their \
+                         common initial sequence (6.5.2.3p6) is empty",
+                        m, fname, live, uname
+                    )
+                } else {
+                    format!(
+                        "a read of `{}.{}` while `{}` is the live member of union {}: `{}` is \
+                         past their common initial sequence (6.5.2.3p6)",
+                        m, fname, live, uname, fname
+                    )
+                });
+            };
+            let lf = lsi.fields[k].name.clone();
+            let loc = base.loc.clone();
+            let arm = Ast {
+                val: ExprT::Member(
+                    u.clone(),
+                    Rc::new(Ast {
+                        val: live.clone().into(),
+                        loc: loc.clone(),
+                    }),
+                ),
+                loc: loc.clone(),
+            };
+            let e = Ast {
+                val: ExprT::Member(
+                    Rc::new(arm),
+                    Rc::new(Ast {
+                        val: lf.into(),
+                        loc: loc.clone(),
+                    }),
+                ),
+                loc,
+            };
+            return self.place(&e, false).map(Some);
+        }
+        let Some(pn) = scalar_pun else {
+            return give_up(self);
+        };
         match &lm.shape {
             FieldShape::One { pn: lpn } if *lpn == pn => {}
             _ => return give_up(self),
         }
         let mut close = vec![format!("{}_unpun_{}_{}_{} {};", un, live, m, fname, a)];
         close.extend(bcr);
-        Some(Focus {
+        Ok(Some(Focus {
             bits: None,
             pn: pn.clone(),
             write_fn: format!("{}_write", pn),
@@ -14938,7 +15124,7 @@ impl<'a> Body<'a> {
             open_write: Vec::new(),
             close_read: close.clone(),
             close_write: close,
-        })
+        }))
     }
 
     fn field_ty(&self, base: &Expr, f: &Ident) -> Result<Rc<Type>, String> {
@@ -15092,6 +15278,17 @@ impl<'a> Body<'a> {
             match target {
                 Scattering::Slot(i) => self.slots[i].init = true,
                 Scattering::Block(i) => self.blocks[i].init = true,
+            }
+            // An arm made live by a field write to a local union: the union's
+            // own slot holds a value again and the arm's is done.
+            if let Scattering::Slot(i) = target
+                && let Some((un, _)) = self.slots[i].union_arm.clone()
+                && let Some(j) = self.slots[..i].iter().rposition(|s| {
+                    s.addr == ff.a && s.palow_ty == un && !s.global && s.union_arm.is_none()
+                })
+            {
+                self.slots[j].init = true;
+                self.slots.remove(i);
             }
             self.gather_enclosing(&ff.a, &mut close_write);
         }
@@ -15469,16 +15666,35 @@ impl<'a> Body<'a> {
         {
             return Ok((a, Vec::new(), Vec::new()));
         }
+        // The first write to a field of a struct-typed arm of a local union
+        // makes that arm the live one; see `activate_local_struct_arm`.
+        if writing
+            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
+            && self.union_of(b2).is_some()
+            && let Some(a) = self.activate_local_struct_arm(b2, f2)
+        {
+            return Ok((a, Vec::new(), Vec::new()));
+        }
         // A field of a struct-typed union *arm*. The arm has to be focused out
         // of the union before anything inside it can be named, which is the
         // same shape as a nested struct field -- except that the step is a
         // union member's, because every arm starts at the union's own address
-        // and which arm is live is a fact about the program.
-        if !writing
-            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
+        // and which arm is live is a fact about the program. A write is the
+        // same focus, as long as the arm already holds a value: storing one
+        // field of it leaves the arm live and its other fields as they were.
+        if let ExprT::Member(b2, f2) = &strip_vattr(base).val
             && self.union_of(b2).is_some()
         {
-            let f = self.union_member(b2, f2, false)?;
+            let f = self.union_member(b2, f2, false).map_err(|e| {
+                if writing {
+                    format!(
+                        "a write to a field of union member `{}`, which is not the live one here",
+                        f2.val
+                    )
+                } else {
+                    e
+                }
+            })?;
             self.lines.extend(f.open_read.iter().cloned());
             return Ok((f.at, f.close_read, f.close_write));
         }
@@ -18402,11 +18618,6 @@ impl<'a> Body<'a> {
         if name.val.as_ref() == "memcmp" {
             self.compared_objects(args)?;
         }
-        // A callee that was handed a pointer may have made a different member
-        // live, and nothing in the signature says otherwise. The emitter's
-        // record of which member is live is knowledge it put there itself, so
-        // it gives it up whenever control leaves.
-        self.active.clear();
         let c = self
             .callees
             .get(&*name.val.to_string())
@@ -18706,6 +18917,31 @@ impl<'a> Body<'a> {
         for a in implicit_args {
             out += &format!(" {}", a);
         }
+        // A callee that was handed a pointer may have made a different member
+        // live, and nothing in the signature says otherwise. The emitter's
+        // record of which member is live is knowledge it put there itself, so
+        // it gives it up whenever control leaves -- which is after the
+        // arguments, evaluated while it still holds. A local whose address is
+        // never taken is out of every callee's reach, so what it holds stays
+        // known.
+        let private: HashSet<String> = self
+            .slots
+            .iter()
+            .filter(|s| {
+                !s.global
+                    && s.array.is_none()
+                    && s.union_arm.is_none()
+                    && !self.escaped.contains(&s.name)
+            })
+            .map(|s| s.addr.clone())
+            .chain(
+                self.blocks
+                    .iter()
+                    .filter(|b| !self.escaped.contains(&b.var))
+                    .map(|b| b.tmp.clone()),
+            )
+            .collect();
+        self.active.retain(|a, _| private.contains(a));
         Ok(format!("({})", out))
     }
 
@@ -18821,6 +19057,7 @@ impl<'a> Body<'a> {
         owns_one: impl Fn(usize) -> bool,
     ) -> Result<HashMap<usize, String>, String> {
         let mut groups: Vec<(String, Rc<Expr>, Vec<(usize, Rc<Ident>)>)> = Vec::new();
+        let mut opened = HashMap::new();
         for (i, a) in args.iter().enumerate() {
             let out = outs.get(i) == Some(&true);
             if !out && !owns_one(i) {
@@ -18836,6 +19073,28 @@ impl<'a> Body<'a> {
                 && self.unaligned_field(&sn, &f.val)
             {
                 return Err(misaligned_addr(&f.val));
+            }
+            // `&u.m` handed to a callee: the member is focused out of the
+            // union for the call, which needs it to be the live one -- a
+            // callee typed at `m` reads and writes it as an `m`.
+            if !out
+                && self.union_of(base).is_some()
+                && !self.in_pieces(base)
+                && !self
+                    .ty_of(inner)
+                    .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
+            {
+                let fo = self.union_member(base, f, false).map_err(|_| {
+                    format!(
+                        "the address of union member `{}`, which is not known to be the live \
+                         one here",
+                        f.val
+                    )
+                })?;
+                self.lines.extend(fo.open_read.iter().cloned());
+                self.pending_close.extend(fo.close_write);
+                opened.insert(i, fo.at);
+                continue;
             }
             if self.union_of(base).is_some()
                 || self.in_pieces(base)
@@ -18859,7 +19118,6 @@ impl<'a> Body<'a> {
                 None => groups.push((key, base.clone(), vec![(i, f.clone())])),
             }
         }
-        let mut opened = HashMap::new();
         for (key, base, fields) in groups {
             // Storage still being filled is scattered already, or will be by
             // the first `_out` that reaches it.
@@ -19910,6 +20168,16 @@ impl<'a> Body<'a> {
     ) -> Result<String, String> {
         if self.in_branch && !self.tail_branch {
             return Err("an allocation inside a branch".to_string());
+        }
+        // A union is claimed as declared storage, whose bytes keep their type
+        // for good; allocated storage has none to keep until a store gives
+        // it one. Only the unions whose members are all pointers have the
+        // allocated form so far.
+        if pn.starts_with("union_") && zero.is_none() && !fresh_pointer_object(self.tds, pn) {
+            return Err(format!(
+                "an allocated `union {}`, whose effective type the union model does not track",
+                pn.trim_start_matches("union_")
+            ));
         }
         let tmp = self.fresh(&var.val);
         self.lines
@@ -21442,6 +21710,16 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let a = self.addr(lhs)?;
+        // Allocated storage acquiring a union type: see `allocate`.
+        if pn.starts_with("union_")
+            && !fresh_pointer_object(self.tds, pn)
+            && self.blocks.iter().any(|b| b.tmp == a)
+        {
+            return Err(format!(
+                "an allocated `union {}`, whose effective type the union model does not track",
+                pn.trim_start_matches("union_")
+            ));
+        }
         // A store of a whole union value picks the live member from the value
         // itself, which the emitter does not read back.
         self.active.remove(&a);
@@ -26389,6 +26667,11 @@ fn emit_body(
                 (q, v)
             })
             .collect();
+    let escaped = {
+        let mut t = Touched::default();
+        touch_stmts(&defn.body, &mut t);
+        t.escaped
+    };
     let mut arrays = HashMap::new();
     for a in &defn.decl.args {
         // An `_arrayptr` is not an array here: Palow grants it nothing, so
@@ -26508,6 +26791,7 @@ fn emit_body(
         literal_aliases: literal_alias_set(tds, &defn.body),
         literal_drops: Vec::new(),
         active: HashMap::new(),
+        escaped,
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
         // on nothing.

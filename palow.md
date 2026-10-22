@@ -1198,11 +1198,11 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 25 |
+| Verified enabled cases within the supported target/model | 26 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 8 |
 | Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 23.1 and 23.2) | 12 |
-| Checked rejections before the UB access (13.4, 13.5, 14.3 and 24.5) | 4 |
+| Checked rejections before the UB access (13.4, 13.5 and 14.3) | 3 |
 | Explicit unsupported-translation expectations | 15 |
 | Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
@@ -1216,10 +1216,26 @@ through the union; contested, like 24.1), 24.9 (a common initial sequence
 broken by `int` vs `unsigned`, then a same-offset same-type field read past
 it) and 24.10 (the common initial sequence read in a function where the union
 declaration is not visible). All four are UB, and all four are currently
-explicit unsupported-translation expectations, like the other union cases.
+explicit unsupported-translation expectations, like the other union cases;
+24.9 and 24.10 are refused with a diagnostic naming the rule they break
+(the common initial sequence is empty; the address of a member not known to
+be live escapes into a function that cannot see the union).
 
-The twenty-five supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
-5.2, 5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.2, 9.1, 9.2, 10.1, 10.2 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
+Common initial sequences (6.5.2.3p6) are supported for local unions: a read
+of `u.m.f` while struct member `l` is live is rewritten to the read of the
+field of `l` at the same position, provided `f` lies inside the common
+initial sequence of `l` and `m` (pairwise same offset, size and compatible
+type, no bit-fields). The first field store into an inactive struct member
+of a local union activates it implicitly (`union_X_switch_m`), the struct
+being filled field by field; and a local union's live member survives a call
+as long as no address of the union escapes in the body. `&u.m` of the live
+member may be passed to a function, which then sees only `m`. A union
+acquired by allocated storage (`malloc`, a cast, a whole-union store) is
+refused, because the model does not yet track union effective types of
+allocated storage.
+
+The twenty-six supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
+5.2, 5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 9.1, 9.2, 10.1, 10.2 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
 incompatible effective type. The eight view rejections fail on
 `View.view_ok` or `View.aggregate_view_ok` at the incompatible access. In
@@ -1239,9 +1255,8 @@ objects" below. 23.2 writes into a string literal through a `char *` local
 bound to it; the store fails for want of the full permission, since a
 literal only ever lends fractional shares (6.4.5p7, see "String literals
 bound to locals" below). 17.2 fails on the alignment obligation of the
-interior pointer it retypes (`aligned_field`, `1 % alignof(double) == 0`). The other four fail earlier, for a reason
-that is not the effective-type violation itself: 24.5 stores a whole union,
-which has no whole-object initialization, and 13.4, 13.5 and 14.3 pass an
+interior pointer it retypes (`aligned_field`, `1 % alignof(double) == 0`). The other three fail earlier, for a reason
+that is not the effective-type violation itself: 13.4, 13.5 and 14.3 pass an
 uninitialized local array to a function.
 
 The corpus helper `sink_d` computes `(unsigned long long)(v * 7.0)` for an
@@ -2598,7 +2613,8 @@ new facts about memory.
    write needs no such history and is never refused.
 
    The emitter tracks which member is live per address, and gives that
-   knowledge up the moment control leaves: at a call, at either arm of an
+   knowledge up the moment control leaves: at a call (unless the union is a
+   local whose address never escapes), at either arm of an
    `if`, at a `switch`, around a loop, and at a whole-union write. Over-
    clearing costs an `admit()`; under-clearing would emit a read F\* rejects,
    so the bias is the safe one.

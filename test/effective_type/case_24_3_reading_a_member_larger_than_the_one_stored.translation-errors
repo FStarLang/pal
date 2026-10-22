@@ -1,1 +1,1 @@
-error: `Func_case_24_3_reading_a_member_larger_than_the_one_stored`: its body is not translated: a read of union member `d`, which is not known to be the live one here
+error: `Func_case_24_3_reading_a_member_larger_than_the_one_stored`: its body is not translated: an allocated `union big`, whose effective type the union model does not track
