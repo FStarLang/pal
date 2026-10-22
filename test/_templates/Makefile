@@ -24,6 +24,22 @@ endif
 
 all: verify compile
 
+ifneq ($(wildcard native-check.c),)
+.PHONY: native-check
+all: native-check
+native-check:
+	@mkdir -p $(OBJ_DIR)
+	$(CC) $(INCLUDES) $(EXTRA_OPTS) $(C_FILES) -o $(OBJ_DIR)/native-check
+	$(OBJ_DIR)/native-check
+endif
+
+ifneq ($(wildcard reverse-order),)
+.PHONY: linkage-controls
+all: linkage-controls
+linkage-controls: verify
+	python3 ../check-linkage.py "$(abspath $(C2PULSE))" "$(abspath $(FSTAR_EXE))" "$(abspath $(OUT_DIR))" "$(CC)"
+endif
+
 translate: $(OUT_DIR)/.stamp
 
 $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
@@ -33,7 +49,9 @@ $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
 
 verify: $(OUT_DIR)/.stamp
 	@$(MAKE) --no-print-directory -f ../verify.mk \
-		OUT_DIR=$(OUT_DIR) FSTAR_EXE=$(FSTAR_EXE) CACHE_DIR=$(CACHE_DIR)
+		OUT_DIR=$(OUT_DIR) FSTAR_EXE=$(FSTAR_EXE) CACHE_DIR=$(CACHE_DIR) \
+		EXPECTED_FAILURES_FILE=expected-verification-failures.txt \
+		EXPECTED_FAILURE_TEXT_FILE=expected-verification-error.txt
 
 compile: $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_FILES))
 

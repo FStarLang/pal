@@ -1,0 +1,4 @@
+[
+  {"directory": "@TEST_DIRECTORY@", "file": "linkage_context.c", "arguments": ["clang", "-DSETTING=1", "-c", "linkage_context.c", "-o", "first.o"]},
+  {"directory": "@TEST_DIRECTORY@", "file": "other.c", "arguments": ["clang", "-DSETTING=2", "-c", "other.c", "-o", "second.o"]}
+]

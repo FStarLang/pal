@@ -192,6 +192,9 @@ mod crate::clang {
         fn get_define(&self, usize) -> &str;
 
         fn set_target_int_widths(&mut self, TargetIntWidths);
+        fn set_linkage_context(&mut self, &str);
+        fn add_c_symbol(&mut self, &str, u32, &str, bool, bool, bool, Rc<SourceInfo>);
+        fn mk_symbol_ident(&mut self, &str, bool, Rc<SourceInfo>) -> Rc<Ident>;
 
         fn intern_str(&mut self, &str) -> Rc<str>;
 

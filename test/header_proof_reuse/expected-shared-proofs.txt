@@ -1,0 +1,5 @@
+shared_increment
+shared_zero
+shared_not
+shared_read
+shared_ghost

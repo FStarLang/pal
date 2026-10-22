@@ -1,4 +1,5 @@
 #include "generated.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/MacroArgs.h"
@@ -281,6 +282,90 @@ public:
     ctx.set_target_int_widths(
         TargetIntWidths(TI.getCharWidth(), TI.getShortWidth(), TI.getIntWidth(),
                         TI.getLongWidth(), TI.getLongLongWidth()));
+    ctx.set_linkage_context(toStr(StringRef(TI.getDataLayoutString())));
+  }
+
+  bool isLinkerAlias(const Decl *d) {
+    return d->hasAttr<AsmLabelAttr>() || d->hasAttr<AliasAttr>() ||
+           d->hasAttr<IFuncAttr>() || d->hasAttr<WeakRefAttr>();
+  }
+
+  void collectLinkage(DeclContext *dc) {
+    for (auto *d : dc->decls()) {
+      if (d->isInvalidDecl())
+        continue;
+      auto *function = dyn_cast<FunctionDecl>(d);
+      auto *object = dyn_cast<VarDecl>(d);
+      if ((function || object) && isLinkerAlias(d) &&
+          (astCtx->getSourceManager().isWrittenInMainFile(
+               astCtx->getSourceManager().getExpansionLoc(d->getLocation())) ||
+           (function && function->doesThisDeclarationHaveABody()) ||
+           (object && object->isThisDeclarationADefinition() !=
+                          VarDecl::DeclarationOnly)))
+        ctx.report_diag(getRange(d->getSourceRange()), true,
+                        "unsupported linker symbol alias"_rs);
+      if (auto *fd = dyn_cast<FunctionDecl>(d)) {
+        // These anchors emit Pulse/type declarations, not C functions.
+        bool anchor = false;
+        for (auto *attr : fd->specific_attrs<AnnotateAttr>()) {
+          auto name = attr->getAnnotation();
+          anchor |= name == "pal-type" || name == "pal-includes" ||
+                    name == "pal-let" || name == "pal-let-rec" ||
+                    name == "pal-letimpure";
+        }
+        if (anchor)
+          continue;
+        ctx.add_c_symbol(toStr(fd->getName()), 0,
+                         toStr(fd->getType().getCanonicalType().getAsString()),
+                         !fd->hasExternalFormalLinkage(),
+                         fd->doesThisDeclarationHaveABody(), fd->isInlined(),
+                         getRange(fd->getSourceRange()));
+      } else if (auto *vd = dyn_cast<VarDecl>(d); vd && vd->isFileVarDecl()) {
+        ctx.add_c_symbol(toStr(vd->getName()), 1,
+                         toStr(vd->getType().getCanonicalType().getAsString()),
+                         !vd->hasExternalFormalLinkage(),
+                         vd->isThisDeclarationADefinition() !=
+                             VarDecl::DeclarationOnly,
+                         false, getRange(vd->getSourceRange()));
+      } else if (auto *rd = dyn_cast<RecordDecl>(d);
+                 rd && rd->isCompleteDefinition()) {
+        if (rd->getIdentifier()) {
+          const auto &layout = astCtx->getASTRecordLayout(rd);
+          std::string signature =
+              std::to_string(layout.getSize().getQuantity()) + ":" +
+              std::to_string(layout.getAlignment().getQuantity());
+          for (auto *field : rd->fields()) {
+            signature +=
+                "|" + fieldNameStr(field) + ":" +
+                field->getType().getCanonicalType().getAsString() + ":" +
+                std::to_string(layout.getFieldOffset(field->getFieldIndex()));
+            if (field->isBitField())
+              signature += ":" + std::to_string(field->getBitWidthValue());
+          }
+          ctx.add_c_symbol(toStr(rd->getName()), rd->isUnion() ? 3 : 2,
+                           toStr(signature), false, false, false,
+                           getRange(rd->getSourceRange()));
+        }
+        collectLinkage(rd);
+      } else if (auto *td = dyn_cast<TypedefNameDecl>(d)) {
+        ctx.add_c_symbol(
+            toStr(td->getName()), 4,
+            toStr(td->getUnderlyingType().getCanonicalType().getAsString()),
+            false, false, false, getRange(td->getSourceRange()));
+      } else if (auto *ed = dyn_cast<EnumDecl>(d)) {
+        for (auto *constant : ed->enumerators()) {
+          SmallString<32> value;
+          constant->getInitVal().toString(value, 10);
+          ctx.add_c_symbol(toStr(constant->getName()), 5,
+                           toStr(StringRef(value)), false, false, false,
+                           getRange(constant->getSourceRange()));
+        }
+      }
+    }
+  }
+
+  void HandleTranslationUnit(ASTContext &Context) override {
+    collectLinkage(Context.getTranslationUnitDecl());
   }
 
   virtual bool HandleTopLevelDecl(DeclGroupRef DG) override {
@@ -292,7 +377,17 @@ public:
   Rc<ir::Ident> getDeclName(NamedDecl *d) {
     auto loc = mk_fallback_sourceinfo(
         getRange(d->getSourceRange())); // TODO: get range of name token
-    return ctx.mk_ident(toStr(d->getName()), std::move(loc));
+    return symbolIdent(d, std::move(loc), false);
+  }
+
+  Rc<ir::Ident> symbolIdent(NamedDecl *d, Rc<ir::SourceInfo> loc,
+                            bool reference = true) {
+    if (reference && isLinkerAlias(d))
+      ctx.report_diag(loc.clone(), true, "unsupported linker symbol alias"_rs);
+    bool internal = isa<FunctionDecl>(d) && !d->hasExternalFormalLinkage();
+    if (auto *vd = dyn_cast<VarDecl>(d))
+      internal = vd->isFileVarDecl() && !vd->hasExternalFormalLinkage();
+    return ctx.mk_symbol_ident(toStr(d->getName()), internal, std::move(loc));
   }
 
   // Name to use for a struct/union field. Unnamed fields (e.g. C11 anonymous
@@ -762,7 +857,7 @@ public:
     if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
       return trLValue(generic->getResultExpr());
     } else if (auto dre = dyn_cast<DeclRefExpr>(e)) {
-      auto id = ctx.mk_ident(toStr(dre->getDecl()->getName()), loc.clone());
+      auto id = symbolIdent(dre->getDecl(), loc.clone());
       return mk_lvalue_var(std::move(loc), std::move(id));
     } else if (auto p = dyn_cast<ParenExpr>(e)) {
       return trLValue(p->getSubExpr());
@@ -1526,7 +1621,7 @@ public:
         if (auto *dre = dyn_cast<DeclRefExpr>(
                 uo->getSubExpr()->IgnoreParenImpCasts())) {
           if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
-            auto id = ctx.mk_ident(toStr(fd->getName()), loc.clone());
+            auto id = symbolIdent(fd, loc.clone());
             return mk_rvalue_fnref(std::move(loc), std::move(id));
           }
         }
@@ -1938,8 +2033,7 @@ public:
             }
           }
         }
-        auto fn = ctx.mk_ident(toStr(fd->getName()),
-                               getRange(c->getCallee()->getSourceRange()));
+        auto fn = symbolIdent(fd, getRange(c->getCallee()->getSourceRange()));
         auto args = Vec<Rc<ir::Expr>>::new_();
         for (unsigned i = 0; i < c->getNumArgs(); ++i) {
           auto *arg = c->getArg(i);
@@ -2027,7 +2121,7 @@ public:
       // A bare reference to a function (function-to-pointer decay): produce a
       // function reference, identical to `&func`.
       if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
-        auto id = ctx.mk_ident(toStr(fd->getName()), loc.clone());
+        auto id = symbolIdent(fd, loc.clone());
         return mk_rvalue_fnref(std::move(loc), std::move(id));
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
@@ -3156,6 +3250,12 @@ public:
       for (auto d : ds->decls()) {
         auto dloc = getRange(d->getSourceRange());
         if (auto vd = dyn_cast<VarDecl>(d)) {
+          if (vd->isStaticLocal()) {
+            ctx.report_diag(dloc.clone(), true,
+                            "block-scope static storage is not supported"_rs);
+            stmts.push(mk_stmt_err(dloc.clone()));
+            continue;
+          }
           auto id = ctx.mk_ident(toStr(vd->getName()), dloc.clone());
           auto qt = vd->getType();
           if (auto *vat =
@@ -3610,7 +3710,7 @@ public:
       return {};
     } else if (auto *VD = dyn_cast<VarDecl>(D)) {
       auto loc = getRange(VD->getSourceRange());
-      auto id = ctx.mk_ident(toStr(VD->getName()), loc.clone());
+      auto id = symbolIdent(VD, loc.clone(), false);
       auto ty = trQualType(VD->getType(), VD->getSourceRange(), nullptr,
                            findFnProtoTypeLoc(VD->getTypeSourceInfo()));
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
@@ -3912,6 +4012,31 @@ static void parse_file(RefMut<Ctx> ctx) {
     compDB = std::make_unique<FixedCompilationDatabase>(".", argsForCompDB);
   }
 
+  const auto commands = compDB->getCompileCommands(fileName);
+  if (commands.size() != 1) {
+    ctx.report_diag(
+        mk_original_location(ctx.intern_str(toStr(fileName)), 1, 1, 1, 1), true,
+        "missing or ambiguous compilation commands for selected translation unit"_rs);
+    return;
+  }
+  const auto &command = commands.front();
+  std::string context = command.Directory;
+  bool output = false;
+  for (const auto &arg : command.CommandLine) {
+    if (output) {
+      output = false;
+      continue;
+    }
+    if (arg == "-o") {
+      output = true;
+      continue;
+    }
+    if (arg == fileName || arg == command.Filename || arg == "-c")
+      continue;
+    context += "\n" + arg;
+  }
+  ctx.set_linkage_context(toStr(context));
+
   ClangTool Tool(*compDB, sourcePathList,
                  std::make_shared<PCHContainerOperations>(), CtxVFS::make(ctx));
 
@@ -3957,7 +4082,10 @@ static void parse_file(RefMut<Ctx> ctx) {
   }
 
   PALActionFactory factory(ctx, rangeMap);
-  Tool.run(&factory);
+  if (Tool.run(&factory) != 0)
+    ctx.report_diag(
+        mk_original_location(ctx.intern_str(toStr(fileName)), 1, 1, 1, 1), true,
+        "failed to parse selected translation unit"_rs);
 }
 
 namespace rust::exported_functions {

@@ -15,6 +15,70 @@ In the following, we differentiate between two kinds of annotations:
 
 To suppress the default ownership for one parameter, prefix it with `_plain`. -->
 
+## Translation units and C linkage
+
+In a multi-file invocation, private functions and file-scope objects are named
+`__pal_tu_<hash>_<C name>` before dependency pruning, merging and emission.
+The hash identifies the **owning input translation unit**, not the header
+containing the declaration. Thus each inclusion of a shared header's statics
+remains independent, even when the original definitions are byte-identical.
+External names and single-file private names retain their existing spelling.
+
+Identical header-local functions can share their body verification without
+merging their TU-specific names. After elaboration, PAL compares the complete
+function bodies, contracts and types, requiring the same header source range,
+canonical C signature and compilation context. One deterministic representative
+retains the original body; the other copies forward to it with their original
+interfaces. Pure copies use a definition alias. The forwarding functions still
+undergo interface/call checking, but do not repeat the original body proof.
+Dependency names are not normalized: references to distinct TU-local objects or
+helpers prevent reuse, as do macro-dependent differences in bodies or contracts.
+Recursive and address-taken functions are conservatively excluded. Single-file
+translation is unchanged.
+
+PAL canonicalizes the selected input paths, finds their common parent ancestor,
+and hashes each input's normalized relative path. Moving an unchanged selected
+source tree to a different root, reversing the input order, or using a symlink
+alias does not change those identities. Selecting one canonical file twice is
+an error; hash collisions are checked explicitly. Changing the selected set or
+its relative layout can change identities. Multi-file inputs whose canonical
+identity cannot be established are rejected rather than assigned guessed names.
+
+Before name-based merging, PAL checks canonical C declarations, selected
+compilation-command contexts, target/record layouts and translated type/object
+representations. It rejects incompatible declarations and conflicting external
+definitions instead of selecting a body by input order. Equal inline definitions
+from the same source range may merge. Compatible prototypes and existing global
+`_pure`/`_opaque_to_smt` annotation merging remain supported. Shared external
+objects select a compatible original declaration's representation deterministically,
+preferring complete array extents and defining declarations, with logical TU paths
+and type spelling as tie-breakers. This preserves typedef semantics while making
+emitted type spelling independent of input order. Typedef expansion is used for
+compatibility checking, not for erasing pointer-view definitions.
+
+Compatibility checks are deliberately conservative: harmless command differences
+or more complex compatible declarators may be rejected. Missing or ambiguous
+compilation commands and failed Clang parses are explicit errors. Selected or
+referenced linker aliases and block-scope static storage are unsupported.
+Incompatible named type/Pulse representations are diagnosed, not silently merged.
+
+C references are qualified while Clang still knows their bindings.
+Specifications and C antiquotations track parameters, ghost bindings, locals and
+quantifiers. Since the IR flattens bare C blocks, an antiquotation referring to
+a private name after a same-named local declaration is conservatively rejected.
+Raw unqualified `Func_`, `Funcptr_` and `Global_` references to private entities
+are also rejected in multi-file mode; use supported C antiquotations instead.
+The generated `__pal_tu_` namespace is reserved, including local and ghost binders.
+
+The linkage tests verify genuine contracts and retained original bodies, reject
+contradictory contracts for their actual value property, execute native 1/2 and
+private-address controls, and compare every generated `.fst`/`.fsti` byte across
+both input orders and two copied source roots. Absolute paths in diagnostic and
+source-range JSON remain provenance, not portable module identity.
+
+This does not add cross-translation-unit read-only analysis, expose later
+definitions to eager argument classification, or extend expression lowering.
+
 ## Variadic calls with an ignored tail
 
 PAL supports direct calls to variadic functions whose bodies do not access

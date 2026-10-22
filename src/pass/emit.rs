@@ -7656,6 +7656,40 @@ impl<'a> Emitter<'a> {
         env.push_fn_decl_args_for_body(decl);
         decl_doc.append(block(arg_redecl_as_mut.append(self.emit_stmts(env, body))).group())
     }
+
+    fn emit_shared_fn(&mut self, env: &Env, decl: &FnDecl, representative: Rc<str>) -> Doc {
+        let callee = self.emit_name(Name::Fn(representative));
+        if decl.is_pure {
+            return Doc::text("let ")
+                .append(self.emit_name(Name::Fn(decl.name.val.clone())))
+                .append(" = ")
+                .append(callee);
+        }
+        let signature = self.emit_fn_sig(env, decl).nest(2).append(Doc::hardline());
+        let mut args: Vec<_> = decl
+            .ghost_args
+            .iter()
+            .map(|arg| Doc::text("#").append(self.emit_name(Name::Var(arg.name.val.clone()))))
+            .collect();
+        if decl.args.is_empty() {
+            args.push(Doc::text("()"));
+        } else {
+            args.extend(decl.args.iter().enumerate().map(|(i, arg)| {
+                self.emit_name(Name::Var(
+                    arg.name
+                        .as_ref()
+                        .map(|n| n.val.clone())
+                        .unwrap_or_else(|| Rc::from(format!("_unnamed{i}"))),
+                ))
+            }));
+        }
+        signature.append(block(
+            Doc::line()
+                .append(callee)
+                .append(" ")
+                .append(Doc::intersperse(args, Doc::text(" "))),
+        ))
+    }
 } // impl Emitter (group E)
 
 /// Append remaining statements to a block (for if/else continuation in pure functions).
@@ -8571,7 +8605,11 @@ pub struct EmittedModule {
 
 /// Emit each declaration as its own module.
 /// Returns a list of (module_name, code, source_range_map) for each declaration.
-pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<EmittedModule> {
+pub fn emit_multifile(
+    diags: &mut Diagnostics,
+    tu: &TranslationUnit,
+    header_statics: &[super::linkage::HeaderStatic],
+) -> Vec<EmittedModule> {
     // Build env with all decls pre-registered so call sites can resolve forward
     // references regardless of source order. PAL's clang frontend does not always
     // visit decls in source order (e.g. functions defined later in a TU may be
@@ -8610,6 +8648,12 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
 
     let env = full_env;
     // Reuse a single Emitter across all modules
+    let addr_taken = collect_addr_taken(&tu.decls);
+    let shared_proofs = if diags.has_errors() {
+        HashMap::new()
+    } else {
+        super::linkage::shared_header_proofs(tu, header_statics, &addr_taken)
+    };
     let mut emitter = Emitter {
         nm: NameMangling::new(),
         diags,
@@ -8624,14 +8668,20 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         tmp_counter: 0,
     };
 
-    let addr_taken = collect_addr_taken(&tu.decls);
-
     for decl in &tu.decls {
         let mod_name = module_name_for_decl(decl);
         emitter.current_module = mod_name.clone();
 
         // Emit just the body (decl code)
-        let body_doc = emitter.emit_decl(&env, decl);
+        let body_doc = if let DeclT::FnDefn(defn) = &decl.val
+            && let Some(representative) = shared_proofs.get(&defn.decl.name.val)
+        {
+            annotated(decl, || {
+                emitter.emit_shared_fn(&env, &defn.decl, representative.clone())
+            })
+        } else {
+            emitter.emit_decl(&env, decl)
+        };
         let mut writer = StrWriter::new();
         body_doc.render_raw(100, &mut writer).unwrap();
 
