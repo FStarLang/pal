@@ -1198,12 +1198,12 @@ failure is never counted as a successful strict-aliasing proof.
 
 | Outcome | Cases |
 |---|---:|
-| Verified enabled cases within the supported target/model | 31 |
+| Verified enabled cases within the supported target/model | 32 |
 | Checked initialization failures (19.1 and 19.2) | 2 |
 | Checked view rejections (11.1, 13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 9 |
-| Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 23.1, 23.2 and 24.5) | 13 |
+| Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 23.1, 23.2, 24.4 and 24.5) | 14 |
 | Checked rejections before the UB access (13.4, 13.5 and 14.3) | 3 |
-| Explicit unsupported-translation expectations | 7 |
+| Explicit unsupported-translation expectations | 5 |
 | Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
 | Accepted known gaps (the three 22.1 lifetime-value variants, and 12.6) | 4 |
 | Total | 75 |
@@ -1279,9 +1279,15 @@ source's live member over (12.2). `memcpy`, `memmove` and `free` do not make
 their arguments escape, and a pointer assigned to a local escapes only if
 that local does.
 
-Other array members and struct members are not read through the heap
-family, so 12.3 and 24.4 (struct members, with a common initial sequence)
-remain unsupported. A union nested in an allocated struct is tracked when the
+A struct member whose fields are all provenance-free scalars (no bit-fields,
+no invariants) is stored whole through the struct's `_encode`, and its field
+`f` is read in place with `union_X_heap_read_m_f`: a typed read
+(`Machine.Intrinsics`) at the field's slice of the union's index, which
+leaves the bytes as they are. A read of `u->m.f` while struct member `l` is
+live is the read of the corresponding field of `l` when `f` lies in their
+common initial sequence (6.5.2.3p6), so 12.3 verifies; past it, the read is
+refused with a diagnostic, which makes 24.4 a checked rejection at the UB
+access. Field stores, as member stores, are refused. A union nested in an allocated struct is tracked when the
 struct is stored whole with a brace initialiser naming the member (12.6), but
 the typed claim of the malloc'd struct then fails on
 `ET.declared_destination`: the struct's family is the declared one whenever

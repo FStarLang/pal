@@ -1,1 +1,1 @@
-error: `Func_case_24_4_reading_past_the_common_initial_sequence`: its body is not translated: an allocated `union cis`, whose effective type the union model does not track
+a read of `a.x` while `b` is the live member of union cis: `x` is past their common initial sequence (6.5.2.3p6)

@@ -6816,6 +6816,14 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
 /// back through: a scalar without provenance, which has a byte encoding and
 /// a typed read at an exact index.
 fn heap_member(m: &UnionMember) -> Option<&str> {
+    match &m.shape {
+        FieldShape::One { pn } if m.size > 0 && heap_scalar(pn) => Some(pn.as_str()),
+        _ => None,
+    }
+}
+
+/// Whether a scalar is one `heap_member` accepts.
+fn heap_scalar(pn: &str) -> bool {
     const HEAP: &[&str] = &[
         "bool_t",
         "int8_t",
@@ -6832,15 +6840,38 @@ fn heap_member(m: &UnionMember) -> Option<&str> {
         "float32_t",
         "float64_t",
     ];
-    match &m.shape {
-        FieldShape::One { pn } if m.size > 0 && HEAP.contains(&pn.as_str()) => Some(pn.as_str()),
-        _ => None,
-    }
+    HEAP.contains(&pn)
+}
+
+/// A struct member a union in allocated storage can be stored whole as, and
+/// whose fields are read in place: one with nothing but `heap_scalar` fields
+/// and no invariant, so that it has a byte encoding (`_encode`) and each
+/// field a typed read at its offset. The struct's Palow name and its fields.
+fn heap_struct_member<'a>(
+    tds: &'a Typedefs,
+    m: &UnionMember,
+) -> Option<(String, &'a [StructField])> {
+    let FieldShape::One { pn } = &m.shape else {
+        return None;
+    };
+    let si = tds.structs.get(pn.strip_prefix("struct_")?)?;
+    (m.size > 0
+        && si.inv.is_none()
+        && si.bitfields.is_empty()
+        && !si.fields.is_empty()
+        && si.fields.iter().all(|f| {
+            f.inv.is_none() && matches!(&f.shape, FieldShape::One { pn } if heap_scalar(pn))
+        }))
+    .then(|| (pn.clone(), si.fields.as_slice()))
 }
 
 /// Whether a union gets the allocated-storage family `_heap`.
 fn union_heap_capable(tds: &Typedefs, ui: &UnionInfo) -> bool {
-    active_pointer_members(tds, ui).is_none() && ui.members.iter().any(|m| heap_member(m).is_some())
+    active_pointer_members(tds, ui).is_none()
+        && ui
+            .members
+            .iter()
+            .any(|m| heap_member(m).is_some() || heap_struct_member(tds, m).is_some())
 }
 
 /// A union in allocated storage (C11 6.5p6): a store of the whole union
@@ -6872,13 +6903,29 @@ fn emit_heap_union(tds: &Typedefs, name: &str) -> String {
          let {un}_heap_storable (x: {un}) : bool =\n  match x with\n"
     );
     for m in &ui.members {
-        c += &format!("  | {} _ -> {}\n", ctor(m), heap_member(m).is_some());
+        c += &format!(
+            "  | {} _ -> {}\n",
+            ctor(m),
+            heap_member(m).is_some() || heap_struct_member(tds, m).is_some()
+        );
     }
     c += &format!(
         "\nlet {un}_heap_encode (x: {un} {{ {un}_heap_storable x }}) : b:bytes {{ {un}_repr x b /\\ initialized b }} =\n  match x with\n"
     );
     for m in &ui.members {
         let Some(pn) = heap_member(m) else {
+            if let Some((sn, _)) = heap_struct_member(tds, m) {
+                c += &format!(
+                    "  | {k} v ->\n    \
+                     let r0 = {sn}_encode v in\n    \
+                     let r1 = zeroed {rest} in\n    \
+                     initialized_append r0 r1;\n    \
+                     append_slice_left r0 r1;\n    \
+                     append r0 r1\n",
+                    k = ctor(m),
+                    rest = size - m.size,
+                );
+            }
             continue;
         };
         c += &format!(
@@ -6941,6 +6988,93 @@ fn emit_heap_union(tds: &Typedefs, name: &str) -> String {
             k = ctor(m),
             msz = m.size,
         );
+    }
+    // A read of one field of a live struct member, in place: a typed read at
+    // the field's slice of the union's index, which the bytes keep.
+    for m in &ui.members {
+        let Some((sn, fields)) = heap_struct_member(tds, m) else {
+            continue;
+        };
+        for f in fields {
+            let pn = f.shape.pn();
+            let fty = field_type(tds, &f.ty).unwrap();
+            let (off, fsz) = (f.offset, f.size);
+            let at = if off == 0 {
+                "a".to_string()
+            } else {
+                format!("(a +! {sn}_offsetof_{})", f.name)
+            };
+            let mut body = format!(
+                "  unfold {un}_heap_pts_to a p ({k} v);\n  \
+                 with b. assert (mem_pts_to_at a p b (ET.etypes_of {un}_ctype false));\n  \
+                 {un}_member_aligned a;\n  \
+                 {aligned};\n  \
+                 ET.read_ok_of {un}_ctype false;\n  \
+                 assert_norm (ET.access_ok {un}_ctype {off} {pn}_ctype /\\ ET.compose_ok {un}_ctype {pn}_ctype);\n  \
+                 ET.read_ok_slice (ET.etypes_of {un}_ctype false) {un}_ctype {off} {pn}_ctype;\n  \
+                 slice_prefix b {msz} {off} {end};\n  \
+                 {pn}_repr_no_prov (reveal v).fld_{f} (slice b {off} {end});\n",
+                k = ctor(m),
+                f = f.name,
+                msz = m.size,
+                end = off + fsz,
+                aligned = if off == 0 {
+                    format!("aligned_divides a {sn}_alignof {pn}_alignof")
+                } else {
+                    format!(
+                        "aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof",
+                        f.name
+                    )
+                },
+            );
+            if off > 0 {
+                body += &format!(
+                    "  mem_split_at a {sn}_offsetof_{f};\n  \
+                     slice_suffix b {off} 0 {fsz};\n  \
+                     Seq.slice_slice (ET.etypes_of {un}_ctype false) {off} {size} 0 {fsz};\n",
+                    f = f.name
+                );
+            }
+            if off + fsz < size {
+                body += &format!("  mem_split_at {at} {fsz}sz;\n");
+            }
+            body += &format!(
+                "  let y = Pulse.Lib.C.Palow.Machine.Intrinsics.{pn}_read_at {at} #p #(hide (reveal v).fld_{f});\n",
+                f = f.name
+            );
+            if off + fsz < size {
+                body += &format!("  mem_join_at {at} {fsz}sz;\n");
+                if off > 0 {
+                    body += &format!(
+                        "  slice_append (slice b {off} (len b)) {fsz};\n  \
+                         Seq.lemma_split (Seq.slice (ET.etypes_of {un}_ctype false) {off} {size}) {fsz};\n"
+                    );
+                } else {
+                    body += &format!(
+                        "  slice_append b {fsz};\n  \
+                         Seq.lemma_split (ET.etypes_of {un}_ctype false) {fsz};\n"
+                    );
+                }
+            }
+            if off > 0 {
+                body += &format!(
+                    "  mem_join_at a {sn}_offsetof_{f};\n  \
+                     slice_append b {off};\n  \
+                     Seq.lemma_split (ET.etypes_of {un}_ctype false) {off};\n",
+                    f = f.name
+                );
+            }
+            c += &format!(
+                "fn {un}_heap_read_{m}_{f} (a: ptr) (#p: perm) (#v: erased {sn})\n\
+                 \x20 preserves {un}_heap_pts_to a p ({k} v)\n\
+                 \x20 returns  y: {fty}\n\
+                 \x20 ensures  pure (y == (reveal v).fld_{f})\n\
+                 {{\n{body}  fold {un}_heap_pts_to a p ({k} v);\n  y\n}}\n\n",
+                m = m.name,
+                f = f.name,
+                k = ctor(m),
+            );
+        }
     }
     // A character read of one byte of the live member, for `u->b[i]` with
     // `b` an `unsigned char` array member (see `heap_union_byte`).
@@ -15054,6 +15188,11 @@ impl<'a> Body<'a> {
             return r;
         }
         let via_pointer = std::mem::take(&mut self.via_pointer);
+        if let ExprT::Member(base, f) = &strip_vattr(e).val
+            && let Some(focus) = self.heap_union_field(base, f, writing)?
+        {
+            return Ok(focus);
+        }
         if !writing
             && let ExprT::Member(base, f) = &strip_vattr(e).val
             && let Some(focus) = self.punned_field(base, f)?
@@ -15367,12 +15506,6 @@ impl<'a> Body<'a> {
         })
     }
 
-    /// A member of a union in allocated storage, which is `None` when `base`
-    /// is not such a union. The storage holds the union -- the `_heap`
-    /// family -- only after a store of a whole union value (6.5p6); before
-    /// that, or after a store of anything else, it does not, and no member of
-    /// the union can be read from it. A member is never focused out of it,
-    /// and never written to: see `emit_heap_union`.
     /// The allocated block `base` -- `*p` -- is, when `un` has the `_heap`
     /// family and `p` is a live block; an error when the block does not
     /// hold the union (6.5p6).
@@ -15472,6 +15605,106 @@ impl<'a> Body<'a> {
         }))
     }
 
+    /// A field `f` of a struct member `m` of a union in allocated storage,
+    /// `u->m.f`, which is `None` when `base` is not such a member. The field
+    /// is read in place (`emit_heap_union`); while another struct member is
+    /// live, only through their common initial sequence (6.5.2.3p6), as the
+    /// corresponding field of the live one.
+    fn heap_union_field(
+        &mut self,
+        base: &Expr,
+        f: &Ident,
+        writing: bool,
+    ) -> Result<Option<Focus>, String> {
+        let ExprT::Member(inner, mname) = &strip_casts(strip_vattr(base)).val else {
+            return Ok(None);
+        };
+        let Some(un) = self.union_of(inner) else {
+            return Ok(None);
+        };
+        let uname = un.trim_start_matches("union_").to_string();
+        let Some(ui) = self.tds.unions.get(&uname) else {
+            return Ok(None);
+        };
+        let Some(m) = ui.members.iter().find(|m| m.name == *mname.val) else {
+            return Ok(None);
+        };
+        let Some((_, fields)) = heap_struct_member(self.tds, m) else {
+            return Ok(None);
+        };
+        let Some(a) = self.heap_union_block(inner, &un)? else {
+            return Ok(None);
+        };
+        if writing {
+            return Err(format!(
+                "a store to `{}.{}` of a `union {}` in allocated storage: it would make the field's type the effective type of the bytes, not the union's (6.5p6), and the union model has no step for that",
+                mname.val, f.val, uname
+            ));
+        }
+        let Some(k) = fields.iter().position(|x| x.name == *f.val) else {
+            return Err(format!("no field `{}` in member `{}`", f.val, mname.val));
+        };
+        let Some(live) = self.active.get(&a).cloned() else {
+            return Err(format!(
+                "a read of union member `{}`, which is not known to be the live one here",
+                mname.val
+            ));
+        };
+        let lm = ui.members.iter().find(|x| x.name == live).unwrap();
+        let read = if live == *mname.val {
+            fields[k].name.clone()
+        } else {
+            let (Some((_, lfields)), FieldShape::One { pn: lpn }, FieldShape::One { pn: mpn }) =
+                (heap_struct_member(self.tds, lm), &lm.shape, &m.shape)
+            else {
+                return Err(format!(
+                    "a read of `{}.{}` while `{}` is the live member of union {}, which is not a struct: their common initial sequence (6.5.2.3p6) is empty",
+                    mname.val, f.val, live, uname
+                ));
+            };
+            let cis = common_initial_sequence(
+                self.tds,
+                &self.tds.structs[lpn.trim_start_matches("struct_")],
+                &self.tds.structs[mpn.trim_start_matches("struct_")],
+            );
+            if k >= cis {
+                return Err(if cis == 0 {
+                    format!(
+                        "a read of `{}.{}` while `{}` is the live member of union {}: their \
+                         common initial sequence (6.5.2.3p6) is empty",
+                        mname.val, f.val, live, uname
+                    )
+                } else {
+                    format!(
+                        "a read of `{}.{}` while `{}` is the live member of union {}: `{}` is \
+                         past their common initial sequence (6.5.2.3p6)",
+                        mname.val, f.val, live, uname, f.val
+                    )
+                });
+            }
+            lfields[k].name.clone()
+        };
+        let fld = &fields[k];
+        Ok(Some(Focus {
+            bits: None,
+            pn: fld.shape.pn().to_string(),
+            write_fn: fld.shape.write_fn(),
+            unaligned: false,
+            read_as: Some(format!("{}_heap_read_{}_{}", un, live, read)),
+            at: a,
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+        }))
+    }
+
+    /// A member of a union in allocated storage, which is `None` when `base`
+    /// is not such a union. The storage holds the union -- the `_heap`
+    /// family -- only after a store of a whole union value (6.5p6); before
+    /// that, or after a store of anything else, it does not, and no member of
+    /// the union can be read from it. A member is never focused out of it,
+    /// and never written to: see `emit_heap_union`.
     fn heap_union_member(
         &mut self,
         base: &Expr,
