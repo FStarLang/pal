@@ -1208,6 +1208,16 @@ failure is never counted as a successful strict-aliasing proof.
 | Accepted known lifetime-value gaps (the three 22.1 variants) | 3 |
 | Total | 75 |
 
+Four negative union cases were added on top of the original corpus, to cover
+the edges of the four ways C lets a union be read through a member other than
+the one last stored: 24.7 (punning to bytes that are not a `_Bool` value,
+6.2.6.1p5), 24.8 (punning through a plain pointer to a member rather than
+through the union; contested, like 24.1), 24.9 (a common initial sequence
+broken by `int` vs `unsigned`, then a same-offset same-type field read past
+it) and 24.10 (the common initial sequence read in a function where the union
+declaration is not visible). All four are UB, and all four are currently
+explicit unsupported-translation expectations, like the other union cases.
+
 The twenty-five supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1,
 5.2, 5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.2, 9.1, 9.2, 10.1, 10.2 and 10.3; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
 The two initialization failures exercise indeterminate reads, not an
