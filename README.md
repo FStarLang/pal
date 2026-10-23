@@ -120,6 +120,19 @@ pal [OPTIONS] <FILES>...
       --tmpdir <DIR>     directory for intermediates
 ```
 
+### Optional MCP server
+
+```bash
+env -u ADMIT -u OTHERFLAGS make -C pulse && cargo build --features mcp
+LIBCLANG_PATH=/usr/lib/llvm20/lib target/debug/pal mcp   # JSON-RPC on stdio, logs on stderr
+```
+
+Tools: `pal_session` (open a project root, cancel, close), `add_include_paths`,
+`add_preprocessor_definition`, `pal_verify` (background job; status at
+`pal://sessions/<id>/status`), `pal_query` (symbols, definition, references, callers,
+callees, hover). Unchanged generated proofs reuse F\* checked artifacts and a 32-entry
+in-memory LRU, both process-local; new include paths, definitions or root drop the proof caches.
+
 ---
 
 ## Reviewing pull requests
