@@ -4776,8 +4776,18 @@ impl<'a> Emitter<'a> {
                     ensures,
                     body,
                 } => {
-                    let head = Doc::text("while ")
-                        .append(parens(self.emit_rvalue(env, cond)))
+                    // Reading a struct in Pulse's guard can freeze its witness in the
+                    // break precondition. Check read-only guards in the body instead,
+                    // retaining the normal-exit alternative alongside the break posts.
+                    let guard_in_body = !ensures.is_empty() && !expr_may_have_side_effects(cond);
+                    let guard = self.emit_rvalue(env, cond);
+                    let loop_cond = if guard_in_body {
+                        Doc::text("true")
+                    } else {
+                        guard.clone()
+                    };
+                    let mut head = Doc::text("while ")
+                        .append(parens(loop_cond))
                         .append(Doc::line())
                         .append(Doc::concat(inv.iter().map(|inv| {
                             Doc::text("invariant ")
@@ -4800,7 +4810,25 @@ impl<'a> Emitter<'a> {
                                 .nest(2)
                                 .append(Doc::line())
                         })));
-                    let body_doc = self.emit_block(env, body);
+                    let body_doc = if guard_in_body {
+                        let mut exit = unaryfn(Doc::text("not"), guard.clone());
+                        for r in requires.iter() {
+                            exit = binop(exit, Doc::text("/\\"), self.emit_rvalue(env, r));
+                        }
+                        head = head.append("ensures ").append(exit).append(Doc::line());
+                        let check_guard = Doc::text("if ")
+                            .append(parens(unaryfn(Doc::text("not"), guard)))
+                            .append(" ")
+                            .append(block(Doc::hardline().append("break;")))
+                            .append(";");
+                        block(
+                            Doc::hardline()
+                                .append(check_guard)
+                                .append(self.emit_stmts(env, body)),
+                        )
+                    } else {
+                        self.emit_block(env, body)
+                    };
                     head.nest(2).append(body_doc).append(";").group()
                 }
                 StmtT::Break => Doc::text("break;"),
