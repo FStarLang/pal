@@ -1,0 +1,1 @@
+error: `Func_case_24_9_common_initial_sequence_needs_compatible_types`: its body is not translated: a read of `s.x` while `u` is the live member of union cis: their common initial sequence (6.5.2.3p6) is empty

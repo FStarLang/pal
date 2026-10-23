@@ -15,9 +15,9 @@
    predicate names the type stored in it, so there is no proposition for
    "`n` bytes of storage, contents unspecified, yours to free" -- the return
    type would have to be `T *` for some `T` the allocator does not know. In
-   Palow that proposition is just `mem_pts_to` at `uninit n` plus `freeable`,
-   which is what `Xm.block` below says, and the caller claims those bytes at
-   whatever type it likes. */
+   Palow that proposition records indexed `uninit n` bytes, their allocated
+   origin, and `freeable`, which is what `Xm.block` below says. A genuine
+   caller store can then establish its chosen effective type. */
 
 _include_pulse(Xm,
   include Pulse.Lib.C.Palow.Ptr
@@ -26,8 +26,9 @@ _include_pulse(Xm,
   include Pulse.Lib.C.Palow.Alloc
 
   unfold let block (a: ptr) (n: FStar.SizeT.t) : slprop =
-    mem_pts_to a 1.0R (uninit (FStar.SizeT.v n)) ** freeable a n
-    ** pure (aligned a max_align)
+    mem_pts_to_at a 1.0R (uninit (FStar.SizeT.v n))
+      (Seq.create (FStar.SizeT.v n) None) ** freeable a n
+    ** pure (aligned a max_align /\ allocated_region a (FStar.SizeT.v n))
 )
 
 /* A postcondition of `0` is false, so there is no state this function could

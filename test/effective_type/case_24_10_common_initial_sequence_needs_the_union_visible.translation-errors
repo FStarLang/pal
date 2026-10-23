@@ -1,0 +1,1 @@
+error: `Func_case_24_10_common_initial_sequence_needs_the_union_visible`: its body is not translated: the address of union member `a`, which is not known to be the live one here

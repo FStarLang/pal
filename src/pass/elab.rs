@@ -209,6 +209,7 @@ impl<'a> Elaborator<'a> {
             TypeT::Int {
                 signed: _,
                 width: _,
+                ..
             } => {}
             TypeT::Float { width: _ } => {}
             TypeT::SizeT => {}
@@ -798,6 +799,7 @@ impl<'a> Elaborator<'a> {
                                 meet_type = TypeT::Int {
                                     signed: true,
                                     width: 32,
+                                    ident: crate::ir::IntIdent::Std,
                                 }
                                 .with_loc(lhs.loc.clone())
                                 .into();
@@ -822,6 +824,7 @@ impl<'a> Elaborator<'a> {
                         let u32_ty: MaybeRc<Type> = TypeT::Int {
                             signed: false,
                             width: 32,
+                            ident: crate::ir::IntIdent::Std,
                         }
                         .with_loc(rhs.loc.clone())
                         .into();
@@ -1045,7 +1048,7 @@ impl<'a> Elaborator<'a> {
                 }
                 self.elab_stmts(env, Rc::make_mut(body));
             }
-            StmtT::Break | StmtT::Continue => {}
+            StmtT::Break | StmtT::Continue | StmtT::Freeze(_) => {}
             StmtT::Return(x) => {
                 if let Some(x) = x {
                     let expected_ret = env.return_type.as_ref().map(|t| t.as_ref());

@@ -275,6 +275,15 @@ void list_example2(void)
     struct item2 fourth = {
         .priority = 4, .used = 4, .samples = {41, 42, 43, 44}, .processed = &fourth_count
     };
+    _ghost_stmt(ET.read_ok_of Struct_item2.struct_item2_ctype (1 = 1));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&first) Struct_item2.struct_item2_ctype
+        (ET.etypes_of Struct_item2.struct_item2_ctype (1 = 1)));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&second) Struct_item2.struct_item2_ctype
+        (ET.etypes_of Struct_item2.struct_item2_ctype (1 = 1)));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&third) Struct_item2.struct_item2_ctype
+        (ET.etypes_of Struct_item2.struct_item2_ctype (1 = 1)));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&fourth) Struct_item2.struct_item2_ctype
+        (ET.etypes_of Struct_item2.struct_item2_ctype (1 = 1)));
     _ghost_stmt(let d_first = IntrusiveListExample2.make 2l 4ul
         (IntrusiveListExample2.samples_of [11ul; 12ul; 13ul; 14ul]) $(&first_count) 0ul);
     _ghost_stmt(let d_second = IntrusiveListExample2.make 1l 0ul
@@ -411,4 +420,8 @@ void list_example2(void)
         assert(first.processed == &first_count);
         assert(second.used == 0);
     }
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&first) Struct_item2.struct_item2_ctype);
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&second) Struct_item2.struct_item2_ctype);
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&third) Struct_item2.struct_item2_ctype);
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&fourth) Struct_item2.struct_item2_ctype);
 }

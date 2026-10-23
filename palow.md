@@ -1,8 +1,11 @@
 # Palow
 
-*Status: draft / design proposal.*
+*Status: implemented memory model with conservative native-C lowering.*
 
 Palow ("PAL, low-level") is a new, lower-level memory model for PAL.
+The motivation and early interface sketches retain the original design context.
+See [Implementation status](#implementation-status) and the effective-type
+acceptance matrix for current coverage and restrictions.
 
 ## Motivation
 
@@ -601,11 +604,12 @@ followed by an `array_repr` chunk, with no special support in the translator.
 
 C's effective-type rules (C11 6.5p6-7) are what license a compiler's
 type-based alias analysis. Ignoring them is *permissive*: we would verify
-programs that clang may miscompile. Since ignoring them never blocks a
-verification, this can be staged last — but the design should reserve room for
-it now, because retrofitting an index onto `mem_pts_to` later is disruptive.
+programs that clang may miscompile. The index therefore belongs in the
+primitive memory resource rather than in optional annotations.
 
-Proposal: carry a per-byte effective-type map alongside the bytes.
+Palow carries a per-byte effective-type map alongside the bytes. The following
+sketch summarizes that index; the checked interfaces also protect origin and
+preparation, as described below.
 
 ```fstar
 type ctype =                         // generated descriptors, one per C type
@@ -642,7 +646,8 @@ Access rules:
 - Declared objects (`fixed = true`) get their entries at allocation and keep
   them for their lifetime.
 
-**Implemented, in two of three stages.**
+**Implemented: rules, descriptors, and indexed enforcement.** Native C coverage
+and conservative restrictions are distinguished below from model-level proofs.
 
 *Stage 1 -- the rules.* `Pulse.Lib.C.Palow.Etype` defines the vocabulary and
 the access rules, and proves the facts that decide whether they are usable:
@@ -675,10 +680,16 @@ Two cases are worth naming. `int8_t` and `uint8_t` are `signed char` and
 `TScalar SChar` rather than distinct 8-bit descriptors. And a flexible array
 member is omitted from its struct's descriptor: it has no size, so it is not
 part of the type, and the storage past the last real member is typed by
-whatever is stored into it. Emitting the descriptors changed no proof and cost
-nothing measurable: the census is unchanged at 1104/1082/0/22/0.
+whatever is stored into it. Introducing descriptors alone did not change the
+access rules; the checked ownership and machine interfaces now use them.
 
-*Stage 3 -- enforcement* is not done. See below.
+*Stage 3 -- enforcement.* Typed predicates constrain the actual index, loads
+require an initialized representation and a permitted view, and genuine stores
+update the index through the checked machine interface. Generated contextual
+ownership preserves enclosing-object information during member operations.
+Explicit preparation and source-derived object copies are lowered from C.
+The acceptance matrix below records both this contract and remaining frontend
+restrictions; not every example in the original corpus is translatable.
 
 Layer 0 carries the index on the *primitive* points-to, `mem_pts_to_at`, and
 ties the index-free one to it by an slprop equality:
@@ -721,15 +732,14 @@ keeps the matcher exactly as it was: the whole suite is unchanged.
 `mem_join_at` rather than independent assumptions, and are stated separately
 only because layer 0 has no implementation module to derive them in.
 
-In this first cut the index is still not *enforced*: no layer-1 predicate
-constrains it, so no existing proof changes.
+In the initial prototype, layer 1 did not constrain this index. The checked
+typed predicates now do; hiding it existentially does not remove its guards.
 
-#### What enforcement will cost
+#### Typed ownership
 
-Switching it on is the disruptive part, and the shape is now clear. The index
-is state, so the fact that these bytes are accessible at type `T` cannot be a
-duplicable side condition -- it has to live inside `T_pts_to`. But it need not
-live there *precisely*: the typed layer never needs to know the index, only
+The index is state, so the fact that these bytes are accessible at type `T`
+cannot be a duplicable side condition -- it has to live inside `T_pts_to`.
+But it need not live there *precisely*: the typed layer never needs to know the index, only
 that `read_ok e T_ctype` holds of it. That predicate is established once, by
 `T_claim`, and preserved by every `T`-write, so each typed points-to grows one
 existential and one `pure` conjunct:
@@ -750,10 +760,12 @@ Where the rule bites is *re-typing*. Fresh `malloc` storage has an all-`None`
 index, which satisfies `read_ok` at every type, so claiming it costs nothing.
 Once it has been written at `uint32_t`, claiming the same bytes at another
 type fails -- which is the point. C allows the retype, so it has to be
-available, but only as an explicit ghost step on full permission
-(`mem_store_etypes`), which is exactly right: you cannot retype storage you
-share, and it has no effect on a declared object, whose store is undefined
-behaviour rather than a retype.
+available, but only by explicitly preparing fully owned allocated storage
+with `Effective.prepare`, then actually initializing it through the checked
+machine interface. Preparation returns an opaque write-only reservation;
+it does not relabel the old bytes as a readable value. The former
+`mem_store_etypes` ghost hook has been removed because it allowed precisely
+that byte-preserving shortcut. Declared storage cannot be prepared.
 
 #### How fine is the index?
 
@@ -844,13 +856,515 @@ of a `struct T { uint32_t y, z; }`, and they are not one. An aggregate's index
 is strictly more than the conjunction of its fields', so it cannot be dropped
 at the aggregate boundary and rebuilt from the fields.
 
-Putting the two together: the index must be named at the bytes-to-object
-boundary — `t_conceal`, `struct_S_claim_uninit`, `_claim_*_flex`, `_of_elem`,
-which take `mem_pts_to_at` rather than `mem_pts_to` — and nowhere else. That is
-the same small set of entry points that already carries `aligned a
-struct_S_alignof`, and for the same reason: it is where an object is made out
-of storage. Everything above it (the predicates, the focus and unfocus
-machinery, `unless_null`, the generated contracts) is untouched.
+The bytes-to-object boundaries — `t_conceal`, `struct_S_claim_uninit`,
+`_claim_*_flex`, `_of_elem` — must take actual indexed storage rather than an
+existential raw-byte view. This is necessary but not sufficient: the index must
+also survive field focus, updates, unfocus, and calls when restoring nominal
+aggregate ownership. An existential scalar postcondition alone does not prove
+that its enclosing aggregate's original index was preserved.
+
+The checked library therefore supplies explicit-index scalar and array
+operations and nominal aggregate split/join proofs. Generated contracts and
+field helpers still need the corresponding migration. Field-by-field writes
+into fresh allocated storage establish the affected member types; they must
+not be described as establishing one nominal aggregate type without further
+justification. Member-access ownership and whole-object access evidence must
+remain distinct.
+
+#### Enforcement contract and acceptance matrix
+
+The enforcement migration distinguishes three independent facts about storage:
+its immutable origin (declared, or without a declared type), its effective-type
+index, and the initialization/representation of its contents. An access view
+is evidence derived from those facts, not a fourth way to change them.
+
+The source of truth is C11 6.5p6-7, together with the representation rules in
+6.2.6.1-2 and the union-member rules in 6.5.2.3. The following is the acceptance
+contract. The model and native-C regression suites cover its implemented
+paths; references to original corpus cases are semantic examples, not a claim
+that every such case has frontend support.
+
+| Operation | Required behavior | Regression examples |
+|---|---|---|
+| Read a declared object through its own type | Preserve its declared type and require a valid initialized representation | effective_type 1.1 |
+| Read through a character view | Preserve origin and effective type; inspect the representation only | effective_type 2.1 |
+| Corresponding signed/unsigned access | Permit the access without establishing a different object type | effective_type 1.2 |
+| First non-character store into allocated storage | Establish the storing lvalue's type for the affected object | effective_type 3.1, 6.1 |
+| Destructively reuse allocated storage | Require exclusive ownership and explicit ghost preparation; no incompatible read before a justified initialization | effective_type 4.1 |
+| Prepare declared storage for an incompatible type | Reject; forgetting a value must not discard its declared origin | effective_type 14.2, 14.3 |
+| Read zero-filled, still-untyped storage | Permit a representation-valid access without installing a persistent type | effective_type 6.3 |
+| Copy into allocated storage | Justify the destination type from the source object, not the pointer cast or byte values alone | effective_type 5.1, 5.3 |
+| Copy into declared storage | Preserve the destination's declared type, even when the source type differs | effective_type 2.2, 14.1 |
+| Partial copy or partial initialization | Establish only the covered facts; do not initialize or relabel untouched bytes | effective_type 18.2 |
+| Field/array-element access | Retain enclosing-object information and the accessed extent | out_struct_fields, array_alloc |
+| Union representation view | Require an established permitted union view and a valid representation of the accessed member | effective_type 12.1; union_test3 |
+| Prepare, reveal, then conceal old bytes as a new type | Reject without a corresponding type-justified C initialization | dedicated enforcement regressions |
+
+Preparation is a write-only reservation, not a C store. Its obligation must
+survive raw-byte views and cannot be discharged by a representation proof
+about the old contents. A typed store or checked object-representation copy
+can complete it. A source that is only reserved for a type is not an
+established source object of that type.
+
+The C annotation for this operation is a standalone
+`_ghost_stmt($prepare(T) $(p))`. It reserves an exclusively owned, non-null
+allocated prefix of `sizeof(T)` bytes. The original allocation's remaining
+bytes and deallocation extent are retained:
+
+```c
+void *p = malloc(64);
+if (!p) return;
+_ghost_stmt($prepare(int) $(p));
+*(int *)p = 7;
+_ghost_stmt($prepare(float) $(p));
+*(float *)p = 1.25f;
+free(p);
+```
+
+Neither the annotation nor a pointer cast initializes the prefix. A genuine
+matching typed store, or a checked copy from an established matching source,
+is still required. A reserved prefix may instead be abandoned by freeing the
+original allocation. Different pending types or initialization states do not
+silently merge at a branch join or loop back edge.
+
+C11 6.5p6 lets a non-character store replace an allocated object's effective
+type, so a whole-object store does the preparation itself: when `*q = v`
+targets a live, null-checked allocated block whose contents are raw bytes or
+an object of another type, the translator first emits exactly what
+`$prepare(T)` would (forgetting the old contents) and then the store
+initializes the prefix. A whole `memcpy` of an initialized scalar into a
+typed allocated block (`int *t = malloc(sizeof *t); memcpy(t, &s, sizeof s)`)
+is prepared for the source's type in the same way, since 6.5p6 gives the
+storage the source's effective type; raw blocks need no preparation, because
+their fresh index already accepts the copy. No test needs the explicit
+annotation any more; it remains available to reserve storage ahead of an
+operation the translator does not prepare itself. The implicit retype is deliberately
+narrow. A character store installs no type and stays a byte access:
+`b[i] = y` (or `*b = y`) through an `unsigned char *` naming raw storage is
+`RawBytes.byte_store`, which leaves the untyped index alone. On `calloc`
+storage the bytes stay *defined* (initialised, without provenance); on
+`malloc` storage only the bytes written are, and the bytes' own term
+(`upd_byte`) records which, so a character read of a written byte succeeds and
+one of an unwritten byte -- or a wider read covering one -- fails. A later read of such storage
+through an unsigned integer type decodes whatever those bytes are
+(`RawBytes.<T>_of_bytes`), which is what 6.2 does. A character read may
+also inspect a declared scalar: through `unsigned char *b = (unsigned char
+*)&d`, `b[i]` reveals `d`'s representation and is `RawBytes.byte_load` of
+its `i`-th byte, after which `d` is concealed again unchanged (2.1). A
+hand-written byte copy `for (i = 0; i < n; i++) d[i] = s[i];` between two
+character views bound to `dst` and `src`, with `n` a constant, is
+translated as `memcpy(dst, src, n); i = n;` -- C11 6.5p6 gives a copy "as an
+array of character type" exactly `memcpy`'s effect on the effective type
+(5.2). A
+`memset(&x, c, sizeof x)` with a constant nonzero `c` is a whole-object
+store of the value every integer member decodes from `c` replicated; like a
+zero fill it says nothing about the padding, which stays unspecified. A
+floating member gets `float{w}_of_bits` of those bits and a zero fill gets
+`Float{w}.zero` (+0.0): on an Annex F target every bit pattern is a float
+(`Float.float{w}_bits_of_bits`). Pointer and `_Bool` members are refused. For
+a declared object `x` the count may also be a constant equal to `sizeof x`
+(`memset(&x, 0, 4)`); a count covering only part of `x` is refused. A whole
+`memcpy` between declared scalars of the same width converts the
+representation in either direction between `float` and `uint32_t`/`int32_t`
+and between `double` and `uint64_t`/`int64_t` (`Copy.uint32_float32` etc.),
+keeping the destination's declared type. `memcmp` of two whole, initialised objects
+of the compared size checks that ownership and returns an unconstrained
+`int`: with padding, C leaves the result unspecified (10.2). Reads
+never retype, so a read through another type still fails at the read. Array,
+flexible-struct, field-by-field and callee-provided blocks keep their existing
+rules, and an aggregate without a whole-object initialization keeps its
+checked failure. Declared storage is never a block and is never retyped.
+
+Compatible structural views are not nominal establishment. The
+`Effective.Relation` rules retain existing indexed entries and constrain fresh
+member entries by strict subobject paths, without the character-access
+exception. Contextual member ownership carries the containing type and
+offset through focus, calls and reconstruction. In particular, assembling
+independently initialized fields must not manufacture a nominal struct or
+union label. A genuine whole-object store can establish that label; a ghost
+fold cannot.
+
+Retypability follows storage origin, not `freeable`: pool chunks carved from
+allocated storage remain eligible for reuse, whereas a pool backed by a
+declared character array does not erase that array's declared type. Copying
+never transfers the source's origin to the destination.
+
+The compatibility relation must not equate C type identity with machine width,
+layout, or permission for a single member access. Partial/aggregate cases with
+contested C interpretations, including effective_type 24.1, remain explicitly
+unsupported until that interpretation is specified. Generic translation or
+ownership failures are not successful negative effective-type tests.
+
+Generated scalar, array and aggregate operations use the checked interfaces.
+Supported non-null default contracts retain actual indices rather than
+inventing a uniform nominal index after a call. Retained/contextual read loans
+keep an indexed half-permission while exposing a public half; gathering the halves
+proves byte/index agreement before reconstructing the original owner.
+Pointer-value invalidation after `free` (effective_type
+22.1), atomics, `restrict`, and returned-aggregate temporary lifetime are
+separate workstreams.
+
+#### Regression expectations
+
+The `effective_*` tests are plain C, without `_ghost_stmt` or
+`_include_pulse`, except `effective_prefix_agreement_bad` (a soundness check
+of the byte model itself, with no C counterpart) and the two pointer-object
+tests whose ghost `rewrite` moves ownership across a proven pointer equality
+(`effective_pointer_value_cast`, `effective_pointer_object_bad/bad_returned_public_local_call`).
+`effective_retype_c`, `effective_copy_c`, `effective_machine`,
+`effective_values`, `effective_store_c` and `effective_untyped_copy` are the
+positive ones. An expected failure is not evidence of effective-type
+enforcement unless it reaches the corresponding checked operation.
+
+The test template therefore distinguishes two kinds of expectations.
+`should-fail` contains literal diagnostics required from F* verification.
+`translation-errors`, when present, additionally contains literal PAL
+diagnostics required from `out/translate.log`. A frontend rejection requires
+both expectations; it is classified separately from a checked memory-model
+rejection. Empty expectation files and mismatched diagnostics fail the test.
+Standalone corpora can use `<case>.should-fail` and
+`<case>.translation-errors`, with the directory-level files as fallbacks.
+An explicit standalone translation-error expectation also selects the shared
+`_templates/translation-should-fail` check unless the case supplies a more
+specific verification expectation. This checks PAL's rejecting
+`TranslationErrors` module in addition to every case-specific frontend
+diagnostic; it does not turn that frontend limitation into a checked
+effective-type rejection.
+Frontend negatives check that rejecting module directly, rather than trying
+to verify admitted bodies or unrelated generated helper modules. Translation
+also removes obsolete generated `.fst`/`.fsti` files before dependency
+discovery, so declarations removed by pruning cannot leave stale proof
+obligations behind.
+Known unsupported translation must not be counted as successfully rejecting
+the C program's undefined behavior.
+
+The current scalar pointer descriptor does not distinguish C pointee types.
+Consequently the new native preparation and object-copy paths reject
+pointer-valued targets/sources explicitly, rather than treating `int *` and
+`float *` as interchangeable effective types. This is an unsupported
+translation, not an effective-type proof. Incompatible stored-pointer
+reinterpretation is likewise rejected at the access; casting a pointer value
+without accessing a differently typed pointer object remains allowed.
+The source-view check also covers direct/indirect ownership transfers and
+handwritten `_plain` contracts that carry memory ownership. Cast-only identity
+returns and single-assignment local aliases retain their original view;
+unknown returned or reassigned views cannot gain stored-pointer access merely
+from their result type. Truly address-only calls remain allowed. This is
+bounded source tracking, not a general pointer-provenance analysis.
+
+Integer type identity. The IR keeps, besides width and signedness, which C
+type an integer is (`IntIdent`): a standard one, `long long`, or an
+enumeration with its tag. Each has its own effective-type descriptor:
+`ET.SLLong`/`ET.SULLong` for `long long`, and `ET.SEnum tag base` for an
+enumeration whose underlying type is `unsigned int` or `int`. On LP64,
+`long long` therefore has `int64_t`'s representation but not its type:
+`long long *` is not `long *`, and reading one through the other fails
+`View.view_ok` (15.3, 17.5). The `long_long_t`/`ulong_long_t` operations are
+copies of the `int64_t`/`uint64_t` ones at the new descriptors.
+
+An enumeration is compatible with its underlying type (6.7.2.2p4), so also
+accessible through that type's counterpart, but two enumerations are not
+compatible with each other. Compatibility is therefore not transitive, and
+`Etype` requires `compose_ok` wherever it chains two compatibilities: a
+view from an enumeration to its underlying type exists, a view from any other
+type to an enumeration does not. Enumerations are one library family per
+underlying type, `Pulse.Lib.C.Palow.Enum*`, parameterized by the tag
+(`enum_u32_read (tag: string)`); each enumeration the output names gets a
+generated `Enum_<tag>` module of `unfold` aliases (`enum_u32_color_read`), so
+the emitter spells it like any other scalar. An enumerated object read or
+written through `unsigned int`/`int` uses the family's `read_as`/`write_as`
+operations (9.1), since the view back to the enumeration is not available.
+Reading one enumeration through another fails at the access
+(`effective_integer_rank_bad/enum_identity`).
+
+The frontend still rejects a pointer to an enumeration whose underlying type
+is not `int` or `unsigned int`, or which has no definition or name.
+
+Similarly, zero-filled native views
+require a proved representation: integer zero is supported without changing
+the actual untyped index; floating zero is not inferred from `calloc`'s zero
+bits. Raw `calloc` products must fit `size_t`; the overflow/null-return case
+requires a separate allocator contract.
+Whole-allocation raw `memset(p, 0, n)` uses the exact-index-preserving byte
+operation and supports the same non-sticky integer views as raw `calloc`;
+neither operation establishes a nominal effective type.
+
+Native declared-union reconstruction requires a real declared-origin
+certificate and an actual union-readable index. Fresh allocated unions support
+initialization and updates of eligible pointer members with the same canonical
+C pointer-object type and extent. Initialization requires genuinely all-None
+input metadata and allocated origin; it retains the actual member and suffix
+indices. Containing records are assembled structurally, without manufacturing
+a nominal enclosing union or record label. Incompatible allocated-member
+switches and whole overwrites of active allocated unions remain unsupported.
+These restrictions are separate from the model's established union access
+rules.
+
+Native object-copy lowering currently requires a complete owned source
+object and an equally sized declared destination, or an allocated destination
+prefix with sufficient extent. An existing allocated type must be compatible
+with the source and its metadata must satisfy the complete-copy rule; an
+incompatible reuse requires explicit preparation first. A wholly untyped
+destination can acquire its type from an established source. A source whose type
+was installed by a whole-object store in the same body is established: the
+emitter initializes it with `{T}_initialize_at` and reveals the indexed value,
+so the complete-copy rule sees the type. A copy between two wholly untyped
+allocations (C11 6.5p6, "if it has one") goes through the trusted
+`memcpy_untyped`: the bytes move verbatim and both index sequences stay
+`None`. Otherwise a source without an established type is unsupported by the
+checked complete-copy rule, even when its bytes are initialized; fallback
+readability alone must not complete a prepared destination. A copy of a
+constant prefix of an established object (`memcpy_prefix`) moves the bytes
+and the prefix of the index, leaving no complete object at the destination. Distinct owned objects use the disjoint copy
+operation for both `memcpy` and `memmove`; an identical-object `memmove` is a
+no-op, while identical-object `memcpy` requires zero length. Computed regions,
+array regions, overlapping non-identical views and
+source regions with nonuniform type information still need frontend region lowering. A failed
+whole-object size obligation is not evidence of C undefined behavior.
+
+The original `effective_type` corpus keeps case-specific diagnostic
+expectations for unsupported translation, including declared/allocated alias
+regions, character-array access and copies, inactive/common-initial-sequence
+union views, and nonzero `memset`.
+These expectations deliberately include defined C programs:
+they record missing frontend support, not permission to classify the programs
+as undefined. The disabled cases remain separate -- 4.2 because PAL has no
+`realloc` (it needs a contract carrying the old effective-type index to the
+new block, and per-element retyping of a raw block in a loop) and 20.1
+because PAL drops `volatile` (the model cannot tell a `volatile int` object
+from an `int` one) -- as do the
+three 22.1 lifetime tests whose freed pointer *values* are not invalidated by
+the current model.
+
+#### Typed view aliases
+
+A local pointer that is assigned once from the address of a named place, and
+never rebound, is a *view alias* of that place: `T *q = (T *)&obj;`,
+`T *q = (T *)id(&obj);` where `id` returns a parameter (its body is just that
+`return`, or its contract says `_ensures(return == p)`), `T *q = (T *)id(a)`
+for a local array `a` (a view of `a[0]`), `T *q = &(*p).f` where `p` is
+itself an alias, and `T *q = (T *)p` where `p` holds a `malloc`/`calloc`
+block for the whole call. Only pointer-to-pointer conversions are looked
+through, with one exception: an immediate round trip `(T *)(uintptr_t)p` of a
+pointer `p` is `(T *)p`, because 7.20.1.4p1 guarantees the result compares
+equal to `p` and nothing in between can have taken the address apart. Any
+other conversion from an integer is still PNVI's invalid pointer.
+
+`*q` is then `*(T *)&place`. The place is first resolved structurally: a view
+at the type of the first member (or of the enclosing struct, for a first
+member) is that member (or that struct). Otherwise the access goes through
+`Pulse.Lib.C.Palow.Effective.View`. A scalar read or store converts the
+place's ownership to the view type with `View.elem_view`, which requires
+`View.view_ok`: both types are scalars of equal size, the stored effective
+type permits the view (`access_ok`, i.e. same type up to signedness or
+character access), and every representation of the source type is a
+representation of the view type. The ownership is converted back after the
+access. An aggregate view requires `View.aggregate_view_ok`, which is false:
+distinct struct types are never compatible, so a layout-compatible pun is a
+checked rejection rather than a translation error.
+
+#### `const` objects
+
+6.7.3p6 makes any attempt to modify an object defined with a
+const-qualified type undefined, however the pointer used for it was
+obtained. The frontend marks a `const` local right after its initialization,
+and from there the emitter keeps half of the local's points-to put away
+under `Pulse.Lib.C.Palow.Held.held`, which the prover does not see through.
+The half left in sight is enough to read the object and not enough to write
+it, so a store to it fails on the permission; the end of the local's
+lifetime takes the half back (`unhold`, `_gather`) before releasing the
+storage. Only scalar locals are frozen this way; a `const` aggregate or
+array local is still treated as mutable.
+
+#### String literals bound to locals
+
+`char *s = "..."` (possibly through an identity call) does not copy the
+literal: `s` is bound to `literal_addr` of the literal itself, with the
+fractional share obtained from `acquire_literal_<n>`, and the share is
+dropped (`literal_share_drop`) when the function returns. Reads through `s`
+focus on that share; a store through `s` needs the full permission, which a
+literal never gives out, so modifying a string literal (6.4.5p7) fails to
+verify.
+
+#### Identity calls, guards and interior pointers in allocated storage
+
+Before emission, a call to an identity function whose argument is
+side-effect free (a local, a constant, a member, an address, a cast, or a sum
+or difference of these) is hoisted into a statement of its own where it is
+dereferenced, handed to `memcpy`/`memmove`, or bound to a pointer local: the
+call still runs, and the access names the argument directly. A guard
+`if (!a || !b) { ...; return; }` with side-effect-free tests is split into two
+nested tests, so that each arm knows which allocations it holds. `free` of an
+allocation not yet tested for null tests it in place.
+
+Pointer-typed allocated storage. `ptr_ctype` is one descriptor for every
+pointer type, so an allocated block can receive a pointer value only where
+the emitter pins which pointer type it holds: the first pointer-typed access
+through a local bound to `malloc`/`calloc` records the type, and every later
+pointer-typed access must agree. A later read at a non-pointer type (17.4)
+then fails for want of that type's ownership.
+
+Interior pointers. `T *p = (T *)(raw + k)` for a constant `k` inside a raw,
+not yet typed allocation carves the bytes from `k` on out of the block
+(`mem_split_at`, `allocated_region_subrange`) as a block of their own held by
+`p`. Its first store prepares it like any allocated block, except that its
+alignment comes from the parent's, shifted by the offset (`aligned_field`),
+which requires `k` to be a multiple of `alignof(T)`. `free` of the parent
+returns the child to raw bytes and joins it back first; `free` of the
+interior pointer itself is refused. While carved, the parent supports neither
+copies nor `memset` nor typed accesses of its own.
+
+The 75 original corpus files are partitioned as follows; an expected frontend
+failure is never counted as a successful strict-aliasing proof.
+
+| Outcome | Cases |
+|---|---:|
+| Verified enabled cases within the supported target/model | 32 |
+| Checked initialization failures (19.1 and 19.2) | 2 |
+| Checked view rejections (11.1, 13.1, 13.2, 13.3, 14.2, 15.1, 15.3, 17.4 and 17.5) | 9 |
+| Checked rejections at the UB access (14.1, 15.2, 16.1, 16.2, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 23.1, 23.2, 24.4 and 24.5) | 14 |
+| Checked rejections before the UB access (13.4, 13.5 and 14.3) | 3 |
+| Explicit unsupported-translation expectations | 5 |
+| Disabled cases (4.2, 16.3, 20.1, 20.2, 21.1 and 22.3) | 6 |
+| Accepted known gaps (the three 22.1 lifetime-value variants, and 12.6) | 4 |
+| Total | 75 |
+
+Four negative union cases were added on top of the original corpus, to cover
+the edges of the four ways C lets a union be read through a member other than
+the one last stored: 24.7 (punning to bytes that are not a `_Bool` value,
+6.2.6.1p5), 24.8 (punning through a plain pointer to a member rather than
+through the union; contested, like 24.1), 24.9 (a common initial sequence
+broken by `int` vs `unsigned`, then a same-offset same-type field read past
+it) and 24.10 (the common initial sequence read in a function where the union
+declaration is not visible). All four are UB, and all four are currently
+explicit unsupported-translation expectations, like the other union cases,
+except 24.7, which translates and fails at the reread (below);
+24.9 and 24.10 are refused with a diagnostic naming the rule they break
+(the common initial sequence is empty; the address of a member not known to
+be live escapes into a function that cannot see the union), and 24.8 at the
+read through a pointer to an inactive member: punning is licensed only
+through the union (6.5.2.3p3, footnote 95), so a read through a pointer
+bound to `&u.m` is accepted only where `m` is known to be live.
+
+Common initial sequences (6.5.2.3p6) are supported for local unions: a read
+of `u.m.f` while struct member `l` is live is rewritten to the read of the
+field of `l` at the same position, provided `f` lies inside the common
+initial sequence of `l` and `m` (pairwise same offset, size and compatible
+type, no bit-fields). The first field store into an inactive struct member
+of a local union activates it implicitly (`union_X_switch_m`), the struct
+being filled field by field; and a local union's live member survives a call
+as long as no address of the union escapes in the body. `&u.m` of the live
+member may be passed to a function, which then sees only `m`.
+
+A union in allocated storage acquires its type from a store of a whole union
+value (6.5p6), and that is the one way it is supported, for unions with at
+least one provenance-free scalar member (the members that are pointers have
+their own family, above). Such a union gets a second family,
+`union_X_heap`: `malloc` gives raw bytes, and a store `*u = (union X){ .m = v }`
+prepares them for `union X` and initializes them with
+`union_X_heap_initialize`, whose index is exactly the union's
+(`ET.etypes_of union_X_ctype false`, what `Machine.initialize` installs for a
+noncharacter type). The declared family cannot be used: it recovers the
+union's byte types after handing a member out from the declared bytes'
+fixed metadata, which allocated bytes do not have. So the heap family never
+hands a member out. A read of scalar member `m` is
+`union_X_heap_read_m`, a typed read at a slice of the union's index that puts
+it back before returning, and a reread through another scalar member is
+`union_X_heap_reread_l_m`, the local family's step at this predicate. A store
+through a member lvalue is refused: it would install the member's type, not
+the union's (24.1). A later store of another type retypes the block as for
+any other type, after which a read through the union is refused (24.6, at the
+stale read); a store of another whole union value retypes it to the union
+again (12.5, which verifies). 24.5 fails at its `double` read of a block
+holding a `union upun`, for want of the `double` ownership. 24.3 is refused
+at the read of the wider `double` member, as a floating-point reread target.
+An element `u->b[i]` of an `unsigned char` array member is a character read
+(6.5p7, last bullet) of byte `i` of the live member's representation:
+`union_X_heap_read_byte_l` (`RawBytes.byte_load` on the union's own bytes,
+which leaves them and their index as they are), with `i` required to lie
+inside the live member `l`, since the bytes past it are unspecified
+(6.2.6.1p7). 12.1 and 12.4 verify with it. The member a union in allocated
+storage holds also survives an `if` whose arms both leave it live, which is
+what the nested `c ? "little" : d ? "big" : "mixed"` of 12.4 needs; that
+variadic argument is evaluated as the `if`s a conditional in statement
+position is, since only its conditions oblige anything. The live member of a local union likewise
+survives an `if` whose arms both leave it live, and either arm of an `if`
+with an early `return`.
+
+A whole-object `memcpy` from an initialized declared union into allocated
+storage (6.5p6: the copy gives the destination the effective type of the
+source, the union's) prepares the destination for the union, copies with
+`Machine.memcpy_prepared` -- whose result index is exactly the heap family's
+-- and folds `union_X_heap_pts_to` at the source's value, carrying the
+source's live member over (12.2). `memcpy`, `memmove` and `free` do not make
+their arguments escape, and a pointer assigned to a local escapes only if
+that local does.
+
+A struct member whose fields are all provenance-free scalars (no bit-fields,
+no invariants) is stored whole through the struct's `_encode`, and its field
+`f` is read in place with `union_X_heap_read_m_f`: a typed read
+(`Machine.Intrinsics`) at the field's slice of the union's index, which
+leaves the bytes as they are. A read of `u->m.f` while struct member `l` is
+live is the read of the corresponding field of `l` when `f` lies in their
+common initial sequence (6.5.2.3p6), so 12.3 verifies; past it, the read is
+refused with a diagnostic, which makes 24.4 a checked rejection at the UB
+access. Field stores, as member stores, are refused. A union nested in an allocated struct is tracked when the
+struct is stored whole with a brace initialiser naming the member (12.6), but
+the typed claim of the malloc'd struct then fails on
+`ET.declared_destination`: the struct's family is the declared one whenever
+it contains a union. 12.6 is an accepted known gap.
+
+Rereading a local union through another scalar member (6.5.2.3p3, footnote
+95) is supported when the read member is no wider than the live one and every
+bit pattern of its size is a value of its type: a signed or unsigned integer
+type, or `_Bool`. Each such pair gets a generated ghost step
+`union_X_reread_l_m`, which reinterprets the prefix of the live member's
+bytes through the raw-byte decoders of `Pulse.Lib.C.Palow.RawBytes`. A
+`_Bool` target additionally requires that the byte be 0 or 1 (6.2.6.1p5):
+24.7 fails on exactly that obligation. Floating-point targets are refused
+(no axiom makes every bit pattern a value), and so is a reread through a
+pointer to the member (24.8). 2.3 verifies with this. 11.1 verifies up to
+its section (5), the GCC `may_alias` extension, which is not standard C and
+fails on `View.view_ok` like 13.1.
+
+The thirty supported cases are 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 4.1, 5.1,
+5.2, 5.3, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 9.1, 9.2, 10.1, 10.2, 10.3, 12.1, 12.4 and 12.5; 1.2, 1.3, 8.2, 9.1 and 9.2 go through typed view aliases.
+The two initialization failures exercise indeterminate reads, not an
+incompatible effective type. The nine view rejections fail on
+`View.view_ok` or `View.aggregate_view_ok` at the incompatible access. In
+15.1 a store has installed `int` and the read is through `float`; 17.4 is
+the same with a pointer type installed and read through `uint64_t` (see
+"Pointer-typed allocated storage" below); in 15.3 and 17.5 that is a `long long` read of an allocated block holding a
+`double` or a `long` (see "Integer type identity" above). In
+15.2, 16.1, 16.2, 16.4, 17.1 and 17.3 a store or copy has retyped the
+allocated block, and the later read through another type fails for want of
+that type's ownership -- the read is the undefined access.
+14.1 and 18.2 copy only a prefix of an object, and the read of the
+incomplete object fails; 18.1 copies an untyped, uninitialized source and the
+typed read of the copy fails. 23.1 modifies a `const int` through a pointer
+whose `const` was cast off (and laundered through `uintptr_t` and an identity
+call); the store fails for want of the full permission -- see "`const`
+objects" below. 23.2 writes into a string literal through a `char *` local
+bound to it; the store fails for want of the full permission, since a
+literal only ever lends fractional shares (6.4.5p7, see "String literals
+bound to locals" below). 17.2 fails on the alignment obligation of the
+interior pointer it retypes (`aligned_field`, `1 % alignof(double) == 0`). The other three fail earlier, for a reason
+that is not the effective-type violation itself: 13.4, 13.5 and 14.3 pass an
+uninitialized local array to a function.
+
+The corpus helper `sink_d` computes `(unsigned long long)(v * 7.0)` for an
+arbitrary `double v`. That conversion is undefined unless the truncated value
+fits in the target type (6.3.1.4p1), so `Func_sink_d` is rejected on
+`float64_fits` in every case that uses it, and those cases record that
+failure alongside their own. In 3.1, 5.1, 6.1, 7.2 and 12.5, which were rejected
+by it alone, `sink_d` carries `_requires(0.0 <= v && v <= 1000.0)`: the float value
+semantics below make `v * 7.0` provably within range, and the callers, which
+pass small literals, discharge the precondition.
+
+The separate native-C regressions exercise
+preparation, non-sticky zero views, copying, contextual ownership and the
+conservative type-identity boundaries without relying on the original corpus's
+unsupported constructs.
 
 #### What to watch
 
@@ -900,7 +1414,7 @@ index to `mem_pts_to` touches every module in the stack.
 | VST (Appel et al.) | CompCert's | CompCert's | no | `memory_block` → `data_at`/`field_at` |
 | RefinedC (Sammler et al., PLDI 2021) | Caesium (CompCert-like) | bytes | no | layout types → refined ownership types |
 | Low\* / Pulse (today) | typed, parametric `ref a` | none | n/a | flat, typed only |
-| **Palow** | PNVI-ae-udi | `option UInt8.t` + provenance | staged, see above | `mem_pts_to` → `t_pts_to` |
+| **Palow** | PNVI-ae-udi | `option UInt8.t` + provenance | checked indexed views; restrictions above | `mem_pts_to_at` → typed/contextual ownership |
 
 The closest fit is **VST**: `memory_block sh n p` underneath
 `data_at sh t v p`, with `field_at` for field-granular shares, is almost
@@ -1193,15 +1707,16 @@ mechanical extra argument to `array_pts_to` in six test files, plus
 
 ## Implementation status
 
-Milestone 1 is implemented in `pulse/`, together with enough of milestones 2, 4
-and 6 to check that the layering actually works. Everything below verifies as
-part of `make -C pulse`.
+The model modules live in `pulse/`. Everything below verifies as part of
+`make -C pulse`; machine primitives and physical-origin certificates remain
+explicit assumptions, while their ownership adapters and transition lemmas
+are checked.
 
 | Module | Kind | Contents |
 | --- | --- | --- |
 | `Pulse.Lib.C.Palow.Bytes` | proved | `alloc_id`, `prov`, `byte`, `bytes`, `uninit`/`zeroed`, `strip_prov`, slice/append lemmas |
 | `Pulse.Lib.C.Palow.Ptr` | axiomatized | `ptr`, `addr_of`, `prov_of`, `ptr_ext`, `( +! )`, `disjoint_ranges` |
-| `Pulse.Lib.C.Palow` | axiomatized | `mem_pts_to`, `mem_split`/`mem_join`, disjointness, injectivity, share/gather |
+| `Pulse.Lib.C.Palow` | axiomatized | indexed memory, split/join, disjointness, share/gather, immutable origin certificates |
 | `Pulse.Lib.C.Palow.Encoding` | proved | little-endian `encode`/`decode`, round-trip and injectivity |
 | `Pulse.Lib.C.Palow.Scalar` | proved | `uint8_t`/`uint32_t`/stored-pointer `*_repr`, `*_pts_to`, `*_sizeof`, agreement, share/gather, reveal/conceal |
 | `Pulse.Lib.C.Palow.Nullable` | proved | `unless_null` with its intro/elim pair |
@@ -1212,6 +1727,12 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.CTypes` | proved | the remaining C scalar types (`_Bool`, `int8_t`..`int64_t`, `uint16_t`, `uint64_t`, `size_t`, `uint8_t`'s derived set) |
 | `Pulse.Lib.C.Palow.Examples` | proved | hand-written Palow renditions of programs PAL already translates |
 | `Pulse.Lib.C.Palow.Etype` | proved | `ctype`, per-byte effective-type entries, `access_ok`, the store rule, and the union/array/punning theorems |
+| `Pulse.Lib.C.Palow.Effective` | proved | protected preparation, initialization and establishment evidence |
+| `Pulse.Lib.C.Palow.Effective.Machine` | axiomatized | checked stores and source-derived byte/object copies |
+| `Pulse.Lib.C.Palow.Effective.Relation` | proved | strict structural subobject views without nominal establishment |
+| `Pulse.Lib.C.Palow.Effective.Retained` | proved | actual-index scalar/array ownership, transitions and public read loans |
+| `Pulse.Lib.C.Palow.Effective.Context` | proved | enclosing-object/offset ownership and contextual scalar-array views |
+| `Pulse.Lib.C.Palow.Copy` | proved | typed initialized/uninitialized object-copy adapters |
 | `Pulse.Lib.C.Palow.Aggregate` | proved | two structs (with and without padding), field split/join, flexible array members |
 | `Pulse.Lib.C.Palow.Array` | proved | generic `array_repr`/`array_pts_to`, split/join, per-element focus |
 | `Pulse.Lib.C.Palow.Union` | proved | `union U { uint32_t x; struct T t; }`, member views, the type-punning acceptance test |
@@ -1285,11 +1806,12 @@ theorems that give it content are proved in `Provenance`: the `uintptr_t` round
 trip returns the pointer you started with, and `memcpy` preserves a stored
 pointer's usability.
 
-Milestone 8 is done for the model: the rules are defined and proved, and layer
-0 carries the index, but nothing enforces it yet -- see the effective-types
-section for what switching it on costs.
+Milestone 8 includes checked typed ownership and machine operations, explicit
+preparation, contextual member views and native object-copy lowering. See the
+effective-types section for the acceptance contract and frontend restrictions.
 
-Not yet implemented: the remaining translator changes.
+Remaining native-C restrictions are listed in the acceptance matrix and known
+deviations below.
 `Machine`, `Alloc` and `Expose` are axiomatized because their operations are
 machine primitives, but note that their *specifications* are written entirely
 in terms of the derived layer-1 predicates, so they add operations rather than
@@ -1325,11 +1847,12 @@ new facts about memory.
   choosing nondeterministically among the exposed allocations containing the
   address. This is PNVI-ae-udi's "user disambiguation" resolved statically, and
   it is a restriction only for programs that genuinely rely on the ambiguity.
-- The effective-type index is defined and carried by layer 0 but not enforced:
-  no typed load demands `read_ok` and no typed store produces `store_etypes`,
-  so the index is a fact about the bytes that nothing yet has to respect.
-  Until stage 3 lands we are strictly more permissive than ISO C, in the
-  direction of accepting programs clang may miscompile.
+- Native effective-type lowering is conservative: incompatible allocated
+  reuse requires explicit preparation; pointer-valued preparation/copy and
+  general overlapping, partial or nonuniform copy regions are unsupported.
+  Unsupported frontend cases are tracked separately from checked semantic
+  rejections. Freed pointer *values* are still not invalidated merely by
+  `free`; the three effective_type 22.1 tests retain that separate lifetime gap.
 - `size_t` is eight bytes and `SizeT.v` is assumed to be below `pow2 64`, for
   the same reason and with the same justification as `Ptr.addr_bound`.
 - Palow has no *total* function pointers. Divergence is inferred per body,
@@ -1341,27 +1864,18 @@ new facts about memory.
   wrapped in `unless_null`. That is a *stronger* precondition than C's -- the
   caller must establish the refinement even when passing NULL -- so it is
   sound, but it is less useful than the old model's phrasing.
-- `--palow` translates the user's `_requires`/`_ensures` clauses where it can,
-  but all-or-nothing per function: if any clause is untranslatable the whole
-  contract is dropped and a `(* contract dropped: ... *)` comment is emitted in
-  its place. 107 of 480 contracts are currently dropped this way. A passing
-  `make palow-check` therefore says that the translation typechecks, not that
-  every function could be implemented against its real contract -- for a
-  dropped contract the function has no obligations left to fail.
-- `malloc` may return null here, and the old model's allocator cannot: PAL
-  emits `Pulse.Lib.C.Ref.alloc_ref`, which always succeeds. So C that
-  allocates and then dereferences or frees without testing the result
-  translates today and is refused by `--palow`. This is the deviation being in
-  the honest direction -- the refused programs have a real bug -- and where the
-  function returns `void` the fix is the one a C programmer would make anyway:
-  test the result and return early. Six admitted bodies came back that way, and
-  the checks verify unchanged under the old model too, so nothing had to be
-  hidden behind `#ifdef PALOW`. What is left is the case where there is nothing
-  to return early *with*: a function whose job is to allocate and hand the
-  block back -- `mk_point`, `alloc_int`, `mk_itemx`, `get_ops` -- cannot test
-  the result without its return type becoming `_nullable`, and a `_nullable`
-  *return* is an annotation neither model has. Five admitted bodies wait on
-  that.
+- Unsupported contracts may leave a `(* contract dropped: ... *)` marker in
+  generated text, but strict emission diagnoses the weakening and emits a
+  rejecting `TranslationErrors` module. Only `--palow-permissive` suppresses
+  those weakening diagnostics for coverage runs; ordinary frontend errors
+  remain errors. A passing permissive census is not evidence that the original
+  contract was verified.
+- `malloc` and `calloc` may return null. A caller must establish non-nullness
+  before dereferencing or transferring ownership to a non-null contract;
+  an early return or a specified non-returning failure handler can establish
+  that fact. Native nullable owned return contracts still need a dedicated
+  interface. Unsupported allocator wrappers are not accepted as admitted
+  implementations in strict mode.
 - An `if`'s two arms must agree on which locals and `_out` parameters hold a
   value and which still hold uninitialised storage; those are different
   slprops and there is nothing to join them to. For a single-object `_out`
@@ -2192,7 +2706,8 @@ new facts about memory.
    write needs no such history and is never refused.
 
    The emitter tracks which member is live per address, and gives that
-   knowledge up the moment control leaves: at a call, at either arm of an
+   knowledge up the moment control leaves: at a call (unless the union is a
+   local whose address never escapes), at either arm of an
    `if`, at a `switch`, around a loop, and at a whole-union write. Over-
    clearing costs an `admit()`; under-clearing would emit a read F\* rejects,
    so the bias is the safe one.
@@ -4077,13 +4592,43 @@ new facts about memory.
    -- the two blocks were generated from the `int32_t` and `int64_t` ones by
    substitution, which is the clearest evidence that nothing about floating
    point is special *to the memory model*. The translator side is the
-   arithmetic: literals go to `of_literal`, the operators to F\*'s, and the
+   arithmetic: literals go to `float{w}_lit`, the operators to F\*'s, and the
    conversions say what C says -- widening `float` to `double` is exact and
    narrowing rounds, so they are two functions and only one is invertible,
    where a model without them would have to route the conversion through an
-   integer and get a different answer. `==` is `ieee_eq` and not F\*
+   integer and get a different answer. An integer converts with F\*'s
+   `of_int`, except a `uint64_t`, whose upper half has no `Int64.t` and goes
+   through `float{32,64}_of_uint64` instead. A float converts to an integer
+   with `float{w}_to_{u,}int{n}`, which truncates and whose refinement is
+   C's range condition (6.3.1.4p1): `float{w}_fits x lo hi`, i.e. `x` is
+   strictly between `lo - 1` and `hi + 1`, stated with exact comparisons
+   `float{w}_gt_int`/`float{w}_lt_int` against mathematical integers. Those
+   comparisons are axiomatized only for values `of_int` produces exactly, so
+   `(int32_t)(double)x` for an `int16_t x` verifies and an arbitrary
+   `(int32_t)d` does not (`test/float_to_int_bad`).
+
+   To let a contract bound a float, the library gives a float a value, again
+   by axioms each true of IEEE-754 round-to-nearest: `float{w}_value x` is
+   the real it denotes, `None` for a NaN or an infinity. A decimal literal is
+   rounded by the translator exactly as C rounds it (at the literal's own
+   width) and emitted as `float{w}_lit "2.5" 5 2 1`, whose refinement gives
+   its value `num / 2^k` -- conditionally on that being a representable
+   value, so the axiom cannot be instantiated falsely; `of_literal` itself
+   gets no value, since two calls on one string could otherwise disagree.
+   `of_int` of a small integer has its exact value; `lt`/`lte` agree with
+   the order on values of finite operands, and a float between two finite
+   ones is finite; `mul` of finite operands whose exact product is below
+   `1e300` (`1e38` for `float`) is finite and within half an ulp of it, plus
+   a deliberately loose absolute `0.5` for underflow; and a value above or
+   below an integer gives `gt_int`/`lt_int`. Contracts may now contain float
+   constants and `<`, `<=`, `==` on floats, emitted as the IEEE comparison.
+   That is enough for `_requires(0.0 <= v && v <= 1000.0)` to prove
+   `(unsigned long long)(v * 7.0)` defined. Addition, subtraction, division
+   and the conversions have no value axioms yet. The one cost is extraction:
+   `float{w}_lit` is abstract, so extracting it would need mapping back to
+   the C literal it carries. `==` is `ieee_eq` and not F\*
    equality, since C's `==` identifies the two zeros and makes a NaN unequal
-   to itself. The whole of `test/float_double` -- four functions and a struct
+   to itself. The whole of `test/float_double` -- its functions and a struct
    with padding between a `float` and a `double` -- now translates with no
    skip, no dropped contract and no admit.
 

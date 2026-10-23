@@ -39,6 +39,7 @@ const PRIMS: &[Prim] = &[Prim {
     ret: || TypeT::Int {
         signed: false,
         width: 64,
+        ident: crate::ir::IntIdent::Std,
     },
 }];
 

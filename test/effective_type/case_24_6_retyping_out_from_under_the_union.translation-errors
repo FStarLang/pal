@@ -1,0 +1,1 @@
+error: `Func_case_24_6_retyping_out_from_under_the_union`: its body is not translated: a member of `union upun` in allocated storage whose effective type is not that union here: only a store of a whole union value gives it one (6.5p6)

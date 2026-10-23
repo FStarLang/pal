@@ -142,6 +142,7 @@ enum Token<'src> {
 
     String(&'src str),
     Integer(&'src str, u32, IntegerSuffix),
+    Float(&'src str),
     Char(i64),
     Ident(&'src str),
 
@@ -163,6 +164,7 @@ impl<'src> Display for Token<'src> {
                 };
                 write!(f, "{}{}{}", prefix, i, suffix)
             }
+            Token::Float(x) => write!(f, "{}", x),
             Token::Char(n) => write!(f, "'\\x{:x}'", n),
             Token::Ident(id) => write!(f, "{}", id),
             Token::Punct(punct) => write!(f, "{}", punct.to_str()),
@@ -211,6 +213,23 @@ fn lex_core_token<'src>() -> impl Parser<'src, &'src str, Token<'src>> {
     let integer_literal = choice((hex_literal, octal_literal, decimal_literal))
         .then(integer_suffix)
         .map(|((i, radix), s)| Token::Integer(i, radix, s));
+
+    // A decimal floating constant, kept verbatim (suffix included): `1.5`,
+    // `.5`, `1.`, `1e3`, `2.5e-3f`. It must have a point or an exponent, or
+    // it is an integer.
+    let digits = text::digits(10).at_least(1);
+    let exponent = one_of("eE").then(one_of("+-").or_not()).then(digits);
+    let fraction = choice((
+        digits.then(just('.')).then(digits.or_not()).ignored(),
+        just('.').then(digits).ignored(),
+    ));
+    let float_literal = choice((
+        fraction.then(exponent.or_not()).ignored(),
+        digits.then(exponent).ignored(),
+    ))
+    .then(one_of("fFlL").or_not())
+    .to_slice()
+    .map(Token::Float);
 
     let op = Punct::lexer().map(Token::Punct);
 
@@ -282,7 +301,8 @@ fn lex_core_token<'src>() -> impl Parser<'src, &'src str, Token<'src>> {
         .at_least(1)
         .to(Token::Error);
 
-    integer_literal
+    float_literal
+        .or(integer_literal)
         .or(op)
         .or(ident)
         .or(string)
@@ -476,7 +496,11 @@ fn type_parser<
                     None | Some(_) => tw.int_width,
                 }
             };
-            Ok(TypeT::Int { signed, width })
+            Ok(TypeT::Int {
+                signed,
+                width,
+                ident: crate::ir::IntIdent::Std,
+            })
         });
 
     let ident = select! { Token::Ident(ident) => ident }
@@ -595,7 +619,11 @@ fn expr_parser<
                         None | Some(_) => tw.int_width,
                     }
                 };
-                Ok(TypeT::Int { signed, width })
+                Ok(TypeT::Int {
+                    signed,
+                    width,
+                    ident: crate::ir::IntIdent::Std,
+                })
             });
 
         let ident = select! { Token::Ident(ident) => ident }
@@ -690,22 +718,27 @@ fn expr_parser<
                         IntegerSuffix::U => TypeT::Int {
                             signed: false,
                             width: tw.int_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::L => TypeT::Int {
                             signed: true,
                             width: tw.long_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::UL => TypeT::Int {
                             signed: false,
                             width: tw.long_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::LL => TypeT::Int {
                             signed: true,
                             width: tw.long_long_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::ULL => TypeT::Int {
                             signed: false,
                             width: tw.long_long_width,
+                            ident: crate::ir::IntIdent::Std,
                         },
                         IntegerSuffix::Z | IntegerSuffix::UZ => TypeT::SizeT,
                     };
@@ -727,7 +760,25 @@ fn expr_parser<
                 .into()
         });
 
-        let constant = integer_constant.or(char_constant);
+        // A floating constant has C's type: `double`, or `float` with an `f`
+        // suffix. `long double` has no counterpart in Palow.
+        let float_constant = select! { Token::Float(x) => x }.try_map(move |x: &str, span| {
+            let loc = sift.resolve_source_info(&span);
+            let width = match x.chars().last() {
+                Some('f' | 'F') => 32,
+                Some('l' | 'L') => {
+                    return Err(Rich::custom(
+                        span,
+                        format!("a `long double` constant '{}' in a specification", x),
+                    ));
+                }
+                _ => 64,
+            };
+            let ty = TypeT::Float { width }.with_loc(loc.clone());
+            Ok(ExprT::FloatLit(x.into(), ty.into()).with_loc(loc).into())
+        });
+
+        let constant = integer_constant.or(float_constant).or(char_constant);
 
         let parenthesized = expr
             .clone()
@@ -1760,6 +1811,13 @@ pub fn process_inline_pulse(
             kind: AuxFnKind::Activate,
         });
 
+    let prepare_antiquot =
+        dollar_keyword("prepare").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
+            dollar_span,
+            body_span,
+            kind: AuxFnKind::Prepare,
+        });
+
     let unfold_uninit_antiquot =
         dollar_keyword_uninit("unfold").map(|(dollar_span, body_span)| RawToken::AuxFnAntiquot {
             dollar_span,
@@ -1832,6 +1890,7 @@ pub fn process_inline_pulse(
         unfold_antiquot,
         fold_antiquot,
         activate_antiquot,
+        prepare_antiquot,
         scattered_antiquot,
         gathered_antiquot,
         witness_antiquot,

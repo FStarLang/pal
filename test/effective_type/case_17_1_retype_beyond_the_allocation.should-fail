@@ -1,0 +1,4 @@
+Func_case_17_1_retype_beyond_the_allocation.fst(
+Pulse.Lib.C.Palow.CTypes.float64_t_sizeof <=
+Func_sink_d.fst(
+Pulse.Lib.C.Palow.Float.float64_fits (FStar.Float64.mul var_v

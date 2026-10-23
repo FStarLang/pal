@@ -1,0 +1,1 @@
+stored-pointer access from an unknown returned or reassigned source view is unsupported

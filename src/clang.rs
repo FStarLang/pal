@@ -667,8 +667,29 @@ fn mk_int_type(loc: Rc<SourceInfo>, signed: bool, width: u32) -> Rc<Type> {
     mk_ast(
         loc,
         TypeT::Int {
-            signed: signed,
-            width: width,
+            signed,
+            width,
+            ident: crate::ir::IntIdent::Std,
+        },
+    )
+}
+fn mk_long_long_type(loc: Rc<SourceInfo>, signed: bool) -> Rc<Type> {
+    mk_ast(
+        loc,
+        TypeT::Int {
+            signed,
+            width: 64,
+            ident: crate::ir::IntIdent::LongLong,
+        },
+    )
+}
+fn mk_enum_type(loc: Rc<SourceInfo>, signed: bool, width: u32, tag: &str) -> Rc<Type> {
+    mk_ast(
+        loc,
+        TypeT::Int {
+            signed,
+            width,
+            ident: crate::ir::IntIdent::Enum(tag.into()),
         },
     )
 }
@@ -965,6 +986,9 @@ fn mk_lvalue_err(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Expr> {
 
 fn mk_var_decl(loc: Rc<SourceInfo>, id: Rc<Ident>, ty: Rc<Type>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::Decl(id, ty))
+}
+fn mk_freeze(loc: Rc<SourceInfo>, id: Rc<Ident>) -> Rc<Stmt> {
+    mk_ast(loc, StmtT::Freeze(id))
 }
 fn mk_let_stmt(loc: Rc<SourceInfo>, id: Rc<Ident>, ty: Rc<Type>, value: Rc<Expr>) -> Rc<Stmt> {
     mk_ast(loc, StmtT::Let(id, ty, value))

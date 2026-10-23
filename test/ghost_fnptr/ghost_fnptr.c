@@ -234,8 +234,17 @@ void assign_across_shapes(void)
    type could describe all four, and none has to: the declaration names neither
    half. Each call's `pre`, `post` and witness are pinned entirely by the
    `is_valid` in scope, and PAL emits `_` for all three. */
-_requires(*a > 0 && *a < 100 && *b > 0 && *b < 100)
-int32_t call_across_shapes(int32_t *a, int32_t *b)
+_requires(_inline_pulse(
+    exists* va vb.
+      int32_t_pts_to $(a) 1.0R va **
+      int32_t_pts_to $(b) 1.0R vb **
+      pure (0 < FStar.Int32.v va /\ FStar.Int32.v va < 100
+            /\ 0 < FStar.Int32.v vb /\ FStar.Int32.v vb < 100)))
+_ensures(_inline_pulse(
+    exists* va vb.
+      int32_t_pts_to $(a) 1.0R va **
+      int32_t_pts_to $(b) 1.0R vb))
+int32_t call_across_shapes(_plain int32_t *a, _plain int32_t *b)
 {
     int32_t (*fp)(int32_t *, int32_t *);
 

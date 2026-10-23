@@ -191,10 +191,12 @@ impl FieldShape {
     fn pts_to(&self, at: &str, value: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} p {}", pn, at, value),
-            FieldShape::Unaligned { pn } => format!("elem_pts_to {}_repr {} p {}", pn, at, value),
+            FieldShape::Unaligned { pn } => {
+                format!("elem_pts_to {0}_ctype {}_repr {} p {}", pn, at, value)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
-                    "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p {}",
+                    "array_pts_to {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} p {}",
                     pn, esize, pn, at, value
                 )
             }
@@ -232,10 +234,12 @@ impl FieldShape {
     fn pts_to_at(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to {} {} {}", pn, a, p, v),
-            FieldShape::Unaligned { pn } => format!("elem_pts_to {}_repr {} {} {}", pn, a, p, v),
+            FieldShape::Unaligned { pn } => {
+                format!("elem_pts_to {0}_ctype {}_repr {} {} {}", pn, a, p, v)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
-                    "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} {} {}",
+                    "array_pts_to {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} {} {}",
                     pn, esize, pn, a, p, v
                 )
             }
@@ -245,10 +249,12 @@ impl FieldShape {
     fn uninit_at(&self, a: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_pts_to_uninit {}", pn, a),
-            FieldShape::Unaligned { pn } => format!("bytes_uninit {} (SizeT.v {}_sizeof)", a, pn),
+            FieldShape::Unaligned { pn } => {
+                format!("bytes_uninit {pn}_ctype {} (SizeT.v {}_sizeof)", a, pn)
+            }
             FieldShape::Array { pn, esize, len } => {
                 format!(
-                    "array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {}",
+                    "array_pts_to_uninit {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} {}",
                     pn, esize, pn, len, a
                 )
             }
@@ -261,10 +267,13 @@ impl FieldShape {
         match self {
             FieldShape::One { pn } => format!("{}_conceal {} #{} #{} #{};", pn, a, p, b, v),
             FieldShape::Unaligned { pn } => {
-                format!("elem_conceal {}_repr {} #{} #{} #{};", pn, a, p, b, v)
+                format!(
+                    "elem_conceal {0}_ctype {}_repr {} #{} #{} #{};",
+                    pn, a, p, b, v
+                )
             }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => format!(
-                "array_conceal {}_repr {} {}sz {}_alignof #{} #{} #{};",
+                "array_conceal {0}_ctype {}_repr {} {}sz {}_alignof #{} #{} #{};",
                 pn, a, esize, pn, p, b, v
             ),
         }
@@ -274,10 +283,12 @@ impl FieldShape {
     fn reveal(&self, a: &str, p: &str, v: &str) -> String {
         match self {
             FieldShape::One { pn } => format!("{}_reveal {} #{} #{};", pn, a, p, v),
-            FieldShape::Unaligned { pn } => format!("elem_reveal {}_repr {} #{} #{};", pn, a, p, v),
+            FieldShape::Unaligned { pn } => {
+                format!("elem_reveal {0}_ctype {}_repr {} #{} #{};", pn, a, p, v)
+            }
             FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
                 format!(
-                    "array_reveal {}_repr {} {}sz {}_alignof #{} #{};",
+                    "array_reveal {0}_ctype {}_repr {} {}sz {}_alignof #{} #{};",
                     pn, a, esize, pn, p, v
                 )
             }
@@ -289,10 +300,13 @@ impl FieldShape {
         match self {
             FieldShape::One { pn } => format!("{}_claim_uninit {} #{};", pn, a, b),
             FieldShape::Unaligned { pn } => {
-                format!("bytes_claim_uninit {} (SizeT.v {}_sizeof) #{};", a, pn, b)
+                format!(
+                    "bytes_claim_uninit {pn}_ctype {} (SizeT.v {}_sizeof) #{};",
+                    a, pn, b
+                )
             }
             FieldShape::Array { pn, esize, len } => format!(
-                "array_claim_all_uninit {}_repr {} {}sz {}_alignof {}sz #{};",
+                "array_claim_all_uninit {0}_ctype {}_repr {} {}sz {}_alignof {}sz #{};",
                 pn, a, esize, pn, len, b
             ),
             FieldShape::Flex { .. } => format!("{} {} {};", NO_FLEX_STORAGE, a, b),
@@ -323,11 +337,12 @@ impl FieldShape {
     fn uninit(&self, at: &str) -> Option<String> {
         match self {
             FieldShape::One { pn } => Some(format!("{}_pts_to_uninit {}", pn, at)),
-            FieldShape::Unaligned { pn } => {
-                Some(format!("bytes_uninit {} (SizeT.v {}_sizeof)", at, pn))
-            }
+            FieldShape::Unaligned { pn } => Some(format!(
+                "bytes_uninit {pn}_ctype {} (SizeT.v {}_sizeof)",
+                at, pn
+            )),
             FieldShape::Array { pn, esize, len } => Some(format!(
-                "array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {}",
+                "array_pts_to_uninit {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} {}",
                 pn, esize, pn, len, at
             )),
             // No storage view, so the struct as a whole gets none either:
@@ -335,6 +350,52 @@ impl FieldShape {
             // because how much storage that would be is not known.
             FieldShape::Flex { .. } => None,
         }
+    }
+}
+
+/// The standard Palow scalar whose object representation `pn` shares. `long
+/// long` is a distinct type from `long` (and an enumerated type from its
+/// underlying type), but encodes its values the same way and has the same
+/// library surface, so code that only cares about the representation can
+/// treat it as that scalar.
+fn repr_pn(pn: &str) -> &str {
+    match pn {
+        "long_long_t" => "int64_t",
+        "ulong_long_t" => "uint64_t",
+        _ if pn.starts_with("enum_u32_") => "uint32_t",
+        _ if pn.starts_with("enum_i32_") => "int32_t",
+        _ => pn,
+    }
+}
+
+/// The bits a provenance-free scalar of Palow type `pn` encodes `v` as, which
+/// is what `Encoding.encode` lays out in its bytes; `None` for anything else.
+fn scalar_bits(pn: &str, v: &str) -> Option<String> {
+    Some(match repr_pn(pn) {
+        "bool_t" => format!("(if {v} then 1 else 0)"),
+        "uint8_t" => format!("UInt8.v {v}"),
+        "uint16_t" => format!("UInt16.v {v}"),
+        "uint32_t" => format!("UInt32.v {v}"),
+        "uint64_t" => format!("UInt64.v {v}"),
+        "size_t" => format!("SizeT.v {v}"),
+        "int8_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 8 (Int8.v {v})"),
+        "int16_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 16 (Int16.v {v})"),
+        "int32_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 32 (Int32.v {v})"),
+        "int64_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 64 (Int64.v {v})"),
+        "float32_t" => format!("Pulse.Lib.C.Palow.Float.float32_bits {v}"),
+        "float64_t" => format!("Pulse.Lib.C.Palow.Float.float64_bits {v}"),
+        _ => return None,
+    })
+}
+
+/// The size of the scalar Palow type `pn`, or `None` for an aggregate.
+fn scalar_pn_size(pn: &str) -> Option<u64> {
+    match repr_pn(pn) {
+        "bool_t" | "int8_t" | "uint8_t" => Some(1),
+        "int16_t" | "uint16_t" => Some(2),
+        "int32_t" | "uint32_t" | "float32_t" => Some(4),
+        "int64_t" | "uint64_t" | "size_t" | "float64_t" | "ptr" => Some(8),
+        _ => None,
     }
 }
 
@@ -350,6 +411,8 @@ const UNALIGNED_TYPES: &[&str] = &[
     "uint16_t",
     "uint32_t",
     "uint64_t",
+    "long_long_t",
+    "ulong_long_t",
     "size_t",
     "float32_t",
     "float64_t",
@@ -762,7 +825,7 @@ fn describe(ty: &Type) -> String {
     match &ty.val {
         TypeT::Void => "void".to_string(),
         TypeT::Bool => "_Bool".to_string(),
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             format!("{}int{}_t", if *signed { "" } else { "u" }, width)
         }
         TypeT::Pointer(..) => "a pointer".to_string(),
@@ -888,13 +951,22 @@ struct Chunk {
     origin: Option<Origin>,
 }
 
+/// An enumerated object accessed through its underlying integer type or that
+/// type's counterpart (6.5p7): the enumeration's own `read_as`/`write_as`
+/// operations, since a view back from the integer type to the enumeration is
+/// not available (compatibility is not transitive).
+fn enum_access(from: &str, to: &str) -> bool {
+    (from.starts_with("enum_u32_") || from.starts_with("enum_i32_"))
+        && matches!(to, "uint32_t" | "int32_t")
+}
+
 /// The Palow name of a C type: the prefix of its `_pts_to`, `_repr`, `_read`
 /// and `_sizeof` definitions. `None` for types the model does not cover yet.
 /// The F* module whose `v` takes a machine integer to a mathematical one.
 fn int_module(tds: &Typedefs, ty: &Type) -> Option<String> {
     // `peel`: a `_plain` or refined scalar is still that scalar.
     match &peel(tds, ty).val {
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             Some(format!("{}Int{}", if *signed { "" } else { "U" }, width))
         }
         TypeT::SizeT => Some("SizeT".to_string()),
@@ -931,9 +1003,17 @@ fn is_plain_chain(ty: &Type) -> bool {
 fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
     match &tds.resolve(ty).val {
         TypeT::Bool => Some("bool_t".to_string()),
-        TypeT::Int { signed, width } => {
-            Some(format!("{}int{}_t", if *signed { "" } else { "u" }, width))
-        }
+        TypeT::Int {
+            signed,
+            width,
+            ident,
+        } => Some(match ident {
+            IntIdent::Std => format!("{}int{}_t", if *signed { "" } else { "u" }, width),
+            IntIdent::LongLong => format!("{}long_long_t", if *signed { "" } else { "u" }),
+            IntIdent::Enum(tag) => {
+                format!("enum_{}{}_{}", if *signed { "i" } else { "u" }, width, tag)
+            }
+        }),
         TypeT::SizeT => Some("size_t".to_string()),
         // A float is an object with a size and an object representation, like
         // any other scalar; what is special about it lives in the arithmetic,
@@ -975,7 +1055,7 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
     match &tds.resolve(ty).val {
         TypeT::Void => Some("unit".to_string()),
         TypeT::Bool => Some("bool".to_string()),
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             Some(format!("{}Int{}.t", if *signed { "" } else { "U" }, width))
         }
         TypeT::SizeT => Some("SizeT.t".to_string()),
@@ -1424,8 +1504,7 @@ fn allocated_own(
              whose value the contract does not name",
         )?;
         return Ok(Some(format!(
-            "freeable {} ({}_flex_sizeof {})",
-            ptr, sn, val
+            "freeable {ptr} ({sn}_flex_sizeof {val}) ** pure (allocated_region {ptr} (SizeT.v ({sn}_flex_sizeof {val})))"
         )));
     }
     let n = palow_sizeof(tds, pt).ok_or_else(|| {
@@ -1434,7 +1513,9 @@ fn allocated_own(
             describe(tds.resolve(pt))
         )
     })?;
-    Ok(Some(format!("freeable {} {}sz", ptr, n)))
+    Ok(Some(format!(
+        "freeable {ptr} {n}sz ** pure (allocated_region {ptr} {n})"
+    )))
 }
 
 /// Whether a contract clause is the literal `false`.
@@ -1613,6 +1694,7 @@ fn is_shared(mode: ParamMode) -> bool {
 }
 
 struct FnSurface {
+    retained: BTreeSet<String>,
     /// `_out` array parameters: base name -> the term for the sequence of
     /// cells handed in. Their length is the one thing about them a contract
     /// -- including a loop invariant -- can talk about.
@@ -2059,6 +2141,27 @@ impl<'a> Spec<'a> {
         {
             {
                 let ty = self.ty_of(l)?;
+                // A floating-point comparison is the IEEE one the body would
+                // perform, a `bool`: there is no mathematical order to fall
+                // back to, since a NaN compares false with everything.
+                if let TypeT::Float {
+                    width: fw @ (32 | 64),
+                } = self.tds.resolve(&ty).val
+                {
+                    let f = match op {
+                        BinOp::Lt => "lt",
+                        BinOp::LEq => "lte",
+                        BinOp::Eq => "ieee_eq",
+                        _ => return Err("an unsupported operator in a contract".to_string()),
+                    };
+                    return Ok(format!(
+                        "(Float{}.{} {} {} == true)",
+                        fw,
+                        f,
+                        self.value(l, w)?,
+                        self.value(r, w)?
+                    ));
+                }
                 if matches!(op, BinOp::Eq) {
                     // `_Bool` equality is equivalence of the two conditions,
                     // not equality of two values: one side is often a
@@ -2324,7 +2427,12 @@ impl<'a> Spec<'a> {
         } else {
             (signed, width)
         };
-        let ty = TypeT::Int { signed, width }.with_loc(e.loc.clone());
+        let ty = TypeT::Int {
+            signed,
+            width,
+            ident: crate::ir::IntIdent::Std,
+        }
+        .with_loc(e.loc.clone());
         self.lower_bits(e, &ty)
     }
 
@@ -2335,7 +2443,7 @@ impl<'a> Spec<'a> {
             {
                 let t = self.ty_of(inner).ok()?;
                 match peel(self.tds, &t).val {
-                    TypeT::Int { signed, width } => Some((signed, width)),
+                    TypeT::Int { signed, width, .. } => Some((signed, width)),
                     _ => None,
                 }
             }
@@ -2357,7 +2465,7 @@ impl<'a> Spec<'a> {
     fn lower_bits(&self, e: &Expr, ty: &Rc<Type>) -> Option<Rc<Expr>> {
         let loc = e.loc.clone();
         let lit = |n: BigInt| -> Option<Rc<Expr>> {
-            let TypeT::Int { signed, width } = ty.val else {
+            let TypeT::Int { signed, width, .. } = ty.val else {
                 return None;
             };
             let m = BigInt::from(1) << width;
@@ -2409,7 +2517,7 @@ impl<'a> Spec<'a> {
                 _ => None,
             };
         }
-        let TypeT::Int { signed, width } = peel(self.tds, ty).val else {
+        let TypeT::Int { signed, width, .. } = peel(self.tds, ty).val else {
             return None;
         };
         let m = format!("{}Int{}", if signed { "" } else { "U" }, width);
@@ -2421,6 +2529,7 @@ impl<'a> Spec<'a> {
                 let TypeT::Int {
                     signed: rs,
                     width: rw,
+                    ..
                 } = peel(self.tds, &rty).val
                 else {
                     return None;
@@ -2930,6 +3039,7 @@ impl<'a> Spec<'a> {
                         TypeT::Int {
                             signed: false,
                             width,
+                            ..
                         },
                     ) => Ok(format!(
                         "(0{} `Pulse.Lib.C.UInt{}.sub_wrap` {})",
@@ -3515,6 +3625,7 @@ fn emit_fn(
     let mut pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut owned: Vec<OwnedParam> = Vec::new();
     let mut outs: Vec<OwnedParam> = Vec::new();
+    let mut retained: BTreeSet<String> = BTreeSet::new();
     let mut arrays: HashSet<String> = HashSet::new();
     let mut olens: HashMap<String, String> = HashMap::new();
     let mut owns: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
@@ -3783,65 +3894,126 @@ fn emit_fn(
         if null_guard {
             guarded.insert(base.clone());
         }
+        let retain_struct = tds
+            .structs
+            .get(pn.trim_start_matches("struct_"))
+            .is_some_and(|si| contextual_struct(tds, si));
+        let retain_array = extent(tds, &arg.ty) == Some(Extent::Array)
+            && !pn.starts_with("struct_")
+            && !pn.starts_with("union_")
+            && arg.mode != ParamMode::Consumed
+            && !null_guard
+            && !ens_own;
+        let retain_index = (extent(tds, &arg.ty) == Some(Extent::One)
+            && (!pn.starts_with("struct_") || retain_struct)
+            && !pn.starts_with("union_")
+            && !null_guard
+            && arg.mode != ParamMode::Consumed
+            && !ens_own)
+            || retain_array;
+        let index = format!("index_{}", base);
+        if retain_index {
+            let ity = if retain_struct {
+                format!("{pn}_index")
+            } else {
+                "ET.etypes".to_string()
+            };
+            ghosts.push(format!("(#{index}: erased {ity})"));
+            wits.push((index.clone(), ity, true));
+            retained.insert(pname.clone());
+        }
 
         // `T *p` owns one `T`; `T p[]` owns a sequence of them. Same F* type,
         // different contract.
-        let (vty, pts_to): (String, Box<dyn Fn(&str, &str) -> String>) =
-            match extent(tds, &arg.ty).unwrap() {
-                Extent::One => {
-                    let pn = pn.clone();
-                    let p = pname.clone();
-                    (
-                        vty,
-                        Box::new(move |perm: &str, v: &str| {
+        let (vty, pts_to): (String, Box<dyn Fn(&str, &str) -> String>) = match extent(tds, &arg.ty)
+            .unwrap()
+        {
+            Extent::One => {
+                let pn = pn.clone();
+                let p = pname.clone();
+                let index = index.clone();
+                (
+                    vty,
+                    Box::new(move |perm: &str, v: &str| {
+                        if retain_index {
+                            if retain_struct {
+                                if v.is_empty() {
+                                    format!("(fun x -> {pn}_pts_to_retained {index} {p} {perm} x) ")
+                                } else {
+                                    format!("{pn}_pts_to_retained {index} {p} {perm} {v}")
+                                }
+                            } else if v.is_empty() {
+                                format!(
+                                    "(fun x -> R.value {pn}_ctype {pn}_repr {pn}_alignof {p} {perm} x {index}) "
+                                )
+                            } else {
+                                format!(
+                                    "R.value {pn}_ctype {pn}_repr {pn}_alignof {p} {perm} {v} {index}"
+                                )
+                            }
+                        } else {
                             format!("{}_pts_to {} {} {}", pn, p, perm, v)
+                        }
+                    }),
+                )
+            }
+            Extent::Array => {
+                if !has_repr(tds, pt) {
+                    return Err(format!(
+                        "parameter {} is an array of {}, which has no byte-level `_repr`",
+                        pname,
+                        describe(tds.resolve(pt))
+                    ));
+                }
+                arrays.insert(base.clone());
+                let esize = palow_sizeof(tds, pt).ok_or_else(|| {
+                    format!("parameter {} is an array of {}", pname, describe(pt))
+                })?;
+                let pn = pn.clone();
+                let p = pname.clone();
+                let index = index.clone();
+                // `_out` says the callee is handed storage rather than a
+                // value, and storage is the `option` view: the length is
+                // fixed -- it is what the caller allocated -- but no
+                // element is promised to hold anything. Keeping the
+                // sequence as a binder rather than hiding it behind
+                // `array_pts_to_uninit` is what lets `a._length` go on
+                // meaning `Seq.length` of it.
+                if arg.mode == ParamMode::Out {
+                    (
+                        format!("Seq.seq (option ({}))", vty),
+                        Box::new(move |perm: &str, v: &str| {
+                            if retain_array {
+                                format!(
+                                    "RA.value {pn}_ctype (maybe_repr {pn}_repr {esize}) {esize} (SizeT.v {pn}_alignof) {index} {p} {perm} {v}"
+                                )
+                            } else {
+                                format!(
+                                    "array_pts_to {pn}_ctype (maybe_repr {pn}_repr {esize}) {esize} \
+                                     (SizeT.v {pn}_alignof) {p} {perm} {v}"
+                                )
+                            }
+                        }),
+                    )
+                } else {
+                    (
+                        format!("Seq.seq {}", vty),
+                        Box::new(move |perm: &str, v: &str| {
+                            if retain_array {
+                                format!(
+                                    "RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {index} {p} {perm} {v}"
+                                )
+                            } else {
+                                format!(
+                                    "array_pts_to {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} {} {}",
+                                    pn, esize, pn, p, perm, v
+                                )
+                            }
                         }),
                     )
                 }
-                Extent::Array => {
-                    if !has_repr(tds, pt) {
-                        return Err(format!(
-                            "parameter {} is an array of {}, which has no byte-level `_repr`",
-                            pname,
-                            describe(tds.resolve(pt))
-                        ));
-                    }
-                    arrays.insert(base.clone());
-                    let esize = palow_sizeof(tds, pt).ok_or_else(|| {
-                        format!("parameter {} is an array of {}", pname, describe(pt))
-                    })?;
-                    let pn = pn.clone();
-                    let p = pname.clone();
-                    // `_out` says the callee is handed storage rather than a
-                    // value, and storage is the `option` view: the length is
-                    // fixed -- it is what the caller allocated -- but no
-                    // element is promised to hold anything. Keeping the
-                    // sequence as a binder rather than hiding it behind
-                    // `array_pts_to_uninit` is what lets `a._length` go on
-                    // meaning `Seq.length` of it.
-                    if arg.mode == ParamMode::Out {
-                        (
-                            format!("Seq.seq (option ({}))", vty),
-                            Box::new(move |perm: &str, v: &str| {
-                                format!(
-                                    "array_pts_to (maybe_repr {pn}_repr {esize}) {esize} \
-                                     (SizeT.v {pn}_alignof) {p} {perm} {v}"
-                                )
-                            }),
-                        )
-                    } else {
-                        (
-                            format!("Seq.seq {}", vty),
-                            Box::new(move |perm: &str, v: &str| {
-                                format!(
-                                    "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} {} {}",
-                                    pn, esize, pn, p, perm, v
-                                )
-                            }),
-                        )
-                    }
-                }
-            };
+            }
+        };
         // The deep half of the parameter's ownership. A struct pointer in C
         // almost always means the struct *and* what its pointers reach; the
         // two are separate predicates here, so the contract states both. A
@@ -3940,7 +4112,15 @@ fn emit_fn(
             // a `ref t` always holds a `t` -- and here it is just the
             // uninitialised points-to.
             ParamMode::Out if extent(tds, &arg.ty) == Some(Extent::One) => {
-                req.push(format!("{}_pts_to_uninit {}", pn, pname));
+                req.push(if retain_index {
+                    if retain_struct {
+                        format!("{pn}_pts_to_uninit_retained {index} {pname}")
+                    } else {
+                        format!("R.storage {pn}_ctype {pn}_alignof {pname} {index}")
+                    }
+                } else {
+                    format!("{}_pts_to_uninit {}", pn, pname)
+                });
                 if !storable_struct(tds, pt) {
                     outs.push(OwnedParam {
                         base: base.clone(),
@@ -3976,11 +4156,13 @@ fn emit_fn(
                 fresh.push((
                     format!("{}'", vname),
                     format!("Seq.seq {}", plain),
-                    format!(
-                        "array_pts_to {pn}_repr {esize} (SizeT.v {pn}_alignof) \
+                    if retain_array {format!(
+                        "RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {index} {pname} 1.0R {vname}' ** pure (Seq.length {vname}' == Seq.length (reveal {vname}))"
+                    )} else {format!(
+                        "array_pts_to {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) \
                          {pname} 1.0R {vname}' ** \
                          pure (Seq.length {vname}' == Seq.length (reveal {vname}))"
-                    ),
+                    )},
                 ));
                 olens.insert(base.clone(), format!("(reveal {})", vname));
                 pointees.insert(base, (None, Some(format!("{}'", vname))));
@@ -5208,7 +5390,9 @@ fn emit_fn(
         && ret_block.is_none()
         && is_void_ptr(tds, &decl.ret_type)
         && (out.contains(&format!("mem_pts_to ({})", ret_name))
-            || out.contains(&format!("mem_pts_to {}", ret_name)))
+            || out.contains(&format!("mem_pts_to {}", ret_name))
+            || out.contains(&format!("mem_pts_to_at ({})", ret_name))
+            || out.contains(&format!("mem_pts_to_at {}", ret_name)))
     {
         ret_block = Some(RetBlock {
             pn: String::new(),
@@ -5457,6 +5641,7 @@ fn emit_fn(
     }
 
     Ok(FnSurface {
+        retained,
         olens,
         ret_spliced: contract_ok && !(ret_slprops.is_empty() && ret_valued.is_empty()),
         req_props,
@@ -5554,7 +5739,7 @@ const HEADER: &str = r#"(* Generated by pal.
 fn scalar_shape(tds: &Typedefs, ty: &Type) -> Option<(u64, bool, bool)> {
     match &tds.resolve(ty).val {
         TypeT::Bool => Some((1, true, false)),
-        TypeT::Int { signed, width } => Some((*width as u64 / 8, false, *signed)),
+        TypeT::Int { signed, width, .. } => Some((*width as u64 / 8, false, *signed)),
         _ => None,
     }
 }
@@ -5646,6 +5831,7 @@ fn bit_unit(
     let ty = TypeT::Int {
         signed: false,
         width: (us * 8) as u32,
+        ident: crate::ir::IntIdent::Std,
     }
     .with_loc(loc.clone());
     Ok((format!("bits{}", start), ty, start, members))
@@ -6095,6 +6281,49 @@ fn collect_union(
 /// member also represent any other member they happen to encode, and that
 /// non-injectivity is exactly what makes type punning expressible rather than
 /// a thing to be ruled out.
+/// The Palow names of the live member `l` and the member `m` read in its
+/// place, when the union can be reread from the one to the other; see
+/// `emit_union`.
+fn rereadable<'a>(l: &'a UnionMember, m: &'a UnionMember) -> Option<(&'a str, &'a str)> {
+    const SOURCES: &[&str] = &[
+        "bool_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "long_long_t",
+        "ulong_long_t",
+        "size_t",
+        "float32_t",
+        "float64_t",
+    ];
+    const TARGETS: &[&str] = &[
+        "bool_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "long_long_t",
+        "ulong_long_t",
+    ];
+    let (FieldShape::One { pn: lpn }, FieldShape::One { pn: mpn }) = (&l.shape, &m.shape) else {
+        return None;
+    };
+    (l.name != m.name
+        && m.size <= l.size
+        && SOURCES.contains(&lpn.as_str())
+        && TARGETS.contains(&mpn.as_str()))
+    .then_some((lpn.as_str(), mpn.as_str()))
+}
+
 fn emit_union(tds: &Typedefs, name: &str) -> String {
     let ui = &tds.unions[name];
     let un = format!("union_{}", name);
@@ -6198,12 +6427,16 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         un = un
     );
 
+    // Public member owners do not carry a union-context loan. Restrict this
+    // lowering to declared indexes, and remember the actual enclosing index
+    // before handing a member out; allocated union switching needs a separate
+    // modifying-access adapter rather than a fabricated nominal snapshot.
     c += &format!(
         "let {un}_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop =\n  \
-         exists* b. mem_pts_to a p b ** pure ({un}_repr u b /\\ aligned a {un}_alignof)\n\n\
+         exists* b e. mem_pts_to_at a p b e ** pure ({un}_repr u b /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n\n\
          let {un}_pts_to_uninit ([@@@mkey] a: ptr) : slprop =\n  \
-         exists* b. mem_pts_to a 1.0R b\n             \
-         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\n",
+         exists* b e. mem_pts_to_at a 1.0R b e\n             \
+         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n\n",
         un = un
     );
 
@@ -6211,6 +6444,20 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         let mty = field_type(tds, &m.ty).unwrap();
         let k = ctor(m);
         let f = &m.name;
+        let mut permission = if m.size == 0 {
+            String::new()
+        } else {
+            format!(
+                "ET.read_ok_slice e {un}_ctype 0 ({});",
+                ctype_of_shape(&m.shape).unwrap()
+            )
+        };
+        if let FieldShape::Array { pn, len, .. } = &m.shape {
+            permission += &format!(
+                "\n  array_read_ok_from_type {pn}_ctype {len} (Seq.slice e 0 {});",
+                m.size
+            );
+        }
         let at = "a";
         let mem_pts_to = |p: &str, v: &str| m.shape.pts_to_at(at, p, v);
         let mem_uninit = m.shape.uninit_at(at);
@@ -6220,8 +6467,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         // is shorter than telling them apart.
         c += &format!(
             "let {un}_rest_{f} (a: ptr) (p: perm) : slprop =\n  \
-             exists* r. mem_pts_to (a +! {msz}sz) p r\n             \
-             ** pure (len r == {rest} /\\ aligned a {un}_alignof)\n\n",
+             exists* (base: ET.etypes {{ ET.elen base == SizeT.v {un}_sizeof }}) r. mem_pts_to_at (a +! {msz}sz) p r (Seq.slice base {msz} (ET.elen base))\n             \
+             ** pure (len r == {rest} /\\ aligned a {un}_alignof /\\ fixed_metadata a base /\\ ET.declared_destination base /\\ ET.read_ok base {un}_ctype)\n\n",
             un = un,
             f = f,
             msz = m.size,
@@ -6234,9 +6481,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              \x20 ensures  {un}_rest_{f} a p\n\
              {{\n  \
              unfold {un}_pts_to a p ({k} v);\n  \
-             with b. assert (mem_pts_to a p b ** pure ({un}_repr ({k} v) b));\n  \
+             with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr ({k} v) b /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  \
              {un}_member_aligned a;\n  \
-             mem_split a {msz}sz;\n  \
+             remember_fixed_metadata a;\n  \
+             {permission}\n  \
+             mem_split_at a {msz}sz;\n  \
              {conceal}\n  \
              fold {un}_rest_{f} a p;\n}}\n\n",
             un = un,
@@ -6247,7 +6496,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
                 .shape
                 .conceal("a", "p", &format!("(slice b 0 {})", m.size), "v"),
             mty = mty,
-            msz = m.size
+            msz = m.size,
+            permission = permission
         );
         c += &format!(
             "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#v: {mty})\n\
@@ -6256,10 +6506,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              \x20 ensures  {un}_pts_to a p ({k} v)\n\
              {{\n  \
              {reveal}\n  \
-             with bx. assert (mem_pts_to a p bx ** pure ({repr}));\n  \
+             with bx ex. assert (mem_pts_to_at a p bx ex ** pure ({repr} /\\ ET.elen ex == len bx));\n  \
              unfold {un}_rest_{f} a p;\n  \
-             with r. assert (mem_pts_to (a +! {msz}sz) p r);\n  \
-             mem_join a #p #bx #r {msz}sz;\n  \
+             with base r. assert (mem_pts_to_at (a +! {msz}sz) p r (Seq.slice base {msz} (ET.elen base)) ** pure (len r == {rest} /\\ fixed_metadata a base /\\ ET.declared_destination base /\\ ET.read_ok base {un}_ctype));\n  \
+             mem_join_at a #p #bx #r {msz}sz;\n  \
+             fixed_metadata_index a #p #(append bx r) #_ #base;\n  \
              append_slice_left bx r;\n  \
              fold {un}_pts_to a p ({k} v);\n}}\n\n",
             un = un,
@@ -6269,7 +6520,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             reveal = m.shape.reveal("a", "p", "v"),
             repr = m.shape.repr_of("v", "bx"),
             mty = mty,
-            msz = m.size
+            msz = m.size,
+            rest = ui.size - m.size
         );
         // Making a member active is not a focus: the union may currently hold
         // any member at all, so there is no value to hand out, only storage.
@@ -6281,9 +6533,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              \x20 ensures  {un}_rest_{f} a 1.0R\n\
              {{\n  \
              unfold {un}_pts_to a 1.0R u;\n  \
-             with b. assert (mem_pts_to a 1.0R b ** pure ({un}_repr u b));\n  \
+             with b e. assert (mem_pts_to_at a 1.0R b e ** pure ({un}_repr u b /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  \
              {un}_member_aligned a;\n  \
-             mem_split a {msz}sz;\n  \
+             remember_fixed_metadata a;\n  \
+             {permission}\n  \
+             mem_split_at a {msz}sz;\n  \
              {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
@@ -6292,7 +6546,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             claim = m
                 .shape
                 .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
-            msz = m.size
+            msz = m.size,
+            permission = permission
         );
         // The same step from storage that has never held anything. A local
         // union starts out as bytes with nothing said about them, and `union
@@ -6307,9 +6562,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
              \x20 ensures  {un}_rest_{f} a 1.0R\n\
              {{\n  \
              unfold {un}_pts_to_uninit a;\n  \
-             with b. assert (mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof));\n  \
+             with b e. assert (mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  \
              {un}_member_aligned a;\n  \
-             mem_split a {msz}sz;\n  \
+             remember_fixed_metadata a;\n  \
+             {permission}\n  \
+             mem_split_at a {msz}sz;\n  \
              {claim}\n  \
              fold {un}_rest_{f} a 1.0R;\n}}\n\n",
             un = un,
@@ -6318,7 +6575,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             claim = m
                 .shape
                 .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
-            msz = m.size
+            msz = m.size,
+            permission = permission
         );
     }
 
@@ -6366,7 +6624,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
                 let FieldShape::One { pn: fpn } = &fld.shape else {
                     continue;
                 };
-                if fpn != lpn {
+                if fpn != lpn || !same_pointer_object_type(tds, &l.ty, &fld.ty) {
                     continue;
                 }
                 c += &format!(
@@ -6399,28 +6657,72 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         }
     }
 
+    // Rereading the union through another member (6.5.2.3p3, footnote 95):
+    // the bytes the live member left are reinterpreted as the other member.
+    // Only where that is a value for every such byte pattern is it offered:
+    // an integer read of the bytes of a scalar without provenance, no wider
+    // than it -- the bytes past the live member are unspecified (6.2.6.1p7).
+    // A `_Bool` read additionally has to establish that the byte is 0 or 1
+    // (6.2.6.1p5), which is the precondition the caller is left with.
+    for l in &ui.members {
+        for m in &ui.members {
+            let Some((lpn, mpn)) = rereadable(l, m) else {
+                continue;
+            };
+            let lty = field_type(tds, &l.ty).unwrap();
+            let mty = field_type(tds, &m.ty).unwrap();
+            let valid = if mpn == "bool_t" {
+                format!(
+                    "\x20 requires pure (forall (b: bytes). {lpn}_repr v b ==> Pulse.Lib.C.Palow.RawBytes.bool_t_valid (slice b 0 1))\n"
+                )
+            } else {
+                String::new()
+            };
+            c += &format!(
+                "ghost fn {un}_reread_{l}_{m} (a: ptr) (#p: perm) (#v: {lty})\n\
+                 \x20 requires {un}_pts_to a p ({kl} v)\n\
+                 {valid}\
+                 \x20 ensures  exists* (w: {mty}). {un}_pts_to a p ({km} w)\n\
+                 {{\n  \
+                 unfold {un}_pts_to a p ({kl} v);\n  \
+                 with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr ({kl} v) b));\n  \
+                 {lpn}_repr_no_prov v (slice b 0 {lsz});\n  \
+                 Pulse.Lib.C.Palow.RawBytes.defined_slice (slice b 0 {lsz}) 0 {msz};\n  \
+                 slice_prefix b {lsz} 0 {msz};\n  \
+                 Pulse.Lib.C.Palow.RawBytes.{mpn}_decode (slice b 0 {msz});\n  \
+                 fold {un}_pts_to a p ({km} (Pulse.Lib.C.Palow.RawBytes.{mpn}_of_bytes (slice b 0 {msz})));\n}}\n\n",
+                l = l.name,
+                m = m.name,
+                kl = ctor(l),
+                km = ctor(m),
+                lsz = l.size,
+                msz = m.size,
+            );
+        }
+    }
+
     // The same three names the scalar layer publishes, so that a union can be
     // a struct field or an array element without anything downstream having to
     // know it is a union: storage in, storage out, and the loss of knowledge
     // in between.
     c += &format!(
-        "ghost fn {un}_claim_uninit (a: ptr) (#b: bytes)\n\
-         \x20 requires mem_pts_to a 1.0R b\n\
-         \x20 requires pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\
+        "ghost fn {un}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
+         \x20 requires mem_pts_to_at a 1.0R b e\n\
+         \x20 requires pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n\
          \x20 ensures  {un}_pts_to_uninit a\n\
          {{\n  fold {un}_pts_to_uninit a;\n}}\n\n\
          ghost fn {un}_reveal_uninit (a: ptr)\n\
          \x20 requires {un}_pts_to_uninit a\n\
-         \x20 ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof)\n\
+         \x20 ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n\
          {{\n  unfold {un}_pts_to_uninit a;\n}}\n\n\
-         ghost fn {un}_conceal (a: ptr) (#p: perm) (#b: bytes) (#u: {un})\n\
-         \x20 requires mem_pts_to a p b\n\
-         \x20 requires pure ({un}_repr u b /\\ aligned a {un}_alignof)\n\
+         ghost fn {un}_conceal (a: ptr) (#p: perm) (#b: bytes) (#u: {un}) (#e: ET.etypes)\n\
+         \x20 requires mem_pts_to_at a p b e\n\
+         \x20 requires pure ({un}_repr u b /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n\
          \x20 ensures  {un}_pts_to a p u\n\
          {{\n  fold {un}_pts_to a p u;\n}}\n\n\
          ghost fn {un}_reveal (a: ptr) (#p: perm) (#u: {un})\n\
          \x20 requires {un}_pts_to a p u\n\
-         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({un}_repr u b)\n\
+         \x20 ensures  exists* b e. mem_pts_to_at a p b e ** pure ({un}_repr u b /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n\
          {{\n  unfold {un}_pts_to a p u;\n}}\n\n",
         un = un
     );
@@ -6433,8 +6735,10 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          \x20 requires emp\n\
          \x20 returns  a: ptr\n\
          \x20 ensures  {un}_pts_to_uninit a\n\
-         {{\n  let a = mem_stack_alloc {un}_sizeof;\n  \
+         \x20 ensures  pure (fixed_metadata a (ET.etypes_of {un}_ctype true))\n\
+         {{\n  let a = mem_stack_alloc {un}_sizeof (hide {un}_ctype);\n  \
          aligned_divides a max_align {un}_alignof;\n  \
+         ET.read_ok_of {un}_ctype true;\n  \
          fold {un}_pts_to_uninit a;\n  a\n}}\n\n\
          fn {un}_stack_free (a: ptr)\n\
          \x20 requires {un}_pts_to_uninit a\n\
@@ -6454,11 +6758,27 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         un = un
     );
     for m in &ui.members {
+        let mut permission = if m.size == 0 {
+            String::new()
+        } else {
+            format!(
+                "ET.read_ok_slice e {un}_ctype 0 ({});",
+                ctype_of_shape(&m.shape).unwrap()
+            )
+        };
+        if let FieldShape::Array { pn, len, .. } = &m.shape {
+            permission += &format!(
+                "\n      array_read_ok_from_type {pn}_ctype {len} (Seq.slice e 0 {});",
+                m.size
+            );
+        }
         c += &format!(
             "    {k} v -> {{\n      \
-             with b. assert (mem_pts_to a 1.0R b);\n      \
+             with b e. assert (mem_pts_to_at a 1.0R b e ** pure (ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n      \
              {un}_member_aligned a;\n      \
-             mem_split a {msz}sz;\n      \
+             remember_fixed_metadata a;\n      \
+             {permission}\n      \
+             mem_split_at a {msz}sz;\n      \
              {claim}\n      \
              {write}\n      \
              fold {un}_rest_{f} a 1.0R;\n      \
@@ -6471,7 +6791,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
                 .claim_uninit("a", &format!("(slice b 0 {})", m.size)),
             write = m.shape.write_uninit("a", "v"),
             un = un,
-            msz = m.size
+            msz = m.size,
+            permission = permission
         );
     }
     c += "  }\n}\n\n";
@@ -6482,7 +6803,693 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          {{\n  {un}_forget a;\n  {un}_write_uninit a x;\n}}\n\n",
         un = un
     );
+    if active_pointer_members(tds, ui).is_some() {
+        c = emit_active_pointer_union(tds, name, c);
+    }
+    if union_heap_capable(tds, ui) {
+        c += &emit_heap_union(tds, name);
+    }
     c
+}
+
+/// A member a union in allocated storage can be stored whole as and read
+/// back through: a scalar without provenance, which has a byte encoding and
+/// a typed read at an exact index.
+fn heap_member(m: &UnionMember) -> Option<&str> {
+    match &m.shape {
+        FieldShape::One { pn } if m.size > 0 && heap_scalar(pn) => Some(pn.as_str()),
+        _ => None,
+    }
+}
+
+/// Whether a scalar is one `heap_member` accepts.
+fn heap_scalar(pn: &str) -> bool {
+    const HEAP: &[&str] = &[
+        "bool_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "long_long_t",
+        "ulong_long_t",
+        "size_t",
+        "float32_t",
+        "float64_t",
+    ];
+    HEAP.contains(&pn)
+}
+
+/// A struct member a union in allocated storage can be stored whole as, and
+/// whose fields are read in place: one with nothing but `heap_scalar` fields
+/// and no invariant, so that it has a byte encoding (`_encode`) and each
+/// field a typed read at its offset. The struct's Palow name and its fields.
+fn heap_struct_member<'a>(
+    tds: &'a Typedefs,
+    m: &UnionMember,
+) -> Option<(String, &'a [StructField])> {
+    let FieldShape::One { pn } = &m.shape else {
+        return None;
+    };
+    let si = tds.structs.get(pn.strip_prefix("struct_")?)?;
+    (m.size > 0
+        && si.inv.is_none()
+        && si.bitfields.is_empty()
+        && !si.fields.is_empty()
+        && si.fields.iter().all(|f| {
+            f.inv.is_none() && matches!(&f.shape, FieldShape::One { pn } if heap_scalar(pn))
+        }))
+    .then(|| (pn.clone(), si.fields.as_slice()))
+}
+
+/// Whether a union gets the allocated-storage family `_heap`.
+fn union_heap_capable(tds: &Typedefs, ui: &UnionInfo) -> bool {
+    active_pointer_members(tds, ui).is_none()
+        && ui
+            .members
+            .iter()
+            .any(|m| heap_member(m).is_some() || heap_struct_member(tds, m).is_some())
+}
+
+/// A union in allocated storage (C11 6.5p6): a store of the whole union
+/// through an lvalue of union type makes the union the effective type of the
+/// bytes, and from then on every member is read through the union.
+///
+/// The declared family cannot say this. It leans on declared bytes never
+/// changing type, which is what lets it hand a member out and recover the
+/// union's types when it comes back. Allocated bytes have no such snapshot,
+/// so this family never hands a member out: the bytes keep exactly the index
+/// `Machine.initialize` gave them -- the union's own -- and a member read is
+/// a typed read at a slice of that index, put back before it returns. That
+/// is also why it has no member store: a store through a member lvalue
+/// installs the member's type, not the union's (24.1).
+///
+/// Only members that are provenance-free scalars are stored or read; the
+/// reread between them is the declared family's, at this predicate.
+fn emit_heap_union(tds: &Typedefs, name: &str) -> String {
+    let ui = &tds.unions[name];
+    let un = format!("union_{}", name);
+    let ctor = |m: &UnionMember| format!("Union_{}_{}", name, m.name);
+    let size = ui.members.iter().map(|m| m.size).max().unwrap_or(0);
+    let mut c = String::new();
+    c += &format!(
+        "let {un}_heap_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop =\n  \
+         exists* b. mem_pts_to_at a p b (ET.etypes_of {un}_ctype false) ** pure ({un}_repr u b /\\ aligned a {un}_alignof)\n\n\
+         let {un}_heap_pts_to_uninit ([@@@mkey] a: ptr) : slprop =\n  \
+         exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b)\n\n\
+         let {un}_heap_storable (x: {un}) : bool =\n  match x with\n"
+    );
+    for m in &ui.members {
+        c += &format!(
+            "  | {} _ -> {}\n",
+            ctor(m),
+            heap_member(m).is_some() || heap_struct_member(tds, m).is_some()
+        );
+    }
+    c += &format!(
+        "\nlet {un}_heap_encode (x: {un} {{ {un}_heap_storable x }}) : b:bytes {{ {un}_repr x b /\\ initialized b }} =\n  match x with\n"
+    );
+    for m in &ui.members {
+        let Some(pn) = heap_member(m) else {
+            if let Some((sn, _)) = heap_struct_member(tds, m) {
+                c += &format!(
+                    "  | {k} v ->\n    \
+                     let r0 = {sn}_encode v in\n    \
+                     let r1 = zeroed {rest} in\n    \
+                     initialized_append r0 r1;\n    \
+                     append_slice_left r0 r1;\n    \
+                     append r0 r1\n",
+                    k = ctor(m),
+                    rest = size - m.size,
+                );
+            }
+            continue;
+        };
+        c += &format!(
+            "  | {k} v ->\n    \
+             let r0 = Pulse.Lib.C.Palow.Encoding.encode {msz} None ({bits}) in\n    \
+             let r1 = zeroed {rest} in\n    \
+             initialized_append r0 r1;\n    \
+             append_slice_left r0 r1;\n    \
+             append r0 r1\n",
+            k = ctor(m),
+            msz = m.size,
+            bits = scalar_bits(pn, "v").unwrap(),
+            rest = size - m.size,
+        );
+    }
+    c += &format!(
+        "\nfn {un}_heap_initialize (a: ptr) (x: {un})\n\
+         \x20 requires Pulse.Lib.C.Palow.Effective.prepared a {un}_ctype\n\
+         \x20 requires pure (aligned a {un}_alignof /\\ {un}_heap_storable x)\n\
+         \x20 ensures  {un}_heap_pts_to a 1.0R x\n\
+         {{\n  let b = {un}_heap_encode x;\n  \
+         Pulse.Lib.C.Palow.Effective.Machine.initialize a (hide {un}_ctype) b;\n  \
+         fold {un}_heap_pts_to a 1.0R x;\n}}\n\n\
+         ghost fn {un}_heap_forget (a: ptr) (#u: {un})\n\
+         \x20 requires {un}_heap_pts_to a 1.0R u\n\
+         \x20 ensures  {un}_heap_pts_to_uninit a\n\
+         {{\n  unfold {un}_heap_pts_to a 1.0R u;\n  fold {un}_heap_pts_to_uninit a;\n}}\n\n\
+         ghost fn {un}_heap_reveal_uninit (a: ptr)\n\
+         \x20 requires {un}_heap_pts_to_uninit a\n\
+         \x20 ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b)\n\
+         {{\n  unfold {un}_heap_pts_to_uninit a;\n}}\n\n"
+    );
+    for m in &ui.members {
+        let Some(pn) = heap_member(m) else {
+            continue;
+        };
+        let mty = field_type(tds, &m.ty).unwrap();
+        c += &format!(
+            "fn {un}_heap_read_{f} (a: ptr) (#p: perm) (#v: erased ({mty}))\n\
+             \x20 preserves {un}_heap_pts_to a p ({k} v)\n\
+             \x20 returns  y: {mty}\n\
+             \x20 ensures  pure (y == reveal v)\n\
+             {{\n  \
+             unfold {un}_heap_pts_to a p ({k} v);\n  \
+             with b. assert (mem_pts_to_at a p b (ET.etypes_of {un}_ctype false));\n  \
+             {un}_member_aligned a;\n  \
+             ET.read_ok_of {un}_ctype false;\n  \
+             ET.read_ok_slice (ET.etypes_of {un}_ctype false) {un}_ctype 0 {pn}_ctype;\n  \
+             mem_split_at a {msz}sz;\n  \
+             Pulse.Lib.C.Palow.Effective.Value.claim {pn}_ctype {pn}_repr {pn}_alignof a #p #(reveal v) #(slice b 0 {msz});\n  \
+             let y = {pn}_read_at a;\n  \
+             Pulse.Lib.C.Palow.Effective.Value.reveal_value {pn}_ctype {pn}_repr {pn}_alignof a;\n  \
+             with bx. assert (mem_pts_to_at a p bx (Seq.slice (ET.etypes_of {un}_ctype false) 0 {msz}));\n  \
+             mem_join_at a {msz}sz;\n  \
+             append_slice_left bx (slice b {msz} {size});\n  \
+             Seq.lemma_split (ET.etypes_of {un}_ctype false) {msz};\n  \
+             fold {un}_heap_pts_to a p ({k} v);\n  \
+             y\n}}\n\n",
+            f = m.name,
+            k = ctor(m),
+            msz = m.size,
+        );
+    }
+    // A read of one field of a live struct member, in place: a typed read at
+    // the field's slice of the union's index, which the bytes keep.
+    for m in &ui.members {
+        let Some((sn, fields)) = heap_struct_member(tds, m) else {
+            continue;
+        };
+        for f in fields {
+            let pn = f.shape.pn();
+            let fty = field_type(tds, &f.ty).unwrap();
+            let (off, fsz) = (f.offset, f.size);
+            let at = if off == 0 {
+                "a".to_string()
+            } else {
+                format!("(a +! {sn}_offsetof_{})", f.name)
+            };
+            let mut body = format!(
+                "  unfold {un}_heap_pts_to a p ({k} v);\n  \
+                 with b. assert (mem_pts_to_at a p b (ET.etypes_of {un}_ctype false));\n  \
+                 {un}_member_aligned a;\n  \
+                 {aligned};\n  \
+                 ET.read_ok_of {un}_ctype false;\n  \
+                 assert_norm (ET.access_ok {un}_ctype {off} {pn}_ctype /\\ ET.compose_ok {un}_ctype {pn}_ctype);\n  \
+                 ET.read_ok_slice (ET.etypes_of {un}_ctype false) {un}_ctype {off} {pn}_ctype;\n  \
+                 slice_prefix b {msz} {off} {end};\n  \
+                 {pn}_repr_no_prov (reveal v).fld_{f} (slice b {off} {end});\n",
+                k = ctor(m),
+                f = f.name,
+                msz = m.size,
+                end = off + fsz,
+                aligned = if off == 0 {
+                    format!("aligned_divides a {sn}_alignof {pn}_alignof")
+                } else {
+                    format!(
+                        "aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof",
+                        f.name
+                    )
+                },
+            );
+            if off > 0 {
+                body += &format!(
+                    "  mem_split_at a {sn}_offsetof_{f};\n  \
+                     slice_suffix b {off} 0 {fsz};\n  \
+                     Seq.slice_slice (ET.etypes_of {un}_ctype false) {off} {size} 0 {fsz};\n",
+                    f = f.name
+                );
+            }
+            if off + fsz < size {
+                body += &format!("  mem_split_at {at} {fsz}sz;\n");
+            }
+            body += &format!(
+                "  let y = Pulse.Lib.C.Palow.Machine.Intrinsics.{pn}_read_at {at} #p #(hide (reveal v).fld_{f});\n",
+                f = f.name
+            );
+            if off + fsz < size {
+                body += &format!("  mem_join_at {at} {fsz}sz;\n");
+                if off > 0 {
+                    body += &format!(
+                        "  slice_append (slice b {off} (len b)) {fsz};\n  \
+                         Seq.lemma_split (Seq.slice (ET.etypes_of {un}_ctype false) {off} {size}) {fsz};\n"
+                    );
+                } else {
+                    body += &format!(
+                        "  slice_append b {fsz};\n  \
+                         Seq.lemma_split (ET.etypes_of {un}_ctype false) {fsz};\n"
+                    );
+                }
+            }
+            if off > 0 {
+                body += &format!(
+                    "  mem_join_at a {sn}_offsetof_{f};\n  \
+                     slice_append b {off};\n  \
+                     Seq.lemma_split (ET.etypes_of {un}_ctype false) {off};\n",
+                    f = f.name
+                );
+            }
+            c += &format!(
+                "fn {un}_heap_read_{m}_{f} (a: ptr) (#p: perm) (#v: erased {sn})\n\
+                 \x20 preserves {un}_heap_pts_to a p ({k} v)\n\
+                 \x20 returns  y: {fty}\n\
+                 \x20 ensures  pure (y == (reveal v).fld_{f})\n\
+                 {{\n{body}  fold {un}_heap_pts_to a p ({k} v);\n  y\n}}\n\n",
+                m = m.name,
+                f = f.name,
+                k = ctor(m),
+            );
+        }
+    }
+    // A character read of one byte of the live member, for `u->b[i]` with
+    // `b` an `unsigned char` array member (see `heap_union_byte`).
+    let bytes = ui
+        .members
+        .iter()
+        .any(|m| matches!(&m.shape, FieldShape::Array { pn, esize: 1, .. } if pn == "uint8_t"));
+    for m in ui.members.iter().filter(|_| bytes) {
+        let Some(pn) = heap_member(m) else {
+            continue;
+        };
+        let mty = field_type(tds, &m.ty).unwrap();
+        c += &format!(
+            "fn {un}_heap_read_byte_{f} (a: ptr) (i: SizeT.t) (#p: perm) (#v: erased ({mty}))\n\
+             \x20 preserves {un}_heap_pts_to a p ({k} v)\n\
+             \x20 requires pure (SizeT.v i < {msz})\n\
+             \x20 returns  y: UInt8.t\n\
+             {{\n  \
+             unfold {un}_heap_pts_to a p ({k} v);\n  \
+             with b. assert (mem_pts_to_at a p b (ET.etypes_of {un}_ctype false) ** pure ({un}_repr ({k} v) b));\n  \
+             {pn}_repr_no_prov v (slice b 0 {msz});\n  \
+             Pulse.Lib.C.Palow.RawBytes.initialized_value (slice b 0 {msz}) (SizeT.v i);\n  \
+             ET.read_ok_of {un}_ctype false;\n  \
+             Pulse.Lib.C.Palow.RawBytes.read_ok_wf (ET.etypes_of {un}_ctype false) {un}_ctype;\n  \
+             let y = Pulse.Lib.C.Palow.RawBytes.byte_load a i;\n  \
+             fold {un}_heap_pts_to a p ({k} v);\n  \
+             y\n}}\n\n",
+            f = m.name,
+            k = ctor(m),
+            msz = m.size,
+        );
+    }
+    for l in &ui.members {
+        for m in &ui.members {
+            let Some((lpn, mpn)) = rereadable(l, m) else {
+                continue;
+            };
+            let lty = field_type(tds, &l.ty).unwrap();
+            let mty = field_type(tds, &m.ty).unwrap();
+            let valid = if mpn == "bool_t" {
+                format!(
+                    "\x20 requires pure (forall (b: bytes). {lpn}_repr v b ==> Pulse.Lib.C.Palow.RawBytes.bool_t_valid (slice b 0 1))\n"
+                )
+            } else {
+                String::new()
+            };
+            c += &format!(
+                "ghost fn {un}_heap_reread_{l}_{m} (a: ptr) (#p: perm) (#v: {lty})\n\
+                 \x20 requires {un}_heap_pts_to a p ({kl} v)\n\
+                 {valid}\
+                 \x20 ensures  exists* (w: {mty}). {un}_heap_pts_to a p ({km} w)\n\
+                 {{\n  \
+                 unfold {un}_heap_pts_to a p ({kl} v);\n  \
+                 with b. assert (mem_pts_to_at a p b (ET.etypes_of {un}_ctype false) ** pure ({un}_repr ({kl} v) b));\n  \
+                 {lpn}_repr_no_prov v (slice b 0 {lsz});\n  \
+                 Pulse.Lib.C.Palow.RawBytes.defined_slice (slice b 0 {lsz}) 0 {msz};\n  \
+                 slice_prefix b {lsz} 0 {msz};\n  \
+                 Pulse.Lib.C.Palow.RawBytes.{mpn}_decode (slice b 0 {msz});\n  \
+                 fold {un}_heap_pts_to a p ({km} (Pulse.Lib.C.Palow.RawBytes.{mpn}_of_bytes (slice b 0 {msz})));\n}}\n\n",
+                l = l.name,
+                m = m.name,
+                kl = ctor(l),
+                km = ctor(m),
+                lsz = l.size,
+                msz = m.size,
+            );
+        }
+    }
+    c
+}
+
+fn active_pointer_members<'a>(tds: &Typedefs, ui: &'a UnionInfo) -> Option<Vec<&'a UnionMember>> {
+    let first = ui
+        .members
+        .iter()
+        .find(|m| m.size > 0 && matches!(&m.shape, FieldShape::One { pn } if pn == "ptr"))?;
+    Some(
+        ui.members
+            .iter()
+            .filter(|m| {
+                m.size == first.size
+                    && matches!(&m.shape, FieldShape::One { pn } if pn == "ptr")
+                    && same_pointer_object_type(tds, &first.ty, &m.ty)
+            })
+            .collect(),
+    )
+}
+
+fn emit_active_pointer_union(tds: &Typedefs, name: &str, mut c: String) -> String {
+    let ui = &tds.unions[name];
+    let un = format!("union_{name}");
+    let members = active_pointer_members(tds, ui).unwrap();
+    let member_size = members[0].size;
+    for operation in [
+        "pts_to",
+        "rest_",
+        "focus_",
+        "unfocus_",
+        "switch_",
+        "forget",
+        "write",
+        "reveal",
+        "conceal",
+        "claim_uninit",
+        "stack_alloc",
+        "stack_free",
+        "pun_",
+        "unpun_",
+    ] {
+        c = c.replace(
+            &format!("{un}_{operation}"),
+            &format!("{un}_declared_{operation}"),
+        );
+    }
+    c += &format!(
+        "let {un}_active_read_ok (u: {un}) (e: ET.etypes {{ ET.elen e == SizeT.v {un}_sizeof }}) : prop =\n  match u with\n"
+    );
+    for m in &members {
+        c += &format!(
+            "  | Union_{name}_{} _ -> ET.read_ok (Seq.slice e 0 {member_size}) ptr_ctype\n",
+            m.name
+        );
+    }
+    if members.len() != ui.members.len() {
+        c += &format!("  | _ -> ET.declared_destination e /\\ ET.read_ok e {un}_ctype\n");
+    }
+    c += &format!(
+        "\nlet {un}_declared_read_ok (u: {un}) (e: ET.etypes {{ ET.elen e == SizeT.v {un}_sizeof }})\n  : Lemma (requires ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n          (ensures {un}_active_read_ok u e)\n  = match u with\n"
+    );
+    for m in &ui.members {
+        let proof = if members.iter().any(|member| member.name == m.name) {
+            format!("ET.read_ok_slice e {un}_ctype 0 ptr_ctype")
+        } else {
+            "()".to_string()
+        };
+        c += &format!("    | Union_{name}_{} _ -> {proof}\n", m.name);
+    }
+    c += &format!(
+        "\nlet {un}_pointer_read_ok (u: {un}) (e: ET.etypes {{ ET.elen e == SizeT.v {un}_sizeof }})\n  : Lemma (requires {un}_active_read_ok u e)\n          (ensures ET.read_ok (Seq.slice e 0 {member_size}) ptr_ctype)\n  = match u with\n"
+    );
+    for m in &ui.members {
+        let proof = if members.iter().any(|member| member.name == m.name) {
+            "()".to_string()
+        } else {
+            format!("ET.read_ok_slice e {un}_ctype 0 ptr_ctype")
+        };
+        c += &format!("    | Union_{name}_{} _ -> {proof}\n", m.name);
+    }
+    c += &format!(
+        "\nlet {un}_active_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop =\n  exists* b e. mem_pts_to_at a p b e ** pure ({un}_repr u b /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ {un}_active_read_ok u e)\n\n\
+         let {un}_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop = {un}_active_pts_to a p u\n\n\
+         let {un}_pts_to_uninit (a: ptr) : slprop = {un}_declared_pts_to_uninit a\n\n\
+         ghost fn {un}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n  ensures {un}_pts_to_uninit a\n{{\n  {un}_declared_claim_uninit a #b #e;\n  fold {un}_pts_to_uninit a;\n}}\n\n\
+         fn {un}_stack_alloc ()\n  requires emp\n  returns a: ptr\n  ensures {un}_pts_to_uninit a\n{{\n  let a = {un}_declared_stack_alloc ();\n  fold {un}_pts_to_uninit a;\n  a\n}}\n\n\
+         fn {un}_stack_free (a: ptr)\n  requires {un}_pts_to_uninit a\n  ensures emp\n{{\n  unfold {un}_pts_to_uninit a;\n  {un}_declared_stack_free a;\n}}\n\n\
+         let {un}_declared_origin (a: ptr) : prop =\n  exists (base: ET.etypes {{ ET.elen base == SizeT.v {un}_sizeof /\\ ET.declared_destination base /\\ ET.read_ok base {un}_ctype }}). fixed_metadata a base\n\n\
+         let {un}_declared_origin_intro (a: ptr) (base: ET.etypes {{ ET.elen base == SizeT.v {un}_sizeof /\\ ET.declared_destination base /\\ ET.read_ok base {un}_ctype }})\n  : Lemma (requires fixed_metadata a base) (ensures {un}_declared_origin a) = ()\n\n\
+         let {un}_declared_origin_elim (a: ptr {{ {un}_declared_origin a }})\n  : Tot (base: erased (e: ET.etypes {{ ET.elen e == SizeT.v {un}_sizeof /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype }}) {{ fixed_metadata a (reveal base) }})\n  = FStar.IndefiniteDescription.indefinite_description_tot\n      (e: ET.etypes {{ ET.elen e == SizeT.v {un}_sizeof /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype }}) (fun e -> fixed_metadata a e)\n\n\
+         ghost fn {un}_remember_declared (a: ptr) (#p: perm) (#u: {un})\n  preserves {un}_declared_pts_to a p u\n  ensures {un}_declared_origin a\n{{\n  {un}_declared_reveal a;\n  with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr u b /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  remember_fixed_metadata a;\n  {un}_declared_origin_intro a e;\n  {un}_declared_conceal a #p #b #u #e;\n}}\n\n\
+         ghost fn {un}_from_declared (a: ptr) (#p: perm) (#u: {un})\n  requires {un}_declared_pts_to a p u\n  ensures {un}_pts_to a p u\n  ensures {un}_declared_origin a\n{{\n  {un}_remember_declared a;\n  {un}_declared_reveal a;\n  with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr u b /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  {un}_declared_read_ok u e;\n  fold {un}_active_pts_to a p u;\n  fold {un}_pts_to a p u;\n}}\n\n\
+         ghost fn {un}_conceal (a: ptr) (#p: perm) (#b: bytes) (#u: {un}) (#e: ET.etypes)\n  requires mem_pts_to_at a p b e\n  requires pure ({un}_repr u b /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n  ensures {un}_pts_to a p u\n  ensures {un}_declared_origin a\n{{\n  {un}_declared_conceal a #p #b #u #e;\n  {un}_from_declared a;\n}}\n\n\
+         ghost fn {un}_reveal (a: ptr) (#p: perm) (#u: {un})\n  requires {un}_pts_to a p u\n  ensures exists* b e. mem_pts_to_at a p b e ** pure ({un}_repr u b /\\ aligned a {un}_alignof /\\ ET.elen e == len b /\\ {un}_active_read_ok u e)\n{{\n  unfold {un}_pts_to a p u;\n  unfold {un}_active_pts_to a p u;\n}}\n\n\
+         ghost fn {un}_recover_declared (a: ptr) (#p: perm) (#u: {un})\n  requires {un}_pts_to a p u\n  preserves {un}_declared_origin a\n  ensures {un}_declared_pts_to a p u\n{{\n  let base = {un}_declared_origin_elim a;\n  {un}_reveal a;\n  with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr u b /\\ ET.elen e == len b));\n  fixed_metadata_index a #p #b #e #(reveal base);\n  {un}_declared_conceal a #p #b #u #e;\n  {un}_declared_origin_intro a (reveal base);\n}}\n\n\
+         ghost fn {un}_reveal_uninit (a: ptr)\n  requires {un}_pts_to_uninit a\n  ensures exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype)\n{{\n  unfold {un}_pts_to_uninit a;\n  {un}_declared_reveal_uninit a;\n}}\n\n\
+         ghost fn {un}_forget (a: ptr) (#u: {un})\n  requires {un}_pts_to a 1.0R u\n  preserves {un}_declared_origin a\n  ensures {un}_pts_to_uninit a\n{{\n  {un}_recover_declared a;\n  {un}_declared_forget a;\n  fold {un}_pts_to_uninit a;\n}}\n\n\
+         fn {un}_write_uninit (a: ptr) (x: {un})\n  requires {un}_pts_to_uninit a\n  ensures {un}_pts_to a 1.0R x\n  ensures {un}_declared_origin a\n{{\n  unfold {un}_pts_to_uninit a;\n  {un}_declared_write_uninit a x;\n  {un}_from_declared a;\n}}\n\n\
+         fn {un}_write (a: ptr) (x: {un}) (#old: erased {un})\n  requires {un}_pts_to a 1.0R old\n  preserves {un}_declared_origin a\n  ensures {un}_pts_to a 1.0R x\n{{\n  {un}_recover_declared a;\n  {un}_declared_write a x;\n  {un}_from_declared a;\n}}\n\n"
+    );
+    for m in &ui.members {
+        let f = &m.name;
+        let ctor = format!("Union_{name}_{f}");
+        let ty = field_type(tds, &m.ty).unwrap();
+        let pts = m.shape.pts_to_at("a", "p", "v");
+        let storage = m.shape.uninit_at("a");
+        let supported = members.iter().any(|candidate| candidate.name == *f);
+        if supported {
+            c += &format!(
+                "let {un}_active_rest_{f} (a: ptr) (p: perm) : slprop =\n  exists* r er. mem_pts_to_at (a +! {member_size}sz) p r er ** pure (len r == {} /\\ ET.elen er == len r /\\ aligned a {un}_alignof)\n\n\
+                 ghost fn {un}_active_focus_{f} (a: ptr) (#p: perm) (#v: {ty})\n  requires {un}_active_pts_to a p ({ctor} v)\n  ensures {pts} ** {un}_active_rest_{f} a p\n{{\n  unfold {un}_active_pts_to a p ({ctor} v);\n  with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr ({ctor} v) b /\\ ET.elen e == len b /\\ {un}_active_read_ok ({ctor} v) e));\n  {un}_member_aligned a;\n  mem_split_at a {member_size}sz;\n  ptr_conceal a #p #(slice b 0 {member_size}) #v;\n  fold {un}_active_rest_{f} a p;\n}}\n\n\
+                 ghost fn {un}_active_unfocus_{f} (a: ptr) (#p: perm) (#v: {ty})\n  requires {pts} ** {un}_active_rest_{f} a p\n  ensures {un}_active_pts_to a p ({ctor} v)\n{{\n  ptr_reveal a;\n  with b e. assert (mem_pts_to_at a p b e ** pure (ptr_repr v b /\\ ET.elen e == len b /\\ ET.read_ok e ptr_ctype));\n  unfold {un}_active_rest_{f} a p;\n  with r er. assert (mem_pts_to_at (a +! {member_size}sz) p r er ** pure (len r == {} /\\ ET.elen er == len r));\n  mem_join_at a {member_size}sz;\n  append_slice_left b r;\n  Seq.lemma_eq_intro (Seq.slice (Seq.append e er) 0 {member_size}) e;\n  fold {un}_active_pts_to a p ({ctor} v);\n}}\n\n\
+                 ghost fn {un}_active_switch_{f} (a: ptr) (#u: {un})\n  requires {un}_active_pts_to a 1.0R u\n  ensures {storage} ** {un}_active_rest_{f} a 1.0R\n{{\n  unfold {un}_active_pts_to a 1.0R u;\n  with b e. assert (mem_pts_to_at a 1.0R b e ** pure ({un}_repr u b /\\ ET.elen e == len b /\\ {un}_active_read_ok u e));\n  {un}_pointer_read_ok u e;\n  {un}_member_aligned a;\n  mem_split_at a {member_size}sz;\n  ptr_claim_uninit a #(slice b 0 {member_size});\n  fold {un}_active_rest_{f} a 1.0R;\n}}\n\n\
+                 fn {un}_initialize_fresh_{f} (a: ptr) (v: {ty}) (#b: bytes) (#e: ET.etypes)\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b /\\ e == Seq.create (len b) None /\\ aligned a {un}_alignof /\\ allocated_region a (SizeT.v {un}_sizeof))\n  ensures {un}_pts_to a 1.0R ({ctor} v)\n{{\n  {un}_member_aligned a;\n  mem_split_at a {member_size}sz;\n  ptr_claim_uninit a #(slice b 0 {member_size});\n  ptr_write_uninit a v;\n  fold {un}_active_rest_{f} a 1.0R;\n  {un}_active_unfocus_{f} a;\n  fold {un}_pts_to a 1.0R ({ctor} v);\n}}\n\n",
+                ui.size - member_size,
+                ui.size - member_size
+            );
+        }
+        c += &format!(
+            "let {un}_rest_{f} (a: ptr) (p: perm) : slprop = {}\n\n",
+            if supported {
+                format!("{un}_active_rest_{f} a p")
+            } else {
+                format!("{un}_declared_rest_{f} a p")
+            }
+        );
+        c += &format!(
+            "ghost fn {un}_rest_from_declared_{f} (a: ptr) (#p: perm)\n  requires {un}_declared_rest_{f} a p\n  ensures {un}_rest_{f} a p\n{{\n"
+        );
+        if supported {
+            c += &format!(
+                "  unfold {un}_declared_rest_{f} a p;\n  fold {un}_active_rest_{f} a p;\n"
+            );
+        }
+        c += &format!("  fold {un}_rest_{f} a p;\n}}\n\n");
+        c += &format!(
+            "ghost fn {un}_focus_{f} (a: ptr) (#p: perm) (#v: {ty})\n  requires {un}_pts_to a p ({ctor} v)\n  ensures {pts} ** {un}_rest_{f} a p\n{{\n"
+        );
+        if supported {
+            c += &format!(
+                "  unfold {un}_pts_to a p ({ctor} v);\n  {un}_active_focus_{f} a;\n  fold {un}_rest_{f} a p;\n"
+            );
+        } else {
+            c += &format!(
+                "  unfold {un}_pts_to a p ({ctor} v);\n  unfold {un}_active_pts_to a p ({ctor} v);\n  with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr ({ctor} v) b /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  {un}_declared_conceal a #p #b #({ctor} v) #e;\n  {un}_declared_focus_{f} a;\n  fold {un}_rest_{f} a p;\n"
+            );
+        }
+        c += "}\n\n";
+        c += &format!(
+            "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#v: {ty})\n  requires {pts} ** {un}_rest_{f} a p\n  ensures {un}_pts_to a p ({ctor} v)\n{{\n  unfold {un}_rest_{f} a p;\n"
+        );
+        if supported {
+            c += &format!("  {un}_active_unfocus_{f} a;\n  fold {un}_pts_to a p ({ctor} v);\n");
+        } else {
+            c += &format!("  {un}_declared_unfocus_{f} a;\n  {un}_from_declared a;\n");
+        }
+        c += "}\n\n";
+        let origin_guard = if supported {
+            String::new()
+        } else {
+            format!("  preserves {un}_declared_origin a\n")
+        };
+        c += &format!(
+            "ghost fn {un}_switch_{f} (a: ptr) (#u: {un})\n  requires {un}_pts_to a 1.0R u\n{origin_guard}  ensures {storage} ** {un}_rest_{f} a 1.0R\n{{\n"
+        );
+        if supported {
+            c += &format!(
+                "  unfold {un}_pts_to a 1.0R u;\n  {un}_active_switch_{f} a;\n  fold {un}_rest_{f} a 1.0R;\n"
+            );
+        } else {
+            c += &format!(
+                "  {un}_recover_declared a;\n  {un}_declared_switch_{f} a;\n  fold {un}_rest_{f} a 1.0R;\n"
+            );
+        }
+        c += "}\n\n";
+        c += &format!(
+            "ghost fn {un}_switch_uninit_{f} (a: ptr)\n  requires {un}_pts_to_uninit a\n  ensures {storage} ** {un}_rest_{f} a 1.0R\n  ensures pure ({un}_declared_origin a)\n{{\n  unfold {un}_pts_to_uninit a;\n  {un}_declared_reveal_uninit a;\n  with b e. assert (mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  remember_fixed_metadata a;\n  {un}_declared_origin_intro a e;\n  {un}_declared_claim_uninit a #b #e;\n  {un}_declared_switch_uninit_{f} a;\n  {un}_rest_from_declared_{f} a;\n}}\n\n"
+        );
+    }
+    for l in &ui.members {
+        let FieldShape::One { pn } = &l.shape else {
+            continue;
+        };
+        let lty = field_type(tds, &l.ty).unwrap();
+        for m in &ui.members {
+            if m.name == l.name {
+                continue;
+            }
+            let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &peel(tds, &m.ty).val else {
+                continue;
+            };
+            let Some(si) = tds.structs.get(&sname.val.to_string()) else {
+                continue;
+            };
+            for fld in &si.fields {
+                if fld.offset != 0
+                    || !matches!(&fld.shape, FieldShape::One { pn: fpn } if fpn == pn)
+                    || !same_pointer_object_type(tds, &l.ty, &fld.ty)
+                {
+                    continue;
+                }
+                let sn = format!("struct_{}", sname.val);
+                let (ln, mn, f) = (&l.name, &m.name, &fld.name);
+                let ctor = format!("Union_{name}_{ln}");
+                c += &format!(
+                    "ghost fn {un}_pun_{ln}_{mn}_{f} (a: ptr) (#p: perm) (#v: {lty})\n  requires {un}_pts_to a p ({ctor} v)\n  preserves {un}_declared_origin a\n  ensures {pn}_pts_to (a +! {sn}_offsetof_{f}) p v\n  ensures {un}_rest_{ln} a p\n{{\n  {un}_recover_declared a;\n  {un}_declared_pun_{ln}_{mn}_{f} a;\n  {un}_rest_from_declared_{ln} a;\n}}\n\n\
+                     ghost fn {un}_unpun_{ln}_{mn}_{f} (a: ptr) (#p: perm) (#v: {lty})\n  requires {pn}_pts_to (a +! {sn}_offsetof_{f}) p v\n  requires {un}_rest_{ln} a p\n  ensures {un}_pts_to a p ({ctor} v)\n{{\n  rewrite ({pn}_pts_to (a +! {sn}_offsetof_{f}) p v) as ({pn}_pts_to a p v);\n  {un}_unfocus_{ln} a;\n}}\n\n"
+                );
+            }
+        }
+    }
+    c += &format!("let {un}_active_value (u: {un}) : bool =\n  match u with\n");
+    for m in &members {
+        c += &format!("  | Union_{name}_{} _ -> true\n", m.name);
+    }
+    if members.len() != ui.members.len() {
+        c += "  | _ -> false\n";
+    }
+    c += &format!(
+        "\nfn {un}_initialize_fresh (a: ptr) (x: {un}) (#b: bytes) (#e: ET.etypes)\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (len b == SizeT.v {un}_sizeof /\\ ET.elen e == len b /\\ e == Seq.create (len b) None /\\ aligned a {un}_alignof /\\ allocated_region a (SizeT.v {un}_sizeof) /\\ {un}_active_value x)\n  ensures {un}_pts_to a 1.0R x\n{{\n  match x {{\n"
+    );
+    for m in &ui.members {
+        c += &format!("    Union_{name}_{} v -> {{\n", m.name);
+        if members.iter().any(|candidate| candidate.name == m.name) {
+            c += &format!(
+                "      {un}_initialize_fresh_{} a v;\n      rewrite ({un}_pts_to a 1.0R (Union_{name}_{} v)) as ({un}_pts_to a 1.0R x);\n",
+                m.name, m.name
+            );
+        } else {
+            c += "      Pulse.Lib.Core.unreachable ();\n";
+        }
+        c += "    }\n";
+    }
+    c += "  }\n}\n\n";
+    for clause in ["ensures", "preserves"] {
+        c = c.replace(
+            &format!("{clause} {un}_declared_origin a\n"),
+            &format!("{clause} pure ({un}_declared_origin a)\n"),
+        );
+    }
+    c
+}
+
+fn fresh_pointer_record(tds: &Typedefs, si: &StructInfo) -> bool {
+    let active_union = |pn: &str| {
+        pn.strip_prefix("union_")
+            .and_then(|name| tds.unions.get(name))
+            .is_some_and(|ui| active_pointer_members(tds, ui).is_some())
+    };
+    si.has_bytes
+        && si.fields.iter().any(|f| active_union(f.shape.pn()))
+        && si.fields.iter().all(|f| {
+            matches!(&f.shape, FieldShape::One { pn } if
+                active_union(pn) || matches!(repr_pn(pn),
+                    "bool_t" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" |
+                    "int8_t" | "int16_t" | "int32_t" | "int64_t" | "size_t" |
+                    "ptr" | "float32_t" | "float64_t"))
+        })
+}
+
+fn fresh_pointer_object(tds: &Typedefs, pn: &str) -> bool {
+    pn.strip_prefix("union_")
+        .and_then(|name| tds.unions.get(name))
+        .is_some_and(|ui| active_pointer_members(tds, ui).is_some())
+        || pn
+            .strip_prefix("struct_")
+            .and_then(|name| tds.structs.get(name))
+            .is_some_and(|si| fresh_pointer_record(tds, si))
+}
+
+fn emit_fresh_pointer_record(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
+    let si = &tds.structs[name];
+    if !fresh_pointer_record(tds, si) {
+        return String::new();
+    }
+    let sn = format!("struct_{name}");
+    let mut guards = Vec::new();
+    let mut body = format!("  {sn}_field_aligned a;\n");
+    let mut bounds = si
+        .fields
+        .iter()
+        .map(|f| f.offset)
+        .chain(gaps.iter().map(|(off, _)| *off))
+        .filter(|off| *off != 0)
+        .collect::<Vec<_>>();
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut hi = si.size;
+    for off in bounds.iter().rev() {
+        body += &format!(
+            "  mem_split_at a {off}sz;\n  Seq.slice_slice e 0 {hi} {off} {hi};\n  Seq.slice_slice e 0 {hi} 0 {off};\n"
+        );
+        hi = *off;
+    }
+    for f in &si.fields {
+        let pn = f.shape.pn();
+        let field_at = format!("(a +! {sn}_offsetof_{})", f.name);
+        let at = if f.offset == 0 { "a" } else { &field_at };
+        if pn.starts_with("union_") {
+            guards.push(format!("{pn}_active_value x.fld_{}", f.name));
+            body += &format!(
+                "  Seq.lemma_eq_intro (Seq.slice e {} {}) (Seq.create {} None);\n",
+                f.offset,
+                f.offset + f.size,
+                f.size
+            );
+            body += &format!(
+                "  allocated_region_subrange a {sn}_sizeof {sn}_offsetof_{} {pn}_sizeof;\n  {pn}_initialize_fresh {at} x.fld_{};\n",
+                f.name, f.name
+            );
+        } else {
+            body += &format!(
+                "  {pn}_claim_uninit {at};\n  {pn}_write_uninit {at} x.fld_{};\n",
+                f.name
+            );
+        }
+        if f.offset == 0 {
+            body += &format!(
+                "  rewrite ({pn}_pts_to a 1.0R x.fld_{field}) as ({pn}_pts_to {field_at} 1.0R x.fld_{field});\n",
+                field = f.name
+            );
+        }
+    }
+    body += &format!("  fold {sn}_padding a 1.0R;\n  fold {sn}_pts_to a 1.0R x;\n");
+    format!(
+        "fn {sn}_initialize_fresh (a: ptr) (x: {sn}) (#b: bytes) (#e: ET.etypes)\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (len b == SizeT.v {sn}_sizeof /\\ ET.elen e == len b /\\ e == Seq.create (len b) None /\\ aligned a {sn}_alignof /\\ allocated_region a (SizeT.v {sn}_sizeof) /\\ {guard})\n{inv}  ensures {sn}_pts_to a 1.0R x\n{{\n{body}}}\n\n",
+        guard = guards.join(" /\\ "),
+        inv = struct_inv_req(si, &sn, "x")
+    )
+}
+
+fn declared_union_origins(tds: &Typedefs, si: &StructInfo, a: &str) -> Vec<String> {
+    let mut origins = Vec::new();
+    for f in &si.fields {
+        let FieldShape::One { pn } = &f.shape else {
+            continue;
+        };
+        let at = format!("({a} +! {}sz)", f.offset);
+        if let Some(ui) = pn.strip_prefix("union_").and_then(|n| tds.unions.get(n)) {
+            if active_pointer_members(tds, ui).is_some() {
+                origins.push(format!("pure ({pn}_declared_origin {at})"));
+            }
+        } else if let Some(child) = pn.strip_prefix("struct_").and_then(|n| tds.structs.get(n)) {
+            origins.extend(declared_union_origins(tds, child, &at));
+        }
+    }
+    origins
 }
 
 /// The generated code for one struct: the record, its layout constants, its
@@ -6538,7 +7545,7 @@ impl OwnItem {
         match self.esize {
             None => format!("{}_pts_to {} {} {}", self.pn, self.at, p, v),
             Some(es) => format!(
-                "array_pts_to {}_repr {} (SizeT.v {}_alignof) {} {} {}",
+                "array_pts_to {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} {} {}",
                 self.pn, es, self.pn, self.at, p, v
             ),
         }
@@ -6862,6 +7869,35 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     );
+    for f in si.fields.iter().filter(|f| f.size > 0) {
+        if let Some(ct) = ctype_of_shape(&f.shape) {
+            c += &format!(
+                "let {sn}_access_{} (_: unit) : Lemma (ET.access_ok {sn}_ctype {} ({ct})) = assert_norm (ET.access_ok {sn}_ctype {} ({ct}))\n",
+                f.name, f.offset, f.offset
+            );
+        }
+    }
+    c += "\n";
+    for f in &si.fields {
+        if let Some(guard) = f
+            .shape
+            .aligned_at(&format!("(a +! {sn}_offsetof_{})", f.name))
+        {
+            let pn = f.shape.pn();
+            let proof = if f.offset == 0 {
+                format!("aligned_divides a {sn}_alignof {pn}_alignof")
+            } else {
+                format!(
+                    "aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof",
+                    f.name
+                )
+            };
+            c += &format!(
+                "let {sn}_aligned_{} (a: ptr) : Lemma (requires aligned a {sn}_alignof) (ensures {guard}) = {proof}\n\n",
+                f.name
+            );
+        }
+    }
     // Every field of an object of this type is aligned for its own type, and
     // by nothing deeper than arithmetic on numerals: the offset is a multiple
     // of the field's alignment, and the field's alignment divides the
@@ -6963,6 +7999,11 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     if gaps.is_empty() && si.size == 0 {
         gaps.push((0, 0));
     }
+    if contextual_struct(tds, si) {
+        c += &emit_contextual_scalar_struct(tds, name, &gaps);
+        c += &emit_struct_own(tds, name);
+        return c;
+    }
     c += &format!(
         "let {}_padding (a: ptr) (p: perm) : slprop =\n  {}\n\n",
         sn,
@@ -6972,7 +8013,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             gaps.iter()
                 .map(|(off, len)| {
                     format!(
-                        "(exists* g. mem_pts_to {} p g ** pure (len g == {}))",
+                        "(exists* g e. mem_pts_to_at {} p g e ** pure (len g == {} /\\ ET.elen e == len g))",
                         if *off == 0 {
                             "a".to_string()
                         } else {
@@ -7007,6 +8048,24 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         sn,
         invariant
     );
+    if fresh_pointer_record(tds, si) {
+        let mut declared = conj("x", None);
+        for f in &si.fields {
+            if f.shape.pn().starts_with("union_") {
+                let pn = f.shape.pn();
+                declared =
+                    declared.replace(&format!("{pn}_pts_to "), &format!("{pn}_declared_pts_to "));
+            }
+        }
+        c += &format!(
+            "let {sn}_declared_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {sn}) : slprop =\n  {declared} ** {sn}_padding a p{inv}\n\n",
+            inv = if si.inv.is_some() {
+                format!(" ** pure ({sn}_invariant x)")
+            } else {
+                String::new()
+            }
+        );
+    }
 
     for f in &si.fields {
         let fty = field_type(tds, &f.ty).unwrap();
@@ -7066,6 +8125,1237 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     c
 }
 
+fn contains_union(tds: &Typedefs, ty: &Type) -> bool {
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Union(_)) => true,
+        TypeT::TypeRef(TypeRefKind::Struct(name)) => tds
+            .structs
+            .get(&name.val.to_string())
+            .is_some_and(|si| si.fields.iter().any(|f| contains_union(tds, &f.ty))),
+        TypeT::FixedArray(element, _) => contains_union(tds, element),
+        _ => false,
+    }
+}
+
+fn same_pointer_object_type(tds: &Typedefs, a: &Type, b: &Type) -> bool {
+    match (&peel(tds, a).val, &peel(tds, b).val) {
+        (TypeT::Pointer(a, _), TypeT::Pointer(b, _)) => same_pointer_object_type(tds, a, b),
+        (TypeT::TypeRef(a), TypeT::TypeRef(b)) => a.alpha_eq(b),
+        (TypeT::FixedArray(a, n), TypeT::FixedArray(b, m)) => {
+            n == m && same_pointer_object_type(tds, a, b)
+        }
+        (TypeT::FnPtr { args: aa, ret: ar }, TypeT::FnPtr { args: ba, ret: br }) => {
+            aa.len() == ba.len()
+                && aa
+                    .iter()
+                    .zip(ba)
+                    .all(|(a, b)| same_pointer_object_type(tds, a, b))
+                && same_pointer_object_type(tds, ar, br)
+        }
+        (a, b) => a == b,
+    }
+}
+
+/// How many leading fields two structs have in common in the sense of
+/// 6.5.2.3p6: corresponding members of compatible types. A bit-field ends
+/// the run -- its storage unit is not a member, and equal widths are not
+/// something this checks.
+fn common_initial_sequence(tds: &Typedefs, a: &StructInfo, b: &StructInfo) -> usize {
+    let unit = |si: &StructInfo, n: &str| si.bitfields.iter().any(|(_, bf)| bf.unit == n);
+    a.fields
+        .iter()
+        .zip(&b.fields)
+        .take_while(|(x, y)| {
+            !unit(a, &x.name)
+                && !unit(b, &y.name)
+                && x.offset == y.offset
+                && x.size == y.size
+                && same_pointer_object_type(tds, &x.ty, &y.ty)
+        })
+        .count()
+}
+
+fn contextual_scalar_struct(si: &StructInfo) -> bool {
+    si.has_bytes
+        && !si.fields.is_empty()
+        && si.fields.iter().all(|f| {
+            matches!(f.shape, FieldShape::One { .. })
+                && matches!(
+                    repr_pn(f.shape.pn()),
+                    "bool_t"
+                        | "uint8_t"
+                        | "uint16_t"
+                        | "uint32_t"
+                        | "uint64_t"
+                        | "int8_t"
+                        | "int16_t"
+                        | "int32_t"
+                        | "int64_t"
+                        | "size_t"
+                        | "ptr"
+                        | "float32_t"
+                        | "float64_t"
+                )
+        })
+}
+
+fn contextual_struct(tds: &Typedefs, si: &StructInfo) -> bool {
+    contextual_scalar_struct(si)
+        || (si.has_bytes
+            && si.size > 0
+            && !si.fields.is_empty()
+            && si.fields.iter().all(|f| {
+                let scalar = matches!(
+                    repr_pn(f.shape.pn()),
+                    "bool_t"
+                        | "uint8_t"
+                        | "uint16_t"
+                        | "uint32_t"
+                        | "uint64_t"
+                        | "int8_t"
+                        | "int16_t"
+                        | "int32_t"
+                        | "int64_t"
+                        | "size_t"
+                        | "ptr"
+                        | "float32_t"
+                        | "float64_t"
+                );
+                match &f.shape {
+                    FieldShape::One { pn } => {
+                        scalar
+                            || pn
+                                .strip_prefix("struct_")
+                                .and_then(|name| tds.structs.get(name))
+                                .is_some_and(|child| {
+                                    contextual_struct(tds, child)
+                                        || (f.size == 0
+                                            && child.has_bytes
+                                            && child.fields.is_empty())
+                                })
+                    }
+                    FieldShape::Array { len, .. } => scalar && *len > 0,
+                    FieldShape::Unaligned { .. } => scalar,
+                    _ => false,
+                }
+            }))
+}
+
+fn whole_initialize_supported(tds: &Typedefs, ty: &Type) -> bool {
+    let Some(pn) = palow_name(tds, ty) else {
+        return false;
+    };
+    if let Some(ui) = pn.strip_prefix("union_").and_then(|n| tds.unions.get(n)) {
+        return union_heap_capable(tds, ui);
+    }
+    if !pn.starts_with("struct_") {
+        return matches!(
+            repr_pn(&pn),
+            "bool_t"
+                | "uint8_t"
+                | "uint16_t"
+                | "uint32_t"
+                | "uint64_t"
+                | "int8_t"
+                | "int16_t"
+                | "int32_t"
+                | "int64_t"
+                | "size_t"
+                | "ptr"
+                | "float32_t"
+                | "float64_t"
+        );
+    }
+    let Some(si) = tds.structs.get(pn.trim_start_matches("struct_")) else {
+        return false;
+    };
+    if !si.has_bytes
+        || !si.fields.iter().all(|f| {
+            matches!(
+                f.shape,
+                FieldShape::One { .. } | FieldShape::Unaligned { .. }
+            ) && matches!(
+                repr_pn(f.shape.pn()),
+                "bool_t"
+                    | "uint8_t"
+                    | "uint16_t"
+                    | "uint32_t"
+                    | "uint64_t"
+                    | "int8_t"
+                    | "int16_t"
+                    | "int32_t"
+                    | "int64_t"
+                    | "size_t"
+                    | "float32_t"
+                    | "float64_t"
+            )
+        })
+    {
+        return false;
+    }
+    let mut fields: Vec<_> = si.fields.iter().collect();
+    fields.sort_by_key(|f| f.offset);
+    let mut end = 0;
+    for f in fields {
+        if f.offset != end {
+            return false;
+        }
+        end += f.size;
+    }
+    end == si.size
+}
+
+fn contextual_alignment(f: &StructField) -> String {
+    match f.shape {
+        FieldShape::Unaligned { .. } => "1sz".to_string(),
+        _ => format!("{}_alignof", f.shape.pn()),
+    }
+}
+
+fn contextual_ops(sn: &str, f: &StructField) -> String {
+    if f.size == 0 || matches!(f.shape, FieldShape::Unaligned { .. }) {
+        format!("{sn}_{}", f.name)
+    } else {
+        f.shape.pn().to_string()
+    }
+}
+
+fn emit_contextual_unaligned_ops(tds: &Typedefs, sn: &str, f: &StructField) -> String {
+    let pn = f.shape.pn();
+    let op = contextual_ops(sn, f);
+    let ty = fstar_type(tds, &f.ty).unwrap();
+    let v = "Pulse.Lib.C.Palow.Effective.Value";
+    let em = "Pulse.Lib.C.Palow.Effective.Machine";
+    let i = "Pulse.Lib.C.Palow.Machine.Intrinsics";
+    let enc = "Pulse.Lib.C.Palow.Encoding";
+    let read_repr = if pn == "ptr" {
+        "ptr_repr_len (reveal x) b;".to_string()
+    } else {
+        format!("{pn}_repr_no_prov (reveal x) b;")
+    };
+    let store = if pn == "ptr" {
+        format!("  {i}.ptr_store a y;\n")
+    } else {
+        let bits = match pn {
+            "bool_t" => "(if y then 1 else 0)".to_string(),
+            "size_t" => "SizeT.v y".to_string(),
+            "float32_t" => "float32_bits y".to_string(),
+            "float64_t" => "float64_bits y".to_string(),
+            _ => {
+                let rp = repr_pn(pn);
+                let prefix = if rp.starts_with("uint") {
+                    "UInt"
+                } else {
+                    "Int"
+                };
+                let width = rp
+                    .trim_start_matches("uint")
+                    .trim_start_matches("int")
+                    .trim_end_matches("_t");
+                if prefix == "UInt" {
+                    format!("({prefix}{width}.v y)")
+                } else {
+                    format!("({enc}.to_bits {width} ({prefix}{width}.v y))")
+                }
+            }
+        };
+        format!(
+            "  let b = {enc}.encode (SizeT.v {pn}_sizeof) None {bits};\n  {pn}_repr_no_prov y b;\n  {em}.store a (hide {pn}_ctype) b;\n"
+        )
+    };
+    let stored_bytes = if pn == "ptr" {
+        format!("({enc}.encode (SizeT.v ptr_sizeof) (prov_of y) (addr_of y))")
+    } else {
+        "b".to_string()
+    };
+    format!(
+        "fn {op}_read_at (a: ptr) (#p: perm) (#x: erased {ty}) (#e: ET.etypes)\n  preserves {v}.value {pn}_ctype {pn}_repr 1sz a p x e\n  returns y: {ty}\n  ensures rewrites_to y (reveal x)\n{{\n  {v}.reveal_value {pn}_ctype {pn}_repr 1sz a;\n  with b. assert (mem_pts_to_at a p b e);\n  {read_repr}\n  let y = {i}.{pn}_read_at a #p #x #(hide b) #e;\n  {v}.claim {pn}_ctype {pn}_repr 1sz a #p #(reveal x) #b #e;\n  y\n}}\n\n\
+         fn {op}_write_uninit_at (a: ptr) (y: {ty}) (#e: ET.etypes {{ ET.elen e == ET.csize {pn}_ctype }})\n  requires {v}.storage {pn}_ctype 1sz a e\n  ensures {v}.value {pn}_ctype {pn}_repr 1sz a 1.0R y ({em}.store_index e {pn}_ctype)\n{{\n  {v}.reveal_storage {pn}_ctype 1sz a;\n  with old. assert (mem_pts_to_at a 1.0R old e);\n{store}  ET.store_read_ok e {pn}_ctype;\n  {v}.claim {pn}_ctype {pn}_repr 1sz a #1.0R #y #{stored_bytes} #({em}.store_index e {pn}_ctype);\n}}\n\n\
+         let {op}_read_field = K.read_field {pn}_ctype {pn}_repr 1sz {op}_read_at\n\
+         let {op}_write_field = K.write_field {pn}_ctype {pn}_repr 1sz {op}_write_uninit_at\n\
+         let {op}_write_uninit_field = K.write_uninit_field {pn}_ctype {pn}_repr 1sz {op}_write_uninit_at\n\
+         let {op}_forget_field = K.forget {pn}_ctype {pn}_repr 1sz\n\n"
+    )
+}
+
+fn emit_contextual_scalar_struct(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
+    let si = &tds.structs[name];
+    let sn = format!("struct_{name}");
+    let address = |off: u64| format!("(a +! {off}sz)");
+    let index = |f: &StructField| format!("(Seq.slice base {} {})", f.offset, f.offset + f.size);
+    let field = |f: &StructField, x: &str, storage: bool| {
+        let pn = f.shape.pn();
+        let alignment = contextual_alignment(f);
+        let at = address(f.offset);
+        if f.size == 0 {
+            if storage {
+                format!("{pn}_pts_to_uninit {at}")
+            } else {
+                format!("{pn}_pts_to {at} p ({x}).fld_{}", f.name)
+            }
+        } else if let FieldShape::Array { esize, len, .. } = &f.shape {
+            if storage {
+                format!(
+                    "KA.storage {sn}_ctype {} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} {} {at}",
+                    f.offset,
+                    index(f)
+                )
+            } else {
+                format!(
+                    "KA.value {sn}_ctype {} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {} {at} p ({x}).fld_{}",
+                    f.offset,
+                    index(f),
+                    f.name
+                )
+            }
+        } else if pn.starts_with("struct_") {
+            if storage {
+                format!(
+                    "{pn}_pts_to_uninit_context {sn}_ctype {} {} {at}",
+                    f.offset,
+                    index(f)
+                )
+            } else {
+                format!(
+                    "{pn}_pts_to_context {sn}_ctype {} {} {at} p ({x}).fld_{}",
+                    f.offset,
+                    index(f),
+                    f.name
+                )
+            }
+        } else if storage {
+            format!(
+                "K.storage {sn}_ctype {} {pn}_ctype {alignment} {at} {}",
+                f.offset,
+                index(f)
+            )
+        } else {
+            format!(
+                "K.value {sn}_ctype {} {pn}_ctype {pn}_repr {alignment} {at} p ({x}).fld_{} {}",
+                f.offset,
+                f.name,
+                index(f)
+            )
+        }
+    };
+    let fields = |x: &str, storage: bool, skip: Option<&str>| {
+        let xs: Vec<_> = si
+            .fields
+            .iter()
+            .filter(|f| Some(f.name.as_str()) != skip)
+            .map(|f| field(f, x, storage))
+            .collect();
+        if xs.is_empty() {
+            "emp".to_string()
+        } else {
+            xs.join(" **\n  ")
+        }
+    };
+    let inv = si
+        .inv
+        .as_ref()
+        .map(|p| format!("let {sn}_invariant (x: {sn}) : prop = {p}\n\n"))
+        .unwrap_or_default();
+    let inv_pred = if si.inv.is_some() {
+        format!(" ** pure ({sn}_invariant x)")
+    } else {
+        String::new()
+    };
+    let mut c = inv;
+    c += &format!("type {sn}_index = e:ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof }}\n\n");
+    c += &format!(
+        "#push-options \"--fuel {}\"\n",
+        (si.fields.len() + 4).max(6)
+    );
+    for f in si.fields.iter().filter(|f| f.size > 0) {
+        let ct = ctype_of_shape(&f.shape).unwrap();
+        let off = f.offset;
+        let field_name = &f.name;
+        c += &format!(
+            "let {sn}_view_field_{field_name} (_: unit) : Lemma (Relation.view_slice_compatible {sn}_ctype {off} {ct}) =\n\
+             \x20 let aux (k: nat) (en: ET.etype_entry) : Lemma (\n\
+             \x20   k < ET.csize {ct} /\\ en.ET.off < ET.csize en.ET.ty /\\ Relation.strict_subobject {sn}_ctype ({off} + k - en.ET.off) en.ET.ty ==>\n\
+             \x20   ET.access_ok en.ET.ty (en.ET.off - k) {ct} \\/ Relation.strict_subobject {ct} (k - en.ET.off) en.ET.ty) =\n\
+             \x20   match en.ET.ty with\n\
+             \x20   | ET.TScalar _ -> ()\n\
+             \x20   | ET.TStruct _ _ _ -> ()\n\
+             \x20   | ET.TUnion _ _ _ -> ()\n\
+             \x20   | ET.TArr _ _ -> ()\n\
+             \x20 in Classical.forall_intro (fun k -> Classical.forall_intro (aux k))\n\n"
+        );
+    }
+    c += &format!("let {sn}_view_fields (_: unit) : Lemma (ET.csize {sn}_ctype == {} /\\ {}) =\n  {}\n#pop-options\n\n",
+        si.size,
+        si.fields.iter().filter(|f| f.size > 0).map(|f| {
+            let ct=ctype_of_shape(&f.shape).unwrap();
+            format!("(ET.csize {ct} == {} /\\ Relation.strict_subobject {sn}_ctype {} {ct} /\\ ET.access_ok {sn}_ctype {} {ct} /\\ Relation.view_slice_compatible {sn}_ctype {} {ct})",f.size,f.offset,f.offset,f.offset)
+        }).collect::<Vec<_>>().join(" /\\ "),
+        si.fields.iter().filter(|f| f.size > 0).map(|f|format!("{sn}_view_field_{} ()",f.name)).collect::<Vec<_>>().join(";\n  "));
+    let gap_pred: Vec<_> = gaps.iter().map(|(off, n)| {
+        format!("(exists* b e. mem_pts_to_at {} p b e ** pure (len b == {n} /\\ ET.elen e == len b /\\ Relation.retains_at (Seq.slice base {off} {}) e {sn}_ctype {off} /\\ Relation.view_region {sn}_ctype {off} e))", address(*off), off+n)
+    }).collect();
+    c += &format!(
+        "let {sn}_padding_ctx (a: ptr) (p: perm) (base: {sn}_index) : slprop =\n  pure (ET.elen base == SizeT.v {sn}_sizeof /\\ Relation.view_read_ok base {sn}_ctype /\\ Relation.view_region {sn}_ctype 0 base /\\ aligned a {sn}_alignof) **\n  {}\n\n",
+        if gap_pred.is_empty() {
+            "emp".to_string()
+        } else {
+            gap_pred.join(" **\n  ")
+        }
+    );
+    c += &format!(
+        "let {sn}_padding (a: ptr) (p: perm) : slprop = exists* (base: {sn}_index). {sn}_padding_ctx a p base\n\n"
+    );
+    c += &format!(
+        "let {sn}_pts_to_retained (base: {sn}_index) ([@@@mkey] a: ptr) (p: perm) (x: {sn}) : slprop =\n  {} ** {sn}_padding_ctx a p base{inv_pred}\n\n\
+         let {sn}_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {sn}) : slprop = exists* (base: {sn}_index). {sn}_pts_to_retained base a p x\n\n\
+         let {sn}_pts_to_uninit_retained (base: {sn}_index) ([@@@mkey] a: ptr) : slprop =\n  {} ** {sn}_padding_ctx a 1.0R base\n\n\
+         let {sn}_pts_to_uninit ([@@@mkey] a: ptr) : slprop = exists* (base: {sn}_index). {sn}_pts_to_uninit_retained base a\n\n",
+        fields("x", false, None),
+        fields("x", true, None)
+    );
+    for f in &si.fields {
+        let pn = f.shape.pn();
+        let fname = &f.name;
+        let fty = field_type(tds, &f.ty).unwrap();
+        let fty = refined_ty(&fty, f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty)));
+        let at = address(f.offset);
+        let updated = format!("({{ x with fld_{fname} = y }})");
+        c += &format!(
+            "let {sn}_hole_{fname} (base: {sn}_index) (a: ptr) (p: perm) (x: {sn}) : slprop =\n  {} ** {sn}_padding_ctx a p base{inv_pred}\n\n\
+             ghost fn {sn}_focus_{fname}_retained (a: ptr) (#p: perm) (#x: {sn}) (#base: {sn}_index)\n  requires {sn}_pts_to_retained base a p x\n  ensures {}\n  ensures {sn}_hole_{fname} base a p x\n{{\n  unfold {sn}_pts_to_retained base a p x;\n  fold {sn}_hole_{fname} base a p x;\n}}\n\n\
+             ghost fn {sn}_focus_{fname} (a: ptr) (#p: perm) (#x: {sn})\n  requires {sn}_pts_to a p x\n  ensures exists* (base: {sn}_index). {} ** {sn}_hole_{fname} base a p x\n{{\n  unfold {sn}_pts_to a p x;\n  {sn}_focus_{fname}_retained a;\n}}\n\n",
+            fields("x", false, Some(fname)),
+            field(f, "x", false),
+            field(f, "x", false)
+        );
+        let owned_y = if f.size == 0 {
+            format!("{pn}_pts_to {at} p y")
+        } else if let FieldShape::Array { esize, .. } = &f.shape {
+            format!(
+                "KA.value {sn}_ctype {} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {} {at} p y",
+                f.offset,
+                index(f)
+            )
+        } else if pn.starts_with("struct_") {
+            format!(
+                "{pn}_pts_to_context {sn}_ctype {} {} {at} p y",
+                f.offset,
+                index(f)
+            )
+        } else {
+            format!(
+                "K.value {sn}_ctype {} {pn}_ctype {pn}_repr {} {at} p y {}",
+                f.offset,
+                contextual_alignment(f),
+                index(f)
+            )
+        };
+        for (suffix, value, extra) in [
+            ("", updated.as_str(), struct_inv_req(si, &sn, &updated)),
+            ("_read", "x", String::new()),
+        ] {
+            let owned = if suffix.is_empty() {
+                owned_y.clone()
+            } else {
+                field(f, "x", false)
+            };
+            let ybinder = if suffix.is_empty() {
+                format!(" (#y: {fty})")
+            } else {
+                String::new()
+            };
+            c += &format!(
+                "ghost fn {sn}_unfocus{suffix}_{fname}_retained (a: ptr) (#p: perm) (#x: {sn}){ybinder} (#base: {sn}_index)\n  requires {sn}_hole_{fname} base a p x\n  requires {owned}\n{extra}  ensures {sn}_pts_to_retained base a p {value}\n{{\n  unfold {sn}_hole_{fname} base a p x;\n  fold {sn}_pts_to_retained base a p {value};\n}}\n\n\
+                 ghost fn {sn}_unfocus{suffix}_{fname} (a: ptr) (#p: perm) (#x: {sn}){ybinder} (#base: {sn}_index)\n  requires {sn}_hole_{fname} base a p x\n  requires {owned}\n{extra}  ensures {sn}_pts_to a p {value}\n{{\n  {sn}_unfocus{suffix}_{fname}_retained a;\n  fold {sn}_pts_to a p {value};\n}}\n\n"
+            );
+        }
+    }
+    c += &format!(
+        "ghost fn {sn}_release_retained (a: ptr) (#p: perm) (#x: {sn}) (#base: {sn}_index)\n  requires {sn}_pts_to_retained base a p x\n  ensures {sn}_pts_to a p x\n{{\n  fold {sn}_pts_to a p x;\n}}\n\n"
+    );
+    let value = format!(
+        "({{ {} }})",
+        record_fields(
+            si.fields
+                .iter()
+                .map(|f| format!("fld_{} = val_{}", f.name, f.name))
+                .collect(),
+            false
+        )
+    );
+    let binders = si
+        .fields
+        .iter()
+        .map(|f| {
+            format!(
+                "(#val_{}: {})",
+                f.name,
+                refined_ty(
+                    &field_type(tds, &f.ty).unwrap(),
+                    f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty))
+                )
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let gathered = si.fields.iter().map(|f| {
+        let pn=f.shape.pn();
+        if f.size == 0 {
+            format!("{pn}_pts_to {} p val_{}", address(f.offset), f.name)
+        } else if let FieldShape::Array { esize, .. } = &f.shape {
+            format!("KA.value {sn}_ctype {} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {} {} p val_{}",f.offset,index(f),address(f.offset),f.name)
+        } else if pn.starts_with("struct_") {
+            format!("{pn}_pts_to_context {sn}_ctype {} {} {} p val_{}", f.offset,index(f),address(f.offset),f.name)
+        } else {
+            format!("K.value {sn}_ctype {} {pn}_ctype {pn}_repr {} {} p val_{} {}", f.offset,contextual_alignment(f),address(f.offset),f.name,index(f))
+        }
+    }).collect::<Vec<_>>().join("\n  requires ");
+    c += &format!(
+        "ghost fn {sn}_scatter (a: ptr) (#p: perm) (#x: {sn})\n  requires {sn}_pts_to a p x\n  ensures exists* (base: {sn}_index). {} ** {sn}_padding_ctx a p base{inv_pred}\n{{\n  unfold {sn}_pts_to a p x;\n  with base. assert ({sn}_pts_to_retained base a p x);\n  unfold {sn}_pts_to_retained base a p x;\n}}\n\n\
+         ghost fn {sn}_gather (a: ptr) (#p: perm) {binders} (#base: {sn}_index)\n  requires {gathered}\n  requires {sn}_padding_ctx a p base\n{}  ensures {sn}_pts_to a p {value}\n{{\n  fold {sn}_pts_to_retained base a p {value};\n  fold {sn}_pts_to a p {value};\n}}\n\n\
+         ghost fn {sn}_scatter_uninit (a: ptr)\n  requires {sn}_pts_to_uninit a\n  ensures exists* (base: {sn}_index). {} ** {sn}_padding_ctx a 1.0R base\n{{\n  unfold {sn}_pts_to_uninit a;\n  with base. assert ({sn}_pts_to_uninit_retained base a);\n  unfold {sn}_pts_to_uninit_retained base a;\n}}\n\n\
+         ghost fn {sn}_gather_uninit (a: ptr) (#base: {sn}_index)\n  requires {}\n  requires {sn}_padding_ctx a 1.0R base\n  ensures {sn}_pts_to_uninit a\n{{\n  fold {sn}_pts_to_uninit_retained base a;\n  fold {sn}_pts_to_uninit a;\n}}\n\n",
+        fields("x", false, None),
+        struct_inv_req(si, &sn, &value),
+        fields("x", true, None),
+        fields("x", true, None)
+    );
+    c += &format!(
+        "ghost fn {sn}_scatter_retained (a: ptr) (#p: perm) (#x: {sn}) (#base: {sn}_index)\n  requires {sn}_pts_to_retained base a p x\n  ensures {} ** {sn}_padding_ctx a p base{inv_pred}\n{{\n  unfold {sn}_pts_to_retained base a p x;\n}}\n\n\
+         ghost fn {sn}_gather_retained (a: ptr) (#p: perm) {binders} (#base: {sn}_index)\n  requires {gathered}\n  requires {sn}_padding_ctx a p base\n{}  ensures {sn}_pts_to_retained base a p {value}\n{{\n  fold {sn}_pts_to_retained base a p {value};\n}}\n\n",
+        fields("x", false, None),
+        struct_inv_req(si, &sn, &value)
+    );
+    c += &format!(
+        "ghost fn {sn}_scatter_uninit_retained (a: ptr) (#base: {sn}_index)\n  requires {sn}_pts_to_uninit_retained base a\n  ensures {} ** {sn}_padding_ctx a 1.0R base\n{{\n  unfold {sn}_pts_to_uninit_retained base a;\n}}\n\n\
+         ghost fn {sn}_gather_uninit_retained (a: ptr) (#base: {sn}_index)\n  requires {}\n  requires {sn}_padding_ctx a 1.0R base\n  ensures {sn}_pts_to_uninit_retained base a\n{{\n  fold {sn}_pts_to_uninit_retained base a;\n}}\n\n",
+        fields("x", true, None),
+        fields("x", true, None)
+    );
+    let mut emitted_fills = BTreeSet::new();
+    for f in &si.fields {
+        if f.size == 0 {
+            let pn = f.shape.pn();
+            let op = contextual_ops(&sn, f);
+            let ty = field_type(tds, &f.ty).unwrap();
+            c += &format!(
+                "ghost fn {op}_forget_field (a: ptr) (#x: {ty})\n  requires {pn}_pts_to a 1.0R x\n  ensures {pn}_pts_to_uninit a\n{{\n  {pn}_forget a;\n}}\n\n\
+                 fn {op}_write_uninit_field (a: ptr) (x: {ty})\n  requires {pn}_pts_to_uninit a\n  ensures {pn}_pts_to a 1.0R x\n{{\n  {pn}_write_uninit a x;\n}}\n\n\
+                 fn {op}_write_field (a: ptr) (x: {ty}) (#old: {ty})\n  requires {pn}_pts_to a 1.0R old\n  ensures {pn}_pts_to a 1.0R x\n{{\n  {pn}_write a x;\n}}\n\n\
+                 fn {op}_read_field (a: ptr) (#p: perm) (#x: erased {ty})\n  preserves {pn}_pts_to a p x\n  returns y: {ty}\n  ensures pure (y == reveal x)\n{{\n  {pn}_read a\n}}\n\n"
+            );
+        }
+        if matches!(f.shape, FieldShape::Unaligned { .. }) {
+            c += &emit_contextual_unaligned_ops(tds, &sn, f);
+        }
+        if let FieldShape::Array { pn, esize, len } = &f.shape {
+            let TypeT::FixedArray(elem, _) = &peel(tds, &f.ty).val else {
+                unreachable!()
+            };
+            if emitted_fills.insert(fill_name(pn, *esize, *len)) {
+                c += &emit_retained_fill(pn, &fstar_type(tds, elem).unwrap(), *esize, *len);
+            }
+            c += &emit_contextual_array_field_ops(tds, &sn, f);
+        }
+    }
+    for retained in [true, false] {
+        let suff = if retained { "_retained" } else { "" };
+        let basebinder = if retained {
+            format!(" (#base: {sn}_index)")
+        } else {
+            String::new()
+        };
+        let owner = if retained {
+            format!("{sn}_pts_to_retained base")
+        } else {
+            format!("{sn}_pts_to")
+        };
+        let storage = if retained {
+            format!("{sn}_pts_to_uninit_retained base")
+        } else {
+            format!("{sn}_pts_to_uninit")
+        };
+        let open_value = if retained {
+            format!("  unfold {sn}_pts_to_retained base a 1.0R x;\n")
+        } else {
+            format!(
+                "  unfold {sn}_pts_to a 1.0R x;\n  with base. assert ({sn}_pts_to_retained base a 1.0R x);\n  unfold {sn}_pts_to_retained base a 1.0R x;\n"
+            )
+        };
+        let close_storage = format!(
+            "  fold {sn}_pts_to_uninit_retained base a;\n{}",
+            if retained {
+                String::new()
+            } else {
+                format!("  fold {sn}_pts_to_uninit a;\n")
+            }
+        );
+        c += &format!(
+            "ghost fn {sn}_forget{suff} (a: ptr) (#x: {sn}){basebinder}\n  requires {owner} a 1.0R x\n  ensures {storage} a\n{{\n{open_value}"
+        );
+        for f in &si.fields {
+            if f.size == 0 {
+                c += &format!("  {}_forget {};\n", f.shape.pn(), address(f.offset));
+            } else if let FieldShape::Array { pn, esize, .. } = &f.shape {
+                c += &format!(
+                    "  KA.forget {sn}_ctype {} {pn}_ctype {pn}_repr {} {esize}sz {pn}_alignof;\n",
+                    f.offset,
+                    address(f.offset)
+                );
+            } else {
+                c += &format!(
+                    "  {}_forget_field {};\n",
+                    contextual_ops(&sn, f),
+                    address(f.offset)
+                );
+            }
+        }
+        c += &format!("{close_storage}}}\n\n");
+        let open_storage = if retained {
+            format!("  unfold {sn}_pts_to_uninit_retained base a;\n")
+        } else {
+            format!(
+                "  unfold {sn}_pts_to_uninit a;\n  with base. assert ({sn}_pts_to_uninit_retained base a);\n  unfold {sn}_pts_to_uninit_retained base a;\n"
+            )
+        };
+        c += &format!(
+            "fn {sn}_write_uninit{suff} (a: ptr) (x: {sn}){basebinder}\n  requires {storage} a\n{}  ensures {owner} a 1.0R x\n{{\n{open_storage}",
+            struct_inv_req(si, &sn, "x")
+        );
+        for f in &si.fields {
+            if f.size == 0 {
+                c += &format!(
+                    "  {}_write_uninit {} x.fld_{};\n",
+                    f.shape.pn(),
+                    address(f.offset),
+                    f.name
+                );
+            } else if matches!(f.shape, FieldShape::Array { .. }) {
+                c += &format!(
+                    "  {sn}_write_array_{}_context {} x.fld_{};\n",
+                    f.name,
+                    address(f.offset),
+                    f.name
+                );
+            } else {
+                c += &format!(
+                    "  {}_write_uninit_field {} x.fld_{};\n",
+                    contextual_ops(&sn, f),
+                    address(f.offset),
+                    f.name
+                );
+            }
+        }
+        c += &format!(
+            "  fold {sn}_pts_to_retained base a 1.0R x;\n{}}}\n\n",
+            if retained {
+                String::new()
+            } else {
+                format!("  fold {sn}_pts_to a 1.0R x;\n")
+            }
+        );
+        c += &format!(
+            "fn {sn}_write{suff} (a: ptr) (x: {sn}) (#old: {sn}){basebinder}\n  requires {owner} a 1.0R old\n{}  ensures {owner} a 1.0R x\n{{\n  {sn}_forget{suff} a;\n  {sn}_write_uninit{suff} a x;\n}}\n\n",
+            struct_inv_req(si, &sn, "x")
+        );
+        c += &format!(
+            "fn {sn}_read{suff} (a: ptr) (#p: perm) (#x: erased {sn}){basebinder}\n  preserves {owner} a p x\n  returns y: {sn}\n  ensures pure (y == reveal x)\n{{\n"
+        );
+        if !retained {
+            c += &format!(
+                "  unfold {sn}_pts_to a p x;\n  with base. assert ({sn}_pts_to_retained base a p x);\n"
+            );
+        }
+        c += &format!("  unfold {sn}_pts_to_retained base a p x;\n");
+        for f in &si.fields {
+            let reader = if f.size == 0 {
+                format!("{}_read", f.shape.pn())
+            } else if matches!(f.shape, FieldShape::Array { .. }) {
+                format!("{sn}_read_array_{}_context", f.name)
+            } else {
+                format!("{}_read_field", contextual_ops(&sn, f))
+            };
+            c += &format!("  let v_{} = {reader} {};\n", f.name, address(f.offset));
+        }
+        let record = format!(
+            "({{ {} }})",
+            record_fields(
+                si.fields
+                    .iter()
+                    .map(|f| format!("fld_{} = v_{}", f.name, f.name))
+                    .collect(),
+                false
+            )
+        );
+        c += &format!(
+            "  fold {sn}_pts_to_retained base a p x;\n{}  {record}\n}}\n\n",
+            if retained {
+                String::new()
+            } else {
+                format!("  fold {sn}_pts_to a p x;\n")
+            }
+        );
+    }
+    c += &emit_contextual_scalar_struct_bytes(tds, name, gaps);
+    c
+}
+
+fn emit_contextual_array_field_ops(tds: &Typedefs, sn: &str, f: &StructField) -> String {
+    let FieldShape::Array { pn, esize, len } = &f.shape else {
+        unreachable!()
+    };
+    let off = f.offset;
+    let name = &f.name;
+    let ty = field_type(tds, &f.ty).unwrap();
+    let fill = fill_name(pn, *esize, *len);
+    let owner = format!(
+        "KA.value {sn}_ctype {off} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a p xs"
+    );
+    format!(
+        "fn {sn}_read_array_{name}_context (a: ptr) (#p: perm) (#xs: erased {ty}) (#base: ET.etypes)\n  preserves {owner}\n  returns ys: {ty}\n  ensures pure (ys == reveal xs)\n{{\n  KA.borrow_array {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof;\n  let ys = {fill}_read_retained a;\n  KA.restore_array {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof;\n  ys\n}}\n\n\
+         fn {sn}_write_array_{name}_context (a: ptr) (xs: {ty}) (#base: ET.etypes)\n  requires KA.storage {sn}_ctype {off} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} base a\n  ensures KA.value {sn}_ctype {off} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a 1.0R xs\n{{\n  KA.borrow_storage {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof {len}sz;\n  {fill}_fill_retained a xs;\n  KA.restore_array {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof;\n}}\n\n\
+         ghost fn {sn}_not_null_array_{name}_context (a: ptr) (#p: perm) (#xs: {ty}) (#base: ET.etypes)\n  preserves {owner}\n  ensures pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  KA.reveal {sn}_ctype {off} {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof;\n  with b e. assert (mem_pts_to_at a p b e);\n  mem_pts_to_at_not_null a;\n  array_conceal_at {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof #p #b #xs #e;\n  KA.claim {sn}_ctype {off} {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof #p #xs #base #e;\n}}\n\n"
+    )
+}
+
+fn emit_contextual_scalar_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
+    let si = &tds.structs[name];
+    let sn = format!("struct_{name}");
+    let address = |off: u64| {
+        if off == 0 {
+            "a".to_string()
+        } else {
+            format!("(a +! {off}sz)")
+        }
+    };
+    let mut regions: Vec<_> = si
+        .fields
+        .iter()
+        .filter(|f| f.size > 0)
+        .map(Region::Field)
+        .chain(gaps.iter().map(|(off, n)| Region::Gap(*off, *n)))
+        .collect();
+    regions.sort_by_key(Region::offset);
+    let conjuncts = si
+        .fields
+        .iter()
+        .map(|f| {
+            f.shape.repr_of(
+                &format!("x.fld_{}", f.name),
+                &format!("(slice b {} {})", f.offset, f.offset + f.size),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" /\\\n  ");
+    let mut c = format!(
+        "let {sn}_repr (x: {sn}) (b: bytes) : prop =\n  len b == SizeT.v {sn}_sizeof /\\ (len b == SizeT.v {sn}_sizeof ==> {conjuncts})\n\n\
+         let {sn}_repr_len (x: {sn}) (b: bytes) : Lemma (requires {sn}_repr x b) (ensures len b == SizeT.v {sn}_sizeof) = ()\n\n"
+    );
+    let split = |s: &mut String| {
+        let mut hi = si.size;
+        for r in regions.iter().skip(1).rev() {
+            let off = r.offset();
+            *s += &format!(
+                "  mem_split_at a {off}sz;\n  Seq.slice_slice e 0 {hi} {off} {hi};\n  Seq.slice_slice e 0 {hi} 0 {off};\n  slice_prefix b {hi} {off} {hi};\n  slice_prefix b {hi} 0 {off};\n"
+            );
+            hi = off;
+        }
+    };
+    for storage in [true, false] {
+        let suffix = if storage { "_claim_uninit" } else { "_conceal" };
+        let bx = if storage {
+            String::new()
+        } else {
+            format!(" (#x: {sn})")
+        };
+        let p = if storage { "1.0R" } else { "p" };
+        let pb = if storage { "" } else { " (#p: perm)" };
+        let pre = if storage {
+            format!("len b == SizeT.v {sn}_sizeof /\\ Relation.view_read_ok e {sn}_ctype")
+        } else {
+            format!("{sn}_repr x b /\\ Relation.view_read_ok e {sn}_ctype")
+        };
+        let out = if storage {
+            format!("{sn}_pts_to_uninit_retained e a")
+        } else {
+            format!("{sn}_pts_to_retained e a p x")
+        };
+        c += &format!(
+            "ghost fn {sn}{suffix}_retained (a: ptr){pb} (#b: bytes){bx} (#e: {sn}_index)\n  requires mem_pts_to_at a {p} b e\n  requires pure ({pre} /\\ ET.elen e == len b /\\ aligned a {sn}_alignof)\n{}  ensures {out}\n{{\n",
+            if storage {
+                String::new()
+            } else {
+                struct_inv_req(si, &sn, "x")
+            }
+        );
+        c += &format!("  let base = e;\n  Relation.retains_refl e {sn}_ctype;\n");
+        c += &format!("  {sn}_view_fields ();\n");
+        c += &format!("  Relation.view_region_of_view base {sn}_ctype;\n");
+        for r in &regions {
+            let off = r.offset();
+            let n = r.size();
+            let hi = off + n;
+            c += &format!("  Relation.retains_slice base e {sn}_ctype 0 {off} {n};\n");
+            if let Region::Field(f) = r {
+                let pn = f.shape.pn();
+                let ct = ctype_of_shape(&f.shape).unwrap();
+                c += &format!(
+                    "  Relation.view_region_slice base {sn}_ctype 0 {off} {n};\n  Relation.view_read_ok_slice e {sn}_ctype {off} {ct};\n"
+                );
+                // Scalar descriptors are transparent constants, so the scalar
+                // constructor is inferred from the descriptor at this site.
+                if let FieldShape::Array { len, .. } = &f.shape {
+                    c += &format!(
+                        "  KA.scalar_array_read_ok (match {pn}_ctype with | ET.TScalar s -> s | _ -> ET.SChar) {len} (Seq.slice e {off} {hi});\n"
+                    );
+                } else if !pn.starts_with("struct_") {
+                    c += &format!(
+                        "  Relation.view_scalar (Seq.slice e {off} {hi}) (match {pn}_ctype with | ET.TScalar s -> s | _ -> ET.SChar);\n"
+                    );
+                }
+            } else {
+                c += &format!("  Relation.view_region_slice e {sn}_ctype 0 {off} {n};\n");
+            }
+        }
+        c += &format!("  {sn}_field_aligned a;\n");
+        split(&mut c);
+        for f in &si.fields {
+            let pn = f.shape.pn();
+            let alignment = contextual_alignment(f);
+            let off = f.offset;
+            let hi = off + f.size;
+            let at = address(off);
+            if f.size == 0 {
+                c += &format!(
+                    "  mem_pts_to_at_nil (a +! {off}sz) {p} (slice b {off} {off}) (Seq.create 0 None);\n"
+                );
+                if storage {
+                    c += &format!(
+                        "  {pn}_claim_uninit (a +! {off}sz) #(slice b {off} {off}) #(Seq.create 0 None);\n"
+                    );
+                } else {
+                    c += &format!(
+                        "  {pn}_conceal (a +! {off}sz) #p #(slice b {off} {off}) #(x.fld_{}) #(Seq.create 0 None);\n",
+                        f.name
+                    );
+                }
+                continue;
+            }
+            if off == 0 {
+                c += &format!(
+                    "  rewrite (mem_pts_to_at a {p} (slice b 0 {hi}) (Seq.slice e 0 {hi})) as (mem_pts_to_at (a +! 0sz) {p} (slice b 0 {hi}) (Seq.slice e 0 {hi}));\n"
+                );
+            }
+            let at = if off == 0 {
+                "(a +! 0sz)".to_string()
+            } else {
+                at
+            };
+            if let FieldShape::Array { esize, len, .. } = &f.shape {
+                let repr = if storage {
+                    format!("(maybe_repr {pn}_repr {esize})")
+                } else {
+                    format!("{pn}_repr")
+                };
+                let xs = if storage {
+                    format!("(Seq.create {len} None)")
+                } else {
+                    format!("(x.fld_{})", f.name)
+                };
+                if storage {
+                    c += &format!("  create_repr {pn}_repr {esize} {len} (slice b {off} {hi});\n");
+                }
+                c += &format!(
+                    "  array_conceal_at {pn}_ctype {repr} {at} {esize}sz {pn}_alignof #{p} #(slice b {off} {hi}) #{xs} #(Seq.slice e {off} {hi});\n  KA.claim {sn}_ctype {off} {pn}_ctype {repr} {at} {esize}sz {pn}_alignof #{p} #{xs} #(Seq.slice base {off} {hi}) #(Seq.slice e {off} {hi});\n"
+                );
+                if storage {
+                    c += &format!(
+                        "  fold KA.storage {sn}_ctype {off} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} (Seq.slice base {off} {hi}) {at};\n"
+                    );
+                }
+            } else if pn.starts_with("struct_") {
+                c += &format!(
+                    "  {pn}_{}_context {sn}_ctype {off} {at} {}#(slice b {off} {hi}) {}#(Seq.slice e {off} {hi}) #(Seq.slice base {off} {hi});\n",
+                    if storage { "claim_uninit" } else { "conceal" },
+                    if storage {
+                        String::new()
+                    } else {
+                        "#p ".to_string()
+                    },
+                    if storage {
+                        String::new()
+                    } else {
+                        format!("#(x.fld_{}) ", f.name)
+                    }
+                );
+            } else if storage {
+                c += &format!(
+                    "  K.claim_storage {sn}_ctype {off} {pn}_ctype {alignment} {at} #(slice b {off} {hi}) #(Seq.slice e {off} {hi}) #(Seq.slice base {off} {hi});\n"
+                );
+            } else {
+                c += &format!(
+                    "  K.claim {sn}_ctype {off} {pn}_ctype {pn}_repr {alignment} {at} #p #(x.fld_{}) #(slice b {off} {hi}) #(Seq.slice e {off} {hi}) #(Seq.slice base {off} {hi});\n",
+                    f.name
+                );
+            }
+        }
+        c += &format!("  fold {sn}_padding_ctx a {p} base;\n");
+        if storage {
+            c += &format!("  fold {sn}_pts_to_uninit_retained base a;\n}}\n\n");
+        } else {
+            c += &format!("  fold {sn}_pts_to_retained base a p x;\n}}\n\n");
+        }
+        let public_out = if storage {
+            format!("{sn}_pts_to_uninit a")
+        } else {
+            format!("{sn}_pts_to a p x")
+        };
+        let public_pre = if storage {
+            format!("len b == SizeT.v {sn}_sizeof /\\ Relation.view_read_ok e {sn}_ctype")
+        } else {
+            pre
+        };
+        c += &format!(
+            "ghost fn {sn}{suffix} (a: ptr){pb} (#b: bytes){bx} (#e: ET.etypes)\n  requires mem_pts_to_at a {p} b e\n  requires pure ({public_pre} /\\ ET.elen e == len b /\\ aligned a {sn}_alignof)\n{}  ensures {public_out}\n{{\n",
+            if storage {
+                String::new()
+            } else {
+                struct_inv_req(si, &sn, "x")
+            }
+        );
+        c += &format!(
+            "  {sn}{suffix}_retained a {};\n  fold {public_out};\n}}\n\n",
+            if storage { "#b #e" } else { "#p #b #x #e" }
+        );
+    }
+    let mut byte_acc = Vec::new();
+    let mut index_acc = Vec::new();
+    for (i, _) in regions.iter().enumerate() {
+        byte_acc.push(if i == 0 {
+            "r0".to_string()
+        } else {
+            format!("(append {} r{i})", byte_acc[i - 1])
+        });
+        index_acc.push(if i == 0 {
+            "e0".to_string()
+        } else {
+            format!("(Seq.append {} e{i})", index_acc[i - 1])
+        });
+    }
+    for storage in [true, false] {
+        let p = if storage { "1.0R" } else { "p" };
+        let suffix = if storage { "_reveal_uninit" } else { "_reveal" };
+        let extra = if storage {
+            String::new()
+        } else {
+            format!(" (#p: perm) (#x: {sn})")
+        };
+        let owner = if storage {
+            format!("{sn}_pts_to_uninit_retained base a")
+        } else {
+            format!("{sn}_pts_to_retained base a p x")
+        };
+        let repr = if storage {
+            format!("len b == SizeT.v {sn}_sizeof")
+        } else if si.inv.is_some() {
+            format!("{sn}_repr x b /\\ {sn}_invariant x")
+        } else {
+            format!("{sn}_repr x b")
+        };
+        c += &format!(
+            "ghost fn {sn}{suffix}_retained (a: ptr){extra} (#base: {sn}_index)\n  requires {owner}\n  ensures exists* b e. mem_pts_to_at a {p} b e ** pure ({repr} /\\ ET.elen e == len b /\\ Relation.view_read_ok e {sn}_ctype /\\ Relation.retains base e {sn}_ctype /\\ aligned a {sn}_alignof)\n{{\n  unfold {owner};\n"
+        );
+        c += &format!("  unfold {sn}_padding_ctx a {p} base;\n");
+        for f in si.fields.iter().filter(|f| f.size == 0) {
+            let pn = f.shape.pn();
+            let off = f.offset;
+            c += &format!(
+                "  {pn}_{} (a +! {off}sz);\n  with bz_{} ez_{}. assert (mem_pts_to_at (a +! {off}sz) {p} bz_{} ez_{} ** pure (len bz_{} == 0));\n  drop_mem_pts_to_at_nil (a +! {off}sz);\n",
+                if storage { "reveal_uninit" } else { "reveal" },
+                f.name,
+                f.name,
+                f.name,
+                f.name,
+                f.name
+            );
+        }
+        for (i, r) in regions.iter().enumerate() {
+            let off = r.offset();
+            let n = r.size();
+            let at = address(off);
+            if let Region::Field(f) = r {
+                let pn = f.shape.pn();
+                let alignment = contextual_alignment(f);
+                if let FieldShape::Array { esize, len, .. } = &f.shape {
+                    let repr = if storage {
+                        format!("(maybe_repr {pn}_repr {esize})")
+                    } else {
+                        format!("{pn}_repr")
+                    };
+                    if storage {
+                        c += &format!(
+                            "  unfold KA.storage {sn}_ctype {off} {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} (Seq.slice base {off} {}) (a +! {off}sz);\n  with xs{i}. assert (KA.value {sn}_ctype {off} {pn}_ctype {repr} {esize} (SizeT.v {pn}_alignof) (Seq.slice base {off} {}) (a +! {off}sz) 1.0R xs{i});\n",
+                            off + n,
+                            off + n
+                        );
+                    }
+                    c += &format!(
+                        "  KA.reveal {sn}_ctype {off} {pn}_ctype {repr} (a +! {off}sz) {esize}sz {pn}_alignof;\n"
+                    );
+                } else if pn.starts_with("struct_") {
+                    c += &format!(
+                        "  {pn}_{}_context {sn}_ctype {off} (a +! {off}sz);\n",
+                        if storage { "reveal_uninit" } else { "reveal" }
+                    );
+                } else {
+                    c += &format!(
+                        "  K.{} {sn}_ctype {off} {pn}_ctype {}{alignment} (a +! {off}sz);\n",
+                        if storage {
+                            "reveal_storage"
+                        } else {
+                            "reveal_value"
+                        },
+                        if storage {
+                            String::new()
+                        } else {
+                            format!("{pn}_repr ")
+                        }
+                    );
+                }
+            }
+            let rp = if let Region::Field(f) = r {
+                if storage {
+                    String::new()
+                } else {
+                    format!(
+                        " /\\ {}",
+                        f.shape
+                            .repr_of(&format!("x.fld_{}", f.name), &format!("r{i}"))
+                    )
+                }
+            } else {
+                String::new()
+            };
+            let match_at = if off == 0 && matches!(r, Region::Field(_)) {
+                "(a +! 0sz)".to_string()
+            } else {
+                at
+            };
+            let array_region = matches!(
+                r,
+                Region::Field(StructField {
+                    shape: FieldShape::Array { .. },
+                    ..
+                })
+            );
+            let view_guard = if array_region {
+                String::new()
+            } else {
+                format!(" /\\ Relation.view_region {sn}_ctype {off} e{i}")
+            };
+            c += &format!(
+                "  with r{i} e{i}. assert (mem_pts_to_at {match_at} {p} r{i} e{i} ** pure (len r{i} == {n} /\\ ET.elen e{i} == {n} /\\ Relation.retains_at (Seq.slice base {off} {}) e{i} {sn}_ctype {off}{view_guard}{rp}));\n",
+                off + n
+            );
+            if array_region {
+                c += &format!(
+                    "  K.view_region_retained (Seq.slice base {off} {}) e{i} {sn}_ctype {off};\n",
+                    off + n
+                );
+            }
+            if off == 0 && matches!(r, Region::Field(_)) {
+                c += &format!(
+                    "  rewrite (mem_pts_to_at (a +! 0sz) {p} r{i} e{i}) as (mem_pts_to_at a {p} r{i} e{i});\n"
+                );
+            }
+            if i > 0 {
+                c += &format!(
+                    "  Relation.retains_join_prefix base {} e{i} {sn}_ctype 0 {off} {};\n  Relation.view_region_append {sn}_ctype 0 {} e{i};\n  mem_join_at a {off}sz;\n",
+                    index_acc[i - 1],
+                    off + n,
+                    index_acc[i - 1]
+                );
+            }
+        }
+        let last = regions.len() - 1;
+        if !storage {
+            for (i, r) in regions.iter().enumerate() {
+                let Region::Field(f) = r else { continue };
+                for j in (i + 1..regions.len()).rev() {
+                    c += &format!(
+                        "  slice_append_left_at {} r{j} {} {};\n",
+                        byte_acc[j - 1],
+                        f.offset,
+                        f.offset + f.size
+                    );
+                }
+                if i > 0 {
+                    c += &format!("  append_slice_right {} r{i};\n", byte_acc[i - 1]);
+                }
+            }
+        }
+        c += &format!(
+            "  Seq.lemma_eq_intro (Seq.slice base 0 (ET.elen base)) base;\n  Relation.view_region_finish {} {sn}_ctype;\n  Relation.retains_finish base {} {sn}_ctype;\n}}\n\n",
+            index_acc[last], index_acc[last]
+        );
+        let public_owner = if storage {
+            format!("{sn}_pts_to_uninit a")
+        } else {
+            format!("{sn}_pts_to a p x")
+        };
+        c += &format!(
+            "ghost fn {sn}{suffix} (a: ptr){extra}\n  requires {public_owner}\n  ensures exists* b e. mem_pts_to_at a {p} b e ** pure ({repr} /\\ ET.elen e == len b /\\ Relation.view_read_ok e {sn}_ctype /\\ aligned a {sn}_alignof)\n{{\n  unfold {public_owner};\n  {sn}{suffix}_retained a;\n}}\n\n"
+        );
+    }
+    c += &format!(
+        "ghost fn {sn}_retain (a: ptr) (#p: perm) (#x: {sn})\n  requires {sn}_pts_to a p x\n  ensures exists* (base: {sn}_index). {sn}_pts_to_retained base a p x\n{{\n  {sn}_reveal a;\n  {sn}_conceal_retained a #p #_ #x;\n}}\n\n\
+         ghost fn {sn}_retain_uninit (a: ptr)\n  requires {sn}_pts_to_uninit a\n  ensures exists* (base: {sn}_index). {sn}_pts_to_uninit_retained base a\n{{\n  {sn}_reveal_uninit a;\n  {sn}_claim_uninit_retained a;\n}}\n\n\
+         fn {sn}_stack_alloc ()\n  returns a: ptr\n  ensures {sn}_pts_to_uninit a\n  ensures pure (fixed_metadata a (ET.etypes_of {sn}_ctype true))\n{{\n  let a = mem_stack_alloc {sn}_sizeof (hide {sn}_ctype);\n  aligned_divides a max_align {sn}_alignof;\n  ET.read_ok_of {sn}_ctype true;\n  Relation.read_ok_view (ET.etypes_of {sn}_ctype true) {sn}_ctype;\n  {sn}_claim_uninit a;\n  a\n}}\n\n\
+         fn {sn}_stack_free (a: ptr)\n  requires {sn}_pts_to_uninit a\n{{\n  {sn}_reveal_uninit a;\n  mem_stack_free a;\n}}\n\n\
+         ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn})\n  requires elem_pts_to {sn}_ctype {sn}_repr a p x\n  requires pure (aligned a {sn}_alignof)\n{}  ensures {sn}_pts_to a p x\n{{\n  elem_reveal {sn}_ctype {sn}_repr a;\n  with b e. assert (mem_pts_to_at a p b e ** pure ({sn}_repr x b /\\ Relation.view_read_ok e {sn}_ctype));\n  {sn}_conceal a #p #b #x #e;\n}}\n\n\
+         ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n  requires {sn}_pts_to a p x\n  ensures elem_pts_to {sn}_ctype {sn}_repr a p x\n{{\n  {sn}_reveal a;\n  with b e. assert (mem_pts_to_at a p b e ** pure ({sn}_repr x b /\\ ET.elen e == len b /\\ Relation.view_read_ok e {sn}_ctype /\\ aligned a {sn}_alignof));\n  elem_conceal {sn}_ctype {sn}_repr a #p #b #x #e;\n}}\n\n",
+        struct_inv_req(si, &sn, "x")
+    );
+    if let Some(first) = si.fields.iter().find(|f| f.offset == 0 && f.size > 0) {
+        let pn = first.shape.pn();
+        let proof = if matches!(first.shape, FieldShape::Array { .. }) {
+            format!("{sn}_not_null_array_{}_context (a +! 0sz)", first.name)
+        } else if pn.starts_with("struct_") {
+            format!("{pn}_not_null_context {sn}_ctype 0 (a +! 0sz)")
+        } else {
+            format!("K.not_null {pn}_ctype {pn}_repr {pn}_alignof (a +! 0sz)")
+        };
+        c += &format!(
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{} a;\n  {proof};\n  {sn}_unfocus_read_{} a;\n}}\n\n",
+            first.name, first.name
+        );
+    }
+    if si.fields.iter().all(|f| f.inv.is_none()) {
+        if let Some(proofs) = si
+            .fields
+            .iter()
+            .map(|f| zero_repr_proof(tds, &f.ty))
+            .collect::<Option<Vec<_>>>()
+            && let Ok(zero) = si
+                .fields
+                .iter()
+                .map(|f| Ok(format!("fld_{} = {}", f.name, zero_value(tds, &f.ty)?)))
+                .collect::<Result<Vec<_>, String>>()
+        {
+            c += &format!(
+                "let {sn}_repr_zero (_: unit) : Lemma ({sn}_repr ({{ {} }}) (zeroed (SizeT.v {sn}_sizeof))) = {} ()\n\n",
+                record_fields(zero, false),
+                proofs.into_iter().flatten().collect::<Vec<_>>().join(" ")
+            );
+        }
+    }
+    let encodings = regions
+        .iter()
+        .map(|r| match r {
+            Region::Gap(_, n) => Some(format!("zeroed {n}")),
+            Region::Field(f) => {
+                let bits = scalar_bits(f.shape.pn(), &format!("x.fld_{}", f.name))?;
+                Some(format!(
+                    "Pulse.Lib.C.Palow.Encoding.encode {} None ({bits})",
+                    f.size
+                ))
+            }
+        })
+        .collect::<Option<Vec<_>>>();
+    if let Some(encodings) = encodings {
+        c += &format!(
+            "let {sn}_encode (x: {sn}) : b:bytes {{ {sn}_repr x b /\\ initialized b }} =\n"
+        );
+        for (i, e) in encodings.iter().enumerate() {
+            c += &format!("  let r{i} = {e} in\n  assert (initialized r{i});\n");
+        }
+        for i in 1..regions.len() {
+            c += &format!("  initialized_append {} r{i};\n", byte_acc[i - 1]);
+        }
+        for (i, r) in regions.iter().enumerate() {
+            let Region::Field(f) = r else { continue };
+            for j in (i + 1..regions.len()).rev() {
+                c += &format!(
+                    "  slice_append_left_at {} r{j} {} {};\n",
+                    byte_acc[j - 1],
+                    f.offset,
+                    f.offset + f.size
+                );
+            }
+            if i > 0 {
+                c += &format!("  append_slice_right {} r{i};\n", byte_acc[i - 1]);
+            }
+        }
+        c += &format!("  {}\n\n", byte_acc.last().unwrap());
+        if gaps.iter().all(|(_, n)| *n == 0) {
+            c += &format!(
+                "fn {sn}_initialize (a: ptr) (x: {sn})\n  requires Pulse.Lib.C.Palow.Effective.prepared a {sn}_ctype\n  requires pure (aligned a {sn}_alignof)\n{}  ensures {sn}_pts_to a 1.0R x\n{{\n  let b = {sn}_encode x;\n  Pulse.Lib.C.Palow.Effective.Machine.initialize a (hide {sn}_ctype) b;\n  with e. assert (mem_pts_to_at a 1.0R b e);\n  Relation.read_ok_view e {sn}_ctype;\n  {sn}_conceal a #1.0R #b #x;\n}}\n\n",
+                struct_inv_req(si, &sn, "x")
+            );
+        }
+    }
+    c += &emit_contextual_struct_adapters(si, &sn);
+    c
+}
+
+fn emit_contextual_struct_adapters(si: &StructInfo, sn: &str) -> String {
+    let mut c = String::new();
+    let inv_req = struct_inv_req(si, sn, "x");
+    for storage in [false, true] {
+        let suffix = if storage { "_uninit" } else { "" };
+        let value_args = if storage { "" } else { " p x" };
+        let p = if storage { "1.0R" } else { "p" };
+        let xbinder = if storage {
+            String::new()
+        } else {
+            format!(" (#p: perm) (#x: {sn})")
+        };
+        let pure_guard = format!(
+            "Relation.retains_at base current root lo /\\ Relation.view_region root lo base /\\ Relation.strict_subobject root lo {sn}_ctype"
+        );
+        let owner = format!("{sn}_pts_to{suffix}_context root lo base a{value_args}");
+        let retained = format!("{sn}_pts_to{suffix}_retained current a{value_args}");
+        c += &format!(
+            "let {sn}_pts_to{suffix}_context (root: ET.ctype) (lo: nat) (base: {sn}_index) ([@@@mkey] a: ptr){} : slprop =\n  exists* (current: {sn}_index). {retained} ** pure ({pure_guard})\n\n\
+             let {sn}_loan{suffix}_context (root: ET.ctype) (lo: nat) (base current: {sn}_index) ([@@@mkey] a: ptr) : slprop = pure ({pure_guard})\n\n\
+             ghost fn {sn}_borrow{suffix}_context (a: ptr){xbinder} (#root: ET.ctype) (#lo: nat) (#base: {sn}_index)\n  requires {owner}\n  ensures exists* (current: {sn}_index). {retained} ** {sn}_loan{suffix}_context root lo base current a\n{{\n  unfold {owner};\n  with current. assert ({retained} ** pure ({pure_guard}));\n  fold {sn}_loan{suffix}_context root lo base current a;\n}}\n\n\
+             ghost fn {sn}_restore{suffix}_context (a: ptr){xbinder} (#root: ET.ctype) (#lo: nat) (#base #current: {sn}_index)\n  requires {retained}\n  requires {sn}_loan{suffix}_context root lo base current a\n  ensures {owner}\n{{\n  unfold {sn}_loan{suffix}_context root lo base current a;\n  fold {owner};\n}}\n\n",
+            if storage {
+                String::new()
+            } else {
+                format!(" (p: perm) (x: {sn})")
+            }
+        );
+        let raw_repr = if storage {
+            format!("len b == SizeT.v {sn}_sizeof")
+        } else if si.inv.is_some() {
+            format!("{sn}_repr x b /\\ {sn}_invariant x")
+        } else {
+            format!("{sn}_repr x b")
+        };
+        let claim = if storage { "claim_uninit" } else { "conceal" };
+        let claim_args = if storage { "#b #e" } else { "#p #b #x #e" };
+        let raw_binders = if storage {
+            " (#b: bytes)".to_string()
+        } else {
+            format!(" (#p: perm) (#b: bytes) (#x: {sn})")
+        };
+        c += &format!(
+            "ghost fn {sn}_{claim}_context (root: ET.ctype) (lo: nat) (a: ptr){raw_binders} (#e #base: {sn}_index)\n  requires mem_pts_to_at a {p} b e\n  requires pure ({raw_repr} /\\ ET.elen e == len b /\\ aligned a {sn}_alignof /\\ Relation.view_read_ok e {sn}_ctype /\\ Relation.retains_at base e root lo /\\ Relation.view_region root lo base /\\ Relation.strict_subobject root lo {sn}_ctype)\n  ensures {owner}\n{{\n  {sn}_{claim}_retained a {claim_args};\n  fold {owner};\n}}\n\n\
+             ghost fn {sn}_reveal{suffix}_context (root: ET.ctype) (lo: nat) (a: ptr){xbinder} (#base: {sn}_index)\n  requires {owner}\n  ensures exists* b e. mem_pts_to_at a {p} b e ** pure ({raw_repr} /\\ ET.elen e == len b /\\ aligned a {sn}_alignof /\\ Relation.view_read_ok e {sn}_ctype /\\ Relation.retains_at base e root lo /\\ Relation.view_region root lo e /\\ Relation.view_region root lo base /\\ Relation.strict_subobject root lo {sn}_ctype)\n{{\n  unfold {owner};\n  with current. assert ({retained} ** pure ({pure_guard}));\n  {sn}_reveal{suffix}_retained a;\n  with b e. assert (mem_pts_to_at a {p} b e ** pure ({raw_repr} /\\ ET.elen e == len b /\\ Relation.retains current e {sn}_ctype /\\ Relation.view_read_ok e {sn}_ctype /\\ aligned a {sn}_alignof));\n  Relation.retains_child_lift root lo {sn}_ctype current e;\n  Relation.retains_at_trans base current e root lo;\n  K.view_region_retained base e root lo;\n}}\n\n"
+        );
+    }
+    c += &format!(
+        "ghost fn {sn}_restore_initialized_context (a: ptr) (#p: perm) (#x: {sn}) (#root: ET.ctype) (#lo: nat) (#base #current: {sn}_index)\n  requires {sn}_pts_to_retained current a p x\n  requires {sn}_loan_uninit_context root lo base current a\n  ensures {sn}_pts_to_context root lo base a p x\n{{\n  unfold {sn}_loan_uninit_context root lo base current a;\n  fold {sn}_pts_to_context root lo base a p x;\n}}\n\n\
+         ghost fn {sn}_forget_field (a: ptr) (#x: {sn}) (#root: ET.ctype) (#lo: nat) (#base: {sn}_index)\n  requires {sn}_pts_to_context root lo base a 1.0R x\n  ensures {sn}_pts_to_uninit_context root lo base a\n{{\n  {sn}_borrow_context a;\n  {sn}_forget_retained a;\n  unfold {sn}_loan_context root lo base _ a;\n  fold {sn}_pts_to_uninit_context root lo base a;\n}}\n\n\
+         fn {sn}_write_uninit_field (a: ptr) (x: {sn}) (#root: ET.ctype) (#lo: nat) (#base: {sn}_index)\n  requires {sn}_pts_to_uninit_context root lo base a\n{inv_req}  ensures {sn}_pts_to_context root lo base a 1.0R x\n{{\n  {sn}_borrow_uninit_context a;\n  {sn}_write_uninit_retained a x;\n  unfold {sn}_loan_uninit_context root lo base _ a;\n  fold {sn}_pts_to_context root lo base a 1.0R x;\n}}\n\n\
+         fn {sn}_write_field (a: ptr) (x: {sn}) (#old: {sn}) (#root: ET.ctype) (#lo: nat) (#base: {sn}_index)\n  requires {sn}_pts_to_context root lo base a 1.0R old\n{inv_req}  ensures {sn}_pts_to_context root lo base a 1.0R x\n{{\n  {sn}_forget_field a;\n  {sn}_write_uninit_field a x;\n}}\n\n\
+         fn {sn}_read_field (a: ptr) (#p: perm) (#x: erased {sn}) (#root: ET.ctype) (#lo: nat) (#base: {sn}_index)\n  preserves {sn}_pts_to_context root lo base a p x\n  returns y: {sn}\n  ensures pure (y == reveal x)\n{{\n  {sn}_borrow_context a;\n  let y = {sn}_read_retained a;\n  {sn}_restore_context a;\n  y\n}}\n\n\
+         ghost fn {sn}_not_null_context (root: ET.ctype) (lo: nat) (a: ptr) (#p: perm) (#x: {sn}) (#base: {sn}_index)\n  preserves {sn}_pts_to_context root lo base a p x\n  ensures pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_reveal_context root lo a #p #x #base;\n  with b e. assert (mem_pts_to_at a p b e);\n  mem_pts_to_at_not_null a;\n  {sn}_conceal_context root lo a #p #b #x #e #base;\n}}\n\n"
+    );
+    c
+}
+
 /// One contiguous piece of a struct object: either a field or the padding
 /// between two of them. Ordering the pieces by offset turns the object into a
 /// partition, which is what both directions of the byte-level view walk.
@@ -7112,6 +9402,11 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         return String::new();
     }
     let sn = format!("struct_{}", name);
+    let declared_guard = if si.fields.iter().any(|f| contains_union(tds, &f.ty)) {
+        " /\\ ET.declared_destination e"
+    } else {
+        ""
+    };
 
     // A member of size zero -- an embedded empty struct -- is deliberately not
     // a region. Regions tile the object and are carved apart by `mem_split`,
@@ -7226,9 +9521,9 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         let pn = pn_of(f);
         r += &format!(
             "  {pn}_reveal (a +! {sn}_offsetof_{f});
-               with v. assert (mem_pts_to (a +! {sn}_offsetof_{f}) p v **              pure ({pn}_repr x.fld_{f} v));
+               with v ev. assert (mem_pts_to_at (a +! {sn}_offsetof_{f}) p v ev ** pure ({pn}_repr x.fld_{f} v));
                {pn}_repr_len x.fld_{f} v;
-               drop_mem_pts_to_nil (a +! {sn}_offsetof_{f});
+               drop_mem_pts_to_at_nil (a +! {sn}_offsetof_{f});
 ",
             pn = pn,
             sn = sn,
@@ -7250,17 +9545,22 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 );
                 r += &format!("  {}\n", f.shape.reveal(&at(f.offset), "p", &val));
                 r += &format!(
-                    "  with {v}. assert (mem_pts_to {at} p {v} ** pure ({pn}_repr {val} {v}));\n",
+                    "  with {v} e{k}. assert (mem_pts_to_at {at} p {v} e{k} ** pure ({pn}_repr {val} {v} /\\ ET.elen e{k} == len {v}));\n",
                     v = v,
                     at = at(f.offset),
                     pn = pn,
                     val = val
                 );
-                r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+                // The literal length spares the joins below from unfolding
+                // `{pn}_sizeof` themselves, which Z3 does not always find.
+                r += &format!(
+                    "  {}_repr_len {} {};\n  assert (pure (len {} == {}));\n",
+                    pn, val, v, v, f.size
+                );
             }
             Region::Gap(off, n) => {
                 r += &format!(
-                    "  with {v}. assert (mem_pts_to {at} p {v} ** pure (len {v} == {n}));\n",
+                    "  with {v} e{k}. assert (mem_pts_to_at {at} p {v} e{k} ** pure (len {v} == {n} /\\ ET.elen e{k} == len {v}));\n",
                     v = v,
                     at = at(*off),
                     n = n
@@ -7274,7 +9574,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         });
     }
     for reg in regions.iter().skip(1) {
-        r += &format!("  mem_join a {}sz;\n", reg.offset());
+        r += &format!("  mem_join_at a {}sz;\n", reg.offset());
     }
     // Every field's slice of the finished object has to be recognised as the
     // bytes that field was revealed to. Peeling the appends off from the
@@ -7303,7 +9603,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     c += &format!(
         "ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
-         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({sn}_repr x b)\n\
+         \x20 ensures  exists* b e. mem_pts_to_at a p b e ** pure ({sn}_repr x b /\\ ET.elen e == len b)\n\
          {{\n{r}}}\n\n",
         sn = sn,
         r = r
@@ -7314,7 +9614,10 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     let mut hi = si.size;
     for reg in regions.iter().skip(1).rev() {
         let off = reg.offset();
-        w += &format!("  mem_split a {}sz;\n", off);
+        w += &format!(
+            "  mem_split_at a {}sz;\n  Seq.slice_slice e 0 {hi} {off} {hi};\n  Seq.slice_slice e 0 {hi} 0 {off};\n",
+            off
+        );
         w += &format!("  slice_prefix b {hi} 0 {off};\n", hi = hi, off = off);
         w += &format!("  slice_prefix b {hi} {off} {hi};\n", hi = hi, off = off);
         hi = off;
@@ -7323,9 +9626,17 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         let pn = pn_of(f);
         if f.size == 0 {
             w += &format!(
-                "  mem_pts_to_nil {at} p (slice b {lo} {lo});\n",
+                "  mem_pts_to_at_nil {at} p (slice b {lo} {lo}) (Seq.create 0 None);\n",
                 at = at(f.offset),
                 lo = f.offset
+            );
+        }
+        if f.size > 0
+            && let Some(ct) = ctype_of_shape(&f.shape)
+        {
+            w += &format!(
+                "  {sn}_access_{} ();\n  ET.read_ok_slice e {sn}_ctype {} ({ct});\n",
+                f.name, f.offset
             );
         }
         w += &format!(
@@ -7346,9 +9657,9 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         );
     }
     c += &format!(
-        "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: {sn})\n\
-         \x20 requires mem_pts_to a p b\n\
-         \x20 requires pure ({sn}_repr x b /\\ aligned a {sn}_alignof)\n{iv}\
+        "ghost fn {sn}_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: {sn}) (#e: ET.etypes)\n\
+         \x20 requires mem_pts_to_at a p b e\n\
+         \x20 requires pure ({sn}_repr x b /\\ aligned a {sn}_alignof /\\ ET.elen e == len b /\\ ET.read_ok e {sn}_ctype{declared_guard})\n{iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
          {{\n  {sn}_field_aligned a;\n{w}  fold {sn}_padding a p;\n  fold {sn}_pts_to a p x;\n}}\n\n",
         sn = sn,
@@ -7356,21 +9667,102 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         w = w
     );
 
+    let encodings: Option<Vec<String>> = regions
+        .iter()
+        .map(|r| match r {
+            Region::Gap(_, n) => Some(format!("zeroed {n}")),
+            Region::Field(f) => {
+                if !matches!(
+                    f.shape,
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. }
+                ) {
+                    return None;
+                }
+                let pn = f.shape.pn();
+                let v = format!("x.fld_{}", f.name);
+                let bits = match repr_pn(pn) {
+                    "bool_t" => format!("(if {v} then 1 else 0)"),
+                    "uint8_t" => format!("UInt8.v {v}"),
+                    "uint16_t" => format!("UInt16.v {v}"),
+                    "uint32_t" => format!("UInt32.v {v}"),
+                    "uint64_t" => format!("UInt64.v {v}"),
+                    "size_t" => format!("SizeT.v {v}"),
+                    "int8_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 8 (Int8.v {v})"),
+                    "int16_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 16 (Int16.v {v})"),
+                    "int32_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 32 (Int32.v {v})"),
+                    "int64_t" => format!("Pulse.Lib.C.Palow.Encoding.to_bits 64 (Int64.v {v})"),
+                    "float32_t" => format!("Pulse.Lib.C.Palow.Float.float32_bits {v}"),
+                    "float64_t" => format!("Pulse.Lib.C.Palow.Float.float64_bits {v}"),
+                    _ => return None,
+                };
+                Some(format!(
+                    "Pulse.Lib.C.Palow.Encoding.encode {} None ({bits})",
+                    f.size
+                ))
+            }
+        })
+        .collect();
+    if let Some(encodings) = encodings {
+        c += &format!(
+            "let {sn}_encode (x: {sn}) : b:bytes {{ {sn}_repr x b /\\ initialized b }} =\n"
+        );
+        for (k, enc) in encodings.iter().enumerate() {
+            c += &format!("  let r{k} = {enc} in\n  assert (initialized r{k});\n");
+        }
+        for k in 1..regions.len() {
+            c += &format!("  initialized_append {} r{k};\n", accs[k - 1]);
+        }
+        for (j, reg) in regions.iter().enumerate() {
+            let Region::Field(f) = reg else { continue };
+            for k in (j + 1..regions.len()).rev() {
+                c += &format!(
+                    "  slice_append_left_at {} r{k} {} {};\n",
+                    accs[k - 1],
+                    f.offset,
+                    f.offset + f.size
+                );
+            }
+            if j > 0 {
+                c += &format!("  append_slice_right {} r{j};\n", accs[j - 1]);
+            }
+        }
+        c += &format!("  {}\n\n", accs[regions.len() - 1]);
+        if gaps.iter().all(|(_, n)| *n == 0) {
+            c += &format!(
+                "fn {sn}_initialize (a: ptr) (x: {sn})\n\
+             \x20 requires Pulse.Lib.C.Palow.Effective.prepared a {sn}_ctype\n\
+             \x20 requires pure (aligned a {sn}_alignof)\n{iv}\
+             \x20 ensures {sn}_pts_to a 1.0R x\n\
+             {{\n  let b = {sn}_encode x;\n  Pulse.Lib.C.Palow.Effective.Machine.initialize a (hide {sn}_ctype) b;\n  {sn}_conceal a #1.0R #b #x;\n}}\n\n",
+                iv = struct_inv_req(si, &sn, "x")
+            );
+        }
+    }
+
     // The adapters that make the struct an array element. `elem_pts_to` is
     // the generic array layer's view of one slot, stated over the element's
     // representation, so these are the byte-level view read in the other
     // direction and nothing more.
+    if !declared_guard.is_empty() {
+        c += &format!(
+            "ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn}) (#base: ET.etypes {{ ET.elen base == SizeT.v {sn}_sizeof /\\ ET.declared_destination base /\\ ET.read_ok base {sn}_ctype }})\n  requires elem_pts_to {sn}_ctype {sn}_repr a p x\n  requires pure (aligned a {sn}_alignof /\\ fixed_metadata a base)\n{iv}  ensures {sn}_pts_to a p x\n{{\n  elem_reveal {sn}_ctype {sn}_repr a;\n  fixed_metadata_index a #p #_ #_ #base;\n  {sn}_conceal a #p #_ #x;\n}}\n\n\
+             ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn}) (#base: ET.etypes {{ ET.elen base == SizeT.v {sn}_sizeof /\\ ET.declared_destination base /\\ ET.read_ok base {sn}_ctype }})\n  requires {sn}_pts_to a p x\n  requires pure (fixed_metadata a base)\n  ensures elem_pts_to {sn}_ctype {sn}_repr a p x\n{{\n  {sn}_reveal a;\n  fixed_metadata_index a #p #_ #_ #base;\n  object_read_ok_nominal base {sn}_ctype;\n  elem_conceal {sn}_ctype {sn}_repr a #p #_ #x;\n}}\n\n",
+            iv = struct_inv_req(si, &sn, "x")
+        );
+        return c;
+    }
     c += &format!(
         "ghost fn {sn}_of_elem (a: ptr) (#p: perm) (#x: {sn})\n\
-         \x20 requires elem_pts_to {sn}_repr a p x\n\
+         \x20 requires elem_pts_to {sn}_ctype {sn}_repr a p x\n\
          \x20 requires pure (aligned a {sn}_alignof)\n\
          {iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
-         {{\n  elem_reveal {sn}_repr a;\n  {sn}_conceal a #p #_ #x;\n}}\n\n\
+         {{\n  elem_reveal {sn}_ctype {sn}_repr a;\n  {sn}_conceal a #p #_ #x;\n}}\n\n\
          ghost fn {sn}_to_elem (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
-         \x20 ensures  elem_pts_to {sn}_repr a p x\n\
-         {{\n  {sn}_reveal a;\n  elem_conceal {sn}_repr a #p #_ #x;\n}}\n\n",
+         \x20 requires pure (fixed_metadata a (ET.etypes_of {sn}_ctype true))\n\
+         \x20 ensures  elem_pts_to {sn}_ctype {sn}_repr a p x\n\
+         {{\n  {sn}_reveal a;\n  fixed_metadata_index a #p #_ #_ #(ET.etypes_of {sn}_ctype true);\n  ET.read_ok_of {sn}_ctype true;\n  elem_conceal {sn}_ctype {sn}_repr a #p #_ #x;\n}}\n\n",
         iv = struct_inv_req(si, &sn, "x"),
         sn = sn
     );
@@ -7394,6 +9786,16 @@ fn fill_name(pn: &str, esize: u64, len: u64) -> String {
     format!("array_{}_{}_{}", pn, esize, len)
 }
 
+fn emit_retained_fill(pn: &str, elem: &str, esize: u64, len: u64) -> String {
+    let f = fill_name(pn, esize, len);
+    format!(
+        "fn rec {f}_from_retained (a: ptr) (vs: s:Seq.seq {elem} {{Seq.length s == {len}}}) (k: SizeT.t)\n  (#xs: erased (s:Seq.seq (option {elem}) {{Seq.length s == {len}}})) (#base: ET.etypes)\n  requires RA.value {pn}_ctype (maybe_repr {pn}_repr {esize}) {esize} (SizeT.v {pn}_alignof) base a 1.0R xs\n  requires pure (SizeT.v k <= {len} /\\ (forall j. j < SizeT.v k ==> Seq.index xs j == Some (Seq.index vs j)))\n  ensures RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a 1.0R vs\n  decreases ({len} - SizeT.v k)\n{{\n  if (SizeT.lt k {len}sz) {{\n    RA.properties {pn}_ctype (maybe_repr {pn}_repr {esize}) a {esize}sz {pn}_alignof;\n    RA.offset_fits {pn}_ctype (maybe_repr {pn}_repr {esize}) a {esize}sz {pn}_alignof k;\n    RA.write_uninit {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof M.{pn}_write_uninit_at #xs #base k ({esize}sz `SizeT.mul` k) (Seq.index vs (SizeT.v k));\n    {f}_from_retained a vs (k `SizeT.add` 1sz);\n  }} else {{\n    RA.claim_all {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof vs;\n  }}\n}}\n\n\
+         fn {f}_fill_retained (a: ptr) (vs: s:Seq.seq {elem} {{Seq.length s == {len}}}) (#base: ET.etypes)\n  requires RA.storage {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} base a\n  ensures RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a 1.0R vs\n{{\n  unfold RA.storage {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} base a;\n  {f}_from_retained a vs 0sz;\n}}\n\n\
+         fn rec {f}_upto_retained (a: ptr) (k: SizeT.t) (acc: s:Seq.seq {elem} {{Seq.length s == SizeT.v k}})\n  (#p: perm) (#xs: erased (s:Seq.seq {elem} {{Seq.length s == {len}}})) (#base: ET.etypes)\n  preserves RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a p xs\n  requires pure (SizeT.v k <= {len} /\\ (forall j. j < SizeT.v k ==> Seq.index acc j == Seq.index xs j))\n  returns r: s:Seq.seq {elem} {{Seq.length s == {len}}}\n  ensures pure (r == reveal xs)\n  decreases ({len} - SizeT.v k)\n{{\n  if (SizeT.lt k {len}sz) {{\n    RA.properties {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof;\n    RA.offset_fits {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof k;\n    let v = RA.read {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof M.{pn}_read_at #p #xs #base k ({esize}sz `SizeT.mul` k);\n    {f}_upto_retained a (k `SizeT.add` 1sz) (Seq.snoc acc v)\n  }} else {{\n    Seq.lemma_eq_intro acc (reveal xs);\n    acc\n  }}\n}}\n\n\
+         fn {f}_read_retained (a: ptr) (#p: perm) (#xs: erased (s:Seq.seq {elem} {{Seq.length s == {len}}})) (#base: ET.etypes)\n  preserves RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a p xs\n  returns r: s:Seq.seq {elem} {{Seq.length s == {len}}}\n  ensures pure (r == reveal xs)\n{{\n  {f}_upto_retained a 0sz Seq.empty\n}}\n\n"
+    )
+}
+
 /// Filling an array field from a value, which is the one part of a structure's
 /// write-only view that is not a fold: going from storage to holding `vs`
 /// genuinely writes bytes, and there are `len` of them to write.
@@ -7408,37 +9810,37 @@ fn emit_fill(pn: &str, elem: &str, esize: u64, len: u64) -> String {
     let tmpl = "\
 fn rec {f}_from (a: ptr) (vs: (s: Seq.seq {t} {{ Seq.length s == {n} }})) (k: SizeT.t)
                 (#xs: erased (xs: Seq.seq (option {t}) {{ Seq.length xs == {n} }}))
-  requires array_pts_to (maybe_repr {pn}_repr {es}) {es} {aln} a 1.0R xs
+  requires array_pts_to {pn}_ctype (maybe_repr {pn}_repr {es}) {es} {aln} a 1.0R xs
   requires pure (SizeT.v k <= {n} /\\
                  (forall (j: nat). j < SizeT.v k ==> Seq.index xs j == Some (Seq.index vs j)))
-  ensures  array_pts_to {pn}_repr {es} {aln} a 1.0R vs
+  ensures  array_pts_to {pn}_ctype {pn}_repr {es} {aln} a 1.0R vs
   decreases ({n} - SizeT.v k)
 {{
   if (SizeT.lt k {n}sz) {{
-    array_focus (maybe_repr {pn}_repr {es}) a {es}sz {al} k ({es}sz `SizeT.mul` k);
-    elem_maybe_reveal {pn}_repr {es}sz {at};
+    array_focus {pn}_ctype (maybe_repr {pn}_repr {es}) a {es}sz {al} k ({es}sz `SizeT.mul` k);
+    elem_maybe_reveal {pn}_ctype {pn}_repr {es}sz {at};
     {pn}_claim_uninit {at};
     {pn}_write_uninit {at} (Seq.index vs (SizeT.v k));
     {pn}_to_elem {at};
-    elem_maybe_put {pn}_repr {es}sz {at};
-    array_unfocus (maybe_repr {pn}_repr {es}) a {es}sz {al} k ({es}sz `SizeT.mul` k);
+    elem_maybe_put {pn}_ctype {pn}_repr {es}sz {at};
+    array_unfocus {pn}_ctype (maybe_repr {pn}_repr {es}) a {es}sz {al} k ({es}sz `SizeT.mul` k);
     {f}_from a vs (k `SizeT.add` 1sz);
   }} else {{
-    array_claim_all {pn}_repr a {es}sz {al} vs;
+    array_claim_all {pn}_ctype {pn}_repr a {es}sz {al} vs;
   }}
 }}
 
 fn {f}_fill (a: ptr) (vs: (s: Seq.seq {t} {{ Seq.length s == {n} }}))
-  requires array_pts_to_uninit {pn}_repr {es} {aln} {n} a
-  ensures  array_pts_to {pn}_repr {es} {aln} a 1.0R vs
+  requires array_pts_to_uninit {pn}_ctype {pn}_repr {es} {aln} {n} a
+  ensures  array_pts_to {pn}_ctype {pn}_repr {es} {aln} a 1.0R vs
 {{
-  unfold array_pts_to_uninit {pn}_repr {es} {aln} {n} a;
+  unfold array_pts_to_uninit {pn}_ctype {pn}_repr {es} {aln} {n} a;
   {f}_from a vs 0sz;
 }}
 
 fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == SizeT.v k }}))
                 (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs == {n} }}))
-  preserves array_pts_to {pn}_repr {es} {aln} a p xs
+  preserves array_pts_to {pn}_ctype {pn}_repr {es} {aln} a p xs
   requires pure (SizeT.v k <= {n} /\\
                  (forall (j: nat). j < SizeT.v k ==> Seq.index acc j == Seq.index xs j))
   returns  r : (s: Seq.seq {t} {{ Seq.length s == {n} }})
@@ -7446,11 +9848,11 @@ fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == S
   decreases ({n} - SizeT.v k)
 {{
   if (SizeT.lt k {n}sz) {{
-    array_focus {pn}_repr a {es}sz {al} k ({es}sz `SizeT.mul` k);
+    array_focus {pn}_ctype {pn}_repr a {es}sz {al} k ({es}sz `SizeT.mul` k);
     {pn}_of_elem {at};
     let v = {pn}_read {at};
     {pn}_to_elem {at};
-    array_unfocus_read {pn}_repr a {es}sz {al} k ({es}sz `SizeT.mul` k);
+    array_unfocus_read {pn}_ctype {pn}_repr a {es}sz {al} k ({es}sz `SizeT.mul` k);
     {f}_upto a (k `SizeT.add` 1sz) (Seq.snoc acc v)
   }} else {{
     Seq.lemma_eq_intro acc (reveal xs);
@@ -7459,7 +9861,7 @@ fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == S
 }}
 
 fn {f}_read (a: ptr) (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs == {n} }}))
-  preserves array_pts_to {pn}_repr {es} {aln} a p xs
+  preserves array_pts_to {pn}_ctype {pn}_repr {es} {aln} a p xs
   returns  r : (s: Seq.seq {t} {{ Seq.length s == {n} }})
   ensures  pure (r == reveal xs)
 {{
@@ -7537,7 +9939,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     // the `option` view: `array_pts_to_uninit` hides the sequence, and a
     // loop's invariant has to name it.
     let flex_uninit = format!(
-        "array_pts_to (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) {at} 1.0R \
+        "array_pts_to {pn}_ctype (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) {at} 1.0R \
          (Seq.create (SizeT.v n) (None #{el}))",
         pn = fpn,
         es = fes,
@@ -7664,7 +10066,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         }
         FieldShape::Array { pn, esize, len } => {
             *alloc += &format!(
-                "  array_claim_all_uninit {}_repr {} {}sz {}_alignof {}sz{};\n",
+                "  array_claim_all_uninit {0}_ctype {}_repr {} {}sz {}_alignof {}sz{};\n",
                 pn,
                 at(f.offset),
                 esize,
@@ -7673,7 +10075,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
                 if f.size == 0 { " #(uninit 0)" } else { "" }
             );
             *alloc += &format!(
-                "  rewrite (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off})\n    as (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}));\n",
+                "  rewrite (array_pts_to_uninit {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off})\n    as (array_pts_to_uninit {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}));\n",
                 pn = pn,
                 es = esize,
                 n = len,
@@ -7690,21 +10092,32 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     // type's zero. Everything before the tail is claimed as storage either
     // way -- the source writes those fields, and a field it does not write is
     // a field the object cannot be gathered from.
-    let carve = |zeroed: bool| {
+    let carve = |zeroed: bool, raw_tail: bool| {
         let mut alloc = String::new();
+        let mut upper = "ET.elen e".to_string();
         for off in bounds.iter().rev() {
-            alloc += &format!("  mem_split a {}sz;\n", off);
+            alloc += &format!(
+                "  mem_split_at a {off}sz;\n  Seq.slice_slice e 0 ({upper}) {off} ({upper});\n  Seq.slice_slice e 0 ({upper}) 0 {off};\n"
+            );
+            upper = off.to_string();
             match field_at(*off) {
                 Some(f) if std::ptr::eq(f, flex) => {
-                    if zeroed {
+                    if raw_tail {
                         alloc += &format!(
-                            "  array_claim_zeroed {pn}_repr {off} {es}sz {pn}_alignof n #z;\n  array_claim_all {pn}_repr {off} {es}sz {pn}_alignof (Seq.create (SizeT.v n) z);\n",
+                            "  rewrite (mem_pts_to_at {off} 1.0R (slice b {lo} (len b)) (Seq.slice e {lo} (ET.elen e)))\n    as (mem_pts_to_at (a +! {sn}_offsetof_{f}) 1.0R (slice b {lo} (len b)) (Seq.slice e {lo} (ET.elen e)));\n",
+                            off = at(f.offset),
+                            lo = f.offset,
+                            f = f.name,
+                        );
+                    } else if zeroed {
+                        alloc += &format!(
+                            "  array_claim_zeroed {pn}_ctype {pn}_repr {off} {es}sz {pn}_alignof n #z;\n  array_claim_all {pn}_ctype {pn}_repr {off} {es}sz {pn}_alignof (Seq.create (SizeT.v n) z);\n",
                             pn = fpn,
                             off = at(f.offset),
                             es = fes
                         );
                         alloc += &format!(
-                            "  rewrite (array_pts_to {pn}_repr {es} (SizeT.v {pn}_alignof) {off} 1.0R (Seq.create (SizeT.v n) z))\n    as (array_pts_to {pn}_repr {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z));\n",
+                            "  rewrite (array_pts_to {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) {off} 1.0R (Seq.create (SizeT.v n) z))\n    as (array_pts_to {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z));\n",
                             pn = fpn,
                             es = fes,
                             off = at(f.offset),
@@ -7713,13 +10126,13 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
                         );
                     } else {
                         alloc += &format!(
-                            "  array_claim_uninit {pn}_repr {off} {es}sz {pn}_alignof n;\n",
+                            "  array_claim_uninit {pn}_ctype {pn}_repr {off} {es}sz {pn}_alignof n;\n",
                             pn = fpn,
                             off = at(f.offset),
                             es = fes
                         );
                         alloc += &format!(
-                            "  rewrite (array_pts_to (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) {off} 1.0R (Seq.create (SizeT.v n) (None #{el})))\n    as (array_pts_to (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) (None #{el})));\n",
+                            "  rewrite (array_pts_to {pn}_ctype (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) {off} 1.0R (Seq.create (SizeT.v n) (None #{el})))\n    as (array_pts_to {pn}_ctype (maybe_repr {pn}_repr {es}) {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) (None #{el})));\n",
                             pn = fpn,
                             es = fes,
                             off = at(f.offset),
@@ -7750,24 +10163,93 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     for u in &fixed_uninit {
         ensures_fixed += &format!("  ensures  {}\n", u);
     }
+    let mut read_guards = fixed
+        .iter()
+        .filter_map(|f| {
+            let ct = ctype_of_shape(&f.shape)?;
+            let part = format!("(Seq.slice e {} {})", f.offset, f.offset + f.size);
+            Some(match &f.shape {
+                FieldShape::Array { pn, esize, len } => {
+                    format!("array_read_ok {pn}_ctype {esize} {len} {part}")
+                }
+                _ => format!("ET.read_ok {part} ({ct})"),
+            })
+        })
+        .collect::<Vec<_>>();
+    read_guards.push(format!(
+        "array_read_ok {fpn}_ctype {fes} (SizeT.v n) (Seq.slice e {} (ET.elen e))",
+        flex.offset
+    ));
+    let read_guard = read_guards.join(" /\\ ");
     c += &format!(
-        "ghost fn {sn}_claim_uninit_flex (a: ptr) (n: SizeT.t) (#b: bytes)\n  requires mem_pts_to a 1.0R b\n  requires pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es})\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  {fu}\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        "ghost fn {sn}_claim_uninit_flex (a: ptr) (n: SizeT.t) (#b: bytes) (#e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof + SizeT.v n * {es} }})\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es} /\\ ET.elen e == len b)\n  requires pure (aligned a {sn}_alignof /\\ {read_guard})\n{ef}  ensures  {fu}\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
         sn = sn,
         es = fes,
         ef = ensures_fixed,
         fu = flex_uninit,
-        alloc = carve(false)
+        alloc = carve(false, false)
+    );
+    c += &format!(
+        "ghost fn {sn}_claim_uninit_flex_raw_tail (a: ptr) (n: SizeT.t) (#b: bytes {{ len b == SizeT.v {sn}_sizeof + SizeT.v n * {es} }}) (#e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof + SizeT.v n * {es} }})\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (len b == SizeT.v {sn}_sizeof + SizeT.v n * {es} /\\ ET.elen e == len b)\n  requires pure (aligned a {sn}_alignof /\\ {read_guard})\n{ef}  ensures mem_pts_to_at {flex_at} 1.0R (slice b {lo} (len b)) (Seq.slice e {lo} (ET.elen e))\n  ensures {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        es = fes,
+        lo = flex.offset,
+        ef = ensures_fixed,
+        alloc = carve(false, true),
     );
     let elem = fstar_type(tds, flex_elem(tds, &flex.ty).unwrap()).unwrap();
     c += &format!(
-        "ghost fn {sn}_claim_zeroed_flex (a: ptr) (n: SizeT.t) (#z: {el}) (#b: bytes)\n  requires mem_pts_to a 1.0R b\n  requires pure (b == zeroed (SizeT.v {sn}_sizeof + SizeT.v n * {es}))\n  requires pure ({pn}_repr z (zeroed {es}))\n  requires pure (aligned a {sn}_alignof)\n{ef}  ensures  array_pts_to {pn}_repr {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z)\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
+        "ghost fn {sn}_claim_zeroed_flex (a: ptr) (n: SizeT.t) (#z: {el}) (#b: bytes) (#e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof + SizeT.v n * {es} }})\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (b == zeroed (SizeT.v {sn}_sizeof + SizeT.v n * {es}) /\\ ET.elen e == len b)\n  requires pure ({pn}_repr z (zeroed {es}))\n  requires pure (aligned a {sn}_alignof /\\ {read_guard})\n{ef}  ensures  array_pts_to {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) (a +! {sn}_offsetof_{f}) 1.0R (Seq.create (SizeT.v n) z)\n  ensures  {sn}_padding a 1.0R\n{{\n  {sn}_field_aligned a;\n{alloc}  fold {sn}_padding a 1.0R;\n}}\n\n",
         sn = sn,
         el = elem,
         es = fes,
         pn = fpn,
         f = flex.name,
         ef = ensures_fixed,
-        alloc = carve(true)
+        alloc = carve(true, false)
+    );
+    let mut reveal = format!("  unfold {sn}_padding a 1.0R;\n");
+    for f in &fixed {
+        let address = format!("(a +! {sn}_offsetof_{})", f.name);
+        match &f.shape {
+            FieldShape::One { pn } => {
+                reveal += &format!("  {pn}_reveal_uninit {address};\n");
+            }
+            FieldShape::Array { pn, esize, len } => {
+                reveal += &format!(
+                    "  array_reveal_all_uninit {pn}_ctype {pn}_repr {address} {esize}sz {pn}_alignof {len}sz;\n"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+    reveal += &format!("  array_forget {fpn}_ctype {fpn}_repr {flex_at} {fes}sz {fpn}_alignof;\n");
+    let mut regions = fixed
+        .iter()
+        .map(|f| (f.offset, f.size.to_string()))
+        .chain(gaps.iter().map(|(off, n)| (*off, n.to_string())))
+        .collect::<Vec<_>>();
+    regions.push((flex.offset, format!("{fes} * SizeT.v n")));
+    regions.sort_by_key(|(off, _)| *off);
+    for (i, (off, size)) in regions.iter().enumerate() {
+        reveal += &format!(
+            "  with b{i} e{i}. assert (mem_pts_to_at (a +! {off}sz) 1.0R b{i} e{i} ** pure (len b{i} == {size} /\\ ET.elen e{i} == len b{i}));\n"
+        );
+        if *off == 0 {
+            reveal += &format!(
+                "  rewrite (mem_pts_to_at (a +! 0sz) 1.0R b{i} e{i}) as (mem_pts_to_at a 1.0R b{i} e{i});\n"
+            );
+        }
+    }
+    for (off, _) in regions.iter().skip(1) {
+        reveal += &format!("  mem_join_at a {off}sz;\n");
+    }
+    c += &format!(
+        "ghost fn {sn}_reveal_uninit_flex (a: ptr) (n: SizeT.t) (#xs: Seq.seq (option {elem}))\n  requires {fixed}\n  requires array_pts_to {fpn}_ctype (maybe_repr {fpn}_repr {fes}) {fes} (SizeT.v {fpn}_alignof) {flex_at} 1.0R xs\n  requires {sn}_padding a 1.0R\n  requires pure (Seq.length xs == SizeT.v n)\n  ensures exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {sn}_sizeof + {fes} * SizeT.v n /\\ ET.elen e == len b)\n{{\n{reveal}}}\n\n",
+        fixed = if fixed_uninit.is_empty() {
+            "emp".to_string()
+        } else {
+            fixed_uninit.join(" ** ")
+        }
     );
     c
 }
@@ -7775,6 +10257,11 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
 fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String {
     let si = &tds.structs[name];
     let sn = format!("struct_{}", name);
+    let declared_guard = if si.fields.iter().any(|f| contains_union(tds, &f.ty)) {
+        " /\\ ET.declared_destination e"
+    } else {
+        ""
+    };
     // A flexible array member is not a hole in the storage layer, it is a
     // different storage layer: everything is parameterised by the tail's
     // length instead of by `sizeof`.
@@ -8024,96 +10511,189 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         if matches!(f.shape, FieldShape::Unaligned { .. }) {
             return;
         }
-        let pn = f.shape.pn();
-        if f.offset == 0 {
-            *alloc += &format!("  aligned_divides a {sn}_alignof {pn}_alignof;\n");
-        } else {
-            *alloc += &format!(
-                "  aligned_field a {sn}_alignof {sn}_offsetof_{} {pn}_alignof;\n",
-                f.name
-            );
-        }
+        *alloc += &format!("  {sn}_aligned_{} a;\n", f.name);
     };
-    let claim_at = |f: &StructField, alloc: &mut String| match &f.shape {
-        FieldShape::Unaligned { pn } => {
-            *alloc += &format!(
-                "  bytes_claim_uninit {off} (SizeT.v {pn}_sizeof);\n  \
-                 rewrite (bytes_uninit {off} (SizeT.v {pn}_sizeof))\n    \
-                 as (bytes_uninit (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof));\n",
-                pn = pn,
-                off = at(f.offset),
-                sn = sn,
-                f = f.name
-            );
+    let claim_at = |f: &StructField, alloc: &mut String| {
+        if f.size > 0 {
+            if let Some(ct) = ctype_of_shape(&f.shape) {
+                *alloc += &format!(
+                    "  {sn}_access_{} ();\n  ET.read_ok_slice e {sn}_ctype {} ({ct});\n",
+                    f.name, f.offset
+                );
+            }
+            if let FieldShape::Array { pn, len, .. } = &f.shape {
+                *alloc += &format!(
+                    "  array_read_ok_from_type {pn}_ctype {len} (Seq.slice e {} {});\n",
+                    f.offset,
+                    f.offset + f.size
+                );
+            }
         }
-        FieldShape::One { pn } => {
-            // A zero-size member's storage is conjured rather than carved, and
-            // the enclosing object's range is still in the context at the same
-            // address, so the range has to be named rather than inferred.
-            *alloc += &format!(
-                "  {}_claim_uninit {}{};\n",
-                pn,
-                at(f.offset),
-                if f.size == 0 { " #(uninit 0)" } else { "" }
-            );
-            *alloc += &format!(
-                "  rewrite ({pn}_pts_to_uninit {off})\n    as ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}));\n",
-                pn = pn,
-                off = at(f.offset),
-                sn = sn,
-                f = f.name
-            );
-        }
-        FieldShape::Flex { .. } => *alloc += NO_FLEX_STORAGE,
-        FieldShape::Array { pn, esize, len } => {
-            *alloc += &format!(
-                "  array_claim_all_uninit {}_repr {} {}sz {}_alignof {}sz{};\n",
-                pn,
-                at(f.offset),
-                esize,
-                pn,
-                len,
-                if f.size == 0 { " #(uninit 0)" } else { "" }
-            );
-            *alloc += &format!(
-                "  rewrite (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off})\n    as (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}));\n",
-                pn = pn,
-                es = esize,
-                n = len,
-                off = at(f.offset),
-                sn = sn,
-                f = f.name
-            );
+        match &f.shape {
+            FieldShape::Unaligned { pn } => {
+                *alloc += &format!(
+                    "  bytes_claim_uninit {pn}_ctype {off} (SizeT.v {pn}_sizeof);\n  \
+                 rewrite (bytes_uninit {pn}_ctype {off} (SizeT.v {pn}_sizeof))\n    \
+                 as (bytes_uninit {pn}_ctype (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof));\n",
+                    pn = pn,
+                    off = at(f.offset),
+                    sn = sn,
+                    f = f.name
+                );
+            }
+            FieldShape::One { pn } => {
+                // A zero-size member's storage is conjured rather than carved, and
+                // the enclosing object's range is still in the context at the same
+                // address, so the range has to be named rather than inferred.
+                *alloc += &format!(
+                    "  {}_claim_uninit {}{};\n",
+                    pn,
+                    at(f.offset),
+                    if f.size == 0 { " #(uninit 0)" } else { "" }
+                );
+                *alloc += &format!(
+                    "  rewrite ({pn}_pts_to_uninit {off})\n    as ({pn}_pts_to_uninit (a +! {sn}_offsetof_{f}));\n",
+                    pn = pn,
+                    off = at(f.offset),
+                    sn = sn,
+                    f = f.name
+                );
+            }
+            FieldShape::Flex { .. } => *alloc += NO_FLEX_STORAGE,
+            FieldShape::Array { pn, esize, len } => {
+                *alloc += &format!(
+                    "  array_claim_all_uninit {0}_ctype {}_repr {} {}sz {}_alignof {}sz{};\n",
+                    pn,
+                    at(f.offset),
+                    esize,
+                    pn,
+                    len,
+                    if f.size == 0 { " #(uninit 0)" } else { "" }
+                );
+                *alloc += &format!(
+                    "  rewrite (array_pts_to_uninit {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off})\n    as (array_pts_to_uninit {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}));\n",
+                    pn = pn,
+                    es = esize,
+                    n = len,
+                    off = at(f.offset),
+                    sn = sn,
+                    f = f.name
+                );
+            }
         }
     };
     let field_at = |off: u64| si.fields.iter().find(|f| f.offset == off && f.size > 0);
+    c += &format!(
+        "let {sn}_index_prefix_length (e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof }}) (n: nat {{ n <= ET.elen e }})\n  : Lemma (ET.elen (Seq.slice e 0 n) == n) = ()\n\n"
+    );
+    for f in si.fields.iter().filter(|f| f.size > 0) {
+        let mut body = String::new();
+        align_at(f, &mut body);
+        claim_at(f, &mut body);
+        c += &format!(
+            "ghost fn {sn}_claim_field_{} (a: ptr) (#b: bytes {{ len b == SizeT.v {sn}_sizeof }}) (#e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof }})\n  requires mem_pts_to_at {} 1.0R (slice b {} {}) (Seq.slice e {} {})\n  requires pure (aligned a {sn}_alignof /\\ ET.read_ok e {sn}_ctype{declared_guard})\n  ensures {}\n{{\n{body}}}\n\n",
+            f.name,
+            at(f.offset),
+            f.offset,
+            f.offset + f.size,
+            f.offset,
+            f.offset + f.size,
+            f.shape
+                .uninit(&format!("(a +! {sn}_offsetof_{})", f.name))
+                .unwrap()
+        );
+    }
     let mut alloc = String::new();
     // A zero-size member has no bytes to carve out of the object, so its
     // storage is conjured where it stands.
     for f in si.fields.iter().filter(|f| f.size == 0) {
         align_at(f, &mut alloc);
-        alloc += &format!("  mem_pts_to_nil {} 1.0R (uninit 0);\n", at(f.offset));
+        alloc += &format!(
+            "  mem_pts_to_at_nil {} 1.0R (uninit 0) (Seq.create 0 None);\n",
+            at(f.offset)
+        );
         claim_at(f, &mut alloc);
     }
+    // Each split, with the claim of the piece it cuts off, is a ghost function
+    // of its own. Inline, every split leaves its lemmas about `slice b` and
+    // `Seq.slice e` in the context of all the later ones, and Pulse checks each
+    // step against everything before it: on the sixty-nine-field struct in
+    // `test/dpe`, once the effective-type index joined the bytes, that was
+    // well over half an hour and most of a CI runner's memory. Out of line,
+    // each step sees only its own facts, and `_claim_uninit` chains
+    // resources with no pure context to speak of.
+    //
+    // Between steps, what is left to carve travels as `{sn}_carve`, folded, so
+    // that calling a step is a resource match: passing `#b #e` with their
+    // refinements, and the slices in the step's specification, cost the
+    // caller a dozen queries a step against its whole context.
+    if !bounds.is_empty() {
+        c += &format!(
+            "let {sn}_carve (a: ptr) (n: nat {{ n <= SizeT.v {sn}_sizeof }}) : slprop =\n  exists* (b: bytes {{ len b == SizeT.v {sn}_sizeof }}) (e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof }}).\n    mem_pts_to_at a 1.0R (slice b 0 n) (Seq.slice e 0 n) **\n    pure (aligned a {sn}_alignof /\\ ET.read_ok e {sn}_ctype{declared_guard})\n\n"
+        );
+    }
+    let mut upper = si.size;
     for off in bounds.iter().rev() {
-        alloc += &format!("  mem_split a {}sz;\n", off);
-        if let Some(f) = field_at(*off) {
-            align_at(f, &mut alloc);
-            claim_at(f, &mut alloc);
+        let first = upper == si.size;
+        let mut body = if first {
+            String::new()
+        } else {
+            format!(
+                "  unfold {sn}_carve a {upper};\n  with b e. assert (mem_pts_to_at a 1.0R (slice b 0 {upper}) (Seq.slice e 0 {upper}));\n"
+            )
+        };
+        body += &format!(
+            "  {sn}_index_prefix_length e {upper};\n  {sn}_index_prefix_length e {off};\n  mem_split_at a {off}sz;\n  Seq.slice_slice e 0 {upper} {off} {upper};\n  Seq.slice_slice e 0 {upper} 0 {off};\n  slice_prefix b {upper} {off} {upper};\n  slice_prefix b {upper} 0 {off};\n  with prefix{off} eprefix{off}. assert (mem_pts_to_at a 1.0R prefix{off} eprefix{off} ** pure (len prefix{off} == {off}));\n  rewrite (mem_pts_to_at a 1.0R prefix{off} eprefix{off}) as (mem_pts_to_at a 1.0R (slice b 0 {off}) (Seq.slice e 0 {off}));\n  with suffix{off} esuffix{off}. assert (mem_pts_to_at (a +! {off}sz) 1.0R suffix{off} esuffix{off} ** pure (len suffix{off} == {upper} - {off}));\n  rewrite (mem_pts_to_at (a +! {off}sz) 1.0R suffix{off} esuffix{off}) as (mem_pts_to_at (a +! {off}sz) 1.0R (slice b {off} {upper}) (Seq.slice e {off} {upper}));\n"
+        );
+        let piece = match field_at(*off) {
+            Some(f) => {
+                body += &format!("  {sn}_claim_field_{} a #b #e;\n", f.name);
+                f.shape
+                    .uninit(&format!("(a +! {sn}_offsetof_{})", f.name))
+                    .unwrap()
+            }
+            None => format!(
+                "exists* g e. mem_pts_to_at (a +! {off}sz) 1.0R g e ** pure (len g == {} /\\ ET.elen e == len g)",
+                upper - off
+            ),
+        };
+        body += &format!("  fold {sn}_carve a {off};\n");
+        if first {
+            c += &format!(
+                "ghost fn {sn}_claim_step_{off} (a: ptr) (#b: bytes {{ len b == SizeT.v {sn}_sizeof }}) (#e: ET.etypes {{ ET.elen e == SizeT.v {sn}_sizeof }})\n  requires mem_pts_to_at a 1.0R b e\n  requires pure (aligned a {sn}_alignof /\\ ET.read_ok e {sn}_ctype{declared_guard})\n  ensures {sn}_carve a {off}\n  ensures {piece}\n{{\n{body}}}\n\n"
+            );
+            alloc += &format!("  {sn}_claim_step_{off} a #b #e;\n");
+        } else {
+            c += &format!(
+                "ghost fn {sn}_claim_step_{off} (a: ptr)\n  requires {sn}_carve a {upper}\n  ensures {sn}_carve a {off}\n  ensures {piece}\n{{\n{body}}}\n\n"
+            );
+            alloc += &format!("  {sn}_claim_step_{off} a;\n");
         }
+        upper = *off;
     }
     if let Some(f) = field_at(0) {
-        align_at(f, &mut alloc);
-        claim_at(f, &mut alloc);
+        if bounds.is_empty() {
+            alloc += &format!("  {sn}_claim_field_{} a #b #e;\n", f.name);
+        } else {
+            let piece = f
+                .shape
+                .uninit(&format!("(a +! {sn}_offsetof_{})", f.name))
+                .unwrap();
+            c += &format!(
+                "ghost fn {sn}_claim_step_0 (a: ptr)\n  requires {sn}_carve a {upper}\n  ensures {piece}\n{{\n  unfold {sn}_carve a {upper};\n  with b e. assert (mem_pts_to_at a 1.0R (slice b 0 {upper}) (Seq.slice e 0 {upper}));\n  {sn}_claim_field_{} a #b #e;\n}}\n\n",
+                f.name
+            );
+            alloc += &format!("  {sn}_claim_step_0 a;\n");
+        }
     }
     // Claiming raw storage at this type is the carve on its own; a stack
     // allocation is that plus the allocation. Separating them is what lets a
     // struct be an array element or a union member, where the storage comes
     // from somewhere else entirely.
     c += &format!(
-        "ghost fn {sn}_claim_uninit (a: ptr) (#b: bytes)\n\
-         \x20 requires mem_pts_to a 1.0R b\n\
-         \x20 requires pure (len b == SizeT.v {sn}_sizeof /\\ aligned a {sn}_alignof)\n\
+        "ghost fn {sn}_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)\n\
+         \x20 requires mem_pts_to_at a 1.0R b e\n\
+         \x20 requires pure (len b == SizeT.v {sn}_sizeof /\\ aligned a {sn}_alignof /\\ ET.elen e == len b /\\ ET.read_ok e {sn}_ctype{declared_guard})\n\
          \x20 ensures  {sn}_pts_to_uninit a\n\
          {{\n\
          {alloc}\
@@ -8126,8 +10706,9 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         "fn {sn}_stack_alloc ()\n\
          \x20 returns a : ptr\n\
          \x20 ensures {sn}_pts_to_uninit a\n\
+         \x20 ensures pure (fixed_metadata a (ET.etypes_of {sn}_ctype true))\n\
          {{\n\
-         \x20 let a = mem_stack_alloc {sn}_sizeof;\n\
+         \x20 let a = mem_stack_alloc {sn}_sizeof (hide {sn}_ctype);\n\
          \x20 aligned_divides a max_align {sn}_alignof;\n\
          \x20 {sn}_claim_uninit a;\n\
          \x20 a\n}}\n\n",
@@ -8144,9 +10725,9 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     let reveal_at = |f: &StructField, free: &mut String| match &f.shape {
         FieldShape::Unaligned { pn } => {
             *free += &format!(
-                "  rewrite (bytes_uninit (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof))\n    \
-                 as (bytes_uninit {off} (SizeT.v {pn}_sizeof));\n  \
-                 bytes_reveal_uninit {off} (SizeT.v {pn}_sizeof);\n",
+                "  rewrite (bytes_uninit {pn}_ctype (a +! {sn}_offsetof_{f}) (SizeT.v {pn}_sizeof))\n    \
+                 as (bytes_uninit {pn}_ctype {off} (SizeT.v {pn}_sizeof));\n  \
+                 bytes_reveal_uninit {pn}_ctype {off} (SizeT.v {pn}_sizeof);\n",
                 pn = pn,
                 sn = sn,
                 f = f.name,
@@ -8166,7 +10747,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         FieldShape::Flex { .. } => *free += NO_FLEX_STORAGE,
         FieldShape::Array { pn, esize, len } => {
             *free += &format!(
-                "  rewrite (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off});\n",
+                "  rewrite (array_pts_to_uninit {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) {n} (a +! {sn}_offsetof_{f}))\n    as (array_pts_to_uninit {pn}_ctype {pn}_repr {es} (SizeT.v {pn}_alignof) {n} {off});\n",
                 pn = pn,
                 es = esize,
                 n = len,
@@ -8175,7 +10756,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
                 off = at(f.offset)
             );
             *free += &format!(
-                "  array_reveal_all_uninit {}_repr {} {}sz {}_alignof {}sz;\n",
+                "  array_reveal_all_uninit {0}_ctype {}_repr {} {}sz {}_alignof {}sz;\n",
                 pn,
                 at(f.offset),
                 esize,
@@ -8184,26 +10765,63 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             );
         }
     };
+    c += &format!(
+        "ghost fn {sn}_join_uninit (a: ptr) (n: SizeT.t) (m: nat)\n  requires exists* b1 e1 b2 e2. mem_pts_to_at a 1.0R b1 e1 ** mem_pts_to_at (a +! n) 1.0R b2 e2 ** pure (len b1 == SizeT.v n /\\ len b2 == m /\\ ET.elen e1 == len b1 /\\ ET.elen e2 == len b2)\n  ensures exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v n + m /\\ ET.elen e == len b)\n{{\n  mem_join_at a n;\n}}\n\n"
+    );
     let mut free = String::new();
     free += &format!("  unfold {}_pts_to_uninit a;\n", sn);
     for f in si.fields.iter().filter(|f| f.size == 0) {
         reveal_at(f, &mut free);
-        free += &format!("  drop_mem_pts_to_nil {};\n", at(f.offset));
+        free += &format!("  drop_mem_pts_to_at_nil {};\n", at(f.offset));
     }
     free += &format!("  unfold {}_padding a 1.0R;\n", sn);
+    // As with the carve, each reveal-and-join is a ghost function of its own,
+    // and the prefix joined so far travels between them as `{sn}_prefix`,
+    // folded: inline, every join left its existential witnesses and length
+    // facts in the context of all the later ones, and on the sixty-nine-field
+    // struct in `test/dpe` each join was checked in ten seconds against the
+    // ones before it.
+    c += &format!(
+        "let {sn}_prefix (a: ptr) (n: nat) : slprop =\n  exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == n /\\ ET.elen e == len b)\n\n"
+    );
     if let Some(f) = field_at(0) {
         reveal_at(f, &mut free);
+        free += &format!(
+            "  fold {sn}_prefix a {};\n",
+            bounds.first().copied().unwrap_or(si.size)
+        );
     }
-    for off in bounds.iter() {
-        if let Some(f) = field_at(*off) {
-            reveal_at(f, &mut free);
-        }
-        free += &format!("  mem_join a {}sz;\n", off);
+    for (i, off) in bounds.iter().enumerate() {
+        let next = bounds.get(i + 1).copied().unwrap_or(si.size);
+        let mut body = format!("  unfold {sn}_prefix a {off};\n");
+        let piece = match field_at(*off) {
+            Some(f) => {
+                reveal_at(f, &mut body);
+                f.shape
+                    .uninit(&format!("(a +! {sn}_offsetof_{})", f.name))
+                    .unwrap()
+            }
+            None => format!(
+                "exists* g e. mem_pts_to_at (a +! {off}sz) 1.0R g e ** pure (len g == {} /\\ ET.elen e == len g)",
+                next - off
+            ),
+        };
+        body += &format!(
+            "  {sn}_join_uninit a {off}sz {};\n  fold {sn}_prefix a {next};\n",
+            next - off
+        );
+        c += &format!(
+            "ghost fn {sn}_reveal_step_{off} (a: ptr)\n  requires {sn}_prefix a {off}\n  requires {piece}\n  ensures {sn}_prefix a {next}\n{{\n{body}}}\n\n"
+        );
+        free += &format!("  {sn}_reveal_step_{off} a;\n");
+    }
+    if field_at(0).is_some() {
+        free += &format!("  unfold {sn}_prefix a {};\n", si.size);
     }
     c += &format!(
         "ghost fn {sn}_reveal_uninit (a: ptr)\n\
          \x20 requires {sn}_pts_to_uninit a\n\
-         \x20 ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {sn}_sizeof)\n\
+         \x20 ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (len b == SizeT.v {sn}_sizeof /\\ ET.elen e == len b)\n\
          {{\n{free}}}\n\n",
         sn = sn,
         free = free
@@ -8217,8 +10835,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
 
     // Going from a live struct back to storage is per field: the padding is
     // already in both predicates and passes straight through.
+    let forget_owner = format!("{sn}_pts_to");
+    let origin_guards = declared_union_origins(tds, si, "a")
+        .iter()
+        .map(|origin| format!("  preserves {origin}\n"))
+        .collect::<String>();
+    let origin_ensures = declared_union_origins(tds, si, "a")
+        .iter()
+        .map(|origin| format!("  ensures {origin}\n"))
+        .collect::<String>();
     let mut forget = String::new();
-    forget += &format!("  unfold {}_pts_to a 1.0R x;\n", sn);
+    forget += &format!("  unfold {forget_owner} a 1.0R x;\n");
     for f in &si.fields {
         match &f.shape {
             FieldShape::One { pn } => {
@@ -8230,7 +10857,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             FieldShape::Flex { .. } => forget += NO_FLEX_STORAGE,
             FieldShape::Array { pn, esize, len } => {
                 forget += &format!(
-                    "  array_forget_all {}_repr (a +! {}_offsetof_{}) {}sz {}_alignof {}sz;\n",
+                    "  array_forget_all {0}_ctype {}_repr (a +! {}_offsetof_{}) {}sz {}_alignof {}sz;\n",
                     pn, sn, f.name, esize, pn, len
                 );
             }
@@ -8238,7 +10865,8 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     }
     c += &format!(
         "ghost fn {sn}_forget (a: ptr) (#x: {sn})\n\
-         \x20 requires {sn}_pts_to a 1.0R x\n\
+         \x20 requires {forget_owner} a 1.0R x\n\
+         {origin_guards}\
          \x20 ensures  {sn}_pts_to_uninit a\n\
          {{\n{forget}  fold {sn}_pts_to_uninit a;\n}}\n\n",
         sn = sn,
@@ -8275,6 +10903,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
          \x20 requires {sn}_pts_to_uninit a\n\
          {iv}\
          \x20 ensures  {sn}_pts_to a 1.0R x\n\
+         {origin_ensures}\
          {{\n{write}  fold {sn}_pts_to a 1.0R x;\n}}\n\n",
         iv = struct_inv_req(si, &sn, "x"),
         sn = sn,
@@ -8329,13 +10958,15 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
 
     c += &format!(
         "fn {sn}_write (a: ptr) (x: {sn}) (#y: erased {sn})\n\
-         \x20 requires {sn}_pts_to a 1.0R y\n\
+         \x20 requires {forget_owner} a 1.0R y\n\
+         {origin_guards}\
          {iv}\
          \x20 ensures  {sn}_pts_to a 1.0R x\n\
          {{\n  {sn}_forget a;\n  {sn}_write_uninit a x;\n}}\n\n",
         iv = struct_inv_req(si, &sn, "x"),
         sn = sn
     );
+    c += &emit_fresh_pointer_record(tds, name, gaps);
     c
 }
 
@@ -8666,6 +11297,7 @@ fn collect_array_fill_stmts(tds: &Typedefs, ss: &Stmts, out: &mut BTreeMap<Strin
                 }
             }
             StmtT::Return(None)
+            | StmtT::Freeze(_)
             | StmtT::Break
             | StmtT::Continue
             | StmtT::Goto(..)
@@ -8712,6 +11344,26 @@ fn emit_array_fill_helpers(tds: &Typedefs, tu: &TranslationUnit) -> Option<Chunk
 }
 
 /// A subscript's index when it is a constant, after the casts C wraps it in.
+/// A byte count known at translation time.
+fn const_bytes(tds: &Typedefs, e: &Expr) -> Option<u64> {
+    match &e.val {
+        ExprT::IntLit(n, _) => u64::try_from(&**n).ok(),
+        ExprT::SizeOf(t) => palow_sizeof(tds, t),
+        ExprT::Cast(inner, _) | ExprT::VAttr(_, inner) => const_bytes(tds, inner),
+        ExprT::BinOp(op, a, b) => {
+            let (a, b) = (const_bytes(tds, a)?, const_bytes(tds, b)?);
+            match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                BinOp::Div => a.checked_div(b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn const_index(e: &ExprT) -> Option<u64> {
     match e {
         ExprT::IntLit(n, _) => u64::try_from(&**n).ok(),
@@ -8962,6 +11614,33 @@ struct Touched {
     /// The named objects whose own address the body takes. Each of them needs
     /// storage, wherever in the body the `&` happens to appear.
     addressed: HashSet<String>,
+    /// The named objects something other than the body itself may reach: an
+    /// address into one is taken anywhere (`&x`, `&x.f`, `&x.a[i]`), or its
+    /// value -- which for a pointer is what it points at -- is passed to a
+    /// call, stored or returned.
+    escaped: HashSet<String>,
+    /// The locals the body declares.
+    locals: HashSet<String>,
+    /// `x = e` into a declared local `x`: the roots of `e` escape only if `x`
+    /// itself does (`close_escaped`).
+    flows: Vec<(String, HashSet<String>)>,
+}
+
+impl Touched {
+    /// `escaped`, closed under `flows`.
+    fn close_escaped(mut self) -> HashSet<String> {
+        loop {
+            let before = self.escaped.len();
+            for (x, roots) in &self.flows {
+                if self.escaped.contains(x) {
+                    self.escaped.extend(roots.iter().cloned());
+                }
+            }
+            if self.escaped.len() == before {
+                return self.escaped;
+            }
+        }
+    }
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -9028,7 +11707,25 @@ fn alias_of(e: &Expr, t: &Touched) -> Option<Rc<Expr>> {
         ExprT::Deref(x) => x,
         _ => e,
     };
-    t.aliases.get(&lvalue_name(inner)?).cloned()
+    let place = t.aliases.get(&lvalue_name(inner)?)?;
+    Some(view_place(place).unwrap_or(place).clone())
+}
+
+/// The names whose value an expression may be: `p`, `(T *)p`, `c ? p : q`,
+/// `p + 1`. Over-approximate: these are the objects a copy of the value can
+/// reach.
+fn value_roots(e: &Expr, out: &mut HashSet<String>) {
+    match &strip_vattr(e).val {
+        ExprT::Var(v) => {
+            out.insert(v.val.to_string());
+        }
+        ExprT::Cast(x, _) | ExprT::AssignExpr(_, x) => value_roots(x, out),
+        ExprT::Cond(_, b, c) | ExprT::BinOp(_, b, c) => {
+            value_roots(b, out);
+            value_roots(c, out);
+        }
+        _ => {}
+    }
 }
 
 fn touch_expr(e: &Expr, t: &mut Touched) {
@@ -9043,7 +11740,23 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         }
         ExprT::FnCall(n, args) => {
             t.calls.insert(n.val.to_string());
+            // `memcpy` and `memmove` are translated in place (`copy_object`):
+            // the bytes move, but no address is handed to anything. Nor does
+            // `free` keep the pointer it is given: the block is gone after it.
+            let copy = matches!(n.val.as_ref(), "memcpy" | "memmove");
+            let free = n.val.as_ref() == "free";
             for a in args.iter() {
+                if free {
+                } else if !copy {
+                    value_roots(a, &mut t.escaped);
+                } else if let ExprT::Ref(x) = &strip_casts(a).val {
+                    if let Some(n) = lvalue_name(strip_vattr(x)) {
+                        t.addressed.insert(n);
+                    }
+                    touch_write(x, t);
+                    touch_expr(x, t);
+                    continue;
+                }
                 touch_expr(a, t);
             }
         }
@@ -9054,6 +11767,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         ExprT::FnPtrCall(f, args) => {
             touch_expr(f, t);
             for a in args.iter() {
+                value_roots(a, &mut t.escaped);
                 touch_expr(a, t);
             }
         }
@@ -9089,6 +11803,9 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
             if let Some(n) = lvalue_name(strip_vattr(x)) {
                 t.addressed.insert(n);
             }
+            if let Some(b) = lvalue_base(x) {
+                t.escaped.insert(b);
+            }
             touch_write(x, t);
             touch_expr(x, t);
         }
@@ -9097,6 +11814,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
             touch_expr(y, t);
         }
         ExprT::AssignExpr(x, y) => {
+            value_roots(y, &mut t.escaped);
             touch_write(x, t);
             touch_expr(x, t);
             touch_expr(y, t);
@@ -9113,11 +11831,13 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         }
         ExprT::StructInit(_, fs) => {
             for (_, x) in fs {
+                value_roots(x, &mut t.escaped);
                 touch_expr(x, t);
             }
         }
         ExprT::ArrayInit { elems, .. } => {
             for x in elems {
+                value_roots(x, &mut t.escaped);
                 touch_expr(x, t);
             }
         }
@@ -9256,15 +11976,34 @@ fn touch_exprs(es: &Exprs, t: &mut Touched) {
 fn touch_stmts(ss: &Stmts, t: &mut Touched) {
     for s in ss.iter() {
         match &s.val {
-            StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => touch_expr(e, t),
-            StmtT::Let(_, _, e) => touch_expr(e, t),
+            StmtT::Call(e) | StmtT::Assert(e) => touch_expr(e, t),
+            StmtT::Return(Some(e)) | StmtT::Let(_, _, e) => {
+                value_roots(e, &mut t.escaped);
+                touch_expr(e, t)
+            }
             StmtT::DeclStackArray { size, .. } => touch_expr(size, t),
             // The alias assignment itself stores nothing: the pointer is a
             // name, not an object, and the address it takes does not escape.
             StmtT::Assign(a, b)
                 if lvalue_name(a).is_some_and(|n| t.aliases.contains_key(&n))
-                    && matches!(&strip_vattr(b).val, ExprT::Ref(..)) => {}
+                    && matches!(&strip_casts(b).val, ExprT::Ref(..)) => {}
+            // Through an identity function the call still happens, with
+            // whatever else it touches; only the address does not escape.
+            StmtT::Assign(a, b)
+                if lvalue_name(a).is_some_and(|n| t.aliases.contains_key(&n))
+                    && matches!(&strip_casts(b).val, ExprT::FnCall(..)) =>
+            {
+                touch_expr(b, t)
+            }
             StmtT::Assign(a, b) => {
+                match &strip_vattr(a).val {
+                    ExprT::Var(x) if t.locals.contains(&*x.val.to_string()) => {
+                        let mut roots = HashSet::new();
+                        value_roots(b, &mut roots);
+                        t.flows.push((x.val.to_string(), roots));
+                    }
+                    _ => value_roots(b, &mut t.escaped),
+                }
                 touch_write(a, t);
                 touch_expr(a, t);
                 touch_expr(b, t);
@@ -9312,7 +12051,10 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
                 touch_exprs(ensures, t);
             }
             StmtT::Label { ensures, .. } => touch_exprs(ensures, t),
-            StmtT::Decl(..)
+            StmtT::Decl(n, _) => {
+                t.locals.insert(n.val.to_string());
+            }
+            StmtT::Freeze(_)
             | StmtT::Break
             | StmtT::Continue
             | StmtT::Return(None)
@@ -9389,6 +12131,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     holds_fn: BTreeMap::new(),
                     holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
+                    frozen: false,
                 }
             }
             None => {
@@ -9418,6 +12161,7 @@ fn mutable_globals(tds: &Typedefs, tu: &TranslationUnit) -> HashMap<String, Slot
                     holds_fn: BTreeMap::new(),
                     holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
+                    frozen: false,
                 }
             }
         };
@@ -9515,6 +12259,7 @@ pub fn decl_name(decl: &Decl) -> String {
 }
 
 pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
+    let tu = &hoist_identity_calls(tu);
     let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
     for decl in &tu.decls {
@@ -9698,6 +12443,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     let mut written: HashSet<String> = HashSet::new();
     let mut lived: HashSet<String> = HashSet::new();
     let mut decayed: HashSet<String> = HashSet::new();
+    let idents = identity_fns(tu);
     for decl in &tu.decls {
         let DeclT::FnDefn(d) = &decl.val else {
             continue;
@@ -9706,7 +12452,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             aliases: {
                 let mut e = base.clone();
                 e.push_fn_decl_args_for_body(&d.decl);
-                alias_map(&d.body, &|x| ptr_base(&tds, &e, x))
+                alias_map(&d.body, &|x| ptr_base(&tds, &e, x), &idents)
             },
             ..Touched::default()
         };
@@ -9849,6 +12595,15 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         callees.insert(
             fndecl.name.val.to_string(),
             Callee {
+                retained: fndecl
+                    .args
+                    .iter()
+                    .map(|a| {
+                        a.name
+                            .as_ref()
+                            .is_some_and(|n| sig.retained.contains(&format!("var_{}", n.val)))
+                    })
+                    .collect(),
                 noreturn: sig.noreturn,
                 simple: if !fndecl.args.iter().all(|a| {
                     matches!(
@@ -9872,6 +12627,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                 },
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
+                spliced_own: sig.spliced_own,
                 fp: sig.fp.is_some(),
                 fp_wits: sig.fp_wits,
                 implicits: sig.implicits.clone(),
@@ -9908,6 +12664,10 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
                     .map(|a| a.mode == ParamMode::Consumed)
                     .collect(),
                 allocated: sig.ret_block.clone(),
+                return_alias: defn.and_then(syntactic_identity_param),
+                view_identity: defn
+                    .and_then(identity_param)
+                    .or_else(|| contract_identity_param(fndecl)),
             },
         );
         items.push(FnItem {
@@ -10042,6 +12802,7 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         }
     }
 
+    let chunks = with_enum_aliases(chunks);
     let mut modules = into_modules(chunks, &ifaces);
     for m in &mut modules {
         m.code = widen_sizet_literals(&m.code);
@@ -10115,6 +12876,7 @@ open Pulse.Lib.C.Palow.Scalar\n\
 open Pulse.Lib.C.Palow.Float\n\
 open Pulse.Lib.C.Palow.CTypes\n\
 open Pulse.Lib.C.Palow.Machine\n\
+open Pulse.Lib.C.Palow.Effective.Retained.Scalar\n\
 open Pulse.Lib.C.Palow.Array\n\
 open Pulse.Lib.C.Palow.Unaligned\n\
 open Pulse.Lib.C.Palow.ConstSeq\n\
@@ -10127,6 +12889,12 @@ open Pulse.Lib.C.Palow.Empty\n\
 module Seq = FStar.Seq\n\
 module Bits = Pulse.Lib.C.Palow.Bits\n\
 module ET = Pulse.Lib.C.Palow.Etype\n\
+module R = Pulse.Lib.C.Palow.Effective.Retained\n\
+module K = Pulse.Lib.C.Palow.Effective.Context\n\
+module RA = Pulse.Lib.C.Palow.Effective.Retained.Array\n\
+module KA = Pulse.Lib.C.Palow.Effective.Context.Array\n\
+module Relation = Pulse.Lib.C.Palow.Effective.Relation\n\
+module View = Pulse.Lib.C.Palow.Effective.View\n\
 module Int8 = FStar.Int8\n\
 module Int16 = FStar.Int16\n\
 module Int32 = FStar.Int32\n\
@@ -10151,6 +12919,127 @@ module Float64 = FStar.Float64\n\
 /// the text is generated: every definition starts at column zero and every
 /// continuation line is indented, which the emitter maintains anyway because
 /// Pulse is indentation-sensitive.
+/// The enumerated-type families of `Pulse.Lib.C.Palow.Enum*`, by module: the
+/// suffixes of `enum_{u32,i32}_<suffix> (tag: string)`.
+const ENUM_FAMILY: &[(&str, &[&str])] = &[
+    (
+        "Pulse.Lib.C.Palow.Enum.Base",
+        &[
+            "agree",
+            "alignof",
+            "claim",
+            "claim_uninit",
+            "conceal",
+            "ctype",
+            "forget",
+            "gather",
+            "of_elem",
+            "pts_to",
+            "pts_to_not_null",
+            "pts_to_uninit",
+            "pts_to_uninit_not_null",
+            "repr",
+            "repr_injective",
+            "repr_len",
+            "repr_no_prov",
+            "reveal",
+            "reveal_uninit",
+            "share",
+            "sizeof",
+            "to_elem",
+        ],
+    ),
+    (
+        "Pulse.Lib.C.Palow.Enum",
+        &[
+            "initialize",
+            "initialize_at",
+            "read",
+            "read_as_int32_t",
+            "read_as_uint32_t",
+            "read_at",
+            "stack_alloc",
+            "stack_free",
+            "write",
+            "write_as_int32_t",
+            "write_as_uint32_t",
+            "write_at",
+            "write_existing",
+            "write_uninit",
+            "write_uninit_at",
+        ],
+    ),
+    (
+        "Pulse.Lib.C.Palow.Enum.Retained",
+        &[
+            "forget_field",
+            "forget_retained",
+            "read_field",
+            "read_retained",
+            "release_retained",
+            "retain",
+            "reveal_uninit_retained",
+            "write_field",
+            "write_retained",
+            "write_uninit_field",
+            "write_uninit_retained",
+        ],
+    ),
+];
+
+/// An enumerated type's operations are the library family applied to its tag.
+/// Each enumeration the output names gets a module `Enum_<tag>` of `unfold`
+/// aliases (`enum_u32_color_read = enum_u32_read "color"`), so the rest of the
+/// emitter spells it like any other scalar, `{pn}_read`, and Pulse still sees
+/// the library's definitions when it matches resources.
+fn with_enum_aliases(chunks: Vec<Chunk>) -> Vec<Chunk> {
+    let mut used: BTreeSet<(String, String)> = BTreeSet::new();
+    for ch in &chunks {
+        for w in ch
+            .code
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+        {
+            let Some(fam) = ["u32", "i32"]
+                .into_iter()
+                .find(|f| w.starts_with(&format!("enum_{f}_")))
+            else {
+                continue;
+            };
+            let rest = &w["enum_u32_".len()..];
+            let best = ENUM_FAMILY
+                .iter()
+                .flat_map(|(_, ss)| ss.iter())
+                .filter(|s| rest.len() > s.len() + 1 && rest.ends_with(&format!("_{s}")))
+                .max_by_key(|s| s.len());
+            if let Some(s) = best {
+                let tag = &rest[..rest.len() - s.len() - 1];
+                used.insert((fam.to_string(), tag.to_string()));
+            }
+        }
+    }
+    let mut out: Vec<Chunk> = used
+        .into_iter()
+        .map(|(fam, tag)| {
+            let mut code = format!("(* `enum {tag}`: the enum_{fam} family at this tag. *)\n\n");
+            for (m, ss) in ENUM_FAMILY {
+                for s in *ss {
+                    code += &format!(
+                        "unfold let enum_{fam}_{tag}_{s} = {m}.enum_{fam}_{s} \"{tag}\"\n"
+                    );
+                }
+            }
+            code += "\n";
+            Chunk {
+                module: format!("Enum_{tag}"),
+                code,
+                origin: None,
+            }
+        })
+        .collect();
+    out.extend(chunks);
+    out
+}
+
 fn defined_names(code: &str) -> Vec<String> {
     const MODIFIERS: &[&str] = &[
         "assume",
@@ -10397,15 +13286,39 @@ struct Slot {
     /// -- `_scatter_uninit` has run and `_gather` has not -- and the fields
     /// named here hold values while the rest is still storage.
     scattered: BTreeSet<String>,
+    /// Set once a `const` local has been initialised. Half of its points-to
+    /// is put away under `held`, so what the body has is enough to read it
+    /// and not enough to write it; the end of its lifetime takes the half
+    /// back.
+    frozen: bool,
 }
 
 impl Slot {
+    /// The half of a frozen slot that is put away.
+    fn held_body(&self) -> String {
+        format!(
+            "(exists* x. {}_pts_to {} (1.0R /. 2.0R) x)",
+            self.palow_ty, self.addr
+        )
+    }
+
+    fn held(&self) -> String {
+        format!("Pulse.Lib.C.Palow.Held.held {}", self.held_body())
+    }
+
     /// What the slot owns, at a given value.
     fn pts_to(&self, value: &str) -> String {
         match &self.array {
+            None if self.frozen => format!(
+                "{}_pts_to {} (1.0R /. 2.0R) {} ** {}",
+                self.palow_ty,
+                self.addr,
+                value,
+                self.held()
+            ),
             None => format!("{}_pts_to {} 1.0R {}", self.palow_ty, self.addr, value),
             Some((esize, maybe)) => format!(
-                "array_pts_to {r} (SizeT.v {e}) (SizeT.v {a}_alignof) {n} 1.0R {v}",
+                "array_pts_to {a}_ctype {r} (SizeT.v {e}) (SizeT.v {a}_alignof) {n} 1.0R {v}",
                 r = self.elem_repr(esize, *maybe),
                 a = self.palow_ty,
                 e = esize,
@@ -10450,7 +13363,7 @@ struct FieldFocus {
 /// tests the pointer, the non-null arm eliminates the guard and claims the
 /// bytes at the pointee's type, and from there the block behaves exactly like
 /// a stack slot -- with a `freeable` alongside it, which is what `free` spends.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Block {
     /// The C local holding the pointer.
     var: String,
@@ -10478,11 +13391,16 @@ struct Block {
     /// Whether the null test has been passed. Until it has, the block is under
     /// `unless_null` and unusable.
     checked: bool,
+    /// Whether this path has found the pointer null, and so spent its guard:
+    /// there is nothing to free, and `free` of it does nothing.
+    null: bool,
     /// Whether the pointee has been written. `malloc` hands back uninitialised
     /// storage, so the first store through the pointer is an initialising one.
     init: bool,
     /// Whether `free` has already taken the block back.
     freed: bool,
+    prepared: Option<String>,
+    view_size: Option<String>,
     /// The fields written so far, while the block is in pieces -- the same
     /// bookkeeping a local struct gets, for the same reason: C fills a
     /// `malloc`ed object one field at a time, and the object only becomes a
@@ -10502,10 +13420,19 @@ struct Block {
     /// type, so the length has to be carried from the allocation site to
     /// everything that asks how big the object is.
     flex: Option<FlexBlock>,
+    /// For a block carved out of a raw parent at a constant offset
+    /// (`T *p = (T *)(raw + k)`): the parent's local and the offset, as a
+    /// `SizeT.t` literal. The child's alignment is then the parent's, shifted
+    /// by the offset -- which is where a misaligned interior pointer fails.
+    parent: Option<(String, String)>,
+    /// For a raw block a child has been carved out of: the child's local and
+    /// the offset. The parent then owns only the bytes before the offset until
+    /// it is freed.
+    split: Option<(String, String)>,
 }
 
 /// The tail of a flexible-array-member allocation.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct FlexBlock {
     /// The tail's element count, as a `SizeT.t` term.
     n: String,
@@ -10532,7 +13459,7 @@ enum Scattering {
 }
 
 /// The array shape of an allocated block.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ArrayBlock {
     /// The element count, as a `SizeT.t` term.
     n: String,
@@ -10550,6 +13477,12 @@ struct ArrayBlock {
     /// ordinary array wants the other view. Which one it is in decides how it
     /// is given back.
     filled: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyObject {
+    Slot(usize),
+    Block(usize),
 }
 
 /// What one arm of an `if` produced: its statements, and the state it leaves
@@ -10582,6 +13515,39 @@ struct BranchResult {
     /// known to hold on this path.
     holds: Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>,
     out_params: Vec<String>,
+    blocks: Vec<Block>,
+}
+
+fn join_blocks(left: &[Block], right: &[Block], what: &str) -> Result<Vec<Block>, String> {
+    // Bytes known to be zero are in particular defined, so a path that wrote
+    // some of them with character stores joins one that did not.
+    let weaken = |bs: &[Block]| -> Vec<Block> {
+        bs.iter()
+            .map(|b| {
+                let mut b = b.clone();
+                let other = left
+                    .iter()
+                    .chain(right)
+                    .any(|o| o.var == b.var && o.tmp == b.tmp && o.fill == "defined");
+                if b.fill == "zeroed" && other {
+                    b.fill = "defined";
+                    b.init = true;
+                }
+                b
+            })
+            .collect()
+    };
+    let (left, right) = (&weaken(left)[..], &weaken(right)[..]);
+    if left
+        .iter()
+        .filter(|b| !b.freed)
+        .ne(right.iter().filter(|b| !b.freed))
+    {
+        return Err(format!(
+            "{what} leaves different allocated-storage initialization or effective-type states"
+        ));
+    }
+    Ok(left.to_vec())
 }
 
 fn indent(line: &str) -> String {
@@ -10592,6 +13558,7 @@ fn indent(line: &str) -> String {
 /// order to call it: whether every parameter is one the call translation can
 /// pass, and whether the result is a value.
 struct Callee {
+    retained: Vec<bool>,
     /// Whether a call to this function does not return. See `is_false_lit`.
     noreturn: bool,
 
@@ -10604,6 +13571,9 @@ struct Callee {
     /// were not its specification says only what memory comes back, and a
     /// caller that has a contract of its own has nothing to prove it with.
     contract: bool,
+    /// Handwritten ownership is also an access capability on `_plain`
+    /// parameters, rather than an address-only calling convention.
+    spliced_own: bool,
     /// Whether a `__fp` wrapper was emitted, so the function can be decayed
     /// to a code pointer.
     fp: bool,
@@ -10640,6 +13610,12 @@ struct Callee {
     /// The caller has to start tracking it or the ownership the `ensures` just
     /// granted would be left over.
     allocated: Option<RetBlock>,
+    /// A cast-only return of an unchanged parameter preserves its source view,
+    /// even when the return declaration changes the apparent pointer type.
+    return_alias: Option<usize>,
+    /// The parameter the call returns unchanged, by its body or by its
+    /// contract, so that a typed view of it is a view of the argument.
+    view_identity: Option<usize>,
 }
 
 /// Cloneable so that a speculative attempt can be rolled back *in full*
@@ -10664,6 +13640,8 @@ struct Body<'a> {
     lines: Vec<String>,
     /// C locals with a stack slot, in allocation order.
     slots: Vec<Slot>,
+    /// Addresses whose contracts retain existing metadata across ordinary calls.
+    retained: BTreeSet<String>,
     /// Pointer parameters declared `_out`: they arrive holding storage rather
     /// than a value, so the first store through one is an initialising store.
     out_params: Vec<String>,
@@ -10868,6 +13846,11 @@ struct Body<'a> {
     /// Local pointers loaded once out of memory, with what they were loaded
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
+    pointer_views: HashMap<String, Option<Rc<Expr>>>,
+    /// For a local bound once to fresh `malloc`/`calloc` storage, the pointer
+    /// type its first pointer-typed access gave the storage. `ptr_ctype` does
+    /// not tell pointer types apart, so the emitter keeps them consistent.
+    alloc_ptr_types: RefCell<HashMap<String, Rc<Type>>>,
     /// Locals bound once to a converted parameter, `void *b = (void *)q;`:
     /// the structure a byte offset from `b` lands in. See `byte_base_map`.
     byte_bases: HashMap<String, Rc<Expr>>,
@@ -10882,6 +13865,13 @@ struct Body<'a> {
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
+    /// Array-view locals bound once to an array compound literal:
+    /// `_array int *p = (int[]){1, 2};`. The literal gets storage when the
+    /// binding is reached, and from then on `p` is another name for it.
+    literal_aliases: HashSet<String>,
+    /// The read-only shares of string literals that array-view locals were
+    /// bound to, put down when the function is left.
+    literal_drops: Vec<String>,
     /// Which member of a union at a given address is live, where the emitter
     /// knows. C's rule is that reading a member other than the one last
     /// written is not reading what you wrote, and Palow says the same thing by
@@ -10891,6 +13881,14 @@ struct Body<'a> {
     /// changed it. Keyed by the address expression, which is the emitter's own
     /// name for the object.
     active: HashMap<String, String>,
+    /// The locals an address into is taken of somewhere in the body; see
+    /// `Touched::escaped`.
+    escaped: HashSet<String>,
+    /// Whether the place being opened was reached through a pointer bound to
+    /// the address of a union member rather than spelled as a member access.
+    /// Reading another member's bytes is only licensed through the union
+    /// (6.5.2.3p3, footnote 95), so such a read is never a pun.
+    via_pointer: bool,
     /// Union members the function's own `_requires` says are the live ones,
     /// as the C lvalue naming the union object and the member's name. A read
     /// of a union member is only sound where the member is the live one, and
@@ -10979,6 +13977,103 @@ impl<'a> Body<'a> {
             .map_err(|_| "the type of a subexpression could not be inferred".to_string())
     }
 
+    fn check_pointer_object_access(&self, pointer: &Expr) -> Result<(), String> {
+        let target = self.ty_of(pointer)?;
+        let TypeT::Pointer(target, _) = &peel(self.tds, &target).val else {
+            return Ok(());
+        };
+        if !matches!(
+            peel(self.tds, target).val,
+            TypeT::Pointer(..) | TypeT::FnPtr { .. }
+        ) {
+            return Ok(());
+        }
+        // Storage with no effective type takes that of the first store into
+        // it (C11 6.5p6); every later pointer-typed access must agree.
+        if let ExprT::Var(v) = &strip_casts(pointer).val
+            && let Some(Some(src)) = self.pointer_views.get(&*v.val)
+            && let ExprT::FnCall(f, _) = &strip_casts(src).val
+            && matches!(f.val.as_ref(), "malloc" | "calloc")
+        {
+            let mut tys = self.alloc_ptr_types.borrow_mut();
+            let first = tys
+                .entry(v.val.to_string())
+                .or_insert_with(|| target.clone());
+            if !same_pointer_object_type(self.tds, first, target) {
+                return Err(
+                    "incompatible stored-pointer reinterpretation is unsupported: ptr_ctype does not distinguish C pointee types"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        let source = self.pointer_object_source(pointer, &mut HashSet::new())?;
+        let TypeT::Pointer(source, _) = &peel(self.tds, &source).val else {
+            return Err(
+                "stored-pointer access from an unknown returned or reassigned source view is unsupported"
+                    .to_string(),
+            );
+        };
+        if !same_pointer_object_type(self.tds, source, target) {
+            return Err(
+                "incompatible stored-pointer reinterpretation is unsupported: ptr_ctype does not distinguish C pointee types"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn pointer_object_source(
+        &self,
+        pointer: &Expr,
+        seen: &mut HashSet<String>,
+    ) -> Result<Rc<Type>, String> {
+        let unknown = || {
+            "stored-pointer access from an unknown returned or reassigned source view is unsupported"
+                .to_string()
+        };
+        let pointer = strip_casts(pointer);
+        match &pointer.val {
+            ExprT::FnCall(name, args) => {
+                let i = self
+                    .callees
+                    .get(&name.val.to_string())
+                    .and_then(|c| c.return_alias)
+                    .ok_or_else(unknown)?;
+                self.pointer_object_source(args.get(i).ok_or_else(unknown)?, seen)
+            }
+            ExprT::FnPtrCall(f, args) => {
+                let i = self
+                    .target_of(f)
+                    .and_then(|name| self.callees.get(&name))
+                    .and_then(|c| c.return_alias)
+                    .ok_or_else(unknown)?;
+                self.pointer_object_source(args.get(i).ok_or_else(unknown)?, seen)
+            }
+            ExprT::Var(name) => {
+                let name = name.val.to_string();
+                let Some(source) = self.pointer_views.get(&name) else {
+                    return self.ty_of(pointer);
+                };
+                if !seen.insert(name.clone()) {
+                    return Err(unknown());
+                }
+                let result = self.pointer_object_source(source.as_ref().ok_or_else(unknown)?, seen);
+                seen.remove(&name);
+                result
+            }
+            ExprT::Cond(_, left, right) => {
+                let left = self.pointer_object_source(left, seen)?;
+                let right = self.pointer_object_source(right, seen)?;
+                if !same_pointer_object_type(self.tds, &left, &right) {
+                    return Err(unknown());
+                }
+                Ok(left)
+            }
+            _ => self.ty_of(pointer),
+        }
+    }
+
     /// Make a union arm the live one, leaving its storage uninitialised.
     ///
     /// C says the member you last wrote is the one you may read, and the
@@ -11046,7 +14141,7 @@ impl<'a> Body<'a> {
                 ));
             };
             self.lines.push(format!(
-                "unfold array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {};",
+                "unfold array_pts_to_uninit {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} {};",
                 pn, esize, pn, len, a
             ));
             self.slots.retain(|s| s.addr != a);
@@ -11063,6 +14158,7 @@ impl<'a> Body<'a> {
                 holds_fn: BTreeMap::new(),
                 holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
+                frozen: false,
                 filling: Some((len, BTreeSet::new())),
             });
             return Ok(());
@@ -11078,8 +14174,15 @@ impl<'a> Body<'a> {
         // uninitialised. Anything already recorded there described the union
         // and no longer does.
         self.slots.retain(|s| s.addr != a);
+        self.push_arm_slot(&un, &arm.val.to_string(), pn, fty, a);
+        Ok(())
+    }
+
+    /// Record that the storage of struct-typed arm `arm` of union `un` is
+    /// what is held at `a`, uninitialised, to be filled field by field.
+    fn push_arm_slot(&mut self, un: &str, arm: &str, pn: String, fty: String, a: String) {
         self.slots.push(Slot {
-            name: format!("*{}.{}", a, arm.val),
+            name: format!("*{}.{}", a, arm),
             addr: a,
             palow_ty: pn,
             fstar_ty: fty,
@@ -11089,13 +14192,75 @@ impl<'a> Body<'a> {
             // The union's own storage is released by whoever owns it; this
             // slot only records what is in it.
             global: true,
-            union_arm: Some((un, arm.val.to_string())),
+            union_arm: Some((un.to_string(), arm.to_string())),
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
             filling: None,
         });
-        Ok(())
+    }
+
+    /// `u.m.f = x` where `u` is a local union and `m` a struct-typed arm that
+    /// is not the live one. This is the write that makes `m` live (6.5.2.3p3
+    /// footnote 95: the member last stored is the one the union holds), but
+    /// it only stores one field, so there is no arm *value* to store: the
+    /// union gives up what it held, the arm's storage is handed over, and the
+    /// fields are filled one at a time exactly as `$activate` arranges. The
+    /// union's own slot stays, because the local's storage is still released
+    /// as a union; it holds a value again once the last field is written.
+    fn activate_local_struct_arm(&mut self, b2: &Expr, f2: &Ident) -> Option<String> {
+        let un = self.union_of(b2)?;
+        let uname = un.strip_prefix("union_")?.to_string();
+        let m = self
+            .tds
+            .unions
+            .get(&uname)?
+            .members
+            .iter()
+            .find(|m| m.name == *f2.val)?;
+        let mty = m.ty.clone();
+        let TypeT::TypeRef(TypeRefKind::Struct(_)) = &peel(self.tds, &mty).val else {
+            return None;
+        };
+        let (pn, fty) = (palow_name(self.tds, &mty)?, fstar_type(self.tds, &mty)?);
+        self.scatter_fields(&pn)?;
+        let mark = self.lines.len();
+        let closing = self.pending_close.len();
+        let a = match self.addr_only(b2) {
+            Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => a,
+            _ => {
+                self.lines.truncate(mark);
+                self.pending_close.truncate(closing);
+                return None;
+            }
+        };
+        if self.active.get(&a).map(String::as_str) == Some(&*f2.val.to_string()) {
+            return None;
+        }
+        let i = self.slots.iter().rposition(|s| {
+            s.addr == a
+                && s.palow_ty == un
+                && !s.global
+                && s.array.is_none()
+                && s.union_arm.is_none()
+        })?;
+        // Anything still being filled at this address is another arm, and
+        // switching away from it would drop the fields written so far.
+        if self.slots[i + 1..].iter().any(|s| s.addr == a) {
+            return None;
+        }
+        let from_uninit = !self.slots[i].init;
+        self.lines.push(format!(
+            "{}_switch{}_{} {};",
+            un,
+            if from_uninit { "_uninit" } else { "" },
+            f2.val,
+            a
+        ));
+        self.active.insert(a.clone(), f2.val.to_string());
+        self.push_arm_slot(&un, &f2.val.to_string(), pn, fty, a.clone());
+        Some(a)
     }
 
     /// Close whichever array element a `$fold` ends the bracket of. The most
@@ -11169,6 +14334,7 @@ impl<'a> Body<'a> {
                 holds_fn: BTreeMap::new(),
                 holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
+                frozen: false,
             });
             return;
         }
@@ -11203,6 +14369,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
         });
     }
 
@@ -11675,6 +14842,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
         });
         Ok(format!("loc_{}", name))
     }
@@ -11683,6 +14851,17 @@ impl<'a> Body<'a> {
     fn addr(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
             return self.addr(&p);
+        }
+        match self.typed_view(e) {
+            Some(Err(place)) => return self.addr(&place),
+            // An aggregate seen at a type that is neither its own nor one of
+            // its first members: 6.5p7 has no case for it, and the verifier
+            // is told so.
+            Some(Ok((_, from, to))) if is_aggregate(&from) || is_aggregate(&to) => {
+                self.lines
+                    .push(format!("View.aggregate_view {from}_ctype {to}_ctype;"));
+            }
+            _ => {}
         }
         // The pointer itself, rather than what it points at. Its address is
         // the place's, but handing it out means handing out ownership of the
@@ -11725,132 +14904,145 @@ impl<'a> Body<'a> {
             // pointee in the contract; a pointer that was itself loaded out of
             // memory -- `*s->next`, `**p` -- does not, and the caller would
             // have had to grant it in a `_requires` that is not translated.
-            ExprT::Deref(inner) => match &strip_vattr(inner).val {
-                // `*(&e)` is `e`. Clang leaves the pair in the AST, and
-                // nothing is loaded by it: the address of a named object is
-                // that object's address.
-                ExprT::Ref(place) => self.addr(place),
-                // A checked block's pointee is owned just like a parameter's,
-                // and naming the allocation directly rather than loading the
-                // local keeps the frame stated in terms of the same pointer.
-                ExprT::Var(v)
-                    if self
-                        .blocks
-                        .iter()
-                        .any(|b| b.var == *v.val && b.checked && !b.freed) =>
-                {
-                    let b = self
-                        .blocks
-                        .iter()
-                        .find(|b| b.var == *v.val && b.checked && !b.freed)
-                        .unwrap();
-                    Ok(b.tmp.clone())
+            ExprT::Deref(inner) => {
+                self.check_pointer_object_access(inner)?;
+                let mut pointer = strip_vattr(inner);
+                while let ExprT::Cast(value, to) = &pointer.val {
+                    let from = self.ty_of(value)?;
+                    if !matches!(peel(self.tds, to).val, TypeT::Pointer(..))
+                        || !matches!(peel(self.tds, &from).val, TypeT::Pointer(..))
+                    {
+                        break;
+                    }
+                    pointer = strip_vattr(value);
                 }
-                ExprT::Var(v)
-                    if self
-                        .slots
-                        .iter()
-                        .any(|s| s.addr == format!("var_{}", v.val)) =>
-                {
-                    // A single-object `_out` struct parameter is tracked as a
-                    // slot for its pointee, whose storage is the parameter's
-                    // own value and so is recorded at the address `var_<p>`.
-                    // The contract does not grant ordinary dereference
-                    // ownership for `p`, so without this the arms below would
-                    // refuse the access. The test is on the slot's address
-                    // rather than on its display name because the address is
-                    // what identifies the storage.
-                    self.rvalue(inner)
-                }
-                ExprT::Var(v)
-                    if self.params.contains(&*v.val.to_string())
-                        && (self.granted.contains(&*v.val.to_string())
+                match &pointer.val {
+                    // `*(&e)` is `e`. Clang leaves the pair in the AST, and
+                    // nothing is loaded by it: the address of a named object is
+                    // that object's address.
+                    ExprT::Ref(place) => self.addr(place),
+                    // A checked block's pointee is owned just like a parameter's,
+                    // and naming the allocation directly rather than loading the
+                    // local keeps the frame stated in terms of the same pointer.
+                    ExprT::Var(v)
+                        if self
+                            .blocks
+                            .iter()
+                            .any(|b| b.var == *v.val && b.checked && !b.freed) =>
+                    {
+                        let b = self
+                            .blocks
+                            .iter()
+                            .find(|b| b.var == *v.val && b.checked && !b.freed)
+                            .unwrap();
+                        Ok(b.tmp.clone())
+                    }
+                    ExprT::Var(v)
+                        if self
+                            .slots
+                            .iter()
+                            .any(|s| s.addr == format!("var_{}", v.val)) =>
+                    {
+                        // A single-object `_out` struct parameter is tracked as a
+                        // slot for its pointee, whose storage is the parameter's
+                        // own value and so is recorded at the address `var_<p>`.
+                        // The contract does not grant ordinary dereference
+                        // ownership for `p`, so without this the arms below would
+                        // refuse the access. The test is on the slot's address
+                        // rather than on its display name because the address is
+                        // what identifies the storage.
+                        self.rvalue(inner)
+                    }
+                    ExprT::Var(v)
+                        if self.params.contains(&*v.val.to_string())
+                            && (self.granted.contains(&*v.val.to_string())
                             || self.unguarded.contains(&v.val.to_string())
                             // A written `_out` is owned from then on.
                             || (self.outs.iter().any(|o| *o.base == *v.val)
                                 && !self.out_params.iter().any(|n| *n == *v.val))) =>
-                {
-                    self.rvalue(inner)
-                }
-                // A parameter the contract says nothing about points at
-                // memory this function does not hold. Saying so is the whole
-                // difference between a weaker specification and a wrong one
-                // -- unless the contract spliced its ownership in, in which
-                // case what it says is beyond reading and the access is left
-                // to slprop matching, exactly as below.
-                ExprT::Var(v)
-                    if self.params.contains(&*v.val.to_string())
-                        && !self.spliced_own
-                        && !self.ghost_names.contains(&*v.val.to_string()) =>
-                {
-                    Err(format!(
-                        "a dereference of `{}`, whose ownership the contract does not state",
+                    {
+                        self.rvalue(inner)
+                    }
+                    // A parameter the contract says nothing about points at
+                    // memory this function does not hold. Saying so is the whole
+                    // difference between a weaker specification and a wrong one
+                    // -- unless the contract spliced its ownership in, in which
+                    // case what it says is beyond reading and the access is left
+                    // to slprop matching, exactly as below.
+                    ExprT::Var(v)
+                        if self.params.contains(&*v.val.to_string())
+                            && !self.spliced_own
+                            && !self.ghost_names.contains(&*v.val.to_string()) =>
+                    {
+                        Err(format!(
+                            "a dereference of `{}`, whose ownership the contract does not state",
+                            v.val
+                        ))
+                    }
+                    // `malloc` may fail, so an allocation the source never tested
+                    // is genuinely not owned. This is a real difference from the
+                    // old model, whose allocator could not return null.
+                    ExprT::Var(v) if self.blocks.iter().any(|b| b.var == *v.val && !b.freed) => {
+                        Err(format!(
+                            "a dereference of `{}`, whose allocation was not checked for null",
+                            v.val
+                        ))
+                    }
+                    // A local holding a pointer loaded out of a struct the contract
+                    // owns deeply. The ownership behind it is in that struct's
+                    // `_own`, so the access opens it exactly as a direct
+                    // `*(s->f)` would; whether the local still holds that field's
+                    // value is left to slprop matching.
+                    ExprT::Var(v)
+                        if self
+                            .ptr_src
+                            .get(&*v.val.to_string())
+                            .is_some_and(|src| self.own_item(src).is_some()) =>
+                    {
+                        let src = self.ptr_src[&*v.val.to_string()].clone();
+                        let (p, sn, _) = self.own_item(&src).unwrap();
+                        self.open_own(&p, &sn);
+                        self.rvalue(inner)
+                    }
+                    ExprT::Var(v) if self.spliced_own => self.rvalue(inner),
+                    // A local a ghost statement in this body speaks about. What
+                    // that statement did to the state is the author's business,
+                    // and moving ownership onto a recovered pointer is exactly
+                    // what such a statement is for -- so the access is left to
+                    // slprop matching, on the same terms a spliced contract gets.
+                    ExprT::Var(v)
+                        if self.ghost_names.contains(&*v.val.to_string())
+                            || self.params.contains(&*v.val.to_string()) =>
+                    {
+                        self.rvalue(inner)
+                    }
+                    ExprT::Var(v) => Err(format!(
+                        "a dereference of local `{}`, whose target the contract does not grant",
                         v.val
-                    ))
+                    )),
+                    _ if self.stable_ptr(inner) => self.rvalue(inner),
+                    // A pointer loaded out of a struct the contract deeply owns.
+                    // `_own` says what it reaches, so unfolding it for the length
+                    // of this statement is all the access needs; the matching
+                    // gather is owed at the end of the statement, like any other
+                    // borrow.
+                    _ if self.own_item(inner).is_some() => {
+                        let (p, sn, _) = self.own_item(inner).unwrap();
+                        self.open_own(&p, &sn);
+                        self.rvalue(inner)
+                    }
+                    // A contract that spliced its own ownership in can have
+                    // granted anything, in words the emitter does not read. It
+                    // cannot say what is unowned, so it says nothing and lets
+                    // slprop matching decide -- which is where the honesty is: if
+                    // the splice did not grant this, F* rejects the access.
+                    _ if self.spliced_own => self.rvalue(inner),
+                    other => Err(format!(
+                        "a dereference of {}, whose target the contract does not grant",
+                        expr_kind_of(other)
+                    )),
                 }
-                // `malloc` may fail, so an allocation the source never tested
-                // is genuinely not owned. This is a real difference from the
-                // old model, whose allocator could not return null.
-                ExprT::Var(v) if self.blocks.iter().any(|b| b.var == *v.val && !b.freed) => {
-                    Err(format!(
-                        "a dereference of `{}`, whose allocation was not checked for null",
-                        v.val
-                    ))
-                }
-                // A local holding a pointer loaded out of a struct the contract
-                // owns deeply. The ownership behind it is in that struct's
-                // `_own`, so the access opens it exactly as a direct
-                // `*(s->f)` would; whether the local still holds that field's
-                // value is left to slprop matching.
-                ExprT::Var(v)
-                    if self
-                        .ptr_src
-                        .get(&*v.val.to_string())
-                        .is_some_and(|src| self.own_item(src).is_some()) =>
-                {
-                    let src = self.ptr_src[&*v.val.to_string()].clone();
-                    let (p, sn, _) = self.own_item(&src).unwrap();
-                    self.open_own(&p, &sn);
-                    self.rvalue(inner)
-                }
-                ExprT::Var(v) if self.spliced_own => self.rvalue(inner),
-                // A local a ghost statement in this body speaks about. What
-                // that statement did to the state is the author's business,
-                // and moving ownership onto a recovered pointer is exactly
-                // what such a statement is for -- so the access is left to
-                // slprop matching, on the same terms a spliced contract gets.
-                ExprT::Var(v)
-                    if self.ghost_names.contains(&*v.val.to_string())
-                        || self.params.contains(&*v.val.to_string()) =>
-                {
-                    self.rvalue(inner)
-                }
-                ExprT::Var(v) => Err(format!(
-                    "a dereference of local `{}`, whose target the contract does not grant",
-                    v.val
-                )),
-                _ if self.stable_ptr(inner) => self.rvalue(inner),
-                // A pointer loaded out of a struct the contract deeply owns.
-                // `_own` says what it reaches, so unfolding it for the length
-                // of this statement is all the access needs; the matching
-                // gather is owed at the end of the statement, like any other
-                // borrow.
-                _ if self.own_item(inner).is_some() => {
-                    let (p, sn, _) = self.own_item(inner).unwrap();
-                    self.open_own(&p, &sn);
-                    self.rvalue(inner)
-                }
-                // A contract that spliced its own ownership in can have
-                // granted anything, in words the emitter does not read. It
-                // cannot say what is unowned, so it says nothing and lets
-                // slprop matching decide -- which is where the honesty is: if
-                // the splice did not grant this, F* rejects the access.
-                _ if self.spliced_own => self.rvalue(inner),
-                other => Err(format!(
-                    "a dereference of {}, whose target the contract does not grant",
-                    expr_kind_of(other)
-                )),
-            },
+            }
             // `&s.f` is the structure's address plus the field's offset.
             // Taking an address needs no ownership -- nothing is read by it --
             // so this does not have to open the field the way an access does,
@@ -11904,6 +15096,9 @@ impl<'a> Body<'a> {
                 }
                 let f = self.focus_elem(base, Some(idx), false)?;
                 self.lines.extend(f.open_read.iter().cloned());
+                if f.write_fn.ends_with("_retained") {
+                    self.retained.insert(f.at.clone());
+                }
                 self.pending_close.extend(f.close_write);
                 Ok(f.at)
             }
@@ -12008,6 +15203,7 @@ impl<'a> Body<'a> {
             TypeT::Int {
                 signed: false,
                 width,
+                ..
             } if *width != 8 => Ok(format!("(sizet_of_uint{} {})", width, v)),
             // A `ptrdiff_t` is an `int64_t` on this target, and a negative one
             // wraps to the `size_t` whose *addition* is the subtraction C
@@ -12061,11 +15257,11 @@ impl<'a> Body<'a> {
         let off = format!("({} `SizeT.mul` {})", esize, i);
         let at = format!("({} +! {})", arr, off);
         self.lines.push(format!(
-            "array_offset_fits {}_repr {} {} {}_alignof {};",
+            "array_offset_fits {0}_ctype {}_repr {} {} {}_alignof {};",
             pn, arr, esize, pn, i
         ));
         self.lines.push(format!(
-            "array_focus {}_repr {} {} {}_alignof {} {};",
+            "array_focus {0}_ctype {}_repr {} {} {}_alignof {} {};",
             pn, arr, esize, pn, i, off
         ));
         self.lines.push(format!("{}_of_elem {};", pn, at));
@@ -12082,16 +15278,26 @@ impl<'a> Body<'a> {
     /// with nothing in between: the object is in pieces until then.
     fn place(&mut self, e: &Expr, writing: bool) -> Result<Focus, String> {
         if let Some(p) = self.unalias(e) {
-            return self.place(&p, writing);
+            let outer = std::mem::replace(&mut self.via_pointer, true);
+            let r = self.place(&p, writing);
+            self.via_pointer = outer;
+            return r;
+        }
+        let via_pointer = std::mem::take(&mut self.via_pointer);
+        if let ExprT::Member(base, f) = &strip_vattr(e).val
+            && let Some(focus) = self.heap_union_field(base, f, writing)?
+        {
+            return Ok(focus);
         }
         if !writing
             && let ExprT::Member(base, f) = &strip_vattr(e).val
-            && let Some(focus) = self.punned_field(base, f)
+            && let Some(focus) = self.punned_field(base, f)?
         {
             return Ok(focus);
         }
         match &strip_vattr(e).val {
             ExprT::Member(base, f) if self.union_of(base).is_some() => {
+                self.via_pointer = via_pointer;
                 self.union_member(base, f, writing)
             }
             ExprT::Member(base, f) => {
@@ -12118,6 +15324,7 @@ impl<'a> Body<'a> {
                         ));
                     }
                     return Ok(Focus {
+                        read_as: None,
                         write_fn: format!("{}_write", pn),
                         unaligned: false,
                         pn,
@@ -12139,15 +15346,46 @@ impl<'a> Body<'a> {
                     return Ok(focus);
                 }
                 self.no_value_yet(&ff.a)?;
-                self.lines
-                    .push(format!("{}_focus_{} {};", ff.sn, ff.field, ff.a));
-                let mut close_read = vec![format!("{}_unfocus_read_{} {};", ff.sn, ff.field, ff.a)];
+                let retained_suffix = if self.retained.contains(&ff.a) {
+                    "_retained"
+                } else {
+                    ""
+                };
+                self.lines.push(format!(
+                    "{}_focus_{}{} {};",
+                    ff.sn, ff.field, retained_suffix, ff.a
+                ));
+                let mut close_read = vec![format!(
+                    "{}_unfocus_read_{}{} {};",
+                    ff.sn, ff.field, retained_suffix, ff.a
+                )];
                 close_read.extend(ff.close_read);
-                let mut close_write = vec![format!("{}_unfocus_{} {};", ff.sn, ff.field, ff.a)];
+                let mut close_write = vec![format!(
+                    "{}_unfocus_{}{} {};",
+                    ff.sn, ff.field, retained_suffix, ff.a
+                )];
                 close_write.extend(ff.close_write);
                 Ok(Focus {
+                    read_as: None,
                     write_fn: match unaligned {
+                        true if self
+                            .tds
+                            .structs
+                            .get(ff.sn.trim_start_matches("struct_"))
+                            .is_some_and(|si| contextual_struct(self.tds, si)) =>
+                        {
+                            format!("{}_{}_write_field", ff.sn, ff.field)
+                        }
                         true => format!("{}_write_u", pn),
+                        false
+                            if self
+                                .tds
+                                .structs
+                                .get(ff.sn.trim_start_matches("struct_"))
+                                .is_some_and(|si| contextual_struct(self.tds, si)) =>
+                        {
+                            format!("{}_write_field", pn)
+                        }
                         false => format!("{}_write", pn),
                     },
                     unaligned,
@@ -12160,7 +15398,10 @@ impl<'a> Body<'a> {
                     close_write,
                 })
             }
-            ExprT::Index(base, idx) => self.focus_elem(base, Some(idx), writing),
+            ExprT::Index(base, idx) => match self.heap_union_byte(base, idx, writing)? {
+                Some(f) => Ok(f),
+                None => self.focus_elem(base, Some(idx), writing),
+            },
             _ => Err(format!("a place that is {}", expr_kind_of(&e.val))),
         }
     }
@@ -12204,9 +15445,40 @@ impl<'a> Body<'a> {
     /// what you wrote; the emitter allows the read exactly where it put the
     /// value there itself.
     fn union_member(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<Focus, String> {
+        let via_pointer = std::mem::take(&mut self.via_pointer);
         let un = self
             .union_of(base)
             .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
+        if let Some(f) = self.heap_union_member(base, &un, f, writing, via_pointer)? {
+            return Ok(f);
+        }
+        if writing
+            && let Some(ui) = un
+                .strip_prefix("union_")
+                .and_then(|n| self.tds.unions.get(n))
+            && let Some(members) = active_pointer_members(self.tds, ui)
+            && !members.iter().any(|m| m.name == *f.val)
+        {
+            let mut root = strip_vattr(base);
+            while let ExprT::Member(parent, _) = &root.val {
+                root = strip_vattr(parent);
+            }
+            if let ExprT::Deref(pointer) = &root.val
+                && let Some(name) = self.block_name(pointer)
+                && self.blocks.iter().any(|b| {
+                    b.var == name
+                        && b.checked
+                        && !b.freed
+                        && b.init
+                        && fresh_pointer_object(self.tds, &b.pn)
+                })
+            {
+                return Err(
+                    "incompatible active allocated-union member switching is unsupported"
+                        .to_string(),
+                );
+            }
+        }
         let fty = self.field_ty(base, f)?;
         // An array arm has no single Palow name -- its ownership is the array
         // combinator applied to its element's -- so the whole shape is what
@@ -12223,6 +15495,29 @@ impl<'a> Body<'a> {
         };
         let pn = shape.pn().to_string();
         let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
+        // Another member is known to be the live one: reread the union
+        // through this one, where its bytes are a value of this one's type.
+        // Only through the union itself, never through a pointer to a member.
+        if !writing
+            && !via_pointer
+            && let Some(l) = self.active.get(&a).cloned()
+            && l != *f.val
+            && let Some(ui) = un
+                .strip_prefix("union_")
+                .and_then(|n| self.tds.unions.get(n))
+            && let Some(lm) = ui.members.iter().find(|x| x.name == l)
+            && let Some(mm) = ui.members.iter().find(|x| x.name == *f.val)
+        {
+            if rereadable(lm, mm).is_none() {
+                return Err(format!(
+                    "a read of union member `{}` while `{}` is the live one: its bytes are not known to be a value of its type",
+                    f.val, l
+                ));
+            }
+            self.lines
+                .push(format!("{}_reread_{}_{} {};", un, l, f.val, a));
+            self.active.insert(a.clone(), f.val.to_string());
+        }
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
             // The other way to know is the contract. There the union's value
             // is whatever the caller passed, so the tag is a fact rather than
@@ -12249,6 +15544,12 @@ impl<'a> Body<'a> {
                     .iter()
                     .any(|(obj, m)| *m == *f.val && same_lvalue(obj, &named))
             {
+                if via_pointer {
+                    return Err(format!(
+                        "a read of union member `{}` through a pointer to it, which is not known to be the live one here: punning is only licensed through the union (6.5.2.3p3, footnote 95)",
+                        f.val
+                    ));
+                }
                 return Err(format!(
                     "a read of union member `{}`, which is not known to be the live one here",
                     f.val
@@ -12285,6 +15586,7 @@ impl<'a> Body<'a> {
             v
         };
         Ok(Focus {
+            read_as: None,
             bits: None,
             pn: pn.clone(),
             write_fn: shape.write_fn(),
@@ -12298,6 +15600,270 @@ impl<'a> Body<'a> {
             close_read: close(base_close_read),
             close_write: close(base_close_write),
         })
+    }
+
+    /// The allocated block `base` -- `*p` -- is, when `un` has the `_heap`
+    /// family and `p` is a live block; an error when the block does not
+    /// hold the union (6.5p6).
+    fn heap_union_block(&self, base: &Expr, un: &str) -> Result<Option<String>, String> {
+        let Some(ui) = un
+            .strip_prefix("union_")
+            .and_then(|n| self.tds.unions.get(n))
+        else {
+            return Ok(None);
+        };
+        if !union_heap_capable(self.tds, ui) {
+            return Ok(None);
+        }
+        let base = match self.unalias(base) {
+            Some(p) => (*p).clone(),
+            None => base.clone(),
+        };
+        let ExprT::Deref(pointer) = &strip_vattr(&base).val else {
+            return Ok(None);
+        };
+        let Some(name) = self.block_name(pointer) else {
+            return Ok(None);
+        };
+        let Some(b) = self
+            .blocks
+            .iter()
+            .find(|b| b.var == name && b.checked && !b.freed)
+        else {
+            return Ok(None);
+        };
+        if b.pn != format!("{}_heap", un) || !b.init {
+            return Err(format!(
+                "a member of `union {}` in allocated storage whose effective type is not that union here: only a store of a whole union value gives it one (6.5p6)",
+                un.trim_start_matches("union_")
+            ));
+        }
+        Ok(Some(b.tmp.clone()))
+    }
+
+    /// `u->b[i]` for an `unsigned char` array member `b` of a union in
+    /// allocated storage: a character read of byte `i` of the live member's
+    /// representation (6.5p7, last bullet), which leaves the union as it is.
+    /// The bytes past the live member are unspecified (6.2.6.1p7) and are not
+    /// read: the index has to be inside the live member.
+    fn heap_union_byte(
+        &mut self,
+        base: &Expr,
+        idx: &Expr,
+        writing: bool,
+    ) -> Result<Option<Focus>, String> {
+        let ExprT::Member(inner, f) = &strip_casts(strip_vattr(base)).val else {
+            return Ok(None);
+        };
+        let Some(un) = self.union_of(inner) else {
+            return Ok(None);
+        };
+        let Some(ui) = un
+            .strip_prefix("union_")
+            .and_then(|n| self.tds.unions.get(n))
+        else {
+            return Ok(None);
+        };
+        let Some(m) = ui.members.iter().find(|m| m.name == *f.val) else {
+            return Ok(None);
+        };
+        if !matches!(&m.shape, FieldShape::Array { pn, esize: 1, .. } if pn == "uint8_t") {
+            return Ok(None);
+        }
+        let Some(a) = self.heap_union_block(inner, &un)? else {
+            return Ok(None);
+        };
+        if writing {
+            return Err(format!(
+                "a store to an element of member `{}` of a `union {}` in allocated storage: it would make the member's type the effective type of the bytes, not the union's (6.5p6), and the union model has no step for that",
+                f.val,
+                un.trim_start_matches("union_")
+            ));
+        }
+        let Some(l) = self.active.get(&a).cloned() else {
+            return Err(format!(
+                "a read of an element of union member `{}`, while no member is known to be the live one here",
+                f.val
+            ));
+        };
+        let i = self.index(idx)?;
+        Ok(Some(Focus {
+            bits: None,
+            pn: "uint8_t".to_string(),
+            write_fn: "uint8_t_write".to_string(),
+            unaligned: false,
+            read_as: Some(format!("{}_heap_read_byte_{} {}", un, l, a)),
+            at: i,
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+        }))
+    }
+
+    /// A field `f` of a struct member `m` of a union in allocated storage,
+    /// `u->m.f`, which is `None` when `base` is not such a member. The field
+    /// is read in place (`emit_heap_union`); while another struct member is
+    /// live, only through their common initial sequence (6.5.2.3p6), as the
+    /// corresponding field of the live one.
+    fn heap_union_field(
+        &mut self,
+        base: &Expr,
+        f: &Ident,
+        writing: bool,
+    ) -> Result<Option<Focus>, String> {
+        let ExprT::Member(inner, mname) = &strip_casts(strip_vattr(base)).val else {
+            return Ok(None);
+        };
+        let Some(un) = self.union_of(inner) else {
+            return Ok(None);
+        };
+        let uname = un.trim_start_matches("union_").to_string();
+        let Some(ui) = self.tds.unions.get(&uname) else {
+            return Ok(None);
+        };
+        let Some(m) = ui.members.iter().find(|m| m.name == *mname.val) else {
+            return Ok(None);
+        };
+        let Some((_, fields)) = heap_struct_member(self.tds, m) else {
+            return Ok(None);
+        };
+        let Some(a) = self.heap_union_block(inner, &un)? else {
+            return Ok(None);
+        };
+        if writing {
+            return Err(format!(
+                "a store to `{}.{}` of a `union {}` in allocated storage: it would make the field's type the effective type of the bytes, not the union's (6.5p6), and the union model has no step for that",
+                mname.val, f.val, uname
+            ));
+        }
+        let Some(k) = fields.iter().position(|x| x.name == *f.val) else {
+            return Err(format!("no field `{}` in member `{}`", f.val, mname.val));
+        };
+        let Some(live) = self.active.get(&a).cloned() else {
+            return Err(format!(
+                "a read of union member `{}`, which is not known to be the live one here",
+                mname.val
+            ));
+        };
+        let lm = ui.members.iter().find(|x| x.name == live).unwrap();
+        let read = if live == *mname.val {
+            fields[k].name.clone()
+        } else {
+            let (Some((_, lfields)), FieldShape::One { pn: lpn }, FieldShape::One { pn: mpn }) =
+                (heap_struct_member(self.tds, lm), &lm.shape, &m.shape)
+            else {
+                return Err(format!(
+                    "a read of `{}.{}` while `{}` is the live member of union {}, which is not a struct: their common initial sequence (6.5.2.3p6) is empty",
+                    mname.val, f.val, live, uname
+                ));
+            };
+            let cis = common_initial_sequence(
+                self.tds,
+                &self.tds.structs[lpn.trim_start_matches("struct_")],
+                &self.tds.structs[mpn.trim_start_matches("struct_")],
+            );
+            if k >= cis {
+                return Err(if cis == 0 {
+                    format!(
+                        "a read of `{}.{}` while `{}` is the live member of union {}: their \
+                         common initial sequence (6.5.2.3p6) is empty",
+                        mname.val, f.val, live, uname
+                    )
+                } else {
+                    format!(
+                        "a read of `{}.{}` while `{}` is the live member of union {}: `{}` is \
+                         past their common initial sequence (6.5.2.3p6)",
+                        mname.val, f.val, live, uname, f.val
+                    )
+                });
+            }
+            lfields[k].name.clone()
+        };
+        let fld = &fields[k];
+        Ok(Some(Focus {
+            bits: None,
+            pn: fld.shape.pn().to_string(),
+            write_fn: fld.shape.write_fn(),
+            unaligned: false,
+            read_as: Some(format!("{}_heap_read_{}_{}", un, live, read)),
+            at: a,
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+        }))
+    }
+
+    /// A member of a union in allocated storage, which is `None` when `base`
+    /// is not such a union. The storage holds the union -- the `_heap`
+    /// family -- only after a store of a whole union value (6.5p6); before
+    /// that, or after a store of anything else, it does not, and no member of
+    /// the union can be read from it. A member is never focused out of it,
+    /// and never written to: see `emit_heap_union`.
+    fn heap_union_member(
+        &mut self,
+        base: &Expr,
+        un: &str,
+        f: &Ident,
+        writing: bool,
+        via_pointer: bool,
+    ) -> Result<Option<Focus>, String> {
+        let Some(a) = self.heap_union_block(base, un)? else {
+            return Ok(None);
+        };
+        let ui = &self.tds.unions[un.trim_start_matches("union_")];
+        let uname = un.trim_start_matches("union_");
+        if writing {
+            return Err(format!(
+                "a store to member `{}` of a `union {}` in allocated storage: it would make the member's type the effective type of the bytes, not the union's (6.5p6), and the union model has no step for that",
+                f.val, uname
+            ));
+        }
+        let m = ui
+            .members
+            .iter()
+            .find(|m| m.name == *f.val)
+            .ok_or_else(|| format!("no member `{}` in `union {}`", f.val, uname))?;
+        let Some(pn) = heap_member(m) else {
+            return Err(format!(
+                "a read of member `{}` of a `union {}` in allocated storage, which is not a provenance-free scalar",
+                f.val, uname
+            ));
+        };
+        match self.active.get(&a).cloned() {
+            Some(l) if l == *f.val => {}
+            Some(l) if !via_pointer => {
+                let lm = ui.members.iter().find(|x| x.name == l).unwrap();
+                if rereadable(lm, m).is_none() {
+                    return Err(format!(
+                        "a read of union member `{}` while `{}` is the live one: its bytes are not known to be a value of its type",
+                        f.val, l
+                    ));
+                }
+                self.lines
+                    .push(format!("{}_heap_reread_{}_{} {};", un, l, f.val, a));
+                self.active.insert(a.clone(), f.val.to_string());
+            }
+            _ => {
+                return Err(format!(
+                    "a read of union member `{}`, which is not known to be the live one here",
+                    f.val
+                ));
+            }
+        }
+        Ok(Some(Focus {
+            bits: None,
+            pn: pn.to_string(),
+            write_fn: m.shape.write_fn(),
+            unaligned: false,
+            read_as: Some(format!("{}_heap_read_{}", un, f.val)),
+            at: a,
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+        }))
     }
 
     /// Type punning: a read of `u.m.f` where the live member is not `m`.
@@ -12316,50 +15882,58 @@ impl<'a> Body<'a> {
     /// no such value, and a pun stated at the whole member would be unsound.
     /// Stating it at the field is what makes the program provable while
     /// leaving the rest of the arm unreadable -- which is what C promises.
-    fn punned_field(&mut self, base: &Expr, f: &Ident) -> Option<Focus> {
+    fn punned_field(&mut self, base: &Expr, f: &Ident) -> Result<Option<Focus>, String> {
         let base = match self.unalias(base) {
             Some(p) => (*p).clone(),
             None => base.clone(),
         };
         let ExprT::Member(u, m) = &strip_vattr(&base).val else {
-            return None;
+            return Ok(None);
         };
         let (u, m) = (u.clone(), m.val.to_string());
-        let un = self.union_of(&u)?;
-        let uname = un.strip_prefix("union_")?.to_string();
-        let mty = self
-            .field_ty(
-                &u,
-                &Ast {
-                    val: m.clone().into(),
-                    loc: base.loc.clone(),
-                },
-            )
-            .ok()?;
+        let Some(un) = self.union_of(&u) else {
+            return Ok(None);
+        };
+        let Some(uname) = un.strip_prefix("union_").map(str::to_string) else {
+            return Ok(None);
+        };
+        let Ok(mty) = self.field_ty(
+            &u,
+            &Ast {
+                val: m.clone().into(),
+                loc: base.loc.clone(),
+            },
+        ) else {
+            return Ok(None);
+        };
         let sname = match &peel(self.tds, &mty).val {
             TypeT::TypeRef(TypeRefKind::Struct(n)) => n.val.to_string(),
-            _ => return None,
+            _ => return Ok(None),
         };
         let fname = f.val.to_string();
-        let si = self.tds.structs.get(&sname)?;
-        let fld = si.fields.iter().find(|x| x.name == fname)?;
-        if fld.offset != 0 {
-            return None;
-        }
-        let FieldShape::One { pn } = &fld.shape else {
-            return None;
+        let Some(si) = self.tds.structs.get(&sname) else {
+            return Ok(None);
         };
-        let (sn, pn) = (format!("struct_{}", sname), pn.clone());
+        let Some(fld) = si.fields.iter().find(|x| x.name == fname) else {
+            return Ok(None);
+        };
+        // Only meaningful for a scalar live member; a struct one is the
+        // common initial sequence below.
+        let scalar_pun = match &fld.shape {
+            FieldShape::One { pn } if fld.offset == 0 => Some(pn.clone()),
+            _ => None,
+        };
+        let sn = format!("struct_{}", sname);
         // Everything below may emit, so anything that turns out not to be a
         // pun has to leave the body as it found it.
         let mark = self.lines.len();
         let Ok((a, bcr, _)) = self.base_addr(&u, false) else {
             self.lines.truncate(mark);
-            return None;
+            return Ok(None);
         };
         let give_up = |me: &mut Self| {
             me.lines.truncate(mark);
-            None
+            Ok(None)
         };
         let Some(live) = self.active.get(&a).cloned() else {
             return give_up(self);
@@ -12373,13 +15947,68 @@ impl<'a> Body<'a> {
         let Some(lm) = ui.members.iter().find(|x| x.name == live) else {
             return give_up(self);
         };
+        // The live member is a struct too: 6.5.2.3p6, the common initial
+        // sequence. Reading `f` of `m` while `l` is live is reading the
+        // corresponding field of `l`, which is a value in hand -- so the read
+        // *is* that read, and nothing about the bytes has to be argued.
+        if let TypeT::TypeRef(TypeRefKind::Struct(ln)) = &peel(self.tds, &lm.ty).val {
+            let ln = ln.val.to_string();
+            self.lines.truncate(mark);
+            let (Some(lsi), Some(msi)) = (self.tds.structs.get(&ln), self.tds.structs.get(&sname))
+            else {
+                return Ok(None);
+            };
+            let cis = common_initial_sequence(self.tds, lsi, msi);
+            let Some(k) = msi.fields.iter().take(cis).position(|x| x.name == fname) else {
+                return Err(if cis == 0 {
+                    format!(
+                        "a read of `{}.{}` while `{}` is the live member of union {}: their \
+                         common initial sequence (6.5.2.3p6) is empty",
+                        m, fname, live, uname
+                    )
+                } else {
+                    format!(
+                        "a read of `{}.{}` while `{}` is the live member of union {}: `{}` is \
+                         past their common initial sequence (6.5.2.3p6)",
+                        m, fname, live, uname, fname
+                    )
+                });
+            };
+            let lf = lsi.fields[k].name.clone();
+            let loc = base.loc.clone();
+            let arm = Ast {
+                val: ExprT::Member(
+                    u.clone(),
+                    Rc::new(Ast {
+                        val: live.clone().into(),
+                        loc: loc.clone(),
+                    }),
+                ),
+                loc: loc.clone(),
+            };
+            let e = Ast {
+                val: ExprT::Member(
+                    Rc::new(arm),
+                    Rc::new(Ast {
+                        val: lf.into(),
+                        loc: loc.clone(),
+                    }),
+                ),
+                loc,
+            };
+            return self.place(&e, false).map(Some);
+        }
+        let Some(pn) = scalar_pun else {
+            return give_up(self);
+        };
         match &lm.shape {
             FieldShape::One { pn: lpn } if *lpn == pn => {}
             _ => return give_up(self),
         }
         let mut close = vec![format!("{}_unpun_{}_{}_{} {};", un, live, m, fname, a)];
         close.extend(bcr);
-        Some(Focus {
+        Ok(Some(Focus {
+            read_as: None,
             bits: None,
             pn: pn.clone(),
             write_fn: format!("{}_write", pn),
@@ -12389,7 +16018,7 @@ impl<'a> Body<'a> {
             open_write: Vec::new(),
             close_read: close.clone(),
             close_write: close,
-        })
+        }))
     }
 
     fn field_ty(&self, base: &Expr, f: &Ident) -> Result<Rc<Type>, String> {
@@ -12478,13 +16107,35 @@ impl<'a> Body<'a> {
             })?),
         };
         let unaligned = self.unaligned_field(&ff.sn, &ff.field);
+        let contextual = contextual_struct(self.tds, si);
+        let ops = if contextual && unaligned {
+            format!("{}_{}", ff.sn, ff.field)
+        } else {
+            pn.to_string()
+        };
+        let retained_suffix = if self.retained.contains(&ff.a) {
+            "_retained"
+        } else {
+            ""
+        };
         if !writing {
             if !self.scattered_set(target).contains(&*f.val) {
                 return None;
             }
             return Some(Focus {
+                read_as: None,
                 bits: None,
-                write_fn: format!("{}_write{}", pn, if unaligned { "_u" } else { "" }),
+                write_fn: format!(
+                    "{}_write{}",
+                    ops,
+                    if contextual {
+                        "_field"
+                    } else if unaligned {
+                        "_u"
+                    } else {
+                        ""
+                    }
+                ),
                 unaligned,
                 pn: pn.to_string(),
                 at: ff.at.clone(),
@@ -12500,13 +16151,15 @@ impl<'a> Body<'a> {
         // the claim is what broke it up, and there is no whole-object
         // uninitialised view to break up instead.
         if !self.scatter_started(target, &ff.a) && !flex {
-            self.lines
-                .push(format!("{}_scatter_uninit {};", ff.sn, ff.a));
+            self.lines.push(format!(
+                "{}_scatter_uninit{} {};",
+                ff.sn, retained_suffix, ff.a
+            ));
         }
         self.scattered_set_mut(target).insert(f.val.to_string());
         let mut close_write = Vec::new();
         if names.iter().all(|n| self.scattered_set(target).contains(n)) {
-            close_write.push(format!("{}_gather {};", ff.sn, ff.a));
+            close_write.push(format!("{}_gather{} {};", ff.sn, retained_suffix, ff.a));
             // An arm that is complete is a value of the arm's type, and what
             // holds it is the union: putting it back is what turns the last
             // field write into a whole-member write after the fact.
@@ -12521,14 +16174,36 @@ impl<'a> Body<'a> {
                 Scattering::Slot(i) => self.slots[i].init = true,
                 Scattering::Block(i) => self.blocks[i].init = true,
             }
+            // An arm made live by a field write to a local union: the union's
+            // own slot holds a value again and the arm's is done.
+            if let Scattering::Slot(i) = target
+                && let Some((un, _)) = self.slots[i].union_arm.clone()
+                && let Some(j) = self.slots[..i].iter().rposition(|s| {
+                    s.addr == ff.a && s.palow_ty == un && !s.global && s.union_arm.is_none()
+                })
+            {
+                self.slots[j].init = true;
+                self.slots.remove(i);
+            }
             self.gather_enclosing(&ff.a, &mut close_write);
         }
         // Whatever had to be opened to reach the storage is still open:
         // scattering happens *inside* that, not instead of it.
         close_write.extend(ff.close_write.iter().cloned());
         Some(Focus {
+            read_as: None,
             bits: None,
-            write_fn: format!("{}_write_uninit{}", pn, if unaligned { "_u" } else { "" }),
+            write_fn: format!(
+                "{}_write_uninit{}",
+                ops,
+                if contextual {
+                    "_field"
+                } else if unaligned {
+                    "_u"
+                } else {
+                    ""
+                }
+            ),
             unaligned,
             pn: pn.to_string(),
             at: ff.at.clone(),
@@ -12589,12 +16264,28 @@ impl<'a> Body<'a> {
         let Some((pa, psn, pf)) = self.nested_scatter.remove(a) else {
             return;
         };
+        if let Some(si) = self.tds.structs.get(psn.trim_start_matches("struct_"))
+            && contextual_struct(self.tds, si)
+            && let Some(f) = si.fields.iter().find(|f| f.name == pf)
+        {
+            close.push(format!("{}_restore_initialized_context {a};", f.shape.pn()));
+            self.retained.remove(a);
+        }
         let (Some(t), Some(names)) = (self.scatter_target(&pa), self.scatter_fields(&psn)) else {
             return;
         };
         self.scattered_set_mut(t).insert(pf);
         if names.iter().all(|n| self.scattered_set(t).contains(n)) {
-            close.push(format!("{}_gather {};", psn, pa));
+            close.push(format!(
+                "{}_gather{} {};",
+                psn,
+                if self.retained.contains(&pa) {
+                    "_retained"
+                } else {
+                    ""
+                },
+                pa
+            ));
             self.scattered_set_mut(t).clear();
             self.prescattered.remove(&pa);
             match t {
@@ -12688,7 +16379,26 @@ impl<'a> Body<'a> {
         }
         // Already written: `f` is a value, and the access focuses into it.
         if self.scattered_set(target).contains(&*f2.val) {
-            return Ok(Some((ff.at, ff.close_read, ff.close_write)));
+            let mut close_read = ff.close_read;
+            let mut close_write = ff.close_write;
+            if self
+                .tds
+                .structs
+                .get(sn.trim_start_matches("struct_"))
+                .is_some_and(|si| contextual_struct(self.tds, si))
+                && let Some(pn) = palow_name(self.tds, fty)
+                && self
+                    .tds
+                    .structs
+                    .get(pn.trim_start_matches("struct_"))
+                    .is_some_and(|si| contextual_struct(self.tds, si))
+            {
+                self.lines.push(format!("{pn}_borrow_context {};", ff.at));
+                self.retained.insert(ff.at.clone());
+                close_read.insert(0, format!("{pn}_restore_context {};", ff.at));
+                close_write.insert(0, format!("{pn}_restore_context {};", ff.at));
+            }
+            return Ok(Some((ff.at, close_read, close_write)));
         }
         // Already being filled itself.
         if self.nested_scatter.contains_key(&ff.at) && self.scatter_target(&ff.at).is_some() {
@@ -12711,7 +16421,26 @@ impl<'a> Body<'a> {
             ));
         }
         if !self.scatter_started(target, &a) {
-            self.lines.push(format!("{}_scatter_uninit {};", sn, a));
+            self.lines.push(format!(
+                "{}_scatter_uninit{} {};",
+                sn,
+                if self.retained.contains(&a) {
+                    "_retained"
+                } else {
+                    ""
+                },
+                a
+            ));
+        }
+        if self
+            .tds
+            .structs
+            .get(sn.trim_start_matches("struct_"))
+            .is_some_and(|si| contextual_struct(self.tds, si))
+        {
+            self.lines
+                .push(format!("{pn}_borrow_uninit_context {};", ff.at));
+            self.retained.insert(ff.at.clone());
         }
         self.nested_scatter
             .insert(ff.at.clone(), (a, sn, f2.val.to_string()));
@@ -12731,6 +16460,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
         });
         Ok(Some((ff.at, ff.close_read, ff.close_write)))
     }
@@ -12774,8 +16504,17 @@ impl<'a> Body<'a> {
     fn focus_field(&mut self, base: &Expr, f: &Ident, writing: bool) -> Result<FieldFocus, String> {
         let ff = self.open_field(base, f, writing)?;
         self.no_value_yet(&ff.a)?;
-        self.lines
-            .push(format!("{}_focus_{} {};", ff.sn, ff.field, ff.a));
+        self.lines.push(format!(
+            "{}_focus_{}{} {};",
+            ff.sn,
+            ff.field,
+            if self.retained.contains(&ff.a) {
+                "_retained"
+            } else {
+                ""
+            },
+            ff.a
+        ));
         Ok(ff)
     }
 
@@ -12823,16 +16562,35 @@ impl<'a> Body<'a> {
         {
             return Ok((a, Vec::new(), Vec::new()));
         }
+        // The first write to a field of a struct-typed arm of a local union
+        // makes that arm the live one; see `activate_local_struct_arm`.
+        if writing
+            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
+            && self.union_of(b2).is_some()
+            && let Some(a) = self.activate_local_struct_arm(b2, f2)
+        {
+            return Ok((a, Vec::new(), Vec::new()));
+        }
         // A field of a struct-typed union *arm*. The arm has to be focused out
         // of the union before anything inside it can be named, which is the
         // same shape as a nested struct field -- except that the step is a
         // union member's, because every arm starts at the union's own address
-        // and which arm is live is a fact about the program.
-        if !writing
-            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
+        // and which arm is live is a fact about the program. A write is the
+        // same focus, as long as the arm already holds a value: storing one
+        // field of it leaves the arm live and its other fields as they were.
+        if let ExprT::Member(b2, f2) = &strip_vattr(base).val
             && self.union_of(b2).is_some()
         {
-            let f = self.union_member(b2, f2, false)?;
+            let f = self.union_member(b2, f2, false).map_err(|e| {
+                if writing {
+                    format!(
+                        "a write to a field of union member `{}`, which is not the live one here",
+                        f2.val
+                    )
+                } else {
+                    e
+                }
+            })?;
             self.lines.extend(f.open_read.iter().cloned());
             return Ok((f.at, f.close_read, f.close_write));
         }
@@ -12854,11 +16612,32 @@ impl<'a> Body<'a> {
                 TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
             ) {
                 let inner = self.focus_field(b2, f2, writing)?;
-                let mut close_read =
-                    vec![format!("{}_unfocus_read_{} {};", inner.sn, f2.val, inner.a)];
+                let suffix = if self.retained.contains(&inner.a) {
+                    "_retained"
+                } else {
+                    ""
+                };
+                let mut close_read = vec![format!(
+                    "{}_unfocus_read_{}{} {};",
+                    inner.sn, f2.val, suffix, inner.a
+                )];
                 close_read.extend(inner.close_read);
-                let mut close_write = vec![format!("{}_unfocus_{} {};", inner.sn, f2.val, inner.a)];
+                let mut close_write = vec![format!(
+                    "{}_unfocus_{}{} {};",
+                    inner.sn, f2.val, suffix, inner.a
+                )];
                 close_write.extend(inner.close_write);
+                if let Some(si) = self.tds.structs.get(inner.sn.trim_start_matches("struct_"))
+                    && contextual_struct(self.tds, si)
+                    && let Some(pn) = palow_name(self.tds, &fty)
+                    && pn.starts_with("struct_")
+                {
+                    self.lines
+                        .push(format!("{pn}_borrow_context {};", inner.at));
+                    self.retained.insert(inner.at.clone());
+                    close_read.insert(0, format!("{pn}_restore_context {};", inner.at));
+                    close_write.insert(0, format!("{pn}_restore_context {};", inner.at));
+                }
                 return Ok((inner.at, close_read, close_write));
             }
         }
@@ -12954,6 +16733,12 @@ impl<'a> Body<'a> {
     /// Whether the number of elements at this array is settled here rather
     /// than being whatever the caller passed.
     fn array_len_known(&self, e: &Expr) -> bool {
+        if self
+            .ty_of(strip_casts(e))
+            .is_ok_and(|ty| matches!(peel(self.tds, &ty).val, TypeT::FixedArray(..)))
+        {
+            return true;
+        }
         let ExprT::Var(v) = &strip_vattr(e).val else {
             return false;
         };
@@ -13186,8 +16971,43 @@ impl<'a> Body<'a> {
                 // is only the original up to eta -- which is enough for F* but
                 // not for the syntactic match that finds the struct's deep
                 // ownership in the context.
-                let mut close_read = vec![format!("{}_unfocus_read_{} {};", ff.sn, f.val, ff.a)];
-                let mut close_write = vec![format!("{}_unfocus_{} {};", ff.sn, f.val, ff.a)];
+                let suffix = if self.retained.contains(&ff.a) {
+                    "_retained"
+                } else {
+                    ""
+                };
+                let mut close_read = vec![format!(
+                    "{}_unfocus_read_{}{} {};",
+                    ff.sn, f.val, suffix, ff.a
+                )];
+                let mut close_write =
+                    vec![format!("{}_unfocus_{}{} {};", ff.sn, f.val, suffix, ff.a)];
+                if self
+                    .tds
+                    .structs
+                    .get(ff.sn.trim_start_matches("struct_"))
+                    .is_some_and(|si| contextual_struct(self.tds, si))
+                {
+                    self.lines.push(format!(
+                        "KA.borrow_array {pn}_ctype {pn}_repr {} {esize}sz {pn}_alignof;",
+                        ff.at
+                    ));
+                    self.retained.insert(ff.at.clone());
+                    close_read.insert(
+                        0,
+                        format!(
+                            "KA.restore_array {pn}_ctype {pn}_repr {} {esize}sz {pn}_alignof;",
+                            ff.at
+                        ),
+                    );
+                    close_write.insert(
+                        0,
+                        format!(
+                            "KA.restore_array {pn}_ctype {pn}_repr {} {esize}sz {pn}_alignof;",
+                            ff.at
+                        ),
+                    );
+                }
                 close_read.extend(ff.close_read);
                 close_write.extend(ff.close_write);
                 Ok(ArrayPlace {
@@ -13229,6 +17049,7 @@ impl<'a> Body<'a> {
         idx: Option<&Expr>,
         writing: bool,
     ) -> Result<Focus, String> {
+        self.check_pointer_object_access(base)?;
         // `array_focus` demands `i < Seq.length xs`. A constant index of an
         // array whose extent is in its type carries that bound with it;
         // anything else is the function's own `_requires` saying so, and
@@ -13287,12 +17108,58 @@ impl<'a> Body<'a> {
         if writing && let Some(s) = self.slots.iter_mut().find(|s| s.addr == arr) {
             s.array_value = None;
         }
+        if self.retained.contains(&arr) {
+            self.lines.push(format!(
+                "RA.properties {pn}_ctype {repr} {arr} {esize} {pn}_alignof;"
+            ));
+            self.lines.push(format!(
+                "RA.offset_fits {pn}_ctype {repr} {arr} {esize} {pn}_alignof {i};"
+            ));
+            self.lines.push(format!(
+                "RA.focus {pn}_ctype {repr} {arr} {esize} {pn}_alignof {i} {off};"
+            ));
+            let common = format!("{pn}_ctype {repr} {arr} {esize} {pn}_alignof {i} {off}");
+            let mut close_read = Vec::new();
+            let mut close_write = Vec::new();
+            let (open_read, open_write) = if maybe {
+                close_read.push(format!(
+                    "RA.element_some {pn}_ctype {pn}_repr {at} {esize} {pn}_alignof;"
+                ));
+                close_write = close_read.clone();
+                (
+                    vec![format!(
+                        "RA.element_get {pn}_ctype {pn}_repr {at} {esize} {pn}_alignof;"
+                    )],
+                    vec![format!(
+                        "RA.element_storage {pn}_ctype {pn}_repr {at} {esize} {pn}_alignof;"
+                    )],
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            close_read.push(format!("RA.unfocus {common};"));
+            close_write.push(format!("RA.unfocus {common};"));
+            close_read.extend(cl_read);
+            close_write.extend(cl_write);
+            return Ok(Focus {
+                read_as: None,
+                bits: None,
+                at,
+                write_fn: format!("{pn}_write{}_retained", if maybe { "_uninit" } else { "" }),
+                unaligned: false,
+                pn,
+                open_read,
+                open_write,
+                close_read,
+                close_write,
+            });
+        }
         self.lines.push(format!(
-            "array_offset_fits {} {} {} {}_alignof {};",
+            "array_offset_fits {pn}_ctype {} {} {} {}_alignof {};",
             repr, arr, esize, pn, i
         ));
         self.lines.push(format!(
-            "array_focus {} {} {} {}_alignof {} {};",
+            "array_focus {pn}_ctype {} {} {} {}_alignof {} {};",
             repr, arr, esize, pn, i, off
         ));
         let common = format!("{} {} {}_alignof {} {}", arr, esize, pn, i, off);
@@ -13300,15 +17167,16 @@ impl<'a> Body<'a> {
             self.lines.push(format!("{}_of_elem {};", pn, at));
             let mut close_read = vec![
                 format!("{}_to_elem {};", pn, at),
-                format!("array_unfocus_read {} {};", repr, common),
+                format!("array_unfocus_read {pn}_ctype {} {};", repr, common),
             ];
             let mut close_write = vec![
                 format!("{}_to_elem {};", pn, at),
-                format!("array_unfocus {} {};", repr, common),
+                format!("array_unfocus {pn}_ctype {} {};", repr, common),
             ];
             close_read.extend(cl_read);
             close_write.extend(cl_write);
             return Ok(Focus {
+                read_as: None,
                 bits: None,
                 at,
                 write_fn: format!("{}_write", pn),
@@ -13325,11 +17193,11 @@ impl<'a> Body<'a> {
         // not: it goes down to the raw bytes and comes back up through the
         // type's own write-only view, exactly as a scalar local does.
         let open_read = vec![
-            format!("elem_maybe_get {}_repr {} {};", pn, esize, at),
+            format!("elem_maybe_get {0}_ctype {}_repr {} {};", pn, esize, at),
             format!("{}_of_elem {};", pn, at),
         ];
         let open_write = vec![
-            format!("elem_maybe_reveal {}_repr {} {};", pn, esize, at),
+            format!("elem_maybe_reveal {0}_ctype {}_repr {} {};", pn, esize, at),
             format!("{}_claim_uninit {};", pn, at),
         ];
         // Both directions close through `array_unfocus`, even the read: what
@@ -13337,8 +17205,8 @@ impl<'a> Body<'a> {
         // only up to a proof, and `array_unfocus_read` matches syntactically.
         let mut both = vec![
             format!("{}_to_elem {};", pn, at),
-            format!("elem_maybe_put {}_repr {} {};", pn, esize, at),
-            format!("array_unfocus {} {};", repr, common),
+            format!("elem_maybe_put {0}_ctype {}_repr {} {};", pn, esize, at),
+            format!("array_unfocus {pn}_ctype {} {};", repr, common),
         ];
         let mut close_write = both.clone();
         let mut close_read = both;
@@ -13363,7 +17231,7 @@ impl<'a> Body<'a> {
             if full {
                 let (un, arm) = self.slots[si].union_arm.clone().unwrap();
                 close_write.push(format!(
-                    "array_claim_all_somes {}_repr {} {} {}_alignof;",
+                    "array_claim_all_somes {0}_ctype {}_repr {} {} {}_alignof;",
                     pn, arr, esize, pn
                 ));
                 close_write.push(format!("{}_unfocus_{} {};", un, arm, arr));
@@ -13373,6 +17241,7 @@ impl<'a> Body<'a> {
         close_read.extend(cl_read);
         close_write.extend(cl_write);
         Ok(Focus {
+            read_as: None,
             bits: None,
             at,
             write_fn: format!("{}_write_uninit", pn),
@@ -13454,9 +17323,11 @@ impl<'a> Body<'a> {
                 return Ok(v);
             };
             let inlinable = self.in_guard
-                || d.split_whitespace()
-                    .next()
-                    .is_some_and(|h| h.ends_with("_read"));
+                || d.split_whitespace().next().is_some_and(|h| {
+                    h.ends_with("_read")
+                        || h.ends_with("_read_retained")
+                        || h.ends_with("_read_field")
+                });
             bound.push((n.to_string(), format!("({})", d), inlinable));
         }
         for i in (0..bound.len()).rev() {
@@ -13791,6 +17662,33 @@ impl<'a> Body<'a> {
     /// own representation of a struct. Palow's representation is different, so
     /// there is nothing honest to point them at, and they are refused.
     fn inline_pulse(&mut self, code: &InlinePulseCode) -> Result<String, String> {
+        let retained_structural = if matches!(
+            aux_fn_kind(code),
+            Some(
+                AuxFnKind::Unfold
+                    | AuxFnKind::UnfoldUninit
+                    | AuxFnKind::Fold
+                    | AuxFnKind::FoldUninit
+            )
+        ) {
+            let object = code.tokens.iter().find_map(|token| match token {
+                InlinePulseToken::RValueAntiquot { expr, .. } => Some((expr, false)),
+                InlinePulseToken::LValueAntiquot { expr, .. } => Some((expr, true)),
+                _ => None,
+            });
+            if let Some((expr, address)) = object {
+                let a = if address {
+                    self.addr(expr)?
+                } else {
+                    self.inline(expr)?
+                };
+                self.retained.contains(&a)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let mut out = String::new();
         for tok in &code.tokens {
             match tok {
@@ -13852,6 +17750,18 @@ impl<'a> Body<'a> {
                 } => {
                     out.push_str(before);
                     out.push_str(&aux_fn_antiquot(self.tds, ty, field_name.as_ref(), *kind)?);
+                    if retained_structural
+                        && field_name.is_none()
+                        && matches!(
+                            kind,
+                            AuxFnKind::Unfold
+                                | AuxFnKind::UnfoldUninit
+                                | AuxFnKind::Fold
+                                | AuxFnKind::FoldUninit
+                        )
+                    {
+                        out.push_str("_retained");
+                    }
                 }
                 InlinePulseToken::Declare { .. } => {
                     return Err("`$declare` in a statement".to_string());
@@ -13868,6 +17778,16 @@ impl<'a> Body<'a> {
     /// the emitter can see the tag in the source expression and does not have
     /// to read it back out of a value it just erased.
     fn note_union_store(&mut self, lhs: &Expr, rhs: &Expr) {
+        // A struct initialiser tags each union it initialises, at the member
+        // it names: `*t = (struct s){ .u = { .f = x } }` makes `t->u.f` live.
+        if let ExprT::StructInit(_, fields) = &strip_vattr(rhs).val {
+            for (f, v) in fields {
+                let place =
+                    ExprT::Member(Rc::new(lhs.clone()), f.clone()).with_loc(lhs.loc.clone());
+                self.note_union_store(&place, v);
+            }
+            return;
+        }
         let ExprT::UnionInit(_, m, _) = &strip_vattr(rhs).val else {
             return;
         };
@@ -13985,7 +17905,16 @@ impl<'a> Body<'a> {
     /// Storing a block's address somewhere does not move its ownership, it
     /// only gives the block a second name.
     fn block_name(&self, e: &Expr) -> Option<String> {
-        if let ExprT::Var(v) = &strip_vattr(e).val {
+        if let ExprT::Var(v) = &strip_casts(e).val {
+            if let Some(root) = self
+                .slots
+                .iter()
+                .rev()
+                .find(|s| s.name == *v.val)
+                .and_then(|s| s.holds_block.get(""))
+            {
+                return Some(root.clone());
+            }
             return Some(v.val.to_string());
         }
         let (slot, path) = self.place_key(e)?;
@@ -14226,7 +18155,7 @@ impl<'a> Body<'a> {
     fn cond_arm(&mut self, e: &Expr) -> Result<(Vec<String>, String), String> {
         let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
         let nslots = self.slots.len();
-        let blocks: Vec<(bool, bool)> = self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
+        let blocks = self.blocks.clone();
         let outer = std::mem::take(&mut self.lines);
         let v = self.rvalue(e);
         let close = std::mem::take(&mut self.pending_close);
@@ -14235,9 +18164,8 @@ impl<'a> Body<'a> {
         let lines = std::mem::replace(&mut self.lines, outer);
         let v = v?;
         let now: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
-        let now_blocks: Vec<(bool, bool)> =
-            self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
-        if self.slots.len() != nslots || now != inits || now_blocks != blocks {
+        let now_blocks = &self.blocks;
+        if self.slots.len() != nslots || now != inits || *now_blocks != blocks {
             return Err(
                 "a conditional expression whose arm changes what is initialised".to_string(),
             );
@@ -14245,9 +18173,405 @@ impl<'a> Body<'a> {
         Ok((lines, v))
     }
 
+    fn memory_op(&self, pn: &str, operation: &str, address: &str) -> String {
+        let suffix = if self.retained.contains(address) {
+            "_retained"
+        } else {
+            ""
+        };
+        format!("{pn}_{operation}{suffix}")
+    }
+
+    /// `b[i]`, or `*b` as `b[0]`, where `b` is an `unsigned char *` naming
+    /// raw, untyped storage. A character access installs no effective type
+    /// (C11 6.5p6-7), so the block stays raw and the access is a single byte
+    /// of it. A store may go anywhere in such a block, `malloc`'s
+    /// uninitialised bytes included; a load needs the byte written, which
+    /// the block's bytes say when they are all defined (`calloc`, or stores
+    /// into those) and the stores themselves say otherwise (`written`). The
+    /// block's index and the subscript.
+    fn raw_byte_access(&self, e: &Expr, store: bool) -> Option<(usize, Rc<Expr>, Rc<Expr>)> {
+        let (base, idx) = match &strip_vattr(e).val {
+            ExprT::Index(base, idx) => (base.clone(), idx.clone()),
+            ExprT::Deref(base) => (
+                base.clone(),
+                ExprT::IntLit(Rc::new(BigInt::ZERO), TypeT::SizeT.with_loc(e.loc.clone()))
+                    .with_loc(e.loc.clone()),
+            ),
+            _ => return None,
+        };
+        let base = &base;
+        let bty = self.ty_of(base).ok()?;
+        let TypeT::Pointer(elem, _) = &peel(self.tds, &bty).val else {
+            return None;
+        };
+        if !matches!(
+            peel(self.tds, elem).val,
+            TypeT::Int {
+                width: 8,
+                signed: false,
+                ..
+            }
+        ) {
+            return None;
+        }
+        // `T *b = p;` makes `b` a name for `*p`, and so for `p`'s block.
+        let name = match &strip_vattr(base).val {
+            ExprT::Var(v) => match self.aliases.get(&*v.val) {
+                Some(place) => match &strip_vattr(place).val {
+                    ExprT::Deref(inner) => self.block_name(inner)?,
+                    _ => return None,
+                },
+                None => self.block_name(base)?,
+            },
+            _ => self.block_name(base)?,
+        };
+        let i = self.blocks.iter().position(|b| {
+            b.var == name
+                && b.checked
+                && !b.freed
+                && b.pn.is_empty()
+                && b.bytes.is_some()
+                && b.split.is_none()
+                && b.parent.is_none()
+                && b.prepared.is_none()
+                && b.view_size.is_none()
+                && b.array.is_none()
+                && b.flex.is_none()
+                && b.taken.is_none()
+                && (b.fill == "zeroed"
+                    || b.fill == "defined"
+                    || b.fill == "written"
+                    || (store && b.fill == "uninit"))
+        })?;
+        Some((i, base.clone(), idx))
+    }
+
+    /// `b[i]` where `b` is an `unsigned char *` naming a declared scalar
+    /// local: `unsigned char *b = (unsigned char *)&d;`. Character lvalues
+    /// may read any object (C11 6.5p7), so the read is of one byte of `d`'s
+    /// representation. The slot's index and the subscript.
+    fn slot_byte_access(&self, e: &Expr) -> Option<(usize, Rc<Expr>)> {
+        let ExprT::Index(base, idx) = &strip_vattr(e).val else {
+            return None;
+        };
+        let bty = self.ty_of(base).ok()?;
+        let TypeT::Pointer(elem, _) = &peel(self.tds, &bty).val else {
+            return None;
+        };
+        if !matches!(
+            peel(self.tds, elem).val,
+            TypeT::Int {
+                width: 8,
+                signed: false,
+                ..
+            }
+        ) {
+            return None;
+        }
+        let ExprT::Var(v) = &strip_vattr(base).val else {
+            return None;
+        };
+        let place = self.aliases.get(&*v.val)?;
+        let ExprT::Deref(inner) = &strip_vattr(place).val else {
+            return None;
+        };
+        let ExprT::Ref(obj) = &strip_casts(inner).val else {
+            return None;
+        };
+        let ExprT::Var(d) = &strip_vattr(obj).val else {
+            return None;
+        };
+        let i = self.slots.iter().rposition(|s| s.name == *d.val)?;
+        let s = &self.slots[i];
+        if !s.init
+            || s.global
+            || s.array.is_some()
+            || s.union_arm.is_some()
+            || !s.scattered.is_empty()
+            || is_aggregate(&s.palow_ty)
+            || self.retained.contains(&s.addr)
+        {
+            return None;
+        }
+        Some((i, idx.clone()))
+    }
+
+    /// A read of one byte of a declared scalar; see `slot_byte_access`. The
+    /// typed ownership is revealed as bytes for the read and concealed again
+    /// straight after, so the object keeps its value and its type.
+    fn slot_byte(&mut self, e: &Expr) -> Result<Option<String>, String> {
+        let Some((i, idx)) = self.slot_byte_access(e) else {
+            return Ok(None);
+        };
+        let k = self.index(&idx)?;
+        let (a, pn) = (self.slots[i].addr.clone(), self.slots[i].palow_ty.clone());
+        let p = self.fresh("byte_perm");
+        let x = self.fresh("byte_obj");
+        let bytes = self.fresh("byte_bytes");
+        let index = self.fresh("byte_index");
+        let t = self.fresh("byte");
+        self.lines
+            .push(format!("with {p} {x}. assert ({pn}_pts_to {a} {p} {x});"));
+        self.lines.push(format!("{pn}_reveal {a};"));
+        self.lines.push(format!(
+            "with {bytes} {index}. assert (mem_pts_to_at {a} {p} {bytes} {index});"
+        ));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.RawBytes.read_ok_wf {index} {pn}_ctype;"
+        ));
+        self.lines.push(format!("{pn}_repr_no_prov {x} {bytes};"));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.RawBytes.initialized_value {bytes} (SizeT.v {k});"
+        ));
+        self.lines.push(format!(
+            "let {t} = Pulse.Lib.C.Palow.RawBytes.byte_load {a} {k};"
+        ));
+        self.lines
+            .push(format!("{pn}_conceal {a} #{p} #{bytes} #{x} #{index};"));
+        Ok(Some(t))
+    }
+
+    /// A load or store of one byte of a raw block; see `raw_byte_access`.
+    /// The block's bytes stay defined -- initialised and provenance-free --
+    /// whatever is stored, so the block's `fill` records only that.
+    fn raw_byte(&mut self, e: &Expr, value: Option<&str>) -> Result<Option<String>, String> {
+        let Some((i, _, idx)) = self.raw_byte_access(e, value.is_some()) else {
+            return Ok(None);
+        };
+        let k = self.index(&idx)?;
+        let a = self.blocks[i].tmp.clone();
+        match value {
+            Some(v) => {
+                self.lines.push(format!(
+                    "Pulse.Lib.C.Palow.RawBytes.byte_store {a} {k} {v};"
+                ));
+                // Stores into uninitialised bytes define only the bytes they
+                // write, which the bytes' own term records for a later load.
+                if matches!(self.blocks[i].fill, "uninit" | "written") {
+                    self.blocks[i].fill = "written";
+                } else {
+                    self.blocks[i].fill = "defined";
+                    self.blocks[i].init = true;
+                }
+                Ok(Some(String::new()))
+            }
+            None => {
+                let t = self.fresh("byte");
+                self.lines.push(format!(
+                    "let {t} = Pulse.Lib.C.Palow.RawBytes.byte_load {a} {k};"
+                ));
+                Ok(Some(t))
+            }
+        }
+    }
+
+    /// A non-character read of the start of a raw block whose bytes are
+    /// defined but not known: the value is whatever they decode to. The
+    /// block has no effective type, so any type may read it.
+    fn read_untyped_defined(&mut self, i: usize, expr: &Expr) -> Result<String, String> {
+        let ty = self.ty_of(expr)?;
+        let pn = palow_name(self.tds, &ty)
+            .filter(|pn| {
+                matches!(
+                    pn.as_str(),
+                    "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "ulong_long_t"
+                )
+            })
+            .ok_or_else(|| {
+                format!(
+                    "a read of byte-written storage at {}, which has no byte decoding",
+                    describe(&ty)
+                )
+            })?;
+        let a = self.blocks[i].tmp.clone();
+        let size = format!("{pn}_sizeof");
+        let whole_bytes = self.fresh("raw_whole_bytes");
+        let whole_index = self.fresh("raw_whole_index");
+        let bytes = self.fresh("raw_view_bytes");
+        let index = self.fresh("raw_view_index");
+        let result = self.fresh("raw_view");
+        self.lines.push(format!(
+            "with {whole_bytes} {whole_index}. assert (mem_pts_to_at {a} 1.0R {whole_bytes} {whole_index});"
+        ));
+        self.lines.push(format!("mem_split_at {a} {size};"));
+        self.lines.push(format!(
+            "with {bytes} {index}. assert (mem_pts_to_at {a} 1.0R {bytes} {index});"
+        ));
+        self.lines
+            .push(format!("Pulse.Lib.C.Palow.RawBytes.{pn}_decode {bytes};"));
+        self.lines.push(format!(
+            "let {result} = Pulse.Lib.C.Palow.Machine.Intrinsics.{pn}_read_at {a} #1.0R #(hide (Pulse.Lib.C.Palow.RawBytes.{pn}_of_bytes {bytes})) #(hide {bytes}) #{index};"
+        ));
+        self.lines.push(format!("mem_join_at {a} {size};"));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.Bytes.slice_append {whole_bytes} (SizeT.v {size});"
+        ));
+        self.lines
+            .push(format!("KA.slices_join {whole_index} (SizeT.v {size});"));
+        let joined_bytes = self.fresh("raw_joined_bytes");
+        let joined_index = self.fresh("raw_joined_index");
+        self.lines.push(format!(
+            "with {joined_bytes} {joined_index}. assert (mem_pts_to_at {a} 1.0R {joined_bytes} {joined_index});"
+        ));
+        self.lines.push(format!(
+            "assert (pure ({joined_bytes} == {whole_bytes} /\\ {joined_index} == {whole_index}));"
+        ));
+        self.lines.push(format!(
+            "rewrite (mem_pts_to_at {a} 1.0R {joined_bytes} {joined_index}) as (mem_pts_to_at {a} 1.0R {whole_bytes} {whole_index});"
+        ));
+        Ok(result)
+    }
+
+    fn read_untyped_zeroed(&mut self, i: usize, expr: &Expr) -> Result<String, String> {
+        let ty = self.ty_of(expr)?;
+        if !matches!(&self.tds.resolve(&ty).val, TypeT::Int { .. }) {
+            return Err(
+                "a zero-filled native access without an integer representation".to_string(),
+            );
+        }
+        let pn = palow_name(self.tds, &ty)
+            .filter(|pn| !is_aggregate(pn))
+            .ok_or_else(|| "a zero-filled aggregate requires an indexed access view".to_string())?;
+        let proof = zero_repr_proof(self.tds, &ty)
+            .ok_or_else(|| format!("the zero-filled representation of {}", describe(&ty)))?;
+        let zero = zero_value(self.tds, &ty)?;
+        let a = self.blocks[i].tmp.clone();
+        let size = format!("{pn}_sizeof");
+        let whole_bytes = self.fresh("zero_whole_bytes");
+        let whole_index = self.fresh("zero_whole_index");
+        let bytes = self.fresh("zero_view_bytes");
+        let index = self.fresh("zero_view_index");
+        let result = self.fresh("zero_view");
+        self.lines.push(format!(
+            "with {whole_bytes} {whole_index}. assert (mem_pts_to_at {a} 1.0R {whole_bytes} {whole_index});"
+        ));
+        self.lines.push(format!("mem_split_at {a} {size};"));
+        self.lines
+            .push(format!("aligned_divides {a} max_align {pn}_alignof;"));
+        self.lines.push(format!(
+            "with {bytes} {index}. assert (mem_pts_to_at {a} 1.0R {bytes} {index});"
+        ));
+        self.lines.push(format!(
+            "assert (pure ({bytes} == zeroed (SizeT.v {size})));"
+        ));
+        self.lines.extend(proof);
+        self.lines
+            .push(format!("{pn}_repr_no_prov ({zero}) {bytes};"));
+        self.lines.push(format!(
+            "let {result} = Pulse.Lib.C.Palow.Machine.Intrinsics.{pn}_read_at {a} #1.0R #(hide ({zero})) #(hide {bytes}) #{index};"
+        ));
+        self.lines.push(format!("mem_join_at {a} {size};"));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.Bytes.slice_append {whole_bytes} (SizeT.v {size});"
+        ));
+        self.lines
+            .push(format!("KA.slices_join {whole_index} (SizeT.v {size});"));
+        let joined_bytes = self.fresh("zero_joined_bytes");
+        let joined_index = self.fresh("zero_joined_index");
+        self.lines.push(format!(
+            "with {joined_bytes} {joined_index}. assert (mem_pts_to_at {a} 1.0R {joined_bytes} {joined_index});"
+        ));
+        self.lines.push(format!(
+            "assert (pure ({joined_bytes} == {whole_bytes} /\\ {joined_index} == {whole_index}));"
+        ));
+        self.lines.push(format!(
+            "rewrite (mem_pts_to_at {a} 1.0R {joined_bytes} {joined_index}) as (mem_pts_to_at {a} 1.0R {whole_bytes} {whole_index});"
+        ));
+        Ok(result)
+    }
+
+    /// `*(T *)&place` where `T` is not `place`'s own type: the place, and the
+    /// Palow names of its type and of `T`. A conversion that changes nothing
+    /// about which object is accessed is resolved to that object instead.
+    fn typed_view(&self, e: &Expr) -> Option<Result<(Rc<Expr>, String, String), Rc<Expr>>> {
+        view_place(e)?;
+        let resolved = resolve_view(self.tds, &self.env, &Rc::new(e.clone()));
+        let Some(place) = view_place(&resolved) else {
+            return Some(Err(resolved));
+        };
+        let from = palow_name(self.tds, &*self.ty_of(place).ok()?)?;
+        let to = palow_name(self.tds, &*self.ty_of(e).ok()?)?;
+        Some(Ok((place.clone(), from, to)))
+    }
+
+    /// Reinterpret the ownership of the scalar at `a` from type `from` to type
+    /// `to`. `View.elem_view` is where 6.5p7 is checked: the bytes' effective
+    /// type has to license the access, and they have to represent a value of
+    /// the new type. What the old value was is not carried across.
+    fn retype_view(&mut self, a: &str, from: &str, to: &str) {
+        self.lines.push(format!("{from}_to_elem {a};"));
+        let lemma = match (from, to) {
+            ("int8_t", "uint8_t") => Some("repr_int8_uint8"),
+            ("uint8_t", "int8_t") => Some("repr_uint8_int8"),
+            ("int16_t", "uint16_t") => Some("repr_int16_uint16"),
+            ("uint16_t", "int16_t") => Some("repr_uint16_int16"),
+            ("int32_t", "uint32_t") => Some("repr_int32_uint32"),
+            ("uint32_t", "int32_t") => Some("repr_uint32_int32"),
+            ("int64_t", "uint64_t") => Some("repr_int64_uint64"),
+            ("uint64_t", "int64_t") => Some("repr_uint64_int64"),
+            ("long_long_t", "ulong_long_t") => Some("repr_llong_ullong"),
+            ("ulong_long_t", "long_long_t") => Some("repr_ullong_llong"),
+            ("uint64_t", "size_t") => Some("repr_uint64_size_t"),
+            ("size_t", "uint64_t") => Some("repr_size_t_uint64"),
+            ("bool_t", "int8_t") => Some("repr_bool_int8"),
+            ("bool_t", "uint8_t") => Some("repr_bool_uint8"),
+            _ => None,
+        };
+        if let Some(l) = lemma {
+            self.lines.push(format!("View.{l} ();"));
+        }
+        self.lines.push(format!(
+            "View.elem_view {from}_ctype {from}_repr {to}_ctype {to}_repr {a};"
+        ));
+        self.lines.push(format!("{to}_of_elem {a};"));
+    }
+
+    /// The address of a scalar typed view, ready for an access at type `to`.
+    /// `Ok(None)` when `e` is not such a view.
+    fn open_view(&mut self, e: &Expr) -> Result<Option<(String, String, String)>, String> {
+        let Some(Ok((place, from, to))) = self.typed_view(e) else {
+            return Ok(None);
+        };
+        if is_aggregate(&from) || is_aggregate(&to) {
+            return Ok(None);
+        }
+        let a = self.addr(&place)?;
+        if self.retained.contains(&a) {
+            return Err("a typed view of retained storage".to_string());
+        }
+        if !enum_access(&from, &to) {
+            self.retype_view(&a, &from, &to);
+        }
+        Ok(Some((a, from, to)))
+    }
+
     fn rvalue(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(t) = self.raw_byte(e, None)? {
+            return Ok(t);
+        }
+        if let Some(t) = self.slot_byte(e)? {
+            return Ok(t);
+        }
         if let Some(p) = self.unalias(e) {
-            return self.rvalue(&p);
+            let outer = std::mem::replace(&mut self.via_pointer, true);
+            let r = self.rvalue(&p);
+            self.via_pointer = outer;
+            return r;
+        }
+        if let Some(Err(place)) = self.typed_view(e) {
+            return self.rvalue(&place);
+        }
+        if let Some((a, from, to)) = self.open_view(e)? {
+            let t = self.fresh("view");
+            if enum_access(&from, &to) {
+                self.lines
+                    .push(format!("let {t} = {from}_read_as_{to} {a};"));
+            } else {
+                self.lines.push(format!("let {t} = {to}_read {a};"));
+                self.retype_view(&a, &to, &from);
+            }
+            return Ok(t);
         }
         if let Some(v) = lvalue_name(e) {
             if let Some(a) = self.alias_addr(&v) {
@@ -14312,7 +18636,12 @@ impl<'a> Body<'a> {
                         .ok_or_else(|| format!("`{}` has an unsupported type", v.val))?;
                     let a = s.addr.clone();
                     let t = self.fresh(&v.val);
-                    self.lines.push(format!("let {} = {}_read {};", t, pn, a));
+                    self.lines.push(format!(
+                        "let {} = {} {};",
+                        t,
+                        self.memory_op(&pn, "read", &a),
+                        a
+                    ));
                     Ok(t)
                 } else if self.env.lookup_var(v).is_some() {
                     Ok(format!("var_{}", v.val))
@@ -14331,6 +18660,72 @@ impl<'a> Body<'a> {
                 }
             }
             ExprT::Deref(inner) => {
+                self.check_pointer_object_access(inner)?;
+                if let Some(name) = self.block_name(inner)
+                    && let Some(i) = self.blocks.iter().position(|b| {
+                        b.var == name
+                            && b.checked
+                            && !b.freed
+                            && b.pn.is_empty()
+                            && b.split.is_none()
+                            && b.fill == "zeroed"
+                    })
+                {
+                    return self.read_untyped_zeroed(i, e);
+                }
+                if let Some(name) = self.block_name(inner)
+                    && let Some(i) = self.blocks.iter().position(|b| {
+                        b.var == name
+                            && b.checked
+                            && !b.freed
+                            && b.pn.is_empty()
+                            && b.split.is_none()
+                            && b.view_size.is_none()
+                            && b.fill == "defined"
+                    })
+                {
+                    return self.read_untyped_defined(i, e);
+                }
+                if let Some(name) = self.block_name(inner)
+                    && let Some(b) = self
+                        .blocks
+                        .iter()
+                        .find(|b| b.var == name && b.checked && !b.freed)
+                    && b.view_size.is_some()
+                {
+                    if b.prepared.is_some() || !b.init {
+                        return Err(
+                            "a read of prepared storage before a type-justified initialization"
+                                .to_string(),
+                        );
+                    }
+                    let a = b.tmp.clone();
+                    let held = b.pn.clone();
+                    let ty = self.ty_of(e)?;
+                    let pn = palow_name(self.tds, &ty)
+                        .ok_or_else(|| format!("a dereference yields {}", describe(&ty)))?;
+                    // A read at another scalar type of the same size is a
+                    // view of the object the block holds: 6.5p7 decides,
+                    // in `View.elem_view`, whether that type may read it.
+                    let view = held != pn
+                        && !self.retained.contains(&a)
+                        && scalar_pn_size(&held).is_some()
+                        && scalar_pn_size(&held) == scalar_pn_size(&pn);
+                    if view {
+                        self.retype_view(&a, &held, &pn);
+                    }
+                    let t = self.fresh("deref");
+                    self.lines.push(format!(
+                        "let {} = {} {};",
+                        t,
+                        self.memory_op(&pn, "read", &a),
+                        a
+                    ));
+                    if view {
+                        self.retype_view(&a, &pn, &held);
+                    }
+                    return Ok(t);
+                }
                 if let ExprT::Var(v) = &inner.val {
                     if self.out_params.iter().any(|n| *n == *v.val) {
                         return Err(format!("`*{}` is read before it is written", v.val));
@@ -14358,7 +18753,12 @@ impl<'a> Body<'a> {
                     .ok_or_else(|| format!("a dereference yields {}", describe(&ty)))?;
                 let a = self.addr(e)?;
                 let t = self.fresh("deref");
-                self.lines.push(format!("let {} = {}_read {};", t, pn, a));
+                self.lines.push(format!(
+                    "let {} = {} {};",
+                    t,
+                    self.memory_op(&pn, "read", &a),
+                    a
+                ));
                 Ok(t)
             }
             // A subscript of a published array global is `Seq.index` of a
@@ -14546,11 +18946,11 @@ impl<'a> Body<'a> {
                                 let (addr, pn) = (sl.addr.clone(), sl.palow_ty.clone());
                                 if maybe {
                                     self.lines.push(format!(
-                                        "array_somes {}_repr {} {} {}_alignof;",
+                                        "array_somes {0}_ctype {}_repr {} {} {}_alignof;",
                                         pn, addr, esize, pn
                                     ));
                                     self.pending_close.push(format!(
-                                        "array_unsomes {}_repr {} {} {}_alignof;",
+                                        "array_unsomes {0}_ctype {}_repr {} {} {}_alignof;",
                                         pn, addr, esize, pn
                                     ));
                                 }
@@ -14732,7 +19132,9 @@ impl<'a> Body<'a> {
                     return Ok(if post { old } else { new });
                 }
                 let one = match &peel(self.tds, &ty).val {
-                    TypeT::Int { signed, width } => format!("1{}", int_suffix(*signed, *width)?),
+                    TypeT::Int { signed, width, .. } => {
+                        format!("1{}", int_suffix(*signed, *width)?)
+                    }
                     TypeT::SizeT => "1sz".to_string(),
                     _ => return Err(format!("an increment of {}", describe(&ty))),
                 };
@@ -14758,8 +19160,7 @@ impl<'a> Body<'a> {
                 match &self.tds.resolve(&ty).val {
                     TypeT::Int {
                         signed: false,
-                        width,
-                    } => Ok(format!(
+                        width, .. } => Ok(format!(
                         "(0{} `Pulse.Lib.C.UInt{}.sub_wrap` {})",
                         int_suffix(false, *width)?,
                         width,
@@ -14767,8 +19168,7 @@ impl<'a> Body<'a> {
                     )),
                     TypeT::Int {
                         signed: true,
-                        width,
-                    } if self.signed_ok => Ok(format!(
+                        width, .. } if self.signed_ok => Ok(format!(
                         "(0{} `FStar.Int{}.sub` {})",
                         int_suffix(true, *width)?,
                         width,
@@ -14936,7 +19336,18 @@ impl<'a> Body<'a> {
                         _ => self.rvalue(f)?,
                     };
                     let mut vs = Vec::new();
-                    for a in args.iter() {
+                    let fty = self.ty_of(f)?;
+                    let access_args = match &peel(self.tds, &fty).val {
+                        TypeT::FnPtr { args, .. } => args
+                            .iter()
+                            .map(|ty| matches!(peel(self.tds, ty).val, TypeT::Pointer(..)))
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    };
+                    for (i, a) in args.iter().enumerate() {
+                        if access_args.get(i) == Some(&true) {
+                            self.check_pointer_object_access(a)?;
+                        }
                         vs.push(self.rvalue(a)?);
                     }
                     let tuple = match vs.len() {
@@ -15030,9 +19441,35 @@ impl<'a> Body<'a> {
                     return Err(format!("`{}` has no function-pointer wrapper", g));
                 }
                 self.uses.insert(g.clone());
+                let c = &self.callees[&g];
+                let retained_args = c.retained.clone();
+                let outs = c.outs.clone();
+                let arr_args = c.arr_args.clone();
+                let consumes = c.consumes.clone();
+                let plain_ptrs = c.plain_ptrs.clone();
+                let spliced_own = c.spliced_own;
                 let mut vs = Vec::new();
-                for a in args.iter() {
-                    vs.push(self.rvalue(a)?);
+                for (i, a) in args.iter().enumerate() {
+                    if plain_ptrs.get(i) != Some(&true) || spliced_own {
+                        self.check_pointer_object_access(a)?;
+                    }
+                    let v = if outs.get(i) == Some(&true) {
+                        self.out_arg(a)?
+                    } else {
+                        self.rvalue(a)?
+                    };
+                    if retained_args.get(i) == Some(&true) {
+                        self.retain_call_arg(
+                            a,
+                            &v,
+                            outs.get(i) == Some(&true),
+                            arr_args.get(i) == Some(&true),
+                        )?;
+                    }
+                    if consumes.get(i) == Some(&true) {
+                        self.give_away(a)?;
+                    }
+                    vs.push(v);
                 }
                 let tuple = match vs.len() {
                     0 => "()".to_string(),
@@ -15106,11 +19543,12 @@ impl<'a> Body<'a> {
     /// The F* application for a call to an already-emitted function. Every
     /// argument is translated first, since translating one may emit reads.
     fn call(&mut self, name: &Ident, args: &Exprs) -> Result<String, String> {
-        // A callee that was handed a pointer may have made a different member
-        // live, and nothing in the signature says otherwise. The emitter's
-        // record of which member is live is knowledge it put there itself, so
-        // it gives it up whenever control leaves.
-        self.active.clear();
+        if matches!(name.val.to_string().as_str(), "memcpy" | "memmove") {
+            return self.copy_object(name, args);
+        }
+        if name.val.as_ref() == "memcmp" {
+            self.compared_objects(args)?;
+        }
         let c = self
             .callees
             .get(&*name.val.to_string())
@@ -15133,6 +19571,7 @@ impl<'a> Body<'a> {
             return Err(format!("`{}`'s contract was dropped", name.val));
         }
         let outs = c.outs.clone();
+        let retained_args = c.retained.clone();
         let consts = c.consts.clone();
         let plain_ptrs = c.plain_ptrs.clone();
         let const_args = c.const_args.clone();
@@ -15152,6 +19591,13 @@ impl<'a> Body<'a> {
         }
         let mut out = format!("func_{}", name.val);
         let mut implicit_args: Vec<String> = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if (plain_ptrs.get(i) != Some(&true) && arrayptr_args.get(i) != Some(&true))
+                || c.spliced_own
+            {
+                self.check_pointer_object_access(arg)?;
+            }
+        }
         let opened = self.field_args(args, &outs, |i| {
             !(arr_args.get(i) == Some(&true)
                 || arrayptr_args.get(i) == Some(&true)
@@ -15160,6 +19606,14 @@ impl<'a> Body<'a> {
         })?;
         for (i, a) in args.iter().enumerate() {
             if let Some(at) = opened.get(&i) {
+                if retained_args.get(i) == Some(&true) {
+                    self.retain_call_arg(
+                        a,
+                        at,
+                        outs.get(i) == Some(&true),
+                        arr_args.get(i) == Some(&true),
+                    )?;
+                }
                 out += &format!(" {}", at);
                 continue;
             }
@@ -15218,7 +19672,7 @@ impl<'a> Body<'a> {
                 let ab = self.blocks[bi].array.clone().unwrap();
                 let (z, _) = ab.zero.clone().unwrap();
                 self.lines.push(format!(
-                    "array_claim_all {}_repr {} {} {}_alignof (Seq.create (SizeT.v {}) {});",
+                    "array_claim_all {0}_ctype {}_repr {} {} {}_alignof (Seq.create (SizeT.v {}) {});",
                     pn, tmp, ab.esize, pn, ab.n, z
                 ));
                 if let Some(x) = self.blocks[bi].array.as_mut() {
@@ -15247,9 +19701,29 @@ impl<'a> Body<'a> {
                 } else {
                     (self.addr_only(base)?, Vec::new(), Vec::new())
                 };
-                self.lines.push(format!("{}_focus_{} {};", sn, f.val, at));
+                let suffix = if self.retained.contains(&at) {
+                    "_retained"
+                } else {
+                    ""
+                };
+                self.lines
+                    .push(format!("{}_focus_{}{} {};", sn, f.val, suffix, at));
                 self.pending_close
-                    .push(format!("{}_unfocus_{} {};", sn, f.val, at));
+                    .push(format!("{}_unfocus_{}{} {};", sn, f.val, suffix, at));
+                if self
+                    .tds
+                    .structs
+                    .get(sn.trim_start_matches("struct_"))
+                    .is_some_and(|si| contextual_struct(self.tds, si))
+                    && let Some(FieldShape::Array { pn, esize, .. }) = field_shape(self.tds, &aty)
+                {
+                    let array_at = format!("({at} +! {sn}_offsetof_{})", f.val);
+                    self.lines.push(format!(
+                        "KA.borrow_array {pn}_ctype {pn}_repr {array_at} {esize}sz {pn}_alignof;"
+                    ));
+                    self.retained.insert(array_at.clone());
+                    self.pending_close.insert(0,format!("KA.restore_array {pn}_ctype {pn}_repr {array_at} {esize}sz {pn}_alignof;"));
+                }
                 self.pending_close.extend(close);
             }
             // An array field decayed into a parameter that is not `_array`
@@ -15281,6 +19755,9 @@ impl<'a> Body<'a> {
                 } else {
                     fo.close_read
                 });
+                if retained_args.get(i) == Some(&true) && !fo.write_fn.ends_with("_retained") {
+                    self.retain_call_arg(a, &fo.at, false, false)?;
+                }
                 out += &format!(" {}", fo.at);
                 continue;
             }
@@ -15298,6 +19775,14 @@ impl<'a> Body<'a> {
             } else {
                 self.rvalue(a)?
             };
+            if retained_args.get(i) == Some(&true) {
+                self.retain_call_arg(
+                    a,
+                    &v,
+                    outs.get(i) == Some(&true),
+                    arr_args.get(i) == Some(&true),
+                )?;
+            }
             // A `_consumes` parameter takes the argument's ownership for good.
             // Nothing has to be emitted for that -- the callee's `requires`
             // asks for it and slprop matching hands it over -- but the
@@ -15318,6 +19803,9 @@ impl<'a> Body<'a> {
             {
                 if const_args.get(i) == Some(&true) {
                     implicit_args.push("#1.0R".to_string());
+                }
+                if retained_args.get(i) == Some(&true) {
+                    implicit_args.push("#_".to_string());
                 }
                 implicit_args.push(format!("#(hide {})", value));
             }
@@ -15360,7 +19848,132 @@ impl<'a> Body<'a> {
         for a in implicit_args {
             out += &format!(" {}", a);
         }
+        // A callee that was handed a pointer may have made a different member
+        // live, and nothing in the signature says otherwise. The emitter's
+        // record of which member is live is knowledge it put there itself, so
+        // it gives it up whenever control leaves -- which is after the
+        // arguments, evaluated while it still holds. A local whose address is
+        // never taken is out of every callee's reach, so what it holds stays
+        // known.
+        let private: HashSet<String> = self
+            .slots
+            .iter()
+            .filter(|s| {
+                !s.global
+                    && s.array.is_none()
+                    && s.union_arm.is_none()
+                    && !self.escaped.contains(&s.name)
+            })
+            .map(|s| s.addr.clone())
+            .chain(
+                self.blocks
+                    .iter()
+                    .filter(|b| !self.escaped.contains(&b.var))
+                    .map(|b| b.tmp.clone()),
+            )
+            .collect();
+        // A union nested in a private object is as private as it is: its
+        // address is the object's plus offsets, `((t +! o1) +! o2)`.
+        self.active.retain(|a, _| {
+            let root = a.trim_start_matches('(');
+            private.contains(a)
+                || private.iter().any(|p| {
+                    root.strip_prefix(p.as_str())
+                        .is_some_and(|r| r.starts_with(" +! "))
+                })
+        });
         Ok(format!("({})", out))
+    }
+
+    fn retain_call_arg(
+        &mut self,
+        arg: &Expr,
+        at: &str,
+        uninit: bool,
+        array: bool,
+    ) -> Result<(), String> {
+        let contextual_field = if let ExprT::Ref(inner) = &strip_vattr(arg).val
+            && let ExprT::Member(base, _) = &strip_vattr(inner).val
+            && let Ok((sn, _)) = self.struct_of(base)
+        {
+            self.tds
+                .structs
+                .get(sn.trim_start_matches("struct_"))
+                .is_some_and(|si| contextual_struct(self.tds, si))
+        } else {
+            false
+        };
+        if self.retained.contains(at) && !contextual_field {
+            return Ok(());
+        }
+        let ty = self.ty_of(arg)?;
+        let pt = match &peel(self.tds, &ty).val {
+            TypeT::Pointer(pt, _) | TypeT::FixedArray(pt, _) => pt,
+            _ => return Err("retained argument is not an object pointer".to_string()),
+        };
+        let pn = palow_name(self.tds, pt)
+            .ok_or_else(|| "retained argument has no typed owner".to_string())?;
+        if array {
+            let esize = palow_sizeof(self.tds, pt).ok_or("retained array has no element extent")?;
+            let repr = if uninit {
+                format!("(maybe_repr {pn}_repr {esize})")
+            } else {
+                format!("{pn}_repr")
+            };
+            self.lines.push(format!(
+                "RA.retain {pn}_ctype {repr} {at} {esize}sz {pn}_alignof;"
+            ));
+            self.pending_close.insert(
+                0,
+                format!("RA.release {pn}_ctype {pn}_repr {at} {esize}sz {pn}_alignof;"),
+            );
+            return Ok(());
+        }
+        if contextual_field {
+            if pn.starts_with("struct_") {
+                self.lines.push(format!(
+                    "{pn}_borrow{}_context {at};",
+                    if uninit { "_uninit" } else { "" }
+                ));
+                self.pending_close.insert(
+                    0,
+                    format!(
+                        "{pn}_restore{}_context {at};",
+                        if uninit { "_initialized" } else { "" }
+                    ),
+                );
+                return Ok(());
+            }
+            self.lines.push(if uninit {
+                format!("K.borrow_storage {pn}_ctype {pn}_alignof {at};")
+            } else {
+                format!("K.borrow_value {pn}_ctype {pn}_repr {pn}_alignof {at};")
+            });
+            self.pending_close.insert(
+                0,
+                format!("K.restore_value {pn}_ctype {pn}_repr {pn}_alignof {at};"),
+            );
+            return Ok(());
+        }
+        if uninit {
+            if self
+                .tds
+                .structs
+                .get(pn.trim_start_matches("struct_"))
+                .is_some_and(|si| contextual_struct(self.tds, si))
+            {
+                self.lines.push(format!("{pn}_retain_uninit {at};"));
+            } else {
+                self.lines.push(format!("{pn}_reveal_uninit {at};"));
+                self.lines
+                    .push(format!("R.claim_storage_raw {pn}_ctype {pn}_alignof {at};"));
+            }
+        } else {
+            self.lines.push(format!("{pn}_retain {at};"));
+        }
+        self.pending_close
+            .insert(0, format!("{pn}_release_retained {at};"));
+        Ok(())
     }
 
     /// Open the fields whose addresses a call's arguments are, for the length
@@ -15384,6 +19997,7 @@ impl<'a> Body<'a> {
         owns_one: impl Fn(usize) -> bool,
     ) -> Result<HashMap<usize, String>, String> {
         let mut groups: Vec<(String, Rc<Expr>, Vec<(usize, Rc<Ident>)>)> = Vec::new();
+        let mut opened = HashMap::new();
         for (i, a) in args.iter().enumerate() {
             let out = outs.get(i) == Some(&true);
             if !out && !owns_one(i) {
@@ -15399,6 +20013,28 @@ impl<'a> Body<'a> {
                 && self.unaligned_field(&sn, &f.val)
             {
                 return Err(misaligned_addr(&f.val));
+            }
+            // `&u.m` handed to a callee: the member is focused out of the
+            // union for the call, which needs it to be the live one -- a
+            // callee typed at `m` reads and writes it as an `m`.
+            if !out
+                && self.union_of(base).is_some()
+                && !self.in_pieces(base)
+                && !self
+                    .ty_of(inner)
+                    .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
+            {
+                let fo = self.union_member(base, f, false).map_err(|_| {
+                    format!(
+                        "the address of union member `{}`, which is not known to be the live \
+                         one here",
+                        f.val
+                    )
+                })?;
+                self.lines.extend(fo.open_read.iter().cloned());
+                self.pending_close.extend(fo.close_write);
+                opened.insert(i, fo.at);
+                continue;
             }
             if self.union_of(base).is_some()
                 || self.in_pieces(base)
@@ -15422,7 +20058,6 @@ impl<'a> Body<'a> {
                 None => groups.push((key, base.clone(), vec![(i, f.clone())])),
             }
         }
-        let mut opened = HashMap::new();
         for (key, base, fields) in groups {
             // Storage still being filled is scattered already, or will be by
             // the first `_out` that reaches it.
@@ -15479,16 +20114,33 @@ impl<'a> Body<'a> {
             }
             let ff = self.open_field(&base, &fields[0].1, true)?;
             self.no_value_yet(&ff.a)?;
-            self.lines.push(format!("{}_scatter {};", sn, ff.a));
+            let retained_suffix = if self.retained.contains(&ff.a) {
+                "_retained"
+            } else {
+                ""
+            };
+            self.lines
+                .push(format!("{}_scatter{} {};", sn, retained_suffix, ff.a));
             for (i, f) in &fields {
                 let at = format!("({} +! {}_offsetof_{})", ff.a, sn, f.val);
                 if outs.get(*i) == Some(&true) {
                     let pn = self.field_pn(&base, f)?;
-                    self.lines.push(format!("{}_forget {};", pn, at));
+                    let suffix = if self
+                        .tds
+                        .structs
+                        .get(sname)
+                        .is_some_and(|si| contextual_struct(self.tds, si))
+                    {
+                        "_field"
+                    } else {
+                        ""
+                    };
+                    self.lines.push(format!("{}_forget{} {};", pn, suffix, at));
                 }
                 opened.insert(*i, at);
             }
-            self.pending_close.push(format!("{}_gather {};", sn, ff.a));
+            self.pending_close
+                .push(format!("{}_gather{} {};", sn, retained_suffix, ff.a));
             self.pending_close.extend(ff.close_write);
         }
         Ok(opened)
@@ -15562,7 +20214,7 @@ impl<'a> Body<'a> {
         {
             let (pn, at) = (self.slots[i].palow_ty.clone(), self.slots[i].addr.clone());
             self.pending_close.push(format!(
-                "array_unsomes {}_repr {} {} {}_alignof;",
+                "array_unsomes {0}_ctype {}_repr {} {} {}_alignof;",
                 pn, at, esize, pn
             ));
             return Ok(at);
@@ -15577,8 +20229,13 @@ impl<'a> Body<'a> {
             && !ap.maybe
         {
             let (pn, at, esize) = (ap.pn.clone(), ap.addr.clone(), ap.esize.clone());
+            let operation = if self.retained.contains(&at) {
+                "RA.unsomes"
+            } else {
+                "array_unsomes"
+            };
             self.lines.push(format!(
-                "array_unsomes {}_repr {} {} {}_alignof;",
+                "{operation} {0}_ctype {}_repr {} {} {}_alignof;",
                 pn, at, esize, pn
             ));
             return Ok(at);
@@ -15610,6 +20267,14 @@ impl<'a> Body<'a> {
             self.lines.extend(f.open_write.iter().cloned());
             if f.write_fn == format!("{}_write", f.pn) {
                 self.lines.push(format!("{}_forget {};", f.pn, f.at));
+            } else if f.write_fn == format!("{}_write_field", f.pn) {
+                self.lines.push(format!("{}_forget_field {};", f.pn, f.at));
+            } else if f.write_fn == format!("{}_write_retained", f.pn) {
+                self.lines
+                    .push(format!("{}_forget_retained {};", f.pn, f.at));
+            }
+            if f.write_fn.ends_with("_retained") {
+                self.retained.insert(f.at.clone());
             }
             self.pending_close.extend(f.close_write);
             return Ok(f.at);
@@ -15730,11 +20395,11 @@ impl<'a> Body<'a> {
         };
         if maybe {
             self.lines.push(format!(
-                "array_somes {}_repr {} {} {}_alignof;",
+                "array_somes {0}_ctype {}_repr {} {} {}_alignof;",
                 pn, addr, esize, pn
             ));
             self.pending_close.push(format!(
-                "array_unsomes {}_repr {} {} {}_alignof;",
+                "array_unsomes {0}_ctype {}_repr {} {} {}_alignof;",
                 pn, addr, esize, pn
             ));
         }
@@ -15786,6 +20451,43 @@ impl<'a> Body<'a> {
         name
     }
 
+    /// An array-view local bound to a string literal. Unlike a compound
+    /// literal, a string literal has static storage that the program may not
+    /// modify (6.4.5p7), so the local is not given storage of its own: it
+    /// names the literal's, under the same read-only share a `const` array
+    /// argument gets. A read through it goes through; a store fails for want
+    /// of the full permission.
+    fn literal_view(&mut self, v: &str, lit: &Expr) -> Result<(), String> {
+        let ty = self.ty_of(lit)?;
+        let TypeT::FixedArray(elem, _) = &peel(self.tds, &ty).val else {
+            return Err("a literal that is not a fixed array".to_string());
+        };
+        let (Some(fty), Some(esize)) = (fstar_type(self.tds, elem), palow_sizeof(self.tds, elem))
+        else {
+            return Err(format!("a literal of {}", describe(self.tds.resolve(elem))));
+        };
+        let saved = self.pending_close.len();
+        let addr = self.literal_share_arg(lit)?;
+        self.literal_drops
+            .extend(self.pending_close.drain(saved..).collect::<Vec<_>>());
+        let pn = palow_name(self.tds, elem).unwrap();
+        self.lines.push(format!("let var_{} = {};", v, addr));
+        self.arrays.insert(
+            v.to_string(),
+            ArrayParam {
+                pn,
+                fty,
+                esize: format!("{}sz", esize),
+                // The term the ownership is stated at: Pulse does not see
+                // through the `let`.
+                addr,
+                maybe: false,
+                known_len: true,
+            },
+        );
+        Ok(())
+    }
+
     fn literal_share_arg(&mut self, a: &Expr) -> Result<String, String> {
         let mut lit = Rc::new(strip_vattr(a).clone());
         while let ExprT::Cast(inner, _) = &lit.clone().val {
@@ -15825,7 +20527,7 @@ impl<'a> Body<'a> {
         // assumption says one true thing about one piece of static data --
         // the same trust an immutable global's `acquire_var_*` asks for.
         let own = format!(
-            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Pulse.Lib.C.Palow.ConstSeq.const_seq_with_len {} {})",
+            "exists* (p: perm). array_pts_to {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} p (Pulse.Lib.C.Palow.ConstSeq.const_seq_with_len {} {})",
             pn,
             esize,
             pn,
@@ -15836,8 +20538,8 @@ impl<'a> Body<'a> {
         let name = self.assumed_slprop("acquire_literal", &own);
         self.lines.push(format!("{} ();", name));
         self.pending_close.push(format!(
-            "literal_share_drop {}_repr {}sz {}_alignof {};",
-            pn, esize, pn, xs
+            "literal_share_drop {}_ctype {}_repr {}sz {}_alignof {};",
+            pn, pn, esize, pn, xs
         ));
         Ok(addr)
     }
@@ -15868,7 +20570,7 @@ impl<'a> Body<'a> {
                 ));
             }
             self.lines.push(format!(
-                "let loc_{} = array_stack_alloc {}_repr {}sz {}_alignof {}sz {}sz;",
+                "let loc_{} = array_stack_alloc {1}_ctype {}_repr {}sz {}_alignof {}sz {}sz;",
                 name.val,
                 pn,
                 esize,
@@ -15892,6 +20594,7 @@ impl<'a> Body<'a> {
                 holds_fn: BTreeMap::new(),
                 holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
+                frozen: false,
             });
             return Ok(pn);
         }
@@ -15924,6 +20627,7 @@ impl<'a> Body<'a> {
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
+            frozen: false,
         });
         Ok(pn)
     }
@@ -15941,7 +20645,7 @@ impl<'a> Body<'a> {
         }
         if let Some(n) = &b.bytes {
             return format!(
-                "(mem_pts_to {t} 1.0R ({f} (SizeT.v {n})) ** freeable {t} {n} \
+                "(mem_pts_to_at {t} 1.0R ({f} (SizeT.v {n})) (Seq.create (SizeT.v {n}) None) ** freeable {t} {n} \
              ** pure (aligned {t} max_align))",
                 t = b.tmp,
                 f = b.fill,
@@ -15955,7 +20659,7 @@ impl<'a> Body<'a> {
             _ => format!("{}_sizeof", b.pn),
         };
         format!(
-            "(mem_pts_to {t} 1.0R ({f} (SizeT.v {n})) ** freeable {t} {n} \
+            "(mem_pts_to_at {t} 1.0R ({f} (SizeT.v {n})) (Seq.create (SizeT.v {n}) None) ** freeable {t} {n} \
              ** pure (aligned {t} max_align))",
             t = b.tmp,
             f = b.fill,
@@ -16024,12 +20728,17 @@ impl<'a> Body<'a> {
             checked: rb.guarded.is_none(),
             init: init_done,
             freed: false,
+            prepared: None,
+            view_size: None,
             scattered: BTreeSet::new(),
             zero: None,
             taken: rb.guarded.map(|g| g.replace(PTR_HOLE, v)),
             array: None,
             flex: None,
             bytes: None,
+            null: false,
+            parent: None,
+            split: None,
         });
         Ok(())
     }
@@ -16075,38 +20784,66 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// `malloc(n)` at `void *`: an allocation of bytes, with no type in sight.
+    /// A byte-count allocation with no type supplied by `sizeof`.
     ///
     /// The typed forms above are recognised by the frontend, which reads the
     /// `sizeof` in the argument and hands back a type. There is nothing to
     /// read here -- the size is a runtime value -- so the call arrives as an
     /// ordinary call to a declared function, and the only thing that makes it
     /// an allocation is the name. That is the same thing C relies on.
-    fn raw_alloc_of(&self, e: &Expr) -> Option<Rc<Expr>> {
+    fn raw_alloc_of(&self, e: &Expr) -> Option<(&'static str, Rc<Expr>, Option<Rc<Expr>>)> {
         let e = strip_casts(e);
         let ExprT::FnCall(name, args) = &e.val else {
             return None;
         };
-        if &*name.val.to_string() != "malloc" || args.len() != 1 {
-            return None;
+        match (name.val.as_ref(), args.as_slice()) {
+            ("malloc", [n]) => Some(("malloc", n.clone(), None)),
+            ("calloc", [count, size]) => Some(("calloc", count.clone(), Some(size.clone()))),
+            _ => None,
         }
-        Some(args[0].clone())
     }
 
     /// Start a block of `n` bytes of no type.
-    fn allocate_raw(&mut self, var: &Ident, n: &Expr) -> Result<String, String> {
-        let n = self.rvalue(n)?;
+    fn allocate_raw(
+        &mut self,
+        var: &Ident,
+        which: &str,
+        n: &Expr,
+        element_size: Option<&Expr>,
+    ) -> Result<String, String> {
+        let count = self.rvalue(n)?;
+        let n = if let Some(size) = element_size {
+            let size = self.rvalue(size)?;
+            let bytes = self.fresh("calloc_bytes");
+            self.lines
+                .push(format!("let {bytes} = ({count} `SizeT.mul` {size});"));
+            self.lines.push(format!(
+                "assert (pure (SizeT.v {bytes} == SizeT.v {count} * SizeT.v {size}));"
+            ));
+            bytes
+        } else {
+            count
+        };
         let tmp = self.fresh(&var.val);
-        self.lines.push(format!("let {} = malloc {};", tmp, n));
+        self.lines.push(format!("let {} = {} {};", tmp, which, n));
         self.blocks.retain(|b| b.var != *var.val);
         self.blocks.push(Block {
             var: var.val.to_string(),
             tmp: tmp.clone(),
             pn: String::new(),
-            fill: "uninit",
+            fill: if which == "calloc" {
+                "zeroed"
+            } else {
+                "uninit"
+            },
             checked: false,
+            null: false,
+            parent: None,
+            split: None,
             init: false,
             freed: false,
+            prepared: None,
+            view_size: None,
             scattered: BTreeSet::new(),
             zero: None,
             taken: None,
@@ -16208,8 +20945,13 @@ impl<'a> Body<'a> {
             pn: sn,
             fill: if zero.is_some() { "zeroed" } else { "uninit" },
             checked: false,
+            null: false,
+            parent: None,
+            split: None,
             init: false,
             freed: false,
+            prepared: None,
+            view_size: None,
             // `calloc`'s tail already holds a value, so the tail counts as a
             // field that has been written; `malloc`'s does not, and the
             // source has to fill it before the object can be gathered.
@@ -16329,8 +21071,13 @@ impl<'a> Body<'a> {
                 "uninit"
             },
             checked: false,
+            null: false,
+            parent: None,
+            split: None,
             init: false,
             freed: false,
+            prepared: None,
+            view_size: None,
             scattered: BTreeSet::new(),
             zero: None,
             taken: None,
@@ -16362,6 +21109,57 @@ impl<'a> Body<'a> {
         if self.in_branch && !self.tail_branch {
             return Err("an allocation inside a branch".to_string());
         }
+        // A union is claimed as declared storage, whose bytes keep their type
+        // for good; allocated storage has none to keep until a store gives
+        // it one. Only the unions whose members are all pointers have the
+        // allocated form so far.
+        // A union whose members can be stored whole has the allocated form
+        // `_heap`: the storage starts as raw bytes, and the first store of a
+        // whole union gives it the union's type (see `prepare_block`).
+        if pn.starts_with("union_")
+            && zero.is_none()
+            && pn
+                .strip_prefix("union_")
+                .and_then(|n| self.tds.unions.get(n))
+                .is_some_and(|ui| union_heap_capable(self.tds, ui))
+        {
+            let size = format!("{}_sizeof", pn);
+            let tmp = self.fresh(&var.val);
+            self.lines
+                .push(format!("let {} = {} {};", tmp, which, size));
+            self.blocks.retain(|b| b.var != *var.val);
+            self.blocks.push(Block {
+                var: var.val.to_string(),
+                tmp: tmp.clone(),
+                pn: String::new(),
+                fill: if which == "calloc" {
+                    "zeroed"
+                } else {
+                    "uninit"
+                },
+                checked: false,
+                null: false,
+                parent: None,
+                split: None,
+                init: false,
+                freed: false,
+                prepared: None,
+                view_size: None,
+                scattered: BTreeSet::new(),
+                zero: None,
+                taken: None,
+                array: None,
+                flex: None,
+                bytes: Some(size),
+            });
+            return Ok(tmp);
+        }
+        if pn.starts_with("union_") && zero.is_none() && !fresh_pointer_object(self.tds, pn) {
+            return Err(format!(
+                "an allocated `union {}`, whose effective type the union model does not track",
+                pn.trim_start_matches("union_")
+            ));
+        }
         let tmp = self.fresh(&var.val);
         self.lines
             .push(format!("let {} = {} {}_sizeof;", tmp, which, pn));
@@ -16376,8 +21174,13 @@ impl<'a> Body<'a> {
                 "uninit"
             },
             checked: false,
+            null: false,
+            parent: None,
+            split: None,
             init: zero.is_some(),
             freed: false,
+            prepared: None,
+            view_size: None,
             scattered: BTreeSet::new(),
             zero,
             taken: None,
@@ -16509,6 +21312,7 @@ impl<'a> Body<'a> {
     fn mark_checked(&mut self, i: usize, live: bool) {
         let b = &mut self.blocks[i];
         b.checked = live;
+        b.null = !live;
         if live && b.zero.is_some() && b.array.is_none() && b.flex.is_none() {
             b.init = true;
         }
@@ -16545,6 +21349,9 @@ impl<'a> Body<'a> {
                                 fx.n,
                                 z
                             ),
+                            None if self.piece_types.contains(&b.pn) => {
+                                format!("{}_claim_uninit_flex_raw_tail {} {};", b.pn, b.tmp, fx.n)
+                            }
                             None => {
                                 format!("{}_claim_uninit_flex {} {};", b.pn, b.tmp, fx.n)
                             }
@@ -16554,9 +21361,9 @@ impl<'a> Body<'a> {
                     // as an array: it is storage to hand out. Giving it up
                     // here rather than at the end is what lets a ghost step
                     // the author writes see it as bytes.
-                    if self.piece_types.contains(&b.pn) {
+                    if self.piece_types.contains(&b.pn) && fx.zero.is_some() {
                         ls.push(format!(
-                            "array_forget{} {}_repr ({} +! {}_offsetof_{}) {} {}_alignof;",
+                            "array_forget{} {1}_ctype {}_repr ({} +! {}_offsetof_{}) {} {}_alignof;",
                             if fx.zero.is_some() { "_full" } else { "" },
                             fx.pn,
                             b.tmp,
@@ -16568,6 +21375,10 @@ impl<'a> Body<'a> {
                     }
                     ls
                 }
+                None if fresh_pointer_object(self.tds, &b.pn) && b.zero.is_none() => vec![
+                    format!("elim_unless_null {} {};", b.tmp, sl),
+                    format!("aligned_divides {} max_align {}_alignof;", b.tmp, b.pn),
+                ],
                 None => vec![
                     format!("elim_unless_null {} {};", b.tmp, sl),
                     format!("aligned_divides {} max_align {}_alignof;", b.tmp, b.pn),
@@ -16600,7 +21411,7 @@ impl<'a> Body<'a> {
                         // zero. Nothing else in the generated code needs that,
                         // so it is named here rather than left to a pattern.
                         Some((z, why)) => format!(
-                            "{} array_claim_zeroed {}_repr {} {} {}_alignof {} #{};",
+                            "{} array_claim_zeroed {1}_ctype {}_repr {} {} {}_alignof {} #{};",
                             why.join(" "),
                             b.pn,
                             b.tmp,
@@ -16610,7 +21421,7 @@ impl<'a> Body<'a> {
                             z
                         ),
                         None => format!(
-                            "array_claim_uninit {}_repr {} {} {}_alignof {};",
+                            "array_claim_uninit {0}_ctype {}_repr {} {} {}_alignof {};",
                             b.pn, b.tmp, a.esize, b.pn, a.n
                         ),
                     },
@@ -16672,7 +21483,7 @@ impl<'a> Body<'a> {
             return;
         }
         self.lines.push(format!(
-            "array_claim_all_somes {}_repr ({} +! {}_offsetof_{}) {} {}_alignof;",
+            "array_claim_all_somes {0}_ctype {}_repr ({} +! {}_offsetof_{}) {} {}_alignof;",
             fx.pn, tmp, pn, fx.field, fx.esize, fx.pn
         ));
         self.lines.push(format!("{}_gather {};", pn, tmp));
@@ -16713,10 +21524,38 @@ impl<'a> Body<'a> {
             if !self.consumed_freed.insert(name.clone()) {
                 return Err(format!("a second `free` of `{}`", name));
             }
-            self.lines.push(format!("{}_forget var_{};", pn, name));
-            self.lines
-                .push(format!("{}_reveal_uninit var_{};", pn, name));
+            if fresh_pointer_object(self.tds, &pn) {
+                self.lines.push(format!("{}_reveal var_{};", pn, name));
+            } else {
+                self.lines.push(format!("{}_forget var_{};", pn, name));
+                self.lines
+                    .push(format!("{}_reveal_uninit var_{};", pn, name));
+            }
             self.lines.push(format!("free var_{};", name));
+            return Ok(());
+        }
+        // `free(NULL)` does nothing, and a pointer not yet tested may be
+        // either: the test happens here instead.
+        if let Some(i) = self
+            .blocks
+            .iter()
+            .position(|b| b.var == name && !b.checked && !b.freed)
+        {
+            let b = &self.blocks[i];
+            if !b.null {
+                if b.taken.is_some() {
+                    return Err(format!(
+                        "a `free` of `{}`, which may be null and was handed over by a call",
+                        name
+                    ));
+                }
+                let sl = Self::block_slprop(b);
+                self.lines.push(format!(
+                    "if (is_null {0}) {{ elim_unless_null_null {0} {1}; }} else {{ elim_unless_null {0} {1}; free {0}; }};",
+                    b.tmp, sl
+                ));
+            }
+            self.blocks[i].freed = true;
             return Ok(());
         }
         let found = self
@@ -16729,6 +21568,22 @@ impl<'a> Body<'a> {
         // is either, which is why this goes through the step that asks the
         // ownership rather than the caller; and if the splice did not in fact
         // grant it, F* rejects the `free`.
+        if let Some(i) = found
+            && self.blocks[i].parent.is_some()
+        {
+            return Err(format!(
+                "a `free` of `{}`, which points into the middle of a block",
+                name
+            ));
+        }
+        if let Some(i) = found
+            && let Some((child, k)) = self.blocks[i].split.clone()
+        {
+            self.release_child(&child)?;
+            let tmp = self.blocks[i].tmp.clone();
+            self.lines.push(format!("mem_join_at {} {};", tmp, k));
+            self.blocks[i].split = None;
+        }
         let Some(i) = found else {
             // A struct the contract owns in pieces has no whole to give up:
             // the ownership `free` needs is the ownership the contract has,
@@ -16748,7 +21603,7 @@ impl<'a> Body<'a> {
             {
                 let v = self.rvalue(arg)?;
                 self.lines.push(format!(
-                    "array_forget_full {}_repr {} {}sz {}_alignof;",
+                    "array_forget_full {0}_ctype {}_repr {} {}sz {}_alignof;",
                     pn, v, es, pn
                 ));
                 self.lines.push(format!("free {};", v));
@@ -16759,46 +21614,1099 @@ impl<'a> Body<'a> {
                 name
             ));
         };
+        if let Some(target) = &self.blocks[i].prepared {
+            let b = &self.blocks[i];
+            let n = b
+                .bytes
+                .as_ref()
+                .ok_or_else(|| "prepared allocation lost its original extent".to_string())?;
+            self.lines.push(format!(
+                "Pulse.Lib.C.Palow.Effective.Machine.free_prepared_prefix {} (hide {}) (hide {}_ctype);",
+                b.tmp, n, target
+            ));
+            self.blocks[i].prepared = None;
+            self.blocks[i].freed = true;
+            return Ok(());
+        }
+        if self.blocks[i].pn.is_empty() {
+            if let Some(size) = &self.blocks[i].view_size {
+                self.lines
+                    .push(format!("mem_join_at {} {};", self.blocks[i].tmp, size));
+            }
+            self.lines.push(format!("free {};", self.blocks[i].tmp));
+            self.blocks[i].freed = true;
+            return Ok(());
+        }
         let (tmp, pn, init) = {
             let b = &self.blocks[i];
             (b.tmp.clone(), b.pn.clone(), b.init)
         };
+        if let Some(fx) = self.blocks[i].flex.clone() {
+            let si = &self.tds.structs[pn.trim_start_matches("struct_")];
+            if init {
+                self.lines.push(format!("unfold {pn}_pts_to {tmp} 1.0R _;"));
+            }
+            for f in &si.fields {
+                let address = format!("({tmp} +! {pn}_offsetof_{})", f.name);
+                if f.name == fx.field {
+                    if init || fx.zero.is_some() {
+                        self.lines.push(format!(
+                            "array_unsomes {0}_ctype {0}_repr {address} {1} {0}_alignof;",
+                            fx.pn, fx.esize
+                        ));
+                    }
+                } else if init || self.blocks[i].scattered.contains(&f.name) {
+                    match &f.shape {
+                        FieldShape::One { pn } => {
+                            self.lines.push(format!("{pn}_forget {address};"));
+                        }
+                        FieldShape::Array { pn, esize, .. } => {
+                            self.lines.push(format!(
+                                "array_forget_full {pn}_ctype {pn}_repr {address} {esize}sz {pn}_alignof;"
+                            ));
+                            self.lines.push(format!(
+                                "array_claim_all_uninit {pn}_ctype {pn}_repr {address} {esize}sz {pn}_alignof {}sz;",
+                                match &f.shape {
+                                    FieldShape::Array { len, .. } => len,
+                                    _ => unreachable!(),
+                                }
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.lines
+                .push(format!("{pn}_reveal_uninit_flex {tmp} {};", fx.n));
+            self.lines.push(format!("free {tmp};"));
+            self.blocks[i].freed = true;
+            return Ok(());
+        }
         match &self.blocks[i].array.clone() {
             Some(a) if a.filled => self.lines.push(format!(
-                "array_forget_full {}_repr {} {} {}_alignof;",
+                "array_forget_full {0}_ctype {}_repr {} {} {}_alignof;",
                 pn, tmp, a.esize, pn
             )),
             Some(a) => self.lines.push(format!(
-                "array_forget {}_repr {} {} {}_alignof;",
+                "array_forget {0}_ctype {}_repr {} {} {}_alignof;",
                 pn, tmp, a.esize, pn
             )),
             None => {
-                if init {
-                    self.lines.push(format!("{}_forget {};", pn, tmp));
+                if fresh_pointer_object(self.tds, &pn) && self.blocks[i].zero.is_none() {
+                    if init {
+                        self.lines.push(format!("{}_reveal {};", pn, tmp));
+                    }
+                } else {
+                    if init {
+                        self.lines.push(format!("{}_forget {};", pn, tmp));
+                    }
+                    self.lines.push(format!("{}_reveal_uninit {};", pn, tmp));
                 }
-                self.lines.push(format!("{}_reveal_uninit {};", pn, tmp));
             }
+        }
+        if let Some(size) = &self.blocks[i].view_size {
+            self.lines.push(format!("mem_join_at {} {};", tmp, size));
         }
         self.lines.push(format!("free {};", tmp));
         self.blocks[i].freed = true;
         Ok(())
     }
 
-    /// Store into an lvalue, choosing the initialising store when the target
-    /// is a slot that has not been written yet.
+    /// Reserve a prefix without exposing its old contents.
+    fn prepare_block(&mut self, ty: &Type, obj: &Expr) -> Result<(), String> {
+        // `ptr_ctype` is one descriptor for every pointer type, so a pointer
+        // can be installed only where the emitter itself pins which pointer
+        // type the storage holds (see `alloc_ptr_types`).
+        let pinned = matches!(peel(self.tds, ty).val, TypeT::Pointer(..))
+            && match &strip_casts(obj).val {
+                ExprT::Var(v) => self
+                    .alloc_ptr_types
+                    .borrow()
+                    .get(&*v.val)
+                    .is_some_and(|t| same_pointer_object_type(self.tds, t, ty)),
+                _ => false,
+            };
+        if !pinned
+            && matches!(
+                peel(self.tds, ty).val,
+                TypeT::Pointer(..) | TypeT::FnPtr { .. }
+            )
+        {
+            return Err(
+                "preparing pointer-valued storage requires pointer-type-specific effective-type descriptors"
+                    .to_string(),
+            );
+        }
+        let pn = palow_name(self.tds, ty)
+            .ok_or_else(|| format!("preparing storage for {}", describe(ty)))?;
+        if let Some(n) = pn.strip_prefix("union_")
+            && !self
+                .tds
+                .unions
+                .get(n)
+                .is_some_and(|ui| union_heap_capable(self.tds, ui))
+        {
+            return Err(format!(
+                "an allocated `union {}`, whose effective type the union model does not track",
+                n
+            ));
+        }
+        let name = self
+            .block_name(obj)
+            .ok_or_else(|| "preparation requires owned allocated storage".to_string())?;
+        let i = self
+            .blocks
+            .iter()
+            .position(|b| b.var == name && b.checked && !b.freed)
+            .ok_or_else(|| {
+                "preparation requires a live, non-null allocated region; declared storage cannot be retyped"
+                    .to_string()
+            })?;
+        let b = &self.blocks[i];
+        if b.prepared.is_some() {
+            return Err("storage is already prepared and has not been initialized".to_string());
+        }
+        if b.array.is_some() || b.flex.is_some() || !b.scattered.is_empty() {
+            return Err(
+                "preparation of scattered or array ownership requires a raw region view"
+                    .to_string(),
+            );
+        }
+        if b.split.is_some() {
+            return Err("preparation of a block split at an interior pointer".to_string());
+        }
+        // A child is aligned as its parent is, shifted by its offset.
+        let align_from = match &b.parent {
+            Some((pv, k)) => {
+                let pt = self
+                    .blocks
+                    .iter()
+                    .find(|p| p.var == *pv && !p.freed)
+                    .map(|p| p.tmp.clone())
+                    .ok_or_else(|| "an interior pointer whose block is gone".to_string())?;
+                Some((pt, k.clone()))
+            }
+            None => None,
+        };
+        let a = b.tmp.clone();
+        let n = b
+            .bytes
+            .clone()
+            .unwrap_or_else(|| format!("{}_sizeof", b.pn));
+        if !b.pn.is_empty() {
+            if b.init {
+                self.lines.push(format!("{}_forget {};", b.pn, a));
+            }
+            self.lines.push(format!("{}_reveal_uninit {};", b.pn, a));
+            if let Some(size) = &b.view_size {
+                self.lines.push(format!("mem_join_at {} {};", a, size));
+            }
+        }
+        let size = format!("{}_sizeof", pn);
+        self.lines.push(format!("mem_split_at {} {};", a, size));
+        self.lines.push(format!(
+            "allocated_region_subrange {} {} 0sz {};",
+            a, n, size
+        ));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.Effective.prepare_region {} {}_ctype;",
+            a, pn
+        ));
+        match align_from {
+            Some((pt, k)) => self.lines.push(format!(
+                "aligned_field {} max_align {} {}_alignof;",
+                pt, k, pn
+            )),
+            None => self
+                .lines
+                .push(format!("aligned_divides {} max_align {}_alignof;", a, pn)),
+        }
+        // Whatever union was live in the old contents is gone with them.
+        self.active.remove(&a);
+        let b = &mut self.blocks[i];
+        b.bytes = Some(n);
+        b.pn = if pn.starts_with("union_") {
+            format!("{}_heap", pn)
+        } else {
+            pn.clone()
+        };
+        b.view_size = Some(size);
+        b.prepared = Some(pn);
+        b.init = false;
+        b.zero = None;
+        b.taken = None;
+        Ok(())
+    }
+
+    /// `(T *)(raw + k)` for a constant `k` inside a raw, unviewed block: the
+    /// block's index and the offset in bytes.
+    fn interior_of(&self, e: &Expr) -> Option<(usize, u64, u64)> {
+        let ExprT::BinOp(BinOp::Add, base, off) = &strip_casts(e).val else {
+            return None;
+        };
+        let k = const_index(&strip_vattr(off).val)?;
+        let esize = self.elem_size(&*self.ty_of(base).ok()?)?;
+        let k = k.checked_mul(esize)?;
+        let name = self.block_name(base)?;
+        let i = self.blocks.iter().position(|b| {
+            b.var == name
+                && b.checked
+                && !b.freed
+                && !b.null
+                && b.pn.is_empty()
+                && b.view_size.is_none()
+                && b.prepared.is_none()
+                && b.taken.is_none()
+                && b.array.is_none()
+                && b.flex.is_none()
+                && b.scattered.is_empty()
+                && b.split.is_none()
+                && b.parent.is_none()
+        })?;
+        let total: u64 = self.blocks[i]
+            .bytes
+            .as_ref()?
+            .strip_suffix("sz")?
+            .parse()
+            .ok()?;
+        (0 < k && k < total).then_some((i, k, total))
+    }
+
+    /// Carve the bytes from offset `k` on out of raw block `i`, as a block of
+    /// its own held by `var`. The parent keeps the bytes before `k` until it
+    /// is freed, which gives the child back first.
+    fn carve_block(&mut self, var: &str, i: usize, k: u64, total: u64) -> Result<(), String> {
+        if self
+            .blocks
+            .iter()
+            .any(|b| b.var == var && b.checked && !b.freed)
+        {
+            return Err(format!("`{}` already holds a block", var));
+        }
+        let (pvar, ptmp, n, fill) = {
+            let b = &self.blocks[i];
+            (
+                b.var.clone(),
+                b.tmp.clone(),
+                b.bytes.clone().unwrap(),
+                b.fill,
+            )
+        };
+        let ks = format!("{k}sz");
+        let rest = format!("{}sz", total - k);
+        self.lines.push(format!("mem_split_at {ptmp} {ks};"));
+        self.lines
+            .push(format!("allocated_region_subrange {ptmp} {n} {ks} {rest};"));
+        self.blocks[i].split = Some((var.to_string(), ks.clone()));
+        self.blocks.retain(|b| b.var != var);
+        self.blocks.push(Block {
+            var: var.to_string(),
+            tmp: format!("({ptmp} +! {ks})"),
+            pn: String::new(),
+            fill,
+            checked: true,
+            null: false,
+            parent: Some((pvar, ks)),
+            split: None,
+            init: false,
+            freed: false,
+            prepared: None,
+            view_size: None,
+            scattered: BTreeSet::new(),
+            zero: None,
+            taken: None,
+            array: None,
+            flex: None,
+            bytes: Some(rest),
+        });
+        Ok(())
+    }
+
+    /// Return a carved-out child to raw bytes, ready to be joined back.
+    fn release_child(&mut self, child: &str) -> Result<(), String> {
+        let j = self
+            .blocks
+            .iter()
+            .position(|b| b.var == child && b.parent.is_some() && !b.freed)
+            .ok_or_else(|| format!("the interior block `{}` is no longer tracked", child))?;
+        let b = self.blocks[j].clone();
+        if b.prepared.is_some() {
+            return Err(format!(
+                "a `free` while the interior block `{}` is prepared but not initialized",
+                child
+            ));
+        }
+        if b.array.is_some() || b.flex.is_some() || !b.scattered.is_empty() {
+            return Err(format!(
+                "a `free` while the interior block `{}` is in pieces",
+                child
+            ));
+        }
+        if !b.pn.is_empty() {
+            if fresh_pointer_object(self.tds, &b.pn) && b.zero.is_none() {
+                if b.init {
+                    self.lines.push(format!("{}_reveal {};", b.pn, b.tmp));
+                }
+            } else {
+                if b.init {
+                    self.lines.push(format!("{}_forget {};", b.pn, b.tmp));
+                }
+                self.lines
+                    .push(format!("{}_reveal_uninit {};", b.pn, b.tmp));
+            }
+        }
+        if let Some(size) = &b.view_size {
+            self.lines.push(format!("mem_join_at {} {};", b.tmp, size));
+        }
+        self.blocks[j].freed = true;
+        Ok(())
+    }
+
+    fn zero_raw_allocation(&mut self, args: &Exprs) -> Result<(), String> {
+        let [target, value, count] = args.as_slice() else {
+            return Err("`memset` requires three arguments".to_string());
+        };
+        if !is_zero(value) {
+            return self.fill_object(target, value, count);
+        }
+        let array = strip_casts(target);
+        let nbytes = match &strip_casts(count).val {
+            ExprT::SizeOf(ty) => palow_sizeof(self.tds, ty),
+            _ => int_lit(count),
+        };
+        if let Ok(ty) = self.ty_of(array)
+            && let TypeT::FixedArray(elem, n) = &peel(self.tds, &ty).val
+            && let Some(size) = palow_sizeof(self.tds, &ty)
+            && nbytes == Some(size)
+        {
+            let n = ExprT::IntLit(
+                Rc::new(BigInt::from(*n)),
+                TypeT::SizeT.with_loc(count.loc.clone()),
+            )
+            .with_loc(count.loc.clone());
+            let fill = ExprT::Memset(elem.clone(), Rc::new(array.clone()), value.clone(), n)
+                .with_loc(target.loc.clone());
+            return self.stmt(&StmtT::Call(fill).with_loc(target.loc.clone()));
+        }
+        let i = self
+            .block_name(target)
+            .and_then(|name| {
+                self.blocks.iter().position(|b| {
+                    b.var == name
+                        && b.checked
+                        && !b.freed
+                        && b.pn.is_empty()
+                        && b.prepared.is_none()
+                        && b.split.is_none()
+                })
+            })
+            .ok_or_else(|| {
+                if matches!(&strip_casts(target).val, ExprT::Ref(_)) {
+                    "a `memset` of part of a declared object".to_string()
+                } else {
+                    "a raw `memset` without a complete owned untyped allocation".to_string()
+                }
+            })?;
+        let a = self.blocks[i].tmp.clone();
+        let extent = self.blocks[i]
+            .bytes
+            .clone()
+            .ok_or_else(|| "a raw `memset` without an allocation extent".to_string())?;
+        let n = self.rvalue(count)?;
+        self.lines
+            .push(format!("assert (pure (SizeT.v {n} == SizeT.v {extent}));"));
+        self.lines.push(format!(
+            "Pulse.Lib.C.Palow.Machine.memset_zero {a} {extent};"
+        ));
+        self.blocks[i].fill = "zeroed";
+        Ok(())
+    }
+
+    /// `memset(p, c, sizeof *p)` with a constant `c != 0`, which the frontend
+    /// passes on only for that shape. Every byte of `*p` becomes `c`, so each
+    /// integer member holds `c` replicated across its width: a whole-object
+    /// store of that value. As for a zero fill, the store says nothing about
+    /// the padding, which stays owned and unspecified -- the safe direction.
+    /// A floating member holds the float those bits spell, since on an
+    /// Annex F target every bit pattern is one (`float{w}_of_bits`). Any
+    /// other member type is refused: a pointer or a `_Bool` made of
+    /// arbitrary bytes need not be a value at all.
+    fn fill_object(&mut self, target: &Expr, value: &Expr, count: &Expr) -> Result<(), String> {
+        let byte = int_lit(value)
+            .and_then(|v| u8::try_from(v.rem_euclid(256)).ok())
+            .ok_or_else(|| "a `memset` whose fill is not a constant".to_string())?;
+        let p = strip_casts(target);
+        let pty = self.ty_of(p)?;
+        let ty = match &strip_casts(count).val {
+            ExprT::SizeOf(ty) => ty.clone(),
+            // The frontend passes a constant count on only when it is the
+            // size of the pointee, which is then the object filled.
+            _ => match pointee(self.tds, &pty) {
+                Some(pt) if int_lit(count).is_some() => pt.clone(),
+                _ => return Err("a `memset` with a fill other than zero".to_string()),
+            },
+        };
+        let size = palow_sizeof(self.tds, &ty);
+        if !matches!(&strip_casts(count).val, ExprT::SizeOf(_))
+            && (size.is_none() || int_lit(count) != size)
+        {
+            return Err("a `memset` with a fill other than zero".to_string());
+        }
+        if !pointee(self.tds, &pty).is_some_and(|pt| {
+            palow_sizeof(self.tds, pt).is_some()
+                && palow_sizeof(self.tds, pt) == palow_sizeof(self.tds, &ty)
+        }) {
+            return Err("a `memset` with a fill other than zero".to_string());
+        }
+        if matches!(
+            &peel(self.tds, &ty).val,
+            TypeT::TypeRef(TypeRefKind::Struct(..))
+        ) && !storable_struct(self.tds, &ty)
+        {
+            return Err(format!("a `memset` of {}", describe(&ty)));
+        }
+        let v = fill_value(self.tds, &ty, byte)?;
+        let pn =
+            palow_name(self.tds, &ty).ok_or_else(|| format!("a `memset` of {}", describe(&ty)))?;
+        let place = deref_of(&Rc::new(p.clone()));
+        self.store(&place, &pn, &v)
+    }
+
+    /// `memcmp(p, q, n)` reads the `n` bytes of two whole objects. Its result
+    /// is left to the callee's (unconstrained) contract: when an object has
+    /// padding, C leaves those bytes unspecified (6.2.6.1p6), so the result is
+    /// too. What is checked here is that the read is defined: each side is
+    /// an object owned in full, initialised, and exactly `n` bytes long.
+    fn compared_objects(&mut self, args: &Exprs) -> Result<(), String> {
+        let [p, q, count] = args.as_slice() else {
+            return Err("`memcmp` requires three arguments".to_string());
+        };
+        let n = match &strip_casts(count).val {
+            ExprT::SizeOf(ty) => palow_sizeof(self.tds, ty),
+            _ => int_lit(count).and_then(|n| u64::try_from(n).ok()),
+        };
+        for arg in [p, q] {
+            let (_, addr, pn, init) = self.copy_place(arg)?;
+            let ty = self.ty_of(strip_casts(arg))?;
+            let size = pointee(self.tds, &ty).and_then(|pt| palow_sizeof(self.tds, pt));
+            if !init || n.is_none() || size != n {
+                return Err("a `memcmp` that is not of two whole initialised objects".to_string());
+            }
+            let (perm, value) = (self.fresh("memcmp_perm"), self.fresh("memcmp_value"));
+            self.lines.push(format!(
+                "with {perm} {value}. assert ({pn}_pts_to {addr} {perm} {value});"
+            ));
+        }
+        Ok(())
+    }
+
+    fn copy_place(&self, expr: &Expr) -> Result<(CopyObject, String, String, bool), String> {
+        if let ExprT::Ref(inner) = &strip_casts(expr).val
+            && let ExprT::Var(name) = &strip_vattr(inner).val
+            && let Some(i) = self.slots.iter().rposition(|s| s.name == *name.val)
+        {
+            let s = &self.slots[i];
+            if s.array.is_some() || !s.scattered.is_empty() {
+                return Err(
+                    "representation copy of array or scattered storage requires an indexed region view"
+                        .to_string(),
+                );
+            }
+            return Ok((
+                CopyObject::Slot(i),
+                s.addr.clone(),
+                s.palow_ty.clone(),
+                s.init,
+            ));
+        }
+        if let Some(name) = self.block_name(expr)
+            && let Some(i) = self
+                .blocks
+                .iter()
+                .position(|b| b.var == name && b.checked && !b.freed)
+        {
+            let b = &self.blocks[i];
+            if b.array.is_some() || b.flex.is_some() || !b.scattered.is_empty() {
+                return Err(
+                    "representation copy of array or scattered storage requires an indexed region view"
+                        .to_string(),
+                );
+            }
+            if b.split.is_some() || b.parent.is_some() {
+                return Err(
+                    "representation copy of a block split at an interior pointer".to_string(),
+                );
+            }
+            return Ok((CopyObject::Block(i), b.tmp.clone(), b.pn.clone(), b.init));
+        }
+        Err("representation copy of a computed pointer requires an indexed region view".to_string())
+    }
+
+    fn copy_object(&mut self, name: &Ident, args: &Exprs) -> Result<String, String> {
+        if args.len() != 3 {
+            return Err(format!("`{}` requires three arguments", name.val));
+        }
+        let (src, sa, spn, initialized) = self.copy_place(&args[1])?;
+        let (dst, da, dpn, old_init) = self.copy_place(&args[0])?;
+        if spn == "ptr" || dpn == "ptr" {
+            return Err(
+                "copying pointer-valued objects requires pointer-type-specific effective-type descriptors"
+                    .to_string(),
+            );
+        }
+        let n = self.index(&args[2])?;
+        // A copy of a whole declared union into allocated storage gives the
+        // storage the union's type (6.5p6: the source's effective type), so it
+        // is prepared for the union exactly as a whole-union store prepares
+        // it, and ends up in the `_heap` family holding the same member.
+        let mut heap_copy = None;
+        if let (CopyObject::Slot(si), CopyObject::Block(_)) = (src, dst)
+            && initialized
+            && let Some(un) = spn.strip_prefix("union_")
+            && self
+                .tds
+                .unions
+                .get(un)
+                .is_some_and(|ui| union_heap_capable(self.tds, ui))
+            && const_bytes(self.tds, &args[2]).is_some_and(|k| {
+                self.tds
+                    .unions
+                    .get(un)
+                    .is_some_and(|ui| ui.members.iter().map(|m| m.size).max() == Some(k))
+            })
+        {
+            let sty = self
+                .ty_of(strip_casts(&args[1]))
+                .ok()
+                .and_then(|t| match &peel(self.tds, &t).val {
+                    TypeT::Pointer(t, _) => Some(t.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| "a union copy whose source type is unknown".to_string())?;
+            let live = self.active.get(&self.slots[si].addr).cloned();
+            self.prepare_block(&sty, &args[0])?;
+            heap_copy = Some(live);
+        }
+        let (dst, da, mut dpn, old_init) = if heap_copy.is_some() {
+            self.copy_place(&args[0])?
+        } else {
+            (dst, da, dpn, old_init)
+        };
+        if let CopyObject::Block(i) = src
+            && self.blocks[i].prepared.is_some()
+        {
+            return Err("prepared storage cannot be a representation-copy source".to_string());
+        }
+        if src == dst {
+            let bound = match src {
+                CopyObject::Slot(_) => format!("{}_sizeof", spn),
+                CopyObject::Block(i) => self.blocks[i]
+                    .bytes
+                    .clone()
+                    .unwrap_or_else(|| format!("{}_sizeof", spn)),
+            };
+            self.lines.push(format!(
+                "assert (pure (SizeT.v {} {} SizeT.v {}));",
+                n,
+                if name.val.as_ref() == "memcpy" {
+                    "=="
+                } else {
+                    "<="
+                },
+                if name.val.as_ref() == "memcpy" {
+                    "0sz"
+                } else {
+                    &bound
+                }
+            ));
+            return Ok(da);
+        }
+        // A copy of only the leading bytes of the source object. Into a declared
+        // object it changes the representation but not the type; into allocated
+        // storage it leaves no complete object behind, and the machine refuses
+        // it (see `copy_complete_ok`).
+        let source_size =
+            self.ty_of(strip_casts(&args[1]))
+                .ok()
+                .and_then(|t| match &peel(self.tds, &t).val {
+                    TypeT::Pointer(t, _) => palow_sizeof(self.tds, t),
+                    _ => None,
+                });
+        let prefix = matches!(
+            (const_bytes(self.tds, &args[2]), source_size),
+            (Some(k), Some(s)) if 0 < k && k < s
+        );
+        if prefix && !initialized {
+            return Err("a partial copy of an uninitialized object".to_string());
+        }
+        // A whole copy into typed allocated storage gives it the source's
+        // effective type (6.5p6), as a store would. The typed view only says
+        // the bytes are readable at the old type, so the block is first
+        // prepared for the source type, exactly as a store prepares it.
+        let (dst, da, mut dpn, old_init) = if let CopyObject::Block(j) = dst
+            && heap_copy.is_none()
+            && initialized
+            && !prefix
+            && !spn.is_empty()
+            && !is_aggregate(&spn)
+            && let Some(sty) =
+                source_size.and(self.ty_of(strip_casts(&args[1])).ok().and_then(|t| {
+                    match &peel(self.tds, &t).val {
+                        TypeT::Pointer(t, _) => Some(t.clone()),
+                        _ => None,
+                    }
+                }))
+            && const_bytes(self.tds, &args[2]) == source_size
+            && {
+                let b = &self.blocks[j];
+                !b.pn.is_empty()
+                    && b.prepared.is_none()
+                    && b.taken.is_none()
+                    && b.array.is_none()
+                    && b.flex.is_none()
+                    && b.scattered.is_empty()
+                    && b.split.is_none()
+            } {
+            self.prepare_block(&sty, &args[0])?;
+            self.copy_place(&args[0])?
+        } else {
+            (dst, da, dpn, old_init)
+        };
+        // Neither object has an effective type, so neither does the copy (C11
+        // 6.5p6, "if it has one"): only the bytes move.
+        if let (CopyObject::Block(i), CopyObject::Block(j)) = (src, dst)
+            && spn.is_empty()
+            && dpn.is_empty()
+            && !prefix
+        {
+            let (sb, db) = (&self.blocks[i], &self.blocks[j]);
+            if let (Some(sn), Some(dn), None, None, None) = (
+                sb.bytes.clone(),
+                db.bytes.clone(),
+                &sb.view_size,
+                &db.view_size,
+                &db.prepared,
+            ) {
+                self.lines.push(format!(
+                    "assert (pure (SizeT.v {n} == SizeT.v {sn} /\\ SizeT.v {n} == SizeT.v {dn}));"
+                ));
+                self.lines
+                    .push(format!("memcpy_untyped {} {} {};", da, sa, n));
+                let fill = self.blocks[i].fill;
+                let d = &mut self.blocks[j];
+                d.init = initialized;
+                d.fill = fill;
+                d.zero = None;
+                return Ok(da);
+            }
+        }
+        if let CopyObject::Block(_) = dst
+            && !prefix
+        {
+            dpn = spn.clone();
+        }
+        if prefix && let CopyObject::Block(i) = dst {
+            dpn = self.blocks[i].pn.clone();
+        }
+        if spn.is_empty() || (dpn.is_empty() && !prefix) {
+            return Err(
+                "copying untyped raw storage requires an explicit byte-region specification"
+                    .to_string(),
+            );
+        }
+        self.lines.push(format!(
+            "assert (pure (SizeT.v {} {} SizeT.v {}_sizeof));",
+            n,
+            if prefix { "<" } else { "==" },
+            spn
+        ));
+        if matches!(dst, CopyObject::Slot(_)) {
+            self.lines.push(format!(
+                "assert (pure (SizeT.v {} == SizeT.v {}_sizeof));",
+                n, dpn
+            ));
+        }
+        let conversion = if prefix {
+            match dst {
+                CopyObject::Block(_) => None,
+                CopyObject::Slot(_) => {
+                    let from = spn.strip_suffix("_t").unwrap_or(&spn);
+                    let to = dpn.strip_suffix("_t").unwrap_or(&dpn);
+                    if !matches!((from, to), ("float64", "uint32" | "int32")) {
+                        return Err(format!(
+                            "a partial representation copy from `{spn}` to `{dpn}` requires a checked representation conversion"
+                        ));
+                    }
+                    Some(format!("Pulse.Lib.C.Palow.Copy.{}_{}_prefix", from, to))
+                }
+            }
+        } else if spn != dpn && initialized {
+            let from = spn.strip_suffix("_t").unwrap_or(&spn);
+            let to = dpn.strip_suffix("_t").unwrap_or(&dpn);
+            if !matches!(
+                (from, to),
+                ("float32", "uint32" | "int32")
+                    | ("float64", "uint64" | "int64")
+                    | ("uint32" | "int32", "float32")
+                    | ("uint64" | "int64", "float64")
+            ) {
+                return Err(format!(
+                    "representation copy from `{spn}` to `{dpn}` requires a checked representation conversion"
+                ));
+            }
+            Some(format!("Pulse.Lib.C.Palow.Copy.{}_{}", from, to))
+        } else {
+            None
+        };
+        let p = self.fresh("copy_perm");
+        let x = self.fresh("copy_value");
+        let bs = self.fresh("copy_source");
+        let es = self.fresh("copy_source_index");
+        // A block whose last operation was its type-establishing store still
+        // has the index that store gave it, `etypes_of t false`; the indexed
+        // view keeps it, and the copy needs it to transfer that type.
+        let established = match src {
+            CopyObject::Block(i) if initialized && !is_aggregate(&spn) => {
+                let tmp = self.blocks[i].tmp.clone();
+                let init = format!("{}_initialize {} ", spn, tmp);
+                self.lines
+                    .iter()
+                    .rposition(|l| mentions_word(l, &tmp))
+                    .filter(|&k| self.lines[k].starts_with(&init))
+            }
+            _ => None,
+        };
+        if let Some(k) = established {
+            let l = self.lines[k].replacen("_initialize ", "_initialize_at ", 1);
+            self.lines[k] = l;
+            self.lines.push(format!(
+                "with {} {} {}. assert (Pulse.Lib.C.Palow.Effective.Value.value {}_ctype {}_repr {}_alignof {} {} {} {});",
+                p, x, es, spn, spn, spn, sa, p, x, es
+            ));
+            self.lines.push(format!(
+                "Pulse.Lib.C.Palow.Effective.Value.reveal_value {}_ctype {}_repr {}_alignof {};",
+                spn, spn, spn, sa
+            ));
+            self.lines.push(format!(
+                "with {}. assert (mem_pts_to_at {} {} {} {} ** pure ({}_repr {} {}));",
+                bs, sa, p, bs, es, spn, x, bs
+            ));
+        } else if initialized {
+            self.lines.push(format!(
+                "with {} {}. assert ({}_pts_to {} {} {});",
+                p, x, spn, sa, p, x
+            ));
+            self.lines.push(format!("{}_reveal {};", spn, sa));
+            self.lines.push(format!(
+                "with {} {}. assert (mem_pts_to_at {} {} {} {} ** pure ({}_repr {} {}));",
+                bs, es, sa, p, bs, es, spn, x, bs
+            ));
+        } else {
+            self.lines.push(format!("{}_reveal_uninit {};", spn, sa));
+            self.lines.push(format!(
+                "with {} {}. assert (mem_pts_to_at {} 1.0R {} {});",
+                bs, es, sa, bs, es
+            ));
+        }
+        if matches!(src, CopyObject::Slot(_)) {
+            self.lines.push(format!(
+                "fixed_metadata_index {} #_ #{} #{} #(Pulse.Lib.C.Palow.Etype.etypes_of {}_ctype true);",
+                sa, bs, es, spn
+            ));
+        }
+        let copied_value = if let Some(conversion) = conversion {
+            let value = self.fresh("copy_target_value");
+            self.lines.push(format!(
+                "let {} = hide ({}_value (reveal {}));",
+                value, conversion, x
+            ));
+            self.lines
+                .push(format!("{}_repr (reveal {}) {};", conversion, x, bs));
+            value
+        } else {
+            x.clone()
+        };
+        let prepared = match dst {
+            CopyObject::Block(i) => self.blocks[i].prepared.clone(),
+            CopyObject::Slot(_) => None,
+        };
+        if prefix && prepared.is_some() {
+            return Err("a partial copy into prepared storage".to_string());
+        }
+        if let Some(target) = &prepared {
+            if target != &spn {
+                return Err("copy source does not establish the prepared target type".to_string());
+            }
+            self.lines.push(format!(
+                "Pulse.Lib.C.Palow.Effective.Machine.memcpy_prepared {} {} {} {}_ctype;",
+                da, sa, n, target
+            ));
+        } else {
+            let old_pn = match dst {
+                CopyObject::Slot(i) => &self.slots[i].palow_ty,
+                CopyObject::Block(i) => &self.blocks[i].pn,
+            };
+            if !old_pn.is_empty() {
+                if old_init {
+                    self.lines.push(format!("{}_forget {};", old_pn, da));
+                }
+                self.lines.push(format!("{}_reveal_uninit {};", old_pn, da));
+            }
+            if let CopyObject::Block(i) = dst {
+                if let Some(size) = &self.blocks[i].view_size {
+                    self.lines.push(format!("mem_join_at {} {};", da, size));
+                }
+                let total = self.blocks[i]
+                    .bytes
+                    .clone()
+                    .unwrap_or_else(|| format!("{}_sizeof", self.blocks[i].pn));
+                self.lines.push(format!("mem_split_at {} {};", da, n));
+                self.lines
+                    .push(format!("aligned_divides {} max_align {}_alignof;", da, dpn));
+                self.blocks[i].bytes = Some(total);
+                self.blocks[i].view_size = Some(n.clone());
+            }
+            let bd = self.fresh("copy_destination");
+            let ed = self.fresh("copy_destination_index");
+            self.lines.push(format!(
+                "with {} {}. assert (mem_pts_to_at {} 1.0R {} {});",
+                bd, ed, da, bd, ed
+            ));
+            if matches!(dst, CopyObject::Slot(_)) {
+                self.lines.push(format!(
+                    "fixed_metadata_index {} #1.0R #{} #{} #(Pulse.Lib.C.Palow.Etype.etypes_of {}_ctype true);",
+                    da, bd, ed, dpn
+                ));
+                let source = if prefix {
+                    format!("(Seq.slice {} 0 (SizeT.v {}))", es, n)
+                } else {
+                    es.clone()
+                };
+                self.lines.push(format!(
+                    "Pulse.Lib.C.Palow.Etype.complete_copy_declared_stable (Pulse.Lib.C.Palow.Etype.Ready {}) (Pulse.Lib.C.Palow.Etype.Ready {});",
+                    ed, source
+                ));
+            } else if let CopyObject::Block(i) = dst {
+                let total = self.blocks[i].bytes.as_ref().unwrap();
+                self.lines.push(format!(
+                    "allocated_region_subrange {} {} 0sz {};",
+                    da, total, n
+                ));
+                self.lines.push(format!(
+                    "allocated_region_index {} {} #1.0R #{} #{};",
+                    da, n, bd, ed
+                ));
+            }
+            if prefix {
+                if matches!(dst, CopyObject::Slot(_)) {
+                    self.lines.push(format!(
+                        "Pulse.Lib.C.Palow.Copy.copy_read_ok {} (Seq.slice {} 0 (SizeT.v {})) {}_ctype;",
+                        ed, es, n, dpn
+                    ));
+                }
+                self.lines.push(format!(
+                    "memcpy_prefix {} {} {} #{} #{} #{} #{} #{};",
+                    da, sa, n, p, bs, bd, ed, es
+                ));
+            } else {
+                self.lines.push(format!(
+                    "Pulse.Lib.C.Palow.Copy.copy_read_ok {} {} {}_ctype;",
+                    ed, es, dpn
+                ));
+                self.lines.push(format!(
+                    "memcpy {} {} {} #{} #{} #{} #{} #{};",
+                    da,
+                    sa,
+                    n,
+                    if initialized { &p } else { "1.0R" },
+                    bs,
+                    bd,
+                    ed,
+                    es
+                ));
+            }
+        }
+        if prefix {
+            self.lines.push(format!(
+                "{}_conceal {} #{} #{} #{} #{};",
+                spn, sa, p, bs, x, es
+            ));
+            match dst {
+                CopyObject::Slot(i) => {
+                    self.lines.push(format!(
+                        "{}_claim {} #(slice {} 0 (SizeT.v {})) {};",
+                        dpn, da, bs, n, copied_value
+                    ));
+                    self.slots[i].init = true;
+                }
+                CopyObject::Block(i) => {
+                    // The leading bytes are initialized, but they are no
+                    // complete object: the block holds raw bytes.
+                    self.blocks[i].pn = String::new();
+                    self.blocks[i].init = true;
+                    self.blocks[i].prepared = None;
+                }
+            }
+            return Ok(da);
+        }
+        if initialized {
+            self.lines.push(format!(
+                "{}_conceal {} #{} #{} #{} #{};",
+                spn, sa, p, bs, x, es
+            ));
+            if heap_copy.is_some() {
+                self.lines.push(format!(
+                    "fold {}_heap_pts_to {} 1.0R {};",
+                    dpn, da, copied_value
+                ));
+            } else if is_aggregate(&dpn) {
+                self.lines.push(format!(
+                    "{}_conceal {} #1.0R #{} #{};",
+                    dpn, da, bs, copied_value
+                ));
+            } else {
+                self.lines
+                    .push(format!("{}_claim {} #{} {};", dpn, da, bs, copied_value));
+            }
+        } else {
+            self.lines.push(format!("{}_claim_uninit {};", spn, sa));
+            self.lines.push(format!("{}_claim_uninit {};", dpn, da));
+        }
+        match dst {
+            CopyObject::Slot(i) => self.slots[i].init = initialized,
+            CopyObject::Block(i) => {
+                self.blocks[i].pn = if heap_copy.is_some() {
+                    format!("{}_heap", dpn)
+                } else {
+                    dpn
+                };
+                self.blocks[i].init = initialized;
+                self.blocks[i].prepared = None;
+            }
+        }
+        if let Some(Some(live)) = heap_copy {
+            self.active.insert(da.clone(), live);
+        }
+        Ok(da)
+    }
+
+    /// Store into an lvalue, choosing the initialising store for unwritten storage.
     fn store(&mut self, lhs: &Expr, pn: &str, value: &str) -> Result<(), String> {
+        if self.raw_byte(lhs, Some(value))?.is_some() {
+            return Ok(());
+        }
         if let Some(p) = self.unalias(lhs) {
             return self.store(&p, pn, value);
+        }
+        if let Some(Err(place)) = self.typed_view(lhs) {
+            return self.store(&place, pn, value);
+        }
+        if let Some((a, from, to)) = self.open_view(lhs)? {
+            if enum_access(&from, &to) {
+                self.lines
+                    .push(format!("{from}_write_as_{to} {a} {value};"));
+            } else {
+                self.lines.push(format!("{to}_write {a} {value};"));
+                self.retype_view(&a, &to, &from);
+            }
+            return Ok(());
+        }
+        if let ExprT::Deref(inner) = &lhs.val {
+            self.check_pointer_object_access(inner)?;
         }
         // Whatever was known about the code pointers here is stale now; the
         // caller re-establishes it if the store was a decay.
         self.clear_fn_notes(lhs);
+        // C11 6.5p6: a store through a non-character lvalue into allocated
+        // storage makes the lvalue's type the effective type of the object.
+        // So a whole-object store into a block that is still raw bytes, or
+        // that holds an object of another type, first does what an explicit
+        // `$prepare(T)` would: give up the old contents and reserve the
+        // prefix for `T`. The store below then initializes it. A character
+        // store installs no type, and stays a byte access. Declared
+        // storage is never a block here, and a block that is an array, a
+        // flexible struct, in pieces, or handed over by a callee keeps its
+        // existing rules.
+        if let ExprT::Deref(inner) = &lhs.val
+            && let Some(name) = self.block_name(inner)
+            && let Some(b) = self
+                .blocks
+                .iter()
+                .find(|b| b.var == name && b.checked && !b.freed)
+            && b.prepared.is_none()
+            && b.taken.is_none()
+            && b.array.is_none()
+            && b.flex.is_none()
+            && b.scattered.is_empty()
+            && (b.pn.is_empty() || b.pn != pn)
+            && !matches!(
+                peel(self.tds, &*self.ty_of(lhs)?).val,
+                TypeT::Int { width: 8, .. }
+            )
+        {
+            let ty = self.ty_of(lhs)?;
+            // An aggregate the model cannot initialize whole keeps its old
+            // (checked) failure rather than becoming a translation error.
+            if !is_aggregate(pn) || whole_initialize_supported(self.tds, &ty) {
+                self.prepare_block(&ty, inner)?;
+            }
+        }
+        if let ExprT::Deref(inner) = &lhs.val
+            && let Some(name) = self.block_name(inner)
+            && let Some(i) = self
+                .blocks
+                .iter()
+                .position(|b| b.var == name && b.checked && !b.freed)
+            && self.blocks[i].view_size.is_some()
+        {
+            let b = &self.blocks[i];
+            let op = match &b.prepared {
+                Some(target) if target == pn => "initialize",
+                Some(_) => {
+                    return Err(
+                        "a store through a type different from the prepared target".to_string()
+                    );
+                }
+                None => {
+                    if b.init {
+                        "write"
+                    } else {
+                        "write_uninit"
+                    }
+                }
+            };
+            if op == "initialize" && is_aggregate(pn) {
+                let ty = self.ty_of(lhs)?;
+                if !whole_initialize_supported(self.tds, &ty) {
+                    return Err(
+                        "a prepared aggregate without a supported whole-object initialization"
+                            .to_string(),
+                    );
+                }
+            }
+            // A union in allocated storage is the `_heap` family.
+            let opn = if op == "initialize" && b.pn == format!("{}_heap", pn) {
+                b.pn.clone()
+            } else {
+                pn.to_string()
+            };
+            self.lines
+                .push(format!("{}_{} {} {};", opn, op, b.tmp, value));
+            self.blocks[i].prepared = None;
+            self.blocks[i].init = true;
+            return Ok(());
+        }
         if let ExprT::Deref(inner) = &lhs.val {
             if let ExprT::Var(v) = &inner.val {
                 if let Some(i) = self.out_params.iter().position(|n| *n == *v.val) {
                     self.out_params.remove(i);
-                    self.lines
-                        .push(format!("{}_write_uninit var_{} {};", pn, v.val, value));
+                    let a = format!("var_{}", v.val);
+                    self.lines.push(format!(
+                        "{} {} {};",
+                        self.memory_op(pn, "write_uninit", &a),
+                        a,
+                        value
+                    ));
                     // A struct `_out` pointee is also tracked as the slot
                     // `*p`, so that its fields can be written one at a time.
                     // After a whole write -- `*p = v`, or the zeroing a
@@ -16814,6 +22722,17 @@ impl<'a> Body<'a> {
         }
         if let ExprT::Var(v) = &lhs.val {
             if let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val) {
+                if self.slots[i].init
+                    && self
+                        .blocks
+                        .iter()
+                        .any(|b| b.var == *v.val && !b.freed && b.tmp != value)
+                {
+                    return Err(
+                        "reassigning an owned allocation pointer requires an ownership transfer"
+                            .to_string(),
+                    );
+                }
                 let op = if self.slots[i].init {
                     "write"
                 } else {
@@ -16838,7 +22757,18 @@ impl<'a> Body<'a> {
                     .iter()
                     .position(|b| b.var == *v.val && b.checked && !b.freed)
                 {
-                    let op = if self.blocks[i].init {
+                    let op = if fresh_pointer_object(self.tds, pn)
+                        && self.blocks[i].zero.is_none()
+                        && self.blocks[i].prepared.is_none()
+                    {
+                        if self.blocks[i].init {
+                            return Err(
+                                "whole-object overwrites of active allocated unions require an explicit compatible modifying-access adapter"
+                                    .to_string(),
+                            );
+                        }
+                        "initialize_fresh"
+                    } else if self.blocks[i].init {
                         "write"
                     } else {
                         "write_uninit"
@@ -16887,10 +22817,25 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let a = self.addr(lhs)?;
+        // Allocated storage acquiring a union type: see `allocate`.
+        if pn.starts_with("union_")
+            && !fresh_pointer_object(self.tds, pn)
+            && self.blocks.iter().any(|b| b.tmp == a)
+        {
+            return Err(format!(
+                "an allocated `union {}`, whose effective type the union model does not track",
+                pn.trim_start_matches("union_")
+            ));
+        }
         // A store of a whole union value picks the live member from the value
         // itself, which the emitter does not read back.
         self.active.remove(&a);
-        self.lines.push(format!("{}_write {} {};", pn, a, value));
+        self.lines.push(format!(
+            "{} {} {};",
+            self.memory_op(pn, "write", &a),
+            a,
+            value
+        ));
         Ok(())
     }
 
@@ -16971,6 +22916,38 @@ impl<'a> Body<'a> {
             touch_stmts(b, &mut t);
             t.written
         });
+        // A body that may store bytes into calloc'ed storage leaves it
+        // defined rather than zero, and the invariant has to say only that.
+        if let Some(w) = &written {
+            for n in w.iter() {
+                let name = match self.aliases.get(n).map(|p| &strip_vattr(p).val) {
+                    Some(ExprT::Deref(inner)) => match self.block_name(inner) {
+                        Some(name) => name,
+                        None => continue,
+                    },
+                    Some(_) => continue,
+                    None => self
+                        .slots
+                        .iter()
+                        .rev()
+                        .find(|s| s.name == *n)
+                        .and_then(|s| s.holds_block.get(""))
+                        .cloned()
+                        .unwrap_or_else(|| n.clone()),
+                };
+                for b in self.blocks.iter_mut() {
+                    if b.var == name
+                        && b.checked
+                        && !b.freed
+                        && b.pn.is_empty()
+                        && b.fill == "zeroed"
+                    {
+                        b.fill = "defined";
+                        b.init = true;
+                    }
+                }
+            }
+        }
         let mut deref_slots: Vec<(String, String)> = Vec::new();
         for s in self.slots.clone() {
             let s = &s;
@@ -17011,7 +22988,23 @@ impl<'a> Body<'a> {
             }
             let b = format!("inv_{}", touch);
             binders.push(format!("({}: {})", b, s.fstar_ty));
-            owns.push(s.pts_to(&b));
+            owns.push(if self.retained.contains(&s.addr) {
+                match &s.array {
+                    None => format!(
+                        "{}_pts_to_retained index_{} {} 1.0R {}",
+                        s.palow_ty, touch, s.addr, b
+                    ),
+                    Some((esize, maybe)) => format!(
+                        "RA.value {pn}_ctype {repr} (SizeT.v {esize}) \
+                         (SizeT.v {pn}_alignof) index_{touch} {addr} 1.0R {b}",
+                        pn = s.palow_ty,
+                        repr = s.elem_repr(esize, *maybe),
+                        addr = s.addr
+                    ),
+                }
+            } else {
+                s.pts_to(&b)
+            });
             bound.push(s.name.clone());
             if touch != s.name {
                 deref_slots.push((touch.to_string(), b.clone()));
@@ -17054,6 +23047,74 @@ impl<'a> Body<'a> {
         // value. The invariant is a contract about one point in the body, and
         // the two should not need different words for the same object.
         let mut olds: HashMap<String, String> = HashMap::new();
+        for b in self.blocks.clone() {
+            if !b.checked
+                || b.freed
+                || stated.contains(&b.var)
+                || b.array.is_some()
+                || b.flex.is_some()
+                || !b.scattered.is_empty()
+            {
+                continue;
+            }
+            if let Some(target) = &b.prepared {
+                owns.push(format!(
+                    "Pulse.Lib.C.Palow.Effective.prepared {} {}_ctype",
+                    b.tmp, target
+                ));
+            } else if !b.pn.is_empty() {
+                if b.init {
+                    let value = self.fresh("inv_heap_value");
+                    binders.push(format!("({value}: _)"));
+                    owns.push(format!("{}_pts_to {} 1.0R {}", b.pn, b.tmp, value));
+                    pointees.insert(b.var.clone(), (Some(value.clone()), Some(value)));
+                } else {
+                    owns.push(format!("{}_uninit {}", b.pn, b.tmp));
+                }
+            }
+            let raw = if let Some(prefix) = &b.view_size {
+                let total = b
+                    .bytes
+                    .as_ref()
+                    .ok_or_else(|| "a split allocation without its original extent".to_string())?;
+                Some((
+                    format!("({} +! {})", b.tmp, prefix),
+                    format!("(SizeT.v {} - SizeT.v {})", total, prefix),
+                ))
+            } else if b.pn.is_empty() {
+                Some((
+                    b.tmp.clone(),
+                    format!(
+                        "SizeT.v {}",
+                        match &b.split {
+                            Some((_, k)) => k,
+                            None => b.bytes.as_ref().ok_or_else(|| {
+                                "an untyped allocation without its extent".to_string()
+                            })?,
+                        }
+                    ),
+                ))
+            } else {
+                None
+            };
+            if let Some((address, length)) = raw {
+                let bytes = self.fresh("inv_heap_bytes");
+                let index = self.fresh("inv_heap_index");
+                binders.push(format!("({bytes}: bytes) ({index}: ET.etypes)"));
+                // Raw storage written only by character stores keeps the
+                // allocator's untyped index, and its bytes stay defined.
+                let plain = b.pn.is_empty() && b.view_size.is_none() && b.split.is_none();
+                let fact = match b.fill {
+                    "defined" if plain => format!(
+                        " /\\ {index} == Pulse.Lib.C.Palow.Effective.Machine.fresh_index (len {bytes}) /\\ Pulse.Lib.C.Palow.RawBytes.defined {bytes}"
+                    ),
+                    _ => String::new(),
+                };
+                owns.push(format!(
+                    "mem_pts_to_at {address} 1.0R {bytes} {index} ** pure (len {bytes} == {length} /\\ ET.elen {index} == len {bytes}{fact})"
+                ));
+            }
+        }
         // A parameter the body assigns to gets a slot, and the invariant binds
         // what the slot holds *now*. `_old(p)` asks for what it held on entry,
         // which Palow still has in scope: the parameter.
@@ -17119,9 +23180,16 @@ impl<'a> Body<'a> {
             }
             let b = format!("inv_val_{}", n);
             binders.push(format!("({}: Seq.seq (option ({})))", b, a.fty));
+            let retained = self.retained.contains(&a.addr);
+            let predicate = if retained { "RA.value" } else { "array_pts_to" };
+            let baseline = if retained {
+                format!("index_{} ", n)
+            } else {
+                String::new()
+            };
             owns.push(format!(
-                "array_pts_to (maybe_repr {pn}_repr (SizeT.v {es})) (SizeT.v {es}) \
-                 (SizeT.v {pn}_alignof) {addr} 1.0R {b}",
+                "{predicate} {pn}_ctype (maybe_repr {pn}_repr (SizeT.v {es})) (SizeT.v {es}) \
+                 (SizeT.v {pn}_alignof) {baseline}{addr} 1.0R {b}",
                 pn = a.pn,
                 es = a.esize,
                 addr = a.addr,
@@ -17238,6 +23306,7 @@ impl<'a> Body<'a> {
         let bound = std::mem::take(&mut self.frame_slots);
 
         let before = self.lines.len();
+        let guard_state = self.clone();
         self.in_guard = true;
         let head = self.inline(cond);
         self.in_guard = false;
@@ -17248,18 +23317,30 @@ impl<'a> Body<'a> {
         // what C does: the field is read anew each time round. It is emitted
         // again as an ordinary value so `&&` and `||` keep their short
         // circuit: `i < r->count && r->data[i]` must not read past the end.
-        let head = if self.lines.len() != before {
-            self.lines.truncate(before);
+        let head = if self.lines.len() != before
+            || self.pending_close != guard_state.pending_close
+            || self.own_open != guard_state.own_open
+        {
+            *self = guard_state;
+            let close_mark = self.pending_close.len();
+            let own_mark = self.own_open.len();
             self.in_guard = true;
             let head = self.rvalue(cond);
             self.in_guard = false;
             let head = head?;
+            let result = self.fresh("guard");
+            self.lines.push(format!("let {} = {};", result, head));
+            let close = self.pending_close.split_off(close_mark);
+            self.lines.extend(close);
+            for (sn, v) in self.own_open.split_off(own_mark).into_iter().rev() {
+                self.lines.push(format!("{}_own_gather {};", sn, v));
+            }
             let pre = self.lines.split_off(before);
             let mut g = String::from("{\n");
             for l in &pre {
                 g.push_str(&format!("    {}\n", l));
             }
-            g.push_str(&format!("    {}\n  }}", head));
+            g.push_str(&format!("    {}\n  }}", result));
             g
         } else {
             head
@@ -17323,6 +23404,7 @@ impl<'a> Body<'a> {
         // and nowhere else, so the environment is extended as the statements
         // go by and restored at the closing brace, as it is for a branch.
         let outer_env = self.env.clone();
+        let entry_blocks = self.blocks.clone();
         let outer_nested = self.nested_scatter.clone();
         let outer_prescattered = self.prescattered.clone();
         let mark = self.slots.len();
@@ -17348,6 +23430,7 @@ impl<'a> Body<'a> {
         self.loop_mark = was_mark;
         let body_lines = std::mem::replace(&mut self.lines, outer);
         r?;
+        self.blocks = join_blocks(&entry_blocks, &self.blocks, "a loop iteration")?;
         if self.slots.iter().map(|s| s.init).ne(inits) {
             return Err("a loop that first writes a local in its body".to_string());
         }
@@ -17670,6 +23753,7 @@ impl<'a> Body<'a> {
             StmtT::Decl(name, ty) => {
                 if self.aliases.contains_key(&*name.val.to_string())
                     || self.is_array_alias(&name.val.to_string())
+                    || self.literal_aliases.contains(&*name.val.to_string())
                 {
                     return Ok(());
                 }
@@ -17714,7 +23798,7 @@ impl<'a> Body<'a> {
                 }
                 let n = self.index(size)?;
                 self.lines.push(format!(
-                    "let loc_{} = array_stack_alloc {}_repr {}sz {}_alignof {} \
+                    "let loc_{} = array_stack_alloc {1}_ctype {}_repr {}sz {}_alignof {} \
                      ({}sz `SizeT.mul` {});",
                     name.val, pn, esize, pn, n, esize, n
                 ));
@@ -17735,6 +23819,7 @@ impl<'a> Body<'a> {
                     holds_fn: BTreeMap::new(),
                     holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
+                    frozen: false,
                 });
                 Ok(())
             }
@@ -17750,8 +23835,14 @@ impl<'a> Body<'a> {
                     }
                     (_, Some((which, ty, n))) => self.allocate_array(name, which, &ty, &n)?,
                     _ if self.raw_alloc_of(init).is_some() => {
-                        let n = self.raw_alloc_of(init).unwrap();
-                        self.allocate_raw(name, &n)?
+                        let (which, n, size) = self.raw_alloc_of(init).unwrap();
+                        self.allocate_raw(name, which, &n, size.as_deref())?
+                    }
+                    _ if self.interior_of(init).is_some() => {
+                        let (i, k, total) = self.interior_of(init).unwrap();
+                        let v = self.rvalue(init)?;
+                        self.carve_block(&name.val, i, k, total)?;
+                        v
                     }
                     _ => {
                         let v = self.rvalue(init)?;
@@ -17774,7 +23865,25 @@ impl<'a> Body<'a> {
                 // The alias itself: nothing is stored, because the pointer is
                 // a name and not an object.
                 if let Some(v) = lvalue_name(lhs) {
+                    if self.literal_aliases.contains(&v) {
+                        let lit = Rc::new(strip_casts(rhs).clone());
+                        if let ExprT::ArrayInit {
+                            is_static: true, ..
+                        } = &strip_vattr(&lit).val
+                        {
+                            return self.literal_view(&v, &lit);
+                        }
+                        let a = self.array_literal(&lit)?;
+                        self.array_aliases.insert(v, a);
+                        return Ok(());
+                    }
                     if self.aliases.contains_key(&v) || self.is_array_alias(&v) {
+                        // An identity function is still called, for whatever
+                        // else it does; only its result is already known.
+                        if let ExprT::FnCall(..) = &strip_casts(rhs).val {
+                            let call = Rc::new(strip_casts(rhs).clone());
+                            return self.stmt_inner(&StmtT::Call(call).with_loc(s.loc.clone()));
+                        }
                         return Ok(());
                     }
                 }
@@ -17851,8 +23960,13 @@ impl<'a> Body<'a> {
                         let value = self.allocate_flex(v, which, &ty, &n)?;
                         return self.store(lhs, &pn, &value);
                     }
-                    if let Some(n) = self.raw_alloc_of(rhs) {
-                        let value = self.allocate_raw(v, &n)?;
+                    if let Some((which, n, size)) = self.raw_alloc_of(rhs) {
+                        let value = self.allocate_raw(v, which, &n, size.as_deref())?;
+                        return self.store(lhs, &pn, &value);
+                    }
+                    if let Some((i, k, total)) = self.interior_of(rhs) {
+                        let value = self.rvalue(rhs)?;
+                        self.carve_block(&v.val, i, k, total)?;
                         return self.store(lhs, &pn, &value);
                     }
                 }
@@ -17956,6 +24070,13 @@ impl<'a> Body<'a> {
                     );
                 }
                 restore(self);
+                let mut joined_blocks = last.blocks.clone();
+                for (_, arm) in &arms {
+                    if !arm.returned && !arm.diverged {
+                        joined_blocks = join_blocks(&joined_blocks, &arm.blocks, "a `switch`")?;
+                    }
+                }
+                self.blocks = joined_blocks;
                 self.out_params = outs;
                 self.nested_scatter = nested;
                 self.prescattered = pre;
@@ -18021,6 +24142,31 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("assert (pure ({}));", p));
                 Ok(())
             }
+            // A `const` local has just been given its value. Half of the
+            // points-to is put away, so a read still finds what it needs and
+            // a write -- through the name or through a pointer that has had
+            // its `const` cast off -- does not. Only a scalar can be split
+            // this way; any other `const` object stays as it was.
+            StmtT::Freeze(x) => {
+                if let Some(j) = self.slots.iter().rposition(|s| *s.name == *x.val)
+                    && let s = &self.slots[j]
+                    && s.init
+                    && !s.frozen
+                    && !s.global
+                    && s.array.is_none()
+                    && s.scattered.is_empty()
+                    && !self.retained.contains(&s.addr)
+                    && SHAREABLE_SCALARS.contains(&s.palow_ty.as_str())
+                {
+                    let (pn, addr) = (s.palow_ty.clone(), s.addr.clone());
+                    self.lines.push(format!("{pn}_share {addr};"));
+                    self.slots[j].frozen = true;
+                    let held = self.slots[j].held_body();
+                    self.lines
+                        .push(format!("Pulse.Lib.C.Palow.Held.hold {held};"));
+                }
+                Ok(())
+            }
             StmtT::Break | StmtT::Continue if !self.in_loop => {
                 Err(format!("{} outside a loop", stmt_kind(s)))
             }
@@ -18052,6 +24198,14 @@ impl<'a> Body<'a> {
             StmtT::GhostStmt(code) if aux_activate(code).is_some() => {
                 let (ty, arm, obj) = aux_activate(code).unwrap();
                 self.activate_arm(ty, arm, obj)
+            }
+            StmtT::GhostStmt(code) if matches!(aux_fn_kind(code), Some(AuxFnKind::Prepare)) => {
+                let Some((ty, obj)) = aux_prepare(code) else {
+                    return Err(
+                        "`$prepare(T)` requires exactly one pointer antiquotation".to_string()
+                    );
+                };
+                self.prepare_block(ty, obj)
             }
             StmtT::GhostStmt(code) if matches!(aux_fn_kind(code), Some(AuxFnKind::Fold)) => {
                 // The end of the bracket `$unfold-uninit` opened: the fields
@@ -18165,6 +24319,9 @@ impl<'a> Body<'a> {
             StmtT::Return(None) => Ok(()),
             StmtT::Call(e) => match &e.val {
                 ExprT::FnCall(name, args) => {
+                    if name.val.as_ref() == "memset" {
+                        return self.zero_raw_allocation(args);
+                    }
                     let callee = self.callees.get(&*name.val.to_string());
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
@@ -18249,8 +24406,13 @@ impl<'a> Body<'a> {
                     };
                     let z = if maybe { format!("(Some {})", z) } else { z };
                     self.lines.push(format!("encode_zero {};", esize));
+                    let helper = if self.retained.contains(&arr) {
+                        "RA.memset_zero"
+                    } else {
+                        "array_memset_zero"
+                    };
                     self.lines.push(format!(
-                        "array_memset_zero {} {} {}sz {}_alignof {} {} {};",
+                        "{helper} {pn}_ctype {} {} {}sz {}_alignof {} {} {};",
                         repr, arr, esize, pn, n, nbytes, z
                     ));
                     self.lines.extend(close);
@@ -18285,9 +24447,10 @@ impl<'a> Body<'a> {
                 else_branch,
                 ensures,
             } => {
-                // Either arm may make a different member live, and the two
-                // arms need not agree, so nothing survives the join.
-                self.active.clear();
+                // Either arm may make a different member live, so a member
+                // survives the join only if both arms leave it live (checked
+                // after them, below): the union's predicate is then the same
+                // in both.
                 // A `_ensures` that says only what is live needs no
                 // translation: Pulse computes the join of an `if` itself, so
                 // the annotation exists to be checked and not to make the code
@@ -18351,6 +24514,33 @@ impl<'a> Body<'a> {
                 self.lines.extend(close);
                 self.close_own();
 
+                // Share the actual contextual loan across both literal-write
+                // arms, rather than asking the join to infer its baseline
+                // independently from sliced field indexes.
+                if nt.is_none()
+                    && pt.is_none()
+                    && let (Some(t), Some(e)) = (then_branch.first(), else_branch.first())
+                    && let (StmtT::Assign(tlhs, trhs), StmtT::Assign(elhs, erhs)) = (&t.val, &e.val)
+                    && same_lvalue(tlhs, elhs)
+                    && int_lit(trhs).is_some()
+                    && int_lit(erhs).is_some()
+                    && let ExprT::Member(parent, _) = &strip_vattr(tlhs).val
+                    && let ExprT::Member(outer, field) = &strip_vattr(parent).val
+                    && let Ok(ty) = self.ty_of(parent)
+                    && matches!(
+                        peel(self.tds, &ty).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(_))
+                    )
+                {
+                    let saved = self.clone();
+                    if !matches!(
+                        self.nested_scatter_base(outer, field, &ty, true),
+                        Ok(Some((_, ref cr, ref cw))) if cr.is_empty() && cw.is_empty()
+                    ) {
+                        *self = saved;
+                    }
+                }
+
                 // Whether a slot holds a value or still holds uninitialised
                 // storage decides which of two *different* slprops it has, and
                 // that is the one thing Pulse cannot join for us. The two arms
@@ -18365,6 +24555,7 @@ impl<'a> Body<'a> {
                 let entry_out = self.out_params.clone();
                 let entry_inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
                 let entry_blocks = self.blocks.clone();
+                let null_arms = nt.map(|(i, _)| self.null_test_arms(i));
                 let live_then = matches!(nt, Some((_, false)));
                 if let Some((i, _)) = nt {
                     self.mark_checked(i, live_then);
@@ -18372,11 +24563,15 @@ impl<'a> Body<'a> {
                 if let Some((p, _)) = pt.as_ref().filter(|_| pt_live_then) {
                     self.unguarded.push(p.clone());
                 }
+                // What the condition left live is what both arms start from.
+                let heap_active = self.active.clone();
                 let then = self.branch(then_branch);
                 if pt.is_some() && pt_live_then {
                     self.unguarded.pop();
                 }
                 let mut then = then?;
+                let then_active = std::mem::take(&mut self.active);
+                self.active.extend(heap_active.clone());
                 let then_blocks = self.blocks.clone();
                 self.blocks = entry_blocks.clone();
                 self.out_params = entry_out;
@@ -18394,6 +24589,10 @@ impl<'a> Body<'a> {
                     self.unguarded.pop();
                 }
                 let mut els = els?;
+                let else_active = std::mem::take(&mut self.active);
+                self.active.extend(heap_active.into_iter().filter(|(a, m)| {
+                    then_active.get(a) == Some(m) && else_active.get(a) == Some(m)
+                }));
                 if let Some((p, _)) = &pt {
                     let payload = &self.null_payload[p];
                     let live = if pt_live_then { &mut then } else { &mut els };
@@ -18416,12 +24615,13 @@ impl<'a> Body<'a> {
                     (false, true) => Some(&then_blocks),
                     _ => None,
                 };
+                let has_surviving = surviving.is_some();
                 if let Some(blocks) = surviving {
                     self.blocks = blocks.clone();
                     if let Some((i, _)) = nt {
                         // The test is settled on the path that survives, so
                         // the block is no longer waiting to be checked.
-                        self.blocks[i].checked = false;
+                        self.blocks[i].checked = if then.diverged { !live_then } else { live_then };
                     }
                 } else if let Some((i, _)) = nt {
                     // The arm that owns the block has to give it back, or the
@@ -18437,8 +24637,19 @@ impl<'a> Body<'a> {
                     self.blocks[i].freed = true;
                     self.blocks[i].checked = false;
                 }
+                if !has_surviving {
+                    let mut then_blocks = then_blocks;
+                    let mut els_blocks = els_blocks;
+                    if let Some((i, _)) = nt {
+                        for blocks in [&mut then_blocks, &mut els_blocks] {
+                            blocks[i].freed = true;
+                            blocks[i].checked = false;
+                        }
+                    }
+                    self.blocks = join_blocks(&then_blocks, &els_blocks, "an `if`")?;
+                }
                 let live_res = if then.diverged { &els } else { &then };
-                if surviving.is_none()
+                if !has_surviving
                     && (then.inits != els.inits
                         || then.scattered != els.scattered
                         || then.nested_scatter != els.nested_scatter
@@ -18466,7 +24677,7 @@ impl<'a> Body<'a> {
                 // assigned different functions in the two arms would be called
                 // as whichever arm was translated last.
                 for (i, slot) in self.slots.iter_mut().enumerate() {
-                    if surviving.is_none() && then.holds.get(i) != els.holds.get(i) {
+                    if !has_surviving && then.holds.get(i) != els.holds.get(i) {
                         slot.holds_fn.clear();
                         slot.holds_block.clear();
                     } else if let Some((f, b)) = live_res.holds.get(i) {
@@ -18477,13 +24688,30 @@ impl<'a> Body<'a> {
                 self.slots.extend(live_res.extra_slots.iter().cloned());
 
                 let (then_pre, else_pre) = match nt {
-                    Some((i, null_when_true)) => {
-                        let (n, l) = self.null_test_arms(i);
+                    Some((_, null_when_true)) => {
+                        let (n, l) = null_arms.unwrap();
                         if null_when_true { (n, l) } else { (l, n) }
                     }
                     None => (Vec::new(), Vec::new()),
                 };
                 self.lines.push(format!("if ({})", c));
+                // An arm that retypes a block more than once before freeing it
+                // leaves one existential package of facts per retype, and
+                // Pulse fails to join such an arm with the null one on its
+                // own. The join is the frame either way, so it is stated.
+                let retypes = |ls: &[String]| {
+                    ls.iter()
+                        .filter(|l| l.contains("Pulse.Lib.C.Palow.Effective.prepare_region"))
+                        .count()
+                };
+                if !states_own
+                    && nt.is_some()
+                    && !has_surviving
+                    && retypes(&then.lines).max(retypes(&els.lines)) > 1
+                {
+                    let join = self.frame_slprop(&Vec::new(), "an `if`", "    ")?;
+                    self.lines.push(format!("  ensures {}", join));
+                }
                 if states_own {
                     // Pulse does not frame an `if`'s annotation, so it has to
                     // be the whole state at the join: the author's ownership
@@ -18609,7 +24837,6 @@ impl<'a> Body<'a> {
                     else_branch,
                     ..
                 } if returns(then_branch) || returns(else_branch) => {
-                    self.active.clear();
                     // A test of a freshly allocated pointer is the one
                     // condition that is not just a value: it decides which arm
                     // owns the block, so each arm opens by eliminating the
@@ -18636,6 +24863,9 @@ impl<'a> Body<'a> {
                     // through. Appending it to that arm is what turns an early
                     // `return` into an expression.
                     let after = &stmts[i + 1..];
+                    // Neither arm joins the other -- each ends the function --
+                    // so each starts from what was live after the condition.
+                    let entry_active = self.active.clone();
                     let mut then_stmts: Vec<Rc<Stmt>> = then_branch.to_vec();
                     let mut else_stmts: Vec<Rc<Stmt>> = else_branch.to_vec();
                     if !returns(then_branch) {
@@ -18681,6 +24911,7 @@ impl<'a> Body<'a> {
                         }
                     };
                     open(self, pt_live_then);
+                    self.active = entry_active.clone();
                     let r = self.tail_arm(&then_stmts);
                     let (mut then_lines, then_val) = match r {
                         Ok(r) => r,
@@ -18695,6 +24926,7 @@ impl<'a> Body<'a> {
                         self.mark_checked(i, !live_then);
                     }
                     open(self, !pt_live_then);
+                    self.active = entry_active;
                     let r = self.tail_arm(&else_stmts);
                     let (mut else_lines, else_val) = match r {
                         Ok(r) => r,
@@ -18705,6 +24937,7 @@ impl<'a> Body<'a> {
                     };
                     close(self, !pt_live_then, &mut else_lines);
                     self.blocks = entry_blocks;
+                    self.active.clear();
                     let then_lines: Vec<String> = then_pre.into_iter().chain(then_lines).collect();
                     let else_lines: Vec<String> = else_pre.into_iter().chain(else_lines).collect();
                     if then_val != else_val {
@@ -18926,6 +25159,7 @@ impl<'a> Body<'a> {
                     .map(|s| (s.holds_fn.clone(), s.holds_block.clone()))
                     .collect(),
                 out_params: std::mem::take(&mut self.out_params),
+                blocks: self.blocks.clone(),
             })
         })();
 
@@ -18978,8 +25212,26 @@ impl<'a> Body<'a> {
             .iter()
             .filter(|f| self.slots[i].scattered.contains(&f.name))
             .filter_map(|f| match &f.shape {
-                FieldShape::One { pn } => Some((f.name.clone(), format!("{}_forget", pn))),
-                FieldShape::Unaligned { pn } => Some((f.name.clone(), format!("{}_forget_u", pn))),
+                FieldShape::One { pn } => Some((
+                    f.name.clone(),
+                    format!(
+                        "{}_forget{}",
+                        pn,
+                        if contextual_struct(self.tds, si) {
+                            "_field"
+                        } else {
+                            ""
+                        }
+                    ),
+                )),
+                FieldShape::Unaligned { pn } => Some((
+                    f.name.clone(),
+                    if contextual_struct(self.tds, si) {
+                        format!("struct_{sn}_{}_forget_field", f.name)
+                    } else {
+                        format!("{pn}_forget_u")
+                    },
+                )),
                 FieldShape::Array { .. } | FieldShape::Flex { .. } => None,
             })
             .collect()
@@ -19009,7 +25261,12 @@ impl<'a> Body<'a> {
                 self.lines
                     .push(format!("{} ({} +! {}_offsetof_{});", p, k, pn, name));
             }
-            self.lines.push(format!("{}_gather_uninit {};", pn, k));
+            if self.retained.remove(&k) {
+                self.lines.push(format!("{pn}_gather_uninit_retained {k};"));
+                self.lines.push(format!("{pn}_restore_uninit_context {k};"));
+            } else {
+                self.lines.push(format!("{pn}_gather_uninit {k};"));
+            }
             self.slots[j].scattered.clear();
         }
         any
@@ -19037,6 +25294,9 @@ impl<'a> Body<'a> {
     }
 
     fn release_from(&mut self, mark: usize) {
+        if mark == 0 {
+            self.lines.extend(self.literal_drops.clone());
+        }
         // Leaving the function: anything still held has to go, including a
         // validity seeded for a use that did not consume it -- storing a
         // decayed function in a slot, say.
@@ -19069,8 +25329,13 @@ impl<'a> Body<'a> {
                 let Some(a) = self.arrays.get(&base) else {
                     continue;
                 };
+                let somes = if self.retained.contains(&a.addr) {
+                    "RA.somes"
+                } else {
+                    "array_somes"
+                };
                 self.lines.push(format!(
-                    "array_somes {}_repr {} {} {}_alignof;",
+                    "{somes} {0}_ctype {}_repr {} {} {}_alignof;",
                     a.pn, a.addr, a.esize, a.pn
                 ));
             }
@@ -19097,12 +25362,12 @@ impl<'a> Body<'a> {
             if let Some((esize, maybe)) = array {
                 if maybe {
                     self.lines.push(format!(
-                        "array_stack_free {}_repr {} {} {}_alignof;",
+                        "array_stack_free {0}_ctype {}_repr {} {} {}_alignof;",
                         pn, addr, esize, pn
                     ));
                 } else {
                     self.lines.push(format!(
-                        "array_forget_full {}_repr {} {} {}_alignof;",
+                        "array_forget_full {0}_ctype {}_repr {} {} {}_alignof;",
                         pn, addr, esize, pn
                     ));
                     self.lines.push(format!("mem_stack_free {};", addr));
@@ -19124,6 +25389,12 @@ impl<'a> Body<'a> {
                 }
                 self.lines.push(format!("{}_gather_uninit {};", pn, addr));
             } else if init {
+                if self.slots[i].frozen {
+                    let held = self.slots[i].held_body();
+                    self.lines
+                        .push(format!("Pulse.Lib.C.Palow.Held.unhold {held};"));
+                    self.lines.push(format!("{pn}_gather {addr};"));
+                }
                 self.lines.push(format!("{}_forget {};", pn, addr));
             }
             self.lines.push(format!("{}_stack_free {};", pn, addr));
@@ -19131,9 +25402,30 @@ impl<'a> Body<'a> {
     }
 }
 
+/// The Palow types whose points-to can be split in two and put back.
+const SHAREABLE_SCALARS: &[&str] = &[
+    "bool_t",
+    "enum_i32",
+    "enum_u32",
+    "float32_t",
+    "float64_t",
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "long_long_t",
+    "ulong_long_t",
+    "size_t",
+    "ptr",
+];
+
 fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> {
     match &peel(tds, ty).val {
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             let suffix = int_suffix(*signed, *width)?;
             if *n < BigInt::ZERO {
                 if !*signed {
@@ -19173,6 +25465,7 @@ fn convert(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             val: TypeT::Int {
                 signed: true,
                 width: 64,
+                ident: crate::ir::IntIdent::Std,
             },
             loc: t.loc.clone(),
         },
@@ -19188,10 +25481,12 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: s1,
                 width: w1,
+                ..
             },
             TypeT::Int {
                 signed: s2,
                 width: w2,
+                ..
             },
         ) => Ok(format!(
             "(FStar.Int.Cast.{}_to_{} {})",
@@ -19200,11 +25495,11 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             v
         )),
         // C's `_Bool` converts to 0 or 1, and back by comparison with zero.
-        (TypeT::Bool, TypeT::Int { signed, width }) => {
+        (TypeT::Bool, TypeT::Int { signed, width, .. }) => {
             let one = int_suffix(*signed, *width)?;
             Ok(format!("(if {} then 1{} else 0{})", v, one, one))
         }
-        (TypeT::Int { signed, width }, TypeT::Bool) => {
+        (TypeT::Int { signed, width, .. }, TypeT::Bool) => {
             let z = int_suffix(*signed, *width)?;
             let m = format!("{}Int{}", if *signed { "" } else { "U" }, width);
             Ok(format!("(not ({} `{}.eq` 0{}))", v, m, z))
@@ -19215,6 +25510,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: false,
                 width,
+                ..
             },
             TypeT::SizeT,
         ) => Ok(match width {
@@ -19229,6 +25525,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: false,
                 width,
+                ..
             },
         ) if *width == 32 || *width == 64 => {
             Ok(format!("(FStar.SizeT.sizet_to_uint{} {})", width, v))
@@ -19238,6 +25535,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: false,
                 width,
+                ..
             },
         ) => Ok(format!(
             "(FStar.Int.Cast.uint64_to_uint{} (FStar.SizeT.sizet_to_uint64 {}))",
@@ -19251,6 +25549,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: true,
                 width,
+                ..
             },
         ) => Ok(format!(
             "(FStar.Int.Cast.uint64_to_int{} (FStar.SizeT.sizet_to_uint64 {}))",
@@ -19260,6 +25559,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             TypeT::Int {
                 signed: true,
                 width,
+                ..
             },
             TypeT::SizeT,
         ) => Ok(format!(
@@ -19312,10 +25612,22 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             Ok(format!("(float32_of_float64 {})", v))
         }
         (TypeT::Float { width: a }, TypeT::Float { width: b }) if a == b => Ok(v.to_string()),
-        // An integer converts to the nearest representable value, and every
-        // integer C has fits in an `int64_t`, which is what `of_int` takes.
+        // An integer converts to the nearest representable value. Every C
+        // integer type but `uint64_t` fits in an `int64_t`, which is what
+        // `of_int` takes; a `uint64_t` has its own conversion, because going
+        // through `int64_t` would wrap its upper half to negative numbers.
         (
-            TypeT::Int { signed, width },
+            TypeT::Int {
+                signed: false,
+                width: 64,
+                ..
+            },
+            TypeT::Float {
+                width: w @ (32 | 64),
+            },
+        ) => Ok(format!("(float{}_of_uint64 {})", w, v)),
+        (
+            TypeT::Int { signed, width, .. },
             TypeT::Float {
                 width: w @ (32 | 64),
             },
@@ -19329,6 +25641,26 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             };
             Ok(format!("(Float{}.of_int {})", w, widen))
         }
+        // A float converts to an integer by truncating toward zero, and only
+        // when the result is representable: anything else is undefined
+        // (6.3.1.4p1). The conversion's refinement is that range, so here is
+        // where a program has to show its float fits.
+        (
+            TypeT::Float {
+                width: w @ (32 | 64),
+            },
+            TypeT::Int {
+                signed,
+                width: n @ (8 | 16 | 32 | 64),
+                ..
+            },
+        ) => Ok(format!(
+            "(float{}_to_{}int{} {})",
+            w,
+            if *signed { "" } else { "u" },
+            n,
+            v
+        )),
         // A float is true when it is unequal to zero, which is C's rule and
         // also `ieee_eq`'s: a NaN is not equal to zero, and so is true.
         (
@@ -19364,17 +25696,71 @@ fn float_mod(tds: &Typedefs, ty: &Type) -> Option<String> {
     }
 }
 
-/// A C floating-point literal. F* takes one as a string and replaces it with
-/// the corresponding C constant at extraction, so the only work here is to
-/// drop C's width suffix -- which is already in the type, and which F* would
-/// not recognise.
+/// A C floating-point literal, with C's width suffix dropped -- it is already
+/// in the type, and F* would not recognise it. When the literal is a plain
+/// decimal, it is rounded here exactly as C rounds it (Rust's parser is
+/// correctly rounded, at the literal's own width) and emitted as
+/// `float{w}_lit "text" num den k`, which carries the value `num / 2^k` for
+/// proofs; anything else stays an opaque `of_literal`.
 fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String> {
     let m = float_mod(tds, ty).ok_or_else(|| format!("a literal of {}", describe(ty)))?;
     let digits = text.trim_end_matches(['f', 'F', 'l', 'L']);
     if digits.is_empty() || digits.contains('"') {
         return Err("a float literal that is not a plain constant".to_string());
     }
-    Ok(format!("({}.of_literal \"{}\")", m, digits))
+    let exact = if m == "Float64" {
+        digits.parse::<f64>().ok().and_then(|x| dyadic(x, 53))
+    } else {
+        digits
+            .parse::<f32>()
+            .ok()
+            .and_then(|x| dyadic(f64::from(x), 24))
+    };
+    Ok(match exact {
+        Some((num, k)) => format!(
+            "(float{}_lit \"{}\" {} {} {})",
+            &m[5..],
+            digits,
+            num,
+            BigInt::from(1) << k,
+            k
+        ),
+        None => format!("({}.of_literal \"{}\")", m, digits),
+    })
+}
+
+/// A finite `x` as `num / 2^k` in lowest terms, provided `|num| < 2^bits` --
+/// the shape `float{w}_lit` needs to state the value.
+fn dyadic(x: f64, bits: u32) -> Option<(i64, u32)> {
+    if !x.is_finite() {
+        return None;
+    }
+    let raw = x.to_bits();
+    let exp = ((raw >> 52) & 0x7ff) as i32;
+    let frac = (raw & ((1u64 << 52) - 1)) as i64;
+    let (mut num, mut e) = if exp == 0 {
+        (frac, -1074)
+    } else {
+        (frac | (1i64 << 52), exp - 1075)
+    };
+    if num == 0 {
+        return Some((0, 0));
+    }
+    while num % 2 == 0 && e < 0 {
+        num /= 2;
+        e += 1;
+    }
+    while e > 0 && num < (1i64 << bits) {
+        num *= 2;
+        e -= 1;
+    }
+    if e > 0 || num >= (1i64 << bits) {
+        return None;
+    }
+    if raw >> 63 == 1 {
+        num = -num;
+    }
+    Some((num, (-e) as u32))
 }
 
 /// `~a`, written as the subtraction it equals in two's complement: `-1 - a`
@@ -19382,7 +25768,7 @@ fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String
 /// and unlike F*'s `lognot` the solver can reason about either -- including
 /// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
 fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
-    let TypeT::Int { signed, width } = peel(tds, ty).val else {
+    let TypeT::Int { signed, width, .. } = peel(tds, ty).val else {
         return None;
     };
     let all = if signed {
@@ -19491,7 +25877,7 @@ fn zero_repr_proof(tds: &Typedefs, ty: &Type) -> Option<Vec<String>> {
 fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     let t = peel(tds, ty);
     match &t.val {
-        TypeT::Int { signed, width } => Ok(format!("0{}", int_suffix(*signed, *width)?)),
+        TypeT::Int { signed, width, .. } => Ok(format!("0{}", int_suffix(*signed, *width)?)),
         TypeT::SizeT => Ok("0sz".to_string()),
         TypeT::Bool => Ok("false".to_string()),
         // C says a pointer zero-initialised by a brace initialiser, by static
@@ -19501,6 +25887,10 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
         // value that matters, because that is what a comparison with `NULL`
         // will ask about.
         TypeT::Pointer(..) => Ok("null".to_string()),
+        // All-zero bits are `+0.0`, which is `zero` (`float{w}_bits_zero`).
+        TypeT::Float { .. } => float_mod(tds, ty)
+            .map(|m| format!("{m}.zero"))
+            .ok_or_else(|| format!("a zeroed {}", describe(t))),
         TypeT::TypeRef(TypeRefKind::Struct(name)) => {
             let Some(si) = tds.structs.get(&*name.val) else {
                 return Err(format!("a zeroed struct {}", name.val));
@@ -19537,6 +25927,62 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     }
 }
 
+/// The value of an object of type `ty` all of whose bytes are `byte`; see
+/// `fill_object`.
+fn fill_value(tds: &Typedefs, ty: &Type, byte: u8) -> Result<String, String> {
+    let t = peel(tds, ty);
+    match &t.val {
+        TypeT::Int { signed, width, .. } => {
+            let mut n = BigInt::ZERO;
+            for _ in 0..width / 8 {
+                n = (n << 8u8) + BigInt::from(byte);
+            }
+            if *signed && n >= BigInt::from(1u8) << (width - 1) {
+                n -= BigInt::from(1u8) << *width;
+            }
+            int_literal(tds, &n, ty)
+        }
+        // On an Annex F target every bit pattern is a float, if possibly a
+        // NaN; `float{w}_of_bits` names the one these bytes spell.
+        TypeT::Float {
+            width: w @ (32 | 64),
+        } => {
+            let mut n = BigInt::ZERO;
+            for _ in 0..w / 8 {
+                n = (n << 8u8) + BigInt::from(byte);
+            }
+            Ok(format!("(float{w}_of_bits {n})"))
+        }
+        TypeT::TypeRef(TypeRefKind::Struct(name)) => {
+            let Some(si) = tds.structs.get(&*name.val) else {
+                return Err(format!("a `memset` of struct {}", name.val));
+            };
+            let mut vals = Vec::new();
+            for f in &si.fields {
+                vals.push(match &f.shape {
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
+                        format!("fld_{} = {}", f.name, fill_value(tds, &f.ty, byte)?)
+                    }
+                    FieldShape::Array { len, .. } => {
+                        let Some((elem, _)) = flat_array(tds, &f.ty) else {
+                            return Err(format!("a `memset` of field `{}`", f.name));
+                        };
+                        format!(
+                            "fld_{} = Seq.create {} {}",
+                            f.name,
+                            len,
+                            fill_value(tds, elem, byte)?
+                        )
+                    }
+                    _ => return Err(format!("a `memset` of field `{}`", f.name)),
+                });
+            }
+            Ok(format!("({{ {} }})", record_fields(vals, false)))
+        }
+        _ => Err(format!("a nonzero `memset` of {}", describe(t))),
+    }
+}
+
 /// The size of what a pointer type points at, when arithmetic on it means
 /// anything: C measures a pointer offset in elements, and the model in
 /// bytes.
@@ -19563,7 +26009,7 @@ fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {
     let t = peel(tds, ty);
     let m = match &t.val {
-        TypeT::Int { signed, width } => {
+        TypeT::Int { signed, width, .. } => {
             format!("{}Int{}", if *signed { "" } else { "U" }, width)
         }
         TypeT::SizeT => "SizeT".to_string(),
@@ -19676,6 +26122,7 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     if let TypeT::Int {
         signed: false,
         width,
+        ..
     } = &t.val
     {
         let wrap = format!("Pulse.Lib.C.UInt{}", width);
@@ -19740,6 +26187,9 @@ struct Focus {
     /// Set when the place is a misaligned field of a packed struct, owned by
     /// `elem_pts_to` and accessed through an aligned temporary.
     unaligned: bool,
+    /// A read that is one call of its own rather than the read of `pn`:
+    /// a member of a union in allocated storage, which is never focused.
+    read_as: Option<String>,
     open_read: Vec<String>,
     open_write: Vec<String>,
     close_read: Vec<String>,
@@ -19758,6 +26208,18 @@ fn misaligned_addr(field: &str) -> String {
 
 impl Focus {
     fn read_fn(&self) -> String {
+        if let Some(r) = &self.read_as {
+            return r.clone();
+        }
+        if self.write_fn.ends_with("_field") {
+            return self
+                .write_fn
+                .replace("_write_uninit_field", "_read_field")
+                .replace("_write_field", "_read_field");
+        }
+        if self.write_fn.ends_with("_retained") {
+            return format!("{}_read_retained", self.pn);
+        }
         match self.unaligned {
             true => format!("{}_read_u", self.pn),
             false => format!("{}_read", self.pn),
@@ -20021,6 +26483,36 @@ fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
     out
 }
 
+/// The array-view locals bound exactly once, to an array compound literal.
+/// See `literal_aliases`.
+fn literal_alias_set(tds: &Typedefs, body: &Stmts) -> HashSet<String> {
+    let mut t = Touched::default();
+    touch_stmts(body, &mut t);
+    let locals: HashSet<String> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, ty) if extent(tds, ty) == Some(Extent::Array) => Some(n.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut out = HashSet::new();
+    for st in body.iter() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
+            continue;
+        }
+        if matches!(strip_casts(rhs).val, ExprT::ArrayInit { .. }) {
+            out.insert(q);
+        }
+    }
+    out
+}
+
 /// Whether an expression is a pointer or an array, so that adding to it is
 /// pointer arithmetic rather than ordinary addition. A type that cannot be
 /// inferred here -- a local declared in the body, which this env does not
@@ -20039,34 +26531,56 @@ fn ptr_base(tds: &Typedefs, env: &Env, e: &Expr) -> bool {
     }
 }
 
-fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, Rc<Expr>> {
+fn alias_map(
+    body: &Stmts,
+    ptr_base: &dyn Fn(&Expr) -> bool,
+    idents: &HashMap<String, usize>,
+) -> HashMap<String, Rc<Expr>> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
-    let locals: HashSet<String> = body
+    let local_tys: HashMap<String, Rc<Type>> = body
         .iter()
         .filter_map(|s| match &s.val {
-            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            StmtT::Decl(n, ty) => Some((n.val.to_string(), ty.clone())),
             _ => None,
         })
         .collect();
+    let locals: HashSet<String> = local_tys.keys().cloned().collect();
+    // What `q` stands for when it holds the address of `place` converted to
+    // its own type: the place itself if nothing converted it, and otherwise a
+    // typed view `*(T *)&place` of it, which the body resolves against the
+    // place's own type (`Body::simplify_view`).
+    let view_of = |q: &str, place: &Rc<Expr>, direct: bool, loc: &Rc<SourceInfo>| -> Rc<Expr> {
+        match local_tys.get(q) {
+            Some(qty) if !direct => {
+                let r = ExprT::Ref(place.clone()).with_loc(loc.clone()) as Rc<Expr>;
+                let c = ExprT::Cast(r, qty.clone()).with_loc(loc.clone()) as Rc<Expr>;
+                ExprT::Deref(c).with_loc(loc.clone()) as Rc<Expr>
+            }
+            _ => place.clone(),
+        }
+    };
 
     // Every `q = &place` in the body, in order, with a repeated `q` dropped:
-    // a pointer assigned twice is an object after all.
-    let mut cand: Vec<(String, Rc<Expr>)> = Vec::new();
+    // a pointer assigned twice is an object after all. The address may also
+    // be converted on the way, or passed through a function that returns it
+    // unchanged (`_ensures(return == p)` with a body that is just that
+    // `return`): either way `q` still points at `place`.
+    let mut cand: Vec<(String, Rc<Expr>, Rc<Expr>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for st in body.iter() {
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
         };
-        let (Some(q), ExprT::Ref(place)) = (lvalue_name(lhs), &strip_vattr(rhs).val) else {
+        let (Some(q), Some((place, direct))) = (lvalue_name(lhs), view_root(rhs, idents)) else {
             continue;
         };
         if !locals.contains(&q) {
             continue;
         }
         if !seen.insert(q.clone()) {
-            cand.retain(|(n, _)| *n != q);
+            cand.retain(|(n, _, _)| *n != q);
             continue;
         }
         // The alias assignment is itself the one rebinding of `q`.
@@ -20074,12 +26588,19 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
             continue;
         }
         if !matches!(
-            &strip_vattr(place).val,
+            &strip_vattr(&place).val,
             ExprT::Var(..) | ExprT::Member(..) | ExprT::Index(..)
         ) {
             continue;
         }
-        cand.push((q, place.clone()));
+        // A converted address is a view, and the place it views must not
+        // depend on memory the body may write: `(void *)&p->data[p->begin]`
+        // names a different element once `p->begin` changes.
+        if !direct && !fixed_place(&place) {
+            continue;
+        }
+        let value = view_of(&q, &place, direct, &st.loc);
+        cand.push((q, place, value));
     }
 
     // Taking the address of a *named* object counts as rebinding it, because
@@ -20091,18 +26612,21 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
     // fixpoint rather than a single pass.
     loop {
         let mut discount: HashMap<String, usize> = HashMap::new();
-        for (_, place) in &cand {
+        for (_, place, _) in &cand {
             if let Some(n) = lvalue_name(place) {
                 *discount.entry(n).or_insert(0) += 1;
             }
         }
         let before = cand.len();
-        cand.retain(|(_, place)| {
+        cand.retain(|(_, place, value)| {
             // `&x` for a named object is a fixed address whatever is stored
             // in `x`, so an assignment to `x` is a write to the object the
             // alias already stands for and not a change of which object that
-            // is. Only a place computed *through* a name has to ask.
-            if matches!(&strip_vattr(place).val, ExprT::Var(..)) {
+            // is. Only a place computed *through* a name has to ask. A view
+            // of a member of a named object is fixed in the same way.
+            if matches!(&strip_vattr(place).val, ExprT::Var(..))
+                || (!Rc::ptr_eq(place, value) && fixed_place(place))
+            {
                 return true;
             }
             let mut used = Touched::default();
@@ -20128,8 +26652,17 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
     //
     // No `&` was taken here, so nothing is charged to the fixpoint above and
     // nothing has to be paid back.
-    let mut out: HashMap<String, Rc<Expr>> = cand.into_iter().collect();
-    for st in body.iter() {
+    let mut out: HashMap<String, Rc<Expr>> = cand.into_iter().map(|(q, _, v)| (q, v)).collect();
+    // Where each local's one top-level assignment is, and what it assigns.
+    let mut first_assign: HashMap<String, (usize, Rc<Expr>)> = HashMap::new();
+    for (i, st) in body.iter().enumerate() {
+        if let StmtT::Assign(lhs, rhs) = &st.val
+            && let Some(n) = lvalue_name(lhs)
+        {
+            first_assign.entry(n).or_insert((i, rhs.clone()));
+        }
+    }
+    for (i, st) in body.iter().enumerate() {
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
         };
@@ -20163,11 +26696,67 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         }
         // `q = p` where `p` is itself an alias: a second name for the same
         // place. Copying the place rather than pointing at `p` is what keeps
-        // the two names interchangeable.
-        if let ExprT::Var(v) = &strip_casts(rhs).val
+        // the two names interchangeable. A conversion on the way makes `q` a
+        // typed view of that place, as for `q = (T *)&place` above.
+        if let Some(ExprT::Var(v)) = through_identity(rhs, idents).map(|e| &e.val)
             && let Some(place) = out.get(&*v.val.to_string()).cloned()
         {
-            out.insert(q, place);
+            let direct = !matches!(&strip_vattr(rhs).val, ExprT::Cast(..) | ExprT::FnCall(..));
+            let value = view_of(&q, &place, direct, &st.loc);
+            out.insert(q, value);
+            continue;
+        }
+        // `q = &(*p).f` where `p` is an alias: the member of the place `p`
+        // stands for, possibly viewed at another type.
+        if let Some((place, direct)) = view_root(rhs, idents)
+            && let Some(place) = subst_alias_root(&place, &out)
+        {
+            let value = view_of(&q, &place, direct, &st.loc);
+            out.insert(q, value);
+            continue;
+        }
+        // `q = (T *)id(a)` where `a` is a local array: a view of its first
+        // element, which the access then checks against the array's
+        // element type like any other typed view.
+        if let Some(ExprT::Var(v)) = through_identity(rhs, idents).map(|e| &e.val)
+            && let Some(qty) = local_tys.get(&q)
+            && let Some(aty) = local_tys.get(&*v.val.to_string())
+            && matches!(&aty.val, TypeT::FixedArray(..))
+            && matches!(&strip_vattr(rhs).val, ExprT::Cast(..) | ExprT::FnCall(..))
+        {
+            let loc = &st.loc;
+            let zero = ExprT::IntLit(Rc::new(BigInt::from(0)), TypeT::SizeT.with_loc(loc.clone()))
+                .with_loc(loc.clone());
+            let base = ExprT::Var(v.clone()).with_loc(loc.clone()) as Rc<Expr>;
+            let elem = ExprT::Index(base, zero as Rc<Expr>).with_loc(loc.clone()) as Rc<Expr>;
+            let r = ExprT::Ref(elem).with_loc(loc.clone()) as Rc<Expr>;
+            let c = ExprT::Cast(r, qty.clone()).with_loc(loc.clone()) as Rc<Expr>;
+            out.insert(q, ExprT::Deref(c).with_loc(loc.clone()) as Rc<Expr>);
+            continue;
+        }
+        // `T *q = p;` where `p` holds a fresh allocation for the whole call:
+        // `*q` is `*(T *)p`, the typed access to the block that the body
+        // already knows how to check against the block's effective type.
+        if let Some(ExprT::Var(v)) = through_identity(rhs, idents).map(|e| &e.val)
+            && let Some(qty) = local_tys.get(&q)
+            && let pv = v.val.to_string()
+            && locals.contains(&pv)
+            && !out.contains_key(&pv)
+            && t.rebound.get(&pv) == Some(&1)
+            && let Some((j, init)) = first_assign.get(&pv)
+            && *j < i
+            && match &strip_casts(init).val {
+                ExprT::Malloc(..)
+                | ExprT::MallocArray(..)
+                | ExprT::Calloc(..)
+                | ExprT::CallocArray(..) => true,
+                ExprT::FnCall(f, _) => matches!(&*f.val.to_string(), "malloc" | "calloc"),
+                _ => false,
+            }
+        {
+            let base = ExprT::Var(v.clone()).with_loc(st.loc.clone()) as Rc<Expr>;
+            let c = ExprT::Cast(base, qty.clone()).with_loc(st.loc.clone()) as Rc<Expr>;
+            out.insert(q, ExprT::Deref(c).with_loc(st.loc.clone()) as Rc<Expr>);
             continue;
         }
         if !derived_ptr(rhs) {
@@ -20182,6 +26771,789 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         );
     }
     out
+}
+
+/// The expression a pointer value is computed from once conversions and calls
+/// to functions that return a parameter unchanged are looked through.
+/// Only pointer-to-pointer conversions are looked through: a round trip
+/// through an integer such as `uintptr_t` is not a view of anything.
+fn through_identity<'e>(e: &'e Expr, idents: &HashMap<String, usize>) -> Option<&'e Expr> {
+    match &strip_ptr_casts(e).val {
+        ExprT::FnCall(f, args) => {
+            let i = *idents.get(&*f.val.to_string())?;
+            through_identity(args.get(i)?, idents)
+        }
+        _ => Some(strip_ptr_casts(e)),
+    }
+}
+
+fn strip_ptr_casts(e: &Expr) -> &Expr {
+    match &strip_vattr(e).val {
+        ExprT::Cast(inner, ty) if matches!(&ty.val, TypeT::Pointer(..)) => strip_ptr_casts(inner),
+        _ => strip_vattr(e),
+    }
+}
+
+/// `&place`, possibly converted or passed through an identity function: the
+/// place, and whether the address reaches `q` exactly as written.
+fn view_root(e: &Expr, idents: &HashMap<String, usize>) -> Option<(Rc<Expr>, bool)> {
+    if let ExprT::Ref(place) = &strip_vattr(e).val {
+        // `&(*&s).first` is how the frontend spells `(T *)&s` converted to
+        // its first member's type: a view, not a plain address.
+        let p = deref_ref(place);
+        let direct = Rc::ptr_eq(&p, place);
+        return Some((p, direct));
+    }
+    match through_identity(e, idents).map(|e| &e.val) {
+        Some(ExprT::Ref(place)) => Some((deref_ref(place), false)),
+        _ => None,
+    }
+}
+
+/// A member place `(*p).f...` rooted at an alias `p`, with `*p` replaced by
+/// the place `p` stands for.
+fn subst_alias_root(e: &Rc<Expr>, out: &HashMap<String, Rc<Expr>>) -> Option<Rc<Expr>> {
+    match &strip_vattr(e).val {
+        ExprT::Deref(inner) => match &strip_casts(inner).val {
+            ExprT::Var(v) => out.get(&*v.val.to_string()).cloned(),
+            _ => None,
+        },
+        ExprT::Member(b, f) => {
+            let b = subst_alias_root(b, out)?;
+            Some(ExprT::Member(b, f.clone()).with_loc(e.loc.clone()) as Rc<Expr>)
+        }
+        _ => None,
+    }
+}
+
+/// A place whose address is fixed for the whole call: a member chain from a
+/// named object, possibly indexed by a constant.
+fn fixed_place(e: &Expr) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::Var(_) => true,
+        ExprT::Member(b, _) => fixed_place(b),
+        ExprT::Index(b, i) => matches!(&strip_casts(i).val, ExprT::IntLit(..)) && fixed_place(b),
+        _ => false,
+    }
+}
+
+/// A place with every `*&x` written as `x`. The frontend spells a pointer to
+/// a struct converted to its first member's type as `&(*&s).first`.
+fn deref_ref(e: &Rc<Expr>) -> Rc<Expr> {
+    match &strip_vattr(e).val {
+        ExprT::Deref(inner) => match &strip_vattr(inner).val {
+            ExprT::Ref(x) => deref_ref(x),
+            _ => e.clone(),
+        },
+        ExprT::Member(b, f) => {
+            let b2 = deref_ref(b);
+            if Rc::ptr_eq(&b2, b) {
+                e.clone()
+            } else {
+                ExprT::Member(b2, f.clone()).with_loc(e.loc.clone()) as Rc<Expr>
+            }
+        }
+        _ => e.clone(),
+    }
+}
+
+/// The place a typed view `*(T *)&place` is a view of.
+fn view_place(e: &Expr) -> Option<&Rc<Expr>> {
+    let ExprT::Deref(inner) = &strip_vattr(e).val else {
+        return None;
+    };
+    if !matches!(&strip_vattr(inner).val, ExprT::Cast(..)) {
+        return None;
+    }
+    match &strip_casts(inner).val {
+        ExprT::Ref(place) => Some(place),
+        _ => None,
+    }
+}
+
+/// `*(T *)&place` with the conversion resolved where it changes nothing about
+/// which object is accessed: `T` is the place's own type up to qualifiers, or
+/// the place is reached through first members (6.7.2.1p15), in either
+/// direction. Anything else stays a typed view of `place`, and an access
+/// through it has to be justified by 6.5p7.
+fn resolve_view(tds: &Typedefs, env: &Env, e: &Rc<Expr>) -> Rc<Expr> {
+    let Some(place) = view_place(e) else {
+        return e.clone();
+    };
+    let place = resolve_view(tds, env, place);
+    let name = |x: &Expr| {
+        env.infer_expr(x)
+            .ok()
+            .and_then(|t| palow_name(tds, &t.to_rc()))
+    };
+    let Some(want) = name(e) else {
+        return e.clone();
+    };
+    let first = |x: &Rc<Expr>| -> Option<Rc<Expr>> {
+        let ty = env.infer_expr(x).ok()?.to_rc();
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &tds.resolve(&ty).val else {
+            return None;
+        };
+        let f = tds.structs.get(&*n.val)?.fields.first()?;
+        if f.offset != 0 {
+            return None;
+        }
+        let id = Rc::new(Ast {
+            val: Rc::<str>::from(f.name.as_str()),
+            loc: x.loc.clone(),
+        });
+        Some(ExprT::Member(x.clone(), id).with_loc(x.loc.clone()) as Rc<Expr>)
+    };
+    // Down into first members, then up out of them.
+    let mut down = place.clone();
+    for _ in 0..16 {
+        if name(&down).as_deref() == Some(&want) {
+            return down;
+        }
+        match first(&down) {
+            Some(m) => down = m,
+            None => break,
+        }
+    }
+    let mut up = place.clone();
+    loop {
+        let ExprT::Member(b, f) = &strip_vattr(&up).val else {
+            break;
+        };
+        match first(b) {
+            Some(m) if matches!(&m.val, ExprT::Member(_, g) if g.val == f.val) => up = b.clone(),
+            _ => break,
+        }
+        if name(&up).as_deref() == Some(&want) {
+            return up;
+        }
+    }
+    e.clone()
+}
+
+/// Whether `ident` occurs in `line` as a whole identifier.
+fn mentions_word(line: &str, ident: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '\'';
+    line.match_indices(ident).any(|(k, _)| {
+        !line[..k].chars().next_back().is_some_and(word)
+            && !line[k + ident.len()..].chars().next().is_some_and(word)
+    })
+}
+
+/// A call to an identity function is its argument, so `*(T *)opaque(p)`
+/// accesses `*p`. Where such a call is dereferenced in place, or handed to a
+/// byte copy, the call is hoisted into a statement of its own -- it still
+/// runs, for whatever else it does -- and the access names the argument
+/// directly. Only a side-effect-free argument is duplicated this way. A
+/// disjunctive null guard is split here too (see `hoist_stmts`).
+fn hoist_identity_calls(tu: &TranslationUnit) -> TranslationUnit {
+    let idents = identity_fns(tu);
+    let tds = Typedefs::new(tu);
+    let is_ptr_ty = |t: &Type| matches!(peel(&tds, t).val, TypeT::Pointer(..));
+    let ptr_rets: HashSet<String> = tu
+        .decls
+        .iter()
+        .filter_map(|d| match &d.val {
+            DeclT::FnDefn(f) if is_ptr_ty(&f.decl.ret_type) => Some(f.decl.name.val.to_string()),
+            DeclT::FnDecl(f) if is_ptr_ty(&f.ret_type) => Some(f.name.val.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut bodies = Vec::new();
+    for d in &tu.decls {
+        if let DeclT::FnDefn(f) = &d.val {
+            let mut names = HashMap::new();
+            for a in &f.decl.args {
+                if let Some(n) = &a.name {
+                    names.insert(n.val.to_string(), is_ptr_ty(&a.ty));
+                }
+            }
+            local_pointer_names(&f.body, &is_ptr_ty, &mut names);
+            let rt = RoundTrip {
+                ptrs: names
+                    .into_iter()
+                    .filter(|(_, p)| *p)
+                    .map(|(n, _)| n)
+                    .collect(),
+                ptr_rets: &ptr_rets,
+                is_int: &|t: &Type| {
+                    matches!(
+                        peel(&tds, t).val,
+                        TypeT::Int { width: 64, .. } | TypeT::SizeT
+                    )
+                },
+                is_ptr_ty: &is_ptr_ty,
+            };
+            bodies.push(rt.stmts(&f.body));
+        }
+    }
+    let mut tu = tu.clone();
+    let mut bodies = bodies.into_iter();
+    for d in tu.decls.iter_mut() {
+        if let DeclT::FnDefn(f) = &mut d.val {
+            let body = bodies.next().unwrap();
+            f.body = byte_copy_loops(&hoist_stmts(&body, &idents));
+        }
+    }
+    tu
+}
+
+/// The names a body declares, and whether each is a pointer. A name declared
+/// once as a pointer and once as something else is not one.
+fn local_pointer_names(
+    ss: &Stmts,
+    is_ptr: &dyn Fn(&Type) -> bool,
+    out: &mut HashMap<String, bool>,
+) {
+    for s in ss {
+        match &s.val {
+            StmtT::Decl(n, t) | StmtT::Let(n, t, _) => {
+                let p = is_ptr(t);
+                let e = out.entry(n.val.to_string()).or_insert(p);
+                *e = *e && p;
+            }
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                local_pointer_names(then_branch, is_ptr, out);
+                local_pointer_names(else_branch, is_ptr, out);
+            }
+            StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => {
+                local_pointer_names(body, is_ptr, out)
+            }
+            StmtT::Match {
+                branches,
+                default_branch,
+                ..
+            } => {
+                for b in branches.iter() {
+                    local_pointer_names(&b.body, is_ptr, out);
+                }
+                local_pointer_names(default_branch, is_ptr, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `(T *)(uintptr_t)p` with `p` a pointer is `(T *)p`. 7.20.1.4p1: a valid
+/// pointer converted to `uintptr_t` and back compares equal to the original,
+/// and an immediate round trip is the one case where nothing in between can
+/// have taken the address apart, so the pointer keeps the provenance it had.
+/// Any other conversion from an integer is still the invalid pointer.
+struct RoundTrip<'a> {
+    ptrs: HashSet<String>,
+    ptr_rets: &'a HashSet<String>,
+    is_int: &'a dyn Fn(&Type) -> bool,
+    is_ptr_ty: &'a dyn Fn(&Type) -> bool,
+}
+
+impl RoundTrip<'_> {
+    fn stmts(&self, ss: &Stmts) -> Stmts {
+        ss.iter()
+            .map(|s| {
+                let e = |x: &Rc<Expr>| self.expr(x);
+                let b = |x: &Rc<Stmts>| Rc::new(self.stmts(x));
+                let val = match &s.val {
+                    StmtT::Call(x) => StmtT::Call(e(x)),
+                    StmtT::Let(n, t, x) => StmtT::Let(n.clone(), t.clone(), e(x)),
+                    StmtT::Assign(l, r) => StmtT::Assign(e(l), e(r)),
+                    StmtT::Return(Some(x)) => StmtT::Return(Some(e(x))),
+                    StmtT::If {
+                        cond,
+                        then_branch,
+                        else_branch,
+                        ensures,
+                    } => StmtT::If {
+                        cond: e(cond),
+                        then_branch: b(then_branch),
+                        else_branch: b(else_branch),
+                        ensures: ensures.clone(),
+                    },
+                    StmtT::While {
+                        cond,
+                        inv,
+                        requires,
+                        ensures,
+                        body,
+                    } => StmtT::While {
+                        cond: cond.clone(),
+                        inv: inv.clone(),
+                        requires: requires.clone(),
+                        ensures: ensures.clone(),
+                        body: b(body),
+                    },
+                    StmtT::Match {
+                        scrutinee,
+                        branches,
+                        default_branch,
+                        ensures,
+                    } => StmtT::Match {
+                        scrutinee: scrutinee.clone(),
+                        branches: Rc::new(
+                            branches
+                                .iter()
+                                .map(|br| {
+                                    Rc::new(MatchBranch {
+                                        patterns: br.patterns.clone(),
+                                        body: b(&br.body),
+                                    })
+                                })
+                                .collect(),
+                        ),
+                        default_branch: b(default_branch),
+                        ensures: ensures.clone(),
+                    },
+                    StmtT::GotoBlock {
+                        body,
+                        label,
+                        ensures,
+                    } => StmtT::GotoBlock {
+                        body: b(body),
+                        label: label.clone(),
+                        ensures: ensures.clone(),
+                    },
+                    v => v.clone(),
+                };
+                val.with_loc(s.loc.clone())
+            })
+            .collect()
+    }
+
+    fn is_ptr(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Var(n) => self.ptrs.contains(&*n.val),
+            ExprT::Cast(_, t) => (self.is_ptr_ty)(t),
+            ExprT::Ref(_) => true,
+            ExprT::FnCall(f, _) => self.ptr_rets.contains(&*f.val),
+            _ => false,
+        }
+    }
+
+    fn expr(&self, e: &Rc<Expr>) -> Rc<Expr> {
+        let loc = || e.loc.clone();
+        let r = |x: &Rc<Expr>| self.expr(x);
+        match &e.val {
+            ExprT::Cast(x, t) => {
+                let x = r(x);
+                if (self.is_ptr_ty)(t)
+                    && let ExprT::Cast(y, ti) = &strip_vattr(&x).val
+                    && (self.is_int)(ti)
+                    && self.is_ptr(y)
+                {
+                    return ExprT::Cast(y.clone(), t.clone()).with_loc(loc());
+                }
+                ExprT::Cast(x, t.clone()).with_loc(loc())
+            }
+            ExprT::FnCall(f, args) => {
+                ExprT::FnCall(f.clone(), args.iter().map(r).collect()).with_loc(loc())
+            }
+            ExprT::VAttr(a, x) => ExprT::VAttr(a.clone(), r(x)).with_loc(loc()),
+            ExprT::Deref(x) => ExprT::Deref(r(x)).with_loc(loc()),
+            ExprT::Ref(x) => ExprT::Ref(r(x)).with_loc(loc()),
+            ExprT::Member(x, f) => ExprT::Member(r(x), f.clone()).with_loc(loc()),
+            ExprT::Index(x, i) => ExprT::Index(r(x), r(i)).with_loc(loc()),
+            ExprT::UnOp(o, x) => ExprT::UnOp(o.clone(), r(x)).with_loc(loc()),
+            ExprT::BinOp(o, x, y) => ExprT::BinOp(o.clone(), r(x), r(y)).with_loc(loc()),
+            _ => e.clone(),
+        }
+    }
+}
+
+/// A hand-written byte copy, `for (i = 0; i < n; i++) d[i] = s[i];` with
+/// `d` and `s` character views bound once to `dst` and `src`, is `memcpy`:
+/// 6.5p6 says a copy "as an array of character type" gives the destination
+/// the source's effective type exactly as `memcpy` does. The loop becomes
+/// `memcpy(dst, src, n); i = n;`, which is what it computes.
+fn byte_copy_loops(ss: &Stmts) -> Stmts {
+    let mut out: Stmts = Vec::new();
+    for (k, s) in ss.iter().enumerate() {
+        let rec = |b: &Stmts| Rc::new(byte_copy_loops(b));
+        let s = match &s.val {
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => StmtT::If {
+                cond: cond.clone(),
+                then_branch: rec(then_branch),
+                else_branch: rec(else_branch),
+                ensures: ensures.clone(),
+            }
+            .with_loc(s.loc.clone()),
+            StmtT::While { .. } if let Some(rw) = byte_copy_loop(&ss[..k], s) => {
+                out.extend(rw);
+                continue;
+            }
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: rec(body),
+            }
+            .with_loc(s.loc.clone()),
+            _ => s.clone(),
+        };
+        out.push(s);
+    }
+    out
+}
+
+fn byte_copy_loop(before: &[Rc<Stmt>], s: &Stmt) -> Option<Stmts> {
+    let StmtT::While {
+        cond,
+        body,
+        ensures,
+        ..
+    } = &s.val
+    else {
+        return None;
+    };
+    if !ensures.is_empty() || body.len() != 2 {
+        return None;
+    }
+    let ExprT::BinOp(BinOp::Lt, iv, n) = &strip_vattr(cond).val else {
+        return None;
+    };
+    let ExprT::Var(i) = &strip_casts(iv).val else {
+        return None;
+    };
+    let is_i = |e: &Expr| matches!(&strip_casts(e).val, ExprT::Var(v) if v.val == i.val);
+    // `n` is evaluated once instead of on every iteration, so it has to be
+    // a constant.
+    if !matches!(&strip_casts(n).val, ExprT::SizeOf(..) | ExprT::IntLit(..)) {
+        return None;
+    }
+    let StmtT::Assign(lhs, rhs) = &body[0].val else {
+        return None;
+    };
+    let (ExprT::Index(d, di), ExprT::Index(src, si)) =
+        (&strip_vattr(lhs).val, &strip_casts(rhs).val)
+    else {
+        return None;
+    };
+    if !is_i(di) || !is_i(si) {
+        return None;
+    }
+    let incr = match &body[1].val {
+        StmtT::Call(e) => matches!(
+            &strip_vattr(e).val,
+            ExprT::PostIncr(x) | ExprT::PreIncr(x) if is_i(x)
+        ),
+        _ => false,
+    };
+    if !incr {
+        return None;
+    }
+    let (ExprT::Var(d), ExprT::Var(src)) = (&strip_vattr(d).val, &strip_casts(src).val) else {
+        return None;
+    };
+    // Where each view and the counter were last bound, with nothing but
+    // declarations and other bindings after it.
+    let bound = |v: &Rc<Ident>| -> Option<Rc<Expr>> {
+        before.iter().rev().find_map(|st| match &st.val {
+            StmtT::Assign(l, r) if matches!(&strip_vattr(l).val, ExprT::Var(x) if x.val == v.val) => {
+                Some(r.clone())
+            }
+            _ => None,
+        })
+    };
+    let zero = bound(i)?;
+    if !matches!(&strip_casts(&zero).val, ExprT::IntLit(z, _) if **z == BigInt::from(0)) {
+        return None;
+    }
+    let (dst, from) = (bound(d)?, bound(src)?);
+    let loc = s.loc.clone();
+    let memcpy = Rc::<str>::from("memcpy").with_loc(loc.clone());
+    let call = ExprT::FnCall(memcpy, vec![dst, from, n.clone()]).with_loc(loc.clone());
+    Some(vec![
+        StmtT::Call(call).with_loc(loc.clone()),
+        StmtT::Assign(iv.clone(), n.clone()).with_loc(loc),
+    ])
+}
+
+fn hoist_stmts(ss: &Stmts, idents: &HashMap<String, usize>) -> Stmts {
+    let mut out = Vec::new();
+    for s in ss {
+        let mut pre = Vec::new();
+        let mut h = |e: &Rc<Expr>| hoist_expr(e, false, idents, &mut pre);
+        let val = match &s.val {
+            StmtT::Call(e) => StmtT::Call(h(e)),
+            // `T *x = (T *)opaque(p);` binds `x` to `p` itself.
+            StmtT::Let(n, t, e) if matches!(t.val, TypeT::Pointer(..)) => {
+                StmtT::Let(n.clone(), t.clone(), hoist_expr(e, true, idents, &mut pre))
+            }
+            StmtT::Let(n, t, e) => StmtT::Let(n.clone(), t.clone(), h(e)),
+            // `x = (T *)opaque(p + k);` likewise binds `x` to the interior
+            // pointer itself, which is what lets it name a carved-out block.
+            StmtT::Assign(l, r)
+                if matches!(strip_vattr(l).val, ExprT::Var(_))
+                    && matches!(
+                        strip_casts(&hoist_expr(r, true, idents, &mut Vec::new())).val,
+                        ExprT::BinOp(BinOp::Add, ..)
+                            | ExprT::Ref(_)
+                            | ExprT::Var(_)
+                            | ExprT::ArrayInit {
+                                is_static: true,
+                                ..
+                            }
+                    )
+                    && matches!(strip_casts(r).val, ExprT::FnCall(..))
+                    && !matches!(strip_casts(r).val, ExprT::BinOp(..)) =>
+            {
+                StmtT::Assign(l.clone(), hoist_expr(r, true, idents, &mut pre))
+            }
+            StmtT::Assign(l, r) => {
+                let l = h(l);
+                StmtT::Assign(l, h(r))
+            }
+            StmtT::Return(Some(e)) => StmtT::Return(Some(h(e))),
+            // `if (!a || !b) { ...; return; }` is the guard of two
+            // allocations at once. With side-effect-free tests it is the same
+            // as testing one pointer at a time, which is what lets each arm
+            // know which of them it holds.
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } if let ExprT::BinOp(BinOp::LogOr, x, y) = &strip_vattr(cond).val
+                && pure_test(x)
+                && pure_test(y)
+                && ensures.is_empty()
+                && matches!(then_branch.last().map(|s| &s.val), Some(StmtT::Return(_))) =>
+            {
+                let inner = StmtT::If {
+                    cond: y.clone(),
+                    then_branch: then_branch.clone(),
+                    else_branch: else_branch.clone(),
+                    ensures: ensures.clone(),
+                }
+                .with_loc(s.loc.clone());
+                let outer = StmtT::If {
+                    cond: x.clone(),
+                    then_branch: then_branch.clone(),
+                    else_branch: Rc::new(vec![inner]),
+                    ensures: ensures.clone(),
+                }
+                .with_loc(s.loc.clone());
+                out.extend(hoist_stmts(&vec![outer], idents));
+                continue;
+            }
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => StmtT::If {
+                cond: h(cond),
+                then_branch: Rc::new(hoist_stmts(then_branch, idents)),
+                else_branch: Rc::new(hoist_stmts(else_branch, idents)),
+                ensures: ensures.clone(),
+            },
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: Rc::new(hoist_stmts(body, idents)),
+            },
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => StmtT::Match {
+                scrutinee: scrutinee.clone(),
+                branches: Rc::new(
+                    branches
+                        .iter()
+                        .map(|b| {
+                            Rc::new(MatchBranch {
+                                patterns: b.patterns.clone(),
+                                body: Rc::new(hoist_stmts(&b.body, idents)),
+                            })
+                        })
+                        .collect(),
+                ),
+                default_branch: Rc::new(hoist_stmts(default_branch, idents)),
+                ensures: ensures.clone(),
+            },
+            StmtT::GotoBlock {
+                body,
+                label,
+                ensures,
+            } => StmtT::GotoBlock {
+                body: Rc::new(hoist_stmts(body, idents)),
+                label: label.clone(),
+                ensures: ensures.clone(),
+            },
+            v => v.clone(),
+        };
+        for c in pre {
+            out.push(StmtT::Call(c).with_loc(s.loc.clone()));
+        }
+        out.push(val.with_loc(s.loc.clone()));
+    }
+    out
+}
+
+fn hoist_expr(
+    e: &Rc<Expr>,
+    pointer: bool,
+    idents: &HashMap<String, usize>,
+    pre: &mut Vec<Rc<Expr>>,
+) -> Rc<Expr> {
+    let loc = || e.loc.clone();
+    match &e.val {
+        ExprT::FnCall(f, args) if pointer => {
+            if let Some(a) = idents.get(&*f.val.to_string()).and_then(|i| args.get(*i))
+                && pure_place(a)
+            {
+                pre.push(e.clone());
+                return hoist_expr(a, true, idents, pre);
+            }
+            e.clone()
+        }
+        ExprT::FnCall(f, args) => {
+            let copy = matches!(&*f.val.to_string(), "memcpy" | "memmove");
+            let args = args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| hoist_expr(a, copy && i < 2, idents, pre))
+                .collect();
+            ExprT::FnCall(f.clone(), args).with_loc(loc())
+        }
+        ExprT::Cast(x, t) => {
+            ExprT::Cast(hoist_expr(x, pointer, idents, pre), t.clone()).with_loc(loc())
+        }
+        ExprT::VAttr(a, x) => {
+            ExprT::VAttr(a.clone(), hoist_expr(x, pointer, idents, pre)).with_loc(loc())
+        }
+        ExprT::Deref(x) => ExprT::Deref(hoist_expr(x, true, idents, pre)).with_loc(loc()),
+        ExprT::Member(x, f) => {
+            ExprT::Member(hoist_expr(x, false, idents, pre), f.clone()).with_loc(loc())
+        }
+        ExprT::Index(x, i) => {
+            let x = hoist_expr(x, true, idents, pre);
+            ExprT::Index(x, hoist_expr(i, false, idents, pre)).with_loc(loc())
+        }
+        ExprT::UnOp(o, x) => {
+            ExprT::UnOp(o.clone(), hoist_expr(x, false, idents, pre)).with_loc(loc())
+        }
+        ExprT::BinOp(o, x, y) => {
+            let x = hoist_expr(x, false, idents, pre);
+            ExprT::BinOp(o.clone(), x, hoist_expr(y, false, idents, pre)).with_loc(loc())
+        }
+        _ => e.clone(),
+    }
+}
+
+/// Whether a condition reads only locals and constants.
+fn pure_test(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::Var(_) | ExprT::IntLit(..) | ExprT::BoolLit(_) => true,
+        ExprT::Cast(x, _) | ExprT::VAttr(_, x) | ExprT::UnOp(UnOp::Not, x) => pure_test(x),
+        ExprT::BinOp(BinOp::Eq | BinOp::LogAnd | BinOp::LogOr, x, y) => {
+            pure_test(x) && pure_test(y)
+        }
+        _ => false,
+    }
+}
+
+/// Whether evaluating an expression twice is the same as evaluating it once.
+fn pure_place(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::Var(_) | ExprT::IntLit(..) => true,
+        ExprT::Cast(x, _) | ExprT::VAttr(_, x) | ExprT::Ref(x) | ExprT::Member(x, _) => {
+            pure_place(x)
+        }
+        ExprT::BinOp(BinOp::Add | BinOp::Sub, x, y) => pure_place(x) && pure_place(y),
+        // A string literal denotes the same static array wherever it is
+        // written: its address is a function of its contents.
+        ExprT::ArrayInit {
+            is_static: true,
+            elems,
+            ..
+        } => elems
+            .iter()
+            .all(|x| matches!(strip_vattr(x).val, ExprT::IntLit(..))),
+        _ => false,
+    }
+}
+
+/// The identity functions of a translation unit: those whose whole body
+/// returns one parameter, possibly converted. A call to one is the parameter.
+fn identity_fns(tu: &TranslationUnit) -> HashMap<String, usize> {
+    let mut out = HashMap::new();
+    for decl in &tu.decls {
+        let i = match &decl.val {
+            DeclT::FnDefn(d) => identity_param(d).map(|i| (&d.decl.name, i)),
+            DeclT::FnDecl(d) => contract_identity_param(d).map(|i| (&d.name, i)),
+            _ => None,
+        };
+        if let Some((name, i)) = i {
+            out.insert(name.val.to_string(), i);
+        }
+    }
+    out
+}
+
+/// The parameter a function returns: syntactically, when its body is only
+/// `return p;`, or because its contract says `return == p`, which F* proves.
+fn identity_param(d: &FnDefn) -> Option<usize> {
+    contract_identity_param(&d.decl).or_else(|| syntactic_identity_param(d))
+}
+
+fn syntactic_identity_param(d: &FnDefn) -> Option<usize> {
+    let [st] = d.body.as_slice() else {
+        return None;
+    };
+    let StmtT::Return(Some(value)) = &st.val else {
+        return None;
+    };
+    let ExprT::Var(name) = &strip_casts(value).val else {
+        return None;
+    };
+    d.decl
+        .args
+        .iter()
+        .position(|a| a.name.as_ref().is_some_and(|n| n.val == name.val))
+}
+
+fn contract_identity_param(d: &FnDecl) -> Option<usize> {
+    let var = |e: &Expr| match &strip_casts(e).val {
+        ExprT::Var(v) => Some(v.val.to_string()),
+        _ => None,
+    };
+    d.ensures.iter().find_map(|e| {
+        let ExprT::BinOp(BinOp::Eq, l, r) = &strip_casts(e).val else {
+            return None;
+        };
+        let other = match (var(l).as_deref(), var(r).as_deref()) {
+            (Some("return"), Some(o)) | (Some(o), Some("return")) => o.to_string(),
+            _ => return None,
+        };
+        d.args
+            .iter()
+            .position(|a| a.name.as_ref().is_some_and(|n| *n.val == *other))
+    })
 }
 
 /// An expression with its virtual attributes and conversions removed. A
@@ -20361,6 +27733,57 @@ fn call_bound_map(body: &Stmts) -> HashSet<String> {
     out
 }
 
+fn pointer_view_sources(body: &Stmts) -> HashMap<String, Option<Rc<Expr>>> {
+    fn collect(body: &Stmts, out: &mut HashMap<String, Option<Rc<Expr>>>) {
+        for st in body {
+            let binding = match &st.val {
+                StmtT::Let(name, _, value) => Some((name.val.to_string(), value.clone())),
+                StmtT::Assign(place, value) => lvalue_name(place).map(|name| (name, value.clone())),
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    collect(then_branch, out);
+                    collect(else_branch, out);
+                    None
+                }
+                StmtT::Match {
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    for branch in branches.iter() {
+                        collect(&branch.body, out);
+                    }
+                    collect(default_branch, out);
+                    None
+                }
+                StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => {
+                    collect(body, out);
+                    None
+                }
+                _ => None,
+            };
+            if let Some((name, value)) = binding {
+                out.entry(name)
+                    .and_modify(|source| *source = None)
+                    .or_insert(Some(value));
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    collect(body, &mut out);
+    let mut touched = Touched::default();
+    touch_stmts(body, &mut touched);
+    for (name, source) in &mut out {
+        if touched.addressed.contains(name) || touched.rebound.get(name).is_some_and(|n| *n > 1) {
+            *source = None;
+        }
+    }
+    out
+}
+
 fn derived_ptr(e: &Expr) -> bool {
     match &strip_vattr(e).val {
         ExprT::ContainerOf(inner, _, _) => derived_ptr(inner) || lvalue_name(inner).is_some(),
@@ -20383,7 +27806,31 @@ fn emit_body(
     // An array parameter's ownership is a sequence, so every access through it
     // goes through `array_focus` rather than a plain read. Record what each one
     // needs to be focused: the element's Palow type and its size.
-    let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
+    let idents: HashMap<String, usize> = callees
+        .iter()
+        .filter_map(|(n, c)| c.view_identity.map(|i| (n.clone(), i)))
+        .collect();
+    // A view is resolved against the type of the place it views, which is
+    // usually a local declared in the body itself.
+    let mut view_env = env.clone();
+    for s in defn.body.iter() {
+        if let StmtT::Decl(n, ty) = &s.val {
+            view_env.push_var_decl(n, ty.clone(), crate::env::LocalDeclKind::RValue);
+        }
+    }
+    let aliases: HashMap<String, Rc<Expr>> =
+        alias_map(&defn.body, &|x| ptr_base(tds, &env, x), &idents)
+            .into_iter()
+            .map(|(q, v)| {
+                let v = resolve_view(tds, &view_env, &v);
+                (q, v)
+            })
+            .collect();
+    let escaped = {
+        let mut t = Touched::default();
+        touch_stmts(&defn.body, &mut t);
+        t.close_escaped()
+    };
     let mut arrays = HashMap::new();
     for a in &defn.decl.args {
         // An `_arrayptr` is not an array here: Palow grants it nothing, so
@@ -20432,6 +27879,7 @@ fn emit_body(
         // shadows the global, exactly as C says, because every slot lookup
         // takes the last match.
         slots: sig.globals.clone(),
+        retained: sig.retained.clone(),
         out_params: defn
             .decl
             .args
@@ -20494,10 +27942,16 @@ fn emit_body(
         blocks: Vec::new(),
         aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
+        pointer_views: pointer_view_sources(&defn.body),
+        alloc_ptr_types: RefCell::new(HashMap::new()),
         byte_bases: byte_base_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
+        literal_aliases: literal_alias_set(tds, &defn.body),
+        literal_drops: Vec::new(),
         active: HashMap::new(),
+        escaped,
+        via_pointer: false,
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
         // on nothing.
@@ -20576,6 +28030,7 @@ fn emit_body(
                     holds_fn: BTreeMap::new(),
                     holds_block: BTreeMap::new(),
                     scattered: BTreeSet::new(),
+                    frozen: false,
                 });
             }
             continue;
@@ -20836,7 +28291,7 @@ fn aux_fn_antiquot(
                 AuxFnKind::Activate => {
                     Err("`$activate` of a struct, which has no arms".to_string())
                 }
-                AuxFnKind::Scattered | AuxFnKind::Gathered => Err(format!(
+                AuxFnKind::Scattered | AuxFnKind::Gathered | AuxFnKind::Prepare => Err(format!(
                     "`${}` other than as a statement of its own",
                     kind.keyword()
                 )),
@@ -20854,7 +28309,8 @@ fn aux_fn_antiquot(
                 AuxFnKind::UnfoldUninit
                 | AuxFnKind::FoldUninit
                 | AuxFnKind::Scattered
-                | AuxFnKind::Gathered => Err(format!(
+                | AuxFnKind::Gathered
+                | AuxFnKind::Prepare => Err(format!(
                     "`${}` of a union, which is uninitialised as a whole",
                     kind.keyword()
                 )),
@@ -21037,6 +28493,22 @@ fn aux_activate(code: &InlinePulseCode) -> Option<(&Type, &Ident, &Expr)> {
     Some((ty, arm, obj))
 }
 
+fn aux_prepare(code: &InlinePulseCode) -> Option<(&Type, &Expr)> {
+    match code.tokens.as_slice() {
+        [
+            InlinePulseToken::AuxFnAntiquot {
+                kind: AuxFnKind::Prepare,
+                before,
+                ty,
+                field_name: None,
+            },
+            InlinePulseToken::RValueAntiquot { expr, .. }
+            | InlinePulseToken::LValueAntiquot { expr, .. },
+        ] if before.trim().is_empty() => Some((ty, expr)),
+        _ => None,
+    }
+}
+
 /// The object a `$unfold-uninit` opens, if that is what this statement is.
 ///
 /// The old model's uninitialised-open takes exactly one argument, the object,
@@ -21109,6 +28581,7 @@ fn ghost_interpreted(code: &InlinePulseCode) -> bool {
                     | AuxFnKind::UnfoldUninit
                     | AuxFnKind::Fold
                     | AuxFnKind::FoldUninit
+                    | AuxFnKind::Prepare
             )
         )
 }
@@ -21120,6 +28593,7 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         StmtT::Match { .. } => "a `switch`",
         StmtT::While { .. } => "a loop",
         StmtT::Break => "a `break`",
+        StmtT::Freeze(..) => "a `const` declaration",
         StmtT::Continue => "a `continue`",
         StmtT::Return(..) => "a non-tail `return`",
         StmtT::Assert(..) => "an assertion",

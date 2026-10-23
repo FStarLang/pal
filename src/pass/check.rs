@@ -104,6 +104,7 @@ impl<'a> Checker<'a> {
             TypeT::Int {
                 signed: _,
                 width: _,
+                ..
             } => {}
             TypeT::Float { width: _ } => {}
             TypeT::SizeT => {}
@@ -386,6 +387,7 @@ impl<'a> Checker<'a> {
                             let u32_ty: MaybeRc<Type> = TypeT::Int {
                                 signed: false,
                                 width: 32,
+                                ident: crate::ir::IntIdent::Std,
                             }
                             .with_loc(rhs.loc.clone())
                             .into();
@@ -707,6 +709,7 @@ impl<'a> Checker<'a> {
                 loop_env.enter_loop();
                 self.check_stmts(&loop_env, body);
             }
+            StmtT::Freeze(_) => {}
             StmtT::Break | StmtT::Continue => {
                 if !env.in_loop() {
                     self.report(
