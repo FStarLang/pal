@@ -501,6 +501,12 @@ fn bitfield_at<'a>(tds: &'a Typedefs, ty: &Type, f: &str) -> Option<&'a BitField
 /// struct's type. An ordinary field is a projection; a bit-field is the bits
 /// it occupies of the unit's value.
 fn field_value(tds: &Typedefs, bty: &Type, x: &str, f: &str) -> String {
+    // A union's value is a tagged sum, so a member of one is the payload of
+    // that member's constructor -- which only exists when it is the live one,
+    // and a contract that names it has to have said so first.
+    if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(tds, bty).val {
+        return format!("(Union_{}_{}?.v ({}))", u.val, f, x);
+    }
     match bitfield_at(tds, bty, f) {
         Some(b) => b.pos.get(&format!("({}).fld_{}", x, b.unit)),
         None => format!("({}).fld_{}", x, f),
@@ -2892,12 +2898,17 @@ impl<'a> Spec<'a> {
                     ));
                 }
                 let bty = self.ty_of(base)?;
-                Ok(field_value(
-                    self.tds,
-                    &bty,
-                    &self.value(base, w)?,
-                    &f.val.to_string(),
-                ))
+                let x = self.value(base, w)?;
+                // A union member's payload is only there when it is the live
+                // one, and F* types each clause on its own -- so the clause
+                // carries the tag test itself, as an array index carries its
+                // bound.
+                if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &bty).val {
+                    self.guards
+                        .borrow_mut()
+                        .push(format!("Union_{}_{}? ({})", u.val, f.val, x));
+                }
+                Ok(field_value(self.tds, &bty, &x, &f.val.to_string()))
             }
             ExprT::UnOp(UnOp::BitNot, _)
             | ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ..)
@@ -5960,9 +5971,9 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         }
         // The byte-level view needs every field to have one and to sit at a
         // byte offset of its own, so that the object splits into fields and
-        // padding with nothing left over. An array field is excluded for now
-        // only because the storage operations it would need are not generated
-        // yet, not because anything about it resists the representation.
+        // padding with nothing left over. An array field qualifies when its
+        // element does: `array_repr` is that element's representation laid end
+        // to end, and it pins the field's length as a scalar's does.
         //
         // The size limit is about the proof, not the model. `_reveal` has to
         // recognise each field's slice of the finished object through the
@@ -5974,10 +5985,14 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         // used through.
         let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
             && fields.iter().all(|f| {
-                matches!(
-                    f.shape,
-                    FieldShape::One { .. } | FieldShape::Unaligned { .. }
-                ) && has_repr(tds, &f.ty)
+                match &f.shape {
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
+                    // `field_shape` only gives an array field its shape when
+                    // the element has a representation. A zero-length one
+                    // owns no bytes, and the view does not say so for it.
+                    FieldShape::Array { .. } => f.size > 0,
+                    FieldShape::Flex { .. } => false,
+                }
             });
         let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
         let inv = struct_invariant(tds, env, &fields);
@@ -7137,6 +7152,29 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         }
     };
     let pn_of = |f: &StructField| f.shape.pn().to_string();
+    // An array field is stated with the opaque `array_repr_o`: the carving
+    // below needs only its length, and the element-wise quantifier that
+    // `array_repr` unfolds to is enough to time it out.
+    let repr_of = |f: &StructField, v: &str, b: &str| match &f.shape {
+        FieldShape::Array { pn, esize, .. } => {
+            format!("array_repr_o {}_repr {} {} {}", pn, esize, v, b)
+        }
+        _ => f.shape.repr_of(v, b),
+    };
+    let reveal = |f: &StructField, a: &str, v: &str| match &f.shape {
+        FieldShape::Array { pn, esize, .. } => format!(
+            "array_reveal_o {}_repr {} {}sz {}_alignof #p #{};",
+            pn, a, esize, pn, v
+        ),
+        _ => f.shape.reveal(a, "p", v),
+    };
+    let conceal = |f: &StructField, a: &str, b: &str, v: &str| match &f.shape {
+        FieldShape::Array { pn, esize, .. } => format!(
+            "array_conceal_o {}_repr {} {}sz {}_alignof #p #{} #{};",
+            pn, a, esize, pn, b, v
+        ),
+        _ => f.shape.conceal(a, "p", b, v),
+    };
 
     // The representation pins the fields and says nothing about the padding,
     // which is exactly what C guarantees: the gaps hold unspecified values,
@@ -7152,11 +7190,12 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         .iter()
         .map(|f| {
             format!(
-                "    {}_repr x.fld_{} (slice b {} {})",
-                pn_of(f),
-                f.name,
-                f.offset,
-                f.offset + f.size
+                "    {}",
+                repr_of(
+                    f,
+                    &format!("x.fld_{}", f.name),
+                    &format!("(slice b {} {})", f.offset, f.offset + f.size)
+                )
             )
         })
         .collect();
@@ -7224,16 +7263,19 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     // append below.
     for f in si.fields.iter().filter(|f| f.size == 0) {
         let pn = pn_of(f);
+        let at = format!("(a +! {}_offsetof_{})", sn, f.name);
+        let val = format!("x.fld_{}", f.name);
         r += &format!(
-            "  {pn}_reveal (a +! {sn}_offsetof_{f});
-               with v. assert (mem_pts_to (a +! {sn}_offsetof_{f}) p v **              pure ({pn}_repr x.fld_{f} v));
-               {pn}_repr_len x.fld_{f} v;
-               drop_mem_pts_to_nil (a +! {sn}_offsetof_{f});
-",
-            pn = pn,
-            sn = sn,
-            f = f.name
+            "  {}\n  with v. assert (mem_pts_to {} p v ** pure ({}));\n",
+            reveal(f, &at, &val),
+            at,
+            repr_of(f, &val, "v")
         );
+        // An array states its own length; anything else has a lemma for it.
+        if !matches!(f.shape, FieldShape::Array { .. }) {
+            r += &format!("  {}_repr_len {} v;\n", pn, val);
+        }
+        r += &format!("  drop_mem_pts_to_nil {};\n", at);
     }
     let mut accs: Vec<String> = Vec::new();
     for (k, reg) in regions.iter().enumerate() {
@@ -7248,15 +7290,18 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                         .pts_to_at(&format!("(a +! {}_offsetof_{})", sn, f.name), "p", &val),
                     f.shape.pts_to_at(&at(f.offset), "p", &val)
                 );
-                r += &format!("  {}\n", f.shape.reveal(&at(f.offset), "p", &val));
+                r += &format!("  {}\n", reveal(f, &at(f.offset), &val));
                 r += &format!(
-                    "  with {v}. assert (mem_pts_to {at} p {v} ** pure ({pn}_repr {val} {v}));\n",
+                    "  with {v}. assert (mem_pts_to {at} p {v} ** pure ({repr}));\n",
                     v = v,
                     at = at(f.offset),
-                    pn = pn,
-                    val = val
+                    repr = repr_of(f, &val, &v)
                 );
-                r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+                // An array's representation states its length itself; a
+                // scalar's or a struct's is a lemma.
+                if !matches!(f.shape, FieldShape::Array { .. }) {
+                    r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+                }
             }
             Region::Gap(off, n) => {
                 r += &format!(
@@ -7330,9 +7375,9 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         }
         w += &format!(
             "  {}\n",
-            f.shape.conceal(
+            conceal(
+                f,
                 &at(f.offset),
-                "p",
                 &format!("(slice b {} {})", f.offset, f.offset + f.size),
                 &format!("(x.fld_{})", f.name)
             )
@@ -11007,6 +11052,30 @@ impl<'a> Body<'a> {
         // `$activate` names the union through a pointer to it, so the
         // address is the pointer's value.
         let a = self.inline(obj)?;
+        self.activate_arm_at(&un, m.ty.clone(), arm, a)
+    }
+
+    /// `activate_arm` at an address already computed.
+    /// Forget what the slots at `a` say, now that an arm's storage is what is
+    /// held there. A named local union keeps its slot, under the arm's: it is
+    /// still how the local is found, and it is what gives the storage back at
+    /// the end of its scope -- by which time the arm has been folded back into
+    /// a union value, which is what `init` records.
+    fn retire_slots_at(&mut self, a: &str) {
+        self.slots
+            .retain(|s| s.addr != a || (!s.global && s.union_arm.is_none()));
+        for s in self.slots.iter_mut().filter(|s| s.addr == a) {
+            s.init = true;
+        }
+    }
+
+    fn activate_arm_at(
+        &mut self,
+        un: &str,
+        mty: Rc<Type>,
+        arm: &Ident,
+        a: String,
+    ) -> Result<(), String> {
         // Storage that has never held a value switches from the storage view
         // rather than from a value, exactly as a whole-member write does.
         let from_uninit = self
@@ -11032,8 +11101,8 @@ impl<'a> Body<'a> {
         // one at a time. The switch hands it over folded, with the length
         // pinned in the slprop; every access wants it unfolded, which is the
         // form the elements are focused out of.
-        if let Some(FieldShape::Array { pn, esize, len }) = field_shape(self.tds, &m.ty) {
-            let TypeT::FixedArray(elem, _) = &peel(self.tds, &m.ty).val else {
+        if let Some(FieldShape::Array { pn, esize, len }) = field_shape(self.tds, &mty) {
+            let TypeT::FixedArray(elem, _) = &peel(self.tds, &mty).val else {
                 return Err(format!(
                     "`$activate` of member `{}`, which is not a fixed-size array",
                     arm.val
@@ -11049,7 +11118,7 @@ impl<'a> Body<'a> {
                 "unfold array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {};",
                 pn, esize, pn, len, a
             ));
-            self.slots.retain(|s| s.addr != a);
+            self.retire_slots_at(&a);
             self.slots.push(Slot {
                 name: format!("*{}.{}", a, arm.val),
                 addr: a,
@@ -11059,7 +11128,7 @@ impl<'a> Body<'a> {
                 array: Some((format!("{}sz", esize), true)),
                 array_value: None,
                 global: true,
-                union_arm: Some((un, arm.val.to_string())),
+                union_arm: Some((un.to_string(), arm.val.to_string())),
                 holds_fn: BTreeMap::new(),
                 holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
@@ -11067,8 +11136,7 @@ impl<'a> Body<'a> {
             });
             return Ok(());
         }
-        let (Some(pn), Some(fty)) = (palow_name(self.tds, &m.ty), fstar_type(self.tds, &m.ty))
-        else {
+        let (Some(pn), Some(fty)) = (palow_name(self.tds, &mty), fstar_type(self.tds, &mty)) else {
             return Err(format!(
                 "`$activate` of member `{}`, which has no Palow type",
                 arm.val
@@ -11077,7 +11145,7 @@ impl<'a> Body<'a> {
         // The arm's storage is now what is held at that address, and it is
         // uninitialised. Anything already recorded there described the union
         // and no longer does.
-        self.slots.retain(|s| s.addr != a);
+        self.retire_slots_at(&a);
         self.slots.push(Slot {
             name: format!("*{}.{}", a, arm.val),
             addr: a,
@@ -11089,7 +11157,7 @@ impl<'a> Body<'a> {
             // The union's own storage is released by whoever owns it; this
             // slot only records what is in it.
             global: true,
-            union_arm: Some((un, arm.val.to_string())),
+            union_arm: Some((un.to_string(), arm.val.to_string())),
             holds_fn: BTreeMap::new(),
             holds_block: BTreeMap::new(),
             scattered: BTreeSet::new(),
@@ -12806,6 +12874,27 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(base) {
             return self.base_addr(&p, writing);
         }
+        // A field write into a union that has never held a value makes that
+        // arm the live one first: there is no value to give up, so this is
+        // the `$activate` an author would otherwise have to write, and the
+        // fields are then filled one at a time as below.
+        if writing
+            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
+            && let Some(un) = self.union_of(b2)
+            && let Ok(a) = self.addr(b2)
+            && self.active.get(&a).map(String::as_str) != Some(&*f2.val.to_string())
+            && (self
+                .slots
+                .iter()
+                .any(|s| s.addr == a && !s.init && s.union_arm.is_none())
+                || self
+                    .blocks
+                    .iter()
+                    .any(|b| b.tmp == a && b.checked && !b.freed && !b.init))
+        {
+            let mty = self.field_ty(b2, f2)?;
+            self.activate_arm_at(&un, mty, f2, a)?;
+        }
         // A struct-typed union arm that has been activated is storage at the
         // union's own address: every arm starts there, and activation gave up
         // the union's value in exchange for the arm's uninitialised storage.
@@ -12828,11 +12917,22 @@ impl<'a> Body<'a> {
         // same shape as a nested struct field -- except that the step is a
         // union member's, because every arm starts at the union's own address
         // and which arm is live is a fact about the program.
-        if !writing
-            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
+        //
+        // A write to a field of the arm goes the same way. Only the field
+        // changes, so the arm has to be the live one already -- its other
+        // fields keep their values, and a union whose live member is some
+        // other arm has no such values to keep. Making an arm live is a write
+        // to the arm as a whole, which is `union_member`'s own business.
+        if let ExprT::Member(b2, f2) = &strip_vattr(base).val
             && self.union_of(b2).is_some()
         {
-            let f = self.union_member(b2, f2, false)?;
+            let f = self.union_member(b2, f2, false).map_err(|e| match writing {
+                true => format!(
+                    "a write to a field of union member `{}`, which is not known to be the live one here",
+                    f2.val
+                ),
+                false => e,
+            })?;
             self.lines.extend(f.open_read.iter().cloned());
             return Ok((f.at, f.close_read, f.close_write));
         }
@@ -15106,11 +15206,6 @@ impl<'a> Body<'a> {
     /// The F* application for a call to an already-emitted function. Every
     /// argument is translated first, since translating one may emit reads.
     fn call(&mut self, name: &Ident, args: &Exprs) -> Result<String, String> {
-        // A callee that was handed a pointer may have made a different member
-        // live, and nothing in the signature says otherwise. The emitter's
-        // record of which member is live is knowledge it put there itself, so
-        // it gives it up whenever control leaves.
-        self.active.clear();
         let c = self
             .callees
             .get(&*name.val.to_string())
@@ -15360,6 +15455,12 @@ impl<'a> Body<'a> {
         for a in implicit_args {
             out += &format!(" {}", a);
         }
+        // A callee that was handed a pointer may have made a different member
+        // live, and nothing in the signature says otherwise. The emitter's
+        // record of which member is live is knowledge it put there itself, so
+        // it gives it up whenever control leaves -- which is after the
+        // arguments are set up, since they are evaluated before the call.
+        self.active.clear();
         Ok(format!("({})", out))
     }
 
@@ -15384,6 +15485,7 @@ impl<'a> Body<'a> {
         owns_one: impl Fn(usize) -> bool,
     ) -> Result<HashMap<usize, String>, String> {
         let mut groups: Vec<(String, Rc<Expr>, Vec<(usize, Rc<Ident>)>)> = Vec::new();
+        let mut opened = HashMap::new();
         for (i, a) in args.iter().enumerate() {
             let out = outs.get(i) == Some(&true);
             if !out && !owns_one(i) {
@@ -15399,6 +15501,29 @@ impl<'a> Body<'a> {
                 && self.unaligned_field(&sn, &f.val)
             {
                 return Err(misaligned_addr(&f.val));
+            }
+            // `&u->m` hands the callee the arm itself. Every arm starts at the
+            // union's own address, so this is the arm's focus held open for
+            // the statement: the live one for an ordinary pointer, and fresh
+            // storage for an `_out` one, which the callee fills and so makes
+            // live. An array arm decays to its first element instead, which
+            // is not this.
+            if self.union_of(base).is_some()
+                && !self
+                    .ty_of(inner)
+                    .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
+            {
+                let fo = self.union_member(base, f, out)?;
+                self.lines.extend(match out {
+                    true => fo.open_write.iter().cloned(),
+                    false => fo.open_read.iter().cloned(),
+                });
+                self.pending_close.extend(match out {
+                    true => fo.close_write,
+                    false => fo.close_read,
+                });
+                opened.insert(i, fo.at);
+                continue;
             }
             if self.union_of(base).is_some()
                 || self.in_pieces(base)
@@ -15422,7 +15547,6 @@ impl<'a> Body<'a> {
                 None => groups.push((key, base.clone(), vec![(i, f.clone())])),
             }
         }
-        let mut opened = HashMap::new();
         for (key, base, fields) in groups {
             // Storage still being filled is scattered already, or will be by
             // the first `_out` that reaches it.

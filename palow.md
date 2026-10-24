@@ -6166,3 +6166,31 @@ new facts about memory.
     `use_name(d->name)` for any owned `d` -- now focuses its first element,
     which is all a one-object pointer owns. `test/global_table_array_field`
     covers these cases.
+41. **Unions of structs, used the way C code uses them.** A union whose
+    members are structs already had a type, but most of what C does with one
+    was refused. Four gaps are closed:
+    - A struct with a fixed-size array field now has a byte-level view
+      (`_repr`, `_reveal`, `_conceal`), so it can be a union member or an
+      array element. `array_repr` pins the field's length itself, so the
+      field needs no `_repr_len` step. The view states the field with the
+      opaque `array_repr_o` (opened only by `array_reveal_o` and
+      `array_conceal_o`, which also give the length). Unfolded, its
+      per-element quantifier made `_reveal` time out on a struct that has
+      both a nested struct and an array. A zero-length array field still
+      keeps the struct field-wise.
+    - A write to a field of a struct arm (`u->s.f = v`) focuses the arm the
+      way a read does. That arm has to be known live, from the contract or
+      an earlier write, because the arm's other fields keep their values.
+      The exception is a union that has never held a value, such as a fresh
+      local. There nothing is given up, so the write does the `$activate`
+      itself and the fields are filled one at a time.
+    - `&u->s` passed to a function focuses the arm for the call: the live
+      arm for an ordinary pointer, and fresh storage for an `_out` one, which
+      the call then makes live. The emitter now forgets which arm is live
+      after the arguments are set up rather than before, since they are
+      evaluated before the call.
+    - A contract that names `u->s.f` projects the arm's payload,
+      `Union_U_s?.v`. F* types each clause on its own, so the clause carries
+      its own `Union_U_s? u` guard, as an array subscript carries its bound.
+    Nested unions, where an arm is itself a union of structs, work through
+    the same steps. `test/union_struct_arms` covers all of these.
