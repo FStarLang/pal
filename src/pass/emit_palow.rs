@@ -427,6 +427,566 @@ fn field_type(tds: &Typedefs, ty: &Type) -> Option<String> {
     Some(field_shape(tds, ty)?.value_type(&elem))
 }
 
+/// The declarations behind a punned access named `k`: the bytes the access
+/// sees as a function of the live member's value, the lemma that says so, and
+/// the read; for a write, also the member's value afterwards, the lemma that
+/// re-establishes the union's representation, and the write itself.
+#[allow(clippy::too_many_arguments)]
+fn pun_decls(
+    k: &str,
+    un: &str,
+    ctor: &str,
+    lty: &str,
+    tty: &str,
+    root: &PunNode,
+    s: &PunSite,
+    writing: bool,
+) -> String {
+    let (o, n, t) = (s.o, s.n, &s.tpn);
+    let mut leaves = Vec::new();
+    pun_leaves(root, &mut leaves);
+    let pieces: Vec<String> = leaves
+        .iter()
+        .map(|l| {
+            let PunKind::Int { pn } = &l.kind else {
+                unreachable!()
+            };
+            let (plo, phi) = (l.lo.max(o), l.hi.min(o + n));
+            if plo == l.lo && phi == l.hi {
+                format!("(Pun.{}_bytes {})", pn, l.val)
+            } else {
+                format!(
+                    "(slice (Pun.{}_bytes {}) {} {})",
+                    pn,
+                    l.val,
+                    plo - l.lo,
+                    phi - l.lo
+                )
+            }
+        })
+        .collect();
+    let bytes = pieces
+        .iter()
+        .rev()
+        .cloned()
+        .reduce(|acc, p| format!("(append {} {})", p, acc))
+        .unwrap_or_default();
+    let mut facts = vec![format!(
+        "assert ({} v (slice b {} {}))",
+        root.head, root.lo, root.hi
+    )];
+    pun_old_facts(root, &mut facts);
+    let exact = leaves.len() == 1 && leaves[0].lo == o && leaves[0].hi == o + n;
+    if !exact {
+        let mut parts = Vec::new();
+        for l in &leaves {
+            let (plo, phi) = (l.lo.max(o), l.hi.min(o + n));
+            facts.push(format!(
+                "Seq.slice_slice b {} {} {} {}",
+                l.lo,
+                l.hi,
+                plo - l.lo,
+                phi - l.lo
+            ));
+            parts.push(format!("(slice b {} {})", plo, phi));
+        }
+        if parts.len() > 1 {
+            let joined = parts
+                .into_iter()
+                .rev()
+                .reduce(|acc, p| format!("(append {} {})", p, acc))
+                .unwrap_or_default();
+            facts.push(format!(
+                "Seq.lemma_eq_intro (slice b {} {}) {}",
+                o,
+                o + n,
+                joined
+            ));
+        }
+    }
+    let mut c = format!(
+        "let {k}_bytes (v: {lty}) : bytes =\n  {bytes}\n\n\
+         let {k}_lemma (v: {lty}) (b: bytes)\n  \
+         : Lemma (requires {un}_repr ({ctor} v) b)\n          \
+         (ensures  len b == SizeT.v {un}_sizeof /\\ slice b {o} {e} == {k}_bytes v /\\\n                    \
+         Pun.plain (slice b {o} {e}))\n  \
+         = {facts}\n\n\
+         let {k}_aligned (a: ptr)\n  \
+         : Lemma (requires aligned a {un}_alignof) (ensures aligned (a +! {o}sz) {t}_alignof)\n  \
+         = aligned_field a {un}_alignof {o}sz {t}_alignof\n\n\
+         fn {k}_read (a: ptr) (#p: perm) (#v: erased ({lty}))\n  \
+         requires {un}_pts_to a p ({ctor} v)\n  \
+         returns  r: {tty}\n  \
+         ensures  {un}_pts_to a p ({ctor} v)\n  \
+         ensures  pure (r == Pun.{t}_of_bytes ({k}_bytes v))\n\
+         {{\n  \
+         unfold {un}_pts_to a p ({ctor} v);\n  \
+         with b. assert mem_pts_to a p b;\n  \
+         {k}_lemma v b;\n  \
+         Pun.mem_carve a {o}sz {n}sz;\n  \
+         {k}_aligned a;\n  \
+         Pun.{t}_of_mem (a +! {o}sz);\n  \
+         let r = {t}_read (a +! {o}sz);\n  \
+         Pun.{t}_to_mem (a +! {o}sz);\n  \
+         Pun.mem_uncarve a {o}sz {n}sz;\n  \
+         Pun.overlay_self b {o} {n};\n  \
+         rewrite mem_pts_to a p (Pun.overlay b 0 (Pun.{t}_bytes (Pun.{t}_of_bytes (slice b {o} {e}))) {o})\n    \
+         as mem_pts_to a p b;\n  \
+         fold {un}_pts_to a p ({ctor} v);\n  \
+         r\n}}\n\n",
+        k = k,
+        lty = lty,
+        bytes = bytes,
+        un = un,
+        ctor = ctor,
+        o = o,
+        e = o + n,
+        n = n,
+        t = t,
+        tty = tty,
+        facts = facts.join(";\n    ")
+    );
+    if writing {
+        let upd = pun_upd(root, s).unwrap_or_else(|| "v".to_string());
+        let mut facts = vec![format!(
+            "assert ({} v (slice b {} {}))",
+            root.head, root.lo, root.hi
+        )];
+        pun_old_facts(root, &mut facts);
+        let mut fresh = 0;
+        pun_new_facts(root, &upd, s, &mut facts, &mut fresh);
+        c += &format!(
+            "let {k}_upd (v: {lty}) (x: {tty}) : {lty} =\n  {upd}\n\n\
+             let {k}_wlemma (v: {lty}) (x: {tty}) (b: bytes)\n  \
+             : Lemma (requires {un}_repr ({ctor} v) b)\n          \
+             (ensures  {un}_repr ({ctor} ({k}_upd v x)) (Pun.overlay b 0 (Pun.{t}_bytes x) {o}))\n  \
+             = let b' = Pun.overlay b 0 (Pun.{t}_bytes x) {o} in\n    \
+             {facts}\n\n\
+             fn {k}_write (a: ptr) (x: {tty}) (#v: erased ({lty}))\n  \
+             requires {un}_pts_to a 1.0R ({ctor} v)\n  \
+             ensures  {un}_pts_to a 1.0R ({ctor} ({k}_upd v x))\n\
+             {{\n  \
+             unfold {un}_pts_to a 1.0R ({ctor} v);\n  \
+             with b. assert mem_pts_to a 1.0R b;\n  \
+             {k}_lemma v b;\n  \
+             {k}_wlemma v x b;\n  \
+             Pun.mem_carve a {o}sz {n}sz;\n  \
+             {k}_aligned a;\n  \
+             Pun.{t}_of_mem (a +! {o}sz);\n  \
+             {t}_write (a +! {o}sz) x;\n  \
+             Pun.{t}_to_mem (a +! {o}sz);\n  \
+             Pun.mem_uncarve a {o}sz {n}sz;\n  \
+             fold {un}_pts_to a 1.0R ({ctor} ({k}_upd v x));\n}}\n\n",
+            k = k,
+            lty = lty,
+            tty = tty,
+            upd = upd,
+            un = un,
+            ctor = ctor,
+            o = o,
+            n = n,
+            t = t,
+            facts = facts.join(";\n    ")
+        );
+    }
+    c
+}
+
+/// The integer types `Pulse.Lib.C.Palow.Pun` converts to and from their
+/// bytes, with their size. These are the only types a punned access is made
+/// at, or through: an integer's bytes are its value, and every byte pattern
+/// is some value, so reading another member's bytes as one can neither fail
+/// nor invent anything.
+fn pun_int_size(pn: &str) -> Option<u64> {
+    match pn {
+        "uint8_t" | "int8_t" => Some(1),
+        "uint16_t" | "int16_t" => Some(2),
+        "uint32_t" | "int32_t" => Some(4),
+        "uint64_t" | "int64_t" | "size_t" => Some(8),
+        _ => None,
+    }
+}
+
+/// A punned access: `n` bytes at offset `o` of a union, read or written as
+/// the integer type `tpn`, while some other member is the live one.
+struct PunSite {
+    o: u64,
+    n: u64,
+    tpn: String,
+}
+
+impl PunSite {
+    fn overlaps(&self, lo: u64, hi: u64) -> bool {
+        lo < self.o + self.n && self.o < hi
+    }
+}
+
+/// An object inside the live member of a union, as a punned access sees it:
+/// where it sits (relative to the union), its value as a term over the live
+/// member's value `v`, and the predicate its parent states it with.
+struct PunNode {
+    lo: u64,
+    hi: u64,
+    val: String,
+    /// The representation predicate, applied as `{head} {value} {bytes}`.
+    head: String,
+    kind: PunKind,
+}
+
+enum PunKind {
+    /// Disjoint from the access: carried along untouched.
+    Other,
+    Int {
+        pn: String,
+    },
+    Struct {
+        module: String,
+        fields: Vec<(String, PunNode)>,
+        /// A refinement on the struct or on an affected field, which a write
+        /// would have to re-establish of whatever bytes it produced.
+        inv: bool,
+    },
+    Array {
+        pn: String,
+        esize: u64,
+        len: u64,
+        /// Stated with `array_repr_o`, as array fields of structs are.
+        opaque: bool,
+        elems: Vec<(u64, PunNode)>,
+    },
+}
+
+/// The predicate an object of this shape is stated with in its parent.
+fn pun_head(shape: &FieldShape, in_struct: bool) -> String {
+    match shape {
+        FieldShape::One { pn } | FieldShape::Unaligned { pn } => format!("{}_repr", pn),
+        FieldShape::Array { pn, esize, .. } if in_struct => {
+            format!("array_repr_o {}_repr {}", pn, esize)
+        }
+        FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize } => {
+            format!("array_repr {}_repr {}", pn, esize)
+        }
+    }
+}
+
+/// The node for an object of Palow type `pn` that overlaps the access, or
+/// `None` when the access reaches bytes that are not an integer's: a pointer,
+/// a float, a nested union, padding. Those have no value a pun could read.
+fn pun_obj(
+    tds: &Typedefs,
+    pn: &str,
+    (lo, hi): (u64, u64),
+    val: String,
+    head: String,
+    s: &PunSite,
+) -> Option<PunNode> {
+    if pun_int_size(pn).is_some() {
+        let kind = PunKind::Int { pn: pn.to_string() };
+        return Some(PunNode {
+            lo,
+            hi,
+            val,
+            head,
+            kind,
+        });
+    }
+    let name = pn.strip_prefix("struct_")?;
+    let si = tds.structs.get(name)?;
+    if !si.has_bytes {
+        return None;
+    }
+    let mut inv = si.inv.is_some();
+    let mut fields = Vec::new();
+    for f in &si.fields {
+        let (flo, fhi) = (lo + f.offset, lo + f.offset + f.size);
+        let fval = format!("({}).fld_{}", val, f.name);
+        let fhead = pun_head(&f.shape, true);
+        // An empty member inside the range would need its (empty) bytes
+        // related across the write by extensionality rather than by the
+        // overlay lemmas; nothing real does this, so it is not attempted.
+        if f.size == 0 && flo > s.o && flo < s.o + s.n {
+            return None;
+        }
+        let node = if f.size > 0 && s.overlaps(flo, fhi) {
+            inv |= f.inv.is_some();
+            pun_field(tds, &f.shape, true, (flo, fhi), fval, fhead, s)?
+        } else {
+            PunNode {
+                lo: flo,
+                hi: fhi,
+                val: fval,
+                head: fhead,
+                kind: PunKind::Other,
+            }
+        };
+        fields.push((f.name.clone(), node));
+    }
+    Some(PunNode {
+        lo,
+        hi,
+        val,
+        head,
+        kind: PunKind::Struct {
+            module: format!("Struct_{}", name),
+            fields,
+            inv,
+        },
+    })
+}
+
+fn pun_field(
+    tds: &Typedefs,
+    shape: &FieldShape,
+    in_struct: bool,
+    (lo, hi): (u64, u64),
+    val: String,
+    head: String,
+    s: &PunSite,
+) -> Option<PunNode> {
+    match shape {
+        FieldShape::One { pn } => pun_obj(tds, pn, (lo, hi), val, head, s),
+        FieldShape::Array { pn, esize, len } if *esize > 0 => {
+            let first = s.o.saturating_sub(lo) / esize;
+            let last = (s.o + s.n).saturating_sub(lo).div_ceil(*esize).min(*len);
+            let mut elems = Vec::new();
+            for i in first..last {
+                let (elo, ehi) = (lo + esize * i, lo + esize * (i + 1));
+                if !s.overlaps(elo, ehi) {
+                    continue;
+                }
+                let ev = format!("(Seq.index {} {})", val, i);
+                let e = pun_obj(tds, pn, (elo, ehi), ev, format!("{}_repr", pn), s)?;
+                elems.push((i, e));
+            }
+            Some(PunNode {
+                lo,
+                hi,
+                val,
+                head,
+                kind: PunKind::Array {
+                    pn: pn.clone(),
+                    esize: *esize,
+                    len: *len,
+                    opaque: in_struct,
+                    elems,
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+fn pun_leaves<'a>(n: &'a PunNode, out: &mut Vec<&'a PunNode>) {
+    match &n.kind {
+        PunKind::Other => {}
+        PunKind::Int { .. } => out.push(n),
+        PunKind::Struct { fields, .. } => fields.iter().for_each(|(_, c)| pun_leaves(c, out)),
+        PunKind::Array { elems, .. } => elems.iter().for_each(|(_, e)| pun_leaves(e, out)),
+    }
+}
+
+/// Whether a write has to re-establish a refinement.
+fn pun_has_inv(n: &PunNode) -> bool {
+    match &n.kind {
+        PunKind::Other | PunKind::Int { .. } => false,
+        PunKind::Struct { fields, inv, .. } => *inv || fields.iter().any(|(_, c)| pun_has_inv(c)),
+        PunKind::Array { elems, .. } => elems.iter().any(|(_, e)| pun_has_inv(e)),
+    }
+}
+
+/// The facts a punned access is proved from, about the union's bytes `b`:
+/// every object on the way down to the affected integers is stated at its
+/// absolute range, and each integer's range is its encoding.
+fn pun_old_facts(n: &PunNode, out: &mut Vec<String>) {
+    match &n.kind {
+        PunKind::Other => {}
+        PunKind::Int { pn } => out.push(format!(
+            "assert (slice b {} {} == Pun.{}_bytes {})",
+            n.lo, n.hi, pn, n.val
+        )),
+        PunKind::Struct { fields, .. } => {
+            for (_, c) in fields {
+                out.push(format!(
+                    "Seq.slice_slice b {} {} {} {}",
+                    n.lo,
+                    n.hi,
+                    c.lo - n.lo,
+                    c.hi - n.lo
+                ));
+                out.push(format!(
+                    "assert ({} {} (slice b {} {}))",
+                    c.head, c.val, c.lo, c.hi
+                ));
+                pun_old_facts(c, out);
+            }
+        }
+        PunKind::Array {
+            pn,
+            esize,
+            opaque,
+            elems,
+            ..
+        } => {
+            if *opaque {
+                out.push(format!(
+                    "array_repr_o_eq {}_repr {} {} (slice b {} {})",
+                    pn, esize, n.val, n.lo, n.hi
+                ));
+            }
+            for (i, e) in elems {
+                out.push(format!(
+                    "assert ({} {} (elem_bytes {} (slice b {} {}) {}))",
+                    e.head, e.val, esize, n.lo, n.hi, i
+                ));
+                out.push(format!(
+                    "Seq.slice_slice b {} {} {} {}",
+                    n.lo,
+                    n.hi,
+                    esize * i,
+                    esize * (i + 1)
+                ));
+                out.push(format!(
+                    "assert ({} {} (slice b {} {}))",
+                    e.head, e.val, e.lo, e.hi
+                ));
+                pun_old_facts(e, out);
+            }
+        }
+    }
+}
+
+/// An affected integer's bytes once the access's bytes are written over them.
+fn pun_overlay(n: &PunNode, pn: &str, s: &PunSite) -> String {
+    format!(
+        "(Pun.overlay (Pun.{}_bytes {}) {} (Pun.{}_bytes x) {})",
+        pn, n.val, n.lo, s.tpn, s.o
+    )
+}
+
+/// The value of an object after a punned write of `x`, or `None` if the
+/// write does not touch it.
+fn pun_upd(n: &PunNode, s: &PunSite) -> Option<String> {
+    match &n.kind {
+        PunKind::Other => None,
+        PunKind::Int { pn } => Some(if n.lo == s.o && n.hi == s.o + s.n && *pn == s.tpn {
+            "x".to_string()
+        } else {
+            format!("(Pun.{}_of_bytes {})", pn, pun_overlay(n, pn, s))
+        }),
+        PunKind::Struct { module, fields, .. } => {
+            let items: Vec<String> = fields
+                .iter()
+                .filter_map(|(f, c)| pun_upd(c, s).map(|t| format!("{}.fld_{} = {}", module, f, t)))
+                .collect();
+            Some(format!("({{ {} with {} }})", n.val, items.join("; ")))
+        }
+        PunKind::Array { elems, .. } => {
+            let mut acc = n.val.clone();
+            for (i, e) in elems {
+                if let Some(t) = pun_upd(e, s) {
+                    acc = format!("(Seq.upd {} {} {})", acc, i, t);
+                }
+            }
+            Some(acc)
+        }
+    }
+}
+
+/// The facts about the written bytes `b'` that re-establish the
+/// representation of an object at its new value `nv`, bottom up.
+fn pun_new_facts(n: &PunNode, nv: &str, s: &PunSite, out: &mut Vec<String>, fresh: &mut usize) {
+    match &n.kind {
+        PunKind::Other => out.push(format!(
+            "assert (slice b' {} {} == slice b {} {})",
+            n.lo, n.hi, n.lo, n.hi
+        )),
+        PunKind::Int { pn } => {
+            let ov = pun_overlay(n, pn, s);
+            if nv != "x" {
+                out.push(format!("Pun.{}_bytes_of_bytes {}", pn, ov));
+            }
+            out.push(format!("assert (slice b' {} {} == {})", n.lo, n.hi, ov));
+            out.push(format!(
+                "assert ({} {} (slice b' {} {}))",
+                n.head, nv, n.lo, n.hi
+            ));
+        }
+        PunKind::Struct { fields, .. } => {
+            for (_, c) in fields {
+                out.push(format!(
+                    "Seq.slice_slice b' {} {} {} {}",
+                    n.lo,
+                    n.hi,
+                    c.lo - n.lo,
+                    c.hi - n.lo
+                ));
+                match pun_upd(c, s) {
+                    Some(t) => pun_new_facts(c, &t, s, out, fresh),
+                    None => pun_new_facts(c, "", s, out, fresh),
+                }
+            }
+            out.push(format!(
+                "assert ({} {} (slice b' {} {}))",
+                n.head, nv, n.lo, n.hi
+            ));
+        }
+        PunKind::Array {
+            pn,
+            esize,
+            len,
+            opaque,
+            elems,
+        } => {
+            *fresh += 1;
+            let aux = format!("aux{}", fresh);
+            let mut branches = String::new();
+            for (k, e) in elems {
+                let mut inner = vec![format!(
+                    "Seq.slice_slice b' {} {} {} {}",
+                    n.lo,
+                    n.hi,
+                    esize * k,
+                    esize * (k + 1)
+                )];
+                let t = pun_upd(e, s).unwrap_or_else(|| e.val.clone());
+                pun_new_facts(e, &t, s, &mut inner, fresh);
+                branches += &format!(
+                    "if i = {} then begin\n      {}\n    end else ",
+                    k,
+                    inner.join(";\n      ")
+                );
+            }
+            out.push(format!(
+                "let {aux} (i: nat {{ i < {len} }})\n      \
+                 : Lemma ({pn}_repr (Seq.index {nv} i) (elem_bytes {es} (slice b' {lo} {hi}) i)) =\n    \
+                 {branches}begin\n      \
+                 assert ({pn}_repr (Seq.index {v} i) (elem_bytes {es} (slice b {lo} {hi}) i));\n      \
+                 assert (elem_bytes {es} (slice b' {lo} {hi}) i == elem_bytes {es} (slice b {lo} {hi}) i)\n    \
+                 end\n  in\n  Classical.forall_intro {aux}",
+                aux = aux,
+                len = len,
+                pn = pn,
+                nv = nv,
+                es = esize,
+                lo = n.lo,
+                hi = n.hi,
+                v = n.val,
+                branches = branches
+            ));
+            if *opaque {
+                out.push(format!(
+                    "array_repr_o_eq {}_repr {} {} (slice b' {} {})",
+                    pn, esize, nv, n.lo, n.hi
+                ));
+            }
+            out.push(format!(
+                "assert ({} {} (slice b' {} {}))",
+                n.head, nv, n.lo, n.hi
+            ));
+        }
+    }
+}
+
 /// Where a bit-field sits inside its storage unit, which is everything the
 /// emitter needs to read or write it once the unit is in hand.
 #[derive(Clone, PartialEq, Eq)]
@@ -10183,6 +10743,7 @@ module UInt64 = FStar.UInt64\n\
 module SizeT = FStar.SizeT\n\
 module Float32 = FStar.Float32\n\
 module Float64 = FStar.Float64\n\
+module Pun = Pulse.Lib.C.Palow.Pun\n\
 \n\
 (* The reveal/conceal proofs of a struct carry one hypothesis per field --\n\
 \x20  its representation, its length and its alignment -- so the context grows\n\
@@ -12233,6 +12794,17 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// A place for a load or a store of its value: `place`, or a punned
+    /// access when the place is in a member of a union other than the live
+    /// one. Taking an address never puns -- what it hands out is ownership of
+    /// the member it names, and that member is not there.
+    fn access(&mut self, e: &Expr, writing: bool) -> Result<Focus, String> {
+        if let Some(f) = self.byte_pun(e, writing) {
+            return Ok(f);
+        }
+        self.place(e, writing)
+    }
+
     /// The struct a field belongs to, if the emitter generated a type for it.
     fn struct_of(&self, base: &Expr) -> Result<(String, Rc<Type>), String> {
         let bty = self.ty_of(base)?;
@@ -12457,6 +13029,192 @@ impl<'a> Body<'a> {
             open_write: Vec::new(),
             close_read: close.clone(),
             close_write: close,
+        })
+    }
+
+    /// Type punning in general: an integer read or written through a member
+    /// of a union that is not the live one, where the bytes it covers are the
+    /// bytes of integers of the live member.
+    ///
+    /// C says such an access sees the object representation (C11 6.5.2.3p3,
+    /// footnote 95), and for integers that is all there is: every byte
+    /// pattern is a value and every value is a byte pattern. So the access is
+    /// stated against the live member's value -- a read returns the target
+    /// type's decoding of the live member's encoding at those bytes, and a
+    /// write leaves the same member live, with the integers it overlaps
+    /// re-decoded from the bytes written over them. A common initial sequence
+    /// is the case where that decoding is the identity.
+    ///
+    /// The live member has to be known, by a write earlier in the body or by
+    /// the contract. Anything the bytes do not determine -- padding, a
+    /// pointer, a float, a nested union -- or a refinement a write would have
+    /// to re-establish is `None`, and the ordinary path reports the access.
+    /// So is an access to a whole member by assignment, which is what makes
+    /// that member live rather than a pun.
+    fn byte_pun(&mut self, e: &Expr, writing: bool) -> Option<Focus> {
+        let e = match self.unalias(e) {
+            Some(p) => (*p).clone(),
+            None => e.clone(),
+        };
+        let tty_c = self.ty_of(&e).ok()?;
+        let tpn = palow_name(self.tds, &tty_c)?;
+        let n = pun_int_size(&tpn)?;
+        let tty = fstar_type(self.tds, &tty_c)?;
+        let mut cur = e.clone();
+        let mut o = 0u64;
+        let mut depth = 0;
+        let (u, m) = loop {
+            depth += 1;
+            let next = match &strip_vattr(&cur).val {
+                ExprT::Member(base, f) => {
+                    if self.union_of(base).is_some() {
+                        break (base.clone(), f.val.to_string());
+                    }
+                    let (sn, _) = self.struct_of(base).ok()?;
+                    let si = self.tds.structs.get(sn.strip_prefix("struct_")?)?;
+                    o += si.fields.iter().find(|x| *x.name == *f.val)?.offset;
+                    base.clone()
+                }
+                ExprT::Index(base, idx) => {
+                    let k = const_index(&strip_vattr(idx).val)?;
+                    let mut b = base.clone();
+                    while let ExprT::Cast(inner, _) = &strip_vattr(&b).val {
+                        b = inner.clone();
+                    }
+                    let bty = self.ty_of(&b).ok()?;
+                    let TypeT::FixedArray(elem, len) = &peel(self.tds, &bty).val else {
+                        return None;
+                    };
+                    if k >= *len {
+                        return None;
+                    }
+                    o += k * palow_sizeof(self.tds, elem)?;
+                    b
+                }
+                _ => return None,
+            };
+            cur = (*next).clone();
+        };
+        if writing && depth < 2 {
+            return None;
+        }
+        let un = self.union_of(&u)?;
+        let uname = un.strip_prefix("union_")?.to_string();
+        let ui = self.tds.unions.get(&uname)?;
+        if o % n != 0 || ui.align % n != 0 {
+            return None;
+        }
+        // Finding the base may emit focusing steps and record arms as live;
+        // anything that turns out not to be a pun has to undo both.
+        let mark = self.lines.len();
+        let saved_active = self.active.clone();
+        let saved_close = self.pending_close.clone();
+        let give_up = |me: &mut Self| {
+            me.lines.truncate(mark);
+            me.active = saved_active.clone();
+            me.pending_close = saved_close.clone();
+            None
+        };
+        let Ok((a, bcr, bcw)) = self.base_addr(&u, writing) else {
+            return give_up(self);
+        };
+        let known = self.active.get(&a).cloned();
+        let live = match known.clone() {
+            Some(l) => l,
+            None if self.spliced_own => return give_up(self),
+            None => {
+                let named = self.unalias_place(&u);
+                let Some(l) = self
+                    .live_arms
+                    .iter()
+                    .find(|(obj, _)| same_lvalue(obj, &named))
+                    .map(|(_, l)| l.clone())
+                else {
+                    return give_up(self);
+                };
+                l
+            }
+        };
+        if live == m {
+            return give_up(self);
+        }
+        let ui = self.tds.unions.get(&uname)?;
+        let Some(lm) = ui.members.iter().find(|x| x.name == live) else {
+            return give_up(self);
+        };
+        let s = PunSite {
+            o,
+            n,
+            tpn: tpn.clone(),
+        };
+        if o + n > lm.size {
+            return give_up(self);
+        }
+        let Some(lty) = field_type(self.tds, &lm.ty) else {
+            return give_up(self);
+        };
+        let ctor = format!("Union_{}_{}", uname, live);
+        let head = pun_head(&lm.shape, false);
+        let Some(root) = pun_field(
+            self.tds,
+            &lm.shape,
+            false,
+            (0, lm.size),
+            "v".to_string(),
+            head,
+            &s,
+        ) else {
+            return give_up(self);
+        };
+        let mut leaves = Vec::new();
+        pun_leaves(&root, &mut leaves);
+        let mut at = o;
+        for l in &leaves {
+            if l.lo > at {
+                return give_up(self);
+            }
+            at = at.max(l.hi);
+        }
+        if at < o + n || (writing && pun_has_inv(&root)) {
+            return give_up(self);
+        }
+        let k = format!(
+            "pun_{}_{}_{}_{}{}",
+            uname,
+            live,
+            o,
+            tpn,
+            if writing { "_w" } else { "" }
+        );
+        if !self.decls.iter().any(|(key, _, _)| *key == k) {
+            let text = pun_decls(&k, &un, &ctor, &lty, &tty, &root, &s, writing);
+            self.decls.push((k.clone(), k.clone(), text));
+        }
+        // Known from the contract only: the ownership in hand is stated at an
+        // opaque value, and the access is stated at the constructor.
+        if known.is_none() {
+            let vp = self.fresh("perm");
+            let vu = self.fresh("union");
+            self.lines.push(format!(
+                "with {} {}. assert ({}_pts_to {} {} {});",
+                vp, vu, un, a, vp, vu
+            ));
+            self.lines.push(format!(
+                "rewrite ({}_pts_to {} {} {}) as ({}_pts_to {} {} ({} ({}?.v {})));",
+                un, a, vp, vu, un, a, vp, ctor, ctor, vu
+            ));
+            self.active.insert(a.clone(), live);
+        }
+        Some(Focus {
+            bits: None,
+            pn: k.clone(),
+            write_fn: format!("{}_write", k),
+            unaligned: false,
+            at: a,
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: bcr,
+            close_write: bcw,
         })
     }
 
@@ -14571,7 +15329,7 @@ impl<'a> Body<'a> {
                     ExprT::Member(_, f) => f.val.to_string(),
                     _ => "elem".to_string(),
                 };
-                let f = self.place(e, false)?;
+                let f = self.access(e, false)?;
                 self.lines.extend(f.open_read.iter().cloned());
                 let t = self.fresh(&hint);
                 self.lines
@@ -16987,7 +17745,7 @@ impl<'a> Body<'a> {
             }
         }
         if matches!(lhs.val, ExprT::Member(..) | ExprT::Index(..)) {
-            let f = self.place(lhs, true)?;
+            let f = self.access(lhs, true)?;
             self.lines.extend(f.open_write.iter().cloned());
             match &f.bits {
                 // Storing into a bit-field is a read, a substitution and a
