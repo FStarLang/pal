@@ -584,8 +584,11 @@ fn pun_decls(
          ensures  pure (r == Pun.{t}_of_bytes ({k}_bytes v))\n\
          {{\n  \
          unfold {un}_pts_to a p ({ctor} v);\n  \
-         with b. assert mem_pts_to a p b;\n  \
+         with b e. assert (mem_pts_to_at a p b e ** pure ({un}_repr ({ctor} v) b /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  \
          {k}_lemma v b;\n  \
+         remember_fixed_metadata a;\n  \
+         assert_norm (ET.access_ok {un}_ctype {o} {t}_ctype /\\ ET.compose_ok {un}_ctype {t}_ctype);\n  \
+         ET.read_ok_slice e {un}_ctype {o} {t}_ctype;\n  \
          Pun.mem_carve a {o}sz {n}sz;\n  \
          {k}_aligned a;\n  \
          Pun.{t}_of_mem (a +! {o}sz);\n  \
@@ -593,8 +596,10 @@ fn pun_decls(
          Pun.{t}_to_mem (a +! {o}sz);\n  \
          Pun.mem_uncarve a {o}sz {n}sz;\n  \
          Pun.overlay_self b {o} {n};\n  \
-         rewrite mem_pts_to a p (Pun.overlay b 0 (Pun.{t}_bytes (Pun.{t}_of_bytes (slice b {o} {e}))) {o})\n    \
-         as mem_pts_to a p b;\n  \
+         with e'. assert mem_pts_to_at a p (Pun.overlay b 0 (Pun.{t}_bytes (Pun.{t}_of_bytes (slice b {o} {e}))) {o}) e';\n  \
+         rewrite mem_pts_to_at a p (Pun.overlay b 0 (Pun.{t}_bytes (Pun.{t}_of_bytes (slice b {o} {e}))) {o}) e'\n    \
+         as mem_pts_to_at a p b e';\n  \
+         fixed_metadata_index a #p #b #e' #e;\n  \
          fold {un}_pts_to a p ({ctor} v);\n  \
          r\n}}\n\n",
         k = k,
@@ -630,15 +635,20 @@ fn pun_decls(
              ensures  {un}_pts_to a 1.0R ({ctor} ({k}_upd v x))\n\
              {{\n  \
              unfold {un}_pts_to a 1.0R ({ctor} v);\n  \
-             with b. assert mem_pts_to a 1.0R b;\n  \
+             with b e. assert (mem_pts_to_at a 1.0R b e ** pure ({un}_repr ({ctor} v) b /\\ ET.elen e == len b /\\ ET.declared_destination e /\\ ET.read_ok e {un}_ctype));\n  \
              {k}_lemma v b;\n  \
              {k}_wlemma v x b;\n  \
+             remember_fixed_metadata a;\n  \
+             assert_norm (ET.access_ok {un}_ctype {o} {t}_ctype /\\ ET.compose_ok {un}_ctype {t}_ctype);\n  \
+             ET.read_ok_slice e {un}_ctype {o} {t}_ctype;\n  \
              Pun.mem_carve a {o}sz {n}sz;\n  \
              {k}_aligned a;\n  \
              Pun.{t}_of_mem (a +! {o}sz);\n  \
              {t}_write (a +! {o}sz) x;\n  \
              Pun.{t}_to_mem (a +! {o}sz);\n  \
              Pun.mem_uncarve a {o}sz {n}sz;\n  \
+             with b' e'. assert mem_pts_to_at a 1.0R b' e';\n  \
+             fixed_metadata_index a #1.0R #b' #e' #e;\n  \
              fold {un}_pts_to a 1.0R ({ctor} ({k}_upd v x));\n}}\n\n",
             k = k,
             lty = lty,
@@ -7063,9 +7073,9 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         let mut permission = if m.size == 0 {
             String::new()
         } else {
+            let ct = ctype_of_shape(&m.shape).unwrap();
             format!(
-                "ET.read_ok_slice e {un}_ctype 0 ({});",
-                ctype_of_shape(&m.shape).unwrap()
+                "assert_norm (ET.access_ok {un}_ctype 0 ({ct}) /\\ ET.compose_ok {un}_ctype ({ct}));\n  ET.read_ok_slice e {un}_ctype 0 ({ct});"
             )
         };
         if let FieldShape::Array { pn, len, .. } = &m.shape {
@@ -7377,9 +7387,9 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
         let mut permission = if m.size == 0 {
             String::new()
         } else {
+            let ct = ctype_of_shape(&m.shape).unwrap();
             format!(
-                "ET.read_ok_slice e {un}_ctype 0 ({});",
-                ctype_of_shape(&m.shape).unwrap()
+                "assert_norm (ET.access_ok {un}_ctype 0 ({ct}) /\\ ET.compose_ok {un}_ctype ({ct}));\n  ET.read_ok_slice e {un}_ctype 0 ({ct});"
             )
         };
         if let FieldShape::Array { pn, len, .. } = &m.shape {
@@ -16783,6 +16793,11 @@ impl<'a> Body<'a> {
             return None;
         }
         let un = self.union_of(&u)?;
+        // A union in allocated storage is owned through its heap family, not
+        // `_pts_to`; its accesses are the `heap_union_*` paths.
+        if !matches!(self.heap_union_block(&u, &un), Ok(None)) {
+            return None;
+        }
         let uname = un.strip_prefix("union_")?.to_string();
         let ui = self.tds.unions.get(&uname)?;
         if o % n != 0 || ui.align % n != 0 {
@@ -16899,6 +16914,7 @@ impl<'a> Body<'a> {
             open_write: Vec::new(),
             close_read: bcr,
             close_write: bcw,
+            read_as: None,
         })
     }
 

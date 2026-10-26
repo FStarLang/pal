@@ -1236,15 +1236,19 @@ the one last stored: 24.7 (punning to bytes that are not a `_Bool` value,
 through the union; contested, like 24.1), 24.9 (a common initial sequence
 broken by `int` vs `unsigned`, then a same-offset same-type field read past
 it) and 24.10 (the common initial sequence read in a function where the union
-declaration is not visible). All four are UB, and all four are currently
-explicit unsupported-translation expectations, like the other union cases,
-except 24.7, which translates and fails at the reread (below);
-24.9 and 24.10 are refused with a diagnostic naming the rule they break
-(the common initial sequence is empty; the address of a member not known to
-be live escapes into a function that cannot see the union), and 24.8 at the
+declaration is not visible). The corpus marks all four UB. 24.7 translates
+and fails at the reread (below); 24.10 is refused with a diagnostic naming
+the rule it breaks (the address of a member not known to be live escapes into
+a function that cannot see the union), and 24.8 at the
 read through a pointer to an inactive member: punning is licensed only
 through the union (6.5.2.3p3, footnote 95), so a read through a pointer
 bound to `&u.m` is accepted only where `m` is known to be live.
+24.9 now verifies: its read of `v.s.x` while `v.u` is live is the `int` at
+the same offset as the live `v.u.x`, so it is accepted by type punning on the
+bytes of the live member (6.5.2.3p3, footnote 95; item 42 of the change log)
+rather than by the common initial sequence, which is empty. The corpus's UB
+reading, that only the common initial sequence licenses such a read, is
+contested, like 24.1 and 24.8.
 
 Common initial sequences (6.5.2.3p6) are supported for local unions: a read
 of `u.m.f` while struct member `l` is live is rewritten to the read of the
@@ -6770,5 +6774,12 @@ new facts about memory.
       with a refinement.
     - It is a whole-member access through another member, such as `&u->b`
       while `a` is live.
+    - The union is in allocated storage, which the `heap_union_*` paths
+      handle.
+    Against the effective-type index the helpers carve the union's
+    `mem_pts_to_at` window together with its index slice. They justify the
+    integer view with `ET.read_ok_slice` from the union's `read_ok`, and
+    after the access they recover the union's index with
+    `fixed_metadata_index`.
     The older `punned_field` path still handles same-type leading scalars of
     non-integer type. `test/union_pun_bytes` covers the new cases.
