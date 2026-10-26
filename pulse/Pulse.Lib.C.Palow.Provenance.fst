@@ -12,10 +12,10 @@ module Pulse.Lib.C.Palow.Provenance
       carry around, it actually buys the round trip.
 
    2. `transport` -- acceptance test 5 from `palow.md`. A stored pointer copied
-      byte-wise with `memcpy` into an object of an unrelated type is still
+      byte-wise with `memcpy` into fresh untyped allocated storage is still
       dereferenceable at the destination. Nothing in `memcpy`'s spec mentions
-      pointers or provenance; it falls out of the destination holding the same
-      *bytes*, and bytes carrying provenance.
+      provenance; it falls out of the destination holding the same bytes.
+      Its effective-type rule additionally needs an established source.
 
    The second is worth dwelling on. Under a model where the object
    representation is a sequence of plain `uint8_t`s, this program is not
@@ -38,6 +38,9 @@ open Pulse.Lib.C.Palow.Expose
 
 module U32 = FStar.UInt32
 module SZ = FStar.SizeT
+module ET = Pulse.Lib.C.Palow.Etype
+module V = Pulse.Lib.C.Palow.Effective.Value
+module Seq = FStar.Seq
 
 (* `(uintptr_t) a` followed by a cast back yields `a` itself. Note where the
    ownership is used: `expose` and `mem_pts_to_footprint` both need it, but
@@ -59,22 +62,24 @@ fn round_trip (a: ptr) (#p: perm) (#x: erased U32.t)
   b
 }
 
-(* Acceptance test 5. `src` holds a pointer to a `uint32_t`; `dst` is eight
-   bytes of storage of no particular type. After copying the bytes across, the
-   pointer read back out of `dst` can be dereferenced -- and `rewrites_to` on
-   `ptr_read` means we never have to say that it equals `target`, it just is. *)
+(* The source has an established pointer type; mere fallback readability is
+   not sufficient to establish the destination's type through copying. *)
 fn transport (src dst: ptr) (#target: ptr) (#bd: bytes) (#x: erased U32.t)
-  requires ptr_pts_to src 1.0R target
-  requires mem_pts_to dst 1.0R bd
+  requires V.value ptr_ctype ptr_repr ptr_alignof src 1.0R target
+    (ET.etypes_of ptr_ctype true)
+  requires mem_pts_to_at dst 1.0R bd (Seq.create 8 None)
   requires pure (len bd == SZ.v ptr_sizeof /\ aligned dst ptr_alignof)
   preserves uint32_t_pts_to target 1.0R x
   returns   y : U32.t
-  ensures   ptr_pts_to src 1.0R target ** ptr_pts_to dst 1.0R target
+  ensures V.value ptr_ctype ptr_repr ptr_alignof src 1.0R target
+    (ET.etypes_of ptr_ctype true) ** ptr_pts_to dst 1.0R target
   ensures   pure (y == reveal x)
 {
-  ptr_reveal src #1.0R #target;
+  V.reveal_value ptr_ctype ptr_repr ptr_alignof src;
+  with bs. assert (mem_pts_to_at src 1.0R bs (ET.etypes_of ptr_ctype true));
   memcpy dst src ptr_sizeof;
-  ptr_conceal src #1.0R #_ #target;
+  V.claim ptr_ctype ptr_repr ptr_alignof src #1.0R #target #bs
+    #(ET.etypes_of ptr_ctype true);
   ptr_conceal dst #1.0R #_ #target;
   let p = ptr_read dst;
   uint32_t_read p;

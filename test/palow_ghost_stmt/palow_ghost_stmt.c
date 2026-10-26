@@ -16,10 +16,21 @@ _pure int pure_ghost_stmt()
   return 1;
 }
 
-/* Owning a pointee is already a proof that the pointer is not null, and in
- * Palow that lemma is named after the type stored, because the points-to
- * predicate is. */
+/* Reveal the actual indexed bytes to prove nonnull, then restore the same
+ * retained owner without discarding its effective-type information. */
 void check_nonnull(const int *x) {
-    _ghost_stmt(int32_t_pts_to_not_null $(x));
+    _ghost_stmt(
+      unfold R.value int32_t_ctype int32_t_repr int32_t_alignof
+        $(x) perm_x val_x index_x;
+      with actual. assert Pulse.Lib.C.Palow.Effective.Value.value
+        int32_t_ctype int32_t_repr int32_t_alignof $(x) perm_x val_x actual;
+      Pulse.Lib.C.Palow.Effective.Value.reveal_value
+        int32_t_ctype int32_t_repr int32_t_alignof $(x) #perm_x #val_x #actual;
+      with b. assert mem_pts_to_at $(x) perm_x b actual;
+      mem_pts_to_at_not_null $(x) #perm_x #b #actual;
+      Pulse.Lib.C.Palow.Effective.Value.claim
+        int32_t_ctype int32_t_repr int32_t_alignof $(x) #perm_x #val_x #b #actual;
+      R.conceal int32_t_ctype int32_t_repr int32_t_alignof
+        $(x) #perm_x #val_x #actual #index_x);
     assert(x);
 }

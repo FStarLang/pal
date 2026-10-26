@@ -179,6 +179,13 @@ void list_example3(void)
     struct item3 first = {.ready = false};
     struct item3 second = {.ready = false};
     struct item3 third = {.ready = false};
+    _ghost_stmt(ET.read_ok_of Struct_item3.struct_item3_ctype (1 = 1));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&first) Struct_item3.struct_item3_ctype
+        (ET.etypes_of Struct_item3.struct_item3_ctype (1 = 1)));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&second) Struct_item3.struct_item3_ctype
+        (ET.etypes_of Struct_item3.struct_item3_ctype (1 = 1)));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&third) Struct_item3.struct_item3_ctype
+        (ET.etypes_of Struct_item3.struct_item3_ctype (1 = 1)));
     bool assertion_empty = false;
     _plain struct item3 *removed = NULL;
 
@@ -271,4 +278,7 @@ void list_example3(void)
     items3_unit_validate(&destination);
     _ghost_stmt(IntrusiveList.release_empty IntrusiveListExample3.payload $(&source));
     _ghost_stmt(IntrusiveList.release_empty IntrusiveListExample3.payload $(&destination));
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&first) Struct_item3.struct_item3_ctype);
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&second) Struct_item3.struct_item3_ctype);
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&third) Struct_item3.struct_item3_ctype);
 }

@@ -285,6 +285,15 @@ void list_example(void)
     struct item second = {.value = 1};
     struct item third = {.value = 2};
     struct item fourth = {.value = 4};
+    _ghost_stmt(ET.read_ok_of Struct_item.struct_item_ctype (1 = 1));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&first) Struct_item.struct_item_ctype
+        (ET.etypes_of Struct_item.struct_item_ctype (1 = 1)));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&second) Struct_item.struct_item_ctype
+        (ET.etypes_of Struct_item.struct_item_ctype (1 = 1)));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&third) Struct_item.struct_item_ctype
+        (ET.etypes_of Struct_item.struct_item_ctype (1 = 1)));
+    _ghost_stmt(IntrusiveListItemRefs.declared_intro $(&fourth) Struct_item.struct_item_ctype
+        (ET.etypes_of Struct_item.struct_item_ctype (1 = 1)));
     bool assertion_empty = false;
     _plain struct item *assertion_item = NULL;
 
@@ -452,4 +461,8 @@ void list_example(void)
         $(&destination) $(&destination) [] []);
     _ghost_stmt(IntrusiveListOps.indexed_release_empty IntrusiveListExample.item_ipl $(&source));
     _ghost_stmt(IntrusiveListOps.indexed_release_empty IntrusiveListExample.item_ipl $(&destination));
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&first) Struct_item.struct_item_ctype);
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&second) Struct_item.struct_item_ctype);
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&third) Struct_item.struct_item_ctype);
+    _ghost_stmt(IntrusiveListItemRefs.declared_drop $(&fourth) Struct_item.struct_item_ctype);
 }

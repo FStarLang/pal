@@ -537,11 +537,100 @@ public:
     return {};
   }
 
+  bool isLongLong(QualType t) {
+    t = t.getCanonicalType();
+    return t->isSpecificBuiltinType(BuiltinType::LongLong) ||
+           t->isSpecificBuiltinType(BuiltinType::ULongLong);
+  }
+
+  // The tag PAL names an enumerated type by: its own tag, or else the typedef
+  // that names an anonymous enum. Empty when the enum is not supported as an
+  // effective type: no name, or an underlying type other than `int` or
+  // `unsigned int` (the ones Clang picks for C enums that fit).
+  std::string supportedEnumTag(QualType t) {
+    auto ed = dyn_cast_or_null<EnumDecl>(t.getCanonicalType()->getAsTagDecl());
+    if (!ed)
+      return {};
+    if (auto def = ed->getDefinition())
+      ed = def;
+    else
+      return {};
+    auto underlying = ed->getIntegerType();
+    if (underlying.isNull())
+      return {};
+    underlying = underlying.getCanonicalType();
+    if (!underlying->isSpecificBuiltinType(BuiltinType::Int) &&
+        !underlying->isSpecificBuiltinType(BuiltinType::UInt))
+      return {};
+    if (ed->getIdentifier())
+      return ed->getName().str();
+    if (auto tdef = ed->getTypedefNameForAnonDecl())
+      return tdef->getName().str();
+    return {};
+  }
+
+  QualType noncanonicalIntegerStorage(QualType t,
+                                      std::unordered_set<const Type *> &seen) {
+    t = t.getCanonicalType().getUnqualifiedType();
+    if (!seen.insert(t.getTypePtr()).second)
+      return {};
+    if (t->isEnumeralType())
+      return supportedEnumTag(t).empty() ? t : QualType();
+    if (t->isIntegerType() && !t->isBooleanType() && !t->isAnyCharacterType()) {
+      if (isLongLong(t))
+        return {};
+      auto canonical = astCtx->getIntTypeForBitwidth(astCtx->getIntWidth(t),
+                                                     t->isSignedIntegerType());
+      if (!canonical.isNull() && !astCtx->hasSameType(t, canonical))
+        return t;
+    } else if (auto array = astCtx->getAsArrayType(t)) {
+      return noncanonicalIntegerStorage(array->getElementType(), seen);
+    } else if (auto record = t->getAs<RecordType>()) {
+      if (auto definition = record->getDecl()->getDefinition()) {
+        for (auto field : definition->fields()) {
+          auto unsupported = noncanonicalIntegerStorage(field->getType(), seen);
+          if (!unsupported.isNull())
+            return unsupported;
+        }
+      }
+    } else if (auto function = t->getAs<FunctionProtoType>()) {
+      auto unsupported =
+          noncanonicalIntegerStorage(function->getReturnType(), seen);
+      if (!unsupported.isNull())
+        return unsupported;
+      for (auto param : function->param_types()) {
+        unsupported = noncanonicalIntegerStorage(param, seen);
+        if (!unsupported.isNull())
+          return unsupported;
+      }
+    }
+    return {};
+  }
+
+  bool unsupportedIntegerStoragePointer(QualType t, SourceRange range,
+                                        Rc<ir::SourceInfo> loc) {
+    if (!t->isPointerType())
+      return false;
+    std::unordered_set<const Type *> seen;
+    auto unsupported = noncanonicalIntegerStorage(t->getPointeeType(), seen);
+    if (unsupported.isNull())
+      return false;
+    reportUnsupported(range, loc,
+                      "unsupported addressable integer type identity: "
+                      "effective-type descriptors "
+                      "do not distinguish ",
+                      unsupported.getAsString());
+    return true;
+  }
+
   Rc<ir::Type> trQualType(QualType t, SourceRange range,
                           AnonNameGen *liftStructs = nullptr,
                           FunctionProtoTypeLoc protoLoc = {}) {
     t = t.IgnoreParens();
     auto loc = getRange(range);
+    // Preserve the known layout for error recovery; TranslationErrors rejects
+    // the unsupported type instead of later passes seeing an unresolved type.
+    unsupportedIntegerStoragePointer(t, range, loc.clone());
 
     if (t.getAsString() == "size_t") {
       return mk_sizet(std::move(loc));
@@ -635,6 +724,12 @@ public:
     if (t->isSignedIntegerType() || t->isUnsignedIntegerType()) {
       bool isSigned = t->isSignedIntegerType();
       unsigned width = astCtx->getIntWidth(t);
+      // An object's effective type is its exact C type, so keep the identity
+      // of the types that share a representation with another one.
+      if (auto tag = supportedEnumTag(t); !tag.empty())
+        return mk_enum_type(std::move(loc), isSigned, width, toStr(tag));
+      if (isLongLong(t))
+        return mk_long_long_type(std::move(loc), isSigned);
       return mk_int_type(std::move(loc), isSigned, width);
     }
 
@@ -1068,6 +1163,18 @@ public:
   // Whether an ignored variadic argument can be dropped without losing a
   // proof obligation: evaluating it must have no side effects, read no memory
   // other than non-volatile locals, and have no undefined behavior.
+  /// `c ? x : d ? y : z` whose leaves are all inert: what evaluating it
+  /// obliges is what evaluating the conditions on the path taken does.
+  bool inertVariadicConditional(Expr *e) {
+    auto *co = dyn_cast<ConditionalOperator>(e->IgnoreParenImpCasts());
+    if (!co)
+      return false;
+    auto leaf = [&](Expr *a) {
+      return canOmitVariadicArgument(a) || inertVariadicConditional(a);
+    };
+    return leaf(co->getTrueExpr()) && leaf(co->getFalseExpr());
+  }
+
   bool canOmitVariadicArgument(Expr *e) {
     if (e->HasSideEffects(*astCtx))
       return false;
@@ -1134,6 +1241,11 @@ public:
 
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
+    if (unsupportedIntegerStoragePointer(e->getType(), e->getSourceRange(),
+                                         loc.clone())) {
+      auto ty = trQualType(e->getType(), e->getSourceRange());
+      return mk_rvalue_err(std::move(loc), std::move(ty));
+    }
 
     if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
       return trRValue(generic->getResultExpr());
@@ -1898,8 +2010,49 @@ public:
           return mk_rvalue_err(std::move(loc),
                                trQualType(c->getType(), c->getSourceRange()));
         }
-        if ((fd->getName() == "memset" && c->getNumArgs() == 3) ||
-            isMemsetAlias) {
+        // `memset(&x, c, n)` with `x` a declared object and `n` a constant
+        // equal to `sizeof x` fills the whole of `x`, exactly as `sizeof x`
+        // would. Only a declared object: allocated storage has no type to
+        // take the size of, and a fill must not give it one (6.5p6).
+        auto declaredObjectSize = [&](Expr *ptrArg, Expr *sizeArg) -> bool {
+          auto *addr = dyn_cast<UnaryOperator>(ptrArg->IgnoreParenImpCasts());
+          if (!addr || addr->getOpcode() != UO_AddrOf)
+            return false;
+          auto *ref =
+              dyn_cast<DeclRefExpr>(addr->getSubExpr()->IgnoreParenImpCasts());
+          if (!ref || !isa<VarDecl>(ref->getDecl()))
+            return false;
+          auto objQt = addr->getSubExpr()->getType();
+          if (objQt->isIncompleteType() || objQt->isDependentType() ||
+              objQt->isArrayType())
+            return false;
+          Expr::EvalResult szRes;
+          return sizeArg->EvaluateAsInt(szRes, *astCtx) && szRes.Val.isInt() &&
+                 szRes.Val.getInt() ==
+                     astCtx->getTypeSizeInChars(objQt).getQuantity();
+        };
+        // A constant nonzero fill of one whole object, `memset(&x, c,
+        // sizeof x)`, stays a call: the emitter stores the value every member
+        // decodes from that byte, which only it can compute.
+        bool objectFill = false;
+        if (fd->getName() == "memset" && c->getNumArgs() == 3 &&
+            !isMemsetAlias) {
+          Expr::EvalResult fill;
+          auto *sz = dyn_cast<UnaryExprOrTypeTraitExpr>(
+              c->getArg(2)->IgnoreParenImpCasts());
+          auto pointee =
+              c->getArg(0)->IgnoreParenImpCasts()->getType()->getPointeeType();
+          objectFill =
+              c->getArg(1)->EvaluateAsInt(fill, *astCtx) && fill.Val.isInt() &&
+              fill.Val.getInt() != 0 &&
+              ((sz && sz->getKind() == UETT_SizeOf && !pointee.isNull() &&
+                astCtx->hasSameUnqualifiedType(sz->getTypeOfArgument(),
+                                               pointee)) ||
+               declaredObjectSize(c->getArg(0), c->getArg(2)));
+        }
+        if (((fd->getName() == "memset" && c->getNumArgs() == 3) ||
+             isMemsetAlias) &&
+            !objectFill) {
           auto *ptrArg = c->getArg(0);
           // Strip implicit void* cast
           if (auto *ic = dyn_cast<ImplicitCastExpr>(ptrArg)) {
@@ -1937,6 +2090,15 @@ public:
                                       trRValue(ptrArg));
               }
             }
+          }
+          // The same with the size spelled as a constant: `memset(&x, 0, 4)`.
+          if (!isMemsetAlias && declaredObjectSize(c->getArg(0), sizeArg)) {
+            auto *obj = cast<UnaryOperator>(c->getArg(0)->IgnoreParenImpCasts())
+                            ->getSubExpr();
+            auto objTy = trQualType(obj->getType().getUnqualifiedType(),
+                                    obj->getSourceRange());
+            return mk_memset_zero(std::move(loc), std::move(objTy),
+                                  trRValue(ptrArg));
           }
           // Zeroing a whole array: `f(arr, N)` where `arr` is an array-typed
           // lvalue that decays to the pointer argument and `N` is its size in
@@ -2415,6 +2577,25 @@ public:
           auto *arg = call->getArg(i);
           if (canOmitVariadicArgument(arg) || hoistedVarargs.count(arg))
             continue;
+          // `c ? "a" : "b"`: the arm chosen is inert and dropped, so what
+          // evaluating the argument obliges is what evaluating `c` does.
+          if (auto *co =
+                  dyn_cast<ConditionalOperator>(arg->IgnoreParenImpCasts());
+              co && canOmitVariadicArgument(co->getTrueExpr()) &&
+              canOmitVariadicArgument(co->getFalseExpr())) {
+            hoistedVarargs.insert(arg);
+            arg = co->getCond();
+            if (canOmitVariadicArgument(arg))
+              continue;
+          }
+          // Nested, the conditions past the first are evaluated only on
+          // their own path, so the argument becomes the `if`s that a
+          // conditional in statement position is: each inert arm drops out.
+          if (inertVariadicConditional(arg)) {
+            hoistedVarargs.insert(arg);
+            trStmt(stmts, arg->IgnoreParenImpCasts());
+            continue;
+          }
           auto argLoc = getRange(arg->getSourceRange());
           auto ty = trQualType(arg->getType(), arg->getSourceRange());
           auto name = "__pal_vararg_" + std::to_string(rvalueHoistCounter++);
@@ -3316,6 +3497,9 @@ public:
               stmts.push(mk_assign(dloc.clone(),
                                    mk_lvalue_var(dloc.clone(), id.clone()),
                                    std::move(init)));
+              // A `const` object may be read but never modified (6.7.3p6).
+              if (qt.isConstQualified())
+                stmts.push(mk_freeze(dloc.clone(), id.clone()));
             }
           }
         } else if (auto fd = dyn_cast<FunctionDecl>(d); fd && !fd->hasBody()) {

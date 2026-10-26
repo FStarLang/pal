@@ -1,0 +1,1 @@
+Each C file is a standalone translation unit with its own main and helper names.

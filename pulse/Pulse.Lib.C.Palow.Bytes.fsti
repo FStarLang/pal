@@ -94,6 +94,10 @@ let slice (b: bytes) (i: nat) (j: nat { i <= j /\ j <= len b })
 let append (b1 b2: bytes) : b:bytes { len b == len b1 + len b2 } =
   Seq.append b1 b2
 
+let initialized_append (b1 b2: bytes)
+  : Lemma (requires initialized b1 /\ initialized b2)
+          (ensures initialized (append b1 b2)) = ()
+
 (* An all-zero range stays all-zero when it is cut up, which is the whole of
    what an aggregate needs in order to see `calloc`'s storage as a value: a
    struct's `_repr` reads each field out of an absolute slice of the object,

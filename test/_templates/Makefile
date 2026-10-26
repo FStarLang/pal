@@ -8,6 +8,29 @@ OBJ_DIR ?= obj
 C_FILES := $(wildcard *.c)
 H_FILES := $(wildcard *.h)
 PAL_OPTS :=
+SHOULD_FAIL ?= should-fail
+TRANSLATION_ERRORS ?= translation-errors
+STANDALONE ?= $(if $(wildcard standalone),1,0)
+
+ifeq ($(STANDALONE),1)
+
+all: $(C_FILES:.c=.all)
+translate: $(C_FILES:.c=.translate)
+verify: $(C_FILES:.c=.verify)
+compile: $(C_FILES:.c=.compile)
+clean: $(C_FILES:.c=.clean)
+
+STANDALONE_TARGETS := $(foreach goal,all translate verify compile clean,$(C_FILES:.c=.$(goal)))
+.PHONY: $(STANDALONE_TARGETS)
+$(STANDALONE_TARGETS):
+	+$(MAKE) --no-print-directory STANDALONE=0 C_FILES=$(basename $@).c \
+		OUT_DIR=$(OUT_DIR)/$(basename $@) CACHE_DIR=$(CACHE_DIR)/$(basename $@) \
+		OBJ_DIR=$(OBJ_DIR)/$(basename $@) DEPEND=$(OUT_DIR)/$(basename $@)/.depend \
+		SHOULD_FAIL=$(if $(wildcard $(basename $@).should-fail),$(basename $@).should-fail,$(if $(wildcard $(basename $@).translation-errors),../_templates/translation-should-fail,$(SHOULD_FAIL))) \
+		TRANSLATION_ERRORS=$(if $(wildcard $(basename $@).translation-errors),$(basename $@).translation-errors,$(TRANSLATION_ERRORS)) \
+		$(patsubst .%,%,$(suffix $@))
+
+else
 
 # The memory model's own modules are checked once, in `pulse/`, and found from
 # there rather than re-verified in every test.
@@ -30,31 +53,59 @@ all: verify compile
 
 translate: $(OUT_DIR)/.stamp
 
-$(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
+$(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h Makefile
 	@mkdir -p $(OUT_DIR)
-	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
+	@rm -f -- "$(OUT_DIR)"/*.fst "$(OUT_DIR)"/*.fsti
+	@$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES) >$(OUT_DIR)/translate.log 2>&1; \
+		status=$$?; cat $(OUT_DIR)/translate.log || exit $$?; exit $$status
 	@touch $@
+
+.PHONY: check-translation-errors
+verify: check-translation-errors
+check-translation-errors: $(OUT_DIR)/.stamp
+ifneq ($(wildcard $(TRANSLATION_ERRORS)),)
+	@if ! grep -q '[^[:space:]]' "$(TRANSLATION_ERRORS)"; then \
+		echo "ERROR: $(TRANSLATION_ERRORS) must name an expected PAL diagnostic" >&2; \
+		exit 1; \
+	fi; \
+	while IFS= read -r pat || [ -n "$$pat" ]; do \
+		[ -z "$$pat" ] && continue; \
+		if ! grep -qF -- "$$pat" $(OUT_DIR)/translate.log; then \
+			echo "ERROR: no PAL diagnostic contains '$$pat'" >&2; \
+			exit 1; \
+		fi; \
+	done < "$(TRANSLATION_ERRORS)"
+endif
 
 # A negative test carries a `should-fail` file: verification must fail, and
 # every line of that file must appear in the output. Without the second half a
 # test could start failing for some unrelated reason and still look like it was
-# doing its job.
-ifneq ($(wildcard should-fail),)
+# doing its job. Standalone cases can instead carry `<case>.should-fail`.
+ifneq ($(wildcard $(SHOULD_FAIL)),)
+ifneq ($(wildcard $(TRANSLATION_ERRORS)),)
+# Check the frontend's rejecting module, not admitted bodies or their helpers.
+NEGATIVE_FILES := FST_FILES="$(OUT_DIR)/TranslationErrors.fst" FSTI_FILES= \
+	DEPEND="$(OUT_DIR)/.translation-errors.depend"
+endif
 verify: $(OUT_DIR)/.stamp
-	@if $(MAKE) --no-print-directory -f ../verify.mk \
-		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
-		HELPERS=$(HELPERS) >$(OUT_DIR)/verify.log 2>&1; then \
-		echo "ERROR: $(CURDIR) verified, but should-fail says it must not" >&2; \
+	@if ! grep -q '[^[:space:]]' "$(SHOULD_FAIL)"; then \
+		echo "ERROR: $(SHOULD_FAIL) must name an expected diagnostic" >&2; \
 		exit 1; \
 	fi; \
-	while IFS= read -r pat; do \
+	if $(MAKE) --no-print-directory -k -f ../verify.mk \
+		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
+		HELPERS=$(HELPERS) $(NEGATIVE_FILES) >$(OUT_DIR)/verify.log 2>&1; then \
+		echo "ERROR: $(CURDIR) verified, but $(SHOULD_FAIL) says it must not" >&2; \
+		exit 1; \
+	fi; \
+	while IFS= read -r pat || [ -n "$$pat" ]; do \
 		[ -z "$$pat" ] && continue; \
 		if ! grep -qF -- "$$pat" $(OUT_DIR)/verify.log; then \
 			echo "ERROR: $(CURDIR) failed, but not for the expected reason:" >&2; \
 			echo "       no line of the output contains '$$pat'" >&2; \
 			exit 1; \
 		fi; \
-	done < should-fail; \
+	done < "$(SHOULD_FAIL)"; \
 	echo "Failed as expected: $(CURDIR)"
 else
 verify: $(OUT_DIR)/.stamp
@@ -71,3 +122,5 @@ $(OBJ_DIR)/%.o: %.c $(C_FILES) $(H_FILES)
 
 clean:
 	rm -rf $(OUT_DIR) $(CACHE_DIR) $(OBJ_DIR) .depend
+
+endif

@@ -1,0 +1,1 @@
+error: `Func_case_22_2_dangling_automatic_object`: its body is not translated: a dereference of local `g_dangling_auto`, whose target the contract does not grant

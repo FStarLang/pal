@@ -1,0 +1,1 @@
+a read of `a.x` while `b` is the live member of union cis: `x` is past their common initial sequence (6.5.2.3p6)

@@ -23,6 +23,49 @@ _include_pulse(P,
   include Pulse.Lib.C.Palow.Array
   include Pulse.Lib.C.Palow.Nullable
   include Struct_pool_anon_1
+  module ET = Pulse.Lib.C.Palow.Etype
+
+  ghost fn hide_index (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+    requires mem_pts_to_at a p b e
+    requires pure (ET.elen e == len b)
+    ensures mem_pts_to a p b
+  {
+    mem_pts_to_at_eq a p b;
+    rewrite (exists* actual. mem_pts_to_at a p b actual **
+      pure (ET.elen actual == len b)) as (mem_pts_to a p b);
+  }
+
+  ghost fn reveal_index (a: ptr) (#p: perm) (#b: bytes)
+    requires mem_pts_to a p b
+    ensures exists* e. mem_pts_to_at a p b e ** pure (ET.elen e == len b)
+  {
+    mem_pts_to_at_eq a p b;
+    rewrite (mem_pts_to a p b) as
+      (exists* actual. mem_pts_to_at a p b actual ** pure (ET.elen actual == len b));
+  }
+
+  let none_slice (n lo hi: nat)
+    : Lemma
+        (requires lo <= hi /\ hi <= n)
+        (ensures FStar.Seq.slice (ET.etypes_none n) lo hi == ET.etypes_none (hi - lo))
+    = FStar.Seq.lemma_eq_intro (FStar.Seq.slice (ET.etypes_none n) lo hi)
+        (ET.etypes_none (hi - lo))
+
+  ghost fn split_fresh (a: ptr) (#b: bytes)
+      (n: FStar.SizeT.t { FStar.SizeT.v n <= len b })
+    requires mem_pts_to_at a 1.0R b (ET.etypes_none (len b))
+    requires pure (FStar.SizeT.v n <= len b)
+    ensures mem_pts_to_at a 1.0R (slice b 0 (FStar.SizeT.v n))
+      (ET.etypes_none (FStar.SizeT.v n)) **
+      mem_pts_to_at (a +! n) 1.0R (slice b (FStar.SizeT.v n) (len b))
+        (ET.etypes_none (len b - FStar.SizeT.v n))
+  {
+    mem_split_at a n;
+    none_slice (len b) 0 (FStar.SizeT.v n);
+    none_slice (len b) (FStar.SizeT.v n) (len b);
+    assert pure (FStar.Seq.slice (ET.etypes_none (len b)) (FStar.SizeT.v n) (len b)
+      == ET.etypes_none (len b - FStar.SizeT.v n));
+  }
 
   (* How much of the pool one allocation of `n` bytes actually consumes.
      A pool that hands out objects of every type has to hand out suitably
@@ -53,7 +96,8 @@ _include_pulse(P,
      `b` is what `begin` holds, `e` what `end` holds, and `r` is how much has
      been given back. The first `r` bytes belong to the pool again, the bytes
      from `r` up to `b` are out with whoever was handed them, and the bytes
-     from `b` on have never been given to anyone. Naming the returned prefix
+     from `b` on have never been given to anyone and retain their actual
+     all-None allocation index. Naming the returned prefix
      is what lets the pool be freed: a pool with `r == b` owns all of its
      storage again, and nothing short of that does.
 
@@ -65,7 +109,8 @@ _include_pulse(P,
       size_t_pts_to (a +! struct_pool_anon_1_offsetof_end) 1.0R e **
       struct_pool_anon_1_padding a 1.0R **
       returned (a +! struct_pool_anon_1_offsetof_data) r **
-      mem_pts_to ((a +! struct_pool_anon_1_offsetof_data) +! b) 1.0R bs **
+      mem_pts_to_at ((a +! struct_pool_anon_1_offsetof_data) +! b) 1.0R bs
+        (ET.etypes_none (len bs)) **
       freeable a sz **
       pure (FStar.SizeT.v b <= FStar.SizeT.v e
 /\ len bs == FStar.SizeT.v e - FStar.SizeT.v b
@@ -102,9 +147,14 @@ pool *pool_new(size_t max_alloc)
     if (!p) return NULL;
     p->begin = 0;
     p->end = max_alloc;
+    _ghost_stmt(P.none_slice
+      (FStar.SizeT.v struct_pool_anon_1_sizeof + FStar.SizeT.v $(max_alloc))
+      (FStar.SizeT.v struct_pool_anon_1_offsetof_data)
+      (FStar.SizeT.v struct_pool_anon_1_sizeof + FStar.SizeT.v $(max_alloc)));
     /* Nothing has been handed out, so the returned prefix is empty and the
        unclaimed range is all of it. Splitting at zero says both at once. */
-    _ghost_stmt(mem_split ($(p) +! struct_pool_anon_1_offsetof_data) 0sz);
+    _ghost_stmt(P.split_fresh ($(p) +! struct_pool_anon_1_offsetof_data) 0sz);
+    _ghost_stmt(P.hide_index ($(p) +! struct_pool_anon_1_offsetof_data));
     _ghost_stmt(fold P.returned ($(p) +! struct_pool_anon_1_offsetof_data) 0sz);
     /* Both `unless_null` introductions are `[@@pulse_intro]`, so which one
        applies has to be said. */
@@ -121,7 +171,8 @@ _requires(_inline_pulse(P.pool_inv $(p) $(b) $(r) $(e)))
 _ensures(_inline_pulse(
   pure ($(return) == ($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) **
   pure (aligned $(return) max_align) **
-  (exists* bs. mem_pts_to $(return) 1.0R bs ** pure (len bs == FStar.SizeT.v $(n))) **
+  (exists* bs. mem_pts_to_at $(return) 1.0R bs (ET.etypes_none (len bs)) **
+    pure (len bs == FStar.SizeT.v $(n))) **
   P.pad $(return) $(n) **
   (exists* b2. pure (FStar.SizeT.v b2 == FStar.SizeT.v $(b) + P.roundup $(n))
                ** P.pool_inv $(p) b2 $(r) $(e))))
@@ -142,8 +193,9 @@ void *pool_alloc(_plain pool *p, size_t n)
     _ghost_stmt(aligned_add $(p) max_align struct_pool_anon_1_offsetof_data);
     _ghost_stmt(aligned_add ($(p) +! struct_pool_anon_1_offsetof_data) max_align $(b));
     /* The slot is `m` bytes: `n` for the caller and the rest for the pad. */
-    _ghost_stmt(mem_split (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(m));
-    _ghost_stmt(mem_split (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
+    _ghost_stmt(P.split_fresh (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(m));
+    _ghost_stmt(P.split_fresh (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
+    _ghost_stmt(P.hide_index ((($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) +! $(n)));
     _ghost_stmt(fold P.pad (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
     p->begin += m;
     /* The chunk handed out sits at `(data + b) + n`, and the contract says
@@ -166,13 +218,17 @@ void pool_free(_plain pool *p)
        the bytes they stand for, and the three ranges join into the one block
        `free` was given. */
     _ghost_stmt(unfold P.returned ($(p) +! struct_pool_anon_1_offsetof_data) $(b));
+    _ghost_stmt(P.hide_index (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)));
     _ghost_stmt(mem_join ($(p) +! struct_pool_anon_1_offsetof_data) $(b));
     _ghost_stmt(unfold struct_pool_anon_1_padding $(p) 1.0R);
     _ghost_stmt(size_t_reveal ($(p) +! struct_pool_anon_1_offsetof_begin));
+    _ghost_stmt(P.hide_index ($(p) +! struct_pool_anon_1_offsetof_begin));
     _ghost_stmt(size_t_reveal ($(p) +! struct_pool_anon_1_offsetof_end));
+    _ghost_stmt(P.hide_index ($(p) +! struct_pool_anon_1_offsetof_end));
     _ghost_stmt(rewrite each ($(p) +! struct_pool_anon_1_offsetof_begin) as $(p));
     _ghost_stmt(mem_join $(p) 8sz);
     _ghost_stmt(mem_join $(p) 16sz);
+    _ghost_stmt(P.reveal_index $(p));
     free(p);
 }
 
@@ -193,12 +249,14 @@ void example()
     /* Hand both chunks back before the pool goes. The pointers are the ones
        `pool_alloc` promised, which is what the two rewrites say. */
     _ghost_stmt(int32_t_reveal $(x));
+    _ghost_stmt(P.hide_index $(x));
     _ghost_stmt(unfold P.pad $(x) 4sz);
     _ghost_stmt(mem_join $(x) 4sz);
     _ghost_stmt(rewrite each $(x)
                 as (($(p) +! struct_pool_anon_1_offsetof_data) +! 0sz));
     _ghost_stmt(P.pool_return $(p) 0sz 16sz);
     _ghost_stmt(int64_t_reveal $(y));
+    _ghost_stmt(P.hide_index $(y));
     /* The second chunk is at `data + 16`, and the pool says so as a `size_t`
        whose value is 16. Naming the address before the rewrite is what keeps
        the equality query small enough to go through. */

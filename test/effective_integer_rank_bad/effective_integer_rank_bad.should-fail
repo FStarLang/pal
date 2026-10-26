@@ -1,0 +1,3 @@
+Func_direct_rank_read.fst(
+R.value long_long_t_ctype
+R.value int64_t_ctype int64_t_repr int64_t_alignof var_p

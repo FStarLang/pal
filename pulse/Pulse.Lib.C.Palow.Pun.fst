@@ -43,6 +43,7 @@ module I16 = FStar.Int16
 module I32 = FStar.Int32
 module I64 = FStar.Int64
 module M = FStar.Math.Lemmas
+module ET = Pulse.Lib.C.Palow.Etype
 
 (* Bytes an integer object could be made of. *)
 let plain (b: bytes) : prop = initialized b /\ no_prov b
@@ -197,45 +198,49 @@ let overlay_self (b: bytes) (o: nat) (n: nat { o + n <= len b })
    Carving a window out of a range, and putting it back
    --------------------------------------------------------------------------- *)
 
-let carve_rest (a: ptr) (p: perm) (b: bytes) (o: SZ.t)
-               (n: SZ.t { SZ.v o + SZ.v n <= len b /\ SZ.fits (SZ.v o + SZ.v n) }) : slprop =
-  mem_pts_to a p (slice b 0 (SZ.v o)) **
-  mem_pts_to (a +! SZ.add o n) p (slice b (SZ.v o + SZ.v n) (len b))
+let carve_rest (a: ptr) (p: perm) (b: bytes) (e: ET.etypes) (o: SZ.t)
+               (n: SZ.t { SZ.v o + SZ.v n <= len b /\ SZ.fits (SZ.v o + SZ.v n) /\ ET.elen e == len b }) : slprop =
+  mem_pts_to_at a p (slice b 0 (SZ.v o)) (Seq.slice e 0 (SZ.v o)) **
+  mem_pts_to_at (a +! SZ.add o n) p (slice b (SZ.v o + SZ.v n) (len b)) (Seq.slice e (SZ.v o + SZ.v n) (ET.elen e))
 
-ghost fn mem_carve (a: ptr) (#p: perm) (#b: bytes) (o: SZ.t)
-                   (n: SZ.t { SZ.v o + SZ.v n <= len b /\ SZ.fits (SZ.v o + SZ.v n) })
-  requires mem_pts_to a p b
-  ensures  mem_pts_to (a +! o) p (slice b (SZ.v o) (SZ.v o + SZ.v n))
-  ensures  carve_rest a p b o n
+ghost fn mem_carve (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (o: SZ.t)
+                   (n: SZ.t { SZ.v o + SZ.v n <= len b /\ SZ.fits (SZ.v o + SZ.v n) /\ ET.elen e == len b })
+  requires mem_pts_to_at a p b e
+  ensures  mem_pts_to_at (a +! o) p (slice b (SZ.v o) (SZ.v o + SZ.v n)) (Seq.slice e (SZ.v o) (SZ.v o + SZ.v n))
+  ensures  carve_rest a p b e o n
 {
-  mem_split a o;
-  mem_split (a +! o) n;
+  mem_split_at a o;
+  mem_split_at (a +! o) #p #(slice b (SZ.v o) (len b)) #(Seq.slice e (SZ.v o) (ET.elen e)) n;
   Seq.slice_slice b (SZ.v o) (len b) 0 (SZ.v n);
   Seq.slice_slice b (SZ.v o) (len b) (SZ.v n) (len b - SZ.v o);
-  rewrite (mem_pts_to (a +! o) p (slice (slice b (SZ.v o) (len b)) 0 (SZ.v n)))
-       as (mem_pts_to (a +! o) p (slice b (SZ.v o) (SZ.v o + SZ.v n)));
-  rewrite (mem_pts_to ((a +! o) +! n) p
-             (slice (slice b (SZ.v o) (len b)) (SZ.v n) (len (slice b (SZ.v o) (len b)))))
-       as (mem_pts_to (a +! SZ.add o n) p (slice b (SZ.v o + SZ.v n) (len b)));
-  fold (carve_rest a p b o n);
+  Seq.slice_slice e (SZ.v o) (ET.elen e) 0 (SZ.v n);
+  Seq.slice_slice e (SZ.v o) (ET.elen e) (SZ.v n) (ET.elen e - SZ.v o);
+  with b1 e1. assert (mem_pts_to_at (a +! o) p b1 e1);
+  rewrite (mem_pts_to_at (a +! o) p b1 e1)
+       as (mem_pts_to_at (a +! o) p (slice b (SZ.v o) (SZ.v o + SZ.v n)) (Seq.slice e (SZ.v o) (SZ.v o + SZ.v n)));
+  with b2 e2. assert (mem_pts_to_at ((a +! o) +! n) p b2 e2);
+  rewrite (mem_pts_to_at ((a +! o) +! n) p b2 e2)
+       as (mem_pts_to_at (a +! SZ.add o n) p (slice b (SZ.v o + SZ.v n) (len b)) (Seq.slice e (SZ.v o + SZ.v n) (ET.elen e)));
+  fold (carve_rest a p b e o n);
 }
 
-ghost fn mem_uncarve (a: ptr) (#p: perm) (#b: bytes) (o: SZ.t)
-                     (n: SZ.t { SZ.v o + SZ.v n <= len b /\ SZ.fits (SZ.v o + SZ.v n) })
-                     (#c: bytes { len c == SZ.v n })
-  requires mem_pts_to (a +! o) p c
-  requires carve_rest a p b o n
-  ensures  mem_pts_to a p (overlay b 0 c (SZ.v o))
+ghost fn mem_uncarve (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes) (o: SZ.t)
+                     (n: SZ.t { SZ.v o + SZ.v n <= len b /\ SZ.fits (SZ.v o + SZ.v n) /\ ET.elen e == len b })
+                     (#c: bytes { len c == SZ.v n }) (#ec: ET.etypes { ET.elen ec == len c })
+  requires mem_pts_to_at (a +! o) p c ec
+  requires carve_rest a p b e o n
+  ensures  exists* e'. mem_pts_to_at a p (overlay b 0 c (SZ.v o)) e' ** pure (ET.elen e' == len b)
 {
-  unfold (carve_rest a p b o n);
-  rewrite (mem_pts_to (a +! SZ.add o n) p (slice b (SZ.v o + SZ.v n) (len b)))
-       as (mem_pts_to ((a +! o) +! n) p (slice b (SZ.v o + SZ.v n) (len b)));
-  mem_join (a +! o) #p #c #(slice b (SZ.v o + SZ.v n) (len b)) n;
-  mem_join a #p #(slice b 0 (SZ.v o)) o;
+  unfold (carve_rest a p b e o n);
+  rewrite (mem_pts_to_at (a +! SZ.add o n) p (slice b (SZ.v o + SZ.v n) (len b)) (Seq.slice e (SZ.v o + SZ.v n) (ET.elen e)))
+       as (mem_pts_to_at ((a +! o) +! n) p (slice b (SZ.v o + SZ.v n) (len b)) (Seq.slice e (SZ.v o + SZ.v n) (ET.elen e)));
+  mem_join_at (a +! o) #p #c #(slice b (SZ.v o + SZ.v n) (len b)) #ec #(Seq.slice e (SZ.v o + SZ.v n) (ET.elen e)) n;
+  mem_join_at a #p #(slice b 0 (SZ.v o)) #(append c (slice b (SZ.v o + SZ.v n) (len b)))
+    #(Seq.slice e 0 (SZ.v o)) #(Seq.append ec (Seq.slice e (SZ.v o + SZ.v n) (ET.elen e))) o;
   let r = Ghost.hide (append (slice b 0 (SZ.v o)) (append c (slice b (SZ.v o + SZ.v n) (len b))));
   Seq.lemma_eq_intro r (overlay b 0 c (SZ.v o));
-  rewrite (mem_pts_to a p (append (slice b 0 (SZ.v o)) (append c (slice b (SZ.v o + SZ.v n) (len b)))))
-       as (mem_pts_to a p (overlay b 0 c (SZ.v o)));
+  with e'. assert (mem_pts_to_at a p r e');
+  rewrite (mem_pts_to_at a p r e') as (mem_pts_to_at a p (overlay b 0 c (SZ.v o)) e');
 }
 
 (* ---------------------------------------------------------------------------
@@ -266,22 +271,23 @@ let uint8_t_bytes_of_bytes (b: bytes)
   = encode_decode b;
     M.small_mod (bytes_nat b) (pow2 8)
 
-ghost fn uint8_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn uint8_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 1 /\ aligned a uint8_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
   ensures  uint8_t_pts_to a p (uint8_t_of_bytes b)
 {
   uint8_t_bytes_of_bytes b;
-  uint8_t_conceal a #p #b #(uint8_t_of_bytes b);
+  uint8_t_conceal a #p #b #(uint8_t_of_bytes b) #e;
 }
 
 ghost fn uint8_t_to_mem (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
-  ensures  mem_pts_to a p (uint8_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (uint8_t_bytes x) e ** pure (ET.elen e == len (uint8_t_bytes x))
 {
   uint8_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (uint8_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (uint8_t_bytes x) e);
 }
 
 (* uint16_t *)
@@ -307,22 +313,23 @@ let uint16_t_bytes_of_bytes (b: bytes)
   = encode_decode b;
     M.small_mod (bytes_nat b) (pow2 16)
 
-ghost fn uint16_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn uint16_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 2 /\ aligned a uint16_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint16_t_ctype)
   ensures  uint16_t_pts_to a p (uint16_t_of_bytes b)
 {
   uint16_t_bytes_of_bytes b;
-  uint16_t_conceal a #p #b #(uint16_t_of_bytes b);
+  uint16_t_conceal a #p #b #(uint16_t_of_bytes b) #e;
 }
 
 ghost fn uint16_t_to_mem (a: ptr) (#p: perm) (#x: U16.t)
   requires uint16_t_pts_to a p x
-  ensures  mem_pts_to a p (uint16_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (uint16_t_bytes x) e ** pure (ET.elen e == len (uint16_t_bytes x))
 {
   uint16_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (uint16_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (uint16_t_bytes x) e);
 }
 
 (* uint32_t *)
@@ -348,22 +355,23 @@ let uint32_t_bytes_of_bytes (b: bytes)
   = encode_decode b;
     M.small_mod (bytes_nat b) (pow2 32)
 
-ghost fn uint32_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn uint32_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 4 /\ aligned a uint32_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
   ensures  uint32_t_pts_to a p (uint32_t_of_bytes b)
 {
   uint32_t_bytes_of_bytes b;
-  uint32_t_conceal a #p #b #(uint32_t_of_bytes b);
+  uint32_t_conceal a #p #b #(uint32_t_of_bytes b) #e;
 }
 
 ghost fn uint32_t_to_mem (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
-  ensures  mem_pts_to a p (uint32_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (uint32_t_bytes x) e ** pure (ET.elen e == len (uint32_t_bytes x))
 {
   uint32_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (uint32_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (uint32_t_bytes x) e);
 }
 
 (* uint64_t *)
@@ -389,22 +397,23 @@ let uint64_t_bytes_of_bytes (b: bytes)
   = encode_decode b;
     M.small_mod (bytes_nat b) (pow2 64)
 
-ghost fn uint64_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn uint64_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 8 /\ aligned a uint64_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint64_t_ctype)
   ensures  uint64_t_pts_to a p (uint64_t_of_bytes b)
 {
   uint64_t_bytes_of_bytes b;
-  uint64_t_conceal a #p #b #(uint64_t_of_bytes b);
+  uint64_t_conceal a #p #b #(uint64_t_of_bytes b) #e;
 }
 
 ghost fn uint64_t_to_mem (a: ptr) (#p: perm) (#x: U64.t)
   requires uint64_t_pts_to a p x
-  ensures  mem_pts_to a p (uint64_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (uint64_t_bytes x) e ** pure (ET.elen e == len (uint64_t_bytes x))
 {
   uint64_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (uint64_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (uint64_t_bytes x) e);
 }
 
 (* int8_t *)
@@ -431,22 +440,23 @@ let int8_t_bytes_of_bytes (b: bytes)
     M.small_mod (bytes_nat b) (pow2 8);
     to_from_bits 8 (bytes_nat b % pow2 8)
 
-ghost fn int8_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn int8_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 1 /\ aligned a int8_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e int8_t_ctype)
   ensures  int8_t_pts_to a p (int8_t_of_bytes b)
 {
   int8_t_bytes_of_bytes b;
-  int8_t_conceal a #p #b #(int8_t_of_bytes b);
+  int8_t_conceal a #p #b #(int8_t_of_bytes b) #e;
 }
 
 ghost fn int8_t_to_mem (a: ptr) (#p: perm) (#x: I8.t)
   requires int8_t_pts_to a p x
-  ensures  mem_pts_to a p (int8_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (int8_t_bytes x) e ** pure (ET.elen e == len (int8_t_bytes x))
 {
   int8_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (int8_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (int8_t_bytes x) e);
 }
 
 (* int16_t *)
@@ -473,22 +483,23 @@ let int16_t_bytes_of_bytes (b: bytes)
     M.small_mod (bytes_nat b) (pow2 16);
     to_from_bits 16 (bytes_nat b % pow2 16)
 
-ghost fn int16_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn int16_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 2 /\ aligned a int16_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e int16_t_ctype)
   ensures  int16_t_pts_to a p (int16_t_of_bytes b)
 {
   int16_t_bytes_of_bytes b;
-  int16_t_conceal a #p #b #(int16_t_of_bytes b);
+  int16_t_conceal a #p #b #(int16_t_of_bytes b) #e;
 }
 
 ghost fn int16_t_to_mem (a: ptr) (#p: perm) (#x: I16.t)
   requires int16_t_pts_to a p x
-  ensures  mem_pts_to a p (int16_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (int16_t_bytes x) e ** pure (ET.elen e == len (int16_t_bytes x))
 {
   int16_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (int16_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (int16_t_bytes x) e);
 }
 
 (* int32_t *)
@@ -515,22 +526,23 @@ let int32_t_bytes_of_bytes (b: bytes)
     M.small_mod (bytes_nat b) (pow2 32);
     to_from_bits 32 (bytes_nat b % pow2 32)
 
-ghost fn int32_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn int32_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 4 /\ aligned a int32_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e int32_t_ctype)
   ensures  int32_t_pts_to a p (int32_t_of_bytes b)
 {
   int32_t_bytes_of_bytes b;
-  int32_t_conceal a #p #b #(int32_t_of_bytes b);
+  int32_t_conceal a #p #b #(int32_t_of_bytes b) #e;
 }
 
 ghost fn int32_t_to_mem (a: ptr) (#p: perm) (#x: I32.t)
   requires int32_t_pts_to a p x
-  ensures  mem_pts_to a p (int32_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (int32_t_bytes x) e ** pure (ET.elen e == len (int32_t_bytes x))
 {
   int32_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (int32_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (int32_t_bytes x) e);
 }
 
 (* int64_t *)
@@ -557,22 +569,23 @@ let int64_t_bytes_of_bytes (b: bytes)
     M.small_mod (bytes_nat b) (pow2 64);
     to_from_bits 64 (bytes_nat b % pow2 64)
 
-ghost fn int64_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn int64_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 8 /\ aligned a int64_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e int64_t_ctype)
   ensures  int64_t_pts_to a p (int64_t_of_bytes b)
 {
   int64_t_bytes_of_bytes b;
-  int64_t_conceal a #p #b #(int64_t_of_bytes b);
+  int64_t_conceal a #p #b #(int64_t_of_bytes b) #e;
 }
 
 ghost fn int64_t_to_mem (a: ptr) (#p: perm) (#x: I64.t)
   requires int64_t_pts_to a p x
-  ensures  mem_pts_to a p (int64_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (int64_t_bytes x) e ** pure (ET.elen e == len (int64_t_bytes x))
 {
   int64_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (int64_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (int64_t_bytes x) e);
 }
 
 (* size_t *)
@@ -598,20 +611,21 @@ let size_t_bytes_of_bytes (b: bytes)
   = encode_decode b;
     M.small_mod (bytes_nat b) (pow2 64)
 
-ghost fn size_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
-  requires mem_pts_to a p b
+ghost fn size_t_of_mem (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (plain b /\ len b == 8 /\ aligned a size_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e size_t_ctype)
   ensures  size_t_pts_to a p (size_t_of_bytes b)
 {
   size_t_bytes_of_bytes b;
-  size_t_conceal a #p #b #(size_t_of_bytes b);
+  size_t_conceal a #p #b #(size_t_of_bytes b) #e;
 }
 
 ghost fn size_t_to_mem (a: ptr) (#p: perm) (#x: SZ.t)
   requires size_t_pts_to a p x
-  ensures  mem_pts_to a p (size_t_bytes x)
+  ensures  exists* e. mem_pts_to_at a p (size_t_bytes x) e ** pure (ET.elen e == len (size_t_bytes x))
 {
   size_t_reveal a;
-  with b. assert (mem_pts_to a p b);
-  rewrite (mem_pts_to a p b) as (mem_pts_to a p (size_t_bytes x));
+  with b e. assert (mem_pts_to_at a p b e);
+  rewrite (mem_pts_to_at a p b e) as (mem_pts_to_at a p (size_t_bytes x) e);
 }

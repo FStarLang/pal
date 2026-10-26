@@ -1,0 +1,2 @@
+Func_store_float_into_declared_integer.fst(
+View.view_ok uint32_t_ctype uint32_t_repr float32_t_ctype float32_t_repr

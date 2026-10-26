@@ -58,6 +58,45 @@ val mem_pts_to_at_eq (a: ptr) (p: perm) (b: bytes)
   : Lemma (mem_pts_to a p b ==
            (exists* e. mem_pts_to_at a p b e ** pure (Etype.elen e == len b)))
 
+(* Storage origin is immutable for a provenance-bearing allocation. These
+   certificates describe that origin, not the current contents or a chosen
+   access view. In particular, a mutable effective type has no fixed snapshot. *)
+val fixed_metadata (a: ptr) (e: Etype.etypes) : prop
+val allocated_region (a: ptr) (n: nat) : prop
+
+ghost fn remember_fixed_metadata (a: ptr) (#p: perm) (#b: bytes)
+                                 (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (Etype.elen e == len b /\ Etype.declared_destination e)
+  ensures pure (fixed_metadata a e)
+
+ghost fn fixed_metadata_index (a: ptr) (#p: perm) (#b: bytes)
+                              (#e #remembered: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (fixed_metadata a remembered /\ len b == Etype.elen remembered)
+  ensures pure (e == remembered)
+
+ghost fn fixed_metadata_subrange (a: ptr) (off n: SZ.t) (#p: perm)
+                                 (#b: bytes) (#e: Etype.etypes)
+                                 (#remembered: Etype.etypes {
+                                   SZ.v off + SZ.v n <= Etype.elen remembered })
+  preserves mem_pts_to_at (a +! off) p b e
+  requires pure (fixed_metadata a remembered /\ len b == SZ.v n /\
+                 SZ.v off + SZ.v n <= Etype.elen remembered)
+  ensures pure (e == Seq.slice remembered (SZ.v off) (SZ.v off + SZ.v n))
+
+ghost fn allocated_region_subrange (a: ptr) (whole off n: SZ.t)
+  requires pure (allocated_region a (SZ.v whole) /\
+                 SZ.v off + SZ.v n <= SZ.v whole)
+  ensures pure (allocated_region (a +! off) (SZ.v n))
+
+ghost fn allocated_region_index (a: ptr) (n: SZ.t) (#p: perm) (#b: bytes)
+                                (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (allocated_region a (SZ.v n) /\ len b == SZ.v n /\
+                 Etype.elen e == len b)
+  ensures pure (Etype.all_mutable e)
+
 val mem_pts_to_timeless (a: ptr) (p: perm) (b: bytes)
   : Lemma (timeless (mem_pts_to a p b))
           [SMTPat (timeless (mem_pts_to a p b))]
@@ -177,20 +216,16 @@ ghost fn mem_join (a: ptr) (#p: perm) (#b1 #b2: bytes) (n: SZ.t { SZ.v n == len 
    layer 0 that cannot be made cheaply after the fact: adding an index to
    `mem_pts_to` touches every module in the stack.
 
-   In this first cut the index is present but not *enforced*: no layer-1
-   predicate constrains it, so `mem_pts_to` -- which hides it -- is all anyone
-   uses, and every existing proof goes through unchanged. Turning enforcement
-   on means making the typed loads and stores in `Pulse.Lib.C.Palow.Machine`
-   demand `Etype.read_ok` and produce `Etype.store_etypes`, and making each
-   typed points-to carry `read_ok e t_ctype` for the index it holds. The
-   aggregate, array and union lemmas do not mention the index at all, since
-   splitting and joining bytes splits and joins the index alongside them.
+   Checked typed ownership constrains the actual index, and machine operations
+   preserve or update that same witness. `mem_pts_to` remains an existential
+   raw-byte view; hiding an index does not grant permission to pick a different
+   one when restoring typed ownership. In particular, independent field views
+   do not establish a nominal aggregate type. Index-preserving helpers and
+   contracts are needed wherever an enclosing object's witness must survive
+   a field access or a call. See palow.md for generator migration status.
    --------------------------------------------------------------------------- *)
 
-(* Splitting a range splits its index at the same point. This is the reason the
-   aggregate and array lemmas survive the addition of effective types untouched:
-   they are stated over `mem_pts_to`, and the index follows the bytes.
-
+(* Splitting a range splits its index at the same point.
    `mem_split` and `mem_join` above are consequences of these two rather than
    independent assumptions -- unfold, split the index with the bytes, fold --
    and are stated separately only because this module has no implementation to
@@ -203,14 +238,54 @@ ghost fn mem_split_at (a: ptr) (#p: perm) (#b: bytes)
   ensures  mem_pts_to_at (a +! n) p (slice b (SZ.v n) (len b))
                          (Seq.slice e (SZ.v n) (Etype.elen e))
 
-(* The bytes at an address determine their index, just as they determine each
-   other (`mem_pts_to_injective`). This is what makes the equality above safe
-   to use in both directions: eliminating the existential gives you *the*
-   index, not merely *an* index. *)
+ghost fn mem_share_at (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  requires mem_pts_to_at a p b e
+  ensures mem_pts_to_at a (p /. 2.0R) b e ** mem_pts_to_at a (p /. 2.0R) b e
+
+[@@allow_ambiguous]
+ghost fn mem_gather_at (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
+                       (#e1 #e2: Etype.etypes)
+  requires mem_pts_to_at a p1 b1 e1 ** mem_pts_to_at a p2 b2 e2
+  requires pure (len b1 == len b2)
+  ensures mem_pts_to_at a (p1 +. p2) b1 e1 ** pure (b1 == b2 /\ e1 == e2)
+
+ghost fn mem_pts_to_at_not_null (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (len b > 0)
+  ensures pure (not (is_null a) /\ Some? (prov_of a))
+
+ghost fn mem_pts_to_at_fits (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  ensures pure (SZ.fits (addr_of a + len b))
+
+ghost fn mem_pts_to_at_perm_bound (a: ptr) (#p: perm) (#b: bytes) (#e: Etype.etypes)
+  preserves mem_pts_to_at a p b e
+  requires pure (len b > 0)
+  ensures pure (p <=. 1.0R)
+
+[@@allow_ambiguous]
+ghost fn mem_pts_to_at_disjoint (a1 a2: ptr) (#p2: perm) (#b1 #b2: bytes)
+                                (#e1 #e2: Etype.etypes)
+  preserves mem_pts_to_at a1 1.0R b1 e1
+  preserves mem_pts_to_at a2 p2 b2 e2
+  requires pure (len b1 > 0 /\ len b2 > 0)
+  ensures pure (disjoint_ranges a1 (len b1) a2 (len b2))
+
+[@@allow_ambiguous]
+ghost fn mem_pts_to_at_bytes_injective (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
+                                       (#e1 #e2: Etype.etypes)
+  preserves mem_pts_to_at a p1 b1 e1
+  preserves mem_pts_to_at a p2 b2 e2
+  requires pure (len b1 == len b2)
+  ensures pure (b1 == b2)
+
+(* Agreement is for the same extent: a prefix and its enclosing range may
+   share their base address without having equal index sequences. *)
 ghost fn mem_pts_to_at_injective (a: ptr) (#p1 #p2: perm) (#b1 #b2: bytes)
                                  (#e1 #e2: Etype.etypes)
   preserves mem_pts_to_at a p1 b1 e1
   preserves mem_pts_to_at a p2 b2 e2
+  requires pure (len b1 == len b2)
   ensures   pure (e1 == e2)
 
 ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
@@ -219,12 +294,3 @@ ghost fn mem_join_at (a: ptr) (#p: perm) (#b1 #b2: bytes)
                      (n: SZ.t { SZ.v n == len b1 })
   requires mem_pts_to_at a p b1 e1 ** mem_pts_to_at (a +! n) p b2 e2
   ensures  mem_pts_to_at a p (append b1 b2) (Seq.append e1 e2)
-
-(* A store at type `u` relabels allocated storage and leaves declared objects
-   alone; a read at `u` requires the covered entries to be compatible with it.
-   These are the two hooks the typed operations in `Pulse.Lib.C.Palow.Machine`
-   will take once enforcement is switched on. *)
-ghost fn mem_store_etypes (a: ptr) (#b: bytes) (#e: Etype.etypes)
-                          (u: Etype.ctype { Etype.elen e == Etype.csize u })
-  requires mem_pts_to_at a 1.0R b e
-  ensures  mem_pts_to_at a 1.0R b (Etype.store_etypes e u)

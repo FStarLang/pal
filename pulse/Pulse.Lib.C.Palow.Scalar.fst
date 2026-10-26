@@ -3,25 +3,14 @@ module Pulse.Lib.C.Palow.Scalar
 (* ---------------------------------------------------------------------------
    Palow layer 1: scalar types.
 
-   For each C scalar type we give a representation relation and a typed
-   points-to predicate *defined* in terms of `mem_pts_to`. PAL will emit one
-   copy of this per translated C type; the two instances here (`uint8_t` and
-   `uint32_t`) exist to check that the layer-0 interface actually supports the
-   derivation, and to be the leaves of the aggregate proofs in
-   `Pulse.Lib.C.Palow.Aggregate`.
+   Every typed owner retains actual per-byte metadata and read_ok for its C
+   descriptor. Raw reveal returns that same index; claim/conceal require it,
+   together with representation validity and alignment. Ordinary uninit
+   forgets a value, not metadata, and is distinct from opaque preparation.
 
-   Note that a scalar's representation is *unique*: an unsigned integer type
-   with no padding bits has exactly one object representation per value, so the
-   points-to predicate needs no existential over the bytes. The general
-   `exists* b. mem_pts_to a p b ** pure (t_repr x b)` shape from `palow.md` is
-   only needed where the representation is not unique -- aggregates with
-   padding, and unions.
-
-   The predicates are ordinary `let`s, so Pulse will not unfold them
-   automatically; proofs that need to see the bytes use `unfold`/`fold`
-   explicitly. That is deliberate: unfolding everywhere would pollute the
-   context, and the pointee has to stay resolvable from a `mem_pts_to`-free
-   context for nested dereferences to work.
+   Public convenience owners existentially hide the index. Effective.Value
+   and Machine's indexed operations retain it explicitly when an enclosing
+   aggregate or a C-call contract needs to preserve its identity.
    --------------------------------------------------------------------------- *)
 
 #lang-pulse
@@ -32,6 +21,8 @@ open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 
+module ET = Pulse.Lib.C.Palow.Etype
+module T = Pulse.Lib.C.Palow.Effective.Typed
 module SZ = FStar.SizeT
 module U8 = FStar.UInt8
 module U32 = FStar.UInt32
@@ -44,8 +35,7 @@ module M = FStar.Math.Lemmas
 
 
 let uint8_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U8.t) : slprop =
-  mem_pts_to a p (encode (SZ.v uint8_t_sizeof) None (U8.v x))
-  ** pure (aligned a uint8_t_alignof)
+  T.value uint8_t_ctype uint8_t_repr uint8_t_alignof a p x
 
 let uint8_t_repr_len (x: U8.t) (b: bytes)
   : Lemma (requires uint8_t_repr x b)
@@ -54,17 +44,21 @@ let uint8_t_repr_len (x: U8.t) (b: bytes)
 
 ghost fn uint8_t_reveal (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (uint8_t_repr x b /\ aligned a uint8_t_alignof)
+  ensures  exists* b e. mem_pts_to_at a p b e ** pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype /\ uint8_t_repr x b /\ aligned a uint8_t_alignof)
 {
   unfold uint8_t_pts_to a p x;
+  T.reveal_value uint8_t_ctype uint8_t_repr uint8_t_alignof a;
 }
 
-ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U8.t)
-  requires mem_pts_to a p b
+ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U8.t) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (uint8_t_repr x b)
   requires pure (aligned a uint8_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint8_t_ctype)
   ensures  uint8_t_pts_to a p x
 {
+  uint8_t_repr_len x b;
+  T.claim uint8_t_ctype uint8_t_repr uint8_t_alignof a #p #x #b #e;
   fold uint8_t_pts_to a p x;
 }
 
@@ -75,20 +69,17 @@ ghost fn uint8_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U8.t)
 
 
 let uint32_t_pts_to ([@@@mkey] a: ptr) (p: perm) (x: U32.t) : slprop =
-  mem_pts_to a p (encode (SZ.v uint32_t_sizeof) None (U32.v x))
-  ** pure (aligned a uint32_t_alignof)
+  T.value uint32_t_ctype uint32_t_repr uint32_t_alignof a p x
 
 let uint32_t_repr_len (x: U32.t) (b: bytes)
   : Lemma (requires uint32_t_repr x b)
           (ensures  len b == SZ.v uint32_t_sizeof)
   = ()
 
-(* Write-only ownership of storage that is the right size for a `uint32_t` but
-   whose contents we know nothing about: what a stack allocation hands out, and
-   what a deallocation takes back. *)
+(* Unknown contents with retained type admissibility. This is not a pending
+   incompatible write reservation. *)
 let uint32_t_pts_to_uninit ([@@@mkey] a: ptr) : slprop =
-  exists* b. mem_pts_to a 1.0R b
-             ** pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
+  T.storage uint32_t_ctype uint32_t_alignof a
 
 (* An integer object carries no provenance: this is what distinguishes it from
    a stored pointer with the same bit pattern, and is why writing an integer
@@ -117,7 +108,7 @@ ghost fn uint32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U32.t)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 {
   unfold uint32_t_pts_to a p x;
-  mem_pts_to_not_null a;
+  T.not_null uint32_t_ctype uint32_t_repr uint32_t_alignof a;
   fold uint32_t_pts_to a p x;
 }
 
@@ -129,8 +120,7 @@ ghost fn uint32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
 {
   unfold uint32_t_pts_to a p1 x;
   unfold uint32_t_pts_to a p2 y;
-  mem_pts_to_injective a;
-  uint32_t_repr_injective x y (encode (SZ.v uint32_t_sizeof) None (U32.v x));
+  T.agree uint32_t_ctype uint32_t_repr uint32_t_alignof uint32_t_repr_injective a;
   fold uint32_t_pts_to a p1 x;
   fold uint32_t_pts_to a p2 y;
 }
@@ -140,7 +130,7 @@ ghost fn uint32_t_share (a: ptr) (#p: perm) (#x: U32.t)
   ensures  uint32_t_pts_to a (p /. 2.0R) x ** uint32_t_pts_to a (p /. 2.0R) x
 {
   unfold uint32_t_pts_to a p x;
-  mem_share a;
+  T.share uint32_t_ctype uint32_t_repr uint32_t_alignof a;
   fold uint32_t_pts_to a (p /. 2.0R) x;
   fold uint32_t_pts_to a (p /. 2.0R) x;
 }
@@ -152,8 +142,7 @@ ghost fn uint32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
 {
   unfold uint32_t_pts_to a p1 x;
   unfold uint32_t_pts_to a p2 y;
-  mem_gather a;
-  uint32_t_repr_injective x y (encode (SZ.v uint32_t_sizeof) None (U32.v x));
+  T.gather uint32_t_ctype uint32_t_repr uint32_t_alignof uint32_t_repr_injective a;
   fold uint32_t_pts_to a (p1 +. p2) x;
 }
 
@@ -163,17 +152,21 @@ ghost fn uint32_t_gather (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
    an axiom. *)
 ghost fn uint32_t_reveal (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
-  ensures  exists* b. mem_pts_to a p b ** pure (uint32_t_repr x b /\ aligned a uint32_t_alignof)
+  ensures  exists* b e. mem_pts_to_at a p b e ** pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype /\ uint32_t_repr x b /\ aligned a uint32_t_alignof)
 {
   unfold uint32_t_pts_to a p x;
+  T.reveal_value uint32_t_ctype uint32_t_repr uint32_t_alignof a;
 }
 
-ghost fn uint32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U32.t)
-  requires mem_pts_to a p b
+ghost fn uint32_t_conceal (a: ptr) (#p: perm) (#b: bytes) (#x: U32.t) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
   requires pure (uint32_t_repr x b)
   requires pure (aligned a uint32_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
   ensures  uint32_t_pts_to a p x
 {
+  uint32_t_repr_len x b;
+  T.claim uint32_t_ctype uint32_t_repr uint32_t_alignof a #p #x #b #e;
   fold uint32_t_pts_to a p x;
 }
 
@@ -185,34 +178,41 @@ ghost fn uint32_t_forget (a: ptr) (#x: U32.t)
   ensures  uint32_t_pts_to_uninit a
 {
   unfold uint32_t_pts_to a 1.0R x;
+  T.forget uint32_t_ctype uint32_t_repr uint32_t_alignof a;
   fold uint32_t_pts_to_uninit a;
 }
 
-ghost fn uint32_t_claim_uninit (a: ptr) (#b: bytes)
-  requires mem_pts_to a 1.0R b
+ghost fn uint32_t_claim_uninit (a: ptr) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
   requires pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
   ensures  uint32_t_pts_to_uninit a
 {
+  T.claim_storage uint32_t_ctype uint32_t_alignof a;
   fold uint32_t_pts_to_uninit a;
 }
 
 (* Raw storage of the right size can be claimed as a `uint32_t` object as soon as
    we can exhibit a value it represents. This is the step a custom allocator
    takes when it hands out a chunk of a block it carved up. *)
-ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t)
-  requires mem_pts_to a 1.0R b
+ghost fn uint32_t_claim (a: ptr) (#b: bytes) (x: U32.t) (#e: ET.etypes)
+  requires mem_pts_to_at a 1.0R b e
   requires pure (uint32_t_repr x b)
   requires pure (aligned a uint32_t_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype)
   ensures  uint32_t_pts_to a 1.0R x
 {
+  uint32_t_repr_len x b;
+  T.claim uint32_t_ctype uint32_t_repr uint32_t_alignof a #1.0R #x #b #e;
   fold uint32_t_pts_to a 1.0R x;
 }
 
 ghost fn uint32_t_reveal_uninit (a: ptr)
   requires uint32_t_pts_to_uninit a
-  ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
+  ensures  exists* b e. mem_pts_to_at a 1.0R b e ** pure (ET.elen e == len b /\ ET.read_ok e uint32_t_ctype /\ len b == SZ.v uint32_t_sizeof /\ aligned a uint32_t_alignof)
 {
   unfold uint32_t_pts_to_uninit a;
+  T.reveal_storage uint32_t_ctype uint32_t_alignof a;
 }
 
 (* ---------------------------------------------------------------------------
@@ -239,8 +239,7 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
 
 
 let ptr_pts_to ([@@@mkey] dest: ptr) (p: perm) (a: ptr) : slprop =
-  mem_pts_to dest p (encode (SZ.v ptr_sizeof) (prov_of a) (addr_of a))
-  ** pure (aligned dest ptr_alignof)
+  T.value ptr_ctype ptr_repr ptr_alignof dest p a
 
 let ptr_repr_len (a: ptr) (b: bytes)
   : Lemma (requires ptr_repr a b)
@@ -273,7 +272,7 @@ ghost fn ptr_pts_to_not_null (dest: ptr) (#p: perm) (#a: ptr)
   ensures   pure (not (is_null dest) /\ Some? (prov_of dest))
 {
   unfold ptr_pts_to dest p a;
-  mem_pts_to_not_null dest;
+  T.not_null ptr_ctype ptr_repr ptr_alignof dest;
   fold ptr_pts_to dest p a;
 }
 
@@ -285,8 +284,7 @@ ghost fn ptr_agree (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
 {
   unfold ptr_pts_to dest p1 a1;
   unfold ptr_pts_to dest p2 a2;
-  mem_pts_to_injective dest;
-  ptr_repr_injective a1 a2 (encode (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
+  T.agree ptr_ctype ptr_repr ptr_alignof ptr_repr_injective dest;
   fold ptr_pts_to dest p1 a1;
   fold ptr_pts_to dest p2 a2;
 }
@@ -296,7 +294,7 @@ ghost fn ptr_share (dest: ptr) (#p: perm) (#a: ptr)
   ensures  ptr_pts_to dest (p /. 2.0R) a ** ptr_pts_to dest (p /. 2.0R) a
 {
   unfold ptr_pts_to dest p a;
-  mem_share dest;
+  T.share ptr_ctype ptr_repr ptr_alignof dest;
   fold ptr_pts_to dest (p /. 2.0R) a;
   fold ptr_pts_to dest (p /. 2.0R) a;
 }
@@ -308,24 +306,27 @@ ghost fn ptr_gather (dest: ptr) (#p1 #p2: perm) (#a1 #a2: ptr)
 {
   unfold ptr_pts_to dest p1 a1;
   unfold ptr_pts_to dest p2 a2;
-  mem_gather dest;
-  ptr_repr_injective a1 a2 (encode (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1));
+  T.gather ptr_ctype ptr_repr ptr_alignof ptr_repr_injective dest;
   fold ptr_pts_to dest (p1 +. p2) a1;
 }
 
 ghost fn ptr_reveal (dest: ptr) (#p: perm) (#a: ptr)
   requires ptr_pts_to dest p a
-  ensures  exists* b. mem_pts_to dest p b ** pure (ptr_repr a b /\ aligned dest ptr_alignof)
+  ensures  exists* b e. mem_pts_to_at dest p b e ** pure (ET.elen e == len b /\ ET.read_ok e ptr_ctype /\ ptr_repr a b /\ aligned dest ptr_alignof)
 {
   unfold ptr_pts_to dest p a;
+  T.reveal_value ptr_ctype ptr_repr ptr_alignof dest;
 }
 
-ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
-  requires mem_pts_to dest p b
+ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr) (#e: ET.etypes)
+  requires mem_pts_to_at dest p b e
   requires pure (ptr_repr a b)
   requires pure (aligned dest ptr_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ptr_ctype)
   ensures  ptr_pts_to dest p a
 {
+  ptr_repr_len a b;
+  T.claim ptr_ctype ptr_repr ptr_alignof dest #p #a #b #e;
   fold ptr_pts_to dest p a;
 }
 
@@ -333,36 +334,39 @@ ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
    same `_pts_to_uninit`/`_forget` pair every scalar type has; it exists so the
    translator can allocate and release a local without a case for pointers. *)
 let ptr_pts_to_uninit ([@@@mkey] dest: ptr) : slprop =
-  exists* b. mem_pts_to dest 1.0R b
-             ** pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
+  T.storage ptr_ctype ptr_alignof dest
 
 ghost fn ptr_forget (dest: ptr) (#a: ptr)
   requires ptr_pts_to dest 1.0R a
   ensures  ptr_pts_to_uninit dest
 {
   unfold ptr_pts_to dest 1.0R a;
+  T.forget ptr_ctype ptr_repr ptr_alignof dest;
   fold ptr_pts_to_uninit dest;
 }
 
-ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes)
-  requires mem_pts_to dest 1.0R b
+ghost fn ptr_claim_uninit (dest: ptr) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at dest 1.0R b e
   requires pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
+  requires pure (ET.elen e == len b /\ ET.read_ok e ptr_ctype)
   ensures  ptr_pts_to_uninit dest
 {
+  T.claim_storage ptr_ctype ptr_alignof dest;
   fold ptr_pts_to_uninit dest;
 }
 
 ghost fn ptr_reveal_uninit (dest: ptr)
   requires ptr_pts_to_uninit dest
-  ensures  exists* b. mem_pts_to dest 1.0R b ** pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
+  ensures  exists* b e. mem_pts_to_at dest 1.0R b e ** pure (ET.elen e == len b /\ ET.read_ok e ptr_ctype /\ len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
 {
   unfold ptr_pts_to_uninit dest;
+  T.reveal_storage ptr_ctype ptr_alignof dest;
 }
 
 (* ---------------------------------------------------------------------------
    Elements of an array
 
-   `array_focus` hands back an `elem_pts_to t_repr`, which is the generic
+   `array_focus` hands back an `elem_pts_to t_ctype t_repr`, which is the generic
    "there exist bytes representing this value" form. Every scalar type has its
    own points-to predicate instead, so each one gets a pair of ghost functions
    trading between the two. They are what makes an emitted subscript short: the
@@ -370,56 +374,55 @@ ghost fn ptr_reveal_uninit (dest: ptr)
    --------------------------------------------------------------------------- *)
 
 ghost fn uint8_t_of_elem (a: ptr) (#p: perm) (#x: U8.t)
-  requires elem_pts_to uint8_t_repr a p x
+  requires elem_pts_to uint8_t_ctype uint8_t_repr a p x
   requires pure (aligned a uint8_t_alignof)
   ensures  uint8_t_pts_to a p x
 {
-  elem_reveal uint8_t_repr a;
+  elem_reveal uint8_t_ctype uint8_t_repr a;
   uint8_t_conceal a #p #_ #x;
 }
 
 ghost fn uint8_t_to_elem (a: ptr) (#p: perm) (#x: U8.t)
   requires uint8_t_pts_to a p x
-  ensures  elem_pts_to uint8_t_repr a p x
+  ensures  elem_pts_to uint8_t_ctype uint8_t_repr a p x
   ensures  pure (aligned a uint8_t_alignof)
 {
   uint8_t_reveal a;
-  elem_conceal uint8_t_repr a #p #_ #x;
+  elem_conceal uint8_t_ctype uint8_t_repr a #p #_ #x;
 }
 
 ghost fn uint32_t_of_elem (a: ptr) (#p: perm) (#x: U32.t)
-  requires elem_pts_to uint32_t_repr a p x
+  requires elem_pts_to uint32_t_ctype uint32_t_repr a p x
   requires pure (aligned a uint32_t_alignof)
   ensures  uint32_t_pts_to a p x
 {
-  elem_reveal uint32_t_repr a;
+  elem_reveal uint32_t_ctype uint32_t_repr a;
   uint32_t_conceal a #p #_ #x;
 }
 
 ghost fn uint32_t_to_elem (a: ptr) (#p: perm) (#x: U32.t)
   requires uint32_t_pts_to a p x
-  ensures  elem_pts_to uint32_t_repr a p x
+  ensures  elem_pts_to uint32_t_ctype uint32_t_repr a p x
   ensures  pure (aligned a uint32_t_alignof)
 {
   uint32_t_reveal a;
-  elem_conceal uint32_t_repr a #p #_ #x;
+  elem_conceal uint32_t_ctype uint32_t_repr a #p #_ #x;
 }
 
 ghost fn ptr_of_elem (a: ptr) (#p: perm) (#x: ptr)
-  requires elem_pts_to ptr_repr a p x
+  requires elem_pts_to ptr_ctype ptr_repr a p x
   requires pure (aligned a ptr_alignof)
   ensures  ptr_pts_to a p x
 {
-  elem_reveal ptr_repr a;
+  elem_reveal ptr_ctype ptr_repr a;
   ptr_conceal a #p #_ #x;
 }
 
 ghost fn ptr_to_elem (a: ptr) (#p: perm) (#x: ptr)
   requires ptr_pts_to a p x
-  ensures  elem_pts_to ptr_repr a p x
+  ensures  elem_pts_to ptr_ctype ptr_repr a p x
   ensures  pure (aligned a ptr_alignof)
 {
   ptr_reveal a;
-  elem_conceal ptr_repr a #p #_ #x;
+  elem_conceal ptr_ctype ptr_repr a #p #_ #x;
 }
-
