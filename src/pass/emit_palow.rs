@@ -564,6 +564,12 @@ fn bitfield_at<'a>(tds: &'a Typedefs, ty: &Type, f: &str) -> Option<&'a BitField
 /// struct's type. An ordinary field is a projection; a bit-field is the bits
 /// it occupies of the unit's value.
 fn field_value(tds: &Typedefs, bty: &Type, x: &str, f: &str) -> String {
+    // A union's value is a tagged sum, so a member of one is the payload of
+    // that member's constructor -- which only exists when it is the live one,
+    // and a contract that names it has to have said so first.
+    if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(tds, bty).val {
+        return format!("(Union_{}_{}?.v ({}))", u.val, f, x);
+    }
     match bitfield_at(tds, bty, f) {
         Some(b) => b.pos.get(&format!("({}).fld_{}", x, b.unit)),
         None => format!("({}).fld_{}", x, f),
@@ -3001,12 +3007,17 @@ impl<'a> Spec<'a> {
                     ));
                 }
                 let bty = self.ty_of(base)?;
-                Ok(field_value(
-                    self.tds,
-                    &bty,
-                    &self.value(base, w)?,
-                    &f.val.to_string(),
-                ))
+                let x = self.value(base, w)?;
+                // A union member's payload is only there when it is the live
+                // one, and F* types each clause on its own -- so the clause
+                // carries the tag test itself, as an array index carries its
+                // bound.
+                if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &bty).val {
+                    self.guards
+                        .borrow_mut()
+                        .push(format!("Union_{}_{}? ({})", u.val, f.val, x));
+                }
+                Ok(field_value(self.tds, &bty, &x, &f.val.to_string()))
             }
             ExprT::UnOp(UnOp::BitNot, _)
             | ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ..)
@@ -5972,8 +5983,47 @@ fn struct_invariant(tds: &Typedefs, env: &Env, fields: &[StructField]) -> Option
     Some(out.join(" /\\ "))
 }
 
+/// The structs a union holds, directly or through the fields of a struct or
+/// the members of a union it holds. Only these give an array field the
+/// byte-level view: a union member is owned through its bytes, while every
+/// other struct with an array field keeps the field-wise view it already has.
+fn union_reachable_structs(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
+    fn named(tds: &Typedefs, ty: &Type) -> Option<TypeRefKind> {
+        match &peel(tds, ty).val {
+            TypeT::FixedArray(elem, _) => named(tds, elem),
+            TypeT::TypeRef(k @ (TypeRefKind::Struct(_) | TypeRefKind::Union(_))) => Some(k.clone()),
+            _ => None,
+        }
+    }
+    let field_types = |fields: &[Field]| -> Vec<Rc<Type>> {
+        fields.iter().map(|f| f.val.logical_type(&f.loc)).collect()
+    };
+    let mut structs: HashMap<String, Vec<Rc<Type>>> = HashMap::new();
+    let mut work: Vec<Rc<Type>> = Vec::new();
+    for decl in &tu.decls {
+        match &decl.val {
+            DeclT::StructDefn(sd) => {
+                structs.insert(sd.name.val.to_string(), field_types(&sd.fields));
+            }
+            DeclT::UnionDefn(ud) => work.extend(field_types(&ud.fields)),
+            _ => {}
+        }
+    }
+    let mut seen = HashSet::new();
+    while let Some(ty) = work.pop() {
+        if let Some(TypeRefKind::Struct(n)) = named(tds, &ty)
+            && seen.insert(n.val.to_string())
+            && let Some(fs) = structs.get(&*n.val)
+        {
+            work.extend(fs.iter().cloned());
+        }
+    }
+    seen
+}
+
 fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<Chunk> {
     let layouts = crate::layout::LayoutCtx::of_tu(tu);
+    let in_union = union_reachable_structs(tu, tds);
     let mut code: Vec<Chunk> = Vec::new();
     for decl in &tu.decls {
         if let DeclT::UnionDefn(ud) = &decl.val {
@@ -6146,9 +6196,11 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         }
         // The byte-level view needs every field to have one and to sit at a
         // byte offset of its own, so that the object splits into fields and
-        // padding with nothing left over. An array field is excluded for now
-        // only because the storage operations it would need are not generated
-        // yet, not because anything about it resists the representation.
+        // padding with nothing left over. An array field qualifies when its
+        // element does: `array_repr` is that element's representation laid end
+        // to end, and it pins the field's length as a scalar's does. It does so
+        // only in a struct a union holds (`union_reachable_structs`), where
+        // the byte view is what ownership of the member is stated through.
         //
         // The size limit is about the proof, not the model. `_reveal` has to
         // recognise each field's slice of the finished object through the
@@ -6160,10 +6212,14 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         // used through.
         let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
             && fields.iter().all(|f| {
-                matches!(
-                    f.shape,
-                    FieldShape::One { .. } | FieldShape::Unaligned { .. }
-                ) && has_repr(tds, &f.ty)
+                match &f.shape {
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
+                    // `field_shape` only gives an array field its shape when
+                    // the element has a representation. A zero-length one
+                    // owns no bytes, and the view does not say so for it.
+                    FieldShape::Array { .. } => f.size > 0 && in_union.contains(&name),
+                    FieldShape::Flex { .. } => false,
+                }
             });
         let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
         let inv = struct_invariant(tds, env, &fields);
@@ -9254,6 +9310,12 @@ fn emit_contextual_scalar_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64,
         .map(|r| match r {
             Region::Gap(_, n) => Some(format!("zeroed {n}")),
             Region::Field(f) => {
+                if !matches!(
+                    f.shape,
+                    FieldShape::One { .. } | FieldShape::Unaligned { .. }
+                ) {
+                    return None;
+                }
                 let bits = scalar_bits(f.shape.pn(), &format!("x.fld_{}", f.name))?;
                 Some(format!(
                     "Pulse.Lib.C.Palow.Encoding.encode {} None ({bits})",
@@ -9432,6 +9494,29 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         }
     };
     let pn_of = |f: &StructField| f.shape.pn().to_string();
+    // An array field is stated with the opaque `array_repr_o`: the carving
+    // below needs only its length, and the element-wise quantifier that
+    // `array_repr` unfolds to is enough to time it out.
+    let repr_of = |f: &StructField, v: &str, b: &str| match &f.shape {
+        FieldShape::Array { pn, esize, .. } => {
+            format!("array_repr_o {}_repr {} {} {}", pn, esize, v, b)
+        }
+        _ => f.shape.repr_of(v, b),
+    };
+    let reveal = |f: &StructField, a: &str, v: &str| match &f.shape {
+        FieldShape::Array { pn, esize, .. } => format!(
+            "array_reveal_o {0}_ctype {}_repr {} {}sz {}_alignof #p #{};",
+            pn, a, esize, pn, v
+        ),
+        _ => f.shape.reveal(a, "p", v),
+    };
+    let conceal = |f: &StructField, a: &str, b: &str, v: &str| match &f.shape {
+        FieldShape::Array { pn, esize, .. } => format!(
+            "array_conceal_o {0}_ctype {}_repr {} {}sz {}_alignof #p #{} #{};",
+            pn, a, esize, pn, b, v
+        ),
+        _ => f.shape.conceal(a, "p", b, v),
+    };
 
     // The representation pins the fields and says nothing about the padding,
     // which is exactly what C guarantees: the gaps hold unspecified values,
@@ -9447,11 +9532,12 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         .iter()
         .map(|f| {
             format!(
-                "    {}_repr x.fld_{} (slice b {} {})",
-                pn_of(f),
-                f.name,
-                f.offset,
-                f.offset + f.size
+                "    {}",
+                repr_of(
+                    f,
+                    &format!("x.fld_{}", f.name),
+                    &format!("(slice b {} {})", f.offset, f.offset + f.size)
+                )
             )
         })
         .collect();
@@ -9519,16 +9605,19 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     // append below.
     for f in si.fields.iter().filter(|f| f.size == 0) {
         let pn = pn_of(f);
+        let at = format!("(a +! {}_offsetof_{})", sn, f.name);
+        let val = format!("x.fld_{}", f.name);
         r += &format!(
-            "  {pn}_reveal (a +! {sn}_offsetof_{f});
-               with v ev. assert (mem_pts_to_at (a +! {sn}_offsetof_{f}) p v ev ** pure ({pn}_repr x.fld_{f} v));
-               {pn}_repr_len x.fld_{f} v;
-               drop_mem_pts_to_at_nil (a +! {sn}_offsetof_{f});
-",
-            pn = pn,
-            sn = sn,
-            f = f.name
+            "  {}\n  with v ev. assert (mem_pts_to_at {} p v ev ** pure ({}));\n",
+            reveal(f, &at, &val),
+            at,
+            repr_of(f, &val, "v")
         );
+        // An array states its own length; anything else has a lemma for it.
+        if !matches!(f.shape, FieldShape::Array { .. }) {
+            r += &format!("  {}_repr_len {} v;\n", pn, val);
+        }
+        r += &format!("  drop_mem_pts_to_at_nil {};\n", at);
     }
     let mut accs: Vec<String> = Vec::new();
     for (k, reg) in regions.iter().enumerate() {
@@ -9543,20 +9632,21 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                         .pts_to_at(&format!("(a +! {}_offsetof_{})", sn, f.name), "p", &val),
                     f.shape.pts_to_at(&at(f.offset), "p", &val)
                 );
-                r += &format!("  {}\n", f.shape.reveal(&at(f.offset), "p", &val));
+                r += &format!("  {}\n", reveal(f, &at(f.offset), &val));
                 r += &format!(
-                    "  with {v} e{k}. assert (mem_pts_to_at {at} p {v} e{k} ** pure ({pn}_repr {val} {v} /\\ ET.elen e{k} == len {v}));\n",
+                    "  with {v} e{k}. assert (mem_pts_to_at {at} p {v} e{k} ** pure ({repr} /\\ ET.elen e{k} == len {v}));\n",
                     v = v,
                     at = at(f.offset),
-                    pn = pn,
-                    val = val
+                    repr = repr_of(f, &val, &v)
                 );
-                // The literal length spares the joins below from unfolding
-                // `{pn}_sizeof` themselves, which Z3 does not always find.
-                r += &format!(
-                    "  {}_repr_len {} {};\n  assert (pure (len {} == {}));\n",
-                    pn, val, v, v, f.size
-                );
+                // An array's representation states its length itself; a
+                // scalar's or a struct's is a lemma. The literal length then
+                // spares the joins below from unfolding `{pn}_sizeof`
+                // themselves, which Z3 does not always find.
+                if !matches!(f.shape, FieldShape::Array { .. }) {
+                    r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+                }
+                r += &format!("  assert (pure (len {} == {}));\n", v, f.size);
             }
             Region::Gap(off, n) => {
                 r += &format!(
@@ -9623,7 +9713,6 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         hi = off;
     }
     for f in &si.fields {
-        let pn = pn_of(f);
         if f.size == 0 {
             w += &format!(
                 "  mem_pts_to_at_nil {at} p (slice b {lo} {lo}) (Seq.create 0 None);\n",
@@ -9638,12 +9727,19 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 "  {sn}_access_{} ();\n  ET.read_ok_slice e {sn}_ctype {} ({ct});\n",
                 f.name, f.offset
             );
+            if let FieldShape::Array { pn, len, .. } = &f.shape {
+                w += &format!(
+                    "  array_read_ok_from_type {pn}_ctype {len} (Seq.slice e {} {});\n",
+                    f.offset,
+                    f.offset + f.size
+                );
+            }
         }
         w += &format!(
             "  {}\n",
-            f.shape.conceal(
+            conceal(
+                f,
                 &at(f.offset),
-                "p",
                 &format!("(slice b {} {})", f.offset, f.offset + f.size),
                 &format!("(x.fld_{})", f.name)
             )
@@ -9789,10 +9885,10 @@ fn fill_name(pn: &str, esize: u64, len: u64) -> String {
 fn emit_retained_fill(pn: &str, elem: &str, esize: u64, len: u64) -> String {
     let f = fill_name(pn, esize, len);
     format!(
-        "fn rec {f}_from_retained (a: ptr) (vs: s:Seq.seq {elem} {{Seq.length s == {len}}}) (k: SizeT.t)\n  (#xs: erased (s:Seq.seq (option {elem}) {{Seq.length s == {len}}})) (#base: ET.etypes)\n  requires RA.value {pn}_ctype (maybe_repr {pn}_repr {esize}) {esize} (SizeT.v {pn}_alignof) base a 1.0R xs\n  requires pure (SizeT.v k <= {len} /\\ (forall j. j < SizeT.v k ==> Seq.index xs j == Some (Seq.index vs j)))\n  ensures RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a 1.0R vs\n  decreases ({len} - SizeT.v k)\n{{\n  if (SizeT.lt k {len}sz) {{\n    RA.properties {pn}_ctype (maybe_repr {pn}_repr {esize}) a {esize}sz {pn}_alignof;\n    RA.offset_fits {pn}_ctype (maybe_repr {pn}_repr {esize}) a {esize}sz {pn}_alignof k;\n    RA.write_uninit {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof M.{pn}_write_uninit_at #xs #base k ({esize}sz `SizeT.mul` k) (Seq.index vs (SizeT.v k));\n    {f}_from_retained a vs (k `SizeT.add` 1sz);\n  }} else {{\n    RA.claim_all {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof vs;\n  }}\n}}\n\n\
-         fn {f}_fill_retained (a: ptr) (vs: s:Seq.seq {elem} {{Seq.length s == {len}}}) (#base: ET.etypes)\n  requires RA.storage {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} base a\n  ensures RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a 1.0R vs\n{{\n  unfold RA.storage {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} base a;\n  {f}_from_retained a vs 0sz;\n}}\n\n\
-         fn rec {f}_upto_retained (a: ptr) (k: SizeT.t) (acc: s:Seq.seq {elem} {{Seq.length s == SizeT.v k}})\n  (#p: perm) (#xs: erased (s:Seq.seq {elem} {{Seq.length s == {len}}})) (#base: ET.etypes)\n  preserves RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a p xs\n  requires pure (SizeT.v k <= {len} /\\ (forall j. j < SizeT.v k ==> Seq.index acc j == Seq.index xs j))\n  returns r: s:Seq.seq {elem} {{Seq.length s == {len}}}\n  ensures pure (r == reveal xs)\n  decreases ({len} - SizeT.v k)\n{{\n  if (SizeT.lt k {len}sz) {{\n    RA.properties {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof;\n    RA.offset_fits {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof k;\n    let v = RA.read {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof M.{pn}_read_at #p #xs #base k ({esize}sz `SizeT.mul` k);\n    {f}_upto_retained a (k `SizeT.add` 1sz) (Seq.snoc acc v)\n  }} else {{\n    Seq.lemma_eq_intro acc (reveal xs);\n    acc\n  }}\n}}\n\n\
-         fn {f}_read_retained (a: ptr) (#p: perm) (#xs: erased (s:Seq.seq {elem} {{Seq.length s == {len}}})) (#base: ET.etypes)\n  preserves RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a p xs\n  returns r: s:Seq.seq {elem} {{Seq.length s == {len}}}\n  ensures pure (r == reveal xs)\n{{\n  {f}_upto_retained a 0sz Seq.empty\n}}\n\n"
+        "fn rec {f}_from_retained (a: ptr) (vs: (s:Seq.seq {elem} {{Seq.length s == {len}}})) (k: SizeT.t)\n  (#xs: erased (s:Seq.seq (option {elem}) {{Seq.length s == {len}}})) (#base: ET.etypes)\n  requires RA.value {pn}_ctype (maybe_repr {pn}_repr {esize}) {esize} (SizeT.v {pn}_alignof) base a 1.0R xs\n  requires pure (SizeT.v k <= {len} /\\ (forall j. j < SizeT.v k ==> Seq.index xs j == Some (Seq.index vs j)))\n  ensures RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a 1.0R vs\n  decreases ({len} - SizeT.v k)\n{{\n  if (SizeT.lt k {len}sz) {{\n    RA.properties {pn}_ctype (maybe_repr {pn}_repr {esize}) a {esize}sz {pn}_alignof;\n    RA.offset_fits {pn}_ctype (maybe_repr {pn}_repr {esize}) a {esize}sz {pn}_alignof k;\n    RA.write_uninit {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof {pn}_write_uninit_at #xs #base k ({esize}sz `SizeT.mul` k) (Seq.index vs (SizeT.v k));\n    {f}_from_retained a vs (k `SizeT.add` 1sz);\n  }} else {{\n    RA.claim_all {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof vs;\n  }}\n}}\n\n\
+         fn {f}_fill_retained (a: ptr) (vs: (s:Seq.seq {elem} {{Seq.length s == {len}}})) (#base: ET.etypes)\n  requires RA.storage {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} base a\n  ensures RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a 1.0R vs\n{{\n  unfold RA.storage {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) {len} base a;\n  {f}_from_retained a vs 0sz;\n}}\n\n\
+         fn rec {f}_upto_retained (a: ptr) (k: SizeT.t) (acc: (s:Seq.seq {elem} {{Seq.length s == SizeT.v k}}))\n  (#p: perm) (#xs: erased (s:Seq.seq {elem} {{Seq.length s == {len}}})) (#base: ET.etypes)\n  preserves RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a p xs\n  requires pure (SizeT.v k <= {len} /\\ (forall j. j < SizeT.v k ==> Seq.index acc j == Seq.index xs j))\n  returns r: (s:Seq.seq {elem} {{Seq.length s == {len}}})\n  ensures pure (r == reveal xs)\n  decreases ({len} - SizeT.v k)\n{{\n  if (SizeT.lt k {len}sz) {{\n    RA.properties {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof;\n    RA.offset_fits {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof k;\n    let v = RA.read {pn}_ctype {pn}_repr a {esize}sz {pn}_alignof {pn}_read_at #p #xs #base k ({esize}sz `SizeT.mul` k);\n    {f}_upto_retained a (k `SizeT.add` 1sz) (Seq.snoc acc v)\n  }} else {{\n    Seq.lemma_eq_intro acc (reveal xs);\n    acc\n  }}\n}}\n\n\
+         fn {f}_read_retained (a: ptr) (#p: perm) (#xs: erased (s:Seq.seq {elem} {{Seq.length s == {len}}})) (#base: ET.etypes)\n  preserves RA.value {pn}_ctype {pn}_repr {esize} (SizeT.v {pn}_alignof) base a p xs\n  returns r: (s:Seq.seq {elem} {{Seq.length s == {len}}})\n  ensures pure (r == reveal xs)\n{{\n  {f}_upto_retained a 0sz Seq.empty\n}}\n\n"
     )
 }
 
@@ -14102,6 +14198,30 @@ impl<'a> Body<'a> {
         // `$activate` names the union through a pointer to it, so the
         // address is the pointer's value.
         let a = self.inline(obj)?;
+        self.activate_arm_at(&un, m.ty.clone(), arm, a)
+    }
+
+    /// `activate_arm` at an address already computed.
+    /// Forget what the slots at `a` say, now that an arm's storage is what is
+    /// held there. A named local union keeps its slot, under the arm's: it is
+    /// still how the local is found, and it is what gives the storage back at
+    /// the end of its scope -- by which time the arm has been folded back into
+    /// a union value, which is what `init` records.
+    fn retire_slots_at(&mut self, a: &str) {
+        self.slots
+            .retain(|s| s.addr != a || (!s.global && s.union_arm.is_none()));
+        for s in self.slots.iter_mut().filter(|s| s.addr == a) {
+            s.init = true;
+        }
+    }
+
+    fn activate_arm_at(
+        &mut self,
+        un: &str,
+        mty: Rc<Type>,
+        arm: &Ident,
+        a: String,
+    ) -> Result<(), String> {
         // Storage that has never held a value switches from the storage view
         // rather than from a value, exactly as a whole-member write does.
         let from_uninit = self
@@ -14127,8 +14247,8 @@ impl<'a> Body<'a> {
         // one at a time. The switch hands it over folded, with the length
         // pinned in the slprop; every access wants it unfolded, which is the
         // form the elements are focused out of.
-        if let Some(FieldShape::Array { pn, esize, len }) = field_shape(self.tds, &m.ty) {
-            let TypeT::FixedArray(elem, _) = &peel(self.tds, &m.ty).val else {
+        if let Some(FieldShape::Array { pn, esize, len }) = field_shape(self.tds, &mty) {
+            let TypeT::FixedArray(elem, _) = &peel(self.tds, &mty).val else {
                 return Err(format!(
                     "`$activate` of member `{}`, which is not a fixed-size array",
                     arm.val
@@ -14144,7 +14264,7 @@ impl<'a> Body<'a> {
                 "unfold array_pts_to_uninit {0}_ctype {}_repr {} (SizeT.v {}_alignof) {} {};",
                 pn, esize, pn, len, a
             ));
-            self.slots.retain(|s| s.addr != a);
+            self.retire_slots_at(&a);
             self.slots.push(Slot {
                 name: format!("*{}.{}", a, arm.val),
                 addr: a,
@@ -14154,7 +14274,7 @@ impl<'a> Body<'a> {
                 array: Some((format!("{}sz", esize), true)),
                 array_value: None,
                 global: true,
-                union_arm: Some((un, arm.val.to_string())),
+                union_arm: Some((un.to_string(), arm.val.to_string())),
                 holds_fn: BTreeMap::new(),
                 holds_block: BTreeMap::new(),
                 scattered: BTreeSet::new(),
@@ -14163,8 +14283,7 @@ impl<'a> Body<'a> {
             });
             return Ok(());
         }
-        let (Some(pn), Some(fty)) = (palow_name(self.tds, &m.ty), fstar_type(self.tds, &m.ty))
-        else {
+        let (Some(pn), Some(fty)) = (palow_name(self.tds, &mty), fstar_type(self.tds, &mty)) else {
             return Err(format!(
                 "`$activate` of member `{}`, which has no Palow type",
                 arm.val
@@ -14173,8 +14292,8 @@ impl<'a> Body<'a> {
         // The arm's storage is now what is held at that address, and it is
         // uninitialised. Anything already recorded there described the union
         // and no longer does.
-        self.slots.retain(|s| s.addr != a);
-        self.push_arm_slot(&un, &arm.val.to_string(), pn, fty, a);
+        self.retire_slots_at(&a);
+        self.push_arm_slot(un, &arm.val.to_string(), pn, fty, a);
         Ok(())
     }
 
@@ -15927,15 +16046,19 @@ impl<'a> Body<'a> {
         // Everything below may emit, so anything that turns out not to be a
         // pun has to leave the body as it found it.
         let mark = self.lines.len();
+        let saved_active = self.active.clone();
         let Ok((a, bcr, _)) = self.base_addr(&u, false) else {
             self.lines.truncate(mark);
+            self.active = saved_active;
             return Ok(None);
         };
-        let give_up = |me: &mut Self| {
+        let live = self.active.get(&a).cloned();
+        let give_up = move |me: &mut Self| {
             me.lines.truncate(mark);
+            me.active = saved_active;
             Ok(None)
         };
-        let Some(live) = self.active.get(&a).cloned() else {
+        let Some(live) = live else {
             return give_up(self);
         };
         if live == m {
@@ -16544,6 +16667,27 @@ impl<'a> Body<'a> {
     ) -> Result<(String, Vec<String>, Vec<String>), String> {
         if let Some(p) = self.unalias(base) {
             return self.base_addr(&p, writing);
+        }
+        // A field write into a union that has never held a value makes that
+        // arm the live one first: there is no value to give up, so this is
+        // the `$activate` an author would otherwise have to write, and the
+        // fields are then filled one at a time as below.
+        if writing
+            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
+            && let Some(un) = self.union_of(b2)
+            && let Ok(a) = self.addr(b2)
+            && self.active.get(&a).map(String::as_str) != Some(&*f2.val.to_string())
+            && (self
+                .slots
+                .iter()
+                .any(|s| s.addr == a && !s.init && s.union_arm.is_none())
+                || self
+                    .blocks
+                    .iter()
+                    .any(|b| b.tmp == a && b.checked && !b.freed && !b.init))
+        {
+            let mty = self.field_ty(b2, f2)?;
+            self.activate_arm_at(&un, mty, f2, a)?;
         }
         // A struct-typed union arm that has been activated is storage at the
         // union's own address: every arm starts there, and activation gave up
@@ -20015,23 +20159,31 @@ impl<'a> Body<'a> {
                 return Err(misaligned_addr(&f.val));
             }
             // `&u.m` handed to a callee: the member is focused out of the
-            // union for the call, which needs it to be the live one -- a
-            // callee typed at `m` reads and writes it as an `m`.
-            if !out
+            // union for the call. Every arm starts at the union's own
+            // address, so this is the arm's focus held open for the
+            // statement: the live one for an ordinary pointer -- a callee
+            // typed at `m` reads and writes it as an `m` -- and fresh storage
+            // for an `_out` one, which the callee fills and so makes live. An
+            // array arm decays to its first element instead, which is not
+            // this.
+            if (out || !self.in_pieces(base))
                 && self.union_of(base).is_some()
-                && !self.in_pieces(base)
                 && !self
                     .ty_of(inner)
                     .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
             {
-                let fo = self.union_member(base, f, false).map_err(|_| {
-                    format!(
+                let fo = self.union_member(base, f, out).map_err(|e| match out {
+                    true => e,
+                    false => format!(
                         "the address of union member `{}`, which is not known to be the live \
                          one here",
                         f.val
-                    )
+                    ),
                 })?;
-                self.lines.extend(fo.open_read.iter().cloned());
+                self.lines.extend(match out {
+                    true => fo.open_write.iter().cloned(),
+                    false => fo.open_read.iter().cloned(),
+                });
                 self.pending_close.extend(fo.close_write);
                 opened.insert(i, fo.at);
                 continue;

@@ -285,6 +285,53 @@ ghost fn array_reveal (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop) (a
   unfold (array_pts_to ct t_repr (SZ.v esize) (SZ.v ealign) a p xs);
 }
 
+(* The same pair, with the representation kept out of the solver's sight.
+   `array_repr` is a quantifier over the elements, and a proof that only
+   carves an enclosing object into pieces -- a structure's byte-level view,
+   with an array field among the pieces -- needs nothing from it but the
+   length. Unfolded there it is pure cost, and enough of it times the proof
+   out. So the byte-level view of a structure states its array fields with
+   `array_repr_o`, and these two are the only places it is opened. *)
+[@@"opaque_to_smt"]
+let array_repr_o (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
+                 (xs: Seq.seq t) (b: bytes) : prop =
+  array_repr t_repr esize xs b
+
+let array_repr_o_eq (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
+                    (xs: Seq.seq t) (b: bytes)
+  : Lemma (array_repr_o t_repr esize xs b <==> array_repr t_repr esize xs b)
+  = reveal_opaque (`%array_repr_o) (array_repr_o t_repr esize xs b)
+
+ghost fn array_conceal_o (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                         (#p: perm) (#b: bytes) (#xs: Seq.seq t) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
+  requires pure (array_repr_o t_repr (SZ.v esize) xs b)
+  requires pure (array_aligned (SZ.v esize) (SZ.v ealign) a)
+  requires pure (array_read_ok ct (SZ.v esize) (Seq.length xs) e)
+  ensures  array_pts_to ct t_repr (SZ.v esize) (SZ.v ealign) a p xs
+{
+  array_repr_o_eq t_repr (SZ.v esize) xs b;
+  fold (array_pts_to ct t_repr (SZ.v esize) (SZ.v ealign) a p xs);
+}
+
+(* The effective types come back only as a length: the enclosing object
+   re-derives each field's from its own when it conceals again, and the
+   per-element quantifier of `array_read_ok` is the same dead weight. *)
+ghost fn array_reveal_o (#t: Type0) (ct: ET.ctype) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                        (#p: perm) (#xs: Seq.seq t)
+  requires array_pts_to ct t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures  exists* b e. mem_pts_to_at a p b e **
+                        pure (array_repr_o t_repr (SZ.v esize) xs b /\
+                              len b == SZ.v esize * Seq.length xs /\
+                              ET.elen e == len b)
+{
+  unfold (array_pts_to ct t_repr (SZ.v esize) (SZ.v ealign) a p xs);
+  with b e. assert (mem_pts_to_at a p b e);
+  array_repr_o_eq t_repr (SZ.v esize) xs b;
+  assert pure (array_repr t_repr (SZ.v esize) xs b);
+  assert pure (array_repr_o t_repr (SZ.v esize) xs b);
+}
+
 (* ---------------------------------------------------------------------------
    Arithmetic helpers
 

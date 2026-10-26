@@ -224,8 +224,8 @@ ghost fn borrow_array (#t: Type0) (ct: ET.ctype) (repr: t -> bytes -> prop)
 ghost fn restore_array (#t: Type0) (ct: ET.ctype) (repr: t -> bytes -> prop)
     (a: ptr) (esize alignment: SZ.t)
     (#root: ET.ctype) (#lo: nat) (#p: perm) (#xs: Seq.seq t) (#base #current: ET.etypes)
-  requires loan root lo ct (SZ.v esize) (Seq.length xs) a base current
   requires RA.value ct repr (SZ.v esize) (SZ.v alignment) current a p xs
+  requires loan root lo ct (SZ.v esize) (Seq.length xs) a base current
   ensures value root lo ct repr (SZ.v esize) (SZ.v alignment) base a p xs
 {
   unfold loan root lo ct (SZ.v esize) (Seq.length xs) a base current;
