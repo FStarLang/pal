@@ -6739,3 +6739,36 @@ new facts about memory.
       its own `Union_U_s? u` guard, as an array subscript carries its bound.
     Nested unions, where an arm is itself a union of structs, work through
     the same steps. `test/union_struct_arms` covers all of these.
+42. **Type punning on the bytes of the live member.** Before this, a read
+    through a member that was not the live one worked only when it was a
+    leading scalar of the live member's own type. Now any integer read or
+    write `u->m.f`, `u->a[i]` (constant `i`) that lands inside the live
+    member's integer bytes is translated. `Pulse.Lib.C.Palow.Pun` supplies
+    the pieces:
+    - `T_bytes` and `T_of_bytes` encode and decode every integer type.
+    - `overlay` replaces a byte range.
+    - `mem_carve` and `mem_uncarve` split off the accessed bytes.
+    - `plain` is the fact that bytes carry no pointer provenance.
+    For each access site the emitter writes a set of helpers named
+    `pun_U_live_off_T`:
+    - `_bytes` gives the accessed bytes as a function of the live member's
+      value.
+    - `_lemma` relates those bytes to the union's representation.
+    - `_aligned` is a standalone alignment step, kept apart so that it does
+      not time out in a big context.
+    - `_read` covers loads. Writes also get `_upd`, a record or `Seq.upd`
+      update of the live value, with `_wlemma` and `_write`.
+    The live member stays live, and its value changes only in the leaves
+    the written bytes overlap. That covers several things: the common
+    initial sequence, a word that spans two fields, a byte inside a field,
+    writes through a struct arm while an array arm is live, and
+    signed/unsigned reinterpretation. The access is refused in these cases:
+    - The bytes include a pointer, a float, a bool, or padding.
+    - The access is misaligned or uses a variable index.
+    - The live member is unknown.
+    - It is a write at a fractional permission, or a write into a field
+      with a refinement.
+    - It is a whole-member access through another member, such as `&u->b`
+      while `a` is live.
+    The older `punned_field` path still handles same-type leading scalars of
+    non-integer type. `test/union_pun_bytes` covers the new cases.
