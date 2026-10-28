@@ -2489,6 +2489,25 @@ impl<'a> Spec<'a> {
         Ok(parts.join(" ** "))
     }
 
+    /// Scope new definedness obligations to the branch that evaluates them.
+    /// Return the conjunction too, so a proposition can type its guarded terms.
+    fn guard_since(&self, mark: usize, condition: &str) -> Option<String> {
+        let guards = self
+            .guards
+            .borrow_mut()
+            .drain(mark..)
+            .collect::<Vec<_>>()
+            .join(r" /\ ");
+        if guards.is_empty() {
+            None
+        } else {
+            self.guards
+                .borrow_mut()
+                .push(format!("({} ==> ({}))", condition, guards));
+            Some(guards)
+        }
+    }
+
     /// A specification expression in proposition position.
     fn prop(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
@@ -2588,7 +2607,17 @@ impl<'a> Spec<'a> {
                     _ => None,
                 };
                 if let Some(o) = logical {
-                    let (a, b) = (self.prop(l, w)?, self.prop(r, w)?);
+                    let a = self.prop(l, w)?;
+                    let mark = self.guards.borrow().len();
+                    let mut b = self.prop(r, w)?;
+                    let condition = if matches!(op, BinOp::LogOr) {
+                        format!("(~({}))", a)
+                    } else {
+                        a.clone()
+                    };
+                    if let Some(g) = self.guard_since(mark, &condition) {
+                        b = format!(r"({} /\ {})", g, b);
+                    }
                     // `_live(x) && p` is just `p` once the frame carries the
                     // storage, and a loop invariant is mostly `_live` clauses.
                     if matches!(op, BinOp::LogAnd) {
@@ -3537,17 +3566,17 @@ impl<'a> Spec<'a> {
                 // of a `_let`, say -- has to come out as an F* `bool`, not as a
                 // proposition, because something is going to compare it with
                 // `true`.
-                if let Some(o) = match op {
-                    BinOp::LogAnd => Some("&&"),
-                    BinOp::LogOr => Some("||"),
-                    _ => None,
-                } {
-                    return Ok(format!(
-                        "({} {} {})",
-                        self.value(l, w)?,
-                        o,
-                        self.value(r, w)?
-                    ));
+                if matches!(op, BinOp::LogAnd | BinOp::LogOr) {
+                    let a = self.value(l, w)?;
+                    let mark = self.guards.borrow().len();
+                    let b = self.value(r, w)?;
+                    let and = matches!(op, BinOp::LogAnd);
+                    self.guard_since(mark, &format!("({} == {})", a, and));
+                    return Ok(if and {
+                        format!("(if {} then {} else false)", a, b)
+                    } else {
+                        format!("(if {} then true else {})", a, b)
+                    });
                 }
                 let ty = self.ty_of(l)?;
                 if let Some(t) = self.ptr_arith_value(*op, l, r, &ty, w)? {
@@ -3585,8 +3614,9 @@ impl<'a> Spec<'a> {
                         // needs it, as a conjunct to its own left: `p /\ q`
                         // types `q` with `p` assumed, which is exactly the
                         // scope the application is missing. The clause it
-                        // guards is then a stronger statement than C's, and
-                        // provable from the `_requires` that motivated it.
+                        // guards still needs the operator to be defined.
+                        // Enclosing short-circuit and conditional expressions
+                        // keep that obligation on the path that evaluates it.
                         Err(e) => {
                             let g = self.definedness(*op, &ty, l, r, w).ok_or(e)?;
                             self.guards.borrow_mut().push(g);
@@ -3615,12 +3645,16 @@ impl<'a> Spec<'a> {
                     self.value(r, w)?
                 ))
             }
-            ExprT::Cond(c, t, f) => Ok(format!(
-                "(if {} then {} else {})",
-                self.value(c, w)?,
-                self.value(t, w)?,
-                self.value(f, w)?
-            )),
+            ExprT::Cond(c, t, f) => {
+                let c = self.value(c, w)?;
+                let mark = self.guards.borrow().len();
+                let t = self.value(t, w)?;
+                self.guard_since(mark, &format!("({} == true)", c));
+                let mark = self.guards.borrow().len();
+                let f = self.value(f, w)?;
+                self.guard_since(mark, &format!("({} == false)", c));
+                Ok(format!("(if {} then {} else {})", c, t, f))
+            }
             // Hand-written Pulse as a contract *term*: a pure fact the author
             // states themselves. The slprop-valued case is not here -- an
             // slprop is ownership, not a proposition, and it goes into the

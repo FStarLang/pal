@@ -6083,6 +6083,16 @@ new facts about memory.
 
     `test/contract_ops` covers these.
 
+    Definedness also follows evaluation: the right side of `&&`, `||`,
+    and implication, and each arm of `?:`, needs its guards only on the
+    path that evaluates it. Hoisting `x != 0` out of `x == 0 || y / x == 0`
+    incorrectly strengthens the contract, even making a valid external
+    contract contradictory at zero. Guards remain separate from the
+    proposition as well as available inside its guarded terms, so negating
+    a condition cannot hide an evaluated division by zero.
+    `contract_guard_extern` rejects the former false proof, and
+    `contract_guard_negation` rejects the undefined call under negation.
+
 34. **Struct and array `_out` parameters in loops.** Loops are no longer
     refused in a function with such a parameter.
     - A struct `_out` is the slot `*p`. Once it is written, a loop that
