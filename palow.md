@@ -2369,9 +2369,14 @@ new facts about memory.
    constructor while preserving the entire union's ownership and padding.
    No ghost tag becomes runtime data. The emitter selects a member from a
    preceding write or an unconditional `_active` contract, otherwise trying
-   the first member with the same checked precondition. A copy whose tag
-   cannot be established still fails verification; `union_value_unknown`
-   checks that boundary.
+   the first member with the same checked precondition. A local holding a
+   previously stored runtime union value can instead forward that value,
+   after proving that its byte ownership still holds. Calls, potentially
+   aliasing writes, ghost statements, and loops invalidate these remembered
+   values; a branch join retains only incoming names left unchanged on every
+   path. This does not provide a general union decoder: a memory read with
+   neither a retained value nor a proved active member still fails, as
+   `union_value_unknown` checks.
 
    Two smaller fixes came with it. A common-initial-sequence union that PAL
    collapses into a struct was losing its layout: the table is keyed by how a

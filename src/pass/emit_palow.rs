@@ -11430,6 +11430,7 @@ struct BranchResult {
     /// Which function, and which allocated block, each enclosing slot is
     /// known to hold on this path.
     holds: Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>,
+    union_values: HashMap<String, String>,
     out_params: Vec<String>,
 }
 
@@ -11769,6 +11770,9 @@ struct Body<'a> {
     /// changed it. Keyed by the address expression, which is the emitter's own
     /// name for the object.
     active: HashMap<String, String>,
+    /// Runtime values last stored in union locals. Forwarding one still
+    /// checks its byte ownership; no erased active-arm tag is inspected.
+    union_values: HashMap<String, String>,
     /// Union members the function's own `_requires` says are the live ones,
     /// as the C lvalue naming the union object and the member's name. A read
     /// of a union member is only sound where the member is the live one, and
@@ -13209,14 +13213,19 @@ impl<'a> Body<'a> {
             .map(|_| format!("union_{}", uname.val))
     }
 
-    /// Copy a union through one statically selected member, never by reading
-    /// its erased tag. The reader requires proof that this member is live.
-    /// If neither a write nor a contract names it, try the first member and
-    /// leave that same obligation to F*, including for spliced contracts.
+    /// Forward a stored runtime value if its ownership is still available.
+    /// Otherwise read through a statically selected member, never an erased
+    /// tag. If no member is known, try the first and leave its tag obligation
+    /// to F*, including for spliced contracts.
     fn read_union_value(&mut self, e: &Expr, a: &str, hint: &str) -> Result<String, String> {
         let un = self
             .union_of(e)
             .ok_or_else(|| "a whole-value read of a union with no Palow type".to_string())?;
+        if let Some(value) = self.union_values.get(a).cloned() {
+            self.lines
+                .push(format!("assert ({}_pts_to {} 1.0R {});", un, a, value));
+            return Ok(value);
+        }
         let uname = un.strip_prefix("union_").unwrap();
         let ui = &self.tds.unions[uname];
         let named = self.unalias_place(e);
@@ -16373,6 +16382,7 @@ impl<'a> Body<'a> {
                         "let {} = call_div _ _ {} {} {};",
                         t, callee, tuple, w
                     ));
+                    self.union_values.clear();
                     // The callee hands the validity back -- it is a fact, not
                     // a resource it uses up. Where the caller keeps the
                     // ownership it came with, the fact goes back into the
@@ -16429,6 +16439,7 @@ impl<'a> Body<'a> {
                     "let {} = call_div {} {} {} {} {};",
                     t, pre, post, addr, tuple, w
                 ));
+                self.union_values.clear();
                 self.lines
                     .push(format!("drop_is_valid {} {} {};", addr, pre, post));
                 Ok(t)
@@ -16732,6 +16743,7 @@ impl<'a> Body<'a> {
         // it gives it up whenever control leaves -- which is after the
         // arguments are set up, since they are evaluated before the call.
         self.active.clear();
+        self.union_values.clear();
         Ok(format!("({})", out))
     }
 
@@ -18309,6 +18321,9 @@ impl<'a> Body<'a> {
     /// Store into an lvalue, choosing the initialising store when the target
     /// is a slot that has not been written yet.
     fn store(&mut self, lhs: &Expr, pn: &str, value: &str) -> Result<(), String> {
+        if !matches!(lhs.val, ExprT::Var(_)) {
+            self.union_values.clear();
+        }
         if let Some(p) = self.unalias(lhs) {
             return self.store(&p, pn, value);
         }
@@ -18340,6 +18355,17 @@ impl<'a> Body<'a> {
                 };
                 self.slots[i].init = true;
                 let a = self.slots[i].addr.clone();
+                self.union_values.remove(&a);
+                if pn.starts_with("union_") {
+                    self.active.remove(&a);
+                    if !self.slots[i].global
+                        && self.inlining == 0
+                        && !value.is_empty()
+                        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        self.union_values.insert(a.clone(), value.to_string());
+                    }
+                }
                 self.lines.push(format!("{}_{} {} {};", pn, op, a, value));
                 // A mirrored slot's ghost reference holds what the slot holds,
                 // which is only true if it is written whenever the slot is.
@@ -19191,6 +19217,9 @@ impl<'a> Body<'a> {
         let close = std::mem::take(&mut self.pending_close);
         let open = std::mem::take(&mut self.own_open);
         r?;
+        if matches!(s.val, StmtT::GhostStmt(_)) {
+            self.union_values.clear();
+        }
         self.lines.extend(close);
         self.own_open = open;
         self.close_own();
@@ -19407,8 +19436,10 @@ impl<'a> Body<'a> {
                 // The body runs an unknown number of times, so what was live
                 // before it says nothing about what is live after.
                 self.active.clear();
+                self.union_values.clear();
                 self.loop_(cond, inv, requires, ensures, body)?;
                 self.active.clear();
+                self.union_values.clear();
                 Ok(())
             }
             // A `switch` whose cases all end in `break` reaches the IR as a
@@ -19532,6 +19563,10 @@ impl<'a> Body<'a> {
                 // whatever follows the `switch`.
                 let label = self.fresh("match_join");
                 self.lines.push(format!("label {}:;", label));
+                self.union_values.retain(|a, v| {
+                    arms.iter()
+                        .all(|(_, arm)| arm.union_values.get(a) == Some(v))
+                });
                 Ok(())
             }
             StmtT::Assert(e) => {
@@ -20086,6 +20121,9 @@ impl<'a> Body<'a> {
                     self.seeded
                         .push((addr, "_".to_string(), "_".to_string(), key));
                 }
+                self.union_values.retain(|a, v| {
+                    then.union_values.get(a) == Some(v) && els.union_values.get(a) == Some(v)
+                });
                 Ok(())
             }
             _ => Err(format!("{} is not translated yet", stmt_kind(s))),
@@ -20362,6 +20400,7 @@ impl<'a> Body<'a> {
     /// against a copy of the state at the `if`.
     fn tail_arm(&mut self, stmts: &[Rc<Stmt>]) -> Result<(Vec<String>, bool), String> {
         let outer_env = self.env.clone();
+        let outer_union_values = self.union_values.clone();
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
         let outer_slots = self.slots.clone();
@@ -20385,6 +20424,7 @@ impl<'a> Body<'a> {
         self.slots = outer_slots;
         self.out_params = outer_out;
         self.env = outer_env;
+        self.union_values = outer_union_values;
         self.lines = outer_lines;
         out
     }
@@ -20396,6 +20436,7 @@ impl<'a> Body<'a> {
     /// to agree on.
     fn branch(&mut self, stmts: &Stmts) -> Result<BranchResult, String> {
         let mark = self.slots.len();
+        let outer_union_values = self.union_values.clone();
         // What the enclosing slots hold before the arm runs. An arm is one
         // path, so what it stores is only true on that path: the other arm has
         // to start where this one did, and what survives the join is what both
@@ -20501,6 +20542,7 @@ impl<'a> Body<'a> {
                     .iter()
                     .map(|s| (s.holds_fn.clone(), s.holds_block.clone()))
                     .collect(),
+                union_values: self.union_values.clone(),
                 out_params: std::mem::take(&mut self.out_params),
             })
         })();
@@ -20516,6 +20558,7 @@ impl<'a> Body<'a> {
             slot.scattered = scattered;
         }
         self.env = outer_env;
+        self.union_values = outer_union_values;
         self.lines = outer_lines;
         if out.is_err() {
             self.out_params = outer_out;
@@ -22093,6 +22136,7 @@ fn emit_body(
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
         active: HashMap::new(),
+        union_values: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a
         // promise the caller made, so a read resting on it would be resting
         // on nothing.
