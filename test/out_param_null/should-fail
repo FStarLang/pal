@@ -1,0 +1,3 @@
+Func_call_required_with_null.fst
+Cannot prove:
+int32_t_pts_to_uninit null

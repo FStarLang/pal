@@ -2209,6 +2209,10 @@ struct FnSurface {
     /// whose guard also encloses a refinement is not here -- the payload would
     /// have to restate it -- so a body still cannot dereference one.
     null_payload: HashMap<String, String>,
+    /// Nullable single-object outputs, whose guarded payload changes from
+    /// uninitialised storage to a value. The type also supplies the arbitrary
+    /// ghost value used on a null path, where either payload is empty.
+    null_outs: HashMap<String, Rc<Type>>,
     /// Parameters whose pointee the emitted `requires` really owns. A `_plain`
     /// pointer owns nothing by itself: what ownership it has comes from a
     /// `_refine_value`, and the all-or-nothing contract drop takes that away
@@ -4210,6 +4214,7 @@ fn emit_fn(
     // Parameters whose ownership the contract puts behind `unless_null`.
     let mut guarded: HashSet<String> = HashSet::new();
     let mut null_payload: HashMap<String, String> = HashMap::new();
+    let mut null_outs: HashMap<String, Rc<Type>> = HashMap::new();
     // These values are available only inside the nullness guard. Keep them
     // separate from the map that permits ordinary specification dereferences.
     let mut guarded_pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
@@ -4461,6 +4466,8 @@ fn emit_fn(
                 _ => "1.0R".to_string(),
             };
             null_payload.insert(base.clone(), pts_to(&perm, "_"));
+        } else if null_guard && extent(tds, &arg.ty) == Some(Extent::One) {
+            null_payload.insert(base.clone(), format!("{}_pts_to_uninit {}", pn, pname));
         }
         let pts_to: Box<dyn Fn(&str, &str) -> String> = if null_guard {
             let p = pname.clone();
@@ -4518,7 +4525,32 @@ fn emit_fn(
                 }
             }
             match arg.mode {
-                ParamMode::Out => return Err(format!("parameter {} is a nullable `_out`", pname)),
+                ParamMode::Out if extent(tds, &arg.ty) == Some(Extent::One) => {
+                    req.push(format!(
+                        "unless_null {} ({}_pts_to_uninit {})",
+                        pname, pn, pname
+                    ));
+                    if !storable_struct(tds, pt) {
+                        outs.push(OwnedParam {
+                            base: base.clone(),
+                            vty: vty.clone(),
+                            pre: format!("{}_pts_to {} 1.0R ", pn, pname),
+                            entry: String::new(),
+                        });
+                    }
+                    if !ens_own {
+                        fresh.push((
+                            format!("{}'", vname),
+                            vty,
+                            pts_to("1.0R", &format!("{}'", vname)),
+                        ));
+                    }
+                    null_outs.insert(base.clone(), pt.clone());
+                    guarded_pointees.insert(base, (None, Some(format!("{}'", vname))));
+                }
+                ParamMode::Out => {
+                    return Err(format!("parameter {} is a nullable `_out` array", pname));
+                }
                 ParamMode::Const => {
                     let perm = format!("perm_{}", base);
                     perms.push(format!("(#{}: perm)", perm));
@@ -6104,6 +6136,7 @@ fn emit_fn(
         outs,
         guarded,
         null_payload,
+        null_outs,
         granted,
         spliced_own: contract_ok
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
@@ -11495,6 +11528,8 @@ struct Body<'a> {
     guarded: &'a HashSet<String>,
     /// See `FnSurface::null_payload`.
     null_payload: &'a HashMap<String, String>,
+    /// See `FnSurface::null_outs`.
+    null_outs: &'a HashMap<String, Rc<Type>>,
     /// Guarded parameters a null test has opened on the current path: their
     /// pointee is owned as if the contract had granted it. The guard is put
     /// back where an arm that falls through ends, so that both arms of the
@@ -13527,7 +13562,7 @@ impl<'a> Body<'a> {
             self.scattered_set_mut(target).clear();
             self.prescattered.remove(&ff.a);
             match target {
-                Scattering::Slot(i) => self.slots[i].init = true,
+                Scattering::Slot(i) => self.mark_slot_initialized(i),
                 Scattering::Block(i) => self.blocks[i].init = true,
             }
             self.gather_enclosing(&ff.a, &mut close_write);
@@ -13607,7 +13642,7 @@ impl<'a> Body<'a> {
             self.scattered_set_mut(t).clear();
             self.prescattered.remove(&pa);
             match t {
-                Scattering::Slot(i) => self.slots[i].init = true,
+                Scattering::Slot(i) => self.mark_slot_initialized(i),
                 Scattering::Block(i) => self.blocks[i].init = true,
             }
             self.gather_enclosing(&pa, close);
@@ -15327,11 +15362,11 @@ impl<'a> Body<'a> {
         let Some(p) = opened else {
             return self.cond_arm(e);
         };
+        let payload = self.nullable_payload(&p, &self.out_params);
         self.unguarded.push(p.clone());
         let r = self.cond_arm(e);
         self.unguarded.pop();
         let (mut lines, v) = r?;
-        let payload = &self.null_payload[&p];
         lines.insert(0, format!("elim_unless_null var_{} ({});", p, payload));
         lines.push(format!("intro_unless_null var_{} ({});", p, payload));
         Ok((lines, v))
@@ -15345,6 +15380,7 @@ impl<'a> Body<'a> {
     /// would then leave a different state behind.
     fn cond_arm(&mut self, e: &Expr) -> Result<(Vec<String>, String), String> {
         let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
+        let outs = self.out_params.clone();
         let nslots = self.slots.len();
         let blocks: Vec<(bool, bool)> = self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
         let outer = std::mem::take(&mut self.lines);
@@ -15357,7 +15393,11 @@ impl<'a> Body<'a> {
         let now: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
         let now_blocks: Vec<(bool, bool)> =
             self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
-        if self.slots.len() != nslots || now != inits || now_blocks != blocks {
+        if self.slots.len() != nslots
+            || now != inits
+            || now_blocks != blocks
+            || self.out_params != outs
+        {
             return Err(
                 "a conditional expression whose arm changes what is initialised".to_string(),
             );
@@ -15744,7 +15784,7 @@ impl<'a> Body<'a> {
                     .then(|| self.param_null_test(c))
                     .flatten();
                 let cv = match &pt {
-                    Some((p, when)) => Self::null_cond(&format!("var_{}", p), *when),
+                    Some((p, when)) => self.param_null_cond(c, p, *when)?,
                     None => self.rvalue(c)?,
                 };
                 if self.inlining > 0 {
@@ -15798,7 +15838,7 @@ impl<'a> Body<'a> {
                     .flatten()
                     .filter(|(_, null_when_true)| *null_when_true == matches!(op, BinOp::LogOr));
                 let a = match &pt {
-                    Some((p, when)) => Self::null_cond(&format!("var_{}", p), *when),
+                    Some((p, when)) => self.param_null_cond(l, p, *when)?,
                     None => self.rvalue(l)?,
                 };
                 // `&&` and `||` evaluate their right side only when the left
@@ -16684,6 +16724,14 @@ impl<'a> Body<'a> {
         }
     }
 
+    fn mark_slot_initialized(&mut self, i: usize) {
+        let s = &mut self.slots[i];
+        s.init = true;
+        if let Some(name) = s.name.strip_prefix('*') {
+            self.out_params.retain(|n| n != name);
+        }
+    }
+
     /// The storage passed for an `_out` parameter.
     ///
     /// The pointee is not read, but the pointer itself is still evaluated:
@@ -16693,6 +16741,11 @@ impl<'a> Body<'a> {
     /// own `_out` parameter, and the emitter already tracks both -- so all
     /// this does is spend one and record that it is now initialised.
     fn out_arg(&mut self, a: &Expr) -> Result<String, String> {
+        // The callee's contract still decides whether null is allowed.
+        // A nullable output owns only an empty guard at this address.
+        if is_zero(strip_casts(a)) {
+            return Ok("null".to_string());
+        }
         if let ExprT::Ref(inner) = &strip_vattr(a).val
             && let ExprT::Var(v) = &strip_vattr(inner).val
             && let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val)
@@ -17616,7 +17669,7 @@ impl<'a> Body<'a> {
     /// The arm where it is not null owns the pointee: it opens the guard, the
     /// body reads and writes through the parameter as through any other, and
     /// the guard is closed again (see `unguarded`). The null arm has `emp`
-    /// behind the guard and leaves it alone.
+    /// behind the guard, including when an output's payload changes.
     fn param_null_test(&self, cond: &Expr) -> Option<(String, bool)> {
         fn peel(e: &Expr) -> &Expr {
             match &strip_vattr(e).val {
@@ -17642,11 +17695,48 @@ impl<'a> Body<'a> {
         if !self.params.contains(&*name)
             || !self.null_payload.contains_key(&name)
             || self.unguarded.contains(&name)
-            || self.slots.iter().any(|s| s.name == name)
         {
             return None;
         }
         Some((name, null_when_true))
+    }
+
+    fn param_null_cond(&mut self, cond: &Expr, p: &str, when: bool) -> Result<String, String> {
+        let name: Rc<IdentT> = Rc::from(p);
+        let e = ExprT::Var(name.with_loc(cond.loc.clone())).with_loc(cond.loc.clone());
+        // An addressable parameter may have changed. Use its incoming address
+        // for the guard only after checking the current pointer still agrees.
+        let at = self.tracked_pointee_addr(&e, p)?;
+        Ok(Self::null_cond(&at, when))
+    }
+
+    fn nullable_payload(&self, p: &str, outs: &[String]) -> String {
+        if !outs.iter().any(|n| n == p)
+            && let Some(ty) = self.null_outs.get(p)
+        {
+            let pn = palow_name(self.tds, ty).unwrap();
+            return format!("{}_pts_to var_{} 1.0R _", pn, p);
+        }
+        self.null_payload[p].clone()
+    }
+
+    /// No object is written here: under `is_null p`, both guarded storage
+    /// predicates are empty. A concrete ghost witness keeps the initialized
+    /// predicate well typed without constraining a value on the non-null path.
+    fn null_out_init(&self, p: &str) -> Result<Vec<String>, String> {
+        let ty = &self.null_outs[p];
+        let pn = palow_name(self.tds, ty).unwrap();
+        let value = zero_value(self.tds, ty)?;
+        Ok(vec![
+            format!(
+                "elim_unless_null_null var_{} ({});",
+                p, self.null_payload[p]
+            ),
+            format!(
+                "intro_unless_null_null var_{} ({}_pts_to var_{} 1.0R {});",
+                p, pn, p, value
+            ),
+        ])
     }
 
     /// The emitted condition of a null test, in the polarity the C source
@@ -19269,7 +19359,7 @@ impl<'a> Body<'a> {
                 self.scattered_set_mut(t).clear();
                 self.prescattered.remove(&addr);
                 match t {
-                    Scattering::Slot(i) => self.slots[i].init = true,
+                    Scattering::Slot(i) => self.mark_slot_initialized(i),
                     Scattering::Block(i) => self.blocks[i].init = true,
                 }
                 // If the object was itself a field of something being filled,
@@ -19452,7 +19542,7 @@ impl<'a> Body<'a> {
                 };
                 let c = match (nt, &pt) {
                     (Some((i, when)), _) => Self::null_cond(&self.blocks[i].tmp, when),
-                    (None, Some((p, when))) => Self::null_cond(&format!("var_{}", p), *when),
+                    (None, Some((p, when))) => self.param_null_cond(cond, p, *when)?,
                     (None, None) => {
                         let cty = self.ty_of(cond)?;
                         if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
@@ -19525,7 +19615,7 @@ impl<'a> Body<'a> {
                 let mut then = then?;
                 let then_blocks = self.blocks.clone();
                 self.blocks = entry_blocks.clone();
-                self.out_params = entry_out;
+                self.out_params = entry_out.clone();
                 for (slot, init) in self.slots.iter_mut().zip(&entry_inits) {
                     slot.init = *init;
                 }
@@ -19541,13 +19631,34 @@ impl<'a> Body<'a> {
                 }
                 let mut els = els?;
                 if let Some((p, _)) = &pt {
-                    let payload = &self.null_payload[p];
-                    let live = if pt_live_then { &mut then } else { &mut els };
+                    let payload = self.nullable_payload(p, &entry_out);
+                    let (live, null) = if pt_live_then {
+                        (&mut then, &mut els)
+                    } else {
+                        (&mut els, &mut then)
+                    };
                     live.lines
                         .insert(0, format!("elim_unless_null var_{} ({});", p, payload));
                     if !live.returned && !live.diverged {
+                        let payload = self.nullable_payload(p, &live.out_params);
                         live.lines
                             .push(format!("intro_unless_null var_{} ({});", p, payload));
+                    }
+                    if self.null_outs.contains_key(p)
+                        && null.out_params.contains(p)
+                        && !null.diverged
+                    {
+                        let lines = self.null_out_init(p)?;
+                        if null.returned {
+                            null.lines.splice(0..0, lines);
+                        } else {
+                            null.lines.extend(lines);
+                        }
+                        null.out_params.retain(|n| n != p);
+                        let star = format!("*{}", p);
+                        if let Some(i) = self.slots.iter().position(|s| s.name == star) {
+                            null.inits[i] = true;
+                        }
                     }
                 }
                 let els_blocks = self.blocks.clone();
@@ -19768,7 +19879,7 @@ impl<'a> Body<'a> {
                     };
                     let c = match (nt, &pt) {
                         (Some((i, when)), _) => Self::null_cond(&self.blocks[i].tmp, when),
-                        (None, Some((p, when))) => Self::null_cond(&format!("var_{}", p), *when),
+                        (None, Some((p, when))) => self.param_null_cond(cond, p, *when)?,
                         (None, None) => {
                             let cty = self.ty_of(cond)?;
                             if !matches!(self.tds.resolve(&cty).val, TypeT::Bool) {
@@ -19812,6 +19923,17 @@ impl<'a> Body<'a> {
                         self.mark_checked(i, live_then);
                     }
                     let pt_live_then = matches!(pt, Some((_, false)));
+                    let pt_payload = pt
+                        .as_ref()
+                        .map(|(p, _)| self.nullable_payload(p, &self.out_params));
+                    let pt_null_lines = match &pt {
+                        Some((p, _))
+                            if self.null_outs.contains_key(p) && self.out_params.contains(p) =>
+                        {
+                            self.null_out_init(p)?
+                        }
+                        _ => Vec::new(),
+                    };
                     let open = |b: &mut Self, live: bool| {
                         if let Some((p, _)) = pt.as_ref().filter(|_| live) {
                             b.unguarded.push(p.clone());
@@ -19822,8 +19944,14 @@ impl<'a> Body<'a> {
                             b.unguarded.pop();
                             lines.insert(
                                 0,
-                                format!("elim_unless_null var_{} ({});", p, b.null_payload[p]),
+                                format!(
+                                    "elim_unless_null var_{} ({});",
+                                    p,
+                                    pt_payload.as_ref().unwrap()
+                                ),
                             );
+                        } else if !live {
+                            lines.splice(0..0, pt_null_lines.iter().cloned());
                         }
                     };
                     open(self, pt_live_then);
@@ -21612,6 +21740,7 @@ fn emit_body(
         piece_types: &sig.piece_types,
         guarded: &sig.guarded,
         null_payload: &sig.null_payload,
+        null_outs: &sig.null_outs,
         unguarded: Vec::new(),
         valid_fps: &sig.valid_fps,
         valid_fp_fields: &sig.valid_fp_fields,

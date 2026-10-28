@@ -1368,10 +1368,11 @@ new facts about memory.
   struct, the tracked slot is the pointee `*p`: writing `p->f` in both arms
   leaves the same scattered-field set, and writing every field in both arms
   leaves the same gathered value. This is a real restriction on the C we
-  accept rather than an artefact. The `_ensures` a user writes on an `if` is
-  ignored, since Pulse infers the join without it. A mixed direct-store/call
-  join can also lose an output-value equality when another cell is framed
-  across the branches; this occurs even without reading the framed cell.
+  accept rather than an artefact. Pure and liveness-only `_ensures` on an
+  `if` leave Pulse to infer the join; ownership-bearing annotations are
+  emitted with the rest of the frame. A mixed direct-store/call join can lose
+  an output-value equality when another cell is framed across the branches;
+  this occurs even without reading the framed cell.
 - An `_out` pointee is uninitialised, but the pointer parameter itself is an
   initialised C object. Taking that parameter's address, including in a proof
   annotation inside a branch, allocates its local cell at function entry.
@@ -1384,6 +1385,24 @@ new facts about memory.
   `out_param_rebind_fields` reject writes through a rebound pointer that would
   leave the original output unwritten. `out_param_live_uninit` checks that an
   initialised pointer cell does not make its pointee initialised.
+- A single-object `_nullable _out` parameter arrives with
+  `unless_null p (T_pts_to_uninit p)` and normally returns an existentially
+  quantified initialized value under the same guard. An ownership-bearing
+  `_ensures` still replaces that automatic output ownership. A non-null
+  branch must initialize the object; the null branch changes only its empty
+  guard, using an arbitrary zero-valued ghost witness, not a C store or a
+  claim about a null pointer's bytes. Repeated null checks use the initialized
+  payload after a write or forwarding call. Completing a record's fields also
+  completes the tracked `_out`, including before a later whole-object write.
+  `nullable_out` covers scalar and record outputs, early returns, forwarding,
+  addressed parameters, exact values, and null/non-null callers.
+  Callers introduce and eliminate nullable ownership explicitly, as for
+  other nullable parameters; a non-null caller derives non-nullness before
+  wrapping its storage. Nullable output arrays remain unsupported, and a
+  null-path witness requires a type whose ghost zero value can be constructed.
+  `nullable_out_uninit`, `nullable_out_unchecked`, `nullable_out_rebind`, and
+  `out_param_null` reject unwritten outputs, unchecked writes, rebinding, and
+  null passed to a required output.
 - The layer-1 points-to predicates are abstract (`CTypes.fsti`,
   `Scalar.fsti`). This is not a matter of taste: a transparent definition
   makes F\* unfold to `encode` when it has to equate two branch-joined values,
@@ -6005,6 +6024,12 @@ new facts about memory.
     whose guard also encloses a `_refine` is not opened, since the payload
     would have to restate it. Contracts still cannot mention `*p`.
     `test/nullable_deref` covers these.
+
+    An addressable parameter's null test reads its current pointer and checks
+    equality with the incoming address before using the guard stated at that
+    address. Reassignment is not silently ignored.
+    `test/nullable_param_rebind_test` rejects a false result contract that
+    would hold if a test after `p = NULL` tested the incoming non-null pointer.
 
 28. **`~` on a signed operand** (#349). The body translation of `~` only
     knew unsigned widths; a signed operand (including the `int` that
