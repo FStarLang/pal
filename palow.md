@@ -1544,7 +1544,11 @@ new facts about memory.
    under it; C's short-circuiting is invisible because an assertion has no
    side effects. `test/palow_assert` covers locals, pointees, an
    assertion following a write, two pointees at once, an ordering through
-   `_specint`, and an element of an array parameter.
+   `_specint`, and an element of an array parameter. Mathematical division
+   and remainder use the same operators as in contracts, including their
+   nonzero-divisor proof obligation. The quotient/remainder and bounded-scale
+   cases in `test/palow_assert` exercise them;
+   `test/palow_assert_zero_divisor` rejects division without that proof.
 
    Loops are translated. This is the one construct where the translation has
    to ask the C source for something the old model never needed. Pulse infers

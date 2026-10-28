@@ -51,3 +51,18 @@ void about_an_element(uint32_t a[], size_t n)
 {
   _assert(a[0] == 4);
 }
+
+void quotient_and_remainder(uint32_t n, uint32_t d)
+  _requires(d > 0)
+{
+  _assert(((_specint)n / d) * d + ((_specint)n % d) == n);
+  _assert((_specint)n % d < d);
+}
+
+uint32_t bounded_scale(uint16_t n)
+  _requires(n <= UINT16_MAX / 8)
+  _ensures(return == (_specint)n * 8)
+{
+  _assert(n <= UINT16_MAX / 8);
+  return (uint32_t)n * 8;
+}

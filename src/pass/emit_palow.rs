@@ -14863,13 +14863,18 @@ impl<'a> Body<'a> {
             // over specification integers.
             // Mathematical integers are F*'s own, so arithmetic over them is
             // the same arithmetic with no overflow obligation attached.
+            // Division and remainder retain F*'s nonzero-divisor obligation.
             match &strip_vattr(e).val {
                 ExprT::IntLit(n, _) => return Ok(format!("({})", n)),
                 ExprT::UnOp(UnOp::Neg, inner) => {
                     let v = self.num(inner)?;
                     return Ok(format!("(- {})", v));
                 }
-                ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) => {
+                ExprT::BinOp(
+                    op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod),
+                    l,
+                    r,
+                ) => {
                     let a = self.num(l)?;
                     let b = self.num(r)?;
                     return Ok(format!("({} {} {})", a, op.to_str(), b));
