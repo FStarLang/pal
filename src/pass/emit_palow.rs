@@ -16977,8 +16977,8 @@ impl<'a> Body<'a> {
     /// The pointee is not read, but the pointer itself is still evaluated:
     /// assigning to a C parameter changes where it points. The callee wants
     /// the uninitialised points-to. For tracked storage, record that the call
-    /// initializes it. A `_plain` parameter can instead carry storage through
-    /// a handwritten contract, whose ownership the callee must still prove.
+    /// initializes it. A handwritten contract can instead supply storage for
+    /// an untracked pointer, whose ownership the callee must still prove.
     fn out_arg(&mut self, a: &Expr) -> Result<String, String> {
         // The callee's contract still decides whether null is allowed.
         // A nullable output owns only an empty guard at this address.
@@ -17049,6 +17049,26 @@ impl<'a> Body<'a> {
             // function has nothing left to prove about it on the way out.
             return Ok(at);
         }
+        // A written output can be overwritten. Evaluate the pointer again:
+        // the C parameter may have been reassigned since the first write.
+        if let ExprT::Var(v) = &strip_vattr(a).val
+            && (self.outs.iter().any(|o| *o.base == *v.val)
+                || self
+                    .slots
+                    .iter()
+                    .any(|s| s.name == format!("*{}", v.val) && s.init))
+        {
+            let ty = self.ty_of(a)?;
+            if extent(self.tds, &ty) == Some(Extent::One)
+                && let TypeT::Pointer(pt, _) = &peel(self.tds, &ty).val
+            {
+                let pn = palow_name(self.tds, pt)
+                    .ok_or_else(|| format!("`{}` has an unsupported pointee type", v.val))?;
+                let at = self.rvalue(a)?;
+                self.lines.push(format!("{}_forget {};", pn, at));
+                return Ok(at);
+            }
+        }
         // A place rather than a whole object: a field, an array element, or an
         // element of a field's array. The callee writes through it, so it is
         // opened for the length of the statement and closed afterwards, and
@@ -17089,15 +17109,11 @@ impl<'a> Body<'a> {
             }
             return Ok(self.blocks[i].tmp.clone());
         }
-        // A custom contract may supply uninitialised storage without making
-        // the parameter `_out`. Read the actual pointer; the callee's
-        // precondition checks its storage rather than assuming it exists.
-        if self.spliced_own
-            && let ExprT::Var(v) = &strip_vattr(a).val
-            && self.params.contains(&*v.val)
-        {
+        // Explicit ownership can be borrowed through a local pointer too.
+        // The callee's precondition checks the actual pointer's storage.
+        if self.spliced_own {
             let ty = self.ty_of(a)?;
-            if is_plain(self.tds, &ty) && extent(self.tds, &ty) == Some(Extent::One) {
+            if extent(self.tds, &ty) == Some(Extent::One) {
                 return self.rvalue(a);
             }
         }
