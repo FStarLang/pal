@@ -1407,6 +1407,19 @@ new facts about memory.
   `nullable_out_uninit`, `nullable_out_unchecked`, `nullable_out_rebind`, and
   `out_param_null` reject unwritten outputs, unchecked writes, rebinding, and
   null passed to a required output.
+- A pure parameter refinement such as `_refine(*this == value)` on a
+  nullable pointer is conditional on non-nullness, at each end where its
+  pointee is initialized. In particular an optional output gains the
+  refinement on return, not on entry. Only `this` gains access to the guarded
+  value; other nullable pointees remain unavailable. Arithmetic definedness
+  stays under the nullness and short-circuit guards. `nullable_refine` covers
+  inputs, outputs, updates, forwarding, and null/non-null callers;
+  `nullable_refine_bad_value`, `nullable_refine_undefined`, and
+  `nullable_refine_other` reject wrong values, evaluated division by zero,
+  and an unguarded read of another optional output. F* can still eagerly
+  reduce a machine division at literal zero under a false guard; the
+  null/zero caller keeps its zero divisor symbolic to avoid that verifier
+  normalization limitation.
 - The layer-1 points-to predicates are abstract (`CTypes.fsti`,
   `Scalar.fsti`). This is not a matter of taste: a transparent definition
   makes F\* unfold to `encode` when it has to equate two branch-joined values,
@@ -6025,9 +6038,12 @@ new facts about memory.
     bump(p);`), the same join problem as in entry 26.
 
     The payload is the points-to with its value left as `_`; a parameter
-    whose guard also encloses a `_refine` is not opened, since the payload
-    would have to restate it. Contracts still cannot mention `*p`.
-    `test/nullable_deref` covers these.
+    whose guard also encloses an ownership or pointee-type `_refine` is not
+    opened, since the payload would have to restate it. A pure refinement on
+    the pointer parameter is instead stated as an implication outside the
+    ownership guard and does not prevent opening it. Ordinary function
+    contracts still cannot mention `*p`; a guarded parameter refinement uses
+    `*this`. `test/nullable_deref` and `test/nullable_refine` cover these.
 
     An addressable parameter's null test reads its current pointer and checks
     equality with the incoming address before using the guard stated at that

@@ -4487,10 +4487,9 @@ fn emit_fn(
                 null_payload.remove(&base);
             }
             match refinements(tds, &arg.ty) {
-                // Ownership survives the guard: it is stated where the
-                // points-to is stated, inside it. A *proposition* does not --
-                // it would have to become an implication rather than a
-                // conjunct, and nothing yet writes one.
+                // Ownership stays inside the guard. A value proposition is
+                // instead conditional on non-nullness, so it says nothing
+                // about the arbitrary pointee witness on a null path.
                 Ok((ps, us, bs)) if us.is_empty() && bs.is_empty() => {
                     for cl in ps {
                         if refines_struct
@@ -4499,14 +4498,9 @@ fn emit_fn(
                         {
                             continue;
                         }
-                        if slprop_refine(tds, &cl).is_none() {
-                            refine_err.get_or_insert(format!(
-                                "parameter {} carries a value refinement behind a nullness guard",
-                                pname
-                            ));
-                            continue;
+                        if slprop_refine(tds, &cl).is_some() {
+                            null_payload.remove(&base);
                         }
-                        null_payload.remove(&base);
                         // A parameter with no pointee -- an `_arrayptr`, say --
                         // had its refinements collected above already.
                         if !refines
@@ -5077,8 +5071,11 @@ fn emit_fn(
         // no storage and `this` is simply the value, so it is bound as a
         // local instead. Without the second case a `_refine` on such a
         // parameter had nowhere to go and was dropped in silence.
+        // A nullable refinement is guarded by its caller. Expose its pointee
+        // only as `this`, not any other nullable parameter the clause names.
         let by_value = match pointees
             .get(base)
+            .or_else(|| guarded_pointees.get(base))
             .cloned()
             .filter(|_| !as_value && matches!(this_value, None | Some((_, _, true))))
         {
@@ -5197,7 +5194,15 @@ fn emit_fn(
             as_value,
             None,
             siblings,
-            &|sp: &Spec, w| sp.prop(p, w),
+            &|sp: &Spec, w| {
+                let prop = sp.prop(p, w)?;
+                let guards = sp.guards.borrow();
+                Ok(if guards.is_empty() {
+                    prop
+                } else {
+                    format!(r"({} /\ {})", guards.join(r" /\ "), prop)
+                })
+            },
         )
     };
     // Whether a parameter's ownership is stated at this end of the contract,
@@ -5206,7 +5211,11 @@ fn emit_fn(
     // immutable, so its refinement is a precondition and nothing more: stating
     // it again on the way out would add nothing the caller could not already
     // derive.
-    let stated = |base: &str, w: When| match spec.pointees.get(base) {
+    let stated = |base: &str, w: When| match spec
+        .pointees
+        .get(base)
+        .or_else(|| guarded_pointees.get(base))
+    {
         None => matches!(w, When::Pre),
         Some((pre, post)) => match w {
             When::Post => post.is_some(),
@@ -5284,7 +5293,11 @@ fn emit_fn(
                 continue;
             }
             if stated(base, w) {
-                out.push(refine_clause(base, None, ty, p, w, false, &[])?);
+                let prop = refine_clause(base, None, ty, p, w, false, &[])?;
+                out.push(match null_wrap.get(base) {
+                    Some(ptr) => format!("(not (is_null {}) ==> ({}))", ptr, prop),
+                    None => prop,
+                });
             }
         }
         for (base, sname, fname, fty, p, via) in &refines_field {
@@ -5341,7 +5354,9 @@ fn emit_fn(
             // never handing it back would leave the body holding something it
             // has no way to put down, and a body that calls through the
             // pointer twice needs it for the second call as much as the first.
-            let both = spec.pointees.get(base).is_none() && !consumed.contains(base);
+            let both = spec.pointees.get(base).is_none()
+                && !guarded_pointees.contains_key(base)
+                && !consumed.contains(base);
             if !both && !stated(base, w) {
                 continue;
             }
