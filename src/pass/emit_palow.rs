@@ -19756,7 +19756,11 @@ impl<'a> Body<'a> {
                         spliced_names(e, &mut stated);
                     }
                     for n in stated {
-                        if let Some(sl) = self.slots.iter().find(|s| s.name == n) {
+                        let ident = Rc::<IdentT>::from(n.as_str()).with_loc(s.loc.clone());
+                        if self.env.lookup_var_type(&ident).is_some_and(|ty| {
+                            matches!(peel(self.tds, &ty).val, TypeT::FnPtr { .. })
+                        }) && let Some(sl) = self.slots.iter().find(|s| s.name == n)
+                        {
                             let addr = sl.addr.clone();
                             self.local_valid_fps.insert(n.clone());
                             // Nobody owns this validity once the function is

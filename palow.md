@@ -1372,7 +1372,11 @@ new facts about memory.
   `if` leave Pulse to infer the join; ownership-bearing annotations are
   emitted with the rest of the frame. A mixed direct-store/call join can lose
   an output-value equality when another cell is framed across the branches;
-  this occurs even without reading the framed cell.
+  this occurs even without reading the framed cell. An explicit ownership
+  postcondition with a typed value binder and the pointer cell's ownership
+  works around this inference limitation; `init_mixed_addressed` in
+  `out_param` preserves the exact output value this way. Mentioning a data
+  pointer's cell does not grant or require function-pointer validity.
 - An `_out` pointee is uninitialised, but the pointer parameter itself is an
   initialised C object. Taking that parameter's address, including in a proof
   annotation inside a branch, allocates its local cell at function entry.
