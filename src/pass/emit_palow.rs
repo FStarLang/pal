@@ -11175,8 +11175,7 @@ use num_bigint::BigInt;
 /// A C local's automatic storage. `init` tracks whether anything has been
 /// stored yet, because an uninitialised slot takes `_write_uninit` rather than
 /// `_write`, and releasing one must not `_forget` a value it never held.
-/// Tracking this with a flag is only sound because the translated subset is
-/// straight-line; a branch would need a join.
+/// At a join, a value is available only if both surviving arms provide one.
 #[derive(Clone, PartialEq)]
 struct Slot {
     name: String,
@@ -19840,14 +19839,6 @@ impl<'a> Body<'a> {
                 self.lines.extend(close);
                 self.close_own();
 
-                // Whether a slot holds a value or still holds uninitialised
-                // storage decides which of two *different* slprops it has, and
-                // that is the one thing Pulse cannot join for us. The two arms
-                // therefore have to agree, which is a real restriction on the
-                // C we accept rather than an artefact: an `if` that
-                // initialises a local on one path only genuinely leaves two
-                // different states behind.
-                //
                 // Both arms start from the state at the `if`, so the second is
                 // translated against a restored snapshot rather than against
                 // whatever the first left behind.
@@ -19946,6 +19937,33 @@ impl<'a> Body<'a> {
                     }
                     self.blocks[i].freed = true;
                     self.blocks[i].checked = false;
+                }
+                // A whole local written on only one path has a common storage
+                // view. Forget its value on that path, without changing the
+                // bytes: later reads still require a write on every path.
+                if !then.diverged && !els.diverged && !then.returned && !els.returned {
+                    for (i, slot) in self.slots.iter().enumerate() {
+                        if then.inits[i] == els.inits[i]
+                            || slot.global
+                            || slot.name.starts_with('*')
+                            || slot.array.is_some()
+                            || slot.union_arm.is_some()
+                            || slot.filling.is_some()
+                            || [&then, &els].iter().any(|b| {
+                                !b.scattered[i].is_empty()
+                                    || b.prescattered.contains(&slot.addr)
+                                    || b.nested_scatter.contains_key(&slot.addr)
+                                    || b.nested_scatter.values().any(|(a, _, _)| *a == slot.addr)
+                            })
+                        {
+                            continue;
+                        }
+                        let written = if then.inits[i] { &mut then } else { &mut els };
+                        written
+                            .lines
+                            .push(format!("{}_forget {};", slot.palow_ty, slot.addr));
+                        written.inits[i] = false;
+                    }
                 }
                 let live_res = if then.diverged { &els } else { &then };
                 if surviving.is_none()

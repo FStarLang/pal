@@ -2804,6 +2804,12 @@ new facts about memory.
    storage initialized after a join; `test/uninit_join_frame_bad` rejects an
    initialized-value claim before the write.
 
+   When only one arm writes a whole local, `_forget` on that arm gives both
+   paths the same storage-only view. It does not change the bytes or
+   initialize the other path. The local must be written again before it can
+   be read after the join. This does not merge differing output-parameter,
+   global, array, or partially scattered ownership states.
+
    `memset` was next, and it is the construct the byte-level model was
    supposed to make easy, so it is worth saying how easy it turned out to be.
    Zeroing an array needed one new axiom -- the machine layer can make a byte

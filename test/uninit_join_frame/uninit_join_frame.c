@@ -33,3 +33,48 @@ int delayed_union(int *p, _Bool write)
     result.value = *p;
     return result.value;
 }
+
+int conditional_scalar(int *p, _Bool write)
+    _ensures(return == (write ? 7 : _old(*p)))
+{
+    int result;
+    _ghost_stmt(with initial. assert int32_t_pts_to $(p) 1.0R initial);
+    if (write)
+        _ensures((_slprop)_inline_pulse(
+            exists* v. int32_t_pts_to $&(*p) 1.0R v **
+                pure (v == (if $(write) then 7l else initial))))
+    {
+        result = 7;
+        *p = result;
+    }
+    result = *p;
+    return result;
+}
+
+int conditional_else(_Bool choose)
+    _ensures(return == (choose ? 1 : 2))
+{
+    int temporary;
+    int result;
+    if (choose) {
+        result = 1;
+    } else {
+        temporary = 2;
+        result = temporary;
+    }
+    return result;
+}
+
+int conditional_union(int *p, _Bool first, _Bool second)
+    _ensures(return == (first && second ? 3 : _old(*p)))
+{
+    union result result;
+    if (first) {
+        if (second) {
+            result.value = 3;
+            *p = result.value;
+        }
+    }
+    result.value = *p;
+    return result.value;
+}
