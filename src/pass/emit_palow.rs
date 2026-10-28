@@ -1681,7 +1681,7 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
 /// The alignment of a type the model covers. Every scalar Palow knows about is
 /// aligned to its own width on LP64, and an array is aligned like its element.
 fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
-    match &tds.resolve(ty).val {
+    match &peel(tds, ty).val {
         TypeT::FixedArray(t, _) => palow_alignof(tds, t),
         TypeT::TypeRef(TypeRefKind::Struct(n)) => {
             tds.structs.get(&*n.val).map(|s| s.align).or_else(|| {
@@ -1702,7 +1702,7 @@ fn palow_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
 /// The alignment C reports. For a struct this is what `collect_structs`
 /// recorded, which is also what Palow proves with.
 fn c_alignof(tds: &Typedefs, ty: &Type) -> Option<u64> {
-    match &tds.resolve(ty).val {
+    match &peel(tds, ty).val {
         TypeT::FixedArray(t, _) => c_alignof(tds, t),
         TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
             .aggregate_layout(&format!("struct {}", n.val))

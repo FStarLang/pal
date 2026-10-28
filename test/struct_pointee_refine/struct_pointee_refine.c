@@ -26,6 +26,42 @@ int read_bounded(const struct bounded *p)
   return p->x;
 }
 
+_refine(this.x > 0)
+typedef struct positive_pair {
+  int x;
+  int y;
+} positive_pair;
+
+struct positive_pair_box {
+  positive_pair value;
+};
+
+int read_boxed_positive(const struct positive_pair_box *p)
+  _ensures(return > 0)
+{
+  return p->value.x;
+}
+
+void make_boxed_positive(_out struct positive_pair_box *p) {
+  p->value.x = 1;
+  p->value.y = 2;
+}
+
+size_t refined_alignment(void)
+  _ensures(return == _Alignof(int))
+{
+  return _Alignof(positive_pair);
+}
+
+_refine(this._length == 3)
+typedef unsigned char byte_triplet[3];
+
+size_t refined_array_alignment(void)
+  _ensures(return == _Alignof(unsigned char))
+{
+  return _Alignof(byte_triplet);
+}
+
 // The refinement owns the cell as well as relating its contents to the record.
 // The record's own storage is still granted by the ordinary pointer contract.
 struct _refine(_inline_pulse(int32_t_pts_to $(this.cell) 1.0R $(this.x))) owned {

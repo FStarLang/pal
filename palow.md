@@ -476,6 +476,11 @@ claiming it rather than all of them up front (which is worth a factor of two on
 its own), and a hand-written shim that steps a pointer has to call
 `aligned_add`. That last one is the only part a user of PAL sees.
 
+Refinement and ownership wrappers do not change alignment. Field planning and
+`_Alignof` look through them rather than falling back to the wrapped type's
+size. `struct_pointee_refine` covers a nested refined record and the alignment
+of refined record and array typedefs.
+
 #### Open questions
 
 - **`_Alignas` and over-aligned types.** `_Alignas(64) struct S` raises
