@@ -9354,7 +9354,7 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
             for f in &si.fields {
                 let v = match inits.iter().find(|(i, _)| *i.val == *f.name) {
                     Some((_, x)) => const_expr(tds, &f.ty, x)?,
-                    None => static_zero(tds, &f.ty).ok()?,
+                    None => zero_initializer(tds, &f.ty).ok()?,
                 };
                 vals.push(format!("fld_{} = {}", f.name, v));
             }
@@ -9683,7 +9683,7 @@ fn global_const(tds: &Typedefs, gv: &GlobalVar) -> Option<(String, String)> {
     let fty = fstar_type(tds, &gv.ty)?;
     let v = match &gv.init {
         Some(e) => const_expr(tds, &gv.ty, e)?,
-        None => static_zero(tds, &gv.ty).ok()?,
+        None => zero_initializer(tds, &gv.ty).ok()?,
     };
     Some((fty, v))
 }
@@ -12399,7 +12399,7 @@ impl<'a> Body<'a> {
             // What an initialiser did not reach is not all-bits-zero but the
             // static initialisation of C11 6.7.9p10: an arithmetic member is
             // zero and a pointer member is a null pointer.
-            None => static_zero(self.tds, &ty).ok(),
+            None => zero_initializer(self.tds, &ty).ok(),
         }
     }
 
@@ -15626,7 +15626,7 @@ impl<'a> Body<'a> {
             None => (elem.as_ref(), 1),
         };
         if out.len() < start + n * per {
-            let z = zero_value(self.tds, leaf)?;
+            let z = zero_initializer(self.tds, leaf)?;
             while out.len() < start + n * per {
                 out.push(z.clone());
             }
@@ -15948,7 +15948,7 @@ impl<'a> Body<'a> {
             // generated type is a record, so `{ .x = 1 }` is that record with
             // the named fields given and the rest zeroed, which is what C says
             // an incomplete initialiser means. Zeroing is a real translation
-            // rather than a guess -- `zero_value` builds the zero of the
+            // rather than a guess -- `zero_initializer` builds the zero of the
             // field's type, which for a nested struct is its own zeroed
             // record -- so a partial initialiser needs no special case.
             ExprT::StructInit(n, inits) => {
@@ -15965,7 +15965,7 @@ impl<'a> Body<'a> {
                     let given = inits.iter().find(|(i, _)| *i.val == *fname);
                     let v = match given {
                         Some((_, e)) => self.init_value(&fty, e)?,
-                        None => zero_value(self.tds, &fty)?,
+                        None => zero_initializer(self.tds, &fty)?,
                     };
                     vals.push(format!("fld_{} = {}", fname, v));
                 }
@@ -21103,28 +21103,20 @@ fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
     })
 }
 
-/// The all-zero value of a C type, as an F\* term. This is what `memset(p, 0,
-/// sizeof(T))` leaves behind, and it exists as a separate function from the
-/// initialiser machinery because there is no expression to translate.
-///
-/// A pointer is deliberately absent: an all-zero pointer is the null pointer
-/// only on a target that says so, and Palow does not have that assumption in
-/// the byte layer. A union is absent for a better reason -- zeroing it is a
-/// statement about bytes, and the value it names afterwards depends on which
-/// member is read.
-/// The value a static object with no initialiser starts at.
-///
-/// This is *not* `memset` to zero. C11 6.7.9p10 says an arithmetic member
-/// starts at zero and a pointer member starts at a null pointer -- a statement
-/// about values, not about bytes -- so unlike `zero_value` it has an answer
-/// for a pointer, and that answer is `null` on every target.
-fn static_zero(tds: &Typedefs, ty: &Type) -> Result<String, String> {
+/// Implicit value initialization (C11 6.7.9p10,21), not zeroed bytes:
+/// pointers become null and a union initializes its first named member.
+/// Static objects and omitted aggregate subobjects follow the same rule.
+fn zero_initializer(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     let t = peel(tds, ty);
     if matches!(&t.val, TypeT::Pointer(..) | TypeT::FnPtr { .. }) {
         return Ok("null".to_string());
     }
-    if let TypeT::FixedArray(elem, n) = &t.val {
-        return Ok(format!("Seq.create {} {}", n, static_zero(tds, elem)?));
+    if let Some((elem, len)) = flat_array(tds, t) {
+        return Ok(format!(
+            "(Seq.create {} {})",
+            len,
+            zero_initializer(tds, elem)?
+        ));
     }
     if let TypeT::TypeRef(TypeRefKind::Struct(name)) = &t.val {
         let Some(si) = tds.structs.get(&*name.val) else {
@@ -21132,12 +21124,30 @@ fn static_zero(tds: &Typedefs, ty: &Type) -> Result<String, String> {
         };
         let mut vals = Vec::new();
         for f in &si.fields {
-            let FieldShape::One { .. } = &f.shape else {
-                return zero_value(tds, ty);
-            };
-            vals.push(format!("fld_{} = {}", f.name, static_zero(tds, &f.ty)?));
+            if matches!(&f.shape, FieldShape::Flex { .. }) {
+                return Err(format!("a zeroed flexible array member `{}`", f.name));
+            }
+            vals.push(format!(
+                "fld_{} = {}",
+                f.name,
+                zero_initializer(tds, &f.ty)?
+            ));
         }
         return Ok(format!("({{ {} }})", record_fields(vals, false)));
+    }
+    if let TypeT::TypeRef(TypeRefKind::Union(name)) = &t.val {
+        let first = tds
+            .unions
+            .get(&*name.val)
+            .and_then(|ui| ui.members.first())
+            .ok_or_else(|| format!("a zero-initialized union {}", name.val))?;
+        return Ok(format!(
+            "(Union_{}.Union_{}_{} {})",
+            name.val,
+            name.val,
+            first.name,
+            zero_initializer(tds, &first.ty)?
+        ));
     }
     zero_value(tds, ty)
 }

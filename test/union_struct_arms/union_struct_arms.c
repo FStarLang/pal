@@ -348,3 +348,46 @@ void observe_stats_arm(void)
   };
   _ghost_stmt(EnvelopeGhost.observe $(value));
 }
+
+struct envelope partially_initialized_envelope(uint32_t sequence)
+  _ensures(return.sequence == sequence)
+  _ensures(return.record.rd._active)
+  _ensures(return.record.rd.value == 0 && return.record.rd.sensor[3] == 0)
+{
+  struct envelope result = { .sequence = sequence };
+  return result;
+}
+
+struct envelope_pair partially_initialized_pair(uint32_t sequence)
+  _ensures(return.values[0].record.rd._active && return.values[1].record.rd._active)
+  _ensures(return.values[0].sequence == sequence && return.values[1].sequence == 0)
+  _ensures(return.values[0].record.rd.value == 0)
+  _ensures(return.values[1].record.rd.sensor[3] == 0)
+{
+  struct envelope_pair result = { .values = { { .sequence = sequence } } };
+  return result;
+}
+
+struct event_envelope {
+  uint32_t sequence;
+  union event event;
+};
+
+struct event_envelope partially_initialized_event(uint32_t sequence)
+  _ensures(return.sequence == sequence)
+  _ensures(return.event.rec._active && return.event.rec.rd._active)
+  _ensures(return.event.rec.rd.value == 0 && return.event.rec.rd.sensor[3] == 0)
+{
+  struct event_envelope result = { .sequence = sequence };
+  return result;
+}
+
+static const struct event_envelope default_event = { .sequence = 7 };
+
+struct event_envelope copy_default_event(void)
+  _ensures(return.sequence == 7)
+  _ensures(return.event.rec._active && return.event.rec.rd._active)
+  _ensures(return.event.rec.rd.value == 0 && return.event.rec.rd.sensor[3] == 0)
+{
+  return default_event;
+}
