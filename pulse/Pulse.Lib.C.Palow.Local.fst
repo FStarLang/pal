@@ -31,8 +31,10 @@ fn array_stack_alloc (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (eal
   returns a : ptr
   ensures array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) a 1.0R
                        (Seq.create (SZ.v n) (None #t))
+  ensures pure (addr_of a + SZ.v nbytes < pow2 64)
 {
   let a = mem_stack_alloc nbytes;
+  mem_pts_to_fits a;
   aligned_divides a max_align ealign;
   array_claim_uninit t_repr a esize ealign n;
   a

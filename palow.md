@@ -63,7 +63,7 @@ noeq type byte = {
 val ptr : Type0
 val null : ptr
 
-// Byte offset. Only defined when the result stays within the same object.
+// Total byte offset, preserving provenance and wrapping modulo 2^64.
 val ( +! ) (a: ptr) (n: SizeT.t) : ptr
 
 val mem_pts_to (a: ptr) (p: perm) (b: bytes) : slprop
@@ -79,6 +79,29 @@ stored to memory and read back has to keep its allocation identity, so
 provenance necessarily leaks through `bytes`. It is therefore part of the
 design from the start rather than something to retrofit.
 
+Addresses are bounded LP64 words. Consequently, total pointer addition must
+wrap: `addr_of (a +! n) == (addr_of a + SizeT.v n) % pow2 64`.
+An unbounded addition law together with `addr_bound` would prove `False` by
+repeatedly adding one, without owning or accessing any memory.
+`test/pointer_overflow_bad` rejects that derivation.
+
+The nonwrapping law is a proved lemma, `addr_of_add_nowrap`, with the explicit
+premise `addr_of a + SizeT.v n < pow2 64`. Owned byte ranges provide this
+premise through `mem_pts_to_fits`; its pointer-word bound is explicit because
+`SizeT.fits` is abstract. Forming an out-of-bounds pointer is still permitted
+by this model, unlike ISO C, but it provides no ownership or right to access
+that address. Alignment transport also accounts for wrapping: C's
+power-of-two alignments divide `2^64`, while an arbitrary alignment such as
+3 need not survive a wrap.
+
+`array_fits` derives the same extent from typed array ownership. Generated
+bodies call it for automatically owned, unguarded array parameters; plain
+pointers and unopened nullable resources provide no such fact. Stack arrays
+export their bound from the checked allocation wrapper. The intrusive-list
+adapters similarly derive their enclosing-object bounds by revealing the
+owned bytes, rather than relying on an unbounded address formula. The raw
+`void *` subtraction examples state their nonwrapping premises explicitly.
+
 Core lemmas that everything else is built on:
 
 ```fstar
@@ -86,7 +109,7 @@ Core lemmas that everything else is built on:
 // object never overflow.
 ghost fn mem_pts_to_fits (a: ptr) (#p: perm) (#b: bytes)
   preserves mem_pts_to a p b
-  ensures   pure (SZ.fits (addr_of a + len b))
+  ensures   pure (SZ.fits (addr_of a + len b) /\ addr_of a + len b < pow2 64)
 
 ghost fn mem_split (a: ptr) (#p: perm) (#b: bytes) (n: SZ.t { SZ.v n <= len b })
   requires mem_pts_to a p b
@@ -3081,19 +3104,18 @@ new facts about memory.
    aggregate field with no more said. That is the clearest case so far of the
    model doing in one line what the old one had to generate per declaration.
 
-   The right inverse is where the two models genuinely differ, and Palow makes
-   the difference visible rather than hiding it. `(p -? off) +! off == p` needs
-   `off <= addr_of p`: at NULL it is false, because `(null -? off) +! off` has
-   address `off`. The old model's `ref` algebra had nowhere to put that side
-   condition and so implied it everywhere. `sub_wrap_add` states it, and is
-   derivable from `ptr_ext` in three lines, so it is an abbreviation rather
-   than an assumption. `container_field_read` -- the ownership move at the
-   heart of MsQuic's `QuicAckTrackerOnAckFrameAcked`, where a caller owns a
+   The interface exposes the right inverse, `(p -? off) +! off == p`, in its
+   non-underflowing form with `off <= addr_of p`. `sub_wrap_add` follows from
+   the address formulas and `ptr_ext`. With word-wrapping addition, it is not
+   correct to claim that the inverse fails at NULL: modular arithmetic can
+   round-trip there too. An arithmetic round trip alone does not supply
+   ownership of an enclosing object. `container_field_read` -- the ownership
+   move at the heart of MsQuic's `QuicAckTrackerOnAckFrameAcked`, where a caller owns a
    structure through a pointer to its embedded field and then reads that field
    back through the original pointer -- now states the premise in its own
    contract, as a `pure` fact about the field pointer it was handed. That is
-   the same thing ISO C requires of `container_of` and the old model never
-   asked for. Both tests translate with no admits.
+   non-underflowing case used for a field in a real enclosing object. Both
+   tests translate with no admits.
 
    `fnptr_slprop_spec` needed no model work at all, only the shim the
    function-pointer port introduced: one `_include_pulse` naming "a `_plain

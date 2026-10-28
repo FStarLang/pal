@@ -94,10 +94,11 @@ ghost fn mem_pts_to_not_null (a: ptr) (#p: perm) (#b: bytes)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 (* Addresses of live storage fit in `size_t`, so offset computations inside an
-   object never overflow. *)
+   object never overflow. `SizeT.fits` is abstract; the explicit pointer-word
+   bound also ensures byte offsets within this range do not wrap. *)
 ghost fn mem_pts_to_fits (a: ptr) (#p: perm) (#b: bytes)
   preserves mem_pts_to a p b
-  ensures   pure (SZ.fits (addr_of a + len b))
+  ensures   pure (SZ.fits (addr_of a + len b) /\ addr_of a + len b < pow2 64)
 
 ghost fn mem_pts_to_perm_bound (a: ptr) (#p: perm) (#b: bytes)
   preserves mem_pts_to a p b

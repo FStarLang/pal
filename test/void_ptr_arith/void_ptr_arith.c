@@ -5,7 +5,10 @@
 
 void *advance(void *base) { return base + 4; }
 
-void *back(void *base) {
+// Raw pointers carry no ownership from which to derive a nonwrapping extent.
+void *back(void *base)
+  _requires((_slprop)_inline_pulse(pure (addr_of $(base) + 4 < pow2 64)))
+{
   void *p = base + 4;
   return p - 2;
 }
@@ -21,7 +24,9 @@ uint32_t readl(void *addr) _plain { return 0; }
 
 uint32_t read_reg(void *base) { return readl(base + 0x10); }
 
-long diff(void *a) {
+long diff(void *a)
+  _requires((_slprop)_inline_pulse(pure (addr_of $(a) + 12 < pow2 64)))
+{
   void *b = a + 12;
   return b - a;
 }
@@ -67,7 +72,10 @@ uint32_t *advance_elems(_plain uint32_t *base) _ensures(return == base + 2) {
   return base + 2;
 }
 
-void *back_spec(void *base) _ensures(return == base + 4 - 2) {
+void *back_spec(void *base)
+  _requires((_slprop)_inline_pulse(pure (addr_of $(base) + 4 < pow2 64)))
+  _ensures(return == base + 4 - 2)
+{
   void *p = base + 4;
   return p - 2;
 }

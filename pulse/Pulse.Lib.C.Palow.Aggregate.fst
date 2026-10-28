@@ -86,15 +86,10 @@ let struct_S_repr_intro (x: struct_S) (bf bg bpad: bytes)
     Seq.lemma_eq_intro (slice b 4 5) bg
 #pop-options
 
-(* `(a + 4) + 1` and `a + 5` are the same pointer. Proved via `ptr_ext` rather
-   than left to the `add_add` SMT pattern, because that would additionally
-   require the prover to see through `size_t` addition. *)
+(* Explicitly instantiate offset composition and its closed `size_t` sum. *)
 let struct_S_padptr (a: ptr)
   : Lemma ((a +! 4sz) +! 1sz == a +! struct_S_padoff)
-  = addr_of_add a 4sz;
-    addr_of_add (a +! 4sz) 1sz;
-    addr_of_add a struct_S_padoff;
-    ptr_ext ((a +! 4sz) +! 1sz) (a +! struct_S_padoff)
+  = add_add a 4sz 1sz
 
 (* Each field's alignment follows from the structure's plus its offset: clang
    lays a field out at a multiple of its own alignment, so the side condition
