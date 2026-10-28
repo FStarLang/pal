@@ -361,11 +361,13 @@ obligation ISO C imposes on a punning cast.
 
 #### Aggregates and arrays
 
-A field inherits from the struct, but not by carrying the struct's alignment
-in `struct_S_pts_to`: that predicate is already a conjunction of field
-points-to, each of which carries *its own* field's alignment, so the struct's
-follows from the field at offset zero and adding it again would be redundant.
-What each generated struct gets instead is a lemma
+A struct carries its enclosing alignment in `struct_S_padding`, shared by
+the initialized and uninitialized predicates and retained through field
+focuses and scatters. Field alignment alone is insufficient: a struct can be
+more strictly aligned than its first field, or explicitly more strictly
+aligned than all its fields. Both byte-reveal operations return the enclosing
+alignment so that the same bytes can be reclaimed without a new assumption.
+Each generated struct also gets a lemma
 
 ```fstar
 let struct_S_field_aligned (a: ptr)
@@ -375,13 +377,18 @@ let struct_S_field_aligned (a: ptr)
   = ()
 ```
 
-and only the byte-facing entry points — `struct_S_conceal`,
+The byte-facing entry points — `struct_S_conceal`,
 `struct_S_claim_uninit`, `struct_S_claim_*_flex`, `struct_S_of_elem` — ask the
 caller for `aligned a struct_S_alignof`. Every conjunct is
 `struct_S_offsetof_f % T_alignof == 0`, a fact about the layout clang gave us,
 true by construction and, since both sides are literals, discharged by
-computation — which is why the lemma proves by `()`. `unfocus` needs nothing:
-the field's alignment was never given up.
+computation — which is why the lemma proves by `()`. `unfocus` needs no new
+alignment premise: the hole retained the enclosing alignment.
+
+`aggregate_alignment` checks uninitialized and initialized byte round trips
+for an 8-byte-aligned byte-array record. `aggregate_alignment_bad_storage`
+rejects constructing that record from explicitly misaligned field storage;
+the previous field-only predicate incorrectly verified this write.
 
 A **union** is different, because `union_U_pts_to` is stated directly over
 `mem_pts_to` rather than over member points-to; there the conjunct really is
