@@ -18461,6 +18461,8 @@ impl<'a> Body<'a> {
             touch_stmts(b, &mut t);
             t.written
         });
+        let mut mentioned = Touched::default();
+        touch_exprs(clause, &mut mentioned);
         let mut deref_slots: Vec<(String, String)> = Vec::new();
         for s in self.slots.clone() {
             let s = &s;
@@ -18493,6 +18495,19 @@ impl<'a> Body<'a> {
                 continue;
             }
             if !s.init {
+                // A join can carry untouched storage without inventing a
+                // value. Partially scattered objects still need their own frame.
+                if body.is_none()
+                    && s.array.is_none()
+                    && s.scattered.is_empty()
+                    && !self.prescattered.contains(&s.addr)
+                    && !self.nested_scatter.values().any(|(at, _, _)| *at == s.addr)
+                    && !mentioned.vars.contains(touch)
+                    && !mentioned.written.contains(touch)
+                {
+                    owns.push(format!("{}_pts_to_uninit {}", s.palow_ty, s.addr));
+                    continue;
+                }
                 // The frame would have to say that the slot still holds
                 // storage rather than a value, and the body would have to
                 // leave it that way. C that writes a local for the first time

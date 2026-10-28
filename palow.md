@@ -2796,6 +2796,14 @@ new facts about memory.
    nothing to do here beyond being checked, and `_live` clauses have not even
    that, since the slots carry the storage already.
 
+   An explicit ownership join can also carry a scalar or whole aggregate local
+   that has not been written yet. Its frame uses `_pts_to_uninit`, not a
+   made-up value, provided the clause does not read that local. Arrays,
+   partially scattered objects, and uninitialised loop-carried values still
+   need their own invariants. `test/uninit_join_frame` covers scalar and union
+   storage initialized after a join; `test/uninit_join_frame_bad` rejects an
+   initialized-value claim before the write.
+
    `memset` was next, and it is the construct the byte-level model was
    supposed to make easy, so it is worth saying how easy it turned out to be.
    Zeroing an array needed one new axiom -- the machine layer can make a byte
