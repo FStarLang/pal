@@ -3431,6 +3431,22 @@ new facts about memory.
    and would make a self-referential struct's predicate infinite. Stopping is
    the same choice C makes when it asks for a forward declaration.
 
+   A by-value embedded struct is different from a pointee: its layout is
+   already part of the parent, and following embedded fields cannot form a
+   cycle. Its `_own` is therefore a conjunct of the parent's `_own`, with a
+   nested ownership record and the same fractional permission. No second
+   claim is made on the embedded object's bytes. Calls receiving `&s->child`
+   borrow that conjunct; direct accesses through `s->child.p` open the
+   enclosing ownership records in order and restore them in reverse order.
+   Contract projections follow the same nested records. Read-only field
+   borrows restore the original record term, rather than an eta-expanded
+   reconstruction whose matching key differs after a conditional join.
+   `_plain` embedded fields still contribute no ownership.
+   `test/embedded_struct_own` verifies calls, direct reads and writes, two
+   levels of embedding, arrays, and conditional single- and multi-field borrows;
+   `test/embedded_struct_own_plain` rejects a call that needs ownership the
+   plain field does not provide.
+
    A contract states both halves, and a body opens the second one when it
    needs it. A struct pointer parameter now carries `_own` alongside
    `_pts_to`, which is what makes the two models comparable

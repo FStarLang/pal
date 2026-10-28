@@ -2738,6 +2738,17 @@ impl<'a> Spec<'a> {
     fn own_field(&self, base: &Expr, f: &str, w: When) -> Result<String, String> {
         let sv = self.value(base, w)?;
         let Some((pre, post)) = self.owns.get(&sv) else {
+            if let ExprT::Member(parent, field) = &strip_vattr(base).val
+                && let Ok(ty) = self.ty_of(parent)
+                && let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val
+                && let Some(si) = self.tds.structs.get(&*n.val)
+                && own_items(self.tds, si, &n.val)
+                    .iter()
+                    .any(|i| i.name == *field.val && i.embedded)
+            {
+                let owner = self.own_field(parent, &field.val, w)?;
+                return Ok(format!("(({}).own_{})", owner, f));
+            }
             return Err(format!(
                 "`.{}`, whose ownership the contract does not state",
                 f
@@ -7192,8 +7203,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
 /// combinator's, on purpose: a field access and a subscript are the same
 /// operation on a sub-range, and the emitter should not have to tell them
 /// apart.
-/// One sub-object that a struct's `_own` predicate covers: the pointee of an
-/// owned pointer field, or of an owned pointer reached through one.
+/// One part of a struct's `_own`: a pointer field's pointee or the ownership
+/// carried by an embedded struct value.
 ///
 /// C's `struct simple { int x, *y, **z; }` describes three fields but four
 /// objects: the struct, `*y`, `*z` and `**z`. Palow's `_pts_to` is the first
@@ -7206,11 +7217,12 @@ struct OwnItem {
     name: String,
     /// The F\* type of the value held there.
     ty: String,
-    /// The Palow name of its type, whose `_pts_to` states the ownership.
+    /// The Palow name of its type.
     pn: String,
-    /// Its address, as an expression over the struct value `x` and the spec
-    /// record `s`.
+    /// Its address, or embedded value, over the struct `x` and the spec `s`.
     at: String,
+    /// Embedded values contribute `_own`, not a second claim on their bytes.
+    embedded: bool,
     /// The element size, when the field is an `_array` pointer and what it
     /// owns is therefore an extent rather than one object.
     ///
@@ -7236,6 +7248,9 @@ impl OwnItem {
 
     /// The ownership this item states, at a permission and a value.
     fn pts_to(&self, p: &str, v: &str) -> String {
+        if self.embedded {
+            return format!("{}_own {} {} {}", self.pn, self.at, p, v);
+        }
         match self.esize {
             None => format!("{}_pts_to {} {} {}", self.pn, self.at, p, v),
             Some(es) => format!(
@@ -7285,6 +7300,7 @@ fn own_chain(tds: &Typedefs, at: String, name: String, ty: &Type, out: &mut Vec<
         ty: fty,
         pn,
         at,
+        embedded: false,
         esize: None,
         inv: None,
     });
@@ -7325,8 +7341,33 @@ fn own_items(tds: &Typedefs, si: &StructInfo, self_name: &str) -> Vec<OwnItem> {
                 ty: format!("Seq.seq ({})", ety),
                 pn,
                 at: format!("((x).fld_{})", f.name),
+                embedded: false,
                 esize: Some(es),
                 inv: f.inv.clone(),
+            });
+            continue;
+        }
+        let mut ty = tds.resolve(&f.ty);
+        while let TypeT::Refine(t, _)
+        | TypeT::RefineAlways(t, _)
+        | TypeT::RefineUninit(t, _)
+        | TypeT::RefineValue(t, ..) = &ty.val
+        {
+            ty = tds.resolve(t);
+        }
+        if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &ty.val
+            && let Some(nested) = tds.structs.get(&*n.val)
+            && !own_items(tds, nested, &n.val).is_empty()
+        {
+            let pn = format!("struct_{}", n.val);
+            out.push(OwnItem {
+                name: f.name.clone(),
+                ty: format!("{}_own_spec", pn),
+                pn,
+                at: format!("((x).fld_{})", f.name),
+                embedded: true,
+                esize: None,
+                inv: None,
             });
             continue;
         }
@@ -12349,59 +12390,67 @@ impl<'a> Body<'a> {
             .unwrap_or_default()
     }
 
-    /// Which `_own` item, if any, holds the object `e` points at.
-    ///
-    /// The items are named after the path that reaches them -- `z` for what
-    /// `s->z` points at, `z_1` for what *that* points at -- so this is a walk
-    /// of the same shape over the expression. A parameter the contract does
-    /// not really own is not a starting point, because the ownership would
-    /// then be one the signature never stated.
-    fn own_item(&self, e: &Expr) -> Option<(String, String, String)> {
+    /// Owned containers from a parameter down through its embedded structs.
+    fn own_path(&self, e: &Expr) -> Option<Vec<(String, String)>> {
+        let ty = self.ty_of(e).ok()?;
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
+            return None;
+        };
+        let sn = n.val.to_string();
+        if self.own_items_of(&sn).is_empty() {
+            return None;
+        }
         match &strip_vattr(e).val {
-            // `s->f`, which reaches the IR as `(*s).f`, or `a.f` on a struct
-            // passed by value. A parameter is the only root: what a struct
-            // reached any other way owns is not something this signature
-            // states. The two roots differ only in how the struct's value is
-            // spelled -- a ghost binder, or the parameter itself.
-            ExprT::Member(base, f) => {
-                let p;
-                let term;
-                match &strip_vattr(base).val {
-                    ExprT::Deref(root) => {
-                        let ExprT::Var(v) = &strip_vattr(root).val else {
-                            return None;
-                        };
-                        p = v.val.to_string();
-                        if !self.granted.contains(&p) {
-                            return None;
-                        }
-                        term = format!("(reveal val_{})", p);
-                    }
-                    ExprT::Var(v) => {
-                        p = v.val.to_string();
-                        term = format!("var_{}", p);
-                    }
-                    _ => return None,
-                }
-                if !self.params.contains(&p) {
-                    return None;
-                }
-                let ty = self.ty_of(base).ok()?;
-                let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
+            ExprT::Deref(root) => {
+                let ExprT::Var(v) = &strip_vattr(root).val else {
                     return None;
                 };
-                let sn = n.val.to_string();
-                let name = f.val.to_string();
-                self.own_items_of(&sn).iter().find(|i| i.name == name)?;
-                Some((term, sn, name))
+                let p = v.val.to_string();
+                if !self.params.contains(&p) || !self.granted.contains(&p) {
+                    return None;
+                }
+                Some(vec![(format!("(reveal val_{})", p), sn)])
             }
-            ExprT::Deref(inner) => {
-                let (term, sn, item) = self.own_item(inner)?;
-                let name = format!("{}_1", item);
-                self.own_items_of(&sn).iter().find(|i| i.name == name)?;
-                Some((term, sn, name))
+            ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => {
+                Some(vec![(format!("var_{}", v.val), sn)])
+            }
+            ExprT::Member(base, f) => {
+                let mut path = self.own_path(base)?;
+                let (parent, parent_sn) = path.last()?;
+                self.own_items_of(parent_sn)
+                    .iter()
+                    .find(|i| i.name == *f.val && i.embedded)?;
+                path.push((format!("(({}).fld_{})", parent, f.val), sn));
+                Some(path)
             }
             _ => None,
+        }
+    }
+
+    /// The containers to open and the item holding the target of `e`.
+    fn own_item(&self, e: &Expr) -> Option<(Vec<(String, String)>, String)> {
+        match &strip_vattr(e).val {
+            ExprT::Member(base, f) => {
+                let path = self.own_path(base)?;
+                let (_, sn) = path.last()?;
+                let name = f.val.to_string();
+                self.own_items_of(sn).iter().find(|i| i.name == name)?;
+                Some((path, name))
+            }
+            ExprT::Deref(inner) => {
+                let (path, item) = self.own_item(inner)?;
+                let (_, sn) = path.last()?;
+                let name = format!("{}_1", item);
+                self.own_items_of(sn).iter().find(|i| i.name == name)?;
+                Some((path, name))
+            }
+            _ => None,
+        }
+    }
+
+    fn open_own_path(&mut self, path: &[(String, String)]) {
+        for (value, sn) in path {
+            self.open_own(value, sn);
         }
     }
 
@@ -12640,8 +12689,8 @@ impl<'a> Body<'a> {
                         .is_some_and(|src| self.own_item(src).is_some()) =>
                 {
                     let src = self.ptr_src[&*v.val.to_string()].clone();
-                    let (p, sn, _) = self.own_item(&src).unwrap();
-                    self.open_own(&p, &sn);
+                    let (path, _) = self.own_item(&src).unwrap();
+                    self.open_own_path(&path);
                     self.rvalue(inner)
                 }
                 ExprT::Var(v) if self.spliced_own => self.rvalue(inner),
@@ -12667,8 +12716,8 @@ impl<'a> Body<'a> {
                 // gather is owed at the end of the statement, like any other
                 // borrow.
                 _ if self.own_item(inner).is_some() => {
-                    let (p, sn, _) = self.own_item(inner).unwrap();
-                    self.open_own(&p, &sn);
+                    let (path, _) = self.own_item(inner).unwrap();
+                    self.open_own_path(&path);
                     self.rvalue(inner)
                 }
                 // A contract that spliced its own ownership in can have
@@ -14247,13 +14296,14 @@ impl<'a> Body<'a> {
                 // storage is not inside the struct at all: it is what the
                 // struct's deep ownership claims. The address still has to be
                 // read out of the field, which is an ordinary rvalue.
-                if let Some((term, sn, item)) = self.own_item(e)
+                if let Some((path, item)) = self.own_item(e)
+                    && let Some((_, sn)) = path.last()
                     && let Some(i) = self
-                        .own_items_of(&sn)
+                        .own_items_of(sn)
                         .into_iter()
                         .find(|i| i.name == item && i.esize.is_some())
                 {
-                    self.open_own(&term, &sn);
+                    self.open_own_path(&path);
                     let addr = self.rvalue(e)?;
                     return Ok(ArrayPlace {
                         addr,
@@ -16342,7 +16392,7 @@ impl<'a> Body<'a> {
         }
         let mut out = format!("func_{}", name.val);
         let mut implicit_args: Vec<String> = Vec::new();
-        let opened = self.field_args(args, &outs, |i| {
+        let opened = self.field_args(args, &outs, &consts, |i| {
             !(arr_args.get(i) == Some(&true)
                 || arrayptr_args.get(i) == Some(&true)
                 || plain_ptrs.get(i) == Some(&true)
@@ -16372,7 +16422,7 @@ impl<'a> Body<'a> {
                 && matches!(peel(self.tds, &aty).val, TypeT::Pointer(..))
             {
                 match self.own_item(a) {
-                    Some((pv, sn, _)) => self.open_own(&pv, &sn),
+                    Some((path, _)) => self.open_own_path(&path),
                     // Nothing in the generated model owns it -- but a
                     // contract that spliced its own ownership in may, and the
                     // emitter cannot read those words. It says nothing and
@@ -16577,6 +16627,7 @@ impl<'a> Body<'a> {
         &mut self,
         args: &Exprs,
         outs: &[bool],
+        consts: &[bool],
         owns_one: impl Fn(usize) -> bool,
     ) -> Result<HashMap<usize, String>, String> {
         let mut groups: Vec<(String, Rc<Expr>, Vec<(usize, Rc<Ident>)>)> = Vec::new();
@@ -16628,6 +16679,16 @@ impl<'a> Body<'a> {
             {
                 continue;
             }
+            if !out
+                && let Some((path, item)) = self.own_item(inner)
+                && let Some((_, sn)) = path.last()
+                && self
+                    .own_items_of(sn)
+                    .iter()
+                    .any(|i| i.name == item && i.embedded)
+            {
+                self.open_own_path(&path);
+            }
             let mark = self.lines.len();
             let key = self.addr_only(base);
             if self.lines.len() != mark {
@@ -16662,12 +16723,21 @@ impl<'a> Body<'a> {
                     continue;
                 }
                 let place = ExprT::Member(base.clone(), f.clone()).with_loc(base.loc.clone());
-                let fo = self.place(&place, true)?;
+                let read_only = consts.get(*i) == Some(&true);
+                let fo = self.place(&place, !read_only)?;
                 if fo.bits.is_some() {
                     return Err(format!("the address of bit-field `{}`", f.val));
                 }
-                self.lines.extend(fo.open_write.iter().cloned());
-                self.pending_close.extend(fo.close_write);
+                self.lines.extend(if read_only {
+                    fo.open_read.iter().cloned()
+                } else {
+                    fo.open_write.iter().cloned()
+                });
+                self.pending_close.extend(if read_only {
+                    fo.close_read
+                } else {
+                    fo.close_write
+                });
                 opened.insert(*i, fo.at);
                 continue;
             }
@@ -16696,8 +16766,23 @@ impl<'a> Body<'a> {
                     sname
                 ));
             }
-            let ff = self.open_field(&base, &fields[0].1, true)?;
+            let read_only = fields
+                .iter()
+                .all(|(i, _)| consts.get(*i) == Some(&true) && outs.get(*i) != Some(&true));
+            let ff = self.open_field(&base, &fields[0].1, !read_only)?;
             self.no_value_yet(&ff.a)?;
+            // Keep the original record term: a rebuilt eta-record has a
+            // different `_own` matching key after a conditional borrow.
+            let saved = if read_only {
+                let v = self.fresh("fields_value");
+                self.lines.push(format!(
+                    "with {}. assert ({}_pts_to {} _ {});",
+                    v, sn, ff.a, v
+                ));
+                Some(v)
+            } else {
+                None
+            };
             self.lines.push(format!("{}_scatter {};", sn, ff.a));
             for (i, f) in &fields {
                 let at = format!("({} +! {}_offsetof_{})", ff.a, sn, f.val);
@@ -16707,8 +16792,15 @@ impl<'a> Body<'a> {
                 }
                 opened.insert(*i, at);
             }
-            self.pending_close.push(format!("{}_gather {};", sn, ff.a));
-            self.pending_close.extend(ff.close_write);
+            self.pending_close.push(match saved {
+                Some(v) => format!("fold ({}_pts_to {} _ {});", sn, ff.a, v),
+                None => format!("{}_gather {};", sn, ff.a),
+            });
+            self.pending_close.extend(if read_only {
+                ff.close_read
+            } else {
+                ff.close_write
+            });
         }
         Ok(opened)
     }
