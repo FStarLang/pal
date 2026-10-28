@@ -249,3 +249,102 @@ union record replace_record_at_join(union record input, _Bool replace)
   }
   return copy;
 }
+
+struct envelope {
+  uint32_t sequence;
+  union record record;
+};
+
+union wrapped {
+  struct envelope envelope;
+  uint64_t reserved[8];
+};
+
+struct envelope make_envelope(int32_t value)
+  _ensures(return.sequence == 7)
+  _ensures(return.record.rd._active)
+  _ensures(return.record.rd.value == value)
+{
+  struct envelope result = {
+    .sequence = 0,
+    .record = { .rd = { .sensor = { 0 }, .value = 0 } }
+  };
+  result.sequence = 7;
+  result.record.rd.value = value;
+  return result;
+}
+
+struct envelope copy_envelope(const struct envelope *input)
+  _requires(input->record.rd._active)
+  _ensures((_Bool)_inline_pulse($(return) == $(*input)))
+{
+  return *input;
+}
+
+void set_sequence(uint32_t *sequence, uint32_t value)
+  _ensures(*sequence == value)
+{
+  *sequence = value;
+}
+
+struct envelope resequence_envelope(struct envelope input, uint32_t sequence)
+  _requires(input.record.rd._active)
+  _ensures(return.sequence == sequence)
+  _ensures(return.record.rd._active)
+  _ensures(return.record.rd.value == input.record.rd.value)
+{
+  struct envelope copy = input;
+  set_sequence(&copy.sequence, sequence);
+  return copy;
+}
+
+union wrapped copy_wrapped(const union wrapped *input)
+  _requires(input->envelope._active)
+  _requires(input->envelope.record.rd._active)
+  _ensures((_Bool)_inline_pulse($(return) == $(*input)))
+{
+  return *input;
+}
+
+struct envelope_pair {
+  struct envelope values[2];
+};
+
+struct envelope_pair make_envelope_pair(int32_t first, int32_t second)
+  _ensures(return.values[0].record.rd._active && return.values[1].record.rd._active)
+  _ensures(return.values[0].record.rd.value == first)
+  _ensures(return.values[1].record.rd.value == second)
+{
+  struct envelope_pair result = {
+    .values = {
+      { .sequence = 0, .record = { .rd = { .sensor = { 0 }, .value = 0 } } },
+      { .sequence = 0, .record = { .rd = { .sensor = { 0 }, .value = 0 } } }
+    }
+  };
+  result.values[0].record.rd.value = first;
+  result.values[1].record.rd.value = second;
+  return result;
+}
+
+union event copy_event(const union event *input)
+  _requires(input->rec._active && input->rec.rd._active)
+  _ensures((_Bool)_inline_pulse($(return) == $(*input)))
+{
+  return *input;
+}
+
+_include_pulse(EnvelopeGhost,
+  let observe (v: Struct_envelope.struct_envelope)
+    : Lemma (requires Union_record.Union_record_st? v.fld_record)
+            (ensures True)
+    = ()
+)
+
+void observe_stats_arm(void)
+{
+  struct envelope value = {
+    .sequence = 0,
+    .record = { .st = { .samples = 7, .dropped = 2 } }
+  };
+  _ghost_stmt(EnvelopeGhost.observe $(value));
+}

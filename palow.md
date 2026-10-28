@@ -2360,10 +2360,10 @@ new facts about memory.
    union member, which is what `test/dpe`'s `_u_context_t` needed. A struct can
    be claimed from raw storage without that storage having come from a stack
    allocation, because `_claim_uninit` is now separate from `_stack_alloc`. And
-   a struct can be read as a whole value, which a by-value parameter needs --
-   except when it contains a union, which has no general `_read`: choosing
-   an arbitrary active member would mean branching on a ghost tag inside a
-   real function. A whole-union read can instead use a statically selected
+   a struct can be read as a whole value, which a by-value parameter needs.
+   A union has no general `_read`: choosing an arbitrary active member would
+   mean branching on a ghost tag inside a real function. A whole-union read
+   can instead use a statically selected
    member. The generated `union_X_m_read` requires proof that `m` is active,
    focuses its bytes, reads its concrete value, and reconstructs that
    constructor while preserving the entire union's ownership and padding.
@@ -2377,6 +2377,23 @@ new facts about memory.
    path. This does not provide a general union decoder: a memory read with
    neither a retained value nor a proved active member still fails, as
    `union_value_unknown` checks.
+
+   A struct containing unions now has a guarded reader when the first member
+   of each nested union has a reader. Its precondition carries all those arm
+   choices, including through nested structs and every element of an array
+   field. A union-member reader carries its payload's nested requirements
+   too. The body reads concrete fields and reconstructs the value, rather
+   than inspecting an erased tag. `union_struct_arms` checks aggregate copies,
+   field updates across calls, nested union members and arrays of aggregates;
+   `union_struct_read_bad` rejects a copy that knows only the outer tag.
+   Field accesses can establish their tag from a prior aggregate write as
+   well as from a contract, with both cases checked by the same rewrite.
+   Ghost statements still use the ownership witness rather than forcing a
+   runtime reader's arm choice, including after switching to another arm.
+   Probing an uninitialized union arm must roll back any ownership opened
+   while computing its address; otherwise a nested array element is focused
+   repeatedly. Fully supplied array initializers also need no default zero
+   value for padding that does not exist.
 
    Two smaller fixes came with it. A common-initial-sequence union that PAL
    collapses into a struct was losing its layout: the table is keyed by how a

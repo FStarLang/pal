@@ -69,21 +69,83 @@ struct StructField {
     inv: Option<String>,
 }
 
-/// Whether a value of this type can be read out of memory in one step, which
-/// is what a whole-struct `_read` needs of every field.
+/// Whether a value has a reader, possibly guarded by active-union-arm facts.
 fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
     match &peel(tds, ty).val {
         TypeT::TypeRef(TypeRefKind::Struct(n)) => {
             tds.structs.get(&*n.val).is_some_and(|si| si.has_read)
         }
-        TypeT::TypeRef(TypeRefKind::Union(_)) => false,
+        TypeT::TypeRef(TypeRefKind::Union(n)) => tds
+            .unions
+            .get(&*n.val)
+            .and_then(|ui| ui.members.first())
+            .is_some_and(|m| {
+                matches!(m.shape, FieldShape::One { .. }) && readable_field(tds, &m.ty)
+            }),
         // An array field is read element by element, by the recursion the
         // struct's own module generates beside the one that fills it.
-        TypeT::FixedArray(..) => {
-            flat_array(tds, ty).is_some_and(|(t, _)| palow_name(tds, t).is_some())
-        }
+        TypeT::FixedArray(..) => flat_array(tds, ty).is_some_and(|(t, _)| readable_field(tds, t)),
         _ => palow_name(tds, ty).is_some(),
     }
+}
+
+fn value_reader(tds: &Typedefs, ty: &Type) -> Option<String> {
+    if !readable_field(tds, ty) {
+        return None;
+    }
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            let member = tds.unions.get(&*n.val)?.members.first()?;
+            Some(format!("union_{}_{}_read", n.val, member.name))
+        }
+        _ => palow_name(tds, ty).map(|pn| format!("{}_read", pn)),
+    }
+}
+
+/// The reader never branches on an erased tag. It reads a fixed member at
+/// each union, and the caller must establish that entire choice of arms.
+fn value_read_guard(tds: &Typedefs, ty: &Type, x: &str) -> Option<String> {
+    fn guard(tds: &Typedefs, ty: &Type, x: &str, depth: usize) -> Option<String> {
+        match &peel(tds, ty).val {
+            TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                let guards: Vec<_> = tds
+                    .structs
+                    .get(&*n.val)?
+                    .fields
+                    .iter()
+                    .filter_map(|f| {
+                        guard(tds, &f.ty, &format!("({}).fld_{}", x, f.name), depth + 1)
+                    })
+                    .collect();
+                (!guards.is_empty()).then(|| format!("({})", guards.join(" /\\ ")))
+            }
+            TypeT::TypeRef(TypeRefKind::Union(n)) => {
+                let member = tds.unions.get(&*n.val)?.members.first()?;
+                let ctor = format!("Union_{}.Union_{}_{}", n.val, n.val, member.name);
+                let v = format!("read_value_{}", depth);
+                Some(match guard(tds, &member.ty, &v, depth + 1) {
+                    Some(inner) => {
+                        format!(
+                            "(match ({}) with | {} {} -> {} | _ -> False)",
+                            x, ctor, v, inner
+                        )
+                    }
+                    None => format!("({}? ({}))", ctor, x),
+                })
+            }
+            TypeT::FixedArray(..) => {
+                let (elem, _) = flat_array(tds, ty)?;
+                let i = format!("read_index_{}", depth);
+                let inner = guard(tds, elem, &format!("(Seq.index ({}) {})", x, i), depth + 1)?;
+                Some(format!(
+                    "(forall ({}: nat). {} < Seq.length ({}) ==> {})",
+                    i, i, x, inner
+                ))
+            }
+            _ => None,
+        }
+    }
+    guard(tds, ty, x, 0)
 }
 
 /// The largest struct that gets a byte-level view. See `has_bytes`.
@@ -1084,10 +1146,8 @@ struct StructInfo {
     bitfields: Vec<(String, BitField)>,
     size: u64,
     align: u64,
-    /// Whether the struct got a whole-object `_read`, which needs every field
-    /// to have one. A union has none -- reading one would mean branching on a
-    /// ghost tag in a real function -- so a struct containing one cannot be
-    /// read as a value either, only field by field.
+    /// Whether every field has a reader. Union fields use statically selected
+    /// arms, with their tag requirements propagated to the struct reader.
     has_read: bool,
     /// Whether the struct also got a byte-level `_repr`, and with it the
     /// `_reveal`/`_conceal` pair that makes it usable as an array element or a
@@ -6822,8 +6882,8 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             let name = fill_name(pn, *esize, *len);
             if !fills.contains(&name) {
                 fills.push(name);
-                let elem = fstar_type(tds, flat_array(tds, &m.ty).unwrap().0).unwrap();
-                c += &emit_fill(pn, &elem, *esize, *len);
+                let ty = flat_array(tds, &m.ty).unwrap().0;
+                c += &emit_fill(tds, ty, pn, *esize, *len);
             }
         }
     }
@@ -6970,13 +7030,22 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             mty = mty,
             msz = m.size
         );
-        if let FieldShape::One { pn } = &m.shape
-            && readable_field(tds, &m.ty)
+        if let FieldShape::One { .. } = &m.shape
+            && let Some(reader) = value_reader(tds, &m.ty)
         {
+            let nested = value_read_guard(tds, &m.ty, "member_value").map_or(
+                String::new(),
+                |guard| {
+                    format!(
+                        "  requires pure (match (reveal u) with | {k} member_value -> {guard} | _ -> True)\n"
+                    )
+                },
+            );
             c += &format!(
                 "fn {un}_{f}_read (a: ptr) (#p: perm) (#u: erased {un})\n\
                  \x20 preserves {un}_pts_to a p u\n\
                  \x20 requires pure ({k}? (reveal u))\n\
+                 {nested}\
                  \x20 returns r: {un}\n\
                  \x20 ensures pure (r == reveal u)\n\
                  \x20 ensures rewrites_to r (reveal u)\n\
@@ -6984,7 +7053,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
                  rewrite ({un}_pts_to a p u)\n    \
                  as ({un}_pts_to a p ({k} ({k}?.v (reveal u))));\n  \
                  {un}_focus_{f} a;\n  \
-                 let v = {pn}_read a;\n  \
+                 let v = {reader} a;\n  \
                  {un}_unfocus_{f} a;\n  \
                  rewrite ({un}_pts_to a p ({k} v)) as ({un}_pts_to a p u);\n  \
                  {k} v\n}}\n\n"
@@ -8231,10 +8300,12 @@ fn fill_name(pn: &str, esize: u64, len: u64) -> String {
 /// in Pulse is divergent, and divergence here would spread to every function
 /// that declares such a structure. The index is a real argument, and the
 /// measure is how much of the array is left.
-fn emit_fill(pn: &str, elem: &str, esize: u64, len: u64) -> String {
+fn emit_fill(tds: &Typedefs, ty: &Type, pn: &str, esize: u64, len: u64) -> String {
+    let elem = fstar_type(tds, ty).unwrap();
     let f = fill_name(pn, esize, len);
     let at = format!("(a +! ({}sz `SizeT.mul` k))", esize);
-    let tmpl = "\
+    let mut tmpl = String::from(
+        "\
 fn rec {f}_from (a: ptr) (vs: (s: Seq.seq {t} {{ Seq.length s == {n} }})) (k: SizeT.t)
                 (#xs: erased (xs: Seq.seq (option {t}) {{ Seq.length xs == {n} }}))
   requires array_pts_to (maybe_repr {pn}_repr {es}) {es} {aln} a 1.0R xs
@@ -8265,11 +8336,22 @@ fn {f}_fill (a: ptr) (vs: (s: Seq.seq {t} {{ Seq.length s == {n} }}))
   {f}_from a vs 0sz;
 }}
 
+",
+    );
+    if let Some(reader) = value_reader(tds, ty) {
+        let read_req =
+            value_read_guard(tds, ty, "(Seq.index xs read_index)").map_or(String::new(), |guard| {
+                format!(
+                    "  requires pure (forall (read_index: nat). read_index < {len} ==> {guard})\n"
+                )
+            });
+        let read = "\
 fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == SizeT.v k }}))
                 (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs == {n} }}))
   preserves array_pts_to {pn}_repr {es} {aln} a p xs
   requires pure (SizeT.v k <= {n} /\\
                  (forall (j: nat). j < SizeT.v k ==> Seq.index acc j == Seq.index xs j))
+{read_req}\
   returns  r : (s: Seq.seq {t} {{ Seq.length s == {n} }})
   ensures  pure (r == reveal xs)
   decreases ({n} - SizeT.v k)
@@ -8277,7 +8359,7 @@ fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == S
   if (SizeT.lt k {n}sz) {{
     array_focus {pn}_repr a {es}sz {al} k ({es}sz `SizeT.mul` k);
     {pn}_of_elem {at};
-    let v = {pn}_read {at};
+    let v = {reader} {at};
     {pn}_to_elem {at};
     array_unfocus_read {pn}_repr a {es}sz {al} k ({es}sz `SizeT.mul` k);
     {f}_upto a (k `SizeT.add` 1sz) (Seq.snoc acc v)
@@ -8289,6 +8371,7 @@ fn rec {f}_upto (a: ptr) (k: SizeT.t) (acc: (s: Seq.seq {t} {{ Seq.length s == S
 
 fn {f}_read (a: ptr) (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs == {n} }}))
   preserves array_pts_to {pn}_repr {es} {aln} a p xs
+{read_req}\
   returns  r : (s: Seq.seq {t} {{ Seq.length s == {n} }})
   ensures  pure (r == reveal xs)
 {{
@@ -8296,11 +8379,15 @@ fn {f}_read (a: ptr) (#p: perm) (#xs: erased (xs: Seq.seq {t} {{ Seq.length xs =
 }}
 
 ";
+        tmpl += &read
+            .replace("{reader}", &reader)
+            .replace("{read_req}", &read_req);
+    }
     tmpl.replace("{f}", &f)
         .replace("{aln}", &format!("(SizeT.v {}_alignof)", pn))
         .replace("{al}", &format!("{}_alignof", pn))
         .replace("{pn}", pn)
-        .replace("{t}", elem)
+        .replace("{t}", &elem)
         .replace("{es}", &esize.to_string())
         .replace("{n}", &len.to_string())
         .replace("{at}", &at)
@@ -8660,8 +8747,8 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
             let name = fill_name(pn, *esize, *len);
             if !fills.contains(&name) {
                 fills.push(name);
-                let elem = fstar_type(tds, flat_array(tds, &f.ty).unwrap().0).unwrap();
-                c += &emit_fill(pn, &elem, *esize, *len);
+                let ty = flat_array(tds, &f.ty).unwrap().0;
+                c += &emit_fill(tds, ty, pn, *esize, *len);
             }
         }
     }
@@ -9117,34 +9204,41 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // Reading a whole structure is reading every field and packing the
     // record. It exists because a structure passed or returned by value is a
     // value in F* and an object in C, and the two have to meet somewhere.
-    let mut read = String::new();
-    for f in &si.fields {
-        let reader = match &f.shape {
-            FieldShape::One { pn } => format!("{}_read", pn),
-            FieldShape::Unaligned { pn } => format!("{}_read_u", pn),
-            FieldShape::Array { pn, esize, len } => {
-                format!("{}_read", fill_name(pn, *esize, *len))
-            }
-            FieldShape::Flex { .. } => NO_FLEX_STORAGE.to_string(),
-        };
-        read += &format!("  {}_focus_{} a;\n", sn, f.name);
-        read += &format!(
-            "  let v_{f} = {rd} (a +! {sn}_offsetof_{f});\n",
-            f = f.name,
-            rd = reader,
-            sn = sn
-        );
-        read += &format!("  {}_unfocus_read_{} a;\n", sn, f.name);
-    }
     if si.has_read {
+        let mut read = String::new();
+        let mut guards = Vec::new();
+        for f in &si.fields {
+            let reader = match &f.shape {
+                FieldShape::One { .. } => value_reader(tds, &f.ty).unwrap(),
+                FieldShape::Unaligned { pn } => format!("{}_read_u", pn),
+                FieldShape::Array { pn, esize, len } => {
+                    format!("{}_read", fill_name(pn, *esize, *len))
+                }
+                FieldShape::Flex { .. } => NO_FLEX_STORAGE.to_string(),
+            };
+            if let Some(guard) = value_read_guard(tds, &f.ty, &format!("(reveal x).fld_{}", f.name))
+            {
+                guards.push(format!("  requires pure ({})\n", guard));
+            }
+            read += &format!("  {}_focus_{} a;\n", sn, f.name);
+            read += &format!(
+                "  let v_{f} = {rd} (a +! {sn}_offsetof_{f});\n",
+                f = f.name,
+                rd = reader,
+                sn = sn
+            );
+            read += &format!("  {}_unfocus_read_{} a;\n", sn, f.name);
+        }
         c += &format!(
             "fn {sn}_read (a: ptr) (#p: perm) (#x: erased {sn})\n\
          \x20 preserves {sn}_pts_to a p x\n\
+         {guards}\
          \x20 returns  y : {sn}\n\
          \x20 ensures  pure (y == reveal x)\n\
          \x20 ensures  rewrites_to y (reveal x)\n\
          {{\n{read}  ({{ {fields} }} <: {sn})\n}}\n\n",
             sn = sn,
+            guards = guards.join(""),
             read = read,
             fields = record_fields(
                 si.fields
@@ -9335,9 +9429,9 @@ fn array_fill_shape(tds: &Typedefs, elem: &Type, len: u64) -> Option<(String, St
 fn collect_array_fill_type(tds: &Typedefs, ty: &Type, out: &mut BTreeMap<String, String>) {
     match &peel(tds, ty).val {
         TypeT::FixedArray(elem, len) => {
-            if let Some((pn, elem, esize, len)) = array_fill_shape(tds, elem, *len) {
+            if let Some((pn, _, esize, len)) = array_fill_shape(tds, elem, *len) {
                 out.entry(fill_name(&pn, esize, len))
-                    .or_insert_with(|| emit_fill(&pn, &elem, esize, len));
+                    .or_insert_with(|| emit_fill(tds, elem, &pn, esize, len));
             }
             collect_array_fill_type(tds, elem, out);
         }
@@ -9357,10 +9451,9 @@ fn collect_array_fill_type(tds: &Typedefs, ty: &Type, out: &mut BTreeMap<String,
 fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, String>) {
     match &strip_vattr(e).val {
         ExprT::ArrayInit { elem_ty, elems, .. } => {
-            if let Some((pn, elem, esize, len)) = array_fill_shape(tds, elem_ty, elems.len() as u64)
-            {
+            if let Some((pn, _, esize, len)) = array_fill_shape(tds, elem_ty, elems.len() as u64) {
                 out.entry(fill_name(&pn, esize, len))
-                    .or_insert_with(|| emit_fill(&pn, &elem, esize, len));
+                    .or_insert_with(|| emit_fill(tds, elem_ty, &pn, esize, len));
             }
             for x in elems {
                 collect_array_fill_expr(tds, x, out);
@@ -13286,35 +13379,11 @@ impl<'a> Body<'a> {
         let pn = shape.pn().to_string();
         let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
         if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
-            // The other way to know is the contract. There the union's value
-            // is whatever the caller passed, so the tag is a fact rather than
-            // a shape: the ownership in hand is stated at an opaque value,
-            // and `focus` wants it stated at the constructor. Re-stating it
-            // that way is the whole of the step, and it is sound exactly
-            // because the `_requires` said so -- which is why this is not
-            // reachable without one.
+            // A contract or a prior aggregate write can establish the tag
+            // without a syntactic note here. The projector and rewrite both
+            // require F* to prove that the owned value has this constructor.
             let uname = un.strip_prefix("union_").unwrap_or(&un).to_string();
             let ctor = format!("Union_{}_{}", uname, f.val);
-            // A pointer bound to the address of a place stands for that
-            // place, and the contract names the place: `payload->uds` after
-            // `payload = &ctx.payload` is `ctx.payload.uds`.
-            let named = self.unalias_place(base);
-            // Pure preconditions and spliced ownership can both say which
-            // member is live in words the emitter does not read. Emit the
-            // re-statement and leave that obligation to F*: if the contract
-            // does not imply the tag, the `rewrite` fails.
-            if !self.spliced_own
-                && !self.requires_ok
-                && !self
-                    .live_arms
-                    .iter()
-                    .any(|(obj, m)| *m == *f.val && same_lvalue(obj, &named))
-            {
-                return Err(format!(
-                    "a read of union member `{}`, which is not known to be the live one here",
-                    f.val
-                ));
-            }
             let vp = self.fresh("perm");
             let vu = self.fresh("union");
             self.lines.push(format!(
@@ -14079,43 +14148,36 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(base) {
             return self.base_addr(&p, writing);
         }
-        // A field write into a union that has never held a value makes that
-        // arm the live one first: there is no value to give up, so this is
-        // the `$activate` an author would otherwise have to write, and the
-        // fields are then filled one at a time as below.
-        if writing
-            && let ExprT::Member(b2, f2) = &strip_vattr(base).val
-            && let Some(un) = self.union_of(b2)
-            && let Ok(a) = self.addr(b2)
-            && self.active.get(&a).map(String::as_str) != Some(&*f2.val.to_string())
-            && (self
-                .slots
-                .iter()
-                .any(|s| s.addr == a && !s.init && s.union_arm.is_none())
-                || self
-                    .blocks
-                    .iter()
-                    .any(|b| b.tmp == a && b.checked && !b.freed && !b.init))
-        {
-            let mty = self.field_ty(b2, f2)?;
-            self.activate_arm_at(&un, mty, f2, a)?;
-        }
-        // A struct-typed union arm that has been activated is storage at the
-        // union's own address: every arm starts there, and activation gave up
-        // the union's value in exchange for the arm's uninitialised storage.
-        // A field of it is therefore reached by address, with nothing open
-        // around it -- which is what lets the fields be filled one at a time.
+        // Probe storage on a copy: naming a nested array element may open
+        // ownership, which must not escape an unsuccessful activation probe.
         if let ExprT::Member(b2, f2) = &strip_vattr(base).val
-            && let Ok(bty) = self.ty_of(b2)
-            && matches!(
-                &peel(self.tds, &bty).val,
-                TypeT::TypeRef(TypeRefKind::Union(_))
-            )
-            && let Ok(a) = self.addr(b2)
-            && self.active.get(&a).map(String::as_str) == Some(&*f2.val.to_string())
-            && self.slots.iter().any(|s| s.addr == a && !s.init)
+            && let Some(un) = self.union_of(b2)
         {
-            return Ok((a, Vec::new(), Vec::new()));
+            let mut probe = self.clone();
+            if let Ok(a) = probe.addr(b2) {
+                if writing
+                    && probe.active.get(&a).map(String::as_str) != Some(&*f2.val.to_string())
+                    && (probe
+                        .slots
+                        .iter()
+                        .any(|s| s.addr == a && !s.init && s.union_arm.is_none())
+                        || probe
+                            .blocks
+                            .iter()
+                            .any(|b| b.tmp == a && b.checked && !b.freed && !b.init))
+                {
+                    let mty = probe.field_ty(b2, f2)?;
+                    probe.activate_arm_at(&un, mty, f2, a.clone())?;
+                }
+                // An activated arm's storage is at the union address. Its
+                // fields can be filled without focusing an enclosing value.
+                if probe.active.get(&a).map(String::as_str) == Some(&*f2.val.to_string())
+                    && probe.slots.iter().any(|s| s.addr == a && !s.init)
+                {
+                    *self = probe;
+                    return Ok((a, Vec::new(), Vec::new()));
+                }
+            }
         }
         // A field of a struct-typed union *arm*. The arm has to be focused out
         // of the union before anything inside it can be named, which is the
@@ -14729,6 +14791,18 @@ impl<'a> Body<'a> {
                 return Ok(b.clone());
             }
         }
+        // A new guarded reader must not force a ghost-only mention to choose
+        // an arm. The points-to witness is usable even in a different arm.
+        if self.keep_reads
+            && let Ok(ty) = self.ty_of(e)
+            && value_read_guard(self.tds, &ty, "value").is_some()
+        {
+            let mut probe = self.clone();
+            if let Some(value) = probe.ghost_value(e) {
+                *self = probe;
+                return Ok(value);
+            }
+        }
         let before = self.lines.len();
         self.inlining += 1;
         let r = self.rvalue(e);
@@ -14740,9 +14814,8 @@ impl<'a> Body<'a> {
             // object to have a whole-value read at all. The ownership in hand
             // already determines the value, so where a load is impossible the
             // witness of the points-to is named instead. That is what makes a
-            // struct with a union member mentionable in a ghost statement:
-            // there is no reading such an object, but there is a value, and
-            // the proof is about the value.
+            // otherwise unreadable aggregate mentionable in a ghost statement:
+            // there is still a value, and the proof is about the value.
             Err(why) => {
                 self.lines.truncate(before);
                 return self.ghost_value(e).ok_or(why);
@@ -15552,9 +15625,11 @@ impl<'a> Body<'a> {
             Some((t, k)) => (t, usize::try_from(k).unwrap_or(1)),
             None => (elem.as_ref(), 1),
         };
-        let z = zero_value(self.tds, leaf)?;
-        while out.len() < start + n * per {
-            out.push(z.clone());
+        if out.len() < start + n * per {
+            let z = zero_value(self.tds, leaf)?;
+            while out.len() < start + n * per {
+                out.push(z.clone());
+            }
         }
         Ok(())
     }
