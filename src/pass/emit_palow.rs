@@ -20633,6 +20633,9 @@ fn zero_repr_proof(tds: &Typedefs, ty: &Type) -> Option<Vec<String>> {
 
 fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     let t = peel(tds, ty);
+    if let Some((elem, len)) = flat_array(tds, t) {
+        return Ok(format!("(Seq.create {} {})", len, zero_value(tds, elem)?));
+    }
     match &t.val {
         TypeT::Int { signed, width } => Ok(format!("0{}", int_suffix(*signed, *width)?)),
         TypeT::SizeT => Ok("0sz".to_string()),
