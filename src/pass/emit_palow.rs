@@ -7664,8 +7664,12 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     if gaps.is_empty() && si.size == 0 {
         gaps.push((0, 0));
     }
+    // Field alignment need not imply the enclosing alignment, especially for
+    // explicitly aligned structs. Keep that fact with the padding so every
+    // field focus and scatter retains it.
     c += &format!(
-        "let {}_padding (a: ptr) (p: perm) : slprop =\n  {}\n\n",
+        "let {}_padding (a: ptr) (p: perm) : slprop =\n  pure (aligned a {}_alignof) **\n  {}\n\n",
+        sn,
         sn,
         if gaps.is_empty() {
             "emp".to_string()
@@ -8079,7 +8083,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     c += &format!(
         "ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
-         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({sn}_repr x b)\n\
+         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({sn}_repr x b /\\ aligned a {sn}_alignof)\n\
          {{\n{r}}}\n\n",
         sn = sn,
         r = r
@@ -8980,7 +8984,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     c += &format!(
         "ghost fn {sn}_reveal_uninit (a: ptr)\n\
          \x20 requires {sn}_pts_to_uninit a\n\
-         \x20 ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {sn}_sizeof)\n\
+         \x20 ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {sn}_sizeof /\\ aligned a {sn}_alignof)\n\
          {{\n{free}}}\n\n",
         sn = sn,
         free = free
