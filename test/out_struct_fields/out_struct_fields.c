@@ -96,3 +96,11 @@ void mk_addressed_via_call(_out struct pt *p, bool b)
   mk_flat(p);
   p->x = 3;
 }
+
+void fields_then_whole(_out struct pt *p)
+    _ensures(p->x == 3 && p->y == 4) {
+  p->x = 1;
+  p->y = 2;
+  struct pt q = {3, 4};
+  *p = q;
+}
