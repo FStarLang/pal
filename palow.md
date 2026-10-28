@@ -3586,6 +3586,15 @@ new facts about memory.
    there are now two answers: one for an access, which must know the storage
    is held, and one for arithmetic, which must not care.
 
+   Union subobjects follow the same rule. Every arm starts at the union's
+   own address; fields inside an arm add their ordinary struct offsets.
+   Bodies, contracts and proof antiquotations all use that arithmetic.
+   `union_member_address` checks nested field arguments, mutable borrows and
+   address equalities without selecting a live arm merely to name its
+   storage. An access still needs the arm's ownership: the negative companion
+   rejects reading beyond the live scalar through a pointer to another arm's
+   tail. Forming addresses does not duplicate overlapping ownership.
+
    `containing_record`'s `value_proj_null_fires` is the case that shows why it
    matters, and it also shows the model doing without something the old one
    needed. Recovering a first member's address from a structure pointer has to

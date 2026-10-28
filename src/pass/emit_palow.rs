@@ -2780,6 +2780,12 @@ impl<'a> Spec<'a> {
                 let bty = self.ty_of(base)?;
                 let sn = palow_name(self.tds, &bty)
                     .ok_or_else(|| "an address inside something with no layout".to_string())?;
+                if matches!(
+                    &peel(self.tds, &bty).val,
+                    TypeT::TypeRef(TypeRefKind::Union(_))
+                ) {
+                    return self.addr_of(base, w);
+                }
                 Ok(format!(
                     "({} +! {}_offsetof_{})",
                     self.addr_of(base, w)?,
@@ -12849,8 +12855,11 @@ impl<'a> Body<'a> {
             // so this does not have to open the field the way an access does,
             // and there is no focus left hanging past the statement.
             ExprT::Member(base, f) => {
-                let (sn, _) = self.struct_of(base)?;
                 self.field_ty(base, f)?;
+                if self.union_of(base).is_some() {
+                    return self.addr(base);
+                }
+                let (sn, _) = self.struct_of(base)?;
                 let a = self.addr(base)?;
                 Ok(format!("({} +! {}_offsetof_{})", a, sn, f.val))
             }
@@ -12957,8 +12966,11 @@ impl<'a> Body<'a> {
         }
         match &strip_vattr(e).val {
             ExprT::Member(base, f) => {
-                let (sn, _) = self.struct_of(base)?;
                 self.field_ty(base, f)?;
+                if self.union_of(base).is_some() {
+                    return self.addr_only(base);
+                }
+                let (sn, _) = self.struct_of(base)?;
                 let a = self.addr_only(base)?;
                 Ok(format!("({} +! {}_offsetof_{})", a, sn, f.val))
             }
