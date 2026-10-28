@@ -50,14 +50,16 @@ let array_repr (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
 (* What an array's base address has to satisfy for every element of it to be
    correctly aligned. The divisibility is the well-formedness of the pair
    (stride, alignment): C guarantees `alignof(T)` divides `sizeof(T)`, which is
-   what makes element `i` aligned whenever the base is. Carrying it inside the
+   what makes element `i` aligned whenever the base is. C's power-of-two
+   alignments also divide the pointer-word modulus. Carrying these inside the
    predicate rather than demanding it at each use means a split, a focus and a
    `+! esize` all preserve alignment without anyone restating it. *)
 (* Same shape as `aligned`, and opaque for the same reason: the divisibility
    of the address is hidden behind `divides_addr` so that a proof carrying many
    of these facts at once does not hand Z3 a pile of nonlinear arithmetic. *)
 let array_aligned (esize: nat) (ealign: nat) (a: ptr) : prop =
-  esize > 0 /\ ealign > 0 /\ esize % ealign == 0 /\ divides_addr a ealign
+  esize > 0 /\ ealign > 0 /\ esize % ealign == 0 /\
+  pow2 64 % ealign == 0 /\ divides_addr a ealign
 
 let array_aligned_add (esize: nat) (ealign: nat) (a: ptr) (n: SZ.t)
   : Lemma (requires array_aligned esize ealign a /\ SZ.v n % esize == 0)
@@ -67,7 +69,7 @@ let array_aligned_add (esize: nat) (ealign: nat) (a: ptr) (n: SZ.t)
     FStar.Math.Lemmas.lemma_div_exact esize ealign;
     FStar.Math.Lemmas.paren_mul_right (SZ.v n / esize) (esize / ealign) ealign;
     FStar.Math.Lemmas.multiple_modulo_lemma ((SZ.v n / esize) * (esize / ealign)) ealign;
-    FStar.Math.Lemmas.modulo_distributivity (addr_of a) (SZ.v n) ealign
+    divides_addr_add a ealign n
 
 (* The form every split actually has: the offset is a whole number of
    elements. *)
@@ -480,6 +482,18 @@ ghost fn array_unfocus_read (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (e
        as (array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs);
 }
 
+ghost fn array_fits (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                    (#p: perm) (#xs: Seq.seq t)
+  preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures   pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
+                  addr_of a + SZ.v esize * Seq.length xs < pow2 64)
+{
+  unfold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs;
+  with b. assert (mem_pts_to a p b ** pure (array_repr t_repr (SZ.v esize) xs b));
+  mem_pts_to_fits a;
+  fold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs;
+}
+
 (* The byte offset of an in-bounds element fits in a `size_t`, so the
    multiplication a subscript needs is well-defined. This is not an extra
    assumption: owning the array means owning `esize * length xs` bytes at `a`,
@@ -490,13 +504,11 @@ ghost fn array_offset_fits (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (es
                            (i: SZ.t { SZ.v i < Seq.length xs })
   preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
   ensures   pure (SZ.fits (SZ.v esize * SZ.v i))
+  ensures   pure (addr_of a + SZ.v esize * Seq.length xs < pow2 64)
 {
-  unfold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs;
-  with b. assert (mem_pts_to a p b ** pure (array_repr t_repr (SZ.v esize) xs b));
-  mem_pts_to_fits a;
+  array_fits t_repr a esize ealign;
   elem_fits (SZ.v esize) (Seq.length xs) (SZ.v i);
-  SZ.fits_lte (SZ.v esize * SZ.v i) (addr_of a + len b);
-  fold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs;
+  SZ.fits_lte (SZ.v esize * SZ.v i) (addr_of a + SZ.v esize * Seq.length xs);
 }
 
 (* ---------------------------------------------------------------------------

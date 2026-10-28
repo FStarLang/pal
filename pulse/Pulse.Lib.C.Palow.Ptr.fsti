@@ -55,13 +55,20 @@ val addr_bound (a: ptr)
    Known deviation from PNVI: `( +! )` is total, so forming an out-of-bounds
    pointer is not itself an error here; only *accessing* out of bounds is,
    because `mem_pts_to` is only ever available for in-bounds ranges. This is
-   strictly more permissive than ISO C, and is recorded as such in `palow.md`. *)
+   strictly more permissive than ISO C, and is recorded as such in `palow.md`.
+   Total addition wraps at the pointer-word boundary. Unbounded addition would
+   contradict `addr_bound`, even without owning or accessing any memory. *)
 val ( +! ) (a: ptr) (n: SZ.t) : ptr
 
 val addr_of_add (a: ptr) (n: SZ.t)
-  : Lemma (addr_of (a +! n) == addr_of a + SZ.v n /\
+  : Lemma (addr_of (a +! n) == (addr_of a + SZ.v n) % pow2 64 /\
            prov_of (a +! n) == prov_of a)
           [SMTPat (addr_of (a +! n))]
+
+let addr_of_add_nowrap (a: ptr) (n: SZ.t)
+  : Lemma (requires addr_of a + SZ.v n < pow2 64)
+          (ensures addr_of (a +! n) == addr_of a + SZ.v n)
+  = FStar.Math.Lemmas.modulo_lemma (addr_of a + SZ.v n) (pow2 64)
 
 val prov_of_add (a: ptr) (n: SZ.t)
   : Lemma (prov_of (a +! n) == prov_of a)
@@ -116,13 +123,22 @@ let aligned_one (a: ptr) : Lemma (aligned a 1sz) [SMTPat (aligned a 1sz)] =
 let aligned_null (n: SZ.t { SZ.v n > 0 }) : Lemma (aligned null n) =
   reveal_opaque (`%divides_addr) divides_addr
 
-(* Stepping to a field or an array element: an offset that is itself a multiple
-   of the alignment preserves it. *)
-let aligned_add (a: ptr) (m n: SZ.t)
-  : Lemma (requires aligned a m /\ SZ.v n % SZ.v m == 0)
-          (ensures  aligned (a +! n) m)
+(* C alignments are powers of two, so reducing an address modulo the pointer
+   word preserves divisibility by the alignment. An arbitrary divisor need
+   not survive wrapping: `2^64` is not divisible by 3, for example. *)
+let divides_addr_add (a: ptr) (m: pos) (n: SZ.t)
+  : Lemma (requires divides_addr a m /\ SZ.v n % m == 0 /\ pow2 64 % m == 0)
+          (ensures divides_addr (a +! n) m)
   = reveal_opaque (`%divides_addr) divides_addr;
-    FStar.Math.Lemmas.modulo_distributivity (addr_of a) (SZ.v n) (SZ.v m)
+    FStar.Math.Lemmas.lemma_div_exact (pow2 64) m;
+    FStar.Math.Lemmas.modulo_distributivity (addr_of a) (SZ.v n) m;
+    FStar.Math.Lemmas.modulo_modulo_lemma (addr_of a + SZ.v n) m (pow2 64 / m)
+
+let aligned_add (a: ptr) (m n: SZ.t)
+  : Lemma (requires aligned a m /\ SZ.v n % SZ.v m == 0
+                    /\ pow2 64 % SZ.v m == 0)
+          (ensures  aligned (a +! n) m)
+  = divides_addr_add a (SZ.v m) n
 
 (* Weakening a stronger guarantee to the one a particular type needs: this is
    how `malloc`'s alignment for `max_align_t` becomes alignment for whatever
@@ -145,7 +161,7 @@ let aligned_divides (a: ptr) (m n: SZ.t)
    `struct_S_field_aligned` is a list of calls to this and nothing else. *)
 let aligned_field (a: ptr) (m: SZ.t) (off: SZ.t) (n: SZ.t)
   : Lemma (requires aligned a m /\ SZ.v n > 0 /\ SZ.v m % SZ.v n == 0
-                    /\ SZ.v off % SZ.v n == 0)
+                    /\ SZ.v off % SZ.v n == 0 /\ pow2 64 % SZ.v n == 0)
           (ensures  aligned (a +! off) n)
   = aligned_divides a m n;
     aligned_add a n off
@@ -192,7 +208,8 @@ val addr_of_sub (a: ptr) (n: SZ.t { SZ.v n <= addr_of a })
    never an error here, only accessing through one -- and coincides with
    `( -! )` wherever that is defined.
 
-   What the offset is below that point is deliberately unspecified. A caller
+   The explicit address formula below covers the non-underflowing case.
+   `add_sub_wrap` also constrains the wrapping case. A caller
    who knows the field pointer came from a structure knows it as
    `base +! offset`, and the round trip below is then exactly the
    `container (proj p) == p` the old model had to generate a lemma for. *)
@@ -212,20 +229,14 @@ let sub_eq_sub_wrap (a: ptr) (n: SZ.t { SZ.v n <= addr_of a })
           [SMTPat (a -! n)]
   = ptr_ext (a -! n) (a -? n)
 
-(* Derivable from the two lemmas above by `ptr_ext` -- `addr_of (a +! n)` is at
-   least `SZ.v n`, so the offset fits -- and stated here so that it fires
-   without one. *)
+(* Subtraction inverts addition, including addition that wrapped. *)
 val add_sub_wrap (a: ptr) (n: SZ.t)
   : Lemma ((a +! n) -? n == a)
           [SMTPat ((a +! n) -? n)]
 
-(* The other way round, which needs a side condition: the offset has to be
-   there to be taken back. At NULL it is not -- `(null -? n) +! n` has address
-   `n` -- so without the premise this would contradict `null_addr`. A caller
-   that reached a structure through one of its fields has the premise: the
-   field pointer really is `off` bytes into an object, which is exactly what
-   ISO C requires of `container_of` as well. Also derivable from `ptr_ext`, via
-   `addr_of_sub_wrap`. *)
+(* The non-underflowing converse follows from `ptr_ext` and
+   `addr_of_sub_wrap`. This is the form used when the field pointer really is
+   `off` bytes into an object. *)
 val sub_wrap_add (a: ptr) (n: SZ.t)
   : Lemma (requires SZ.v n <= addr_of a)
           (ensures  (a -? n) +! n == a)

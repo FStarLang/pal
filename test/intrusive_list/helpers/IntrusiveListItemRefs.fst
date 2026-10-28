@@ -55,10 +55,16 @@ unfold let item_link ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
 
 ghost fn item_unfold (a: ptr) (#p: perm) (v: I1.struct_item)
   requires I1.struct_item_pts_to a p v
+  ensures  pure (addr_of a + SZ.v I1.struct_item_sizeof < pow2 64)
   ensures  item_unfolded a p
   ensures  item_value a #p v.I1.fld_value
   ensures  N.struct_list_node_pts_to (item_link_1 a) p v.I1.fld_link
 {
+  I1.struct_item_reveal a;
+  with b. assert (mem_pts_to a p b ** pure (I1.struct_item_repr v b));
+  I1.struct_item_repr_len v b;
+  mem_pts_to_fits a;
+  I1.struct_item_conceal a #p #b #v;
   unfold I1.struct_item_pts_to a p v;
 }
 
@@ -104,6 +110,7 @@ unfold let item2_link ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
 
 ghost fn item2_unfold (a: ptr) (#p: perm) (v: I2.struct_item2)
   requires I2.struct_item2_pts_to a p v
+  ensures  pure (addr_of a + SZ.v I2.struct_item2_sizeof < pow2 64)
   ensures  item2_unfolded a p
   ensures  item2_priority a #p v.I2.fld_priority
   ensures  item2_used a #p v.I2.fld_used
@@ -111,6 +118,11 @@ ghost fn item2_unfold (a: ptr) (#p: perm) (v: I2.struct_item2)
   ensures  item2_processed a #p v.I2.fld_processed
   ensures  N.struct_list_node_pts_to (item2_link_1 a) p v.I2.fld_link
 {
+  I2.struct_item2_reveal a;
+  with b. assert (mem_pts_to a p b ** pure (I2.struct_item2_repr v b));
+  I2.struct_item2_repr_len v b;
+  mem_pts_to_fits a;
+  I2.struct_item2_conceal a #p #b #v;
   unfold I2.struct_item2_pts_to a p v;
 }
 
@@ -155,10 +167,16 @@ unfold let item3_link ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
 
 ghost fn item3_unfold (a: ptr) (#p: perm) (v: I3.struct_item3)
   requires I3.struct_item3_pts_to a p v
+  ensures  pure (addr_of a + SZ.v I3.struct_item3_sizeof < pow2 64)
   ensures  item3_unfolded a p
   ensures  item3_ready a #p v.I3.fld_ready
   ensures  N.struct_list_node_pts_to (item3_link_1 a) p v.I3.fld_link
 {
+  I3.struct_item3_reveal a;
+  with b. assert (mem_pts_to a p b ** pure (I3.struct_item3_repr v b));
+  I3.struct_item3_repr_len v b;
+  mem_pts_to_fits a;
+  I3.struct_item3_conceal a #p #b #v;
   unfold I3.struct_item3_pts_to a p v;
 }
 
@@ -199,14 +217,10 @@ unfold let item3_pts_to_uninit (a: ptr) : slprop = I3.struct_item3_pts_to_uninit
 
 (* --- the link really is a link ------------------------------------------ *)
 
-(* Recovering the item from its link field is `container_of`, and it only
-   round-trips if the offset is there to take back: `(a -? n) +! n == a` needs
-   `n <= addr_of a`. The current model assumes both directions of the round
-   trip outright, as generated axioms about opaque projection and container
-   functions. Palow computes both, so one direction is arithmetic and the
-   other needs its premise stated -- and stating it is no loss, because it is
-   exactly the fact that makes the recovery meaningful: this address is a link
-   field inside an item, rather than any address at all.
+(* The container recovery uses the non-underflowing `sub_wrap_add` law.
+   Whole-object byte ownership supplies the nonwrapping extent, so a link
+   inside the object has room for its enclosing prefix. An arbitrary pointer
+   has no such guarantee, even though modular arithmetic can round-trip it.
 
    It belongs in the payload predicate, which is where "this node is one of
    mine" is already said. *)

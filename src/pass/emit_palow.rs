@@ -22144,6 +22144,7 @@ fn emit_body(
     };
     let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
     let mut arrays = HashMap::new();
+    let mut array_facts = Vec::new();
     for a in &defn.decl.args {
         // An `_arrayptr` is not an array here: Palow grants it nothing, so
         // there is no sequence to focus an element out of, and the parameter
@@ -22164,8 +22165,22 @@ fn emit_body(
         if !has_repr(tds, pt) {
             continue;
         }
+        let base = name.val.to_string();
+        // Only automatic, unconditional ownership supplies a byte extent.
+        // A plain pointer or a nullable guard must not acquire one here.
+        if sig.owned.iter().any(|o| o.base == base) || sig.olens.contains_key(&base) {
+            let repr = if a.mode == ParamMode::Out {
+                format!("(maybe_repr {pn}_repr {esize})")
+            } else {
+                format!("{pn}_repr")
+            };
+            array_facts.push(format!(
+                "array_fits {repr} var_{} {esize}sz {pn}_alignof;",
+                name.val
+            ));
+        }
         arrays.insert(
-            name.val.to_string(),
+            base,
             ArrayParam {
                 pn,
                 fty,
@@ -22185,7 +22200,7 @@ fn emit_body(
         env,
         callees,
         diverged: false,
-        lines: Vec::new(),
+        lines: array_facts,
         // A granted global is a slot the function did not allocate and must
         // not release. Seeding them first means a local of the same name
         // shadows the global, exactly as C says, because every slot lookup
