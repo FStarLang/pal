@@ -16751,10 +16751,9 @@ impl<'a> Body<'a> {
     ///
     /// The pointee is not read, but the pointer itself is still evaluated:
     /// assigning to a C parameter changes where it points. The callee wants
-    /// the uninitialised points-to. The two things that
-    /// can supply one are a local that has not been written and the caller's
-    /// own `_out` parameter, and the emitter already tracks both -- so all
-    /// this does is spend one and record that it is now initialised.
+    /// the uninitialised points-to. For tracked storage, record that the call
+    /// initializes it. A `_plain` parameter can instead carry storage through
+    /// a handwritten contract, whose ownership the callee must still prove.
     fn out_arg(&mut self, a: &Expr) -> Result<String, String> {
         // The callee's contract still decides whether null is allowed.
         // A nullable output owns only an empty guard at this address.
@@ -16864,6 +16863,18 @@ impl<'a> Body<'a> {
                 a.filled = true;
             }
             return Ok(self.blocks[i].tmp.clone());
+        }
+        // A custom contract may supply uninitialised storage without making
+        // the parameter `_out`. Read the actual pointer; the callee's
+        // precondition checks its storage rather than assuming it exists.
+        if self.spliced_own
+            && let ExprT::Var(v) = &strip_vattr(a).val
+            && self.params.contains(&*v.val)
+        {
+            let ty = self.ty_of(a)?;
+            if is_plain(self.tds, &ty) && extent(self.tds, &ty) == Some(Extent::One) {
+                return self.rvalue(a);
+            }
         }
         Err("an `_out` argument that is not unwritten storage here".to_string())
     }

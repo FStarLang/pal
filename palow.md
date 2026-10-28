@@ -1389,6 +1389,13 @@ new facts about memory.
   `out_param_rebind_fields` reject writes through a rebound pointer that would
   leave the original output unwritten. `out_param_live_uninit` checks that an
   initialised pointer cell does not make its pointee initialised.
+- A single-object `_plain` parameter may be passed to an `_out` callee when
+  the caller supplies its own spatial contract. This does not grant storage
+  or infer whether it is initialized: the callee must prove its native
+  uninitialized points-to precondition for the actual C pointer value.
+  `out_param` covers scalar and record storage, an addressed pointer, and
+  rebinding to a separately owned output while preserving the original
+  storage. `out_param_unowned` rejects forwarding without storage.
 - A single-object `_nullable _out` parameter arrives with
   `unless_null p (T_pts_to_uninit p)` and normally returns an existentially
   quantified initialized value under the same guard. An ownership-bearing
@@ -2165,14 +2172,14 @@ new facts about memory.
    constant -- the only case where a symbolic index reads as a value, and the
    common one, since a static aggregate with no initialiser is exactly that.
 
-   An `_out` argument is the one place where a call is handed a place rather
-   than a value, so it is the one argument that is not evaluated: `&x` is
-   storage. What the callee asks for is the write-only points-to, and the two
-   things that can supply one -- a local that has not been written, and the
-   caller's own `_out` parameter -- are both already tracked, because the
-   emitter needs them to choose between an initialising and an ordinary store.
-   So the call site does nothing new: it spends one and records that it is now
-   initialised.
+   An `_out` argument supplies storage without reading its pointee; the
+   pointer itself is still evaluated. What the callee asks for is the
+   write-only points-to. A local that has not been written and the caller's
+   own `_out` parameter are already tracked, because the emitter needs them
+   to choose between an initialising and an ordinary store. The call site
+   records that this storage is now initialised. A `_plain` parameter can
+   instead supply storage through an explicit spatial contract; the callee's
+   precondition checks that ownership without inventing initialization state.
 
    The interesting case is passing storage that *has* been written, which C
    allows: `_out` says the callee writes the object, not that nobody wrote it
