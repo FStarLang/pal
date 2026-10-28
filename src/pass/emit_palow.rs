@@ -3161,8 +3161,7 @@ impl<'a> Spec<'a> {
     /// The same splice as in a body, against the contract's view of the world:
     /// `$(e)` is what the specification says `e` is at this point -- which for
     /// an `_old` or an `_ensures` is not what the body would read -- and `$&(e)`
-    /// is the parameter's own address, which a contract can only name for
-    /// something it was handed directly.
+    /// names storage directly. `$&(*p)` is `p` without reading its pointee.
     fn inline_pulse(&self, code: &InlinePulseCode, w: When) -> Result<String, String> {
         let mut out = String::new();
         for tok in &code.tokens {
@@ -3182,15 +3181,21 @@ impl<'a> Spec<'a> {
                     out.push_str(&format!("({})", v));
                 }
                 InlinePulseToken::LValueAntiquot { before, expr } => {
-                    let ExprT::Var(v) = &strip_vattr(expr).val else {
-                        return Err("`$&` of something a contract cannot address".to_string());
+                    let a = match &strip_vattr(expr).val {
+                        ExprT::Var(v) => {
+                            let n = v.val.to_string();
+                            self.addrs
+                                .get(&n)
+                                .cloned()
+                                .unwrap_or_else(|| format!("var_{}", n))
+                        }
+                        ExprT::Deref(p) => self.value(p, w)?,
+                        _ => {
+                            return Err("`$&` of something a contract cannot address".to_string());
+                        }
                     };
-                    let n = v.val.to_string();
                     out.push_str(before);
-                    match self.addrs.get(&n) {
-                        Some(a) => out.push_str(&format!("({})", a)),
-                        None => out.push_str(&format!("(var_{})", n)),
-                    }
+                    out.push_str(&format!("({})", a));
                 }
                 InlinePulseToken::TypeAntiquot { before, ty } => {
                     let t = fstar_type(self.tds, ty)
@@ -11477,6 +11482,33 @@ struct Callee {
     allocated: Option<RetBlock>,
 }
 
+#[derive(Clone)]
+struct OwnPath {
+    root: Rc<Expr>,
+    root_sn: String,
+    fields: Vec<(String, String)>,
+}
+
+impl OwnPath {
+    fn struct_name(&self) -> &str {
+        self.fields.last().map_or(&self.root_sn, |(_, sn)| sn)
+    }
+}
+
+#[derive(Clone)]
+struct OwnRoot {
+    at: Option<String>,
+    sn: String,
+    value: String,
+}
+
+#[derive(Clone)]
+struct OpenOwn {
+    root: Rc<OwnRoot>,
+    fields: Vec<String>,
+    sn: String,
+}
+
 /// Cloneable so that a speculative attempt can be rolled back *in full*
 /// (`attempt` below). Every field is either owned data or a borrow of
 /// something that outlives the body, so the clone is a snapshot of exactly
@@ -11672,7 +11704,7 @@ struct Body<'a> {
     /// pieces, and gathers them back before the statement ends. Bracketing it
     /// per statement rather than per function is what keeps every branch,
     /// loop and call seeing the same shape.
-    own_open: Vec<(String, String)>,
+    own_open: Vec<OpenOwn>,
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
@@ -12391,7 +12423,7 @@ impl<'a> Body<'a> {
     }
 
     /// Owned containers from a parameter down through its embedded structs.
-    fn own_path(&self, e: &Expr) -> Option<Vec<(String, String)>> {
+    fn own_path(&self, e: &Expr) -> Option<OwnPath> {
         let ty = self.ty_of(e).ok()?;
         let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
             return None;
@@ -12409,18 +12441,23 @@ impl<'a> Body<'a> {
                 if !self.params.contains(&p) || !self.granted.contains(&p) {
                     return None;
                 }
-                Some(vec![(format!("(reveal val_{})", p), sn)])
+                Some(OwnPath {
+                    root: Rc::new(e.clone()),
+                    root_sn: sn,
+                    fields: Vec::new(),
+                })
             }
-            ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => {
-                Some(vec![(format!("var_{}", v.val), sn)])
-            }
+            ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => Some(OwnPath {
+                root: Rc::new(e.clone()),
+                root_sn: sn,
+                fields: Vec::new(),
+            }),
             ExprT::Member(base, f) => {
                 let mut path = self.own_path(base)?;
-                let (parent, parent_sn) = path.last()?;
-                self.own_items_of(parent_sn)
+                self.own_items_of(path.struct_name())
                     .iter()
                     .find(|i| i.name == *f.val && i.embedded)?;
-                path.push((format!("(({}).fld_{})", parent, f.val), sn));
+                path.fields.push((f.val.to_string(), sn));
                 Some(path)
             }
             _ => None,
@@ -12428,49 +12465,126 @@ impl<'a> Body<'a> {
     }
 
     /// The containers to open and the item holding the target of `e`.
-    fn own_item(&self, e: &Expr) -> Option<(Vec<(String, String)>, String)> {
+    fn own_item(&self, e: &Expr) -> Option<(OwnPath, String)> {
         match &strip_vattr(e).val {
             ExprT::Member(base, f) => {
                 let path = self.own_path(base)?;
-                let (_, sn) = path.last()?;
                 let name = f.val.to_string();
-                self.own_items_of(sn).iter().find(|i| i.name == name)?;
+                self.own_items_of(path.struct_name())
+                    .iter()
+                    .find(|i| i.name == name)?;
                 Some((path, name))
             }
             ExprT::Deref(inner) => {
                 let (path, item) = self.own_item(inner)?;
-                let (_, sn) = path.last()?;
                 let name = format!("{}_1", item);
-                self.own_items_of(sn).iter().find(|i| i.name == name)?;
+                self.own_items_of(path.struct_name())
+                    .iter()
+                    .find(|i| i.name == name)?;
                 Some((path, name))
             }
             _ => None,
         }
     }
 
-    fn open_own_path(&mut self, path: &[(String, String)]) {
-        for (value, sn) in path {
-            self.open_own(value, sn);
+    fn open_own_path(&mut self, path: &OwnPath) -> Result<(), String> {
+        let value = match &strip_vattr(&path.root).val {
+            ExprT::Var(v) if !self.slots.iter().any(|s| s.name == *v.val) => {
+                Some(format!("var_{}", v.val))
+            }
+            _ => None,
+        };
+        let at = if value.is_some() {
+            None
+        } else {
+            Some(self.addr_only(&path.root)?)
+        };
+        let root = match self.own_open.iter().find(|o| {
+            o.root.sn == path.root_sn
+                && o.root.at == at
+                && value.as_ref().is_none_or(|v| o.root.value == *v)
+        }) {
+            Some(o) => o.root.clone(),
+            None => {
+                let value = match value {
+                    Some(v) => v,
+                    None => {
+                        let v = self.fresh("own_value");
+                        self.lines.push(format!(
+                            "with {}. assert (struct_{}_pts_to {} _ {});",
+                            v,
+                            path.root_sn,
+                            at.as_ref().unwrap(),
+                            v
+                        ));
+                        v
+                    }
+                };
+                Rc::new(OwnRoot {
+                    at,
+                    sn: path.root_sn.clone(),
+                    value,
+                })
+            }
+        };
+        let mut fields = Vec::new();
+        let mut value = root.value.clone();
+        for (field, sn) in std::iter::once((None, &path.root_sn))
+            .chain(path.fields.iter().map(|(f, sn)| (Some(f), sn)))
+        {
+            if let Some(f) = field {
+                fields.push(f.clone());
+                value = format!("(({}).fld_{})", value, f);
+            }
+            if self
+                .own_open
+                .iter()
+                .any(|o| Rc::ptr_eq(&o.root, &root) && o.fields == fields)
+            {
+                continue;
+            }
+            self.lines
+                .push(format!("struct_{}_own_scatter {};", sn, value));
+            self.own_open.push(OpenOwn {
+                root: root.clone(),
+                fields: fields.clone(),
+                sn: sn.clone(),
+            });
         }
+        Ok(())
     }
 
     /// Fold back every deep ownership this statement unfolded, innermost
     /// first: a later item's address can be an earlier one's value.
     fn close_own(&mut self) {
-        for (sn, v) in std::mem::take(&mut self.own_open).into_iter().rev() {
-            self.lines.push(format!("{}_own_gather {};", sn, v));
+        let mut roots: Vec<(Rc<OwnRoot>, String)> = Vec::new();
+        for o in std::mem::take(&mut self.own_open).into_iter().rev() {
+            let mut value = match roots.iter().find(|(r, _)| Rc::ptr_eq(r, &o.root)) {
+                Some((_, v)) => v.clone(),
+                None => {
+                    // A mutable borrow may have replaced embedded values.
+                    // Gather their ownership at the record now held in memory.
+                    let v = match &o.root.at {
+                        Some(at) => {
+                            let v = self.fresh("own_value");
+                            self.lines.push(format!(
+                                "with {}. assert (struct_{}_pts_to {} _ {});",
+                                v, o.root.sn, at, v
+                            ));
+                            v
+                        }
+                        None => o.root.value.clone(),
+                    };
+                    roots.push((o.root.clone(), v.clone()));
+                    v
+                }
+            };
+            for f in &o.fields {
+                value = format!("(({}).fld_{})", value, f);
+            }
+            self.lines
+                .push(format!("struct_{}_own_gather {};", o.sn, value));
         }
-    }
-
-    /// Unfold a struct's deep ownership for the rest of this statement.
-    fn open_own(&mut self, v: &str, sn: &str) {
-        let sn = format!("struct_{}", sn);
-        let v = v.to_string();
-        if self.own_open.iter().any(|(s, x)| *s == sn && *x == v) {
-            return;
-        }
-        self.lines.push(format!("{}_own_scatter {};", sn, v));
-        self.own_open.push((sn, v));
     }
 
     fn stable_ptr(&self, e: &Expr) -> bool {
@@ -12690,7 +12804,7 @@ impl<'a> Body<'a> {
                 {
                     let src = self.ptr_src[&*v.val.to_string()].clone();
                     let (path, _) = self.own_item(&src).unwrap();
-                    self.open_own_path(&path);
+                    self.open_own_path(&path)?;
                     self.rvalue(inner)
                 }
                 ExprT::Var(v) if self.spliced_own => self.rvalue(inner),
@@ -12717,7 +12831,7 @@ impl<'a> Body<'a> {
                 // borrow.
                 _ if self.own_item(inner).is_some() => {
                     let (path, _) = self.own_item(inner).unwrap();
-                    self.open_own_path(&path);
+                    self.open_own_path(&path)?;
                     self.rvalue(inner)
                 }
                 // A contract that spliced its own ownership in can have
@@ -14297,13 +14411,12 @@ impl<'a> Body<'a> {
                 // struct's deep ownership claims. The address still has to be
                 // read out of the field, which is an ordinary rvalue.
                 if let Some((path, item)) = self.own_item(e)
-                    && let Some((_, sn)) = path.last()
                     && let Some(i) = self
-                        .own_items_of(sn)
+                        .own_items_of(path.struct_name())
                         .into_iter()
                         .find(|i| i.name == item && i.esize.is_some())
                 {
-                    self.open_own_path(&path);
+                    self.open_own_path(&path)?;
                     let addr = self.rvalue(e)?;
                     return Ok(ArrayPlace {
                         addr,
@@ -16422,7 +16535,7 @@ impl<'a> Body<'a> {
                 && matches!(peel(self.tds, &aty).val, TypeT::Pointer(..))
             {
                 match self.own_item(a) {
-                    Some((path, _)) => self.open_own_path(&path),
+                    Some((path, _)) => self.open_own_path(&path)?,
                     // Nothing in the generated model owns it -- but a
                     // contract that spliced its own ownership in may, and the
                     // emitter cannot read those words. It says nothing and
@@ -16681,13 +16794,12 @@ impl<'a> Body<'a> {
             }
             if !out
                 && let Some((path, item)) = self.own_item(inner)
-                && let Some((_, sn)) = path.last()
                 && self
-                    .own_items_of(sn)
+                    .own_items_of(path.struct_name())
                     .iter()
                     .any(|i| i.name == item && i.embedded)
             {
-                self.open_own_path(&path);
+                self.open_own_path(&path)?;
             }
             let mark = self.lines.len();
             let key = self.addr_only(base);

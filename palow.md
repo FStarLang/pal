@@ -3441,9 +3441,16 @@ new facts about memory.
    Contract projections follow the same nested records. Read-only field
    borrows restore the original record term, rather than an eta-expanded
    reconstruction whose matching key differs after a conditional join.
+   Mutable borrows restore ownership at the current record value, captured
+   from its points-to after the embedded field has been put back. Later
+   accesses likewise use the current value rather than the entry-state
+   record. An explicit ownership join keeps a mutated record and its `_own`
+   witness together across a conditional; `$&(*p)` names the pointee's
+   storage in that clause without reading it.
    `_plain` embedded fields still contribute no ownership.
    `test/embedded_struct_own` verifies calls, direct reads and writes, two
-   levels of embedding, arrays, and conditional single- and multi-field borrows;
+   levels of embedding, arrays, conditional single- and multi-field borrows,
+   and accesses after mutable embedded borrows;
    `test/embedded_struct_own_plain` rejects a call that needs ownership the
    plain field does not provide.
 

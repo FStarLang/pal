@@ -37,6 +37,40 @@ void write_direct(struct holder *holder, int value)
     *holder->cell.value = value;
 }
 
+void write_cell(struct cell *cell, int value)
+    _ensures(*cell->value == value)
+{
+    *cell->value = value;
+}
+
+int read_after_mutable_borrow(struct holder *holder, int value)
+    _ensures(return == value)
+{
+    write_cell(&holder->cell, value);
+    return read_direct(holder);
+}
+
+int read_after_nested_mutable_borrow(struct outer *outer, int value)
+    _ensures(return == value)
+{
+    write_cell(&outer->holder.cell, value);
+    return *outer->holder.cell.value;
+}
+
+int read_after_conditional_mutable_borrow(struct holder *holder, _Bool write)
+{
+    if (write)
+        _ensures((_slprop)_inline_pulse(
+            exists* (v: Struct_holder.struct_holder)
+                    (s: Struct_holder.struct_holder_own_spec).
+                Struct_holder.struct_holder_pts_to $&(*holder) 1.0R v **
+                Struct_holder.struct_holder_own v 1.0R s))
+    {
+        write_cell(&holder->cell, 1);
+    }
+    return read_direct(holder);
+}
+
 int read_twice_embedded(const struct outer *outer)
     _ensures(return == *outer->holder.cell.value)
 {
