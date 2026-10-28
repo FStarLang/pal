@@ -1,6 +1,7 @@
 #include "pal.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 // Bitwise and partial operators in contracts.
 
@@ -48,3 +49,30 @@ int32_t mul_s(int32_t x, int32_t y)
 size_t mul_sz(size_t x, size_t y)
     _requires(x <= 1000 && y <= 1000)
     _ensures(return == x * y) { return x * y; }
+
+uint32_t guarded_div_or(uint32_t d)
+    _ensures(d == 0 || return / d == 0) { return 0; }
+
+uint32_t guarded_div_negated_and(uint32_t d)
+    _ensures(!(d != 0 && return / d != 0)) { return 0; }
+
+uint32_t guarded_div_condition(uint32_t d)
+    _ensures((d == 0 || return / d == 0) ? return == 0 : return == 1) {
+    return 0;
+}
+
+uint32_t guarded_div_and_condition(uint32_t d)
+    _ensures((d != 0 && return / d != 0) ? return == 1 : return == 0) {
+    return 0;
+}
+
+uint32_t guarded_div_branches(uint32_t x, uint32_t y, bool choose_x)
+    _requires(choose_x ? x != 0 : y != 0)
+    _ensures(return == 0)
+    _ensures(return == (choose_x ? return / x : return / y)) {
+    return 0;
+}
+
+uint32_t call_guarded_div_branches(void) _ensures(return == 0) {
+    return guarded_div_branches(0, 1, false) + guarded_div_branches(1, 0, true);
+}
