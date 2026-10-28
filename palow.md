@@ -397,6 +397,12 @@ carried in the predicate, with a `union_U_member_aligned` lemma for the members
 member is focused carries the union's alignment, so `unfocus` can give it back
 without its caller having to supply it.
 
+A union read can also obtain its live-arm fact from a pure precondition,
+including an opaque predicate, not just `_active` syntax or spliced ownership.
+The generated focus still requires proof of the C-selected arm's tag.
+`union_struct_arms` covers a pure tag predicate and `union_pure_tag_missing`
+rejects an unrelated pure precondition that cannot establish the tag.
+
 `array_pts_to` gains the same conjunct at the array's own alignment (the
 element's, since C arrays have no padding). `array_focus` at index `i` needs
 `aligned (a +! i*esize) T_alignof`, i.e. `(i * esize) % esize == 0`. This is

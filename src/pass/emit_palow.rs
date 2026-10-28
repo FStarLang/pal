@@ -13114,13 +13114,12 @@ impl<'a> Body<'a> {
             // place, and the contract names the place: `payload->uds` after
             // `payload = &ctx.payload` is `ctx.payload.uds`.
             let named = self.unalias_place(base);
-            // A contract that spliced its own ownership in can have said
-            // which member is live too, in words the emitter does not read --
-            // `tag_relation` tying the tag to the constructor is exactly
-            // that. So the re-statement is emitted and the obligation left to
-            // F*, which is where the honesty is: if nothing in the contract
-            // implies the tag, the `rewrite` fails.
+            // Pure preconditions and spliced ownership can both say which
+            // member is live in words the emitter does not read. Emit the
+            // re-statement and leave that obligation to F*: if the contract
+            // does not imply the tag, the `rewrite` fails.
             if !self.spliced_own
+                && !self.requires_ok
                 && !self
                     .live_arms
                     .iter()
