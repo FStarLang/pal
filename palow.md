@@ -2028,6 +2028,14 @@ new facts about memory.
    exactly that distinction, one term per side with `None` where there is no
    value, so the rule reads straight off it.
 
+   A refinement inherited from the pointee's declaration binds `this` to that
+   value, not to the pointer. The clause can contain both propositions and
+   ownership: its conjuncts go through the same refinement translator used for
+   `_refine_value`, rather than treating an slprop as a proposition and emitting
+   `pure (pure (...))`. `struct_pointee_refine` exercises pure and mixed clauses,
+   separately owned pointer fields, mutation, and `_out` construction. Its two
+   negative companions reject an invalid output value and a lost owned cell.
+
    Translating the clause needs no substitution. `this` is bound in the pointee
    map to the same pair of terms as the parameter it refines, and `*this` then
    resolves through the map like any other dereference. What it does need is a
@@ -2329,9 +2337,12 @@ new facts about memory.
    that mentions `*p`, or a body that reads it, is talking about something the
    caller has not unconditionally granted, so a nullable parameter stays out of
    the pointee map and those cases report a dropped contract rather than
-   quietly proving against a precondition nobody supplied. A refinement behind
-   the guard is reported for the same reason: the refinement is a pure fact and
-   the guard is an slprop, so there is no honest place to put it yet.
+   quietly proving against a precondition nobody supplied. Inherited pointee
+   refinements use a separate map of guarded values and are stated inside
+   `unless_null`, on the same entry and exit sides as the points-to. This does
+   not enable an ordinary unguarded dereference. The null-caller regression in
+   `struct_pointee_refine` checks that neither the record nor its refinement
+   demands ownership when the pointer is null.
 
    Fixing this exposed a second thing worth recording. The exit ownership was
    being built by appending the existential binder to a points-to with its last

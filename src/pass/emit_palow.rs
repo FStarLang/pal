@@ -4176,6 +4176,9 @@ fn emit_fn(
     // Parameters whose ownership the contract puts behind `unless_null`.
     let mut guarded: HashSet<String> = HashSet::new();
     let mut null_payload: HashMap<String, String> = HashMap::new();
+    // These values are available only inside the nullness guard. Keep them
+    // separate from the map that permits ordinary specification dereferences.
+    let mut guarded_pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
 
     for (i, arg) in decl.args.iter().enumerate() {
         let pname = match &arg.name {
@@ -4438,6 +4441,10 @@ fn emit_fn(
         // pointee map is what makes those say so rather than quietly succeed
         // against a precondition the caller never granted.
         if null_guard {
+            null_wrap.insert(base.clone(), pname.clone());
+            if refines_struct.iter().any(|(b, _, _)| *b == base) {
+                null_payload.remove(&base);
+            }
             match refinements(tds, &arg.ty) {
                 // Ownership survives the guard: it is stated where the
                 // points-to is stated, inside it. A *proposition* does not --
@@ -4445,6 +4452,12 @@ fn emit_fn(
                 // conjunct, and nothing yet writes one.
                 Ok((ps, us, bs)) if us.is_empty() && bs.is_empty() => {
                     for cl in ps {
+                        if refines_struct
+                            .iter()
+                            .any(|(b, _, q)| *b == base && Rc::ptr_eq(q, &cl))
+                        {
+                            continue;
+                        }
                         if slprop_refine(tds, &cl).is_none() {
                             refine_err.get_or_insert(format!(
                                 "parameter {} carries a value refinement behind a nullness guard",
@@ -4452,7 +4465,6 @@ fn emit_fn(
                             ));
                             continue;
                         }
-                        null_wrap.insert(base.clone(), pname.clone());
                         null_payload.remove(&base);
                         // A parameter with no pointee -- an `_arrayptr`, say --
                         // had its refinements collected above already.
@@ -4480,11 +4492,14 @@ fn emit_fn(
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                     wits.push((vname.clone(), vty.clone(), true));
                     preserved.push(pts_to(&perm, &vname));
+                    let v = format!("(reveal {})", vname);
+                    guarded_pointees.insert(base, (Some(v.clone()), Some(v)));
                 }
                 ParamMode::Consumed => {
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                     wits.push((vname.clone(), vty.clone(), true));
                     req.push(pts_to("1.0R", &vname));
+                    guarded_pointees.insert(base, (Some(format!("(reveal {})", vname)), None));
                 }
                 ParamMode::Regular => {
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
@@ -4495,6 +4510,13 @@ fn emit_fn(
                         vty,
                         pts_to("1.0R", &format!("{}'", vname)),
                     ));
+                    guarded_pointees.insert(
+                        base,
+                        (
+                            Some(format!("(reveal {})", vname)),
+                            Some(format!("{}'", vname)),
+                        ),
+                    );
                 }
             }
             continue;
@@ -5199,26 +5221,6 @@ fn emit_fn(
                 out.push(refine_clause(base, None, ty, p, w, false, &[])?);
             }
         }
-        for (base, ty, p) in &refines_struct {
-            let Some((pre, post)) = spec.pointees.get(base) else {
-                continue;
-            };
-            let this = match w {
-                When::Post => post.as_deref(),
-                _ => pre.as_deref(),
-            };
-            if let Some(this) = this {
-                out.push(refine_clause(
-                    base,
-                    Some((this, None, false)),
-                    ty,
-                    p,
-                    w,
-                    false,
-                    &[],
-                )?);
-            }
-        }
         for (base, sname, fname, fty, p, via) in &refines_field {
             if slprop_refine(tds, p).is_some() {
                 continue;
@@ -5313,6 +5315,38 @@ fn emit_fn(
                 Some(p) => format!("unless_null {} ({})", p, stated_own),
                 None => stated_own,
             });
+        }
+        for (base, ty, p) in &refines_struct {
+            let Some((pre, post)) = spec
+                .pointees
+                .get(base)
+                .or_else(|| guarded_pointees.get(base))
+            else {
+                continue;
+            };
+            let this = match w {
+                When::Post => post.as_deref(),
+                _ => pre.as_deref(),
+            };
+            let Some(this) = this else { continue };
+            let t = with_this(
+                base,
+                Some((this, None, false)),
+                ty,
+                p,
+                w,
+                false,
+                None,
+                &[],
+                &|sp: &Spec, w| sp.refinement(p, w),
+            )?;
+            out.push(match null_wrap.get(base) {
+                Some(ptr) => format!("unless_null {} ({})", ptr, t),
+                None => format!("({})", t),
+            });
+            if refine_states_own(tds, p) {
+                *refine_own_spliced.borrow_mut() = true;
+            }
         }
         for (base, sname, fname, fty, p, via) in &refines_field {
             let Some(code) = slprop_refine(tds, p) else {
