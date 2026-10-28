@@ -152,3 +152,19 @@ int32_t last_value(_array struct reading *rs)
 {
   return rs[2].value;
 }
+
+union record make_reading(int32_t value)
+  _ensures(return.rd._active)
+  _ensures(return.rd.value == value)
+{
+  union record r = { .rd = { .sensor = { 0 }, .value = value } };
+  return r;
+}
+
+union record reading_roundtrip(int32_t value)
+  _ensures(return.rd._active)
+  _ensures(return.rd.value == value)
+{
+  union record r = make_reading(value);
+  return r;
+}

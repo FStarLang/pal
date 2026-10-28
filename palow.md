@@ -2247,9 +2247,17 @@ new facts about memory.
    be claimed from raw storage without that storage having come from a stack
    allocation, because `_claim_uninit` is now separate from `_stack_alloc`. And
    a struct can be read as a whole value, which a by-value parameter needs --
-   except when it contains a union, which has no `_read` and never will,
-   because reading one would mean branching on a ghost tag inside a real
-   function.
+   except when it contains a union, which has no general `_read`: choosing
+   an arbitrary active member would mean branching on a ghost tag inside a
+   real function. A whole-union read can instead use a statically selected
+   member. The generated `union_X_m_read` requires proof that `m` is active,
+   focuses its bytes, reads its concrete value, and reconstructs that
+   constructor while preserving the entire union's ownership and padding.
+   No ghost tag becomes runtime data. The emitter selects a member from a
+   preceding write or an unconditional `_active` contract, otherwise trying
+   the first member with the same checked precondition. A copy whose tag
+   cannot be established still fails verification; `union_value_unknown`
+   checks that boundary.
 
    Two smaller fixes came with it. A common-initial-sequence union that PAL
    collapses into a struct was losing its layout: the table is keyed by how a
