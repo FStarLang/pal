@@ -77,3 +77,22 @@ void whole_then_field(_out struct pt *p) _ensures(p->x == 13 && p->y == 14) {
   *p = q;
   p->y = 14;
 }
+
+void mk_addressed(_out struct outer *p, bool b)
+    _ensures(p->a == 4 && p->inner.c == 5 && p->z == 6) {
+  if (b) {
+    _assert(_live(p));
+  }
+  p->inner.c = 5;
+  p->a = 4;
+  p->z = 6;
+}
+
+void mk_addressed_via_call(_out struct pt *p, bool b)
+    _ensures(p->x == 3 && p->y == 2) {
+  if (b) {
+    _assert(_live(p));
+  }
+  mk_flat(p);
+  p->x = 3;
+}

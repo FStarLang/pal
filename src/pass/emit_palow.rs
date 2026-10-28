@@ -12410,6 +12410,18 @@ impl<'a> Body<'a> {
         Ok(format!("loc_{}", name))
     }
 
+    /// Normalise a tracked pointee to its incoming address, but only after
+    /// checking that a mutable parameter still names that object.
+    fn tracked_pointee_addr(&mut self, e: &Expr, name: &str) -> Result<String, String> {
+        let at = format!("var_{}", name);
+        let current = self.rvalue(e)?;
+        if current != at {
+            self.lines
+                .push(format!("assert (pure ({} == {}));", current, at));
+        }
+        Ok(at)
+    }
+
     /// The address of an lvalue, as an F* expression of type `ptr`.
     fn addr(&mut self, e: &Expr) -> Result<String, String> {
         if let Some(p) = self.unalias(e) {
@@ -12491,7 +12503,7 @@ impl<'a> Body<'a> {
                     // refuse the access. The test is on the slot's address
                     // rather than on its display name because the address is
                     // what identifies the storage.
-                    self.rvalue(inner)
+                    self.tracked_pointee_addr(inner, &v.val)
                 }
                 ExprT::Var(v)
                     if self.params.contains(&*v.val.to_string())
@@ -13599,6 +13611,29 @@ impl<'a> Body<'a> {
         }
     }
 
+    // A bookkeeping key, not an emitted address. The subsequent open_field
+    // checks the actual pointer before using the tracked object.
+    fn tracked_place_key(&self, e: &Expr) -> Option<String> {
+        if let Some(p) = self.unalias(e) {
+            return self.tracked_place_key(&p);
+        }
+        match &strip_vattr(e).val {
+            ExprT::Deref(inner) => {
+                let ExprT::Var(v) = &strip_vattr(inner).val else {
+                    return None;
+                };
+                let at = format!("var_{}", v.val);
+                self.slots.iter().any(|s| s.addr == at).then_some(at)
+            }
+            ExprT::Member(base, f) => {
+                let a = self.tracked_place_key(base)?;
+                let (sn, _) = self.struct_of(base).ok()?;
+                Some(format!("({} +! {}_offsetof_{})", a, sn, f.val))
+            }
+            _ => None,
+        }
+    }
+
     fn nested_scatter_base_inner(
         &mut self,
         b2: &Expr,
@@ -13611,9 +13646,12 @@ impl<'a> Body<'a> {
         // the steps are simply abandoned here.
         let mark = self.lines.len();
         let closing = self.pending_close.len();
-        let a = match self.addr_only(b2) {
-            Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => a,
-            _ => return Ok(None),
+        let a = match self.tracked_place_key(b2) {
+            Some(a) => a,
+            None => match self.addr_only(b2) {
+                Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => a,
+                _ => return Ok(None),
+            },
         };
         // `o.f.g.h`: `o.f` becomes storage being filled only once something
         // is written into it, and this may be that write -- so the level
@@ -16604,11 +16642,19 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    fn mark_out_initialized(&mut self, name: &str) {
+        self.out_params.retain(|n| n != name);
+        let star = format!("*{}", name);
+        if let Some(s) = self.slots.iter_mut().rev().find(|s| s.name == star) {
+            s.init = true;
+        }
+    }
+
     /// The storage passed for an `_out` parameter.
     ///
-    /// An `_out` argument is the one place where a call is handed a place
-    /// rather than a value, so it is not evaluated: `&x` is storage, and what
-    /// the callee wants is the uninitialised points-to. The two things that
+    /// The pointee is not read, but the pointer itself is still evaluated:
+    /// assigning to a C parameter changes where it points. The callee wants
+    /// the uninitialised points-to. The two things that
     /// can supply one are a local that has not been written and the caller's
     /// own `_out` parameter, and the emitter already tracks both -- so all
     /// this does is spend one and record that it is now initialised.
@@ -16668,13 +16714,14 @@ impl<'a> Body<'a> {
             return Ok(at);
         }
         if let ExprT::Var(v) = &strip_vattr(a).val
-            && let Some(i) = self.out_params.iter().position(|n| *n == *v.val)
+            && self.out_params.iter().any(|n| *n == *v.val)
         {
-            self.out_params.remove(i);
+            let at = self.tracked_pointee_addr(a, &v.val)?;
+            self.mark_out_initialized(&v.val);
             // Dropping it from `out_params` is also what records that the
             // callee filled it: the array leaves in the plain view, so this
             // function has nothing left to prove about it on the way out.
-            return Ok(format!("var_{}", v.val));
+            return Ok(at);
         }
         // A place rather than a whole object: a field, an array element, or an
         // element of a field's array. The callee writes through it, so it is
@@ -17879,19 +17926,16 @@ impl<'a> Body<'a> {
         self.clear_fn_notes(lhs);
         if let ExprT::Deref(inner) = &lhs.val {
             if let ExprT::Var(v) = &inner.val {
-                if let Some(i) = self.out_params.iter().position(|n| *n == *v.val) {
-                    self.out_params.remove(i);
-                    self.lines
-                        .push(format!("{}_write_uninit var_{} {};", pn, v.val, value));
+                if self.out_params.iter().any(|n| *n == *v.val) {
+                    let at = self.tracked_pointee_addr(inner, &v.val)?;
                     // A struct `_out` pointee is also tracked as the slot
                     // `*p`, so that its fields can be written one at a time.
                     // After a whole write -- `*p = v`, or the zeroing a
                     // `memset` is lowered to -- the object is initialised,
                     // and a later field write is an ordinary one.
-                    let star = format!("*{}", v.val);
-                    if let Some(s) = self.slots.iter_mut().rev().find(|s| s.name == star) {
-                        s.init = true;
-                    }
+                    self.mark_out_initialized(&v.val);
+                    self.lines
+                        .push(format!("{}_write_uninit {} {};", pn, at, value));
                     return Ok(());
                 }
             }
@@ -21643,7 +21687,6 @@ fn emit_body(
                     scattered: BTreeSet::new(),
                 });
             }
-            continue;
         }
         if !addressed.contains(&n) || b.arrays.contains_key(&n) {
             continue;

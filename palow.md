@@ -1369,7 +1369,21 @@ new facts about memory.
   leaves the same scattered-field set, and writing every field in both arms
   leaves the same gathered value. This is a real restriction on the C we
   accept rather than an artefact. The `_ensures` a user writes on an `if` is
-  ignored, since Pulse infers the join without it.
+  ignored, since Pulse infers the join without it. A mixed direct-store/call
+  join can also lose an output-value equality when another cell is framed
+  across the branches; this occurs even without reading the framed cell.
+- An `_out` pointee is uninitialised, but the pointer parameter itself is an
+  initialised C object. Taking that parameter's address, including in a proof
+  annotation inside a branch, allocates its local cell at function entry.
+  Initialisation tracking identifies the incoming pointee; a use through the
+  local cell first proves that its current pointer still names that object.
+  This is a checked equality, not an assumption that reassignment did not
+  happen. `out_param` and `out_struct_fields` cover addressed parameters,
+  nested initialisation, and forwarding to another initializer.
+  `out_param_rebind_store`, `out_param_rebind_call`, and
+  `out_param_rebind_fields` reject writes through a rebound pointer that would
+  leave the original output unwritten. `out_param_live_uninit` checks that an
+  initialised pointer cell does not make its pointee initialised.
 - The layer-1 points-to predicates are abstract (`CTypes.fsti`,
   `Scalar.fsti`). This is not a matter of taste: a transparent definition
   makes F\* unfold to `encode` when it has to equate two branch-joined values,
