@@ -180,3 +180,72 @@ union record reading_roundtrip(int32_t value)
   union record r = make_reading(value);
   return r;
 }
+
+union record copy_record_value(union record input)
+  _ensures((_Bool)_inline_pulse($(return) == $(input)))
+{
+  union record copy = input;
+  return copy;
+}
+
+union record opaque_record(void);
+
+union record copy_record_from_call(void)
+{
+  union record copy = opaque_record();
+  return copy;
+}
+
+union record replace_record_value(union record input, union record replacement)
+  _ensures((_Bool)_inline_pulse($(return) == $(replacement)))
+{
+  union record copy = input;
+  copy = replacement;
+  return copy;
+}
+
+union record branch_record_value(union record input, union record replacement,
+                                _Bool replace)
+  _ensures(!replace || (_Bool)_inline_pulse($(return) == $(replacement)))
+  _ensures(replace || (_Bool)_inline_pulse($(return) == $(input)))
+{
+  union record copy = input;
+  if (replace) {
+    copy = replacement;
+    return copy;
+  } else {
+    return copy;
+  }
+}
+
+union record change_copied_record(union record input)
+  _ensures(return.st._active)
+  _ensures(return.st.samples == 7 && return.st.dropped == 2)
+{
+  union record copy = input;
+  union record *alias = &copy;
+  alias->st = (struct stats){ .samples = 7, .dropped = 2 };
+  return copy;
+}
+
+union record copy_record_through_join(union record input, _Bool rewrite)
+  _ensures((_Bool)_inline_pulse($(return) == $(input)))
+{
+  union record copy = input;
+  if (rewrite) {
+    copy = input;
+  }
+  return copy;
+}
+
+union record replace_record_at_join(union record input, _Bool replace)
+  _requires(input.rd._active)
+  _ensures(return.rd._active)
+  _ensures(return.rd.value == (replace ? 7 : input.rd.value))
+{
+  union record copy = input;
+  if (replace) {
+    copy = (union record){ .rd = { .sensor = { 0 }, .value = 7 } };
+  }
+  return copy;
+}
