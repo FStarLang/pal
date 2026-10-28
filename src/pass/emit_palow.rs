@@ -7877,6 +7877,9 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 if !matches!(f.shape, FieldShape::Array { .. }) {
                     r += &format!("  {}_repr_len {} {};\n", pn, val, v);
                 }
+                // Keep numeric lengths in scope before joining: recovering
+                // them through nested representations can overwhelm SMT.
+                r += &format!("  assert (pure (len {} == {}));\n", v, f.size);
             }
             Region::Gap(off, n) => {
                 r += &format!(
@@ -9696,6 +9699,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         ExprT::Live(x) => {
             if let ExprT::Var(v) = &strip_vattr(x).val {
                 t.lived.insert(v.val.to_string());
+                t.addressed.insert(v.val.to_string());
             }
             touch_expr(x, t);
         }
@@ -9741,10 +9745,10 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
                 touch_expr(x, t);
             }
         }
+        ExprT::InlinePulse(code, _) => spliced_addresses(code, &mut t.addressed),
         ExprT::BoolLit(_)
         | ExprT::IntLit(..)
         | ExprT::FloatLit(..)
-        | ExprT::InlinePulse(..)
         | ExprT::Malloc(_)
         | ExprT::Calloc(_)
         | ExprT::SizeOf(_)
@@ -9810,6 +9814,17 @@ fn ghost_stmt_names(body: &Stmts, out: &mut HashSet<String>) {
         }
     }
     go(body, out);
+}
+
+fn spliced_addresses(code: &InlinePulseCode, out: &mut HashSet<String>) {
+    for tok in &code.tokens {
+        // `$&(p->field)` addresses the pointee, not the parameter `p`.
+        if let InlinePulseToken::LValueAntiquot { expr, .. } = tok
+            && let Some(n) = lvalue_base(expr)
+        {
+            out.insert(n);
+        }
+    }
 }
 
 fn spliced_names(e: &Expr, out: &mut HashSet<String>) {
@@ -9932,11 +9947,11 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
                 touch_exprs(ensures, t);
             }
             StmtT::Label { ensures, .. } => touch_exprs(ensures, t),
+            StmtT::GhostStmt(code) => spliced_addresses(code, &mut t.addressed),
             StmtT::Decl(..)
             | StmtT::Break
             | StmtT::Continue
             | StmtT::Return(None)
-            | StmtT::GhostStmt(_)
             | StmtT::Goto(_)
             | StmtT::Error => {}
         }
@@ -14427,6 +14442,59 @@ impl<'a> Body<'a> {
         Some(vv)
     }
 
+    /// An ownership assertion about an object, not a read of its value.
+    fn live_assertion(&mut self, e: &Expr) -> Result<String, String> {
+        let value = self.fresh("live");
+        let predicate = if let ExprT::Var(v) = &strip_vattr(e).val
+            && let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val)
+        {
+            let slot = &mut self.slots[i];
+            slot.init = true;
+            slot.pts_to(&value)
+        } else {
+            if !matches!(strip_vattr(e).val, ExprT::Var(_) | ExprT::Deref(_)) {
+                return Err("a `_live` assertion about a compound location".to_string());
+            }
+            let ty = self.ty_of(e)?;
+            let pn = palow_name(self.tds, &ty)
+                .ok_or_else(|| format!("a `_live` assertion about {}", describe(&ty)))?;
+            let a = self.addr(e)?;
+            format!("{}_pts_to {} 1.0R {}", pn, a, value)
+        };
+        // Name the existing value rather than existentially hiding it, which
+        // would forget equalities established before this assertion.
+        self.lines
+            .push(format!("with {}. assert ({});", value, predicate));
+        Ok(predicate)
+    }
+
+    /// A statement assertion may mix ownership and pure propositions. Keep
+    /// both: `_live` is a checked points-to assertion, never `pure True`.
+    fn assertion(&mut self, e: &Expr) -> Result<String, String> {
+        match &e.val {
+            ExprT::VAttr(attr, inner) if !matches!(attr, VAttr::Active(_)) => self.assertion(inner),
+            ExprT::Cast(inner, to)
+                if matches!(self.tds.resolve(to).val, TypeT::SLProp)
+                    || (matches!(self.tds.resolve(to).val, TypeT::Bool)
+                        && self
+                            .ty_of(inner)
+                            .is_ok_and(|t| matches!(self.tds.resolve(&t).val, TypeT::SLProp))) =>
+            {
+                self.assertion(inner)
+            }
+            ExprT::Live(x) => self.live_assertion(x),
+            ExprT::InlinePulse(code, ty) if matches!(self.tds.resolve(ty).val, TypeT::SLProp) => {
+                flatten_fragment(&self.inline_pulse(code)?)
+            }
+            ExprT::BinOp(BinOp::LogAnd, l, r) => Ok(format!(
+                "({}) ** ({})",
+                self.assertion(l)?,
+                self.assertion(r)?
+            )),
+            _ => Ok(format!("pure ({})", self.prop(e)?)),
+        }
+    }
+
     /// A specification proposition in *statement* position, as in `_assert`.
     ///
     /// A contract has ghost binders for everything it owns, so it can name a
@@ -18370,10 +18438,8 @@ impl<'a> Body<'a> {
         // of the locals themselves rather than their mirrors, is what makes it
         // usable by the code that follows.
         for e in ensures.iter() {
-            let p = self.prop(e)?;
-            if p != "True" {
-                self.lines.push(format!("assert (pure ({}));", p));
-            }
+            let p = self.assertion(e)?;
+            self.lines.push(format!("assert ({});", p));
         }
         Ok(())
     }
@@ -18946,23 +19012,9 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("label {}:;", label));
                 Ok(())
             }
-            // `_assert` of a hand-written slprop is an ownership assertion,
-            // not a proposition, so it is checked as written rather than
-            // wrapped in `pure`.
-            StmtT::Assert(e)
-                if matches!(&strip_vattr(e).val,
-                    ExprT::InlinePulse(_, t) if matches!(self.tds.resolve(t).val, TypeT::SLProp)) =>
-            {
-                let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
-                    unreachable!()
-                };
-                let t = flatten_fragment(&self.inline_pulse(code)?)?;
-                self.lines.push(format!("assert ({});", t));
-                Ok(())
-            }
             StmtT::Assert(e) => {
-                let p = self.prop(e)?;
-                self.lines.push(format!("assert (pure ({}));", p));
+                let p = self.assertion(e)?;
+                self.lines.push(format!("assert ({});", p));
                 Ok(())
             }
             StmtT::Break | StmtT::Continue if !self.in_loop => {
@@ -19698,14 +19750,11 @@ impl<'a> Body<'a> {
                     // join the paths that reach it. Here there is no join --
                     // each path carries the continuation with it -- so what is
                     // left to do is check it, which is what the author asked
-                    // for. `_live` says the storage exists, and the slots say
-                    // that already.
+                    // for, including the initialized ownership `_live` asks
+                    // for rather than merely the existence of a slot.
                     for e in ensures.iter() {
-                        if live_only(e) {
-                            continue;
-                        }
-                        let p = self.prop(e)?;
-                        self.lines.push(format!("assert (pure ({}));", p));
+                        let p = self.assertion(e)?;
+                        self.lines.push(format!("assert ({});", p));
                     }
                     // Labels inside the one being jumped to are out of scope
                     // at its continuation, and so is the label itself: a
@@ -21585,20 +21634,6 @@ fn same_lvalue(a: &Expr, b: &Expr) -> bool {
     }
 }
 
-/// Whether a C block always leaves the function, so that whatever follows it
-/// is reached only on the other path. Statements after a `return` are
-/// unreachable, so their shape does not matter.
-/// Whether a proposition says nothing but that some storage exists. A label's
-/// `_ensures` is usually exactly that, and the slots carry it already.
-fn live_only(e: &Expr) -> bool {
-    match &strip_vattr(e).val {
-        ExprT::Live(_) => true,
-        ExprT::Cast(inner, _) => live_only(inner),
-        ExprT::BinOp(BinOp::LogAnd, a, b) => live_only(a) && live_only(b),
-        _ => false,
-    }
-}
-
 /// A literal integer, through the casts a C literal arrives wrapped in.
 fn int_lit(e: &Expr) -> Option<u64> {
     match &strip_vattr(e).val {
@@ -21612,6 +21647,8 @@ fn is_zero(e: &Expr) -> bool {
     int_lit(e) == Some(0)
 }
 
+/// Whether a C block always leaves the function. Statements after a `return`
+/// are unreachable, so their shape does not matter.
 fn returns(stmts: &Stmts) -> bool {
     stmts.iter().any(|s| match &s.val {
         // A `goto` leaves this block too: what follows it in the block is
