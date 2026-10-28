@@ -1553,6 +1553,7 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         // state a range condition without first having to prove it.
         TypeT::SpecInt => Some("int".to_string()),
         TypeT::SpecNat => Some("nat".to_string()),
+        TypeT::SLProp => Some("slprop".to_string()),
         TypeT::Pointer(..) | TypeT::FnPtr { .. } => Some("ptr".to_string()),
         TypeT::TypeRef(TypeRefKind::Struct(n)) if tds.structs.contains_key(&*n.val) => {
             Some(format!("struct_{}", n.val))
@@ -2495,6 +2496,7 @@ impl<'a> Spec<'a> {
                 self.prop(inner, w)
             }
             ExprT::Old(inner) => self.prop(inner, When::Old),
+            ExprT::InlinePulse(code, _) => flatten_fragment(&self.inline_pulse(code, w)?),
             // `_live(x)` says the storage exists. A loop invariant restates the
             // whole ownership frame anyway, so by the time this is read the
             // claim has already been made and there is nothing left to say.
@@ -4037,14 +4039,7 @@ fn pure_let(
 /// author has given a piece of ownership a word, and a contract that uses the
 /// word means the ownership.
 fn is_slprop_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
-    match &strip_vattr(e).val {
-        ExprT::InlinePulse(_, t) => matches!(tds.resolve(t).val, TypeT::SLProp),
-        ExprT::FnCall(n, _) => tds.slprop_lets.contains(&*n.val.to_string()),
-        ExprT::Cast(inner, t) if matches!(tds.resolve(t).val, TypeT::SLProp) => {
-            matches!(&strip_vattr(inner).val, ExprT::FnCall(n, _) if tds.slprop_lets.contains(&*n.val.to_string()))
-        }
-        _ => false,
-    }
+    is_own_refine(tds, e)
 }
 
 /// Build the Pulse declaration for one C function, or explain why we cannot.
