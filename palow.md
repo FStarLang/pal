@@ -2301,9 +2301,15 @@ new facts about memory.
    an F\* record literal, and `union foo f = { .x = 67 }` is `Union_foo_x 67l`.
    The earlier emitter refused a *partial* initialiser rather than guess at the
    missing fields, which was the right caution but not necessary: C says the
-   fields you leave out are zeroed, and `zero_value` already builds the zero of
-   any translatable type, recursively through nested structs and arrays. So a
-   partial initialiser is now a full translation rather than a skip.
+   fields you leave out are initialized as static objects, and `zero_initializer`
+   builds their values: scalar zeros, null pointers, recursively initialized
+   records and the first named member of a union. The union's constructor is
+   fixed by C's initialization rule, not guessed from zeroed bytes.
+   `union_struct_arms` checks omitted union fields, a partially supplied
+   array of union-containing records, and local and static values with an
+   implicitly initialized union whose first member is another union.
+   This does not broaden the representations
+   admitted for byte-zeroing with `memset` or `calloc`.
 
    A union initialiser also carries the one piece of information a union write
    has to record. The member it names is the member it makes live, and the
