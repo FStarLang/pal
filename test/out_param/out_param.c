@@ -35,3 +35,19 @@ void init_by_call_addressed(_out int *x, bool b)
     }
     init_value(x);
 }
+
+void init_mixed_addressed(_out int *x, bool b)
+    _ensures(*x == 42)
+{
+    if (b)
+        _ensures(_inline_pulse(
+            exists* (v: Int32.t).
+                int32_t_pts_to $(x) 1.0R v **
+                pure (Int32.v v == 42) **
+                ptr_pts_to $&(x) 1.0R $(x)))
+    {
+        *x = 42;
+    } else {
+        init_value(x);
+    }
+}
