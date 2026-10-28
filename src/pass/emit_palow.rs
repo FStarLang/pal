@@ -87,7 +87,7 @@ fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
 }
 
 /// The largest struct that gets a byte-level view. See `has_bytes`.
-const MAX_BYTE_LEVEL_FIELDS: usize = 16;
+const MAX_BYTE_LEVEL_FIELDS: usize = 32;
 
 /// How a struct field is owned. A scalar or nested struct field is one
 /// points-to; a fixed-size array field is a whole `array_pts_to`, because in C
@@ -6530,14 +6530,9 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         // element does: `array_repr` is that element's representation laid end
         // to end, and it pins the field's length as a scalar's does.
         //
-        // The size limit is about the proof, not the model. `_reveal` has to
-        // recognise each field's slice of the finished object through the
-        // appends stacked above it, which is one lemma call per field per
-        // region -- fine for the handful of fields a struct used as an array
-        // element or a union member has, and hopeless for the 200-field
-        // configuration records that appear in real headers. Those keep the
-        // field-wise view, which is linear and which is all they are ever
-        // used through.
+        // Bound the whole-object proof context for very wide configuration
+        // records. Larger structs retain their field-wise view; the limit is
+        // a proof-generation budget, not a restriction of the memory model.
         let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
             && fields.iter().all(|f| {
                 match &f.shape {
@@ -7865,6 +7860,9 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                         .pts_to_at(&format!("(a +! {}_offsetof_{})", sn, f.name), "p", &val),
                     f.shape.pts_to_at(&at(f.offset), "p", &val)
                 );
+                if let FieldShape::Array { len, .. } = &f.shape {
+                    r += &format!("  assert (pure (Seq.length {} == {}));\n", val, len);
+                }
                 r += &format!("  {}\n", reveal(f, &at(f.offset), &val));
                 r += &format!(
                     "  with {v}. assert (mem_pts_to {at} p {v} ** pure ({repr}));\n",
@@ -7899,25 +7897,64 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
     for reg in regions.iter().skip(1) {
         r += &format!("  mem_join a {}sz;\n", reg.offset());
     }
-    // Every field's slice of the finished object has to be recognised as the
-    // bytes that field was revealed to. Peeling the appends off from the
-    // outside is what does it, one step per region above the field.
+    // Associate the suffixes once, then expose each field with two slice
+    // lemmas. Keep this pure calculation out of the ownership context.
+    let mut slice_proof = String::new();
+    let last = regions.len() - 1;
+    if last > 0 {
+        slice_proof += &format!("  let s{last} = r{last} in\n");
+        for k in (1..last).rev() {
+            slice_proof += &format!("  let s{k} = append r{k} s{} in\n", k + 1);
+        }
+        for k in (1..last).rev() {
+            slice_proof += &format!("  Seq.append_assoc {} r{} s{};\n", accs[k - 1], k, k + 1);
+        }
+    }
+    let mut slices = vec![format!("len {} == {}", accs[regions.len() - 1], si.size)];
     for (j, reg) in regions.iter().enumerate() {
         let Region::Field(f) = reg else { continue };
         let (lo, hi) = (f.offset, f.offset + f.size);
-        for k in (j + 1..regions.len()).rev() {
-            r += &format!(
-                "  slice_append_left_at {} r{} {} {};\n",
-                accs[k - 1],
-                k,
+        slices.push(format!(
+            "slice {} {} {} == r{}",
+            accs[regions.len() - 1],
+            lo,
+            hi,
+            j
+        ));
+        if j < last {
+            slice_proof += &format!(
+                "  slice_append_left_at {} s{} {} {};\n",
+                accs[j],
+                j + 1,
                 lo,
                 hi
             );
         }
         if j > 0 {
-            r += &format!("  append_slice_right {} r{};\n", accs[j - 1], j);
+            slice_proof += &format!("  append_slice_right {} r{};\n", accs[j - 1], j);
         }
     }
+    let slice_args = regions
+        .iter()
+        .enumerate()
+        .map(|(k, reg)| format!("(r{}: (b: bytes {{ len b == {} }}))", k, reg.size()))
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    c += &format!(
+        "let {sn}_bytes_slices\n  {args}\n  : Lemma ({slices})\n  =\n{proof}  ()\n\n",
+        sn = sn,
+        args = slice_args,
+        slices = slices.join(" /\\\n           "),
+        proof = slice_proof
+    );
+    r += &format!(
+        "  {}_bytes_slices {};\n",
+        sn,
+        (0..regions.len())
+            .map(|k| format!("r{}", k))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     r += &format!(
         "  assert (pure ({sn}_repr x {acc}));\n",
         sn = sn,
@@ -7973,8 +8010,9 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
          \x20 requires mem_pts_to a p b\n\
          \x20 requires pure ({sn}_repr x b /\\ aligned a {sn}_alignof)\n{iv}\
          \x20 ensures  {sn}_pts_to a p x\n\
-         {{\n  {sn}_field_aligned a;\n{w}  fold {sn}_padding a p;\n  fold {sn}_pts_to a p x;\n}}\n\n",
+         {{\n  {sn}_repr_len x b;\n  assert (pure (len b == {size}));\n  {sn}_field_aligned a;\n{w}  fold {sn}_padding a p;\n  fold {sn}_pts_to a p x;\n}}\n\n",
         sn = sn,
+        size = si.size,
         iv = struct_inv_req(si, &sn, "x"),
         w = w
     );

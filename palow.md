@@ -2232,14 +2232,18 @@ new facts about memory.
 
    There is a size limit, and it is about the proof rather than the model.
    `_reveal` has to recognise each field's slice of the finished object
-   through the appends stacked above it, which is one lemma call per field per
-   region above it. For the handful of fields a struct used as an array
-   element or a union member actually has, that is nothing. For the
-   two-hundred-field configuration records that appear in real headers --
-   `_profile_descriptor_t` in the DPE test is one -- it is forty thousand, and
-   F\* will not finish. Those keep the field-wise view, which is linear, and
-   which is the only one they are ever used through. The cutoff is sixteen
-   fields.
+   through the appends stacked above it. A separate pure `_bytes_slices`
+   lemma first associates the suffixes, then exposes each field with at most
+   two slice lemmas. This replaces a quadratic number of Pulse steps with a
+   linear number of pure lemma calls, without repeatedly threading the
+   entire ownership context through them. Very wide configuration records
+   still enlarge the whole-object proof context, so those keep just the
+   field-wise view. The cutoff is thirty-two fields.
+   `_reveal` establishes each field's numeric byte length before
+   joining the ranges, so the join queries need not repeatedly recover those
+   lengths through nested representations. `wide_struct_bytes` checks a
+   thirty-two-field record with inter-field and trailing padding as both a
+   union arm and an array element.
 
    Four things fell out of having it. A struct can be an array element, so
    `struct point pts[]` is a contract rather than a skip. A struct can be a
