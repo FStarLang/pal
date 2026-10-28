@@ -2416,15 +2416,11 @@ impl<'a> Spec<'a> {
     /// inlined rather than referred to.
     fn global_const(&self, v: &Ident) -> Option<String> {
         let gv = self.env.lookup_global_var(v)?;
-        if gv.is_enum_constant {
-            let init = gv.init.as_ref()?;
-            return const_expr(self.tds, &gv.ty, init);
+        let value = global_read_value(self.tds, gv)?;
+        if !gv.is_enum_constant {
+            self.uses.borrow_mut().insert(format!("Global_{}", v.val));
         }
-        if !global_has_value(self.tds, gv) {
-            return None;
-        }
-        self.uses.borrow_mut().insert(format!("Global_{}", v.val));
-        Some(format!("var_{}", v.val))
+        Some(value)
     }
 
     /// An array global this file published as a sequence constant. Nothing
@@ -9567,6 +9563,14 @@ fn global_has_value(tds: &Typedefs, gv: &GlobalVar) -> bool {
         && fstar_type(tds, &gv.ty).is_some()
 }
 
+fn global_read_value(tds: &Typedefs, gv: &GlobalVar) -> Option<String> {
+    if gv.is_enum_constant {
+        const_expr(tds, &gv.ty, gv.init.as_ref()?)
+    } else {
+        global_has_value(tds, gv).then(|| format!("var_{}", gv.name.val))
+    }
+}
+
 /// The value of an immutable global, as an F* type and a term, when this file
 /// can name it.
 ///
@@ -12364,16 +12368,14 @@ impl<'a> Body<'a> {
         const_array(self.tds, &gv.ty, init).map(|(_, n, _)| n)
     }
 
-    fn global_value(&self, v: &Ident) -> bool {
-        let Some(gv) = self.env.lookup_global_var(v) else {
-            return false;
-        };
+    fn global_value(&self, v: &Ident) -> Option<String> {
+        let gv = self.env.lookup_global_var(v)?;
         // An `extern const` has a value this file cannot write down, but it
         // still has *a* value, published abstractly by the global's own
         // module. Reading it needs no ownership for the same reason reading a
         // known constant does not: nothing in the program can write it, so
         // there is no moment at which the read happens.
-        global_has_value(self.tds, gv)
+        global_read_value(self.tds, gv)
     }
 
     /// The place an aliased pointer stands for, when `e` dereferences one.
@@ -15676,11 +15678,11 @@ impl<'a> Body<'a> {
                     Ok(t)
                 } else if self.env.lookup_var(v).is_some() {
                     Ok(format!("var_{}", v.val))
-                } else if self.global_value(v) {
+                } else if let Some(value) = self.global_value(v) {
                     // An immutable global is a constant, and reading it needs
                     // no ownership at all -- which is the whole point of
                     // publishing it as one.
-                    Ok(format!("var_{}", v.val))
+                    Ok(value)
                 } else if self.env.lookup_global_var(v).is_some() {
                     Err(format!(
                         "a read of `{}`, a global whose value is not fixed here",
