@@ -20107,7 +20107,7 @@ impl<'a> Body<'a> {
                     then_branch,
                     else_branch,
                     ..
-                } if returns(then_branch) || returns(else_branch) => {
+                } if may_exit(then_branch) || may_exit(else_branch) => {
                     self.active.clear();
                     // A test of a freshly allocated pointer is the one
                     // condition that is not just a value: it decides which arm
@@ -22168,6 +22168,20 @@ fn int_lit(e: &Expr) -> Option<u64> {
 
 fn is_zero(e: &Expr) -> bool {
     int_lit(e) == Some(0)
+}
+
+/// A nested exit needs continuation lowering even when its sibling falls through.
+fn may_exit(stmts: &Stmts) -> bool {
+    stmts.iter().any(|s| match &s.val {
+        StmtT::Return(_) | StmtT::Goto(_) => true,
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        } => may_exit(then_branch) || may_exit(else_branch),
+        StmtT::GotoBlock { body, .. } => may_exit(body),
+        _ => false,
+    })
 }
 
 /// Whether a C block always leaves the function. Statements after a `return`

@@ -25,6 +25,31 @@ out: _ensures(_live(err) && _live(x))
     return err;
 }
 
+int32_t nested_goto(int32_t x)
+    _ensures(return == (x < 0 ? 7 : 9))
+{
+    int32_t result = 7;
+    if (x > 0)
+        result = 8;
+    else if (x < 0)
+        goto out;
+    result = 9;
+out: _ensures(_live(result))
+    return result;
+}
+
+int32_t nested_return(int32_t x)
+    _ensures(return == (x < 0 ? 7 : 9))
+{
+    int32_t result = 7;
+    if (x > 0)
+        result = 8;
+    else if (x < 0)
+        return result;
+    result = 9;
+    return result;
+}
+
 /* Two labels: the usual C cleanup ladder. `out_free` runs the cleanup and then
    falls through into `out`. */
 int32_t two_labels(int32_t x)

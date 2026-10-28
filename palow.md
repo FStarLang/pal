@@ -2779,6 +2779,13 @@ new facts about memory.
    a jump appended and the two cases become one. The `if` fold that carries
    early returns needed only to be told that a `goto` also leaves a block.
 
+   A nested conditional may leave on only one of its paths. It still needs
+   continuation lowering at the enclosing `if`: looking only for an arm that
+   always leaves misses the nested jump. The emitter distinguishes "may
+   leave" from "always leaves", attaching the continuation to every arm
+   that can fall through. `test/multiple_goto` checks both nested jumps and
+   nested returns, including the value left by the fall-through path.
+
    The continuation is duplicated once per path that reaches the label, which
    is the price of not having a jump; the C this pattern comes from --
    `goto fail` and the unwinding ladder of `out_unlock: ... out_free: ... out:`
