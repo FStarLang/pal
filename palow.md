@@ -2418,7 +2418,11 @@ new facts about memory.
    builds their values: scalar zeros, null pointers, recursively initialized
    records and the first named member of a union. The union's constructor is
    fixed by C's initialization rule, not guessed from zeroed bytes.
-   `union_struct_arms` checks omitted union fields, a partially supplied
+   An omitted fixed-size array field now becomes a flat
+   `Seq.create` of the element's zero value, including multidimensional arrays
+   in C's row-major order. Explicit scalar fields keep their given values.
+   `palow_array_init` checks zero and partial record initialisers and a matrix
+   field. `union_struct_arms` checks omitted union fields, a partially supplied
    array of union-containing records, and local and static values with an
    implicitly initialized union whose first member is another union.
    This does not broaden the representations
