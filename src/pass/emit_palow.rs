@@ -6841,6 +6841,26 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
             mty = mty,
             msz = m.size
         );
+        if let FieldShape::One { pn } = &m.shape
+            && readable_field(tds, &m.ty)
+        {
+            c += &format!(
+                "fn {un}_{f}_read (a: ptr) (#p: perm) (#u: erased {un})\n\
+                 \x20 preserves {un}_pts_to a p u\n\
+                 \x20 requires pure ({k}? (reveal u))\n\
+                 \x20 returns r: {un}\n\
+                 \x20 ensures pure (r == reveal u)\n\
+                 \x20 ensures rewrites_to r (reveal u)\n\
+                 {{\n  \
+                 rewrite ({un}_pts_to a p u)\n    \
+                 as ({un}_pts_to a p ({k} ({k}?.v (reveal u))));\n  \
+                 {un}_focus_{f} a;\n  \
+                 let v = {pn}_read a;\n  \
+                 {un}_unfocus_{f} a;\n  \
+                 rewrite ({un}_pts_to a p ({k} v)) as ({un}_pts_to a p u);\n  \
+                 {k} v\n}}\n\n"
+            );
+        }
         // Making a member active is not a focus: the union may currently hold
         // any member at all, so there is no value to hand out, only storage.
         // It needs full permission for the same reason a write does.
@@ -12826,6 +12846,41 @@ impl<'a> Body<'a> {
             .map(|_| format!("union_{}", uname.val))
     }
 
+    /// Copy a union through one statically selected member, never by reading
+    /// its erased tag. The reader requires proof that this member is live.
+    /// If neither a write nor a contract names it, try the first member and
+    /// leave that same obligation to F*, including for spliced contracts.
+    fn read_union_value(&mut self, e: &Expr, a: &str, hint: &str) -> Result<String, String> {
+        let un = self
+            .union_of(e)
+            .ok_or_else(|| "a whole-value read of a union with no Palow type".to_string())?;
+        let uname = un.strip_prefix("union_").unwrap();
+        let ui = &self.tds.unions[uname];
+        let named = self.unalias_place(e);
+        let arm = self.active.get(a).or_else(|| {
+            self.live_arms
+                .iter()
+                .find(|(obj, _)| same_lvalue(obj, &named))
+                .map(|(_, m)| m)
+        });
+        let member = match arm {
+            Some(arm) => ui.members.iter().find(|m| m.name == *arm),
+            None => ui.members.first(),
+        }
+        .ok_or_else(|| format!("a whole-value read of {un} with no selected member"))?;
+        if !matches!(member.shape, FieldShape::One { .. }) || !readable_field(self.tds, &member.ty)
+        {
+            return Err(format!(
+                "a whole-value read of {un} through member `{}`, which has no reader",
+                member.name
+            ));
+        }
+        let reader = format!("{}_{}_read", un, member.name);
+        let t = self.fresh(hint);
+        self.lines.push(format!("let {} = {} {};", t, reader, a));
+        Ok(t)
+    }
+
     /// A member access on a union. Unlike a struct field this is not a focus
     /// into a disjoint part of the object: every member starts at the same
     /// address and covers the same bytes, so reading one means claiming the
@@ -15154,6 +15209,10 @@ impl<'a> Body<'a> {
                         return Err(format!("`{}` is read before it is written", v.val));
                     }
                     let ty = self.ty_of(e)?;
+                    let a = s.addr.clone();
+                    if self.union_of(e).is_some() {
+                        return self.read_union_value(e, &a, &v.val);
+                    }
                     if !readable_field(self.tds, &ty) {
                         return Err(format!(
                             "a whole-value read of `{}`, which is {}",
@@ -15163,7 +15222,6 @@ impl<'a> Body<'a> {
                     }
                     let pn = palow_name(self.tds, &ty)
                         .ok_or_else(|| format!("`{}` has an unsupported type", v.val))?;
-                    let a = s.addr.clone();
                     let t = self.fresh(&v.val);
                     self.lines.push(format!("let {} = {}_read {};", t, pn, a));
                     Ok(t)
@@ -15201,6 +15259,10 @@ impl<'a> Body<'a> {
                     }
                 }
                 let ty = self.ty_of(e)?;
+                if self.union_of(e).is_some() {
+                    let a = self.addr(e)?;
+                    return self.read_union_value(e, &a, "deref");
+                }
                 if !readable_field(self.tds, &ty) {
                     return Err(format!(
                         "a whole-value read of {}",
@@ -15326,9 +15388,14 @@ impl<'a> Body<'a> {
                 };
                 let f = self.access(e, false)?;
                 self.lines.extend(f.open_read.iter().cloned());
-                let t = self.fresh(&hint);
-                self.lines
-                    .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
+                let t = if self.union_of(e).is_some() {
+                    self.read_union_value(e, &f.at, &hint)?
+                } else {
+                    let t = self.fresh(&hint);
+                    self.lines
+                        .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
+                    t
+                };
                 self.lines.extend(f.close_read);
                 // A bit-field has no storage of its own, so the read reads
                 // the unit and the bits come out of the value. This is also
