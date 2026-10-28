@@ -30,6 +30,18 @@ union event {
   struct alarm al;
 };
 
+_include_pulse(RecordTags,
+  let is_reading (r: Union_record.union_record) : prop =
+    Union_record.Union_record_rd? r
+)
+
+int32_t reading_value_from_pure_contract(const union record *r)
+  _requires((_Bool)_inline_pulse(RecordTags.is_reading $(*r)))
+  _ensures(return == r->rd.value)
+{
+  return r->rd.value;
+}
+
 /* Reading a field of the live arm, including an element of an array field. */
 int32_t reading_value(union record *r)
   _requires(r->rd._active)
