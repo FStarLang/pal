@@ -1,4 +1,5 @@
 #include "pal.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 struct trailer {
@@ -139,6 +140,7 @@ int read_aliased_child(_plain const struct envelope *p)
   _ensures(return == saved.core.trailer.counter)
 {
   const struct packet *core = &p->core;
+  _assert(_live(core));
   _ghost_stmt(unfold (Struct_packet.struct_packet_hole_buffer
     ($(p) +! Struct_envelope.struct_envelope_offsetof_core)
     0.5R $(saved.core)));
@@ -153,4 +155,38 @@ int read_whole(const struct envelope *p)
   _ensures(return == p->core.header)
 {
   return p->core.header;
+}
+
+int read_live_alias(const struct envelope *p)
+  _ensures(return == p->core.header)
+{
+  const struct packet *core = &p->core;
+  _assert(_live(core));
+  return core->header;
+}
+
+int read_spliced_alias(const struct envelope *p)
+  _ensures(return == p->core.header)
+{
+  const struct packet *core = &p->core;
+  _ghost_stmt(
+    with address. assert ptr_pts_to $&(core) 1.0R address;
+    assert pure (address == $(core)));
+  return core->header;
+}
+
+void write_alias_after_join(struct envelope *p, bool choose)
+  _ensures(p->core.header == 3)
+{
+  struct packet *core = &p->core;
+  if (choose)
+    _ensures(_live(core) && _live(*p))
+  {
+    core->header = 1;
+  }
+  else
+  {
+    core->header = 2;
+  }
+  core->header = 3;
 }
