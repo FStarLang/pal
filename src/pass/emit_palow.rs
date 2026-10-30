@@ -13095,6 +13095,12 @@ impl<'a> Body<'a> {
             return false;
         }
         let base = strip_vattr(base);
+        if let ExprT::Member(parent, _) = &base.val {
+            return self.in_pieces(parent)
+                && self
+                    .struct_of(base)
+                    .is_ok_and(|(sn, _)| self.piece_types.contains(&sn));
+        }
         let v = match &base.val {
             ExprT::Deref(inner) => lvalue_name(strip_vattr(inner)),
             _ => lvalue_name(base),
@@ -14314,6 +14320,9 @@ impl<'a> Body<'a> {
                 &peel(self.tds, &fty).val,
                 TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
             ) {
+                if self.in_pieces(b2) {
+                    return Ok((self.addr_only(base)?, Vec::new(), Vec::new()));
+                }
                 let inner = self.focus_field(b2, f2, writing)?;
                 let mut close_read =
                     vec![format!("{}_unfocus_read_{} {};", inner.sn, f2.val, inner.a)];
@@ -21676,22 +21685,24 @@ fn is_literal(e: &Expr) -> bool {
 /// is the right shape for one a caller hands over and gets back; it is the
 /// wrong shape for one that owns storage it hands out, since after the first
 /// hand-out no single term describes what is left. So a contract that names a
-/// field's offset -- which is to say, names a field's storage separately --
-/// and never names the struct's own points-to is one that owns it in pieces,
+/// field's offset or a generated field-hole predicate, and never names the
+/// struct's own points-to, is one that owns it in pieces,
 /// and the fields have to be reached at their own addresses because there is
 /// no whole to open. The contract says which it is by what it mentions; there
 /// is nothing extra for an author to write.
 fn pieces_named(contract: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let b = contract.as_bytes();
-    for (i, _) in contract.match_indices("_offsetof_") {
-        let mut j = i;
-        while j > 0 && (b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_') {
-            j -= 1;
-        }
-        let sn = &contract[j..i];
-        if sn.starts_with("struct_") && !contract.contains(&format!("{}_pts_to", sn)) {
-            out.insert(sn.to_string());
+    for marker in ["_offsetof_", "_hole_"] {
+        for (i, _) in contract.match_indices(marker) {
+            let mut j = i;
+            while j > 0 && (b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_') {
+                j -= 1;
+            }
+            let sn = &contract[j..i];
+            if sn.starts_with("struct_") && !contract.contains(&format!("{}_pts_to", sn)) {
+                out.insert(sn.to_string());
+            }
         }
     }
     out
