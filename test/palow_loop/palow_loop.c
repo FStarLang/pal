@@ -55,3 +55,68 @@ void zero_all(uint32_t a[], size_t n)
     i = i + 1;
   }
 }
+
+uint32_t iteration_scratch(uint32_t n)
+  _ensures(return == n)
+{
+  uint32_t i = 0;
+  uint32_t temporary;
+  while (i < n)
+    _invariant(i <= n)
+  {
+    temporary = i;
+    i = temporary + 1;
+  }
+  return i;
+}
+
+union scratch_word {
+  uint32_t value;
+  uint32_t bits;
+};
+
+uint32_t scratch_jumps(uint32_t n, uint32_t stop, uint32_t skip)
+  _ensures(return <= n)
+{
+  uint32_t i = 0;
+  union scratch_word temporary;
+  while (i < n)
+    _invariant(i <= n)
+    _ensures(i <= n)
+  {
+    temporary.value = i;
+    if (i == stop) {
+      break;
+    }
+    if (i == skip) {
+      i = i + 1;
+      continue;
+    }
+    _assert(temporary.value == i);
+    i = temporary.value + 1;
+  }
+  temporary.value = i;
+  return temporary.value;
+}
+
+uint32_t nested_scratch(uint32_t n)
+  _ensures(return == n)
+{
+  uint32_t i = 0;
+  uint32_t temporary;
+  while (i < n)
+    _invariant(i <= n)
+  {
+    uint32_t j = 0;
+    while (j < 1)
+      _invariant(j <= 1)
+      _invariant(i < n)
+    {
+      temporary = i;
+      _assert(temporary == i);
+      j = j + 1;
+    }
+    i = i + 1;
+  }
+  return i;
+}
