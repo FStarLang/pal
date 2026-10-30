@@ -68,3 +68,31 @@ void set_x_via_ptr(_array struct point *p, int val)
 {
   p->x = val;
 }
+
+void rebind_array_local(_array struct point *a, _array struct point *b)
+  _requires(a._length > 0 && b._length > 0)
+  _preserves_value(a._length)
+  _preserves_value(b._length)
+  _ensures(a[0].x == 10 && b[0].x == 20)
+{
+  _array struct point *p = NULL;
+  p = a;
+  p[0].x = 10;
+  p = b;
+  p[0].x = 20;
+}
+
+union point_array {
+  _array struct point *points;
+  uintptr_t bits;
+};
+
+void read_union_array(_array struct point *a)
+  _requires(a._length > 0)
+  _preserves_value(a._length)
+  _ensures(a[0].x == 42)
+{
+  union point_array u;
+  u.points = a;
+  u.points[0].x = 42;
+}

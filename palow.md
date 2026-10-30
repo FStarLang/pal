@@ -5293,6 +5293,16 @@ new facts about memory.
    never appears in them, so the emitter never has to name `Seq.index xs i`.
    `*p` on an array parameter goes down the same path, since it is `p[0]`.
 
+   A local array pointer and an active union member containing one use the
+   same element operations at the pointer's current value. Reading the
+   pointer grants no ownership: the context must still supply the array
+   predicate and the index bound. In particular, reassigning a local must not
+   keep indexing its earlier target. `test/array_update` checks rebinding
+   between two owned arrays and access through a union's active pointer arm;
+   `test/local_array_unowned` rejects access through a non-NULL pointer with
+   no owned array. This does not read an inactive union arm or add overlay
+   support.
+
    Two obligations are not the emitter's to discharge. `i < Seq.length xs` can
    only come from the function's own `_requires`, so a subscript in a function
    whose contract did not translate is refused (7) rather than emitted to fail.

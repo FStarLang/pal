@@ -14382,6 +14382,10 @@ impl<'a> Body<'a> {
                 // not, because the caller has already initialised them.
                 if let Some(s) = self.slots.iter().rev().find(|s| s.name == v) {
                     let Some(esize) = s.array.clone() else {
+                        let ty = self.ty_of(e)?;
+                        if extent(self.tds, &ty) == Some(Extent::Array) {
+                            return self.pointer_array_place(e);
+                        }
                         return Err(format!("a subscript of local `{}`", v));
                     };
                     return Ok(ArrayPlace {
@@ -14453,6 +14457,9 @@ impl<'a> Body<'a> {
                 }
                 let fty = self.field_ty(b2, f)?;
                 let Some(FieldShape::Array { pn, esize, .. }) = field_shape(self.tds, &fty) else {
+                    if extent(self.tds, &fty) == Some(Extent::Array) {
+                        return self.pointer_array_place(e);
+                    }
                     return Err(format!(
                         "a subscript of a union member of type {}",
                         describe(self.tds.resolve(&fty))
@@ -14591,6 +14598,31 @@ impl<'a> Body<'a> {
             }
             other => Err(format!("a subscript of {}", expr_kind_of(other))),
         }
+    }
+
+    /// Reading an array pointer supplies only its address. The element access
+    /// must still prove array ownership and bounds at that current address.
+    fn pointer_array_place(&mut self, e: &Expr) -> Result<ArrayPlace, String> {
+        if !self.requires_ok {
+            return Err("a subscript whose `_requires` is not translated".to_string());
+        }
+        let ty = self.ty_of(e)?;
+        let TypeT::Pointer(elem, _) = &peel(self.tds, &ty).val else {
+            return Err("a subscript of a non-pointer value".to_string());
+        };
+        let pn =
+            palow_name(self.tds, elem).ok_or_else(|| format!("an array of {}", describe(elem)))?;
+        let esize = palow_sizeof(self.tds, elem)
+            .ok_or_else(|| format!("the size of an array element of {}", describe(elem)))?;
+        Ok(ArrayPlace {
+            addr: self.rvalue(e)?,
+            pn,
+            esize: format!("{}sz", esize),
+            base: 0,
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+            maybe: false,
+        })
     }
 
     /// Open one element of an array for a single access.
