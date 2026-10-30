@@ -2,3 +2,7 @@
 /target
 /.vscode
 /.ccls-cache
+/.claude
+/.trail
+/AGENTS.md
+/opencode.json
