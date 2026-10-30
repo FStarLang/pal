@@ -13094,6 +13094,9 @@ impl<'a> Body<'a> {
         if self.pieces.is_empty() {
             return false;
         }
+        if let Some(place) = self.unalias(base) {
+            return self.in_pieces(&place);
+        }
         let base = strip_vattr(base);
         if let ExprT::Member(parent, _) = &base.val {
             return self.in_pieces(parent)
