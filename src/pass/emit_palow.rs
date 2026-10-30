@@ -2373,6 +2373,8 @@ struct OwnedParam {
     vty: String,
     /// `array_pts_to uint32_t_repr 4 var_a 1.0R ` -- append a value to it.
     pre: String,
+    /// The storage view of a single-object `_out`, before its first write.
+    uninit: Option<String>,
     /// What the value was on entry to the *function*. A loop invariant needs
     /// it because `_old` inside one means the same thing it means in an
     /// `_ensures` -- the state the call started in -- and that is a different
@@ -4656,6 +4658,7 @@ fn emit_fn(
                             base: base.clone(),
                             vty: vty.clone(),
                             pre: format!("{}_pts_to {} 1.0R ", pn, pname),
+                            uninit: Some(format!("{}_pts_to_uninit {}", pn, pname)),
                             entry: String::new(),
                         });
                     }
@@ -4721,6 +4724,7 @@ fn emit_fn(
                         base: base.clone(),
                         vty: vty.clone(),
                         pre: pts_to("1.0R", ""),
+                        uninit: Some(format!("{}_pts_to_uninit {}", pn, pname)),
                         entry: String::new(),
                     });
                 }
@@ -4771,6 +4775,7 @@ fn emit_fn(
                     base: base.clone(),
                     vty: vty.clone(),
                     pre: pts_to(&perm, ""),
+                    uninit: None,
                     entry: format!("(reveal {})", vname),
                 });
                 if let Some((sn, osty)) = &own_info {
@@ -4794,6 +4799,7 @@ fn emit_fn(
                     base: base.clone(),
                     vty: vty.clone(),
                     pre: pts_to("1.0R", ""),
+                    uninit: None,
                     entry: format!("(reveal {})", vname),
                 });
                 if let Some((sn, osty)) = &own_info {
@@ -4818,6 +4824,7 @@ fn emit_fn(
                     base: base.clone(),
                     vty: vty.clone(),
                     pre: pts_to("1.0R", ""),
+                    uninit: None,
                     entry: format!("(reveal {})", vname),
                 });
                 fresh.push((
@@ -19097,6 +19104,18 @@ impl<'a> Body<'a> {
                 continue;
             }
             if self.out_params.contains(&o.base) {
+                if body.is_none()
+                    && !mentioned.vars.contains(&o.base)
+                    && !mentioned.written.contains(&o.base)
+                    && let Some(storage) = &o.uninit
+                {
+                    if self.guarded.contains(&o.base) && !self.unguarded.contains(&o.base) {
+                        owns.push(format!("unless_null var_{} ({})", o.base, storage));
+                    } else {
+                        owns.push(storage.clone());
+                    }
+                    continue;
+                }
                 return Err(format!("{} with `*{}` not yet written", what, o.base));
             }
             let b = format!("inv_val_{}", o.base);
