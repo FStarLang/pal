@@ -1,0 +1,3 @@
+Error 228 at out/Func_read_unowned_parent.fst
+Cannot prove:
+struct_owner_pts_to val_p.fld_parent

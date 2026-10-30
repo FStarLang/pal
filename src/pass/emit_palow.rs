@@ -1140,6 +1140,9 @@ fn field_value(tds: &Typedefs, bty: &Type, x: &str, f: &str) -> String {
 /// mentions them is skipped, as before.
 struct StructInfo {
     fields: Vec<StructField>,
+    /// The ownership actually emitted for this declaration. Later definitions
+    /// must not retroactively add pointees across a recursive pointer edge.
+    own: Vec<OwnItem>,
     /// The bit-fields, by name. They are not in `fields`: a bit-field has no
     /// storage of its own, so what the struct's value records is the unit,
     /// and the bit-field is a function of it.
@@ -2798,9 +2801,7 @@ impl<'a> Spec<'a> {
                 && let Ok(ty) = self.ty_of(parent)
                 && let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val
                 && let Some(si) = self.tds.structs.get(&*n.val)
-                && own_items(self.tds, si, &n.val)
-                    .iter()
-                    .any(|i| i.name == *field.val && i.embedded)
+                && si.own.iter().any(|i| i.name == *field.val && i.embedded)
             {
                 let owner = self.own_field(parent, &field.val, w)?;
                 return Ok(format!("(({}).own_{})", owner, f));
@@ -4254,7 +4255,7 @@ fn emit_fn(
         };
         tds.structs
             .get(&*n.val.to_string())
-            .filter(|si| !own_items(tds, si, &n.val).is_empty())
+            .filter(|si| !si.own.is_empty())
             .map(|_| {
                 (
                     format!("struct_{}", n.val),
@@ -6744,6 +6745,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             name.clone(),
             StructInfo {
                 fields,
+                own: Vec::new(),
                 bitfields,
                 size,
                 align,
@@ -6752,6 +6754,8 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 inv,
             },
         );
+        let own = collect_own_items(tds, &tds.structs[&name], &name);
+        tds.structs.get_mut(&name).unwrap().own = own;
         code.push(Chunk {
             module: format!("Struct_{}", name),
             code: emit_struct(tds, &name),
@@ -7393,7 +7397,7 @@ fn own_chain(tds: &Typedefs, at: String, name: String, ty: &Type, out: &mut Vec<
 }
 
 /// Everything a struct's `_own` predicate covers, in field order.
-fn own_items(tds: &Typedefs, si: &StructInfo, self_name: &str) -> Vec<OwnItem> {
+fn collect_own_items(tds: &Typedefs, si: &StructInfo, self_name: &str) -> Vec<OwnItem> {
     let mut out = Vec::new();
     if tds.plain_structs.contains(self_name) {
         return out;
@@ -7433,7 +7437,7 @@ fn own_items(tds: &Typedefs, si: &StructInfo, self_name: &str) -> Vec<OwnItem> {
         }
         if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &ty.val
             && let Some(nested) = tds.structs.get(&*n.val)
-            && !own_items(tds, nested, &n.val).is_empty()
+            && !nested.own.is_empty()
         {
             let pn = format!("struct_{}", n.val);
             out.push(OwnItem {
@@ -7489,7 +7493,7 @@ fn own_items(tds: &Typedefs, si: &StructInfo, self_name: &str) -> Vec<OwnItem> {
 fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
     let si = &tds.structs[name];
     let sn = format!("struct_{}", name);
-    let items = own_items(tds, si, name);
+    let items = &si.own;
     if items.is_empty() {
         return String::new();
     }
@@ -7535,7 +7539,7 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
     let arg = |i: &OwnItem| format!("own_{}", i.name);
     let at_args = |i: &OwnItem| -> String {
         let mut a = i.at.clone();
-        for j in &items {
+        for j in items {
             a = a.replace(&format!("((s).own_{})", j.name), &arg(j));
         }
         a
@@ -12522,7 +12526,7 @@ impl<'a> Body<'a> {
         self.tds
             .structs
             .get(sn)
-            .map(|si| own_items(self.tds, si, sn))
+            .map(|si| si.own.clone())
             .unwrap_or_default()
     }
 
@@ -16427,7 +16431,7 @@ impl<'a> Body<'a> {
                             .tds
                             .structs
                             .get(&*n.val.to_string())
-                            .is_some_and(|si| !own_items(self.tds, si, &n.val).is_empty()),
+                            .is_some_and(|si| !si.own.is_empty()),
                         _ => false,
                     };
                     let nwit = match &peel(self.tds, &fty).val {

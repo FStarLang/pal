@@ -3967,6 +3967,20 @@ new facts about memory.
    has nothing left to add. `core_ref_chain` is now two plain functions under
    `#ifdef PALOW`, with the marked-up version kept only for the older model.
 
+   A pointer cycle does not license reordering a by-value member after the
+   aggregate that contains it. Merging a forward declaration with its later
+   definition can create exactly that order; when the full dependency graph
+   has a cycle, ordering now respects the by-value dependencies before breaking
+   pointer edges, and breaks a cycle at one of its own nodes, not at an
+   unrelated pointer owner waiting for it. The ownership shape of each emitted struct is also recorded,
+   rather than recomputed when more types become visible: a recursive
+   back-pointer must not retroactively introduce an `_own_spec` that was never
+   generated. This keeps the existing boundary at recursive pointers; it does
+   not grant ownership of their pointees. `forward_struct` checks reads and
+   writes through embedded structs and a union under such a cycle, and
+   preserves an outside observer's ownership of the containing object;
+   `aggregate_backref_unowned` rejects dereferencing the unowned back-pointer.
+
    The other half is about not over-claiming. A contract that splices ownership
    in, in the author's own Pulse, may have granted anything at all: the emitter
    does not read those words and so cannot say what is *not* owned. It used to
