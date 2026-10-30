@@ -3190,6 +3190,9 @@ new facts about memory.
    it in so many words. It is now emitted as `assume (pure False); unreachable
    ()` -- the same shape the existing emitter uses -- behind an `(* external:
    the contract is assumed *)` marker, and counted in a column of its own.
+   Stateful external declarations are `divergent` unless explicitly `_total`:
+   an absent implementation supplies no termination argument. This effect
+   propagates to callers and is identical in the generated `.fst` and `.fsti`.
 
    `_refine_value` is translated. It is the annotation that says a pointer's
    invariant is not about the pointer but about some abstract value the

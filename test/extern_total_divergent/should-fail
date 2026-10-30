@@ -1,0 +1,3 @@
+Func_reject_divergent_model.fst
+Error 54
+is not a subtype of the expected type fn
