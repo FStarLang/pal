@@ -18968,6 +18968,10 @@ impl<'a> Body<'a> {
         let mark = self.slots.len();
         let r = (|| -> Result<(), String> {
             for s in body.iter() {
+                if matches!(s.val, StmtT::Goto(_)) {
+                    self.rest(std::slice::from_ref(s))?;
+                    break;
+                }
                 self.env.push_stmt(s);
                 self.stmt(s)?;
             }
@@ -20082,7 +20086,8 @@ impl<'a> Body<'a> {
                 // what makes `if (!p) abort();` a null check rather than a
                 // fork: the surviving path is the one where `p` is not null,
                 // and it keeps the block.
-                let surviving = match (then.diverged, els.diverged) {
+                let surviving = match (then.diverged || then.returned, els.diverged || els.returned)
+                {
                     (true, false) => Some(&els_blocks),
                     (false, true) => Some(&then_blocks),
                     _ => None,
@@ -20135,7 +20140,11 @@ impl<'a> Body<'a> {
                         written.inits[i] = false;
                     }
                 }
-                let live_res = if then.diverged { &els } else { &then };
+                let live_res = if then.diverged || then.returned {
+                    &els
+                } else {
+                    &then
+                };
                 if surviving.is_none()
                     && (then.inits != els.inits
                         || then.scattered != els.scattered
@@ -20302,6 +20311,13 @@ impl<'a> Body<'a> {
                         r?;
                     }
                     self.release_from(0);
+                    if self.in_loop {
+                        self.lines.push(match v {
+                            Some(v) => format!("return {};", v),
+                            None => "return ();".to_string(),
+                        });
+                        return Ok(false);
+                    }
                     let has = v.is_some();
                     if let Some(v) = v {
                         self.lines.push(v);
@@ -20498,6 +20514,9 @@ impl<'a> Body<'a> {
             }
         }
         self.release_from(0);
+        if self.in_loop {
+            self.lines.push("return ();".to_string());
+        }
         Ok(false)
     }
 
@@ -20576,6 +20595,10 @@ impl<'a> Body<'a> {
 
         let result = (|| -> Result<bool, String> {
             for s in stmts.iter() {
+                if self.in_loop && matches!(s.val, StmtT::Goto(_)) {
+                    self.rest(std::slice::from_ref(s))?;
+                    return Ok(true);
+                }
                 if let StmtT::Return(e) = &s.val {
                     // A Pulse block is an expression: leaving early means
                     // being the tail of what encloses you, which `rest`

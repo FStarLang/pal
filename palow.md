@@ -2847,6 +2847,14 @@ new facts about memory.
    nothing to do here beyond being checked, and `_live` clauses have not even
    that, since the slots carry the storage already.
 
+   A forward jump from a loop uses the same continuation, ending it with
+   Pulse's explicit `return` rather than a tail value: executing the cleanup
+   must leave the function, not resume the loop. The other arm of a
+   conditional keeps its own storage state when the jumping arm returns.
+   `test/multiple_goto` covers conditional and direct loop exits, a result
+   initialized only on the jumping path, and void cleanup that writes an
+   output before returning.
+
    An explicit ownership join can also carry a scalar or whole aggregate local
    that has not been written yet. Its frame uses `_pts_to_uninit`, not a
    made-up value, provided the clause does not read that local. Arrays,
