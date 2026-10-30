@@ -32,3 +32,41 @@ void caller(_out _array int *a, bool b)
     int *p = &a[0];
     maybe_write(p, b);
 }
+
+bool native_outputs(_plain void **p, _plain bool *flag, void *value, bool write)
+  _requires(_inline_pulse(Pulse.Lib.C.Palow.Scalar.ptr_pts_to_uninit $(p)))
+  _requires(_inline_pulse(Pulse.Lib.C.Palow.CTypes.bool_t_pts_to_uninit $(flag)))
+  _ensures(_inline_pulse(
+    if $(return) then
+      ptr_pts_to $(p) 1.0R $(value) ** bool_t_pts_to $(flag) 1.0R $(write)
+    else ptr_pts_to_uninit $(p) ** bool_t_pts_to_uninit $(flag)))
+{
+    if (!write) {
+        return false;
+    }
+    *p = NULL;
+    *p = value;
+    *flag = true;
+    return true;
+}
+
+void native_scalar(_plain uint32_t *p, uint32_t value)
+  _requires(_inline_pulse(uint32_t_pts_to_uninit $(p)))
+  _ensures(_inline_pulse(uint32_t_pts_to $(p) 1.0R $(value)))
+{
+    *p = value;
+}
+
+struct native_pair {
+    uint32_t first;
+    uint32_t second;
+};
+
+void native_fields(_plain struct native_pair *p, uint32_t value)
+  _requires(_inline_pulse(Struct_native_pair.struct_native_pair_pts_to_uninit $(p)))
+  _ensures(_inline_pulse(Struct_native_pair.struct_native_pair_pts_to $(p) 1.0R
+    { Struct_native_pair.fld_first = 1ul; Struct_native_pair.fld_second = $(value) }))
+{
+    p->first = 1;
+    p->second = value;
+}
