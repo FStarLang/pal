@@ -147,11 +147,13 @@ fn ptr_stack_free (a: ptr)
 (* Automatic storage for an aggregate, which has no single scalar type to hang
    an allocation off. This is the raw byte range; the generated per-struct
    `_stack_alloc` carves it into the fields' write-only views, which is a proof
-   from `mem_split` rather than another axiom. *)
-fn mem_stack_alloc (n: SZ.t)
+   from `mem_split` rather than another axiom. The alignment is that of the
+   declared automatic object, including supported extended alignments; unlike
+   malloc, automatic storage is not limited to max_align_t. *)
+fn mem_stack_alloc (n: SZ.t) (al: SZ.t { SZ.v al > 0 /\ pow2 64 % SZ.v al == 0 })
   returns  a : ptr
   ensures  exists* b. mem_pts_to a 1.0R b
-                      ** pure (len b == SZ.v n /\ aligned a max_align)
+                      ** pure (len b == SZ.v n /\ aligned a al)
 
 fn mem_stack_free (a: ptr) (#b: erased bytes)
   requires mem_pts_to a 1.0R b

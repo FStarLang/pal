@@ -7225,8 +7225,7 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          \x20 requires emp\n\
          \x20 returns  a: ptr\n\
          \x20 ensures  {un}_pts_to_uninit a\n\
-         {{\n  let a = mem_stack_alloc {un}_sizeof;\n  \
-         aligned_divides a max_align {un}_alignof;\n  \
+         {{\n  let a = mem_stack_alloc {un}_sizeof {un}_alignof;\n  \
          fold {un}_pts_to_uninit a;\n  a\n}}\n\n\
          fn {un}_stack_free (a: ptr)\n\
          \x20 requires {un}_pts_to_uninit a\n\
@@ -9047,8 +9046,7 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
          \x20 returns a : ptr\n\
          \x20 ensures {sn}_pts_to_uninit a\n\
          {{\n\
-         \x20 let a = mem_stack_alloc {sn}_sizeof;\n\
-         \x20 aligned_divides a max_align {sn}_alignof;\n\
+         \x20 let a = mem_stack_alloc {sn}_sizeof {sn}_alignof;\n\
          \x20 {sn}_claim_uninit a;\n\
          \x20 a\n}}\n\n",
         sn = sn
