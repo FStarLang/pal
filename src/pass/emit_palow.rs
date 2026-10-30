@@ -10499,6 +10499,7 @@ pub fn emit_palow(
 
     let mut callees: HashMap<String, Callee> = HashMap::new();
     let mut items: Vec<FnItem> = Vec::new();
+    let mut divergent_fns: HashSet<String> = HashSet::new();
     for decl in &tu.decls {
         let (fndecl, defn) = match &decl.val {
             DeclT::FnDefn(d) => (&d.decl, Some(d)),
@@ -10542,6 +10543,12 @@ pub fn emit_palow(
                 continue;
             }
         };
+
+        // An absent body proves no termination. Only an explicit `_total`
+        // declaration lets the external contract promise it.
+        if defn.is_none() && !defined.contains(&*fndecl.name.val.to_string()) && !fndecl.is_total {
+            divergent_fns.insert(fndecl.name.val.to_string());
+        }
 
         // A call may only pass ownership it can name: a value, or a pointer to
         // an object the caller holds and gets back unchanged. `_out` and
@@ -10633,7 +10640,6 @@ pub fn emit_palow(
     // Which functions are divergent is not known until their bodies are
     // translated, and a caller of a divergent function is divergent in turn,
     // so the set is reached by repeating the whole pass until it settles.
-    let mut divergent_fns: HashSet<String> = HashSet::new();
     // A representative has to have a signature to forward to.
     let items_ok: HashSet<String> = items
         .iter()
@@ -10657,7 +10663,9 @@ pub fn emit_palow(
                     emit_body(&tds, it.env.clone(), d, sig, &callees, no, &divergent_fns)
                 }
             };
-            if matches!(&body, Ok(b) if b.divergent) {
+            let divergent = (it.defn.is_none() && divergent_fns.contains(&it.name))
+                || matches!(&body, Ok(b) if b.divergent);
+            if divergent {
                 found.insert(it.name.clone());
             }
             it.uses = sig.uses.clone();
@@ -10677,9 +10685,8 @@ pub fn emit_palow(
                     out += d;
                 }
             }
-            match &body {
-                Ok(b) if b.divergent => out += "divergent\n",
-                _ => {}
+            if divergent {
+                out += "divergent\n";
             }
             out += &sig.decl;
             // Everything written so far is exactly what the interface says:
@@ -10688,7 +10695,7 @@ pub fn emit_palow(
             // publish, so it gets no interface and stays fully visible.
             it.iface = sig.decl.trim_start().starts_with("fn ").then(|| {
                 let mut i = String::new();
-                if matches!(&body, Ok(b) if b.divergent) {
+                if divergent {
                     i += "divergent\n";
                 }
                 i + &sig.iface
