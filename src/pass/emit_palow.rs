@@ -69,6 +69,14 @@ struct StructField {
     inv: Option<String>,
 }
 
+struct FieldRefinement {
+    parents: Vec<String>,
+    container: String,
+    field: String,
+    ty: Rc<Type>,
+    clause: Rc<Expr>,
+}
+
 /// Whether a value has a reader, possibly guarded by active-union-arm facts.
 fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
     match &peel(tds, ty).val {
@@ -4225,7 +4233,7 @@ fn emit_fn(
     // ownership cannot carry it -- it is built from representations and has no
     // hook for a clause -- so it is stated in the contract of every function
     // that holds such a struct, at whichever ends the struct itself is stated.
-    let field_refines = |ty: &Type| -> Vec<(String, String, Rc<Type>, Rc<Expr>)> {
+    fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
         let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
             return Vec::new();
         };
@@ -4235,15 +4243,45 @@ fn emit_fn(
         };
         let mut out = Vec::new();
         for f in &si.fields {
-            let Ok((ps, _, _)) = refinements(tds, &f.ty) else {
+            let Ok((mut ps, _, _)) = refinements(tds, &f.ty) else {
                 continue;
             };
+            // An embedded struct carries its declaration's invariant just
+            // as a parameter of that type does. Do not follow pointers:
+            // storing an address is not ownership of the pointed-to object.
+            let nested = !is_plain(tds, &f.ty)
+                && !is_plain_chain(&f.ty)
+                && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
+            if nested {
+                if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
+                    && let Some(r) = tds.refined_structs.get(&*child.val)
+                    && let Ok((clauses, _, _)) = refinements(tds, r)
+                {
+                    for cl in clauses {
+                        if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
+                            ps.push(cl);
+                        }
+                    }
+                }
+            }
             for cl in ps {
-                out.push((sname.clone(), f.name.clone(), f.ty.clone(), cl));
+                out.push(FieldRefinement {
+                    parents: Vec::new(),
+                    container: sname.clone(),
+                    field: f.name.clone(),
+                    ty: f.ty.clone(),
+                    clause: cl,
+                });
+            }
+            if nested {
+                for mut child in field_refines(tds, &f.ty) {
+                    child.parents.insert(0, f.name.clone());
+                    out.push(child);
+                }
             }
         }
         out
-    };
+    }
     // The `_own` predicate a value of this type carries, when its type is a
     // struct that has one.
     // `peel` and not `resolve`: the annotation that makes a struct interesting
@@ -4268,11 +4306,9 @@ fn emit_fn(
     /// at. `this` is the pointee, so it is spelled with the pointee's value
     /// term rather than with the parameter.
     let mut refines_struct: Vec<(String, Rc<Type>, Rc<Expr>)> = Vec::new();
-    /// A refinement written on one field of the struct a parameter is, or
-    /// points at: the parameter, the field's name and type, the clause, and
-    /// whether the struct is behind a pointer (so that `this` is the pointee's
-    /// value) or is the parameter itself.
-    let mut refines_field: Vec<(String, String, String, Rc<Type>, Rc<Expr>, bool)> = Vec::new();
+    // A field refinement, including invariants inherited from embedded
+    // structs: the parameter, its field path, and whether it is a pointer.
+    let mut refines_field: Vec<(String, FieldRefinement, bool)> = Vec::new();
     /// The parameters whose refinements sit behind a nullness guard, and the
     /// pointer the guard tests. `unless_null p (a ** b)` and
     /// `unless_null p a ** unless_null p b` are the same slprop, so a guarded
@@ -4358,9 +4394,9 @@ fn emit_fn(
                     .map(|p| (base.clone(), arg.ty.clone(), p)),
             );
             refines_field.extend(
-                field_refines(&arg.ty)
+                field_refines(tds, &arg.ty)
                     .into_iter()
-                    .map(|(sn, f, fty, p)| (base.clone(), sn, f, fty, p, false)),
+                    .map(|f| (base.clone(), f, false)),
             );
             collect_valued(&mut refines_value, &mut refine_err, tds, &base, &arg.ty, bs);
         }
@@ -4438,9 +4474,9 @@ fn emit_fn(
                         .map(|p| (base.clone(), pt.clone(), p)),
                 );
                 refines_field.extend(
-                    field_refines(pt)
+                    field_refines(tds, pt)
                         .into_iter()
-                        .map(|(sn, f, fty, p)| (base.clone(), sn, f, fty, p, true)),
+                        .map(|f| (base.clone(), f, true)),
                 );
                 refines_uninit.extend(us.into_iter().map(|p| (base.clone(), arg.ty.clone(), p)));
                 // `_refine_always` means what it says: it holds of the storage
@@ -4562,7 +4598,9 @@ fn emit_fn(
         // against a precondition the caller never granted.
         if null_guard {
             null_wrap.insert(base.clone(), pname.clone());
-            if refines_struct.iter().any(|(b, _, _)| *b == base) {
+            if refines_struct.iter().any(|(b, _, _)| *b == base)
+                || refines_field.iter().any(|(b, _, _)| *b == base)
+            {
                 null_payload.remove(&base);
             }
             match refinements(tds, &arg.ty) {
@@ -4987,9 +5025,9 @@ fn emit_fn(
                             .map(|p| ("return".to_string(), pt.clone(), p)),
                     );
                     refines_field.extend(
-                        field_refines(pt)
+                        field_refines(tds, pt)
                             .into_iter()
-                            .map(|(sn, f, fty, p)| ("return".to_string(), sn, f, fty, p, true)),
+                            .map(|f| ("return".to_string(), f, true)),
                     );
                     ret_guard = Some((pn, binders, inner));
                 }
@@ -5030,9 +5068,9 @@ fn emit_fn(
                             .map(|p| ("return".to_string(), pt.clone(), p)),
                     );
                     refines_field.extend(
-                        field_refines(pt)
+                        field_refines(tds, pt)
                             .into_iter()
-                            .map(|(sn, f, fty, p)| ("return".to_string(), sn, f, fty, p, true)),
+                            .map(|f| ("return".to_string(), f, true)),
                     );
                 }
                 _ => {
@@ -5306,15 +5344,16 @@ fn emit_fn(
     // parameter is the struct or points at it, and it exists only at the ends
     // of the contract where the struct's own ownership is stated.
     let field_this = |base: &str,
-                      sname: &str,
-                      fname: &str,
-                      fty: &Rc<Type>,
+                      field: &FieldRefinement,
                       via: bool,
                       w: When,
                       both: bool|
      -> Option<(String, Option<String>, Vec<(String, String, Rc<Type>)>)> {
-        let this = if via {
-            let (pre, post) = spec.pointees.get(base)?;
+        let mut this = if via {
+            let (pre, post) = spec
+                .pointees
+                .get(base)
+                .or_else(|| guarded_pointees.get(base))?;
             match w {
                 When::Post => post.clone()?,
                 _ => pre.clone()?,
@@ -5325,6 +5364,16 @@ fn emit_fn(
             }
             format!("var_{}", base)
         };
+        let mut container_own = spec.owns.get(&this).and_then(|(pre, post)| match w {
+            When::Post => post.clone(),
+            _ => pre.clone(),
+        });
+        for parent in &field.parents {
+            this = format!("({}).fld_{}", this, parent);
+            container_own = container_own.map(|o| format!("({}).own_{}", o, parent));
+        }
+        let fname = &field.field;
+        let fty = &field.ty;
         // A flexible array member is the one array field whose value is the
         // sequence itself, because there is nothing else it could be: the
         // elements are inside the object and their number is not in the type.
@@ -5333,23 +5382,17 @@ fn emit_fn(
         let own = if flex_elem(tds, fty).is_some() {
             Some(format!("({}).fld_{}", this, fname))
         } else if matches!(extent(tds, fty), Some(Extent::Array)) {
-            spec.owns.get(&this).and_then(|(pre, post)| {
-                let o = match w {
-                    When::Post => post.as_deref(),
-                    _ => pre.as_deref(),
-                }?;
-                Some(format!("({}).own_{}", o, fname))
-            })
+            container_own.map(|o| format!("({}).own_{}", o, fname))
         } else {
             None
         };
         let siblings = tds
             .structs
-            .get(sname)
+            .get(&field.container)
             .map(|si| {
                 si.fields
                     .iter()
-                    .filter(|g| g.name != fname)
+                    .filter(|g| g.name != *fname)
                     .map(|g| {
                         (
                             g.name.clone(),
@@ -5377,22 +5420,6 @@ fn emit_fn(
                     Some(ptr) => format!("(not (is_null {}) ==> ({}))", ptr, prop),
                     None => prop,
                 });
-            }
-        }
-        for (base, sname, fname, fty, p, via) in &refines_field {
-            if slprop_refine(tds, p).is_some() {
-                continue;
-            }
-            if let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w, false) {
-                out.push(refine_clause(
-                    base,
-                    Some((&this, own.as_deref(), false)),
-                    fty,
-                    p,
-                    w,
-                    false,
-                    &sibs,
-                )?);
             }
         }
         // An `_out` parameter's storage is unwritten exactly on the way in,
@@ -5508,34 +5535,51 @@ fn emit_fn(
                 *refine_own_spliced.borrow_mut() = true;
             }
         }
-        for (base, sname, fname, fty, p, via) in &refines_field {
-            let Some(code) = slprop_refine(tds, p) else {
-                continue;
-            };
+        for (base, field, via) in &refines_field {
+            let p = &field.clause;
+            let owns = refine_states_own(tds, p);
             // As for a refinement on the parameter itself: ownership in a
             // field of a struct passed by value is handed back, unless the
             // struct is consumed.
-            let both = !*via && spec.pointees.get(base).is_none() && !consumed.contains(base);
-            let Some((this, own, sibs)) = field_this(base, sname, fname, fty, *via, w, both) else {
+            let both =
+                owns && !*via && spec.pointees.get(base).is_none() && !consumed.contains(base);
+            let Some((this, own, sibs)) = field_this(base, field, *via, w, both) else {
                 continue;
             };
-            out.push(with_this(
+            let t = with_this(
                 base,
                 Some((&this, own.as_deref(), false)),
-                fty,
+                &field.ty,
                 p,
                 w,
                 false,
                 None,
                 &sibs,
-                &|sp: &Spec, w| sp.inline_pulse(code, w),
-            )?);
-            if matches!(peel(tds, fty).val, TypeT::FnPtr { .. }) {
+                &|sp: &Spec, w| {
+                    let t = sp.refinement(p, w)?;
+                    let guards = sp.guards.borrow();
+                    Ok(if guards.is_empty() {
+                        t
+                    } else {
+                        format!(r"({}) ** pure ({})", t, guards.join(r" /\ "))
+                    })
+                },
+            )?;
+            out.push(match null_wrap.get(base) {
+                Some(ptr) => format!("unless_null {} ({})", ptr, t),
+                None => format!("({})", t),
+            });
+            if owns
+                && field.parents.is_empty()
+                && matches!(peel(tds, &field.ty).val, TypeT::FnPtr { .. })
+            {
                 valid_fp_fields
                     .borrow_mut()
-                    .insert((base.clone(), fname.clone()));
+                    .insert((base.clone(), field.field.clone()));
             }
-            *refine_own_spliced.borrow_mut() = true;
+            if owns {
+                *refine_own_spliced.borrow_mut() = true;
+            }
         }
         Ok(out)
     };

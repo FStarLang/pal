@@ -85,6 +85,72 @@ void make_owned(_out struct owned *p, _consumes int *cell) {
   p->cell = cell;
 }
 
+struct owned_box {
+  struct owned value;
+};
+
+struct owned_outer {
+  struct owned_box inner;
+};
+
+struct bounded_box {
+  struct bounded value;
+};
+
+int read_nested_bounded(const struct bounded_box *p)
+  _ensures(return > 0 && return < 10)
+{
+  return read_bounded(&p->value);
+}
+
+int read_nested_owned_value(struct owned_outer p)
+  _ensures(return == p.inner.value.x)
+{
+  return *p.inner.value.cell;
+}
+
+int read_nested_owned(const struct owned_outer *p)
+  _ensures(return == p->inner.value.x)
+{
+  return *p->inner.value.cell;
+}
+
+void update_nested_owned(struct owned_outer *p, int value) {
+  p->inner.value.x = value;
+  *p->inner.value.cell = value;
+}
+
+void make_nested_owned(_out struct owned_outer *p, _consumes int *cell) {
+  p->inner.value.x = *cell;
+  p->inner.value.cell = cell;
+}
+
+void keep_nested_nullable(_nullable const struct owned_outer *p) {}
+
+void call_nested_null(void) {
+  _ghost_stmt(intro_unless_null_null null
+    (Struct_owned_outer.struct_owned_outer_pts_to null 1.0R
+      { Struct_owned_outer.fld_inner =
+        { Struct_owned_box.fld_value =
+          { Struct_owned.fld_x = 0l; Struct_owned.fld_cell = null } } }));
+  _ghost_stmt(intro_unless_null_null null (int32_t_pts_to null 1.0R 0l));
+  keep_nested_nullable(NULL);
+  _ghost_stmt(elim_unless_null_null null (int32_t_pts_to null 1.0R 0l));
+  _ghost_stmt(elim_unless_null_null null
+    (Struct_owned_outer.struct_owned_outer_pts_to null 1.0R
+      { Struct_owned_outer.fld_inner =
+        { Struct_owned_box.fld_value =
+          { Struct_owned.fld_x = 0l; Struct_owned.fld_cell = null } } }));
+}
+
+void ignore_nested_plain(_plain struct owned_outer p) {}
+
+struct plain_owned_box {
+  _plain struct owned value;
+};
+
+void ignore_plain_field(struct plain_owned_box p) {}
+
 void keep_nullable(_nullable const struct owned *p) {}
 
 void call_null(void) {
