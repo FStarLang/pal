@@ -3922,6 +3922,14 @@ new facts about memory.
    has nothing left to add. `core_ref_chain` is now two plain functions under
    `#ifdef PALOW`, with the marked-up version kept only for the older model.
 
+   Automatic storage takes the declared type's alignment, including extended
+   alignments, rather than trying to derive it from `max_align_t`. The existing
+   machine-level `mem_stack_alloc` primitive now takes that alignment; struct,
+   union and array wrappers pass it through. Heap allocation is unchanged:
+   ordinary `malloc` still guarantees only `max_align_t`. `aggregate_alignment`
+   checks over-aligned locals and arrays; `overaligned_heap` rejects obtaining
+   the same alignment from an ordinary heap allocation.
+
    The other half is about not over-claiming. A contract that splices ownership
    in, in the author's own Pulse, may have granted anything at all: the emitter
    does not read those words and so cannot say what is *not* owned. It used to
