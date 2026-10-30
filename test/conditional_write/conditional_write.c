@@ -70,3 +70,36 @@ void native_fields(_plain struct native_pair *p, uint32_t value)
     p->first = 1;
     p->second = value;
 }
+
+void forgotten_local(void *value, bool forget)
+{
+    void *p = value;
+    if (forget) {
+        _ghost_stmt(Pulse.Lib.C.Palow.Scalar.ptr_forget $&(p));
+        _assert((_slprop)_inline_pulse(Pulse.Lib.C.Palow.Scalar.ptr_pts_to_uninit $&(p)));
+        return;
+    }
+    _assert(p == value);
+}
+
+uint32_t rewritten_local(void)
+  _ensures(return == 2)
+{
+    uint32_t value = 1;
+    _ghost_stmt(uint32_t_forget $&(value));
+    _assert((_slprop)_inline_pulse(uint32_t_pts_to_uninit $&(value)));
+    value = 2;
+    return value;
+}
+
+void forgotten_fields(void)
+{
+    struct native_pair pair = {1, 2};
+    _ghost_stmt(Struct_native_pair.struct_native_pair_forget $&(pair));
+    _assert((_slprop)_inline_pulse(Struct_native_pair.struct_native_pair_pts_to_uninit $&(pair)));
+    pair.first = 3;
+    pair.second = 4;
+    _assert(pair.first == 3 && pair.second == 4);
+    _ghost_stmt(Struct_native_pair.struct_native_pair_forget $&(pair));
+    _assert((_slprop)_inline_pulse(Struct_native_pair.struct_native_pair_pts_to_uninit $&(pair)));
+}

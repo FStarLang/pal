@@ -15072,6 +15072,33 @@ impl<'a> Body<'a> {
         Ok(predicate)
     }
 
+    /// A proved native storage assertion resets a local's store and cleanup
+    /// bookkeeping after a ghost step has forgotten its value.
+    fn note_uninit_assertion(&mut self, code: &InlinePulseCode) {
+        let Some((pn, InlinePulseToken::LValueAntiquot { expr, .. })) = spliced_uninit_object(code)
+        else {
+            return;
+        };
+        let ExprT::Var(name) = &strip_vattr(expr).val else {
+            return;
+        };
+        let Some(i) = self.slots.iter().rposition(|s| {
+            s.name == *name.val && s.palow_ty == pn && s.array.is_none() && !s.global
+        }) else {
+            return;
+        };
+        let addr = self.slots[i].addr.clone();
+        self.drop_nested(&addr);
+        self.prescattered.remove(&addr);
+        self.active.remove(&addr);
+        self.union_values.remove(&addr);
+        let slot = &mut self.slots[i];
+        slot.init = false;
+        slot.scattered.clear();
+        slot.holds_fn.clear();
+        slot.holds_block.clear();
+    }
+
     /// A statement assertion may mix ownership and pure propositions. Keep
     /// both: `_live` is a checked points-to assertion, never `pure True`.
     fn assertion(&mut self, e: &Expr) -> Result<String, String> {
@@ -15088,7 +15115,9 @@ impl<'a> Body<'a> {
             }
             ExprT::Live(x) => self.live_assertion(x),
             ExprT::InlinePulse(code, ty) if matches!(self.tds.resolve(ty).val, TypeT::SLProp) => {
-                flatten_fragment(&self.inline_pulse(code)?)
+                let p = flatten_fragment(&self.inline_pulse(code)?)?;
+                self.note_uninit_assertion(code);
+                Ok(p)
             }
             ExprT::BinOp(BinOp::LogAnd, l, r) => Ok(format!(
                 "({}) ** ({})",
@@ -22304,16 +22333,9 @@ fn derived_ptr(e: &Expr) -> bool {
     }
 }
 
-/// A direct native storage precondition also makes a `_plain` pointee
-/// unwritten. Recognize only `<type>_pts_to_uninit $(parameter)`, never a
-/// predicate hidden under a guard or another application. This selects the
-/// store operation; its F* precondition still checks the actual ownership.
-fn spliced_uninit_parameter(tds: &Typedefs, decl: &FnDecl, e: &Expr) -> Option<String> {
-    let code = slprop_refine(tds, e)?;
+/// Recognize a direct native storage predicate, not a guarded or nested one.
+fn spliced_uninit_object(code: &InlinePulseCode) -> Option<(String, &InlinePulseToken)> {
     let (last, head) = code.tokens.split_last()?;
-    let InlinePulseToken::RValueAntiquot { expr, .. } = last else {
-        return None;
-    };
     let mut predicate = String::new();
     for token in head {
         let InlinePulseToken::Verbatim(ct) = token else {
@@ -22322,6 +22344,29 @@ fn spliced_uninit_parameter(tds: &Typedefs, decl: &FnDecl, e: &Expr) -> Option<S
         predicate.push_str(ct.before);
         predicate.push_str(&ct.text.val);
     }
+    let predicate = predicate.trim();
+    if !predicate
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        return None;
+    }
+    let pn = predicate
+        .rsplit('.')
+        .next()?
+        .strip_suffix("_pts_to_uninit")?;
+    Some((pn.to_string(), last))
+}
+
+/// A direct native storage precondition also makes a `_plain` pointee
+/// unwritten. This selects the store operation; its F* precondition still
+/// checks the actual ownership.
+fn spliced_uninit_parameter(tds: &Typedefs, decl: &FnDecl, e: &Expr) -> Option<String> {
+    let Some((pn, InlinePulseToken::RValueAntiquot { expr, .. })) =
+        spliced_uninit_object(slprop_refine(tds, e)?)
+    else {
+        return None;
+    };
     let ExprT::Var(name) = &strip_vattr(expr).val else {
         return None;
     };
@@ -22332,13 +22377,7 @@ fn spliced_uninit_parameter(tds: &Typedefs, decl: &FnDecl, e: &Expr) -> Option<S
     let TypeT::Pointer(pt, _) = &peel(tds, &arg.ty).val else {
         return None;
     };
-    let pn = palow_name(tds, pt)?;
-    let predicate = predicate.trim();
-    (predicate.rsplit('.').next()? == format!("{pn}_pts_to_uninit")
-        && predicate
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'))
-    .then(|| name.val.to_string())
+    (pn == palow_name(tds, pt)?).then(|| name.val.to_string())
 }
 
 /// Translate a function body, or say why not. `env` must already have the
