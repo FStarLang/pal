@@ -118,6 +118,37 @@ int read_nested_alias(_plain const struct envelope *p)
   return read_hole(core);
 }
 
+int read_trailer(const struct trailer *p)
+  _ensures(return == p->counter)
+{
+  return p->counter;
+}
+
+int read_aliased_child(_plain const struct envelope *p)
+  _ghost_arg(struct envelope saved)
+  _requires(_inline_pulse(
+    Struct_envelope.struct_envelope_hole_core $(p) 0.5R $(saved) **
+    Struct_packet.struct_packet_hole_buffer
+      ($(p) +! Struct_envelope.struct_envelope_offsetof_core)
+      0.5R $(saved.core)))
+  _ensures(_inline_pulse(
+    Struct_envelope.struct_envelope_hole_core $(p) 0.5R $(saved) **
+    Struct_packet.struct_packet_hole_buffer
+      ($(p) +! Struct_envelope.struct_envelope_offsetof_core)
+      0.5R $(saved.core)))
+  _ensures(return == saved.core.trailer.counter)
+{
+  const struct packet *core = &p->core;
+  _ghost_stmt(unfold (Struct_packet.struct_packet_hole_buffer
+    ($(p) +! Struct_envelope.struct_envelope_offsetof_core)
+    0.5R $(saved.core)));
+  int result = read_trailer(&core->trailer);
+  _ghost_stmt(fold (Struct_packet.struct_packet_hole_buffer
+    ($(p) +! Struct_envelope.struct_envelope_offsetof_core)
+    0.5R $(saved.core)));
+  return result;
+}
+
 int read_whole(const struct envelope *p)
   _ensures(return == p->core.header)
 {
