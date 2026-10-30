@@ -22304,6 +22304,43 @@ fn derived_ptr(e: &Expr) -> bool {
     }
 }
 
+/// A direct native storage precondition also makes a `_plain` pointee
+/// unwritten. Recognize only `<type>_pts_to_uninit $(parameter)`, never a
+/// predicate hidden under a guard or another application. This selects the
+/// store operation; its F* precondition still checks the actual ownership.
+fn spliced_uninit_parameter(tds: &Typedefs, decl: &FnDecl, e: &Expr) -> Option<String> {
+    let code = slprop_refine(tds, e)?;
+    let (last, head) = code.tokens.split_last()?;
+    let InlinePulseToken::RValueAntiquot { expr, .. } = last else {
+        return None;
+    };
+    let mut predicate = String::new();
+    for token in head {
+        let InlinePulseToken::Verbatim(ct) = token else {
+            return None;
+        };
+        predicate.push_str(ct.before);
+        predicate.push_str(&ct.text.val);
+    }
+    let ExprT::Var(name) = &strip_vattr(expr).val else {
+        return None;
+    };
+    let arg = decl
+        .args
+        .iter()
+        .find(|a| a.name.as_ref().is_some_and(|n| n.val == name.val))?;
+    let TypeT::Pointer(pt, _) = &peel(tds, &arg.ty).val else {
+        return None;
+    };
+    let pn = palow_name(tds, pt)?;
+    let predicate = predicate.trim();
+    (predicate.rsplit('.').next()? == format!("{pn}_pts_to_uninit")
+        && predicate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+    .then(|| name.val.to_string())
+}
+
 /// Translate a function body, or say why not. `env` must already have the
 /// function's parameters pushed.
 fn emit_body(
@@ -22315,6 +22352,15 @@ fn emit_body(
     forbidden: &HashSet<String>,
     divergent_fns: &HashSet<String>,
 ) -> Result<TranslatedBody, String> {
+    let spliced_uninit: HashSet<String> = if sig.contract {
+        defn.decl
+            .requires
+            .iter()
+            .filter_map(|e| spliced_uninit_parameter(tds, &defn.decl, e))
+            .collect()
+    } else {
+        HashSet::new()
+    };
     // An array parameter's ownership is a sequence, so every access through it
     // goes through `array_focus` rather than a plain read. Record what each one
     // needs to be focused: the element's Palow type and its size.
@@ -22386,7 +22432,12 @@ fn emit_body(
             .decl
             .args
             .iter()
-            .filter(|a| a.mode == ParamMode::Out)
+            .filter(|a| {
+                a.mode == ParamMode::Out
+                    || a.name
+                        .as_ref()
+                        .is_some_and(|n| spliced_uninit.contains(&*n.val))
+            })
             .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
             .collect(),
         tmp: 0,
@@ -22510,13 +22561,13 @@ fn emit_body(
             continue;
         };
         let n = name.val.to_string();
-        if a.mode == ParamMode::Out {
+        if b.out_params.contains(&n) {
             // A single-object `_out` is storage the caller allocated, so it
             // behaves exactly like an uninitialised local: the field writes
             // scatter into it and the last one gathers it back up. The only
             // difference is that the address is the parameter rather than a
             // stack allocation, and that nothing here frees it.
-            if extent(tds, &a.ty) == Some(Extent::One)
+            if (extent(tds, &a.ty) == Some(Extent::One) || spliced_uninit.contains(&n))
                 && let TypeT::Pointer(pt, _) = &peel(tds, &a.ty).val
                 && let Some(pn) = palow_name(tds, pt)
                 && let Some(fty) = fstar_type(tds, pt)
