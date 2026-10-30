@@ -1,4 +1,5 @@
 #include "pal.h"
+#include <stdint.h>
 #include <stdlib.h>
 
 /* Acceptance test 1 from `palow.md`, in its general form: "`malloc` is no
@@ -28,6 +29,10 @@ _include_pulse(Xm,
   unfold let block (a: ptr) (n: FStar.SizeT.t) : slprop =
     mem_pts_to a 1.0R (uninit (FStar.SizeT.v n)) ** freeable a n
     ** pure (aligned a max_align)
+
+  unfold let word_block (a: ptr) (n: FStar.SizeT.t) : slprop =
+    mem_pts_to a 1.0R (uninit (FStar.SizeT.v n)) ** freeable a n
+    ** pure (aligned a 8sz)
 )
 
 /* A postcondition of `0` is false, so there is no state this function could
@@ -58,4 +63,23 @@ void client(void)
     *i = 6;
     (*i)++;
     free(i);
+}
+
+_ensures(_inline_pulse(Xm.word_block $(return) $(n)))
+_allocated void *word_malloc(size_t n)
+{
+    void *p = malloc(n);
+    if (p == NULL) {
+        xabort();
+    }
+    _ghost_stmt(aligned_divides $(p) max_align 8sz);
+    return p;
+}
+
+void word_client(void)
+{
+    uint32_t *p = word_malloc(sizeof(*p));
+    *p = 42;
+    _assert(*p == 42);
+    free(p);
 }
