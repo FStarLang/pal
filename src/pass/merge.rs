@@ -631,6 +631,23 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
     }
 }
 
+/// By-value dependencies cannot be broken to order a pointer-reference cycle:
+/// the enclosing aggregate needs their value types and byte representations.
+fn collect_value_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
+    match &ty.val {
+        TypeT::FixedArray(inner, _)
+        | TypeT::FlexArray(inner)
+        | TypeT::Plain(inner)
+        | TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _)
+        | TypeT::Nullable(inner) => collect_value_type_refs(inner, out),
+        TypeT::TypeRef(_) => collect_type_refs(ty, out),
+        _ => {}
+    }
+}
+
 /// Collect type references appearing anywhere in an expression (in casts,
 /// allocations, `sizeof`, quantifier binders, inline-Pulse antiquotations, etc.)
 /// and recursively in its subexpressions.
@@ -826,7 +843,22 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
         StmtT::Return(None) | StmtT::Break | StmtT::Continue | StmtT::Goto(_) | StmtT::Error => {}
     }
 }
-/// emitted after the type definitions it references by-value or by-pointer.
+fn in_dependency_cycle(node: usize, prereqs: &[Vec<usize>], done: &[bool]) -> bool {
+    let mut seen = vec![false; prereqs.len()];
+    let mut pending = prereqs[node].clone();
+    while let Some(i) = pending.pop() {
+        if i == node {
+            return true;
+        }
+        if !done[i] && !seen[i] {
+            seen[i] = true;
+            pending.extend(&prereqs[i]);
+        }
+    }
+    false
+}
+
+/// Emit each declaration after the types it references by-value or by-pointer.
 ///
 /// This is required because emission populates the spec-parameter tables for a
 /// type when its predicate is emitted, and a dependent type's predicate reads
@@ -856,6 +888,7 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
 
     // Compute prerequisites: indices that must precede each declaration.
     let mut prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut value_prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, d) in tu.decls.iter().enumerate() {
         let mut refs: Vec<TypeKey> = Vec::new();
         collect_decl_type_refs(d, true, &mut refs);
@@ -866,17 +899,51 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
                 }
             }
         }
+        let mut refs = Vec::new();
+        match &d.val {
+            DeclT::Typedef(t) => collect_value_type_refs(&t.body, &mut refs),
+            DeclT::StructDefn(s) => {
+                collect_value_type_refs(&s.refines, &mut refs);
+                for f in &s.fields {
+                    collect_value_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                }
+            }
+            DeclT::UnionDefn(u) => {
+                for f in &u.fields {
+                    collect_value_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                }
+            }
+            _ => {
+                value_prereqs[i] = prereqs[i].clone();
+                continue;
+            }
+        }
+        for r in refs {
+            if let Some(&j) = node_of_key.get(&r)
+                && j != i
+            {
+                value_prereqs[i].push(j);
+            }
+        }
     }
 
     // Stable topological sort: repeatedly pick the lowest-indexed declaration
-    // whose prerequisites are already placed. On a dependency cycle (e.g.
-    // mutually pointer-referential structs), fall back to original order to
-    // avoid looping.
+    // whose prerequisites are already placed. Break pointer cycles only after
+    // satisfying by-value dependencies, and only at a node on the cycle:
+    // unrelated owners of that node must still wait for its representation.
+    // Keep a final source-order fallback for malformed cycles.
     let mut done = vec![false; n];
     let mut order: Vec<usize> = Vec::with_capacity(n);
     while order.len() < n {
         let picked = (0..n)
             .find(|&i| !done[i] && prereqs[i].iter().all(|&j| done[j]))
+            .or_else(|| {
+                (0..n).find(|&i| {
+                    !done[i]
+                        && value_prereqs[i].iter().all(|&j| done[j])
+                        && in_dependency_cycle(i, &prereqs, &done)
+                })
+            })
             .or_else(|| (0..n).find(|&i| !done[i]))
             .expect("at least one undone declaration");
         done[picked] = true;
