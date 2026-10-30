@@ -17580,8 +17580,10 @@ impl<'a> Body<'a> {
             // has already promised the block. If the size the callee was
             // asked for is not this type's, the claim is what fails, and it
             // fails at the call site where the mistake is.
+            // A custom allocator need not promise max_align_t. Prove the
+            // requested type's alignment from the actual callee contract.
             self.lines
-                .push(format!("aligned_divides {} max_align {}_alignof;", v, pn));
+                .push("reveal_opaque (`%divides_addr) divides_addr;".to_string());
             self.lines.push(format!("{}_claim_uninit {};", pn, v));
             (pn, false)
         } else {

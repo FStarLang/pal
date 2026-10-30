@@ -3989,6 +3989,13 @@ new facts about memory.
    checks over-aligned locals and arrays; `overaligned_heap` rejects obtaining
    the same alignment from an ordinary heap allocation.
 
+   A custom raw allocator's alignment comes from its own contract, not an
+   implicit `max_align_t` promise. Claiming its bytes now exposes the existing
+   address-divisibility definition and proves the target type's alignment
+   directly. `xmalloc_generic` includes an eight-byte-aligned allocator used
+   for a four-byte-aligned scalar; `custom_allocator_alignment_bad` rejects
+   claiming a sixteen-byte-aligned object from that weaker guarantee.
+
    The other half is about not over-claiming. A contract that splices ownership
    in, in the author's own Pulse, may have granted anything at all: the emitter
    does not read those words and so cannot say what is *not* owned. It used to

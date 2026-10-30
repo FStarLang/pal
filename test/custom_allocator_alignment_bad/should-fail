@@ -1,0 +1,3 @@
+Error 19 at out/Func_insufficient_alignment.fst
+Pulse.Lib.C.Palow.Ptr.aligned tmp1_word_allocate
+Struct_aligned_record.struct_aligned_record_alignof
