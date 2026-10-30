@@ -3028,15 +3028,33 @@ public:
           break;
       }
 
-      if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
-        auto makeBody = [&](SwitchGroup &group) {
-          auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
-          for (size_t i = 0; i < bodySize; i++)
-            trStmt(bodyStmts, group.body[i]);
-          return bodyStmts;
-        };
+      auto makeBody = [&](SwitchGroup &group) {
+        auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+        size_t bodySize = group.body.size() - 1;
+        for (size_t i = 0; i < bodySize; i++)
+          trStmt(bodyStmts, group.body[i]);
+        return bodyStmts;
+      };
 
+      // One case group is one choice, not a sequence of partial updates.
+      // Keep both arms together so their output initialization can join.
+      if (hasOnlyTerminalBreaks && cases.size() == 1 && switchEnss.empty()) {
+        auto cond = mk_bool_lit(loc.clone(), false);
+        for (auto *caseValue : cases.front()->caseValues) {
+          auto eq = mk_rvalue_binop(loc.clone(), ir::BinOp::Eq(),
+                                    mk_lvalue_var(loc.clone(), scrutId.clone()),
+                                    trRValue(caseValue->IgnoreParenImpCasts()));
+          cond = mk_rvalue_binop(loc.clone(), ir::BinOp::LogOr(),
+                                 std::move(cond), std::move(eq));
+        }
+        auto defaultBody =
+            defaultGroup ? makeBody(*defaultGroup) : Vec<Rc<ir::Stmt>>::new_();
+        stmts.push(mk_if(loc.clone(), std::move(cond), makeBody(*cases.front()),
+                         std::move(defaultBody), Vec<Rc<ir::Expr>>::new_()));
+        return {};
+      }
+
+      if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
         bool canUseMatch = true;
         for (auto *group : cases) {
           for (auto *caseValue : group->caseValues) {

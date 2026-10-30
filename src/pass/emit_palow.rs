@@ -19758,6 +19758,12 @@ impl<'a> Body<'a> {
             StmtT::Assert(e) => {
                 let p = self.assertion(e)?;
                 self.lines.push(format!("assert ({});", p));
+                if is_false_lit(e) {
+                    // The assertion is still proved, never assumed. No state
+                    // from this impossible path participates in a later join.
+                    self.lines.push("unreachable ();".to_string());
+                    self.diverged = true;
+                }
                 Ok(())
             }
             StmtT::Break | StmtT::Continue if !self.in_loop => {
