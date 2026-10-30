@@ -2850,8 +2850,8 @@ new facts about memory.
    An explicit ownership join can also carry a scalar or whole aggregate local
    that has not been written yet. Its frame uses `_pts_to_uninit`, not a
    made-up value, provided the clause does not read that local. Arrays,
-   partially scattered objects, and uninitialised loop-carried values still
-   need their own invariants. `test/uninit_join_frame` covers scalar and union
+   and partially scattered objects still need their own invariants.
+   `test/uninit_join_frame` covers scalar and union
    storage initialized after a join; `test/uninit_join_frame_bad` rejects an
    initialized-value claim before the write.
 
@@ -2860,6 +2860,15 @@ new facts about memory.
    initialize the other path. The local must be written again before it can
    be read after the join. This does not merge differing output-parameter,
    global, array, or partially scattered ownership states.
+
+   A loop can likewise carry a whole unwritten local as storage when its
+   invariant does not read the value. Each iteration may write and read it;
+   `_forget` restores the storage-only view at the backedge, `break`, and
+   `continue`, without changing C's bytes. Nested loops keep separate storage
+   frames. The loop does not establish that the local is initialized on exit:
+   it may have run zero times. `test/palow_loop` checks scalar scratch,
+   union scratch across both jumps, and nested loops; `test/loop_storage_bad`
+   rejects a read through the storage-only post-loop resource.
 
    `memset` was next, and it is the construct the byte-level model was
    supposed to make easy, so it is worth saying how easy it turned out to be.

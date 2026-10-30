@@ -11813,6 +11813,8 @@ struct Body<'a> {
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
+    /// Locals carried as storage, not initialized values, by this loop.
+    loop_storage: Vec<usize>,
     /// Ghost mirrors of the locals an enclosing loop's `_ensures` talks about,
     /// keyed by the local's name. Pulse's `while` takes an `ensures` that is a
     /// *prop* over the enclosing scope, and every local a loop invariant binds
@@ -18549,11 +18551,12 @@ impl<'a> Body<'a> {
         clause: &Exprs,
         what: &str,
         body: Option<&Stmts>,
-    ) -> Result<(Vec<String>, Vec<String>, Vec<String>), String> {
+    ) -> Result<(Vec<String>, Vec<String>, Vec<String>, Vec<usize>), String> {
         let mut binders: Vec<String> = Vec::new();
         let mut owns: Vec<String> = Vec::new();
         let mut bound: Vec<String> = Vec::new();
         let mut locals: HashMap<String, String> = HashMap::new();
+        let mut storage = Vec::new();
         // A loop invariant rebinds every value it mentions, which is the point
         // for a local the body changes and a disaster for one it does not: a
         // local bound existentially and then constrained by nothing is a local
@@ -18598,7 +18601,7 @@ impl<'a> Body<'a> {
         let mut mentioned = Touched::default();
         touch_exprs(clause, &mut mentioned);
         let mut deref_slots: Vec<(String, String)> = Vec::new();
-        for s in self.slots.clone() {
+        for (i, s) in self.slots.clone().into_iter().enumerate() {
             let s = &s;
             // A struct `_out` parameter's slot is named `*p`; the body
             // touches it through `p`.
@@ -18629,9 +18632,9 @@ impl<'a> Body<'a> {
                 continue;
             }
             if !s.init {
-                // A join can carry untouched storage without inventing a
-                // value. Partially scattered objects still need their own frame.
-                if body.is_none()
+                // A loop may reuse an unwritten local as iteration scratch.
+                // Its value is forgotten at each backedge and early exit.
+                if (body.is_none() || (!s.global && !s.name.starts_with('*')))
                     && s.array.is_none()
                     && s.scattered.is_empty()
                     && !self.prescattered.contains(&s.addr)
@@ -18640,12 +18643,9 @@ impl<'a> Body<'a> {
                     && !mentioned.written.contains(touch)
                 {
                     owns.push(format!("{}_pts_to_uninit {}", s.palow_ty, s.addr));
+                    storage.push(i);
                     continue;
                 }
-                // The frame would have to say that the slot still holds
-                // storage rather than a value, and the body would have to
-                // leave it that way. C that writes a local for the first time
-                // inside a loop is real, but it is not this milestone.
                 return Err(format!("{} with `{}` not yet written", what, s.name));
             }
             let b = format!("inv_{}", touch);
@@ -18837,12 +18837,12 @@ impl<'a> Body<'a> {
         }
         self.uses.extend(spec.uses.borrow().iter().cloned());
         self.frame_slots = bound;
-        Ok((binders, owns, props))
+        Ok((binders, owns, props, storage))
     }
 
     /// The same frame, written out as one slprop.
     fn frame_slprop(&mut self, clause: &Exprs, what: &str, indent: &str) -> Result<String, String> {
-        let (binders, owns, props) = self.frame(clause, what, None)?;
+        let (binders, owns, props, _) = self.frame(clause, what, None)?;
         let sep = format!("\n{}", indent);
         let quant = if binders.is_empty() {
             String::new()
@@ -18873,7 +18873,7 @@ impl<'a> Body<'a> {
         }
         let breaks = has_break(body);
 
-        let (binders, mut owns, props) = self.frame(inv, "a loop", Some(body))?;
+        let (binders, mut owns, props, storage) = self.frame(inv, "a loop", Some(body))?;
         let bound = std::mem::take(&mut self.frame_slots);
 
         let before = self.lines.len();
@@ -18957,6 +18957,7 @@ impl<'a> Body<'a> {
         let was_loop = self.in_loop;
         self.in_loop = true;
         let was_mark = self.loop_mark.replace(self.slots.len());
+        let outer_storage = std::mem::replace(&mut self.loop_storage, storage);
         let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
         // A declaration inside the body is in scope for the rest of the body
         // and nowhere else, so the environment is extended as the statements
@@ -18975,6 +18976,12 @@ impl<'a> Body<'a> {
             // would otherwise be asked to carry a local across an edge where C
             // says its lifetime has ended.
             self.release_from(mark);
+            self.forget_loop_storage()?;
+            for &i in &self.loop_storage {
+                self.slots[i].init = false;
+                self.slots[i].holds_fn.clear();
+                self.slots[i].holds_block.clear();
+            }
             Ok(())
         })();
         self.env = outer_env;
@@ -18985,6 +18992,7 @@ impl<'a> Body<'a> {
         self.tail_branch = was_tail_branch;
         self.in_loop = was_loop;
         self.loop_mark = was_mark;
+        self.loop_storage = outer_storage;
         let body_lines = std::mem::replace(&mut self.lines, outer);
         r?;
         if self.slots.iter().map(|s| s.init).ne(inits) {
@@ -19067,6 +19075,23 @@ impl<'a> Body<'a> {
         for e in ensures.iter() {
             let p = self.assertion(e)?;
             self.lines.push(format!("assert ({});", p));
+        }
+        Ok(())
+    }
+
+    fn forget_loop_storage(&mut self) -> Result<(), String> {
+        for &i in &self.loop_storage {
+            let s = &self.slots[i];
+            if !s.scattered.is_empty()
+                || self.prescattered.contains(&s.addr)
+                || self.nested_scatter.values().any(|(at, _, _)| *at == s.addr)
+            {
+                return Err(format!("a loop leaves `{}` partially initialized", s.name));
+            }
+            if s.init {
+                self.lines
+                    .push(format!("{}_forget {};", s.palow_ty, s.addr));
+            }
         }
         Ok(())
     }
@@ -19672,6 +19697,7 @@ impl<'a> Body<'a> {
                 let close = std::mem::take(&mut self.pending_close);
                 self.lines.extend(close);
                 self.release_from(self.loop_mark.unwrap_or(self.slots.len()));
+                self.forget_loop_storage()?;
                 self.lines.push(
                     match &s.val {
                         StmtT::Break => "break;",
@@ -22214,6 +22240,7 @@ fn emit_body(
         decls: Vec::new(),
         own_open: Vec::new(),
         loop_mark: None,
+        loop_storage: Vec::new(),
         mirrors: HashMap::new(),
         mirror_reads: false,
         frame_slots: Vec::new(),
