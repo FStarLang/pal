@@ -1418,6 +1418,11 @@ new facts about memory.
   works around this inference limitation; `init_mixed_addressed` in
   `out_param` preserves the exact output value this way. Mentioning a data
   pointer's cell does not grant or require function-pointer validity.
+  An explicit ownership join carries an untouched, unwritten scalar output
+  as storage, without inventing a value. Nullable storage keeps its guard
+  unless the current arm has opened it. `uninit_join_frame` covers a later
+  write after both guarded and non-null joins; `out_param_live_uninit` still
+  rejects claiming initialized pointee ownership after such a join.
 - An `_out` pointee is uninitialised, but the pointer parameter itself is an
   initialised C object. Taking that parameter's address, including in a proof
   annotation inside a branch, allocates its local cell at function entry.

@@ -1,4 +1,5 @@
 #include "pal.h"
+#include <stddef.h>
 #include <stdint.h>
 
 int delayed_scalar(int *p, _Bool write)
@@ -77,4 +78,36 @@ int conditional_union(int *p, _Bool first, _Bool second)
     }
     result.value = *p;
     return result.value;
+}
+
+void delayed_output(_out int *out, int *p, _Bool write)
+    _ensures(*out == *p)
+{
+    if (write)
+        _ensures((_slprop)_inline_pulse(
+            exists* v. int32_t_pts_to $&(*p) 1.0R v))
+    {
+        *p = 1;
+    }
+    *out = *p;
+}
+
+void delayed_optional_output(_nullable _out int *out, int *p, _Bool write)
+    _ensures(_inline_pulse(unless_null $(out) (int32_t_pts_to $(out) 1.0R $(*p))))
+{
+    if (write)
+        _ensures((_slprop)_inline_pulse(
+            exists* v. int32_t_pts_to $&(*p) 1.0R v))
+    {
+        *p = 2;
+    }
+    if (out != NULL) {
+        if (write)
+            _ensures((_slprop)_inline_pulse(
+                exists* v. int32_t_pts_to $&(*p) 1.0R v))
+        {
+            *p = 3;
+        }
+        *out = *p;
+    }
 }
