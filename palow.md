@@ -5303,6 +5303,15 @@ new facts about memory.
    no owned array. This does not read an inactive union arm or add overlay
    support.
 
+   Forming `&a[i]` is different from accessing `a[i]`: it computes an address
+   without focusing or reading a cell. This also permits a one-past pointer
+   and an address into partially initialized storage. Actual calls that
+   require a single indexed pointee still borrow it for the statement,
+   including calls through a function pointer and through a local alias.
+   `test/array_update` checks these cases and `test/array_address_unowned`
+   checks that forming the address does not grant the right to read it.
+   Pointer arithmetic retains Palow's existing total-address semantics.
+
    Two obligations are not the emitter's to discharge. `i < Seq.length xs` can
    only come from the function's own `_requires`, so a subscript in a function
    whose contract did not translate is refused (7) rather than emitted to fail.

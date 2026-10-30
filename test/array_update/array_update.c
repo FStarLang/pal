@@ -1,4 +1,5 @@
 #include "pal.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -95,4 +96,57 @@ void read_union_array(_array struct point *a)
   union point_array u;
   u.points = a;
   u.points[0].x = 42;
+}
+
+_plain uint32_t *array_address(_plain _array uint32_t *a, uint32_t i)
+  _ensures(_inline_pulse(
+    pure ($(return) == $(a) +! (4sz `SizeT.mul` (sizet_of_uint32 $(i))))))
+{
+  return &a[i];
+}
+
+_plain struct point *union_array_address(_plain _array struct point *a, uint32_t i)
+  _ensures(_inline_pulse(
+    pure ($(return) == $(a) +! (8sz `SizeT.mul` (sizet_of_uint32 $(i))))))
+{
+  union point_array u;
+  u.points = a;
+  return &u.points[i];
+}
+
+bool uninitialized_array_end(void)
+  _ensures(return == true)
+{
+  uint32_t a[4];
+  _plain uint32_t *end = &a[4];
+  return end == &a[4];
+}
+
+uint64_t read_entry(const struct entry *e)
+  _ensures(return == e->value)
+{
+  return e->value;
+}
+
+uint64_t read_index(_array struct entry *a, uint32_t i)
+  _requires(i < a._length)
+  _ensures(return == a[i].value)
+{
+  return read_entry(&a[i]);
+}
+
+uint64_t read_index_alias(_array struct entry *a, uint32_t i)
+  _requires(i < a._length)
+  _ensures(return == a[i].value)
+{
+  const struct entry *e = &a[i];
+  return read_entry(e);
+}
+
+uint64_t read_index_callback(_array struct entry *a, uint32_t i)
+  _requires(i < a._length)
+  _ensures(return == a[i].value)
+{
+  uint64_t (*read)(const struct entry *) = read_entry;
+  return read(&a[i]);
 }

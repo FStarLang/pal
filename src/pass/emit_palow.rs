@@ -13101,7 +13101,46 @@ impl<'a> Body<'a> {
             ExprT::Index(..) if let Some((g, i)) = self.global_elem(e)? => {
                 Ok(format!("(addr_var_{} +! elem_off_var_{} {})", g, g, i))
             }
+            ExprT::Index(base, idx) => {
+                let ty = self.ty_of(base)?;
+                let esize = match &peel(self.tds, &ty).val {
+                    TypeT::Pointer(t, _) | TypeT::FixedArray(t, _) | TypeT::FlexArray(t) => {
+                        palow_sizeof(self.tds, t)
+                    }
+                    _ => None,
+                }
+                .ok_or_else(|| format!("an indexed address of {}", describe(&ty)))?;
+                let a = self.array_addr(base)?;
+                let off = self.byte_offset(esize, idx)?;
+                Ok(format!("({} +! {})", a, off))
+            }
             _ => self.addr(e),
+        }
+    }
+
+    /// Array decay when only the address is needed, without claiming that
+    /// the elements have been initialized.
+    fn array_addr(&mut self, e: &Expr) -> Result<String, String> {
+        let e = strip_casts(e);
+        if matches!(e.val, ExprT::ArrayInit { .. }) {
+            return self.rvalue(e);
+        }
+        if let Some(v) = lvalue_name(e) {
+            let target = self.array_alias(&v);
+            if target != v {
+                let target: Rc<IdentT> = Rc::from(target.as_str());
+                let target = ExprT::Var(target.with_loc(e.loc.clone())).with_loc(e.loc.clone());
+                return self.array_addr(&target);
+            }
+        }
+        let ty = self.ty_of(e)?;
+        if matches!(
+            peel(self.tds, &ty).val,
+            TypeT::FixedArray(..) | TypeT::FlexArray(..)
+        ) {
+            self.addr_only(e)
+        } else {
+            self.rvalue(e)
         }
     }
 
@@ -15511,7 +15550,34 @@ impl<'a> Body<'a> {
             return Ok(format!("{}sz", k * esize));
         }
         let i = self.index(e)?;
-        Ok(format!("({}sz `SizeT.mul` {})", esize, i))
+        Ok(if esize == 1 {
+            i
+        } else {
+            format!("({}sz `SizeT.mul` {})", esize, i)
+        })
+    }
+
+    /// A pointer read purely for its address: compared, subtracted or offset.
+    fn ptr_val(&mut self, e: &Expr) -> Result<String, String> {
+        let ty = self.ty_of(strip_casts(e))?;
+        if matches!(
+            peel(self.tds, &ty).val,
+            TypeT::FixedArray(..) | TypeT::FlexArray(..)
+        ) {
+            return self.array_addr(e);
+        }
+        self.rvalue(e)
+    }
+
+    /// A callee may access an indexed pointee, so lend that element for the
+    /// statement. Merely storing or returning its address does not do this.
+    fn arg_value(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(place) = self.out_place(strip_casts(e))
+            && matches!(strip_vattr(&place).val, ExprT::Index(..))
+        {
+            return self.addr(&place);
+        }
+        self.rvalue(e)
     }
 
     /// Arithmetic and ordering on pointers, which is arithmetic and ordering
@@ -15525,28 +15591,6 @@ impl<'a> Body<'a> {
     ///
     /// Returns `None` when neither operand is a pointer, which leaves the
     /// ordinary integer path alone.
-    /// A pointer read purely for its address: compared, subtracted or
-    /// offset from. An alias naming an array element normally hands out the
-    /// focus that reaches the element, but arithmetic on the address needs no
-    /// ownership at all, so the focus is computed for its spelling and then
-    /// withdrawn again.
-    fn ptr_val(&mut self, e: &Expr) -> Result<String, String> {
-        if let Some(v) = lvalue_name(e)
-            && self.alias_addr(&v).is_none()
-            && let Some(place) = self.aliases.get(&v).cloned()
-            && let ExprT::Index(arr, idx) = &strip_vattr(&place).val
-            && self.is_array_place(arr)
-        {
-            let (arr, idx) = (arr.clone(), idx.clone());
-            self.uses.insert(v);
-            let mark = self.lines.len();
-            let f = self.focus_elem(&arr, Some(&idx), false);
-            self.lines.truncate(mark);
-            return f.map(|f| f.at);
-        }
-        self.rvalue(e)
-    }
-
     fn ptr_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) -> Result<Option<String>, String> {
         let (lt, rt) = (self.ty_of(l)?, self.ty_of(r)?);
         let lp = self.elem_size(&lt);
@@ -15740,7 +15784,7 @@ impl<'a> Body<'a> {
             // which is where the obligation belongs.
             if let Some(place) = self.aliases.get(&v).cloned() {
                 self.uses.insert(v.clone());
-                return self.addr(&place);
+                return self.addr_only(&place);
             }
         }
         match &e.val {
@@ -16428,7 +16472,7 @@ impl<'a> Body<'a> {
                     };
                     let mut vs = Vec::new();
                     for a in args.iter() {
-                        vs.push(self.rvalue(a)?);
+                        vs.push(self.arg_value(a)?);
                     }
                     let tuple = match vs.len() {
                         0 => "()".to_string(),
@@ -16524,7 +16568,7 @@ impl<'a> Body<'a> {
                 self.uses.insert(g.clone());
                 let mut vs = Vec::new();
                 for a in args.iter() {
-                    vs.push(self.rvalue(a)?);
+                    vs.push(self.arg_value(a)?);
                 }
                 let tuple = match vs.len() {
                     0 => "()".to_string(),
@@ -16781,10 +16825,12 @@ impl<'a> Body<'a> {
                 self.literal_share_arg(a)?
             } else if is_literal(a) && plain_ptrs.get(i) != Some(&true) {
                 self.literal_arg(a)?
-            } else if arrayptr_args.get(i) == Some(&true) {
+            } else if arrayptr_args.get(i) == Some(&true)
+                || (plain_ptrs.get(i) == Some(&true) && arr_args.get(i) != Some(&true))
+            {
                 self.ptr_val(a)?
             } else {
-                self.rvalue(a)?
+                self.arg_value(a)?
             };
             // A `_consumes` parameter takes the argument's ownership for good.
             // Nothing has to be emitted for that -- the callee's `requires`
