@@ -11892,6 +11892,8 @@ struct Body<'a> {
     /// Local pointers that stand for a place rather than for storage. See
     /// `alias_map`.
     aliases: HashMap<String, Rc<Expr>>,
+    /// Fixed aliases whose local pointer cell is named by a contract.
+    stored_aliases: HashSet<String>,
     /// Local pointers loaded once out of memory, with what they were loaded
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
@@ -12837,11 +12839,13 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(e) {
             return self.addr(&p);
         }
-        // The pointer itself, rather than what it points at. Its address is
-        // the place's, but handing it out means handing out ownership of the
-        // place, which is a focus that has to stay open past this statement.
+        // A contract may name the local pointer cell without owning or
+        // exposing the place it points into.
         if let Some(v) = lvalue_name(e) {
             if self.aliases.contains_key(&v) {
+                if let Some(s) = self.slots.iter().rev().find(|s| s.name == v) {
+                    return Ok(s.addr.clone());
+                }
                 return Err(format!("`{}`, whose place would have to escape", v));
             }
         }
@@ -13125,7 +13129,7 @@ impl<'a> Body<'a> {
         if let Some(v) = lvalue_name(e)
             && self.aliases.contains_key(&v)
         {
-            return Err(format!("`{}`, whose place would have to escape", v));
+            return self.addr(e);
         }
         match &strip_vattr(e).val {
             ExprT::Member(base, f) => {
@@ -19478,7 +19482,8 @@ impl<'a> Body<'a> {
     fn stmt_inner(&mut self, s: &Stmt) -> Result<(), String> {
         match &s.val {
             StmtT::Decl(name, ty) => {
-                if self.aliases.contains_key(&*name.val.to_string())
+                if (self.aliases.contains_key(&*name.val.to_string())
+                    && !self.stored_aliases.contains(&*name.val.to_string()))
                     || self.is_array_alias(&name.val.to_string())
                 {
                     return Ok(());
@@ -19581,10 +19586,12 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
-                // The alias itself: nothing is stored, because the pointer is
-                // a name and not an object.
+                // Only contracts that name the pointer cell need its storage;
+                // dereferences still follow the fixed place.
                 if let Some(v) = lvalue_name(lhs) {
-                    if self.aliases.contains_key(&v) || self.is_array_alias(&v) {
+                    if (self.aliases.contains_key(&v) && !self.stored_aliases.contains(&v))
+                        || self.is_array_alias(&v)
+                    {
                         return Ok(());
                     }
                 }
@@ -22418,6 +22425,14 @@ fn emit_body(
         frame_slots: Vec::new(),
         divergent_fns,
         blocks: Vec::new(),
+        stored_aliases: {
+            let mut t = Touched::default();
+            touch_stmts(&defn.body, &mut t);
+            t.addressed
+                .into_iter()
+                .filter(|name| aliases.contains_key(name))
+                .collect()
+        },
         aliases: aliases,
         ptr_src: ptr_source_map(&defn.body),
         byte_bases: byte_base_map(&defn.body),
