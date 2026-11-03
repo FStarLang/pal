@@ -11585,6 +11585,7 @@ struct BranchResult {
     holds: Vec<(BTreeMap<String, String>, BTreeMap<String, String>)>,
     union_values: HashMap<String, String>,
     out_params: Vec<String>,
+    asserted_uninit: HashSet<(String, String)>,
 }
 
 fn indent(line: &str) -> String {
@@ -11780,6 +11781,8 @@ struct Body<'a> {
     piece_types: &'a HashSet<String>,
     /// Places a checked native field-hole assertion owns in pieces.
     asserted_pieces: HashSet<(String, String)>,
+    /// Dynamic pointees whose checked storage assertion selects a first store.
+    asserted_uninit: HashSet<(String, String)>,
     /// Parameters whose ownership sits behind a nullness guard, so a loop
     /// invariant claiming their storage is claiming the guard is discharged.
     guarded: &'a HashSet<String>,
@@ -15085,14 +15088,26 @@ impl<'a> Body<'a> {
         Ok(predicate)
     }
 
-    /// A proved native storage assertion resets a local's store and cleanup
-    /// bookkeeping after a ghost step has forgotten its value.
+    /// A proved native storage assertion selects an initialising store.
+    /// Locals also reset their cleanup bookkeeping after a ghost forget.
     fn note_uninit_assertion(&mut self, code: &InlinePulseCode) {
-        let Some((pn, InlinePulseToken::LValueAntiquot { expr, .. })) = spliced_uninit_object(code)
-        else {
+        let Some((pn, token)) = spliced_uninit_object(code) else {
             return;
         };
-        let ExprT::Var(name) = &strip_vattr(expr).val else {
+        let place = match token {
+            InlinePulseToken::RValueAntiquot { expr, .. } => deref_of(expr),
+            InlinePulseToken::LValueAntiquot { expr, .. } => expr.clone(),
+            _ => return,
+        };
+        let ExprT::Var(name) = &strip_vattr(&place).val else {
+            if matches!(strip_vattr(&place).val, ExprT::Deref(_))
+                && self
+                    .ty_of(&place)
+                    .is_ok_and(|ty| palow_name(self.tds, &ty).as_deref() == Some(pn.as_str()))
+                && let Some(key) = self.place_path(&place)
+            {
+                self.asserted_uninit.insert(key);
+            }
             return;
         };
         let Some(i) = self.slots.iter().rposition(|s| {
@@ -18679,6 +18694,9 @@ impl<'a> Body<'a> {
         // Whatever was known about the code pointers here is stale now; the
         // caller re-establishes it if the store was a decay.
         self.clear_fn_notes(lhs);
+        let initialising = self
+            .place_path(lhs)
+            .is_some_and(|key| self.asserted_uninit.remove(&key));
         if let ExprT::Deref(inner) = &lhs.val {
             if let ExprT::Var(v) = &inner.val {
                 if self.out_params.iter().any(|n| *n == *v.val) {
@@ -18784,7 +18802,12 @@ impl<'a> Body<'a> {
         // A store of a whole union value picks the live member from the value
         // itself, which the emitter does not read back.
         self.active.remove(&a);
-        self.lines.push(format!("{}_write {} {};", pn, a, value));
+        let op = if initialising {
+            "write_uninit"
+        } else {
+            "write"
+        };
+        self.lines.push(format!("{}_{} {} {};", pn, op, a, value));
         Ok(())
     }
 
@@ -19831,6 +19854,7 @@ impl<'a> Body<'a> {
                 self.loop_(cond, inv, requires, ensures, body)?;
                 self.active.clear();
                 self.union_values.clear();
+                self.asserted_uninit.clear();
                 Ok(())
             }
             // A `switch` whose cases all end in `break` reaches the IR as a
@@ -19857,11 +19881,13 @@ impl<'a> Body<'a> {
                 self.active.clear();
 
                 let entry_out = self.out_params.clone();
+                let entry_uninit = self.asserted_uninit.clone();
                 let entry_inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
                 let entry_blocks = self.blocks.clone();
                 let restore = |b: &mut Self| {
                     b.blocks = entry_blocks.clone();
                     b.out_params = entry_out.clone();
+                    b.asserted_uninit = entry_uninit.clone();
                     for (slot, init) in b.slots.iter_mut().zip(&entry_inits) {
                         slot.init = *init;
                     }
@@ -19911,6 +19937,11 @@ impl<'a> Body<'a> {
                 }
                 restore(self);
                 self.out_params = outs;
+                self.asserted_uninit = last.asserted_uninit.clone();
+                self.asserted_uninit.retain(|key| {
+                    arms.iter()
+                        .all(|(_, arm)| arm.asserted_uninit.contains(key))
+                });
                 self.nested_scatter = nested;
                 self.prescattered = pre;
                 for (slot, (init, scattered)) in
@@ -20306,6 +20337,7 @@ impl<'a> Body<'a> {
                 // translated against a restored snapshot rather than against
                 // whatever the first left behind.
                 let entry_out = self.out_params.clone();
+                let entry_uninit = self.asserted_uninit.clone();
                 let entry_inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
                 let entry_blocks = self.blocks.clone();
                 let live_then = matches!(nt, Some((_, false)));
@@ -20323,6 +20355,7 @@ impl<'a> Body<'a> {
                 let then_blocks = self.blocks.clone();
                 self.blocks = entry_blocks.clone();
                 self.out_params = entry_out.clone();
+                self.asserted_uninit = entry_uninit;
                 for (slot, init) in self.slots.iter_mut().zip(&entry_inits) {
                     slot.init = *init;
                 }
@@ -20447,6 +20480,11 @@ impl<'a> Body<'a> {
                     );
                 }
                 self.out_params = live_res.out_params.clone();
+                self.asserted_uninit = live_res.asserted_uninit.clone();
+                if surviving.is_none() {
+                    self.asserted_uninit
+                        .retain(|key| els.asserted_uninit.contains(key));
+                }
                 self.nested_scatter = live_res.nested_scatter.clone();
                 self.prescattered = live_res.prescattered.clone();
                 for (slot, (init, scattered)) in self
@@ -20816,6 +20854,7 @@ impl<'a> Body<'a> {
         let outer_union_values = self.union_values.clone();
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
+        let outer_uninit = self.asserted_uninit.clone();
         let outer_slots = self.slots.clone();
         let outer_seeded = self.seeded.clone();
         let outer_open = self.open_elems.clone();
@@ -20836,6 +20875,7 @@ impl<'a> Body<'a> {
         self.seeded = outer_seeded;
         self.slots = outer_slots;
         self.out_params = outer_out;
+        self.asserted_uninit = outer_uninit;
         self.env = outer_env;
         self.union_values = outer_union_values;
         self.lines = outer_lines;
@@ -20874,6 +20914,7 @@ impl<'a> Body<'a> {
         let outer_env = self.env.clone();
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
+        let outer_uninit = self.asserted_uninit.clone();
         let outer_seeded = self.seeded.clone();
         let outer_open = self.open_elems.clone();
         let outer_nested = self.nested_scatter.clone();
@@ -20961,6 +21002,7 @@ impl<'a> Body<'a> {
                     .collect(),
                 union_values: self.union_values.clone(),
                 out_params: std::mem::take(&mut self.out_params),
+                asserted_uninit: std::mem::take(&mut self.asserted_uninit),
             })
         })();
 
@@ -20977,6 +21019,7 @@ impl<'a> Body<'a> {
         self.env = outer_env;
         self.union_values = outer_union_values;
         self.lines = outer_lines;
+        self.asserted_uninit = outer_uninit;
         if out.is_err() {
             self.out_params = outer_out;
         }
@@ -22592,6 +22635,7 @@ fn emit_body(
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
         asserted_pieces: HashSet::new(),
+        asserted_uninit: HashSet::new(),
         guarded: &sig.guarded,
         null_payload: &sig.null_payload,
         null_outs: &sig.null_outs,
