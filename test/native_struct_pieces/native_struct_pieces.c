@@ -190,3 +190,36 @@ void write_alias_after_join(struct envelope *p, bool choose)
   }
   core->header = 3;
 }
+
+struct message {
+  _plain const struct envelope *owner;
+};
+
+int read_message_holes(_plain struct message message, const struct envelope *whole)
+  _ghost_arg(struct envelope saved)
+  _requires(_inline_pulse(
+    Struct_envelope.struct_envelope_hole_core $(message.owner) 0.5R $(saved) **
+    Struct_packet.struct_packet_hole_buffer
+      ($(message.owner) +! Struct_envelope.struct_envelope_offsetof_core)
+      0.5R $(saved.core)))
+  _ensures(_inline_pulse(
+    Struct_envelope.struct_envelope_hole_core $(message.owner) 0.5R $(saved) **
+    Struct_packet.struct_packet_hole_buffer
+      ($(message.owner) +! Struct_envelope.struct_envelope_offsetof_core)
+      0.5R $(saved.core)))
+  _ensures(return == (saved.core.header ^ whole->core.header))
+{
+  _assert(_inline_pulse(Struct_envelope.struct_envelope_hole_core
+    $(message.owner) 0.5R $(saved)));
+  _assert(_inline_pulse(Struct_packet.struct_packet_hole_buffer
+    $&(message.owner->core) 0.5R $(saved.core)));
+  _ghost_stmt(unfold (Struct_packet.struct_packet_hole_buffer
+    $&(message.owner->core) 0.5R $(saved.core)));
+  const struct packet *core = &message.owner->core;
+  _assert(_live(core));
+  int result = core->header;
+  int other = whole->core.header;
+  _ghost_stmt(fold (Struct_packet.struct_packet_hole_buffer
+    $&(message.owner->core) 0.5R $(saved.core)));
+  return result ^ other;
+}
