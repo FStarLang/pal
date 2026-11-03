@@ -2866,13 +2866,15 @@ new facts about memory.
    global, array, or partially scattered ownership states.
 
    A loop can likewise carry a whole unwritten local as storage when its
-   invariant does not read the value. Each iteration may write and read it;
-   `_forget` restores the storage-only view at the backedge, `break`, and
+   invariant does not read the value, including when an ownership clause
+   explicitly supplies its storage predicate. Such a clause replaces the
+   generated predicate, not the scratch cleanup. Each iteration may write and
+   read it; `_forget` restores the storage-only view at the backedge, `break`, and
    `continue`, without changing C's bytes. Nested loops keep separate storage
    frames. The loop does not establish that the local is initialized on exit:
-   it may have run zero times. `test/palow_loop` checks scalar scratch,
-   union scratch across both jumps, and nested loops; `test/loop_storage_bad`
-   rejects a read through the storage-only post-loop resource.
+   it may have run zero times. `test/palow_loop` checks implicit and explicit
+   scalar scratch, union scratch across both jumps, and nested loops;
+   `test/loop_storage_bad` rejects a read through the storage-only post-loop resource.
 
    `memset` was next, and it is the construct the byte-level model was
    supposed to make easy, so it is worth saying how easy it turned out to be.
