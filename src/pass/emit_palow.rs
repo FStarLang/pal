@@ -13500,10 +13500,15 @@ impl<'a> Body<'a> {
         };
         let pn = shape.pn().to_string();
         let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
-        if !writing && self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string()) {
+        if !writing
+            && (self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string())
+                || !base_close_read.is_empty())
+        {
             // A contract or a prior aggregate write can establish the tag
             // without a syntactic note here. The projector and rewrite both
             // require F* to prove that the owned value has this constructor.
+            // Reopening an enclosing record restores a field projection,
+            // so its constructor must be exposed again even for a known tag.
             let uname = un.strip_prefix("union_").unwrap_or(&un).to_string();
             let ctor = format!("Union_{}_{}", uname, f.val);
             let vp = self.fresh("perm");
@@ -16539,6 +16544,8 @@ impl<'a> Body<'a> {
             ExprT::FnCall(name, args) => {
                 let t = self.fresh(&name.val);
                 let mark = self.seeded.len();
+                let outer_close = std::mem::take(&mut self.pending_close);
+                let outer_own = std::mem::take(&mut self.own_open);
                 let call = self.call(name, args)?;
                 self.lines.push(format!("let {} = {};", t, call));
                 // A validity seeded while evaluating the arguments was seeded
@@ -16546,6 +16553,12 @@ impl<'a> Body<'a> {
                 // a resource anyone consumes -- so it has to be put down here
                 // or it is left over at the end of the body.
                 self.drop_seeded(mark);
+                // Return this call's borrows before evaluating another operand,
+                // without closing the enclosing call's argument borrows.
+                self.lines.append(&mut self.pending_close);
+                self.close_own();
+                self.pending_close = outer_close;
+                self.own_open = outer_own;
                 Ok(t)
             }
             // A named function used as a value is its code address. Because
@@ -16840,6 +16853,23 @@ impl<'a> Body<'a> {
         }
         let mut out = format!("func_{}", name.val);
         let mut implicit_args: Vec<String> = Vec::new();
+        // Read scalar arguments before lending fields: `f(&s->a, s->n)`
+        // must read `n` while the enclosing object is still whole.
+        let mut values = HashMap::new();
+        for (i, a) in args.iter().enumerate() {
+            if self.ty_of(a).is_ok_and(|t| {
+                matches!(
+                    peel(self.tds, &t).val,
+                    TypeT::Bool
+                        | TypeT::Int { .. }
+                        | TypeT::Float { .. }
+                        | TypeT::SizeT
+                        | TypeT::PtrdiffT
+                )
+            }) {
+                values.insert(i, self.arg_value(a)?);
+            }
+        }
         let opened = self.field_args(args, &outs, &consts, |i| {
             !(arr_args.get(i) == Some(&true)
                 || arrayptr_args.get(i) == Some(&true)
@@ -16847,6 +16877,10 @@ impl<'a> Body<'a> {
                 || consumes.get(i) == Some(&true))
         })?;
         for (i, a) in args.iter().enumerate() {
+            if let Some(value) = values.get(&i) {
+                out += &format!(" {}", value);
+                continue;
+            }
             if let Some(at) = opened.get(&i) {
                 out += &format!(" {}", at);
                 continue;

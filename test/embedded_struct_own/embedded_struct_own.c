@@ -25,6 +25,12 @@ int read_embedded(const struct holder *holder)
     return read_cell(&holder->cell);
 }
 
+_Bool compare_embedded_borrows(const struct holder *holder)
+    _ensures(return)
+{
+    return read_cell(&holder->cell) == read_embedded(holder);
+}
+
 int read_direct(const struct holder *holder)
     _ensures(return == *holder->cell.value)
 {

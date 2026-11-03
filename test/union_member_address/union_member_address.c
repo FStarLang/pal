@@ -71,3 +71,43 @@ uint32_t read_nested_member(struct holder *h)
 {
     return read_value(&h->value.pair.last);
 }
+
+_Bool compare_borrowed_member(const struct holder *h)
+    _requires(h->value.pair._active)
+    _ensures(return == (h->value.pair.last == h->value.pair.first))
+{
+    if (read_value(&h->value.pair.last) == h->value.pair.first)
+        return 1;
+    return 0;
+}
+
+uint32_t replace_value(uint32_t *p, uint32_t value)
+    _ensures(*p == value)
+    _ensures(return == value)
+{
+    *p = value;
+    return value;
+}
+
+_Bool compare_written_member(struct holder *h, uint32_t value)
+    _requires(h->value.pair._active)
+    _ensures(h->value.pair._active)
+    _ensures(h->value.pair.last == value)
+    _ensures(h->value.pair.first == _old(h->value.pair.first))
+    _ensures(return == (value == h->value.pair.first))
+{
+    return replace_value(&h->value.pair.last, value) == h->value.pair.first;
+}
+
+uint32_t read_xor(const uint32_t *p, uint32_t other)
+    _ensures(return == (*p ^ other))
+{
+    return *p ^ other;
+}
+
+uint32_t borrow_with_sibling_value(const struct holder *h)
+    _requires(h->value.pair._active)
+    _ensures(return == (h->value.pair.last ^ h->value.pair.first))
+{
+    return read_xor(&h->value.pair.last, h->value.pair.first);
+}
