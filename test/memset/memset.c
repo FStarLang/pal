@@ -72,6 +72,37 @@ int zero_local(void)
 _memset_zero
 void plat_zero(void *buffer, size_t size);
 
+struct bytebuf {
+    uint8_t buf[5];
+    int x;
+};
+
+void zero_buffer_field(struct bytebuf *s)
+    _requires(_inline_pulse(pure (FStar.Int32.v $(s->x) == 42)))
+    _ensures(s->buf[0] == 0 && s->buf[4] == 0)
+    _preserves_value(s->x)
+{
+    memset(s->buf, 0, sizeof(s->buf));
+}
+
+void initialize_buffer_field(_out struct bytebuf *s, int tag)
+    _requires(_inline_pulse(pure (FStar.Int32.v $(tag) == 42)))
+    _ensures(s->x == 42)
+    _ensures(s->buf[0] == 0 && s->buf[4] == 0)
+{
+    s->x = tag;
+    plat_zero(s->buf, sizeof(s->buf));
+}
+
+void initialize_array_first(_out struct bytebuf *s, int tag)
+    _requires(_inline_pulse(pure (FStar.Int32.v $(tag) == 42)))
+    _ensures(s->x == 42)
+    _ensures(s->buf[0] == 0 && s->buf[4] == 0)
+{
+    plat_zero(s->buf, sizeof(s->buf));
+    s->x = tag;
+}
+
 void zero_triple_via_wrapper(struct triple *s)
     _ensures(s->a == 0)
     _ensures(s->c == 0)
