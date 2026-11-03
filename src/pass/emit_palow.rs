@@ -11778,6 +11778,8 @@ struct Body<'a> {
     pieces: &'a HashSet<String>,
     /// See `FnSurface::piece_types`.
     piece_types: &'a HashSet<String>,
+    /// Places a checked native field-hole assertion owns in pieces.
+    asserted_pieces: HashSet<(String, String)>,
     /// Parameters whose ownership sits behind a nullness guard, so a loop
     /// invariant claiming their storage is claiming the guard is discharged.
     guarded: &'a HashSet<String>,
@@ -13102,6 +13104,12 @@ impl<'a> Body<'a> {
     /// half-written local does while it is being filled, and for the same
     /// reason.
     fn in_pieces(&self, base: &Expr) -> bool {
+        if self
+            .place_path(base)
+            .is_some_and(|key| self.asserted_pieces.contains(&key))
+        {
+            return true;
+        }
         if self.pieces.is_empty() {
             return false;
         }
@@ -15099,6 +15107,45 @@ impl<'a> Body<'a> {
         slot.holds_block.clear();
     }
 
+    /// An assertion can expose partial ownership behind a pointer stored in
+    /// an aggregate, rather than a named parameter. It only selects direct
+    /// field access: Pulse still checks the assertion and every accessed cell.
+    fn note_pieces_assertion(&mut self, code: &InlinePulseCode) {
+        let mut predicate = String::new();
+        for token in &code.tokens {
+            if let InlinePulseToken::Verbatim(ct) = token {
+                predicate.push_str(ct.before);
+                predicate.push_str(&ct.text.val);
+                continue;
+            }
+            let predicate = predicate.trim();
+            if !predicate
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+            {
+                return;
+            }
+            let Some((sn, _)) = predicate
+                .rsplit('.')
+                .next()
+                .and_then(|p| p.split_once("_hole_"))
+            else {
+                return;
+            };
+            let place = match token {
+                InlinePulseToken::RValueAntiquot { expr, .. } => deref_of(expr),
+                InlinePulseToken::LValueAntiquot { expr, .. } => expr.clone(),
+                _ => return,
+            };
+            if self.struct_of(&place).is_ok_and(|(actual, _)| actual == sn)
+                && let Some(key) = self.place_path(&place)
+            {
+                self.asserted_pieces.insert(key);
+            }
+            return;
+        }
+    }
+
     /// A statement assertion may mix ownership and pure propositions. Keep
     /// both: `_live` is a checked points-to assertion, never `pure True`.
     fn assertion(&mut self, e: &Expr) -> Result<String, String> {
@@ -15117,6 +15164,7 @@ impl<'a> Body<'a> {
             ExprT::InlinePulse(code, ty) if matches!(self.tds.resolve(ty).val, TypeT::SLProp) => {
                 let p = flatten_fragment(&self.inline_pulse(code)?)?;
                 self.note_uninit_assertion(code);
+                self.note_pieces_assertion(code);
                 Ok(p)
             }
             ExprT::BinOp(BinOp::LogAnd, l, r) => Ok(format!(
@@ -15502,19 +15550,24 @@ impl<'a> Body<'a> {
     /// is what lets a code address stored in the heap be called: the cell has
     /// no name of its own, but the pointer standing in front of it does.
     fn place_key(&self, e: &Expr) -> Option<(String, String)> {
+        let key = self.place_path(e)?;
+        self.slots.iter().any(|s| s.name == key.0).then_some(key)
+    }
+
+    /// A structural path, including parameters kept as values rather than
+    /// spilled into slots. This names a place without claiming ownership.
+    fn place_path(&self, e: &Expr) -> Option<(String, String)> {
         if let Some(p) = self.unalias(e) {
-            return self.place_key(&p);
+            return self.place_path(&p);
         }
         match &strip_vattr(e).val {
-            ExprT::Var(v) if self.slots.iter().any(|s| s.name == *v.val) => {
-                Some((v.val.to_string(), String::new()))
-            }
+            ExprT::Var(v) => Some((v.val.to_string(), String::new())),
             ExprT::Deref(inner) => {
-                let (slot, path) = self.place_key(inner)?;
+                let (slot, path) = self.place_path(inner)?;
                 Some((slot, join_path(&path, "*")))
             }
             ExprT::Member(base, f) => {
-                let (slot, path) = self.place_key(base)?;
+                let (slot, path) = self.place_path(base)?;
                 Some((
                     slot,
                     if path.is_empty() {
@@ -22504,6 +22557,7 @@ fn emit_body(
         spliced_own: sig.spliced_own,
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
+        asserted_pieces: HashSet::new(),
         guarded: &sig.guarded,
         null_payload: &sig.null_payload,
         null_outs: &sig.null_outs,
