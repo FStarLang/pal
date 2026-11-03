@@ -1,4 +1,5 @@
 #include "pal.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -94,6 +95,49 @@ void use_fill_two(void)
 {
   int buf[2];
   fill_two(buf);
+}
+
+void inspect_array_parameter(int *const *p)
+{
+}
+
+void fill_addressed_array(_array int *a, bool inspect)
+  _requires(a._length == 2)
+  _preserves_value(a._length)
+{
+  if (inspect) {
+    inspect_array_parameter(&a);
+  }
+  fill_two(a);
+}
+
+void fill_addressed_output(_out _array int *a, bool inspect)
+  _requires(a._length == 2)
+  _ensures(_forall(size_t j, j < 2 ==> a[j] == 42))
+{
+  if (inspect) {
+    inspect_array_parameter(&a);
+  }
+  for (size_t i = 0; i < 2; i++)
+    _invariant(i <= 2)
+    _invariant(_forall(size_t j, j < i ==> a[j] == 42))
+  {
+    a[i] = 42;
+  }
+}
+
+int read_retargeted_array(_array const int *a, _array const int *b, bool replace)
+  _requires(a._length == 1 && b._length == 1)
+  _ensures(return == (replace ? _old(b[0]) : _old(a[0])))
+{
+  int result;
+  if (replace) {
+    a = b;
+    result = a[0];
+  } else {
+    result = a[0];
+  }
+  return result;
 }
 
 // The array behind a struct's `_array` pointer field. Its ownership lives in

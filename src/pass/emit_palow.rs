@@ -14743,14 +14743,22 @@ impl<'a> Body<'a> {
             palow_name(self.tds, elem).ok_or_else(|| format!("an array of {}", describe(elem)))?;
         let esize = palow_sizeof(self.tds, elem)
             .ok_or_else(|| format!("the size of an array element of {}", describe(elem)))?;
+        let storage = lvalue_name(e).filter(|name| {
+            self.out_params.contains(name) && self.arrays.get(name).is_some_and(|a| a.maybe)
+        });
+        let addr = if let Some(name) = &storage {
+            self.tracked_pointee_addr(e, name)?
+        } else {
+            self.rvalue(e)?
+        };
         Ok(ArrayPlace {
-            addr: self.rvalue(e)?,
+            addr,
             pn,
             esize: format!("{}sz", esize),
             base: 0,
             close_read: Vec::new(),
             close_write: Vec::new(),
-            maybe: false,
+            maybe: storage.is_some(),
         })
     }
 
@@ -17406,7 +17414,8 @@ impl<'a> Body<'a> {
             && let Some(ap) = self.arrays.get(&*v.val)
             && !ap.maybe
         {
-            let (pn, at, esize) = (ap.pn.clone(), ap.addr.clone(), ap.esize.clone());
+            let (pn, esize) = (ap.pn.clone(), ap.esize.clone());
+            let at = self.rvalue(a)?;
             self.lines.push(format!(
                 "array_unsomes {}_repr {} {} {}_alignof;",
                 pn, at, esize, pn
@@ -18884,10 +18893,10 @@ impl<'a> Body<'a> {
             let held: Vec<String> = self.seeded.iter().map(|s| s.3.clone()).collect();
             self.laundered.extend(held);
         }
-        let written: Option<HashSet<String>> = body.map(|b| {
+        let body_touches = body.map(|b| {
             let mut t = Touched::default();
             touch_stmts(b, &mut t);
-            t.written
+            t
         });
         let mut mentioned = Touched::default();
         touch_exprs(clause, &mut mentioned);
@@ -18932,7 +18941,9 @@ impl<'a> Body<'a> {
                 .blocks
                 .iter()
                 .find(|b| b.var == s.name && b.checked && !b.freed)
-                && written.as_ref().is_some_and(|w| !w.contains(&s.name))
+                && body_touches
+                    .as_ref()
+                    .is_some_and(|t| !t.written.contains(&s.name))
             {
                 let tmp = b.tmp.clone();
                 owns.push(s.pts_to(&tmp));
@@ -18941,6 +18952,20 @@ impl<'a> Body<'a> {
             }
             if !s.init {
                 return Err(format!("{} with `{}` not yet written", what, s.name));
+            }
+            // Element writes do not change an addressable array parameter.
+            if self.params.contains(&s.name)
+                && self.arrays.contains_key(&s.name)
+                && body_touches
+                    .as_ref()
+                    .is_some_and(|t| !t.rebound.contains_key(&s.name))
+            {
+                let value = self.fresh("loop_array");
+                self.lines
+                    .push(format!("let {} = {}_read {};", value, s.palow_ty, s.addr));
+                owns.push(s.pts_to(&value));
+                locals.insert(s.name.clone(), value);
+                continue;
             }
             let b = format!("inv_{}", touch);
             binders.push(format!("({}: {})", b, s.fstar_ty));
@@ -22722,13 +22747,10 @@ fn emit_body(
     // parameters are ordinary mutable objects and a loop that walks one --
     // `lo = mid + 1` in a binary search -- writes it from inside an `if`,
     // where a slot could not be allocated at all.
-    let addressed = {
+    let touched = {
         let mut t = Touched::default();
         touch_stmts(&defn.body, &mut t);
-        t.addressed
-            .union(&t.written)
-            .cloned()
-            .collect::<HashSet<_>>()
+        t
     };
     for a in &defn.decl.args {
         let Some(name) = a.name.as_ref() else {
@@ -22765,7 +22787,10 @@ fn emit_body(
                 });
             }
         }
-        if !addressed.contains(&n) || b.arrays.contains_key(&n) {
+        if !touched.addressed.contains(&n)
+            && !touched.rebound.contains_key(&n)
+            && (!touched.written.contains(&n) || b.arrays.contains_key(&n))
+        {
             continue;
         }
         // A refusal here is not a refusal of the body: the `&` may sit

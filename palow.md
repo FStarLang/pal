@@ -4900,6 +4900,14 @@ new facts about memory.
    than silently handing back this iteration's binder, which is what it had
    been doing.
 
+   Array parameters use the same entry-time storage when written or addressed.
+   Subscripts and output calls evaluate the current pointer, not a stale
+   entry address. An unwritten output array retains its optional-element view
+   and checked connection to the incoming storage. `test/array_to_ref` covers
+   addresses taken inside branches, output initialization, and retargeted reads;
+   `test/array_parameter_rebind_bad` rejects output calls through an unowned
+   replacement pointer.
+
    A code address stored in the heap can be called too. The rule for an
    indirect call has not changed -- the emitter translates one exactly when it
    can say which function is being called -- but until now the only places it
