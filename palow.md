@@ -2881,6 +2881,14 @@ new facts about memory.
    scalar scratch, union scratch across both jumps, and nested loops;
    `test/loop_storage_bad` rejects a read through the storage-only post-loop resource.
 
+   Fixed-size array fields get their length from their type, including when
+   the surrounding precondition is handwritten Pulse. A whole-field zero fill
+   can also finish a partially initialized struct: it opens the field's
+   optional-element storage, fills it, and uses the existing field-completion
+   tracking before gathering the parent. `test/memset` checks the field's
+   contents and untouched neighbors; `test/memset_field_overflow` rejects an
+   oversized fill.
+
    `memset` was next, and it is the construct the byte-level model was
    supposed to make easy, so it is worth saying how easy it turned out to be.
    Zeroing an array needed one new axiom -- the machine layer can make a byte

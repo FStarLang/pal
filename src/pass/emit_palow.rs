@@ -14631,6 +14631,12 @@ impl<'a> Body<'a> {
     /// Whether the number of elements at this array is settled here rather
     /// than being whatever the caller passed.
     fn array_len_known(&self, e: &Expr) -> bool {
+        if self
+            .ty_of(e)
+            .is_ok_and(|ty| matches!(peel(self.tds, &ty).val, TypeT::FixedArray(..)))
+        {
+            return true;
+        }
         let ExprT::Var(v) = &strip_vattr(e).val else {
             return false;
         };
@@ -14904,6 +14910,45 @@ impl<'a> Body<'a> {
             }
             other => Err(format!("a subscript of {}", expr_kind_of(other))),
         }
+    }
+
+    /// A whole-array write can finish a field of a partially initialized struct.
+    fn whole_array_place(&mut self, e: &Expr) -> Result<ArrayPlace, String> {
+        if let ExprT::Member(base, f) = &strip_vattr(e).val
+            && let Some(FieldShape::Array { pn, esize, len }) =
+                field_shape(self.tds, self.field_ty(base, f)?.as_ref())
+        {
+            let mut probe = self.clone();
+            let ff = probe.open_field(base, f, true)?;
+            if let Some(target) = probe.scatter_target(&ff.a) {
+                let maybe = !probe.scattered_set(target).contains(&*f.val);
+                if let Some(focus) = probe.scattered_field(&ff, f, &pn, true) {
+                    let mut close_write = Vec::new();
+                    if maybe {
+                        probe.lines.push(format!(
+                            "unfold array_pts_to_uninit {}_repr {} (SizeT.v {}_alignof) {} {};",
+                            pn, esize, pn, len, ff.at
+                        ));
+                        close_write.push(format!(
+                            "array_somes {}_repr {} {}sz {}_alignof;",
+                            pn, ff.at, esize, pn
+                        ));
+                    }
+                    close_write.extend(focus.close_write);
+                    *self = probe;
+                    return Ok(ArrayPlace {
+                        addr: ff.at,
+                        pn,
+                        esize: format!("{}sz", esize),
+                        base: 0,
+                        close_read: Vec::new(),
+                        close_write,
+                        maybe,
+                    });
+                }
+            }
+        }
+        self.array_place(e)
     }
 
     /// Reading an array pointer supplies only its address. The element access
@@ -20438,7 +20483,7 @@ impl<'a> Body<'a> {
                         close_write: close,
                         maybe,
                         ..
-                    } = self.array_place(p)?;
+                    } = self.whole_array_place(p)?;
                     let z = zero_value(self.tds, ty)?;
                     // `Seq.length xs == n` is what says the fill stays inside
                     // the array, and for a parameter that can only come from
