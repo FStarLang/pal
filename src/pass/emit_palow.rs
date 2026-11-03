@@ -18902,7 +18902,24 @@ impl<'a> Body<'a> {
             {
                 continue;
             }
-            if stated.contains(&s.name) || stated.contains(touch) {
+            let explicitly_owned = stated.contains(&s.name) || stated.contains(touch);
+            // Explicit ownership replaces the predicate, not scratch cleanup.
+            if !s.init
+                && (body.is_none() || (!s.global && !s.name.starts_with('*')))
+                && s.array.is_none()
+                && s.scattered.is_empty()
+                && !self.prescattered.contains(&s.addr)
+                && !self.nested_scatter.values().any(|(at, _, _)| *at == s.addr)
+                && !mentioned.vars.contains(touch)
+                && !mentioned.written.contains(touch)
+            {
+                if !explicitly_owned {
+                    owns.push(format!("{}_pts_to_uninit {}", s.palow_ty, s.addr));
+                }
+                storage.push(i);
+                continue;
+            }
+            if explicitly_owned {
                 continue;
             }
             // A local that holds an allocated block and is not reassigned in
@@ -18923,20 +18940,6 @@ impl<'a> Body<'a> {
                 continue;
             }
             if !s.init {
-                // A loop may reuse an unwritten local as iteration scratch.
-                // Its value is forgotten at each backedge and early exit.
-                if (body.is_none() || (!s.global && !s.name.starts_with('*')))
-                    && s.array.is_none()
-                    && s.scattered.is_empty()
-                    && !self.prescattered.contains(&s.addr)
-                    && !self.nested_scatter.values().any(|(at, _, _)| *at == s.addr)
-                    && !mentioned.vars.contains(touch)
-                    && !mentioned.written.contains(touch)
-                {
-                    owns.push(format!("{}_pts_to_uninit {}", s.palow_ty, s.addr));
-                    storage.push(i);
-                    continue;
-                }
                 return Err(format!("{} with `{}` not yet written", what, s.name));
             }
             let b = format!("inv_{}", touch);

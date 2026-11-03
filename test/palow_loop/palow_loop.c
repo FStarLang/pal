@@ -70,6 +70,22 @@ uint32_t iteration_scratch(uint32_t n)
   return i;
 }
 
+uint32_t explicit_iteration_scratch(uint32_t n)
+  _ensures(return == n)
+{
+  uint32_t i = 0;
+  uint32_t temporary;
+  while (i < n)
+    _invariant(i <= n)
+    _invariant(_inline_pulse(
+      Pulse.Lib.C.Palow.Scalar.uint32_t_pts_to_uninit $&(temporary)))
+  {
+    temporary = i;
+    i = temporary + 1;
+  }
+  return i;
+}
+
 union scratch_word {
   uint32_t value;
   uint32_t bits;
@@ -82,6 +98,32 @@ uint32_t scratch_jumps(uint32_t n, uint32_t stop, uint32_t skip)
   union scratch_word temporary;
   while (i < n)
     _invariant(i <= n)
+    _ensures(i <= n)
+  {
+    temporary.value = i;
+    if (i == stop) {
+      break;
+    }
+    if (i == skip) {
+      i = i + 1;
+      continue;
+    }
+    _assert(temporary.value == i);
+    i = temporary.value + 1;
+  }
+  temporary.value = i;
+  return temporary.value;
+}
+
+uint32_t explicit_scratch_jumps(uint32_t n, uint32_t stop, uint32_t skip)
+  _ensures(return <= n)
+{
+  uint32_t i = 0;
+  union scratch_word temporary;
+  while (i < n)
+    _invariant(i <= n)
+    _invariant(_inline_pulse(
+      Union_scratch_word.union_scratch_word_pts_to_uninit $&(temporary)))
     _ensures(i <= n)
   {
     temporary.value = i;
